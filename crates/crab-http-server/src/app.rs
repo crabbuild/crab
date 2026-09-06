@@ -66,6 +66,20 @@ pub(crate) enum Error {
     ReleaseBusy,
     #[error("Release not found")]
     ReleaseNotFound,
+    #[error("Release asset not found")]
+    ReleaseAssetNotFound,
+    #[error("A release asset with this name already exists")]
+    ReleaseAssetConflict,
+    #[error("Release asset is too large")]
+    ReleaseAssetTooLarge,
+    #[error("Release asset upload was cancelled or timed out")]
+    ReleaseAssetCancelled,
+    #[error("Invalid release asset body")]
+    ReleaseAssetBody(#[source] axum::Error),
+    #[error("Release asset temporary file operation failed")]
+    ReleaseAssetIo(#[source] std::io::Error),
+    #[error("Release asset worker failed")]
+    ReleaseAssetWorker(#[source] tokio::task::JoinError),
     #[error("Release tag publication failed")]
     Release(#[source] Box<crate::receive::ReceiveError>),
     #[error("Pull request merge failed")]
@@ -100,6 +114,8 @@ impl IntoResponse for Error {
                 | Self::Merge(_)
                 | Self::MergeObject(_)
                 | Self::Release(_)
+                | Self::ReleaseAssetIo(_)
+                | Self::ReleaseAssetWorker(_)
         ) {
             tracing::error!(error = ?self, "collaboration request failed");
         }
@@ -199,6 +215,31 @@ impl IntoResponse for Error {
                 "Git writes are busy; retry this release shortly",
             ),
             Self::ReleaseNotFound => (StatusCode::NOT_FOUND, "not_found", "Release not found"),
+            Self::ReleaseAssetNotFound => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Release asset not found",
+            ),
+            Self::ReleaseAssetConflict => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "asset_conflict",
+                "A release asset with this name already exists",
+            ),
+            Self::ReleaseAssetTooLarge => (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "asset_too_large",
+                "Release assets must be no larger than 512 MiB",
+            ),
+            Self::ReleaseAssetCancelled => (
+                StatusCode::REQUEST_TIMEOUT,
+                "asset_cancelled",
+                "Release asset upload was cancelled or timed out",
+            ),
+            Self::ReleaseAssetBody(_) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid release asset body",
+            ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",

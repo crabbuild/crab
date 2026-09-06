@@ -261,8 +261,17 @@ overwriting newer notes. `DELETE` on the same route carries the displayed versio
 records a durable tombstone and releases the application tag claim while retaining
 the actual Git tag. Replaying that deletion with the same version repairs an
 interrupted claim release and returns 204. A later release can reuse the retained
-tag with a new submission and release number. Attached release assets are not
-implemented yet.
+tag with a new submission and release number. Writers attach raw binary files with
+`POST /api/repos/{owner}/{name}/releases/{number}/assets?request_id=<uuid>&name=<file>&version=<version>`.
+The body is streamed to object storage, hashed with SHA-256, and made visible only
+after the version-bound release update succeeds; files are limited to 512 MiB and
+duplicate names return 422. The release response includes each asset's stable ID,
+name, content type, byte size, digest, uploader and creation time. Readers can
+download published assets from `/assets/{id}` with repository-scoped access; draft
+assets remain private. Writers remove assets with `DELETE /assets/{id}` and the
+displayed release version. Asset objects use immutable digest paths so retries do
+not corrupt metadata, and the Releases UI exposes the same attach, download and
+remove workflow as GitHub.
 
 A fresh isolated RustFS qualification saved a private draft without advertising
 its reserved tag, recovered the same draft after a graceful restart, and then

@@ -132,6 +132,106 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
     assert_eq!(created.1["tag_oid"], commit);
     assert_eq!(created.1["target_oid"], commit);
     assert_eq!(created.1["version"], 1);
+    assert!(created.1["assets"].as_array().unwrap().is_empty());
+
+    let asset_url = format!(
+        "{}{RELEASES}/1/assets?request_id=99999999-9999-4999-8999-999999999999&name=crab-linux.tar.gz&version=1",
+        h.origin
+    );
+    let asset = h
+        .http
+        .post(&asset_url)
+        .header(header::COOKIE, &alice)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/gzip")
+        .body("release asset bytes")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), StatusCode::CREATED);
+    let asset: Value = serde_json::from_slice(&asset.bytes().await.unwrap()).unwrap();
+    assert_eq!(asset["version"], 2);
+    assert_eq!(asset["assets"][0]["name"], "crab-linux.tar.gz");
+    assert_eq!(asset["assets"][0]["content_type"], "application/gzip");
+    assert_eq!(asset["assets"][0]["size"], 19);
+    assert_eq!(
+        asset["assets"][0]["digest"],
+        "sha256:b1fb5a929aa04a033823f4d88f3d5d046edb4cf775aaea7abff6970589c99f1a"
+    );
+    let replay = h
+        .http
+        .post(&asset_url)
+        .header(header::COOKIE, &alice)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/gzip")
+        .body("release asset bytes")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let duplicate = h
+        .http
+        .post(format!(
+            "{}{RELEASES}/1/assets?request_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa&name=crab-linux.tar.gz&version=2",
+            h.origin
+        ))
+        .header(header::COOKIE, &alice)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/gzip")
+        .body("other bytes")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let download = h
+        .http
+        .get(format!(
+            "{}{RELEASES}/1/assets/99999999-9999-4999-8999-999999999999",
+            h.origin
+        ))
+        .header(header::COOKIE, &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(download.headers()[header::CONTENT_TYPE], "application/gzip");
+    assert_eq!(
+        download.headers()[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"crab-linux.tar.gz\""
+    );
+    assert_eq!(&download.bytes().await.unwrap()[..], b"release asset bytes");
+    let removed = h
+        .http
+        .delete(format!(
+            "{}{RELEASES}/1/assets/99999999-9999-4999-8999-999999999999",
+            h.origin
+        ))
+        .header(header::COOKIE, &alice)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", csrf)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({"version":2}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    let removed: Value = serde_json::from_slice(&removed.bytes().await.unwrap()).unwrap();
+    assert_eq!(removed["version"], 3);
+    assert!(removed["assets"].as_array().unwrap().is_empty());
+    let missing_asset = h
+        .http
+        .get(format!(
+            "{}{RELEASES}/1/assets/99999999-9999-4999-8999-999999999999",
+            h.origin
+        ))
+        .header(header::COOKIE, &alice)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_asset.status(), StatusCode::NOT_FOUND);
 
     crate::server::receive_tests::success(
         source.path(),
@@ -147,7 +247,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .is_empty()
     );
     let replay = publish_release(&h, &alice, csrf, &first).await;
-    assert_eq!(replay, created);
+    assert_eq!(replay.0, created.0);
+    assert_eq!(replay.1["number"], created.1["number"]);
+    assert_eq!(replay.1["version"], 3);
+    assert!(replay.1["assets"].as_array().unwrap().is_empty());
     let list = h.json(RELEASES, &alice).await;
     assert_eq!(list["items"].as_array().unwrap().len(), 1);
     assert_eq!(

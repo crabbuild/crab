@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
 import { Button, TextInput } from "@primer/react";
-import { PencilIcon, TagIcon } from "@primer/octicons-react";
+import {
+  DownloadIcon,
+  PencilIcon,
+  TagIcon,
+  TrashIcon,
+} from "@primer/octicons-react";
 import {
   endpoint,
   navigate,
@@ -10,7 +15,14 @@ import {
   type Repository,
 } from "./api";
 import { Editor, Failure, useSubmission } from "./discussion";
-import { mutateRelease, refName, type Release } from "./release-api";
+import {
+  mutateRelease,
+  removeReleaseAsset,
+  refName,
+  type Release,
+  type ReleaseAsset,
+  uploadReleaseAsset,
+} from "./release-api";
 import { Result, short } from "./ui";
 
 function ReleaseNotesFields({
@@ -69,6 +81,142 @@ function ReleaseNotesFields({
   );
 }
 
+function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function ReleaseAssetsEditor({
+  repo,
+  release,
+  csrf,
+  assets,
+  version,
+  pending,
+  setAssets,
+  setVersion,
+  setError,
+}: {
+  repo: Repository;
+  release: Release;
+  csrf: string;
+  assets: ReleaseAsset[];
+  version: number;
+  pending: boolean;
+  setAssets: (assets: ReleaseAsset[]) => void;
+  setVersion: (version: number) => void;
+  setError: (message: string | undefined) => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [removing, setRemoving] = useState<string>();
+  const current = { ...release, version, assets };
+  return (
+    <section
+      className="release-assets-editor"
+      aria-labelledby="release-assets-heading"
+    >
+      <div className="release-assets-editor-heading">
+        <div>
+          <h3 id="release-assets-heading">Attach binaries</h3>
+          <p>
+            Upload files people can download from this release. Draft releases
+            keep attachments private.
+          </p>
+        </div>
+        <label className="button-link">
+          Add files
+          <input
+            type="file"
+            multiple
+            hidden
+            disabled={pending || uploading}
+            onChange={async (event) => {
+              const files = Array.from(event.target.files ?? []);
+              event.target.value = "";
+              if (!files.length) return;
+              setUploading(true);
+              setError(undefined);
+              try {
+                for (const file of files) {
+                  const updated = await uploadReleaseAsset(
+                    repo,
+                    csrf,
+                    current,
+                    file,
+                  );
+                  setAssets(updated.assets);
+                  setVersion(updated.version);
+                  current.version = updated.version;
+                  current.assets = updated.assets;
+                }
+              } catch (failure) {
+                setError(
+                  failure instanceof Error
+                    ? failure.message
+                    : "The release asset could not be uploaded",
+                );
+              } finally {
+                setUploading(false);
+              }
+            }}
+          />
+        </label>
+      </div>
+      {uploading && <p className="muted">Uploading files…</p>}
+      {assets.length ? (
+        <ul className="release-asset-list">
+          {assets.map((asset) => (
+            <li key={asset.id}>
+              <DownloadIcon />
+              <span>
+                <strong>{asset.name}</strong>
+                <small>
+                  {asset.content_type} · {formatBytes(asset.size)}
+                </small>
+              </span>
+              <Button
+                type="button"
+                size="small"
+                variant="invisible"
+                leadingVisual={TrashIcon}
+                aria-label={`Remove ${asset.name}`}
+                disabled={pending || uploading || Boolean(removing)}
+                onClick={async () => {
+                  setRemoving(asset.id);
+                  setError(undefined);
+                  try {
+                    const updated = await removeReleaseAsset(
+                      repo,
+                      csrf,
+                      current,
+                      asset.id,
+                    );
+                    setAssets(updated.assets);
+                    setVersion(updated.version);
+                    current.version = updated.version;
+                    current.assets = updated.assets;
+                  } catch (failure) {
+                    setError(
+                      failure instanceof Error
+                        ? failure.message
+                        : "The release asset could not be removed",
+                    );
+                  } finally {
+                    setRemoving(undefined);
+                  }
+                }}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="muted">No files attached yet.</p>
+      )}
+    </section>
+  );
+}
+
 function EditReleaseForm({
   repo,
   release,
@@ -83,6 +231,8 @@ function EditReleaseForm({
   const [title, setTitle] = useState(release.title);
   const [body, setBody] = useState(release.body);
   const [prerelease, setPrerelease] = useState(release.prerelease);
+  const [assets, setAssets] = useState(release.assets);
+  const [version, setVersion] = useState(release.version);
   const [pendingAction, setPendingAction] = useState<"draft" | "publish">();
   const [error, setError] = useState<string>();
   const pending = Boolean(pendingAction);
@@ -95,7 +245,7 @@ function EditReleaseForm({
     setError(undefined);
     try {
       await mutateRelease(repo, csrf, release, "PATCH", {
-        version: release.version,
+        version,
         title,
         body,
         prerelease,
@@ -148,6 +298,17 @@ function EditReleaseForm({
         setTitle={setTitle}
         setBody={setBody}
         setPrerelease={setPrerelease}
+      />
+      <ReleaseAssetsEditor
+        repo={repo}
+        release={release}
+        csrf={csrf}
+        assets={assets}
+        version={version}
+        pending={pending}
+        setAssets={setAssets}
+        setVersion={setVersion}
+        setError={setError}
       />
       <Failure message={error} />
       <div className="release-form-actions">
@@ -313,7 +474,9 @@ export function NewRelease({
       <div className="new-release-heading">
         <div>
           <h2>New release</h2>
-          <p>Publish a Git tag with release notes and a source archive.</p>
+          <p>
+            Publish a Git tag with release notes, source archives, and binaries.
+          </p>
         </div>
         <TagIcon size={24} />
       </div>

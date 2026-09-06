@@ -102,7 +102,7 @@ function SourceArchive({
   return (
     <details className="release-assets" open>
       <summary>
-        Assets <span>1</span>
+        Assets <span>{release.assets.length + 1}</span>
       </summary>
       <a
         href={endpoint(repo, "archive", {
@@ -112,6 +112,24 @@ function SourceArchive({
       >
         <DownloadIcon /> Source code (zip)
       </a>
+      {release.assets.map((asset) => (
+        <a
+          key={asset.id}
+          href={endpoint(
+            repo,
+            `releases/${release.number}/assets/${encodeURIComponent(asset.id)}`,
+          )}
+          download={asset.name}
+        >
+          <DownloadIcon />
+          <span>
+            {asset.name}
+            <small>
+              {asset.content_type} · {asset.size.toLocaleString()} bytes
+            </small>
+          </span>
+        </a>
+      ))}
     </details>
   );
 }

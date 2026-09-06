@@ -2790,6 +2790,67 @@ main {
   border-top: 1px solid var(--borderColor-muted);
   font-weight: 600;
 }
+.release-assets > a > span {
+  display: grid;
+  gap: 2px;
+}
+.release-assets > a small {
+  color: var(--fgColor-muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+.release-assets-editor {
+  margin-bottom: 16px;
+  padding: 16px;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+  background: var(--bgColor-default);
+}
+.release-assets-editor-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.release-assets-editor h3,
+.release-assets-editor p {
+  margin: 0;
+}
+.release-assets-editor h3 {
+  font-size: 16px;
+}
+.release-assets-editor-heading p {
+  margin-top: 4px;
+  color: var(--fgColor-muted);
+  font-size: 12px;
+}
+.release-assets-editor input[type="file"] {
+  display: none;
+}
+.release-asset-list {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.release-asset-list > li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--borderColor-muted);
+}
+.release-asset-list > li > span {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.release-asset-list small {
+  color: var(--fgColor-muted);
+  font-size: 12px;
+}
 .release-delete-confirm {
   display: flex;
   align-items: center;

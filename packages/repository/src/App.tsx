@@ -835,106 +835,107 @@ function RepositoryPage({
                         />
                       </>
                     ) : (
-                      <div
-                        className={
-                          overview
-                            ? "code-layout overview-layout"
-                            : showTree
-                              ? "code-layout"
-                              : "code-layout no-sidebar"
-                        }
-                      >
-                        {showTree && (
-                          <aside className="tree-sidebar">
-                            <div className="tree-sidebar-header">
-                              <Button
-                                size="small"
-                                onClick={() => setShowTree(false)}
-                                aria-label="Close file tree"
-                                aria-expanded={true}
-                              >
-                                <SidebarCollapseIcon />
-                              </Button>
-                              <strong>Files</strong>
-                            </div>
-                            <div className="tree-sidebar-controls">
-                              <RepositoryRefControls
-                                repo={repo}
-                                refs={data}
-                                revision={revisionLabel(data, revName ?? rev)}
-                                onSelect={(name) =>
-                                  navigate(repoHref(repo, { rev: name, view }))
-                                }
-                                compact
-                                onCreateBranch={
-                                  canWrite ? createBranch : undefined
-                                }
-                                onCreateFile={
-                                  canWrite && branch
-                                    ? () =>
-                                        navigate(
-                                          repoHref(repo, {
-                                            rev: branch.name,
-                                            view: "create",
-                                            path:
-                                              kind === "Tree"
-                                                ? path
-                                                : parentHex(path),
-                                            kind: "Tree",
-                                          }),
-                                        )
-                                    : undefined
-                                }
-                                onUploadFiles={
-                                  canWrite && branch
-                                    ? () =>
-                                        navigate(
-                                          repoHref(repo, {
-                                            rev: branch.name,
-                                            view: "upload",
-                                            path:
-                                              kind === "Tree"
-                                                ? path
-                                                : parentHex(path),
-                                            kind: "Tree",
-                                          }),
-                                        )
-                                    : undefined
-                                }
-                                onSearch={() =>
-                                  document
-                                    .getElementById("repository-tree-search")
-                                    ?.focus()
-                                }
-                              />
-                            </div>
-                            <RepositoryTree
-                              key={rev}
-                              repo={repo}
-                              rev={rev}
-                              activePath={path ? displayHex(path) : undefined}
-                              activePathHex={path || undefined}
-                              focusRequest={searchFocusRequest}
-                              onSelect={selectEntry}
-                            />
-                          </aside>
+                      <>
+                        {overview && (
+                          <RepositoryToolbar
+                            repo={repo}
+                            refs={data}
+                            revision={revisionLabel(data, revName ?? rev)}
+                            archiveRevision={rev}
+                            view={view}
+                            onRefresh={refs.retry}
+                            onCreateBranch={canWrite ? createBranch : undefined}
+                            onBrowse={() => setShowTree(true)}
+                          />
                         )}
-                        <div className="code-main">
-                          {!showTree &&
-                            (overview ? (
-                              <RepositoryToolbar
+                        <div
+                          className={
+                            overview
+                              ? "code-layout overview-layout"
+                              : showTree
+                                ? "code-layout"
+                                : "code-layout no-sidebar"
+                          }
+                        >
+                          {showTree && (
+                            <aside className="tree-sidebar">
+                              <div className="tree-sidebar-header">
+                                <Button
+                                  size="small"
+                                  onClick={() => setShowTree(false)}
+                                  aria-label="Close file tree"
+                                  aria-expanded={true}
+                                >
+                                  <SidebarCollapseIcon />
+                                </Button>
+                                <strong>Files</strong>
+                              </div>
+                              <div className="tree-sidebar-controls">
+                                <RepositoryRefControls
+                                  repo={repo}
+                                  refs={data}
+                                  revision={revisionLabel(data, revName ?? rev)}
+                                  onSelect={(name) =>
+                                    navigate(
+                                      repoHref(repo, { rev: name, view }),
+                                    )
+                                  }
+                                  compact
+                                  onCreateBranch={
+                                    canWrite ? createBranch : undefined
+                                  }
+                                  onCreateFile={
+                                    canWrite && branch
+                                      ? () =>
+                                          navigate(
+                                            repoHref(repo, {
+                                              rev: branch.name,
+                                              view: "create",
+                                              path:
+                                                kind === "Tree"
+                                                  ? path
+                                                  : parentHex(path),
+                                              kind: "Tree",
+                                            }),
+                                          )
+                                      : undefined
+                                  }
+                                  onUploadFiles={
+                                    canWrite && branch
+                                      ? () =>
+                                          navigate(
+                                            repoHref(repo, {
+                                              rev: branch.name,
+                                              view: "upload",
+                                              path:
+                                                kind === "Tree"
+                                                  ? path
+                                                  : parentHex(path),
+                                              kind: "Tree",
+                                            }),
+                                          )
+                                      : undefined
+                                  }
+                                  onSearch={() =>
+                                    document
+                                      .getElementById("repository-tree-search")
+                                      ?.focus()
+                                  }
+                                />
+                              </div>
+                              <RepositoryTree
+                                key={rev}
                                 repo={repo}
-                                refs={data}
-                                revision={revisionLabel(data, revName ?? rev)}
-                                archiveRevision={rev}
-                                view={view}
-                                onRefresh={refs.retry}
-                                onCreateBranch={
-                                  canWrite ? createBranch : undefined
-                                }
-                                onBrowse={() => setShowTree(true)}
+                                rev={rev}
+                                activePath={path ? displayHex(path) : undefined}
+                                activePathHex={path || undefined}
+                                focusRequest={searchFocusRequest}
+                                onSelect={selectEntry}
                               />
-                            ) : (
+                            </aside>
+                          )}
+                          <div className="code-main">
+                            {!showTree && !overview && (
                               <FileNavigation
                                 repo={repo}
                                 refs={data}
@@ -946,117 +947,125 @@ function RepositoryPage({
                                 onOpenTree={() => setShowTree(true)}
                                 onSearch={focusFileSearch}
                               />
-                            ))}
-                          {!overview && showTree && (
-                            <FileBreadcrumb
-                              repo={repo}
-                              rev={branch?.name ?? rev}
-                              path={path}
-                            />
-                          )}
-                          {kind !== "Tree" && (
-                            <LatestCommit
-                              repo={repo}
-                              rev={rev}
-                              path={path}
-                              kind={kind}
-                            />
-                          )}
-                          <Suspense
-                            fallback={
-                              <div className="notice" role="status">
-                                <Spinner size="small" /> Loading repository
-                                content…
-                              </div>
-                            }
-                          >
-                            {kind === "Tree" ? (
-                              <Directory
-                                key={`${rev}:${path}`}
+                            )}
+                            {!overview && showTree && (
+                              <FileBreadcrumb
                                 repo={repo}
-                                rev={rev}
+                                rev={branch?.name ?? rev}
                                 path={path}
-                                onEntry={selectEntry}
-                                header={
-                                  <LatestCommit
-                                    repo={repo}
-                                    rev={rev}
-                                    path={path}
-                                    kind="Tree"
-                                  />
-                                }
-                              />
-                            ) : kind === "Submodule" ? (
-                              <div className="notice">
-                                This entry points to a commit in a submodule.
-                              </div>
-                            ) : (
-                              <FileView
-                                key={`${rev}:${path}`}
-                                repo={repo}
-                                rev={rev}
-                                path={path}
-                                name={displayHex(path)}
-                                theme={theme}
-                                write={
-                                  canChangeFile
-                                    ? {
-                                        branch: branch.name,
-                                      }
-                                    : undefined
-                                }
                               />
                             )}
-                          </Suspense>
-                        </div>
-                        {overview && (
-                          <aside
-                            className="repository-about"
-                            aria-label="About this repository"
-                          >
-                            <h2>About</h2>
-                            <p>
-                              {repo.description || "No description provided."}
-                            </p>
-                            <div className="about-links">
-                              <Link
-                                href={repoHref(repo, { view: "commits", rev })}
-                              >
-                                <HistoryIcon /> Activity
-                              </Link>
-                              <Link href={repoHref(repo, { view: "issues" })}>
-                                <IssueOpenedIcon /> Issues
-                              </Link>
-                              <Link href={repoHref(repo, { view: "releases" })}>
-                                <TagIcon /> Releases
-                              </Link>
-                            </div>
-                            {data.refs.some((ref) =>
-                              ref.name.startsWith("refs/heads/"),
-                            ) && (
-                              <div className="about-section">
-                                <h3>Branches</h3>
-                                <div className="about-links">
-                                  {data.refs
-                                    .filter((ref) =>
-                                      ref.name.startsWith("refs/heads/"),
-                                    )
-                                    .slice(0, 5)
-                                    .map((ref) => (
-                                      <Link
-                                        key={ref.name}
-                                        href={repoHref(repo, { rev: ref.name })}
-                                      >
-                                        <GitBranchIcon />
-                                        {ref.name.slice("refs/heads/".length)}
-                                      </Link>
-                                    ))}
+                            {kind !== "Tree" && (
+                              <LatestCommit
+                                repo={repo}
+                                rev={rev}
+                                path={path}
+                                kind={kind}
+                              />
+                            )}
+                            <Suspense
+                              fallback={
+                                <div className="notice" role="status">
+                                  <Spinner size="small" /> Loading repository
+                                  content…
                                 </div>
+                              }
+                            >
+                              {kind === "Tree" ? (
+                                <Directory
+                                  key={`${rev}:${path}`}
+                                  repo={repo}
+                                  rev={rev}
+                                  path={path}
+                                  onEntry={selectEntry}
+                                  header={
+                                    <LatestCommit
+                                      repo={repo}
+                                      rev={rev}
+                                      path={path}
+                                      kind="Tree"
+                                    />
+                                  }
+                                />
+                              ) : kind === "Submodule" ? (
+                                <div className="notice">
+                                  This entry points to a commit in a submodule.
+                                </div>
+                              ) : (
+                                <FileView
+                                  key={`${rev}:${path}`}
+                                  repo={repo}
+                                  rev={rev}
+                                  path={path}
+                                  name={displayHex(path)}
+                                  theme={theme}
+                                  write={
+                                    canChangeFile
+                                      ? {
+                                          branch: branch.name,
+                                        }
+                                      : undefined
+                                  }
+                                />
+                              )}
+                            </Suspense>
+                          </div>
+                          {overview && (
+                            <aside
+                              className="repository-about"
+                              aria-label="About this repository"
+                            >
+                              <h2>About</h2>
+                              <p>
+                                {repo.description || "No description provided."}
+                              </p>
+                              <div className="about-links">
+                                <Link
+                                  href={repoHref(repo, {
+                                    view: "commits",
+                                    rev,
+                                  })}
+                                >
+                                  <HistoryIcon /> Activity
+                                </Link>
+                                <Link href={repoHref(repo, { view: "issues" })}>
+                                  <IssueOpenedIcon /> Issues
+                                </Link>
+                                <Link
+                                  href={repoHref(repo, { view: "releases" })}
+                                >
+                                  <TagIcon /> Releases
+                                </Link>
                               </div>
-                            )}
-                          </aside>
-                        )}
-                      </div>
+                              {data.refs.some((ref) =>
+                                ref.name.startsWith("refs/heads/"),
+                              ) && (
+                                <div className="about-section">
+                                  <h3>Branches</h3>
+                                  <div className="about-links">
+                                    {data.refs
+                                      .filter((ref) =>
+                                        ref.name.startsWith("refs/heads/"),
+                                      )
+                                      .slice(0, 5)
+                                      .map((ref) => (
+                                        <Link
+                                          key={ref.name}
+                                          href={repoHref(repo, {
+                                            rev: ref.name,
+                                          })}
+                                        >
+                                          <GitBranchIcon />
+                                          {ref.name.slice("refs/heads/".length)}
+                                        </Link>
+                                      ))}
+                                  </div>
+                                </div>
+                              )}
+                            </aside>
+                          )}
+                        </div>
+                      </>
                     )}
                   </Suspense>
                 </>

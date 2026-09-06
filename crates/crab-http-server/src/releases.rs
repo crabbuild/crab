@@ -1,17 +1,20 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, Query, State, rejection::JsonRejection},
-    http::StatusCode,
+    body::Body,
+    extract::{Path, Query, Request, State, rejection::JsonRejection},
+    http::{HeaderMap, StatusCode, header},
     middleware,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::get,
 };
 use futures_util::{StreamExt, TryStreamExt};
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     app::{self, Error, Result},
@@ -24,6 +27,8 @@ use crate::{
 
 const ROOT: &str = "app/v1/releases";
 const MAX_TAG_BYTES: usize = 255;
+const MAX_ASSET_NAME_BYTES: usize = 255;
+const ASSET_BUDGET: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +76,20 @@ struct Release {
     published_at: Option<u64>,
     updated_at: u64,
     deleted: bool,
+    #[serde(default)]
+    assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReleaseAsset {
+    id: String,
+    name: String,
+    content_type: String,
+    size: u64,
+    digest: String,
+    uploader: Identity,
+    created_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -114,6 +133,14 @@ struct ReleaseDelete {
     version: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssetUpload {
+    request_id: String,
+    name: String,
+    version: u64,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ListParameters {
@@ -151,6 +178,14 @@ pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             "/api/repos/{owner}/{name}/releases/{number}",
             get(detail).patch(edit).delete(remove),
         )
+        .route(
+            "/api/repos/{owner}/{name}/releases/{number}/assets",
+            axum::routing::post(upload_asset),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/releases/{number}/assets/{asset_id}",
+            get(download_asset).delete(remove_asset),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
@@ -187,6 +222,39 @@ fn tag_name(value: &str) -> Result<(String, String)> {
     crab_git::validate_push_refname(&reference)
         .map_err(|_| Error::Invalid("Enter a valid tag name"))?;
     Ok((value.to_owned(), reference))
+}
+
+fn asset_name(value: &str) -> Result<String> {
+    if value.is_empty()
+        || value.len() > MAX_ASSET_NAME_BYTES
+        || !value.is_ascii()
+        || value.starts_with('.')
+        || value.ends_with('.')
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\' | b'"'))
+    {
+        return Err(Error::Invalid(
+            "Asset names must be 1–255 ASCII characters without paths, quotes, controls, or leading/trailing periods",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn asset_path(digest: &str) -> String {
+    format!("{ROOT}/assets/sha256/{}/{digest}", &digest[..2])
+}
+
+fn asset_view(asset: &ReleaseAsset) -> Value {
+    json!({
+        "id": asset.id,
+        "name": asset.name,
+        "content_type": asset.content_type,
+        "size": asset.size,
+        "digest": format!("sha256:{}", asset.digest),
+        "uploader": asset.uploader.name,
+        "created_at": asset.created_at,
+    })
 }
 
 fn same_reservation(left: &ReleaseReservation, right: &ReleaseReservation) -> bool {
@@ -235,6 +303,7 @@ fn view(release: &Release) -> Value {
         "created_at": release.created_at,
         "published_at": release.published_at,
         "updated_at": release.updated_at,
+        "assets": release.assets.iter().map(asset_view).collect::<Vec<_>>(),
     })
 }
 
@@ -516,6 +585,7 @@ async fn create(
         published_at: (!reservation.draft).then_some(reservation.created_at),
         updated_at: reservation.created_at,
         deleted: false,
+        assets: Vec::new(),
     };
     let release = app_storage::create_or_read(repo, &release_path(release.number), release).await?;
     if release.deleted
@@ -525,6 +595,275 @@ async fn create(
         return Err(Error::ReleaseConflict);
     }
     Ok((StatusCode::CREATED, Json(view(&release))))
+}
+
+async fn visible_release(
+    repo: &Repository,
+    principal: &Principal,
+    number: u64,
+) -> Result<(Release, crab_storage::ETag)> {
+    let include_drafts = principal.can_write(&repo.config);
+    app_storage::read::<Release>(repo, &release_path(app::number(number)?))
+        .await?
+        .filter(|(release, _)| !release.deleted && (include_drafts || !release.draft))
+        .ok_or(Error::ReleaseNotFound)
+}
+
+async fn download_asset(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number, asset_id)): Path<(String, String, u64, String)>,
+) -> Result<Response> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    let (release, _) = visible_release(repo, &principal, number).await?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.id == asset_id)
+        .ok_or(Error::ReleaseAssetNotFound)?;
+    let permit = Arc::clone(&server.git_admission)
+        .try_acquire_owned()
+        .map_err(|_| Error::ReleaseBusy)?;
+    let cancel = server.cancellation.child_token();
+    let guard = cancel.clone().drop_guard();
+    let deadline = tokio::time::Instant::now() + ASSET_BUDGET;
+    let path = repo.layout.repo_path(&asset_path(&asset.digest));
+    let (meta, _, stream) = tokio::select! {
+        () = cancel.cancelled() => return Err(Error::ReleaseAssetCancelled),
+        result = tokio::time::timeout_at(deadline, repo.store.get_stream(&path, None)) => result.map_err(|_| Error::ReleaseAssetCancelled)??,
+    };
+    if meta.size != asset.size {
+        return Err(Error::Storage(crab_storage::StorageError::CorruptObject {
+            path: meta.location.to_string(),
+            reason: "release asset size does not match metadata".to_owned(),
+        }));
+    }
+    let stream = stream
+        .take_until(async move {
+            tokio::select! {
+                () = cancel.cancelled() => {},
+                () = tokio::time::sleep_until(deadline) => {},
+            }
+        })
+        .map(move |chunk| {
+            let _ = (&permit, &guard);
+            chunk
+        });
+    Ok((
+        [
+            (header::CONTENT_TYPE, asset.content_type.clone()),
+            (header::CONTENT_LENGTH, asset.size.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", asset.name),
+            ),
+        ],
+        Body::from_stream(stream),
+    )
+        .into_response())
+}
+
+async fn upload_asset(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number)): Path<(String, String, u64)>,
+    Query(input): Query<AssetUpload>,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<impl IntoResponse> {
+    let key = (owner, name);
+    let repo = app::repository(&server, &principal, &key)?;
+    if !principal.can_write(&repo.config) {
+        return Err(Error::ReleasePermission);
+    }
+    if repo.lifecycle().await?.archived {
+        return Err(Error::Archived);
+    }
+    let number = app::number(number)?;
+    let request_id = app::submission(&input.request_id)?;
+    let name = asset_name(&input.name)?;
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.len() <= 255)
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    if headers
+        .get(header::CONTENT_ENCODING)
+        .is_some_and(|value| value != "identity")
+    {
+        return Err(Error::Invalid(
+            "Release asset uploads require identity content encoding",
+        ));
+    }
+    if headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|size| size > crate::server::MAX_DEPENDENCY_FILE_BYTES)
+    {
+        return Err(Error::ReleaseAssetTooLarge);
+    }
+    let (release, _) = visible_release(repo, &principal, number).await?;
+    if release
+        .assets
+        .iter()
+        .any(|asset| asset.name == name && asset.id != request_id)
+    {
+        return Err(Error::ReleaseAssetConflict);
+    }
+    if let Some(asset) = release.assets.iter().find(|asset| asset.id == request_id) {
+        if asset.name == name {
+            return Ok((StatusCode::OK, Json(view(&release))));
+        }
+        return Err(Error::RequestConflict);
+    }
+    if release.version != input.version {
+        return Err(Error::Conflict);
+    }
+
+    let permit = Arc::clone(&server.git_admission)
+        .try_acquire_owned()
+        .map_err(|_| Error::ReleaseBusy)?;
+    let cancel = server.cancellation.child_token();
+    let _guard = cancel.clone().drop_guard();
+    let worker_server = Arc::clone(&server);
+    let (send, result) = tokio::sync::oneshot::channel();
+    server.receives.spawn(async move {
+        let _permit = permit;
+        let work = async {
+            let directory = tokio::task::spawn_blocking(tempfile::tempdir)
+                .await
+                .map_err(Error::ReleaseAssetWorker)?
+                .map_err(Error::ReleaseAssetIo)?;
+            let path = directory.path().join("release-asset");
+            let mut file = tokio::fs::File::create(&path)
+                .await
+                .map_err(Error::ReleaseAssetIo)?;
+            let mut stream = request.into_body().into_data_stream();
+            let mut size = 0_u64;
+            let mut sha256 = Sha256::new();
+            let mut blake3 = blake3::Hasher::new();
+            while let Some(chunk) = tokio::select! {
+                () = cancel.cancelled() => return Err(Error::ReleaseAssetCancelled),
+                chunk = stream.next() => chunk,
+            } {
+                let chunk = chunk.map_err(Error::ReleaseAssetBody)?;
+                size = size
+                    .checked_add(chunk.len() as u64)
+                    .filter(|size| *size <= crate::server::MAX_DEPENDENCY_FILE_BYTES)
+                    .ok_or(Error::ReleaseAssetTooLarge)?;
+                sha256.update(&chunk);
+                blake3.update(&chunk);
+                file.write_all(&chunk)
+                    .await
+                    .map_err(Error::ReleaseAssetIo)?;
+            }
+            file.flush().await.map_err(Error::ReleaseAssetIo)?;
+            drop(file);
+            let digest = format!("{:x}", sha256.finalize());
+            let expected_hash = *blake3.finalize().as_bytes();
+            let repo = app::repository(&worker_server, &principal, &key)?;
+            if repo.lifecycle().await?.archived || !principal.can_write(&repo.config) {
+                return Err(Error::Archived);
+            }
+            repo.store
+                .put_multipart_file_retry(
+                    &repo.layout.repo_path(&asset_path(&digest)),
+                    &path,
+                    size,
+                    expected_hash,
+                    8 * 1024 * 1024,
+                    &cancel,
+                    None,
+                )
+                .await?;
+            let release_path = release_path(number);
+            let (mut release, etag) = visible_release(repo, &principal, number).await?;
+            if let Some(asset) = release.assets.iter().find(|asset| asset.id == request_id) {
+                if asset.name == name
+                    && asset.size == size
+                    && asset.digest == digest
+                    && asset.content_type == content_type
+                {
+                    return Ok(release);
+                }
+                return Err(Error::RequestConflict);
+            }
+            if release.version != input.version {
+                return Err(Error::Conflict);
+            }
+            if release.assets.iter().any(|asset| asset.name == name) {
+                return Err(Error::ReleaseAssetConflict);
+            }
+            let created_at = app_storage::now()?;
+            release.assets.push(ReleaseAsset {
+                id: request_id,
+                name,
+                content_type,
+                size,
+                digest,
+                uploader: app::actor(&principal)?,
+                created_at,
+            });
+            release
+                .assets
+                .sort_by(|left, right| left.name.cmp(&right.name));
+            release.version = release
+                .version
+                .checked_add(1)
+                .filter(|version| *version < app_storage::MAX_NUMBER)
+                .ok_or(Error::Conflict)?;
+            release.updated_at = created_at;
+            app_storage::update(repo, &release_path, &release, etag).await?;
+            Ok::<_, Error>(release)
+        };
+        tokio::pin!(work);
+        let completed = tokio::select! {
+            result = &mut work => result,
+            () = tokio::time::sleep(ASSET_BUDGET) => { cancel.cancel(); work.await },
+        };
+        if let Err(Err(error)) = send.send(completed) {
+            tracing::error!(error = ?error, "disconnected release asset upload failed");
+        }
+    });
+    let release = result.await.map_err(|_| Error::ReleaseAssetCancelled)??;
+    Ok((StatusCode::CREATED, Json(view(&release))))
+}
+
+async fn remove_asset(
+    State(server): State<Arc<Server>>,
+    Extension(principal): Extension<Principal>,
+    Path((owner, name, number, asset_id)): Path<(String, String, u64, String)>,
+    input: std::result::Result<Json<ReleaseDelete>, JsonRejection>,
+) -> Result<Json<Value>> {
+    let repo = app::repository(&server, &principal, &(owner, name))?;
+    if !principal.can_write(&repo.config) {
+        return Err(Error::ReleasePermission);
+    }
+    if repo.lifecycle().await?.archived {
+        return Err(Error::Archived);
+    }
+    let Json(input) = input?;
+    let path = release_path(app::number(number)?);
+    let (mut release, etag) = visible_release(repo, &principal, number).await?;
+    if release.version != input.version {
+        return Err(Error::Conflict);
+    }
+    let index = release
+        .assets
+        .iter()
+        .position(|asset| asset.id == asset_id)
+        .ok_or(Error::ReleaseAssetNotFound)?;
+    release.assets.remove(index);
+    release.version = release
+        .version
+        .checked_add(1)
+        .filter(|version| *version < app_storage::MAX_NUMBER)
+        .ok_or(Error::Conflict)?;
+    release.updated_at = app_storage::now()?;
+    app_storage::update(repo, &path, &release, etag).await?;
+    Ok(Json(view(&release)))
 }
 
 async fn detail(

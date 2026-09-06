@@ -1771,8 +1771,21 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-cache-server": {"crab", "crab-cache-store"},
 }
 WORKSPACE_DEPENDENCY_POLICY = {
-    "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-storage", "crab-xet"}, "dev": {"crab-remote-git"}},
-    "crab-http-server": {"normal": {"crab-read", "crab-remote-git", "crab-storage"}},
+    "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
+    # The browser server is the product composition boundary for Git,
+    # metadata, write, coordination, LFS, and remote-read behavior.
+    "crab-http-server": {
+        "normal": {
+            "crab-coordination",
+            "crab-git",
+            "crab-lfs",
+            "crab-metadata",
+            "crab-read",
+            "crab-remote-git",
+            "crab-storage",
+            "crab-write",
+        }
+    },
     "crab": {
         "normal": {
             "crab-auth",
