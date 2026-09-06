@@ -9517,7 +9517,11 @@ impl PushPipeline {
         let published_recipes = Arc::new(staging.published_recipes_for_files(&file_hashes)?);
         let recipe_hashes = published_recipes
             .values()
-            .filter_map(|recipe| recipe.as_ref().map(FileRecipe::hash))
+            .filter_map(|recipe| {
+                recipe
+                    .as_ref()
+                    .map(|recipe| MerkleHash::from(recipe.hash()))
+            })
             .collect::<Vec<_>>();
         let prepared_xorbs = match staging.prepared_xorbs_for_recipes(&recipe_hashes) {
             Ok(prepared_xorbs) => Some(Arc::new(prepared_xorbs)),
@@ -9589,7 +9593,7 @@ impl PushPipeline {
                     let add_push_plan = prepared_xorbs.as_ref().and_then(|prepared_xorbs| {
                         let mut plan = FilePushPlan::new_verified_recipe(&recipe);
                         plan.prepared_xorbs = prepared_xorbs
-                            .get(&recipe.hash())
+                            .get(&MerkleHash::from(recipe.hash()))
                             .cloned()
                             .unwrap_or_default();
                         if add_push_plan_matches_staging(
