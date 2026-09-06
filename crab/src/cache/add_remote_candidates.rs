@@ -694,4 +694,22 @@ mod tests {
         let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
         assert_eq!(cache.load_persistent(&hashes).expect("load").len(), 600);
     }
+
+    #[test]
+    fn persistent_negative_writes_batch_large_requests() {
+        let dir = tempdir().expect("tempdir");
+        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let entries = (0..600u16)
+            .map(|seed| {
+                let mut bytes = [0; 32];
+                bytes[..2].copy_from_slice(&seed.to_le_bytes());
+                (MerkleHash::from(bytes), None)
+            })
+            .collect::<Vec<_>>();
+        cache.persist_results(&entries).expect("persist negatives");
+        let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+        let loaded = cache.load_persistent(&hashes).expect("load negatives");
+        assert_eq!(loaded.len(), 600);
+        assert!(loaded.values().all(Option::is_none));
+    }
 }
