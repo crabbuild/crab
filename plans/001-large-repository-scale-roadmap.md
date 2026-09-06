@@ -1627,6 +1627,56 @@ correctness evidence for the bounded owner transition. It does not close
 repeated convergence, interruption/resume, memory, 10,000-push differential,
 distributed team load, provider/fault/failover, retention/GC, or rollout gates.
 
+### 2026-08-31 rebased response-producer preflight qualification
+
+The branch was rebased onto `origin/main` at `4c916402e45` and the response
+producer then gained an index-only exact-inventory preflight. For a near-
+complete request, Crab now compares the union of the staged pack indexes with
+the requested OIDs before invoking whole-pack consolidation. If the indexes
+contain an extra object, it goes directly to the exact selected-object repack;
+if the union is exact, it retains the zero-recompression concatenation path.
+The final generated pack still passes the existing exact-object-set check, and
+the index scan runs on a blocking worker so a large response does not stall the
+async runtime. The check is a response optimization only; durable maintenance
+continues to use its full validation contract.
+
+Run `codex-f45c5689-response-indexcheck-20260830` used the read-only
+Kubernetes checkout at revision
+`e72c2715ade37738aa5c029e8de5285cbe1c9441` and local RustFS. Its release
+binary was built from `f45c5689b1b`, SHA-256
+`554e682290c862d90f1f102e89babb69394601a6393dbfd15c2c136bf5aa29bf`; the
+subsequent `3c534759c97` clippy correction and `55b562c1411` telemetry/report
+fields do not change the response selection behavior. The standalone verifier
+returned `status=ok`, `profile=smoke`, `replay_count=100`, and 21/21 checks
+passed. The run's correctness fingerprint was
+`04038c34c84aa8d3fda8f4b16be9b59e8230b94c5fd835627d93e1409b9cdad3`.
+
+- The full cold clone exercised `selected_object_repack` after the preflight
+  found 1,646,245 staged inventory entries versus 1,646,244 selected objects;
+  it used two source packs, 6 source-artifact requests, 11,517 ms source
+  staging, 72,575 ms pack generation, and produced a 1,244,255,615-byte
+  response. Depth-100 also selected the exact repack: 966,820 objects, 7
+  source-artifact requests, 17,161 ms source staging, 54,101 ms pack
+  generation, and 747,264,178 response bytes.
+- The run passed full, filtered, shallow, depth-1/10/100/1,000, blobless, and
+  incremental clone correctness, full fsck, source immutability, and exact
+  remote-prefix cleanup. Active packs converged to 2 at the final checkpoint;
+  physical retention remained separate and preserved 103 immutable pack
+  objects / 1,279,007,682 bytes of physical pack data.
+- This run proves branch activation and correctness, not a speedup. Earlier
+  runs with a duplicate-only union used whole-pack concatenation/consolidation
+  in about 30--40 seconds, while this run correctly chose exact repacking for
+  a different staged pack shape. A same-snapshot A/B measuring preflight,
+  consolidation, exact repack, memory, and response bytes remains required
+  before changing the default strategy or claiming a latency improvement.
+
+The lint-clean current branch head is `55b562c1411`; `make install` rebuilt
+and installed `crab 1.1.0` with embedded `git_sha=55b562c1411` and SHA-256
+`368538d9d46db08dceb67e29cbab806c6306ea8d12d3c4a70d37c243568b40ce`. This is
+an exact build/provenance check, while the 100-replay report above remains
+the behavioral qualification artifact until a repeat run records the latest
+telemetry field.
+
 Still required before the roadmap is DONE:
 
 - an independent repeatability full-profile report from the current binary
