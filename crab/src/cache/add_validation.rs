@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bstr::ByteSlice;
 use crab_types::pointer::Pointer;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use crate::core::error::{CrabError, Result};
 
@@ -85,18 +85,29 @@ impl AddValidationCache {
             .connection
             .transaction()
             .map_err(|error| database_error("begin add validation cache update", error))?;
-        {
+        // Two bind variables per row keep batches below SQLite's default
+        // 999-variable limit while avoiding one statement per file.
+        const UPSERT_BATCH_SIZE: usize = 256;
+        for batch in rows.chunks(UPSERT_BATCH_SIZE) {
+            let values_sql = std::iter::repeat_n("(?,?)", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "INSERT INTO add_validations(path, token) VALUES {values_sql}
+                 ON CONFLICT(path) DO UPDATE SET token = excluded.token"
+            );
             let mut statement = transaction
-                .prepare_cached(
-                    "INSERT INTO add_validations(path, token) VALUES (?1, ?2)
-                     ON CONFLICT(path) DO UPDATE SET token = excluded.token",
-                )
+                .prepare_cached(&query)
                 .map_err(|error| database_error("prepare add validation cache update", error))?;
-            for (path, token) in rows {
-                statement
-                    .execute(params![path, token.as_slice()])
-                    .map_err(|error| database_error("write add validation cache row", error))?;
+            let mut values: Vec<&dyn rusqlite::ToSql> =
+                Vec::with_capacity(batch.len().saturating_mul(2));
+            for (path, token) in batch {
+                values.push(path.as_slice() as &dyn rusqlite::ToSql);
+                values.push(token.as_slice() as &dyn rusqlite::ToSql);
             }
+            statement
+                .execute(params_from_iter(values))
+                .map_err(|error| database_error("write add validation cache batch", error))?;
         }
         transaction
             .commit()
@@ -254,6 +265,26 @@ mod tests {
 
         assert!(cache.contains(&literal_path, &token).unwrap());
         assert!(!cache.contains(b"model.bin", &token).unwrap());
+    }
+
+    #[test]
+    fn cache_upsert_batches_large_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(ADD_VALIDATIONS_FILENAME);
+        let mut cache = AddValidationCache::open(&path).unwrap();
+        let rows = (0..600_u16)
+            .map(|index| {
+                let mut path = b"file-".to_vec();
+                path.extend_from_slice(&index.to_le_bytes());
+                (path, [index as u8; 32])
+            })
+            .collect::<Vec<_>>();
+
+        cache.upsert(&rows).unwrap();
+
+        for (path, token) in rows {
+            assert!(cache.contains(&path, &token).unwrap());
+        }
     }
 
     #[test]
