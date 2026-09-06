@@ -190,6 +190,16 @@ CONTRACTS: dict[str, ScriptContract] = {
                 ),
             ),
             (
+                "artifact-safe private roots",
+                (
+                    '$PrivateRoot = Join-Path ([System.IO.Path]::GetTempPath()) "crab-nfs-windows-private-$RunId"',
+                    '$TestHome = Join-Path $PrivateRoot "home"',
+                    '$CacheRoot = Join-Path $PrivateRoot "crab-cache"',
+                    '$env:CRAB_CACHE_DIR = $CacheRoot',
+                    'Remove-Item -LiteralPath $PrivateRoot -Recurse -Force',
+                ),
+            ),
+            (
                 "retained report checks",
                 SHARED_REPORT_CHECKS,
             ),

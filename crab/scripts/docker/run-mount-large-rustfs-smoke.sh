@@ -21,6 +21,8 @@ CACHE_ROOT="${CRAB_MOUNT_SMOKE_CACHE_ROOT:-$ARTIFACT_ROOT/cache}"
 RUN_ROOT="$ARTIFACT_ROOT/$RUN_ID"
 HOST_TARGET="${CRAB_MOUNT_SMOKE_TARGET_CACHE:-$CACHE_ROOT/target}"
 HOST_CARGO="${CRAB_MOUNT_SMOKE_CARGO_CACHE:-$CACHE_ROOT/cargo}"
+# Keep the private cache outside RUN_ROOT so artifact collection cannot scan it.
+HOST_RUNTIME_CACHE="$CACHE_ROOT/runtime"
 SEED_MIB="${CRAB_MOUNT_SMOKE_SEED_MIB:-32}"
 NEW_MIB="${CRAB_MOUNT_SMOKE_NEW_MIB:-40}"
 RUST_IMAGE="${CRAB_MOUNT_SMOKE_RUST_IMAGE:-rust:1.91-bookworm}"
@@ -53,7 +55,8 @@ command -v "$DOCKER" >/dev/null 2>&1 || die "docker is required"
 command -v "$AWS" >/dev/null 2>&1 || die "aws CLI is required on the host"
 "$DOCKER" info >/dev/null 2>&1 || die "Docker daemon is not running"
 
-mkdir -p "$RUN_ROOT" "$HOST_TARGET" "$HOST_CARGO"
+mkdir -p "$RUN_ROOT" "$HOST_TARGET" "$HOST_CARGO" "$HOST_RUNTIME_CACHE"
+chmod 700 "$HOST_RUNTIME_CACHE"
 
 "$DOCKER" network create "$NET" >/dev/null
 "$DOCKER" run -d \
@@ -95,6 +98,7 @@ printf "rustfs=ready\n"
     -v "$REPO_ROOT:/src" \
     -v "$HOST_TARGET:/src/target" \
     -v "$HOST_CARGO:/cargo" \
+    -v "$HOST_RUNTIME_CACHE:/crab-cache" \
     -v "$RUN_ROOT:/e2e" \
     -e AWS_ACCESS_KEY_ID=crab \
     -e AWS_SECRET_ACCESS_KEY=crab \
@@ -120,7 +124,7 @@ NEW_MIB="$4"
 
 export HOME=/e2e/home
 export PATH="/src/target/debug:$HOME/.cargo/bin:/usr/local/cargo/bin:$PATH"
-export CRAB_CACHE_DIR=/e2e/crab-cache
+export CRAB_CACHE_DIR=/crab-cache
 export GIT_TERMINAL_PROMPT=0
 
 mkdir -p "$HOME" "$CRAB_CACHE_DIR" /e2e/logs /e2e/run
