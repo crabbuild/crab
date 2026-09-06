@@ -6752,20 +6752,6 @@ impl PushPipeline {
         Ok(self.common_git_dir()?.join("objects"))
     }
 
-    async fn cached_recipe_for_file(&self, file_hash: &MerkleHash) -> Result<Option<FileRecipe>> {
-        self.chunk_cache
-            .lock()
-            .await
-            .get(file_hash)
-            .map(|cached| cached.recipe.clone())
-            .ok_or_else(|| {
-                CrabError::Internal(format!(
-                    "push pipeline invariant violated: verified recipe root missing for file {}; lookup_staging must run first",
-                    file_hash.hex()
-                ))
-            })
-    }
-
     async fn cached_recipe_snapshot(&self) -> HashMap<MerkleHash, Option<FileRecipe>> {
         let cache = self.chunk_cache.lock().await;
         cache
