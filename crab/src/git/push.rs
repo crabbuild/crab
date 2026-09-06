@@ -5059,8 +5059,6 @@ impl UploadedXorb {
     }
 }
 
-const PREPARED_XORB_HASH_BUFFER_BYTES: usize = 1024 * 1024;
-
 async fn verify_prepared_xorb_plan(
     path: &Path,
     file_hash: &MerkleHash,
@@ -5068,18 +5066,6 @@ async fn verify_prepared_xorb_plan(
     planned: &PlannedXorb,
     len: usize,
 ) -> Result<(Vec<ChunkPlacement>, [u8; 32])> {
-    let payload_hash = hash_prepared_xorb_file(path).await?;
-    let payload_hash_hex = blake3::Hash::from(payload_hash).to_hex().to_string();
-    if payload_hash_hex != planned.payload_hash {
-        return Err(CrabError::StagingCorrupt(format!(
-            "prepared xorb {} for file {} has payload hash {}, plan says {}",
-            xorb_hash.hex(),
-            file_hash.hex(),
-            payload_hash_hex,
-            planned.payload_hash
-        )));
-    }
-
     if len < FOOTER_SIZE {
         return Err(CrabError::StagingCorrupt(format!(
             "prepared xorb {} for file {} is too small for a footer",
@@ -5096,31 +5082,95 @@ async fn verify_prepared_xorb_plan(
     let mut footer = vec![0u8; FOOTER_SIZE];
     file.read_exact(&mut footer).await?;
     let region = xorb_metadata_region(len, &footer)?;
-    file.seek(SeekFrom::Start(u64::try_from(region.offset).map_err(
-        |_| CrabError::Internal("prepared xorb metadata offset does not fit u64".to_owned()),
-    )?))
-    .await?;
     let mut metadata = vec![0u8; region.len];
-    file.read_exact(&mut metadata).await?;
-    let placements = push_plan::validate_prepared_xorb_metadata(
-        len, &footer, &metadata, file_hash, xorb_hash, planned,
-    )?;
+    let metadata_start = u64::try_from(region.offset).map_err(|_| {
+        CrabError::Internal("prepared xorb metadata offset does not fit u64".to_owned())
+    })?;
+    let metadata_end = metadata_start
+        .checked_add(u64::try_from(region.len).map_err(|_| {
+            CrabError::Internal("prepared xorb metadata length does not fit u64".to_owned())
+        })?)
+        .ok_or_else(|| CrabError::Internal("prepared xorb metadata range overflow".to_owned()))?;
 
-    Ok((placements, payload_hash))
-}
-
-async fn hash_prepared_xorb_file(path: &Path) -> Result<[u8; 32]> {
-    let mut file = tokio::fs::File::open(path).await?;
+    file.seek(SeekFrom::Start(0)).await?;
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0u8; PREPARED_XORB_HASH_BUFFER_BYTES];
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let expected_len = u64::try_from(len)
+        .map_err(|_| CrabError::Internal("prepared xorb length does not fit u64".to_owned()))?;
+    let mut offset = 0u64;
     loop {
         let read = file.read(&mut buffer).await?;
         if read == 0 {
             break;
         }
-        hasher.update(&buffer[..read]);
+        let read_len = read;
+        let read = u64::try_from(read_len).map_err(|_| {
+            CrabError::Internal("prepared xorb read length does not fit u64".to_owned())
+        })?;
+        let end = offset
+            .checked_add(read)
+            .ok_or_else(|| CrabError::StagingCorrupt("prepared xorb length overflow".to_owned()))?;
+        if end > expected_len {
+            return Err(CrabError::StagingCorrupt(format!(
+                "prepared xorb {} for file {} grew while being verified",
+                xorb_hash.hex(),
+                file_hash.hex()
+            )));
+        }
+        hasher.update(&buffer[..read_len]);
+
+        let overlap_start = offset.max(metadata_start);
+        let overlap_end = end.min(metadata_end);
+        if overlap_start < overlap_end {
+            let source_start = usize::try_from(overlap_start - offset).map_err(|_| {
+                CrabError::Internal(
+                    "prepared xorb metadata source offset does not fit usize".to_owned(),
+                )
+            })?;
+            let destination_start =
+                usize::try_from(overlap_start - metadata_start).map_err(|_| {
+                    CrabError::Internal(
+                        "prepared xorb metadata destination offset does not fit usize".to_owned(),
+                    )
+                })?;
+            let overlap_len = usize::try_from(overlap_end - overlap_start).map_err(|_| {
+                CrabError::Internal("prepared xorb metadata overlap does not fit usize".to_owned())
+            })?;
+            metadata[destination_start..destination_start + overlap_len]
+                .copy_from_slice(&buffer[source_start..source_start + overlap_len]);
+        }
+        offset = end;
     }
-    Ok(*hasher.finalize().as_bytes())
+    if offset != expected_len {
+        return Err(CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} changed size while being verified",
+            xorb_hash.hex(),
+            file_hash.hex()
+        )));
+    }
+    let payload_hash = *hasher.finalize().as_bytes();
+    let expected_payload_hash = blake3::Hash::from_hex(&planned.payload_hash).map_err(|error| {
+        CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} has invalid planned payload hash {}: {error}",
+            xorb_hash.hex(),
+            file_hash.hex(),
+            planned.payload_hash
+        ))
+    })?;
+    if blake3::Hash::from(payload_hash) != expected_payload_hash {
+        return Err(CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} has payload hash {}, plan says {}",
+            xorb_hash.hex(),
+            file_hash.hex(),
+            blake3::Hash::from(payload_hash).to_hex(),
+            planned.payload_hash
+        )));
+    }
+    let placements = push_plan::validate_prepared_xorb_metadata(
+        len, &footer, &metadata, file_hash, xorb_hash, planned,
+    )?;
+
+    Ok((placements, payload_hash))
 }
 
 #[derive(Debug)]
