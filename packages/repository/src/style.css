@@ -524,19 +524,78 @@ main {
 .diff-panel {
   margin-top: 24px;
 }
-.blame-annotation {
+.blame-view {
+  overflow-x: auto;
   color: var(--fgColor-muted);
   background: var(--bgColor-muted);
   border-block: 1px solid var(--borderColor-default);
   font-size: 12px;
 }
-.blame-annotation-toolbar {
+.blame-view-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--borderColor-muted);
+}
+.blame-view-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(420px, 1.15fr);
+  min-width: 780px;
+}
+.blame-rows {
+  min-width: 0;
+  border-right: 1px solid var(--borderColor-muted);
+}
+.blame-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 48px 64px minmax(110px, 0.7fr) minmax(180px, 2fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 20px;
+  height: calc(var(--blame-lines) * 20px);
+  padding: 0 16px 0 20px;
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+.blame-row::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  content: "";
+  background: var(--bgColor-attention-muted);
+}
+.blame-row:last-child {
+  border-bottom: 0;
+}
+.blame-row > a {
+  color: var(--fgColor-accent);
+  font-family: var(--fontStack-monospace);
+  font-weight: 600;
+  text-decoration: none;
+}
+.blame-row > a:hover {
+  text-decoration: underline;
+}
+.blame-row code,
+.blame-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blame-row code {
+  color: var(--fgColor-muted);
+  text-align: right;
+}
+.blame-source {
+  min-width: 0;
+}
+.blame-source > diffs-file {
+  display: block;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
 }
 .blame-age-legend,
 .blame-contributors {
@@ -570,38 +629,6 @@ main {
   border: 1px solid var(--borderColor-default);
   border-radius: 999px;
   font-size: 11px;
-}
-.blame-annotation-rows {
-  display: grid;
-}
-.blame-annotation-row {
-  display: grid;
-  grid-template-columns:
-    minmax(58px, auto) minmax(56px, auto) minmax(120px, 0.5fr)
-    minmax(180px, 2fr);
-  align-items: center;
-  gap: 12px;
-  min-height: 40px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--borderColor-muted);
-}
-.blame-annotation-row:last-child {
-  border-bottom: 0;
-}
-.blame-annotation-row > a {
-  color: var(--fgColor-accent);
-  font-family: var(--fontStack-monospace);
-  font-weight: 600;
-  text-decoration: none;
-}
-.blame-annotation-row > a:hover {
-  text-decoration: underline;
-}
-.blame-annotation-row code,
-.blame-message {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .blame-author {
   overflow: hidden;

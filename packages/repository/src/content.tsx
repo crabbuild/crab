@@ -52,10 +52,6 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
   const blame = useRequest<Blame>(
     view === "blame" ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
   );
-  const blameAnnotations = useMemo(
-    () => (blame.data ? [{ lineNumber: 0, metadata: blame.data }] : undefined),
-    [blame.data],
-  );
   const file = useMemo(
     () => ({
       name,
@@ -193,61 +189,68 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
             >
               {content.text}
             </RepositoryMarkdown>
-          ) : (
-            <File
-              file={file}
-              options={options}
-              lineAnnotations={view === "blame" ? blameAnnotations : undefined}
-              renderAnnotation={(annotation) => {
-                const ranges = annotation.metadata?.ranges ?? [];
-                const contributors = new Set(
-                  ranges.map((range) => range.commit.author),
-                ).size;
-                return (
-                  <div
-                    className="blame-annotation"
-                    aria-label="Blame information"
-                  >
-                    <div className="blame-annotation-toolbar">
-                      <div className="blame-age-legend" aria-label="Commit age">
-                        <span>Older</span>
-                        <span className="blame-age-scale" aria-hidden="true" />
-                        <span>Newer</span>
-                      </div>
-                      <span className="blame-contributors">
-                        Contributors <strong>{contributors}</strong>
-                      </span>
-                    </div>
-                    <div className="blame-annotation-rows">
-                      {ranges.map((range) => (
-                        <div
-                          className="blame-annotation-row"
-                          key={`${range.start}:${range.commit.oid}`}
-                        >
-                          <code>
-                            {range.start}–{range.start + range.lines - 1}
-                          </code>
-                          <Link
-                            href={repoHref(repo, {
-                              view: "commit",
-                              rev: range.commit.oid,
-                            })}
-                          >
-                            {short(range.commit.oid)}
-                          </Link>
-                          <span className="blame-author">
-                            {range.commit.author}
-                          </span>
-                          <span className="blame-message">
-                            {range.commit.message.split("\n")[0]}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
+          ) : view === "blame" ? (
+            blame.data ? (
+              <div className="blame-view" aria-label="Blame view">
+                <div className="blame-view-toolbar">
+                  <div className="blame-age-legend" aria-label="Commit age">
+                    <span>Older</span>
+                    <span className="blame-age-scale" aria-hidden="true" />
+                    <span>Newer</span>
                   </div>
-                );
-              }}
-            />
+                  <span className="blame-contributors">
+                    Contributors{" "}
+                    <strong>
+                      {
+                        new Set(
+                          blame.data.ranges.map((range) => range.commit.author),
+                        ).size
+                      }
+                    </strong>
+                  </span>
+                </div>
+                <div className="blame-view-grid">
+                  <div className="blame-rows" aria-label="Blame commits">
+                    {blame.data.ranges.map((range) => (
+                      <div
+                        className="blame-row"
+                        key={`${range.start}:${range.commit.oid}`}
+                        style={
+                          { "--blame-lines": range.lines } as CSSProperties
+                        }
+                      >
+                        <code>
+                          {range.start}–{range.start + range.lines - 1}
+                        </code>
+                        <Link
+                          href={repoHref(repo, {
+                            view: "commit",
+                            rev: range.commit.oid,
+                          })}
+                        >
+                          {short(range.commit.oid)}
+                        </Link>
+                        <span className="blame-author">
+                          {range.commit.author}
+                        </span>
+                        <span className="blame-message">
+                          {range.commit.message.split("\n")[0]}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="blame-source">
+                    <File
+                      file={file}
+                      options={options}
+                      style={{ "--diffs-line-height": "20px" } as CSSProperties}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : null
+          ) : (
+            <File file={file} options={options} />
           )}
         </section>
       )}
