@@ -7803,6 +7803,7 @@ impl PushPipeline {
         let mut recipe_hasher = blake3::Hasher::new();
         recipe_hasher.update(b"crab push file recipes v1\0");
         let remote_records = self.remote_file_recipe_hashes.lock().await.clone();
+        let recipe_snapshot = self.cached_recipe_snapshot().await;
         let mut planned_file_dependencies = Vec::with_capacity(recipe_specs.len());
         for (file_hash, size) in recipe_specs {
             recipe_hasher.update(&<[u8; 32]>::from(file_hash));
@@ -7816,7 +7817,14 @@ impl PushPipeline {
                 })?;
                 (*record, true)
             } else {
-                (self.staged_recipe_hash(&file_hash).await?, false)
+                let recipe =
+                    Self::recipe_from_snapshot(&recipe_snapshot, &file_hash)?.ok_or_else(|| {
+                        CrabError::Internal(format!(
+                            "staged recipe root missing for {}",
+                            file_hash.hex()
+                        ))
+                    })?;
+                (recipe.hash(), false)
             };
             recipe_hasher.update(&recipe_hash);
             planned_file_dependencies.push(PlannedFileDependency {
@@ -15226,18 +15234,6 @@ impl PushPipeline {
         .await;
 
         Ok(())
-    }
-
-    async fn staged_recipe_hash(&self, file_hash: &MerkleHash) -> Result<[u8; 32]> {
-        self.cached_recipe_for_file(file_hash)
-            .await?
-            .map(|recipe| recipe.hash())
-            .ok_or_else(|| {
-                CrabError::Internal(format!(
-                    "staged recipe root missing for {}",
-                    file_hash.hex()
-                ))
-            })
     }
 
     /// Warm the local chunk-index cache tiers for every shard this
