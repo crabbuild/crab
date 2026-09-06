@@ -6788,12 +6788,38 @@ impl PushPipeline {
 
     fn build_file_terms_for_recipe(
         &self,
+        file_hash: &MerkleHash,
         recipe: &FileRecipe,
-        placement: &ChunkPlacementMap,
+        placement: &mut ChunkPlacementMap,
+        verified_existing: &ChunkPlacementMap,
     ) -> Result<Vec<FileTerm>> {
         let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
+        let mut chunk_index = 0usize;
         self.visit_recipe_chunks(recipe, |chunk_hash, _| {
-            builder.push(chunk_hash, placement).map_err(CrabError::from)
+            if !placement.contains_key(&chunk_hash) {
+                match verified_existing.get(&chunk_hash) {
+                    Some(existing) => {
+                        placement.insert(chunk_hash, existing.clone());
+                    }
+                    None => {
+                        return Err(CrabError::IncompleteShardReconstruction {
+                            file_hash: file_hash.hex(),
+                            path: None,
+                            uncovered_chunks: 1,
+                            example_chunk_hash: chunk_hash.hex(),
+                            example_chunk_index: usize_to_shard_u32(
+                                "file chunk index",
+                                chunk_index,
+                            )?,
+                        });
+                    }
+                }
+            }
+            builder
+                .push(chunk_hash, placement)
+                .map_err(CrabError::from)?;
+            chunk_index = chunk_index.saturating_add(1);
+            Ok(())
         })?;
         builder
             .finish(&recipe.file_hash(), recipe.chunk_count())
@@ -12160,44 +12186,12 @@ impl PushPipeline {
                 .collect::<ChunkPlacementMap>()
         };
         let mut merged_from_index = 0u64;
-        if !verified_existing.is_empty() {
-            for (file_hash, _) in &pointer_specs {
-                if remote_only.contains(file_hash) {
-                    continue;
-                }
-                let Some(recipe) = self.cached_recipe_for_file(file_hash).await? else {
-                    continue;
-                };
-                let mut idx = 0usize;
-                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                    if !merged_placement.contains_key(&chunk_hash) {
-                        match verified_existing.get(&chunk_hash) {
-                            Some(placement) => {
-                                merged_placement.insert(chunk_hash, placement.clone());
-                                merged_from_index += 1;
-                            }
-                            None => {
-                                // Invariant 6: shard reconstruction terms must
-                                // cover ALL chunks. If a chunk for this file is
-                                // absent from both the new placement map and
-                                // the verified existing-placement set, we cannot
-                                // build a complete shard.
-                                return Err(CrabError::IncompleteShardReconstruction {
-                                    file_hash: file_hash.hex(),
-                                    path: None,
-                                    uncovered_chunks: 1,
-                                    example_chunk_hash: chunk_hash.hex(),
-                                    example_chunk_index: usize_to_shard_u32(
-                                        "file chunk index",
-                                        idx,
-                                    )?,
-                                });
-                            }
-                        }
-                    }
-                    idx = idx.saturating_add(1);
-                    Ok(())
-                })?;
+        for (chunk_hash, placement) in &verified_existing {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                merged_placement.entry(*chunk_hash)
+            {
+                entry.insert(placement.clone());
+                merged_from_index += 1;
             }
         }
         info!(
@@ -12297,7 +12291,12 @@ impl PushPipeline {
                         "non-empty recipe disappeared during shard build".to_owned(),
                     )
                 })?;
-                let terms = self.build_file_terms_for_recipe(recipe, &merged_placement)?;
+                let terms = self.build_file_terms_for_recipe(
+                    file_hash,
+                    recipe,
+                    &mut merged_placement,
+                    &verified_existing,
+                )?;
 
                 terms
                     .iter()
