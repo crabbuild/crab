@@ -4354,7 +4354,7 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
-        let mut candidates = HashMap::new();
+        let mut candidates = HashMap::with_capacity(chunks.len());
         let mut unique_chunks = Vec::with_capacity(chunks.len());
         let mut seen = HashSet::with_capacity(chunks.len());
         for (chunk_hash, _) in chunks {
@@ -4363,7 +4363,7 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             }
         }
 
-        let mut misses = Vec::new();
+        let mut misses = Vec::with_capacity(unique_chunks.len());
         if let Some(cache) = &self.candidate_cache {
             match cache.memory_get_batch(&unique_chunks) {
                 Ok(cached) => {
@@ -4384,11 +4384,11 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                 }
                 Err(error) => {
                     warn!(error = %error, "add remote candidate memory cache lookup failed");
-                    misses = unique_chunks.clone();
+                    misses = unique_chunks;
                 }
             }
         } else {
-            misses = unique_chunks.clone();
+            misses = unique_chunks;
         }
 
         if !misses.is_empty()
@@ -4403,7 +4403,7 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             };
             match persistent_lookup {
                 Ok(Ok(persisted)) => {
-                    let mut memory_updates = Vec::new();
+                    let mut memory_updates = Vec::with_capacity(lookup_hashes.len());
                     for &chunk_hash in lookup_hashes.iter() {
                         match persisted.get(&chunk_hash).copied() {
                             Some(Some(candidate)) => {
