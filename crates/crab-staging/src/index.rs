@@ -398,42 +398,97 @@ fn remove_empty_published_batches(tx: &rusqlite::Transaction<'_>) -> Result<()> 
     .map_err(|e| StagingError::Internal(format!("failed to remove superseded empty batches: {e}")))
 }
 
-fn ensure_pending_collision_is_idempotent(
+fn ensure_pending_collision_batch_is_idempotent(
     tx: &rusqlite::Transaction<'_>,
-    row: &PendingRow,
+    rows: &[PendingRow],
 ) -> Result<()> {
-    let fh: &[u8] = &row.file_hash;
-    let existing: Option<(Vec<u8>, i64, u64, u64)> = tx
-        .query_row(
-            "SELECT chunk_hash, size, segment_id, segment_offset
-             FROM pending_chunks
-             WHERE file_hash = ?1 AND chunk_index = ?2",
-            params![fh, row.chunk_index],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()
-        .map_err(|e| StagingError::Internal(format!("failed to inspect pending collision: {e}")))?;
-
-    let Some((existing_hash, existing_size, existing_segment_id, existing_offset)) = existing
-    else {
-        return Err(StagingError::Internal(
-            "pending insert reported a conflict but the existing row was not found".to_owned(),
-        ));
-    };
-
-    let existing_hash = decode_hash_blob("pending chunk hash", existing_hash)?;
-    if existing_hash == row.chunk_hash
-        && existing_size == row.size
-        && existing_segment_id == row.segment_id
-        && existing_offset == row.segment_offset
-    {
+    if rows.is_empty() {
         return Ok(());
     }
 
-    Err(StagingError::StagingCorrupt(format!(
-        "pending chunk collision at chunk_index {}: existing row differs from new staging row",
-        row.chunk_index
-    )))
+    // Keep the conflict probe below SQLite's default bind-parameter limit.
+    const COLLISION_QUERY_BATCH: usize = 400;
+    for batch in rows.chunks(COLLISION_QUERY_BATCH) {
+        let placeholders = std::iter::repeat_n("(?, ?)", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(
+            "SELECT file_hash, chunk_index, chunk_hash, size, segment_id, segment_offset
+             FROM pending_chunks
+             WHERE (file_hash, chunk_index) IN ({placeholders})"
+        );
+        let mut statement = tx.prepare_cached(&query).map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to prepare pending collision probe: {error}"
+            ))
+        })?;
+        let file_hashes = batch
+            .iter()
+            .map(|row| row.file_hash.as_slice())
+            .collect::<Vec<_>>();
+        let mut values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 2);
+        for (index, row) in batch.iter().enumerate() {
+            values.push(&file_hashes[index]);
+            values.push(&row.chunk_index);
+        }
+        let rows = statement
+            .query_map(params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, u64>(4)?,
+                    row.get::<_, u64>(5)?,
+                ))
+            })
+            .map_err(|error| {
+                StagingError::Internal(format!("failed to query pending collision probe: {error}"))
+            })?;
+        let mut existing = HashMap::with_capacity(batch.len());
+        for row in rows {
+            let (file_hash, chunk_index, chunk_hash, size, segment_id, segment_offset) = row
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to read pending collision probe: {error}"
+                    ))
+                })?;
+            existing.insert(
+                (
+                    decode_hash_blob("pending file hash", file_hash)?,
+                    chunk_index,
+                ),
+                (
+                    decode_hash_blob("pending chunk hash", chunk_hash)?,
+                    size,
+                    segment_id,
+                    segment_offset,
+                ),
+            );
+        }
+        for row in batch {
+            let Some((existing_hash, existing_size, existing_segment_id, existing_offset)) =
+                existing.get(&(row.file_hash, row.chunk_index))
+            else {
+                return Err(StagingError::Internal(
+                    "pending insert reported a conflict but the existing row was not found"
+                        .to_owned(),
+                ));
+            };
+            if *existing_hash == row.chunk_hash
+                && *existing_size == row.size
+                && *existing_segment_id == row.segment_id
+                && *existing_offset == row.segment_offset
+            {
+                continue;
+            }
+            return Err(StagingError::StagingCorrupt(format!(
+                "pending chunk collision at chunk_index {}: existing row differs from new staging row",
+                row.chunk_index
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl Index {
@@ -1227,6 +1282,7 @@ impl Index {
             StagingError::Internal(format!("failed to begin pending insert tx: {e}"))
         })?;
 
+        let mut conflicts = Vec::new();
         {
             let mut stmt = tx
                 .prepare_cached(
@@ -1255,10 +1311,11 @@ impl Index {
                         StagingError::Internal(format!("failed to insert pending chunk: {e}",))
                     })?;
                 if inserted == 0 {
-                    ensure_pending_collision_is_idempotent(&tx, row)?;
+                    conflicts.push(row.clone());
                 }
             }
         }
+        ensure_pending_collision_batch_is_idempotent(&tx, &conflicts)?;
 
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit pending insert tx: {e}"))
@@ -9821,6 +9878,36 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM pending_chunks", [], |r| r.get(0))
             .expect("count pending");
         assert_eq!(pending_count, 1);
+    }
+
+    #[test]
+    fn insert_pending_validates_large_retry_in_bounded_batches() {
+        const ROWS: usize = 801;
+
+        let idx = open_in_memory();
+        let seg_id = idx.allocate_segment_id().expect("alloc");
+        let file_hash = test_hash(0xF5);
+        let file_size = i64::try_from(ROWS * 8).expect("file size");
+        insert_test_file(&idx, &file_hash, file_size);
+        let rows = (0..ROWS)
+            .map(|index| PendingRow {
+                chunk_hash: test_hash(u8::try_from(index % 256).expect("chunk hash seed")),
+                file_hash,
+                chunk_index: i64::try_from(index).expect("chunk index"),
+                size: 8,
+                segment_id: seg_id,
+                segment_offset: u64::try_from(index * 8).expect("segment offset"),
+            })
+            .collect::<Vec<_>>();
+
+        idx.insert_pending(&rows).expect("first insert");
+        idx.insert_pending(&rows).expect("identical retry");
+
+        let pending_count: i64 = idx
+            .conn
+            .query_row("SELECT COUNT(*) FROM pending_chunks", [], |row| row.get(0))
+            .expect("count pending");
+        assert_eq!(pending_count, i64::try_from(ROWS).expect("row count"));
     }
 
     #[test]
