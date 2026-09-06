@@ -103,6 +103,14 @@ const RECIPE_REMOTE_CHUNK_COLUMNS: &[&str] = &[
     "origin_proof_id",
 ];
 
+const STAGING_BATCH_COLUMNS: &[&str] = &[
+    "batch_id",
+    "state",
+    "recording_term_count",
+    "recording_byte_size",
+    "created_at",
+];
+
 /// A row staged in `pending_chunks` before the segment is fsynced.
 ///
 /// Hashes are stored as raw 32-byte arrays to avoid heap-allocated hex
@@ -560,6 +568,14 @@ impl Index {
             {
                 return Err(retired_staging_schema());
             }
+            if self
+                .table_columns("staging_batches")?
+                .iter()
+                .map(String::as_str)
+                .ne(STAGING_BATCH_COLUMNS.iter().copied())
+            {
+                return Err(retired_staging_schema());
+            }
             let version: Option<String> = self
                 .conn
                 .query_row(
@@ -722,9 +738,11 @@ impl Index {
                     ON recipe_remote_chunks(chunk_hash);
 
                 CREATE TABLE IF NOT EXISTS staging_batches (
-                    batch_id    TEXT PRIMARY KEY,
-                    state       TEXT NOT NULL CHECK(state IN ('open', 'published')),
-                    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+                    batch_id             TEXT PRIMARY KEY,
+                    state                TEXT NOT NULL CHECK(state IN ('open', 'published')),
+                    recording_term_count INTEGER NOT NULL DEFAULT 0,
+                    recording_byte_size  INTEGER NOT NULL DEFAULT 0,
+                    created_at           TEXT NOT NULL DEFAULT (datetime('now'))
                 );
 
                 CREATE TABLE IF NOT EXISTS recipe_recording_terms (
@@ -2942,10 +2960,12 @@ impl Index {
         start_offset: u64,
         chunks: &[(crab_xet::hash::MerkleHash, u64)],
     ) -> Result<()> {
-        let (stored_count, stored_end): (i64, Option<i64>) = tx
+        // Keep the recording tail on the batch row so large recordings do not
+        // rescan their term table on every bounded append.
+        let (stored_count, stored_end): (i64, i64) = tx
             .query_row(
-                "SELECT COUNT(*), MAX(chunk_offset + chunk_size)
-                 FROM recipe_recording_terms WHERE batch_id = ?1",
+                "SELECT recording_term_count, recording_byte_size
+                 FROM staging_batches WHERE batch_id = ?1 AND state = 'open'",
                 params![batch_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -2953,10 +2973,7 @@ impl Index {
                 StagingError::Internal(format!("failed to inspect recipe recording tail: {e}"))
             })?;
         let expected_occurrence = nonnegative_count("recipe recording count", stored_count)?;
-        let expected_offset = stored_end
-            .map(|value| nonnegative_count("recipe recording offset", value))
-            .transpose()?
-            .unwrap_or(0);
+        let expected_offset = nonnegative_count("recipe recording offset", stored_end)?;
         if start_occurrence != expected_occurrence || start_offset != expected_offset {
             return Err(StagingError::StagingCorrupt(format!(
                 "recipe recording append is not contiguous: expected occurrence {expected_occurrence} offset {expected_offset}, found occurrence {start_occurrence} offset {start_offset}"
@@ -3011,6 +3028,23 @@ impl Index {
                 StagingError::Internal(format!("failed to append recipe recording term batch: {e}"))
             })?;
             drop(statement);
+        }
+        let recording_term_count = sqlite_i64("recipe recording count", occurrence)?;
+        let recording_byte_size = sqlite_i64("recipe recording offset", offset)?;
+        let updated = tx
+            .execute(
+                "UPDATE staging_batches
+                 SET recording_term_count = ?2, recording_byte_size = ?3
+                 WHERE batch_id = ?1 AND state = 'open'",
+                params![batch_id, recording_term_count, recording_byte_size],
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to update recipe recording tail: {e}"))
+            })?;
+        if updated != 1 {
+            return Err(StagingError::NotFound {
+                path: format!("open staging batch {batch_id}"),
+            });
         }
         Ok(())
     }
@@ -9416,6 +9450,22 @@ mod tests {
             occurrence += u64::try_from(page.len()).expect("page length");
             offset += page.iter().map(|(_, size)| size).sum::<u64>();
         }
+        let recording_tail: (i64, i64) = idx
+            .conn
+            .query_row(
+                "SELECT recording_term_count, recording_byte_size
+                 FROM staging_batches WHERE batch_id = 'batch-large'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("recording tail");
+        assert_eq!(
+            recording_tail,
+            (
+                i64::try_from(OCCURRENCES).expect("occurrence count"),
+                file_size
+            )
+        );
 
         idx.insert_recipe_lease(
             "batch-large",
@@ -9438,6 +9488,30 @@ mod tests {
         assert_eq!(
             counts,
             (i64::try_from(OCCURRENCES).expect("occurrence count"), 1)
+        );
+    }
+
+    #[test]
+    fn recipe_recording_rejects_corrupt_persisted_tail() {
+        let idx = open_in_memory();
+        idx.insert_batch("batch-tail").expect("batch");
+        idx.conn
+            .execute(
+                "UPDATE staging_batches
+                 SET recording_term_count = -1
+                 WHERE batch_id = 'batch-tail'",
+                [],
+            )
+            .expect("corrupt recording tail");
+
+        assert_staging_corrupt_contains(
+            idx.append_recipe_recording_terms(
+                "batch-tail",
+                0,
+                0,
+                &[(crab_xet::hash::MerkleHash::from(test_hash(0x87)), 8)],
+            ),
+            "recipe recording count is negative",
         );
     }
 
