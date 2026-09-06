@@ -9616,7 +9616,16 @@ impl PushPipeline {
         let mut verified = HashMap::new();
         let mut cached_xorb_hashes = HashSet::new();
         let mut refs_by_xorb: HashMap<XorbHash, Vec<(MerkleHash, XorbRef)>> = HashMap::new();
-        let full_xorb_cache = self.remote_full_xorb_ref_cache.lock().await.clone();
+        // The cache is global and may contain many repositories' xorbs. Only
+        // retain entries referenced by this push; later proof work never needs
+        // to inspect the rest of the cache.
+        let full_xorb_cache = {
+            let cache = self.remote_full_xorb_ref_cache.lock().await;
+            refs.values()
+                .map(|xorb_ref| xorb_ref.xorb_hash)
+                .filter(|xorb_hash| cache.contains(xorb_hash))
+                .collect::<HashSet<_>>()
+        };
         {
             let chunk_ref_cache = self.remote_chunk_ref_cache.lock().await;
             for (chunk_hash, xorb_ref) in refs {
