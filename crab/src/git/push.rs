@@ -12086,7 +12086,8 @@ impl PushPipeline {
         // existing chunks whose referenced xorbs were confirmed present in
         // step 4. Advisory local indexes are not read here; a stale entry
         // must repack, not publish metadata pointing at a missing xorb.
-        let mut merged_placement: ChunkPlacementMap = placement_map.clone();
+        let placement_new = placement_map.len();
+        let mut merged_placement: ChunkPlacementMap = placement_map;
         let mut merged_from_index = 0u64;
         if !verified_existing.is_empty() {
             for (file_hash, _) in &pointer_specs {
@@ -12129,7 +12130,7 @@ impl PushPipeline {
             }
         }
         info!(
-            placement_new = placement_map.len(),
+            placement_new,
             merged_from_index,
             merged_total = merged_placement.len(),
             verified_existing = verified_existing.len(),
