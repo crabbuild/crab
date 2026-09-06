@@ -11031,7 +11031,7 @@ mod tests {
             origin_proof_id: test_hash(0xEA),
         };
 
-        idx.append_recording_batch("remote-batch", 0, 0, &[], &[authority])
+        idx.append_recording_batch("remote-batch", 0, 0, &[], std::slice::from_ref(&authority))
             .expect("initial authority");
         assert_staging_corrupt_contains(
             idx.append_recording_batch(
@@ -11070,7 +11070,7 @@ mod tests {
             0,
             0,
             &[(crab_xet::hash::MerkleHash::from(first_hash), 8)],
-            &[first_authority],
+            std::slice::from_ref(&first_authority),
         )
         .expect("combined recording append");
 
@@ -11089,7 +11089,7 @@ mod tests {
                 9,
                 8,
                 &[(crab_xet::hash::MerkleHash::from(second_hash), 8)],
-                &[second_authority],
+                std::slice::from_ref(&second_authority),
             ),
             "not contiguous",
         );
