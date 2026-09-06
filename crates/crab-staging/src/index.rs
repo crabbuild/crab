@@ -8151,10 +8151,10 @@ impl Index {
         // are common for sparse or zero-filled large files; joining
         // every batch row against every existing row for the same hash
         // turns into an O(batch * staged_rows) explosion.
-        let placeholders = vec!["?"; unique_hashes.len()].join(",");
-
         let mut found_set = std::collections::HashSet::new();
-        {
+        const DEDUP_LOOKUP_BATCH: usize = 400;
+        for unique_batch in unique_hashes.chunks(DEDUP_LOOKUP_BATCH) {
+            let placeholders = vec!["?"; unique_batch.len()].join(",");
             let sql = format!(
                 "SELECT picked.chunk_hash, c.segment_id, c.segment_offset, c.size,
                         EXISTS(SELECT 1 FROM chunks c2
@@ -8176,7 +8176,7 @@ impl Index {
             let rows = stmt
                 .query_map(
                     params_from_iter(
-                        std::iter::once(fh).chain(unique_hashes.iter().map(|h| h.as_slice())),
+                        std::iter::once(fh).chain(unique_batch.iter().map(|h| h.as_slice())),
                     ),
                     |row| {
                         let blob: Vec<u8> = row.get(0)?;
@@ -8216,8 +8216,8 @@ impl Index {
             .filter(|hash| !existing_by_hash.contains_key(hash))
             .collect();
 
-        if !missing_hashes.is_empty() {
-            let pending_placeholders = vec!["?"; missing_hashes.len()].join(",");
+        for missing_batch in missing_hashes.chunks(DEDUP_LOOKUP_BATCH) {
+            let pending_placeholders = vec!["?"; missing_batch.len()].join(",");
             let sql = format!(
                 "SELECT picked.chunk_hash, p.segment_id, p.segment_offset, p.size,
                         EXISTS(SELECT 1 FROM pending_chunks p2
@@ -8239,7 +8239,7 @@ impl Index {
             let rows = stmt
                 .query_map(
                     params_from_iter(
-                        std::iter::once(fh).chain(missing_hashes.iter().map(|h| h.as_slice())),
+                        std::iter::once(fh).chain(missing_batch.iter().map(|h| h.as_slice())),
                     ),
                     |row| {
                         let blob: Vec<u8> = row.get(0)?;
@@ -9946,6 +9946,28 @@ mod tests {
             idx.chunks_for_file(&fh).expect("chunks"),
             vec![test_hash(0xC4)]
         );
+    }
+
+    #[test]
+    fn batch_dedup_check_pages_unique_hashes_below_sqlite_bind_limit() {
+        const HASHES: usize = 1024;
+
+        let idx = open_in_memory();
+        let file_hash = test_hash(0xF6);
+        insert_test_file(&idx, &file_hash, i64::try_from(HASHES).expect("file size"));
+        let hashes = (0..HASHES)
+            .map(|index| {
+                let mut hash = [0; 32];
+                hash[..8].copy_from_slice(&u64::try_from(index).expect("hash index").to_le_bytes());
+                (index, hash)
+            })
+            .collect::<Vec<_>>();
+
+        let (existing, new_indices) = idx
+            .batch_dedup_check(&hashes, &file_hash)
+            .expect("paged batch dedup check");
+        assert!(existing.is_empty());
+        assert_eq!(new_indices.len(), HASHES);
     }
 
     #[test]
