@@ -336,7 +336,7 @@ function IssueDetail({
           <Button
             size="small"
             onClick={resource.retry}
-            disabled={resource.loading}
+            aria-busy={resource.loading}
           >
             Refresh
           </Button>
