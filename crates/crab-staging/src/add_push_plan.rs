@@ -6,9 +6,11 @@ use tracing::debug;
 
 use crate::StagingArea;
 use crate::error::{Result, StagingError};
+#[cfg(test)]
+use crate::push_plan::PreparedXorbSource;
 use crate::push_plan::{
     ExistingChunkCandidate, FilePushPlan, PlannedExistingChunk, PlannedPlacement, PlannedXorb,
-    PreparedXorbCache, PreparedXorbCandidate, PreparedXorbSource, materialize_prepared_xorb,
+    PreparedXorbCache, PreparedXorbCandidate, materialize_prepared_xorb,
 };
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::builder::{RunId, XorbBuilder};
@@ -717,7 +719,7 @@ async fn prepare_one_file_plan(
     remote_lookup: Option<&dyn ExistingChunkLookup>,
     prepared_cache: &mut PreparedXorbCache,
     verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
-    ownership_cache: &mut HashMap<(MerkleHash, MerkleHash), bool>,
+    ownership_cache: &mut HashMap<(MerkleHash, [u8; 32]), bool>,
     cancel: &CancellationToken,
 ) -> Result<FilePlanSummary> {
     let existing_refs = lookup_existing_candidates(file.chunks, remote_lookup).await?;
@@ -751,7 +753,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
-    ownership_cache: &mut HashMap<(MerkleHash, MerkleHash), bool>,
+    ownership_cache: &mut HashMap<(MerkleHash, [u8; 32]), bool>,
     cancel: &CancellationToken,
 ) -> Result<PreparedFilePlan> {
     if existing_refs.len() != file.chunks.len() {
