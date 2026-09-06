@@ -950,13 +950,10 @@ fn ranked_prepared_candidates<'a>(
     unusable_cached_candidates: &HashSet<*const PreparedXorbCandidate>,
 ) -> Vec<PreparedCandidateChoice<'a>> {
     let mut choices = Vec::new();
-    for candidate in prepared_cache.candidates_for_chunk(chunk_hash) {
+    for (candidate, placement) in prepared_cache.candidate_placements_for_chunk(chunk_hash) {
         if unusable_cached_candidates.contains(&prepared_candidate_id(candidate)) {
             continue;
         }
-        let Some(placement) = candidate.placement_for(chunk_hash) else {
-            continue;
-        };
         if u64::from(placement.uncompressed_size) != expected_size {
             continue;
         }

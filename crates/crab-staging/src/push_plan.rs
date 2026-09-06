@@ -137,7 +137,7 @@ impl PreparedXorbCandidate {
 
 #[derive(Debug, Default)]
 pub struct PreparedXorbCache {
-    chunks: HashMap<MerkleHash, Vec<Arc<PreparedXorbCandidate>>>,
+    chunks: HashMap<MerkleHash, Vec<(Arc<PreparedXorbCandidate>, u32)>>,
     xorbs: HashMap<MerkleHash, Vec<Arc<PreparedXorbCandidate>>>,
 }
 
@@ -153,7 +153,26 @@ impl PreparedXorbCache {
         self.chunks
             .get(chunk_hash)
             .into_iter()
-            .flat_map(|candidates| candidates.iter().map(Arc::as_ref))
+            .flat_map(|candidates| candidates.iter().map(|(candidate, _)| candidate.as_ref()))
+    }
+
+    pub(crate) fn candidate_placements_for_chunk(
+        &self,
+        chunk_hash: &MerkleHash,
+    ) -> impl Iterator<Item = (&PreparedXorbCandidate, &ChunkPlacement)> + '_ {
+        self.chunks
+            .get(chunk_hash)
+            .into_iter()
+            .flat_map(|candidates| {
+                candidates
+                    .iter()
+                    .filter_map(|(candidate, placement_index)| {
+                        candidate
+                            .placements
+                            .get(usize::try_from(*placement_index).ok()?)
+                            .map(|placement| (candidate.as_ref(), placement))
+                    })
+            })
     }
 
     pub fn insert_prepared_xorb(&mut self, planned: &PlannedXorb) -> Result<()> {
@@ -209,12 +228,18 @@ impl PreparedXorbCache {
                     placements,
                 });
                 let mut indexed_chunks = HashSet::new();
-                for placement in &candidate.placements {
+                for (placement_index, placement) in candidate.placements.iter().enumerate() {
                     if indexed_chunks.insert(placement.chunk_hash) {
+                        let placement_index = u32::try_from(placement_index).map_err(|_| {
+                            StagingError::StagingCorrupt(format!(
+                                "prepared xorb {} has too many placements",
+                                xorb_hash.hex()
+                            ))
+                        })?;
                         self.chunks
                             .entry(placement.chunk_hash)
                             .or_default()
-                            .push(Arc::clone(&candidate));
+                            .push((Arc::clone(&candidate), placement_index));
                     }
                 }
                 let candidates = self.xorbs.get_mut(&xorb_hash).ok_or_else(|| {
@@ -239,12 +264,18 @@ impl PreparedXorbCache {
             placements,
         });
         let mut indexed_chunks = HashSet::new();
-        for placement in &candidate.placements {
+        for (placement_index, placement) in candidate.placements.iter().enumerate() {
             if indexed_chunks.insert(placement.chunk_hash) {
+                let placement_index = u32::try_from(placement_index).map_err(|_| {
+                    StagingError::StagingCorrupt(format!(
+                        "prepared xorb {} has too many placements",
+                        xorb_hash.hex()
+                    ))
+                })?;
                 self.chunks
                     .entry(placement.chunk_hash)
                     .or_default()
-                    .push(Arc::clone(&candidate));
+                    .push((Arc::clone(&candidate), placement_index));
             }
         }
         self.xorbs.insert(xorb_hash, vec![candidate]);
