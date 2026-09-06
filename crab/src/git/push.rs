@@ -4419,7 +4419,9 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             };
             match persistent_lookup {
                 Ok(Ok(persisted)) => {
-                    let mut memory_updates = Vec::with_capacity(lookup_hashes.len());
+                    // Persisted misses are not inserted into memory; only grow
+                    // this buffer for rows that actually came back from SQLite.
+                    let mut memory_updates = Vec::new();
                     for &chunk_hash in lookup_hashes.iter() {
                         match persisted.get(&chunk_hash).copied() {
                             Some(Some(candidate)) => {
