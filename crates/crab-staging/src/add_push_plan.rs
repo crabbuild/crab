@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -290,8 +291,8 @@ fn debug_file_summary(summary: &AddPushPlanSummary) {
     );
 }
 
-struct PreparedCandidateChoice {
-    candidate: Arc<PreparedXorbCandidate>,
+struct PreparedCandidateChoice<'a> {
+    candidate: &'a PreparedXorbCandidate,
     covered_chunks: Vec<MerkleHash>,
 }
 
@@ -961,7 +962,7 @@ fn ranked_prepared_candidates(
     expected_size: u64,
     chunk_states: &HashMap<MerkleHash, FileChunkState>,
     unusable_cached_xorb_sources: &HashSet<(MerkleHash, PreparedXorbSource)>,
-) -> Vec<PreparedCandidateChoice> {
+) -> Vec<PreparedCandidateChoice<'_>> {
     let mut choices = Vec::new();
     for candidate in prepared_cache.candidates_for_chunk(chunk_hash) {
         if unusable_cached_xorb_sources.contains(&(candidate.xorb_hash, candidate.source.clone())) {
@@ -973,7 +974,7 @@ fn ranked_prepared_candidates(
         if u64::from(placement.uncompressed_size) != expected_size {
             continue;
         }
-        let covered_chunks = matching_file_chunks(&candidate, chunk_states);
+        let covered_chunks = matching_file_chunks(candidate, chunk_states);
         if covered_chunks.is_empty() {
             continue;
         }

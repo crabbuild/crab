@@ -149,11 +149,11 @@ impl PreparedXorbCache {
     pub fn candidates_for_chunk(
         &self,
         chunk_hash: &MerkleHash,
-    ) -> impl Iterator<Item = Arc<PreparedXorbCandidate>> + '_ {
+    ) -> impl Iterator<Item = &PreparedXorbCandidate> + '_ {
         self.chunks
             .get(chunk_hash)
             .into_iter()
-            .flat_map(|candidates| candidates.iter().cloned())
+            .flat_map(|candidates| candidates.iter().map(Arc::as_ref))
     }
 
     pub fn insert_prepared_xorb(&mut self, planned: &PlannedXorb) -> Result<()> {
