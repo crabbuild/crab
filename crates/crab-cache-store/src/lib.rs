@@ -935,11 +935,16 @@ impl CachingStore {
                 unique_hashes.push(hash);
                 input_indexes.push(vec![input_index]);
             }
-            if let Some(known_unique) = self.query_dedup_batches(repo_path, &unique_hashes).await {
+            if let Some(result) = self.query_dedup_batches(repo_path, &unique_hashes).await {
+                let known_by_index = result
+                    .known
+                    .into_iter()
+                    .map(|hit| (hit.index, hit))
+                    .collect::<HashMap<_, _>>();
                 let mut known = Vec::new();
                 let mut unknown = Vec::new();
                 for (unique_index, occurrences) in input_indexes.into_iter().enumerate() {
-                    match known_unique[unique_index].as_ref() {
+                    match known_by_index.get(&unique_index) {
                         Some(hit) => {
                             known.extend(occurrences.into_iter().map(|index| {
                                 crab_cache::KnownChunk {
@@ -981,18 +986,8 @@ impl CachingStore {
         let _ = repo_path;
 
         #[cfg(feature = "remote-client")]
-        if let Some(known_by_index) = self.query_dedup_batches(repo_path, hashes).await {
-            let mut known = Vec::new();
-            let mut unknown = Vec::new();
-            for (index, hit) in known_by_index.into_iter().enumerate() {
-                if let Some(mut hit) = hit {
-                    hit.index = index;
-                    known.push(hit);
-                } else {
-                    unknown.push(index);
-                }
-            }
-            return Ok(DedupQueryResult { known, unknown });
+        if let Some(result) = self.query_dedup_batches(repo_path, hashes).await {
+            return Ok(result);
         }
 
         Ok(DedupQueryResult {
@@ -1006,14 +1001,18 @@ impl CachingStore {
         &self,
         repo_path: &str,
         hashes: &[[u8; 32]],
-    ) -> Option<Vec<Option<crab_cache::KnownChunk>>> {
+    ) -> Option<DedupQueryResult> {
         if !self.dedup_enabled() {
             return None;
         }
         let client = self.cache_client.as_ref()?;
-        let mut known_by_index = (0..hashes.len()).map(|_| None).collect::<Vec<_>>();
+        let mut known = Vec::new();
+        let mut unknown = Vec::new();
+        let mut batch_slots = Vec::new();
         for (batch_index, batch) in hashes.chunks(DEDUP_QUERY_MAX_UNIQUE_HASHES).enumerate() {
             let batch_start = batch_index * DEDUP_QUERY_MAX_UNIQUE_HASHES;
+            batch_slots.clear();
+            batch_slots.resize_with(batch.len(), || None);
             match client.dedup_query(repo_path, batch).await {
                 Ok(result) => {
                     for mut known in result.known {
@@ -1027,7 +1026,7 @@ impl CachingStore {
                             );
                             continue;
                         };
-                        let Some(slot) = known_by_index.get_mut(index) else {
+                        let Some(slot) = batch_slots.get_mut(known.index) else {
                             tracing::warn!(
                                 repo_path = %repo_path,
                                 batch = batch_index,
@@ -1040,6 +1039,13 @@ impl CachingStore {
                         known.index = index;
                         *slot = Some(known);
                     }
+                    for (batch_offset, hit) in batch_slots.drain(..).enumerate() {
+                        if let Some(hit) = hit {
+                            known.push(hit);
+                        } else {
+                            unknown.push(batch_start + batch_offset);
+                        }
+                    }
                 }
                 Err(error) => {
                     // Dedup is advisory. Preserve successes from other
@@ -1051,10 +1057,13 @@ impl CachingStore {
                         error = %error,
                         "dedup query batch failed, treating this batch as unknown",
                     );
+                    unknown.extend(batch_start..batch_start + batch.len());
                 }
             }
         }
-        Some(known_by_index)
+        known.sort_unstable_by_key(|hit| hit.index);
+        unknown.sort_unstable();
+        Some(DedupQueryResult { known, unknown })
     }
 
     /// Query the cache service for cache-local dedup candidates.
