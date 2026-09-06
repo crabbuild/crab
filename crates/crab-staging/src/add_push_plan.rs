@@ -475,6 +475,7 @@ async fn verified_staged_chunks(
     expected_sequence_hash: [u8; 32],
 ) -> Result<()> {
     if let Some(plan) = staging.load_file_push_plan(&file_hash).await?
+        && plan.staged_chunk_sequence_verified
         && plan.chunk_count == expected_chunks.len() as u64
         && plan.sequence_hash()? == expected_sequence_hash
         && plan.file_size == file_size
