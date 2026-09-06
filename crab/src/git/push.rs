@@ -5075,6 +5075,14 @@ async fn verify_prepared_xorb_plan(
             file_hash.hex()
         )));
     }
+    let expected_payload_hash = blake3::Hash::from_hex(&planned.payload_hash).map_err(|error| {
+        CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} has invalid planned payload hash {}: {error}",
+            xorb_hash.hex(),
+            file_hash.hex(),
+            planned.payload_hash
+        ))
+    })?;
 
     let mut file = tokio::fs::File::open(path).await?;
     let footer_offset = u64::try_from(len - FOOTER_SIZE).map_err(|_| {
@@ -5158,14 +5166,6 @@ async fn verify_prepared_xorb_plan(
         )));
     }
     let payload_hash = *hasher.finalize().as_bytes();
-    let expected_payload_hash = blake3::Hash::from_hex(&planned.payload_hash).map_err(|error| {
-        CrabError::StagingCorrupt(format!(
-            "prepared xorb {} for file {} has invalid planned payload hash {}: {error}",
-            xorb_hash.hex(),
-            file_hash.hex(),
-            planned.payload_hash
-        ))
-    })?;
     if blake3::Hash::from(payload_hash) != expected_payload_hash {
         return Err(CrabError::StagingCorrupt(format!(
             "prepared xorb {} for file {} has payload hash {}, plan says {}",
