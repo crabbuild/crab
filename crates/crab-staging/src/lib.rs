@@ -3979,6 +3979,43 @@ impl StagingAreaReadOnly {
         authoritative_file_push_plan(&self.root, &self.index, file_hash)
     }
 
+    /// Load prepared xorb authority for several published recipes in one index read.
+    pub fn prepared_xorbs_for_recipes(
+        &self,
+        recipe_hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Vec<push_plan::PlannedXorb>>> {
+        let raw_hashes = recipe_hashes
+            .iter()
+            .map(|recipe_hash| (*recipe_hash).into())
+            .collect::<Vec<[u8; 32]>>();
+        let stored = lock_index(&self.index)?.prepared_xorbs_for_recipes(&raw_hashes)?;
+        stored
+            .into_iter()
+            .map(|(recipe_hash, xorbs)| {
+                let xorbs = xorbs
+                    .into_iter()
+                    .map(|stored| push_plan::PlannedXorb {
+                        hash: MerkleHash::from(stored.xorb_hash).hex(),
+                        payload_hash: blake3::Hash::from(stored.payload_hash).to_hex().to_string(),
+                        bytes: stored.bytes,
+                        upload: true,
+                        placements: stored
+                            .placements
+                            .into_iter()
+                            .map(|placement| push_plan::PlannedPlacement {
+                                chunk_hash: MerkleHash::from(placement.chunk_hash).hex(),
+                                xorb_hash: MerkleHash::from(stored.xorb_hash).hex(),
+                                chunk_index: placement.chunk_index,
+                                uncompressed_size: placement.uncompressed_size,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                Ok((MerkleHash::from(recipe_hash), xorbs))
+            })
+            .collect()
+    }
+
     /// Retire the staged chunks for a successfully-pushed file.
     ///
     /// Removes every `chunks` row with this `file_hash` and decrements

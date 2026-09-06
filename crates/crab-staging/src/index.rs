@@ -7199,6 +7199,87 @@ impl Index {
             .collect())
     }
 
+    /// Load prepared xorb candidates for several recipes in one index read.
+    pub fn prepared_xorbs_for_recipes(
+        &self,
+        recipe_hashes: &[[u8; 32]],
+    ) -> Result<HashMap<[u8; 32], Vec<StoredPreparedXorb>>> {
+        if recipe_hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut unique = Vec::with_capacity(recipe_hashes.len());
+        let mut requested = HashSet::with_capacity(recipe_hashes.len());
+        for hash in recipe_hashes {
+            if requested.insert(*hash) {
+                unique.push(*hash);
+            }
+        }
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        for batch in unique.chunks(PREPARED_XORB_QUERY_BATCH) {
+            let placeholders = vec!["?"; batch.len()].join(",");
+            let sql = format!(
+                "SELECT lease.recipe_hash, payload.xorb_hash, payload.payload_hash, payload.bytes
+                 FROM prepared_leases AS lease
+                 JOIN prepared_payloads AS payload USING (xorb_hash)
+                 WHERE lease.recipe_hash IN ({placeholders})
+                 ORDER BY lease.recipe_hash, payload.xorb_hash"
+            );
+            let mut statement = self.conn.prepare_cached(&sql).map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare recipe prepared xorb batch: {error}"
+                ))
+            })?;
+            let mapped = statement
+                .query_map(
+                    params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to query recipe prepared xorbs: {error}"
+                    ))
+                })?;
+            for row in mapped {
+                let (recipe_hash, xorb_hash, payload_hash, bytes) = row.map_err(|error| {
+                    StagingError::Internal(format!("failed to read recipe prepared xorb: {error}"))
+                })?;
+                let recipe_hash =
+                    decode_hash_blob("recipe prepared xorb recipe hash", recipe_hash)?;
+                let xorb_hash = decode_hash_blob("recipe prepared xorb hash", xorb_hash)?;
+                if seen.insert((recipe_hash, xorb_hash)) {
+                    rows.push((
+                        recipe_hash,
+                        xorb_hash,
+                        decode_hash_blob("recipe prepared payload hash", payload_hash)?,
+                        nonnegative_count("recipe prepared payload bytes", bytes)?,
+                    ));
+                }
+            }
+        }
+        let xorb_hashes = rows.iter().map(|(_, hash, _, _)| *hash).collect::<Vec<_>>();
+        let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
+        let mut out: HashMap<[u8; 32], Vec<StoredPreparedXorb>> = HashMap::new();
+        for (recipe_hash, xorb_hash, payload_hash, bytes) in rows {
+            out.entry(recipe_hash)
+                .or_default()
+                .push(StoredPreparedXorb {
+                    placements: placements.get(&xorb_hash).cloned().unwrap_or_default(),
+                    xorb_hash,
+                    payload_hash,
+                    bytes,
+                });
+        }
+        Ok(out)
+    }
+
     fn prepared_payload_placements_for_xorbs(
         &self,
         xorb_hashes: &[[u8; 32]],
@@ -9839,6 +9920,70 @@ mod tests {
         assert_eq!(stored[1].xorb_hash, second_xorb);
         assert_eq!(stored[1].placements.len(), 1);
         assert_eq!(stored[1].placements[0].chunk_hash, second_chunk);
+    }
+
+    #[test]
+    fn prepared_xorb_recipe_lookup_returns_grouped_authority() {
+        let idx = open_in_memory();
+        let first_recipe = test_hash(0xC1);
+        let second_recipe = test_hash(0xC2);
+        let first_xorb = test_hash(0xD1);
+        let second_xorb = test_hash(0xD2);
+        let first_chunk = test_hash(0xE1);
+        let second_chunk = test_hash(0xE2);
+        for (recipe_hash, xorb_hash, chunk_hash) in [
+            (first_recipe, first_xorb, first_chunk),
+            (second_recipe, second_xorb, second_chunk),
+        ] {
+            idx.conn
+                .execute(
+                    "INSERT INTO prepared_payloads (xorb_hash, payload_hash, bytes)
+                     VALUES (?1, ?2, 64)",
+                    params![xorb_hash.as_slice(), xorb_hash.as_slice()],
+                )
+                .expect("prepared payload");
+            idx.conn
+                .execute(
+                    "INSERT INTO prepared_leases (recipe_hash, xorb_hash) VALUES (?1, ?2)",
+                    params![recipe_hash.as_slice(), xorb_hash.as_slice()],
+                )
+                .expect("prepared lease");
+            idx.conn
+                .execute(
+                    "INSERT INTO prepared_payload_chunks
+                     (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+                     VALUES (?1, 0, ?2, 32)",
+                    params![xorb_hash.as_slice(), chunk_hash.as_slice()],
+                )
+                .expect("prepared placement");
+        }
+        idx.conn
+            .execute(
+                "INSERT INTO prepared_leases (recipe_hash, xorb_hash) VALUES (?1, ?2)",
+                params![second_recipe.as_slice(), first_xorb.as_slice()],
+            )
+            .expect("shared prepared lease");
+
+        let grouped = idx
+            .prepared_xorbs_for_recipes(&[first_recipe, second_recipe, first_recipe])
+            .expect("prepared recipe lookup");
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[&first_recipe][0].xorb_hash, first_xorb);
+        assert_eq!(
+            grouped[&first_recipe][0].placements[0].chunk_hash,
+            first_chunk
+        );
+        assert_eq!(grouped[&second_recipe].len(), 2);
+        assert_eq!(grouped[&second_recipe][0].xorb_hash, first_xorb);
+        assert_eq!(
+            grouped[&second_recipe][0].placements[0].chunk_hash,
+            first_chunk
+        );
+        assert_eq!(grouped[&second_recipe][1].xorb_hash, second_xorb);
+        assert_eq!(
+            grouped[&second_recipe][0].placements[0].chunk_hash,
+            second_chunk
+        );
     }
 
     #[test]

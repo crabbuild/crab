@@ -9515,11 +9515,21 @@ impl PushPipeline {
             .map(|(file_hash, _)| *file_hash)
             .collect::<Vec<_>>();
         let published_recipes = Arc::new(staging.published_recipes_for_files(&file_hashes)?);
-        let staging = Arc::clone(staging);
+        let recipe_hashes = published_recipes
+            .values()
+            .filter_map(|recipe| recipe.as_ref().map(FileRecipe::hash))
+            .collect::<Vec<_>>();
+        let prepared_xorbs = match staging.prepared_xorbs_for_recipes(&recipe_hashes) {
+            Ok(prepared_xorbs) => Some(Arc::new(prepared_xorbs)),
+            Err(error) => {
+                warn!(error = %error, "failed to batch read prepared xorb authority; continuing without add-time plans");
+                None
+            }
+        };
         let verify_results = futures_util::stream::iter(unique_specs.into_iter().map(
             |(file_hash, pointer_size)| {
-                let staging = Arc::clone(&staging);
                 let published_recipes = Arc::clone(&published_recipes);
+                let prepared_xorbs = prepared_xorbs.clone();
                 async move {
                     let recipe = published_recipes
                         .get(&file_hash)
@@ -9576,35 +9586,27 @@ impl PushPipeline {
                         )));
                     }
 
-                    let add_push_plan = match staging.load_file_push_plan(&file_hash).await
-                    {
-                        Ok(Some(plan))
-                            if add_push_plan_matches_staging(
-                                &plan,
-                                &file_hash,
-                                pointer_size,
-                                &recipe,
-                            ) =>
-                        {
+                    let add_push_plan = prepared_xorbs.as_ref().and_then(|prepared_xorbs| {
+                        let mut plan = FilePushPlan::new_verified_recipe(&recipe);
+                        plan.prepared_xorbs = prepared_xorbs
+                            .get(&recipe.hash())
+                            .cloned()
+                            .unwrap_or_default();
+                        if add_push_plan_matches_staging(
+                            &plan,
+                            &file_hash,
+                            pointer_size,
+                            &recipe,
+                        ) {
                             Some(plan)
-                        }
-                        Ok(Some(_)) => {
+                        } else {
                             debug!(
                                 file_hash = %file_hash.hex(),
-                                "step 2: add-time push plan did not match the verified recipe; ignoring plan"
+                                "batch add-time push plan did not match the verified recipe; ignoring plan"
                             );
                             None
                         }
-                        Ok(None) => None,
-                        Err(e) => {
-                            warn!(
-                                file_hash = %file_hash.hex(),
-                                error = %e,
-                                "step 2: failed to read add-time push plan; continuing from verified recipe"
-                            );
-                            None
-                        }
-                    };
+                    });
 
                     Ok((
                         file_hash,
