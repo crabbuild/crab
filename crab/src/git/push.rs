@@ -4389,7 +4389,9 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             }
         }
 
-        if let Some(cache) = &self.candidate_cache {
+        if !misses.is_empty()
+            && let Some(cache) = &self.candidate_cache
+        {
             let mut remote_misses = Vec::with_capacity(misses.len());
             let persistent_lookup = {
                 let cache = Arc::clone(cache);
