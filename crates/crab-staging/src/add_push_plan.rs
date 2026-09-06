@@ -99,7 +99,17 @@ pub async fn prepare_file_push_plans_with_progress(
         return Ok(AddPushPlanSummary::default());
     }
 
-    let (wanted_prepared_chunks, unique_file_chunks) = collect_unique_file_chunks(files);
+    let (wanted_prepared_chunks, unique_file_chunks) = if files.len() > 1 {
+        let (wanted, unique) = collect_unique_file_chunks(files);
+        (wanted, Some(unique))
+    } else {
+        let wanted = files[0]
+            .chunks
+            .iter()
+            .map(|(chunk_hash, _)| *chunk_hash)
+            .collect();
+        (wanted, None)
+    };
     let mut summary = AddPushPlanSummary {
         remote_lookup: remote_lookup.is_some(),
         ..AddPushPlanSummary::default()
@@ -115,10 +125,12 @@ pub async fn prepare_file_push_plans_with_progress(
             .await?;
     }
     if files.len() > 1 {
+        let unique_file_chunks = unique_file_chunks.as_deref().ok_or_else(|| {
+            StagingError::Internal("missing unique multi-file chunk collection".to_owned())
+        })?;
         let unique_existing_refs =
-            lookup_existing_candidates(&unique_file_chunks, remote_lookup).await?;
-        let existing_refs =
-            expand_existing_refs(files, &unique_file_chunks, &unique_existing_refs)?;
+            lookup_existing_candidates(unique_file_chunks, remote_lookup).await?;
+        let existing_refs = expand_existing_refs(files, unique_file_chunks, &unique_existing_refs)?;
         if prepared_cache.is_empty() {
             return prepare_uncached_file_plans_with_progress(
                 staging,
