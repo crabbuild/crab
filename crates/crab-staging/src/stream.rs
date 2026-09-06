@@ -1019,6 +1019,7 @@ async fn stream_chunk_and_stage_producer(
     let mut remote_existing_chunks = 0u64;
     let mut total = 0u64;
     let mut timings = StreamStageTimingAccumulator::default();
+    let mut flush_scratch = FlushBatchScratch::default();
 
     loop {
         check_cancelled(cancel)?;
@@ -1058,6 +1059,7 @@ async fn stream_chunk_and_stage_producer(
             &mut xorb_writer,
             existing_lookup,
             &mut remote_existing_chunks,
+            &mut flush_scratch,
             &mut timings,
             cancel,
             hooks,
@@ -1090,6 +1092,7 @@ async fn stream_chunk_and_stage_producer(
         &mut xorb_writer,
         existing_lookup,
         &mut remote_existing_chunks,
+        &mut flush_scratch,
         &mut timings,
         cancel,
         hooks,
@@ -1155,6 +1158,12 @@ struct ChunkStageStats {
     timings: StreamStageTimingAccumulator,
 }
 
+#[derive(Default)]
+struct FlushBatchScratch {
+    terms: Vec<(MerkleHash, u64)>,
+    remote_authority: Vec<(MerkleHash, ExistingChunkCandidate)>,
+}
+
 fn append_emitted_chunks(
     chunks: Vec<crab_xet::chunker::Chunk>,
     batch: &mut Vec<(MerkleHash, Bytes)>,
@@ -1198,6 +1207,7 @@ async fn flush_full_batches(
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
     existing_lookup: Option<&dyn ExistingChunkLookup>,
     remote_existing_chunks: &mut u64,
+    scratch: &mut FlushBatchScratch,
     timings: &mut StreamStageTimingAccumulator,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
@@ -1221,6 +1231,7 @@ async fn flush_full_batches(
             xorb_writer,
             existing_lookup,
             remote_existing_chunks,
+            scratch,
             timings,
             cancel,
             hooks,
@@ -1283,6 +1294,7 @@ async fn flush_batch(
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
     existing_lookup: Option<&dyn ExistingChunkLookup>,
     remote_existing_chunks: &mut u64,
+    scratch: &mut FlushBatchScratch,
     timings: &mut StreamStageTimingAccumulator,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
@@ -1293,7 +1305,8 @@ async fn flush_batch(
 
     let batch_start = *chunk_index_offset;
     let lookup_start = Instant::now();
-    let mut existing = classify_existing_batch(batch, existing_lookup, cancel).await?;
+    let mut existing =
+        classify_existing_batch(batch, existing_lookup, cancel, &mut scratch.terms).await?;
     timings.remote_lookup = timings.remote_lookup.saturating_add(lookup_start.elapsed());
     for (candidate, (_, data)) in existing.iter_mut().zip(batch.iter()) {
         if candidate.as_ref().is_some_and(|candidate| {
@@ -1304,13 +1317,17 @@ async fn flush_batch(
             *candidate = None;
         }
     }
-    let remote_authority = batch
-        .iter()
-        .zip(existing.iter())
-        .filter_map(|((chunk_hash, _), candidate)| {
-            candidate.map(|candidate| (*chunk_hash, candidate))
-        })
-        .collect::<Vec<_>>();
+    scratch.remote_authority.clear();
+    scratch
+        .remote_authority
+        .extend(
+            batch
+                .iter()
+                .zip(existing.iter())
+                .filter_map(|((chunk_hash, _), candidate)| {
+                    candidate.map(|candidate| (*chunk_hash, candidate))
+                }),
+        );
     if xorb_builder.is_none() {
         let mut start = 0usize;
         while start < batch.len() {
@@ -1338,24 +1355,25 @@ async fn flush_batch(
             start = end;
         }
     }
-    let recipe_terms = batch
-        .iter()
-        .map(|(hash, data)| (*hash, data.len() as u64))
-        .collect::<Vec<_>>();
+    scratch.terms.clear();
+    scratch
+        .terms
+        .extend(batch.iter().map(|(hash, data)| (*hash, data.len() as u64)));
     staging.append_recording_batch(
         batch_id,
         *chunk_index_offset,
         *recipe_byte_offset,
-        &recipe_terms,
-        &remote_authority,
+        &scratch.terms,
+        &scratch.remote_authority,
     )?;
     *remote_existing_chunks = remote_existing_chunks
-        .checked_add(remote_authority.len() as u64)
+        .checked_add(scratch.remote_authority.len() as u64)
         .ok_or_else(|| {
             CrabError::StagingCorrupt("remote existing chunk count overflow".to_owned())
         })?;
     *recipe_byte_offset =
-        recipe_terms
+        scratch
+            .terms
             .iter()
             .try_fold(*recipe_byte_offset, |offset, (_, size)| {
                 offset.checked_add(*size).ok_or_else(|| {
@@ -1481,18 +1499,17 @@ async fn classify_existing_batch(
     batch: &[(MerkleHash, Bytes)],
     lookup: Option<&dyn ExistingChunkLookup>,
     cancel: &CancellationToken,
+    terms: &mut Vec<(MerkleHash, u64)>,
 ) -> Result<Vec<Option<ExistingChunkCandidate>>> {
     let Some(lookup) = lookup else {
         return Ok(vec![None; batch.len()]);
     };
-    let terms = batch
-        .iter()
-        .map(|(hash, data)| (*hash, data.len() as u64))
-        .collect::<Vec<_>>();
+    terms.clear();
+    terms.extend(batch.iter().map(|(hash, data)| (*hash, data.len() as u64)));
     let result = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        result = lookup.lookup_existing_candidates(&terms) => result,
+        result = lookup.lookup_existing_candidates(terms) => result,
     };
     match result {
         Ok(candidates) if candidates.len() == batch.len() => Ok(candidates),
