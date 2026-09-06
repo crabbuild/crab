@@ -3499,6 +3499,10 @@ enum GitIndexWriteError {
 ///   3. Locks and rereads the current index, applies only the selected
 ///      pointer/stat deltas, and commits one atomic replacement.
 ///
+/// The Git repository handle is opened once for the whole batch so hundreds
+/// of small files do not pay repository discovery and object-store setup per
+/// pointer blob.
+///
 /// Why not just `git add`?  `git add` invokes the crab clean filter,
 /// which re-reads and re-hashes the full file just to emit the same
 /// pointer we can assemble from the data we already have. For a 1.6 GiB
@@ -3541,13 +3545,27 @@ fn write_pointers_and_tracking_to_git_index(
 ) -> std::result::Result<(), GitIndexWriteError> {
     let honor_filemode = git_honors_filemode(repo_root);
     let mut index_entries = Vec::with_capacity(entries.len());
+    let pointer_repo = if entries.is_empty() {
+        None
+    } else {
+        Some(gix::open(repo_root).map_err(|error| {
+            GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                "failed to open git repository for pointer publication: {error}"
+            )))
+        })?)
+    };
 
     for entry in entries {
         // The cache may not contain this file on the first push; the
         // smudge path tolerates a missing hint.
         let pointer = shard_hints.pointer_for(entry.file_hash, entry.size);
         let payload = pointer.serialize();
-        let sha = write_pointer_blob(repo_root, &payload)
+        let pointer_repo = pointer_repo.as_ref().ok_or_else(|| {
+            GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(
+                "pointer repository was not opened for non-empty publication".to_owned(),
+            ))
+        })?;
+        let sha = write_pointer_blob_to_repo(pointer_repo, &payload)
             .map_err(GitIndexWriteError::BeforeIndexMutation)?;
 
         // The index-info record bypasses git's normal worktree mode detection,
@@ -3593,6 +3611,10 @@ fn write_pointer_blob(repo_root: &Path, payload: &[u8]) -> Result<String> {
     let repo = gix::open(repo_root).map_err(|e| {
         CrabError::Internal(format!("failed to open git repository for blob write: {e}"))
     })?;
+    write_pointer_blob_to_repo(&repo, payload)
+}
+
+fn write_pointer_blob_to_repo(repo: &gix::Repository, payload: &[u8]) -> Result<String> {
     let oid = repo
         .write_blob(payload)
         .map_err(|e| CrabError::Internal(format!("failed to write pointer blob: {e}")))?;
