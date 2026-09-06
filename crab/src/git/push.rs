@@ -14908,7 +14908,7 @@ impl PushPipeline {
 
         let raw: Vec<[u8; 32]> = chunk_hashes.iter().map(|h| (*h).into()).collect();
         let result = caching_store
-            .dedup_query(self.router.repo_prefix(), &raw)
+            .dedup_query_unique(self.router.repo_prefix(), &raw)
             .await?;
 
         let mut hits = HashMap::new();
