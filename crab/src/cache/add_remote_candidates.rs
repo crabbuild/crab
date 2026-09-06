@@ -330,11 +330,7 @@ impl AddRemoteCandidateCache {
                 }
             }
         }
-        let positive_hashes = positive_entries
-            .iter()
-            .map(|(chunk_hash, _)| *chunk_hash)
-            .collect::<Vec<_>>();
-        for batch in positive_hashes.chunks(LOOKUP_BATCH_SIZE) {
+        for batch in positive_entries.chunks(LOOKUP_BATCH_SIZE) {
             let placeholders = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
@@ -343,7 +339,7 @@ impl AddRemoteCandidateCache {
             transaction
                 .execute(
                     &query,
-                    params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                    params_from_iter(batch.iter().map(|(hash, _)| hash.as_slice())),
                 )
                 .map_err(|error| database_error("delete stale negative entries", error))?;
         }
