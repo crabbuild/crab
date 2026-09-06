@@ -7533,13 +7533,13 @@ impl Index {
             index_by_hash.entry(*h).or_default().push(i);
         }
 
-        let unique_hashes: Vec<[u8; 32]> = index_by_hash.keys().copied().collect();
-        let placeholders = vec!["?"; unique_hashes.len()].join(",");
-
+        let unique_hashes = index_by_hash.keys().copied().collect::<Vec<_>>();
         let mut out: Vec<Option<ChunkLocator>> = vec![None; hashes.len()];
+        const LOCATE_QUERY_BATCH: usize = 400;
 
         // Query committed chunks first.
-        {
+        for hash_batch in unique_hashes.chunks(LOCATE_QUERY_BATCH) {
+            let placeholders = vec!["?"; hash_batch.len()].join(",");
             let sql = format!(
                 "SELECT chunk_hash, segment_id, segment_offset, size
                  FROM chunks
@@ -7551,7 +7551,7 @@ impl Index {
                 .map_err(|e| StagingError::Internal(format!("prepare locate_batch: {e}")))?;
             let rows = stmt
                 .query_map(
-                    params_from_iter(unique_hashes.iter().map(|h| h.as_slice())),
+                    params_from_iter(hash_batch.iter().map(|h| h.as_slice())),
                     |row| {
                         let blob: Vec<u8> = row.get(0)?;
                         let seg_id: u64 = row.get(1)?;
@@ -7584,18 +7584,14 @@ impl Index {
         }
 
         // Query pending chunks for hashes still missing.
-        let missing_hashes: Vec<[u8; 32]> = unique_hashes
+        let missing_hashes: Vec<[u8; 32]> = index_by_hash
             .iter()
-            .copied()
-            .filter(|h| {
-                index_by_hash
-                    .get(h)
-                    .is_some_and(|indices| indices.iter().any(|&i| out[i].is_none()))
-            })
+            .filter(|(_, indices)| indices.iter().any(|&i| out[i].is_none()))
+            .map(|(h, _)| *h)
             .collect();
 
-        if !missing_hashes.is_empty() {
-            let pending_placeholders = vec!["?"; missing_hashes.len()].join(",");
+        for hash_batch in missing_hashes.chunks(LOCATE_QUERY_BATCH) {
+            let pending_placeholders = vec!["?"; hash_batch.len()].join(",");
             let sql = format!(
                 "SELECT chunk_hash, segment_id, segment_offset, size
                  FROM pending_chunks
@@ -7606,7 +7602,7 @@ impl Index {
             })?;
             let rows = stmt
                 .query_map(
-                    params_from_iter(missing_hashes.iter().map(|h| h.as_slice())),
+                    params_from_iter(hash_batch.iter().map(|h| h.as_slice())),
                     |row| {
                         let blob: Vec<u8> = row.get(0)?;
                         let seg_id: u64 = row.get(1)?;
@@ -7658,58 +7654,63 @@ impl Index {
             indices_by_hash.entry(*hash).or_default().push(index);
         }
         let unique_hashes = indices_by_hash.keys().copied().collect::<Vec<_>>();
-        let placeholders = vec!["?"; unique_hashes.len()].join(",");
-        let sql = format!(
-            "SELECT chunk_hash, xorb_hash, payload_hash, bytes,
-                    chunk_index, uncompressed_size
-             FROM prepared_payload_chunks AS chunk
-             JOIN prepared_payloads AS xorb USING (xorb_hash)
-             WHERE chunk.chunk_hash IN ({placeholders})"
-        );
-        let mut statement = self.conn.prepare(&sql).map_err(|error| {
-            StagingError::Internal(format!("prepare prepared chunk batch lookup: {error}"))
-        })?;
-        let rows = statement
-            .query_map(
-                params_from_iter(unique_hashes.iter().map(|hash| hash.as_slice())),
-                |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                },
-            )
-            .map_err(|error| {
-                StagingError::Internal(format!("query prepared chunk batch lookup: {error}"))
-            })?;
-
         let mut out = vec![None; hashes.len()];
-        for row in rows {
-            let (chunk_hash, xorb_hash, payload_hash, bytes, chunk_index, size) =
-                row.map_err(|error| {
-                    StagingError::Internal(format!("read prepared chunk batch lookup row: {error}"))
+        const LOCATE_QUERY_BATCH: usize = 400;
+        for hash_batch in unique_hashes.chunks(LOCATE_QUERY_BATCH) {
+            let placeholders = vec!["?"; hash_batch.len()].join(",");
+            let sql = format!(
+                "SELECT chunk_hash, xorb_hash, payload_hash, bytes,
+                        chunk_index, uncompressed_size
+                 FROM prepared_payload_chunks AS chunk
+                 JOIN prepared_payloads AS xorb USING (xorb_hash)
+                 WHERE chunk.chunk_hash IN ({placeholders})"
+            );
+            let mut statement = self.conn.prepare(&sql).map_err(|error| {
+                StagingError::Internal(format!("prepare prepared chunk batch lookup: {error}"))
+            })?;
+            let rows = statement
+                .query_map(
+                    params_from_iter(hash_batch.iter().map(|hash| hash.as_slice())),
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                        ))
+                    },
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!("query prepared chunk batch lookup: {error}"))
                 })?;
-            let chunk_hash = decode_hash_blob("prepared chunk hash", chunk_hash)?;
-            let locator = PreparedChunkLocator {
-                xorb_hash: decode_hash_blob("prepared chunk xorb hash", xorb_hash)?,
-                payload_hash: decode_hash_blob("prepared chunk payload hash", payload_hash)?,
-                xorb_bytes: u64::try_from(bytes).map_err(|_| {
-                    StagingError::StagingCorrupt("negative prepared xorb size".to_owned())
-                })?,
-                chunk_index: u32::try_from(chunk_index).map_err(|_| {
-                    StagingError::StagingCorrupt("invalid prepared chunk index".to_owned())
-                })?,
-                size: u32::try_from(size).map_err(|_| {
-                    StagingError::StagingCorrupt("invalid prepared chunk size".to_owned())
-                })?,
-            };
-            if let Some(indices) = indices_by_hash.get(&chunk_hash) {
-                for index in indices {
-                    out[*index] = Some(locator);
+
+            for row in rows {
+                let (chunk_hash, xorb_hash, payload_hash, bytes, chunk_index, size) =
+                    row.map_err(|error| {
+                        StagingError::Internal(format!(
+                            "read prepared chunk batch lookup row: {error}"
+                        ))
+                    })?;
+                let chunk_hash = decode_hash_blob("prepared chunk hash", chunk_hash)?;
+                let locator = PreparedChunkLocator {
+                    xorb_hash: decode_hash_blob("prepared chunk xorb hash", xorb_hash)?,
+                    payload_hash: decode_hash_blob("prepared chunk payload hash", payload_hash)?,
+                    xorb_bytes: u64::try_from(bytes).map_err(|_| {
+                        StagingError::StagingCorrupt("negative prepared xorb size".to_owned())
+                    })?,
+                    chunk_index: u32::try_from(chunk_index).map_err(|_| {
+                        StagingError::StagingCorrupt("invalid prepared chunk index".to_owned())
+                    })?,
+                    size: u32::try_from(size).map_err(|_| {
+                        StagingError::StagingCorrupt("invalid prepared chunk size".to_owned())
+                    })?,
+                };
+                if let Some(indices) = indices_by_hash.get(&chunk_hash) {
+                    for index in indices {
+                        out[*index] = Some(locator);
+                    }
                 }
             }
         }
@@ -9766,6 +9767,28 @@ mod tests {
         assert_eq!(stored[1].xorb_hash, second_xorb);
         assert_eq!(stored[1].placements.len(), 1);
         assert_eq!(stored[1].placements[0].chunk_hash, second_chunk);
+    }
+
+    #[test]
+    fn batch_locator_queries_page_large_unique_hashes() {
+        let idx = open_in_memory();
+        let hashes = (0..1024)
+            .map(|index| {
+                let mut hash = [0u8; 32];
+                hash[..8].copy_from_slice(&(index as u64).to_le_bytes());
+                hash
+            })
+            .collect::<Vec<_>>();
+
+        let segment_locators = idx.locate_batch(&hashes).expect("segment locator lookup");
+        assert_eq!(segment_locators.len(), hashes.len());
+        assert!(segment_locators.iter().all(Option::is_none));
+
+        let prepared_locators = idx
+            .locate_prepared_batch(&hashes)
+            .expect("prepared locator lookup");
+        assert_eq!(prepared_locators.len(), hashes.len());
+        assert!(prepared_locators.iter().all(Option::is_none));
     }
 
     #[test]
