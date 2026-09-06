@@ -119,7 +119,8 @@ pub async fn prepare_file_push_plans_with_progress(
     }
     if files.len() > 1 {
         let all_chunks = all_file_chunks(files);
-        let existing_refs = lookup_existing_candidates(&all_chunks, remote_lookup).await?;
+        let unique_existing_refs = lookup_existing_candidates(&all_chunks, remote_lookup).await?;
+        let existing_refs = expand_existing_refs(files, &all_chunks, &unique_existing_refs)?;
         if prepared_cache.is_empty() {
             return prepare_uncached_file_plans_with_progress(
                 staging,
@@ -281,9 +282,40 @@ struct VerifiedStagedChunks {
 }
 
 fn all_file_chunks(files: &[AddPlanFile<'_>]) -> Vec<(MerkleHash, u64)> {
+    let mut seen = HashSet::new();
     files
         .iter()
         .flat_map(|file| file.chunks.iter().copied())
+        .filter(|(chunk_hash, _)| seen.insert(*chunk_hash))
+        .collect()
+}
+
+fn expand_existing_refs(
+    files: &[AddPlanFile<'_>],
+    unique_chunks: &[(MerkleHash, u64)],
+    unique_refs: &[Option<ExistingChunkCandidate>],
+) -> Result<Vec<Option<ExistingChunkCandidate>>> {
+    if unique_chunks.len() != unique_refs.len() {
+        return Err(StagingError::Internal(
+            "existing chunk lookup returned a different unique chunk count".to_owned(),
+        ));
+    }
+    let by_hash = unique_chunks
+        .iter()
+        .map(|(chunk_hash, _)| *chunk_hash)
+        .zip(unique_refs.iter().copied())
+        .collect::<HashMap<_, _>>();
+    files
+        .iter()
+        .flat_map(|file| {
+            file.chunks.iter().map(|(chunk_hash, _)| {
+                by_hash.get(chunk_hash).copied().ok_or_else(|| {
+                    StagingError::Internal(
+                        "existing chunk lookup lost a requested chunk".to_owned(),
+                    )
+                })
+            })
+        })
         .collect()
 }
 
@@ -1189,6 +1221,57 @@ mod tests {
             recipient_indices(file_plans.len(), &placements, &owners),
             vec![0, 1]
         );
+    }
+
+    #[test]
+    fn multi_file_remote_lookup_deduplicates_shared_chunks() {
+        let shared = numbered_hash(3);
+        let first_only = numbered_hash(4);
+        let second_only = numbered_hash(5);
+        let first_chunks = [(shared, 1), (first_only, 1)];
+        let second_chunks = [(shared, 1), (second_only, 1)];
+        let files = [
+            AddPlanFile {
+                file_hash: numbered_hash(6).into(),
+                size: 2,
+                chunks: &first_chunks,
+            },
+            AddPlanFile {
+                file_hash: numbered_hash(7).into(),
+                size: 2,
+                chunks: &second_chunks,
+            },
+        ];
+        let unique = all_file_chunks(&files);
+        assert_eq!(unique.len(), 3);
+        assert_eq!(
+            unique
+                .iter()
+                .map(|(chunk_hash, _)| *chunk_hash)
+                .collect::<HashSet<_>>()
+                .len(),
+            unique.len()
+        );
+        let shared_candidate = Some(existing_candidate(
+            XorbRef {
+                xorb_hash: numbered_hash(8),
+                chunk_index: 0,
+                uncompressed_size: 1,
+            },
+            8,
+        ));
+        let unique_refs = unique
+            .iter()
+            .map(|(chunk_hash, _)| {
+                (*chunk_hash == shared)
+                    .then_some(shared_candidate)
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        let expanded = expand_existing_refs(&files, &unique, &unique_refs).expect("expand refs");
+        assert_eq!(expanded.len(), 4);
+        assert_eq!(expanded[0], shared_candidate);
+        assert_eq!(expanded[2], shared_candidate);
     }
 
     async fn stage_synthetic_file(
