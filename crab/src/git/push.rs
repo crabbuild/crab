@@ -4374,6 +4374,7 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                 unique_chunks.push(*chunk_hash);
             }
         }
+        drop(seen);
 
         let mut candidates = HashMap::with_capacity(unique_chunks.len());
         let mut misses = Vec::with_capacity(unique_chunks.len());
