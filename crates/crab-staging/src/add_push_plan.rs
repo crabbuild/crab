@@ -822,9 +822,8 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut builder = build_xorb_builder();
 
     let mut pending_new_chunks = Vec::with_capacity(new_chunks.len());
-    let mut queued_new_chunks = HashSet::new();
     for chunk in located_chunks {
-        if new_chunks.contains(&chunk.0) && queued_new_chunks.insert(chunk.0) {
+        if new_chunks.remove(&chunk.0) {
             pending_new_chunks.push(chunk);
         }
     }
