@@ -7188,7 +7188,7 @@ impl Index {
         }
         drop(statement);
         let xorb_hashes = rows.iter().map(|(hash, _, _)| *hash).collect::<Vec<_>>();
-        let placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
+        let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
         Ok(rows
             .into_iter()
             .map(|(xorb_hash, payload_hash, bytes)| StoredPreparedXorb {
@@ -7266,7 +7266,7 @@ impl Index {
             }
         }
         let xorb_hashes = rows.iter().map(|(_, hash, _, _)| *hash).collect::<Vec<_>>();
-        let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
+        let placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
         let mut out: HashMap<[u8; 32], Vec<StoredPreparedXorb>> = HashMap::new();
         for (recipe_hash, xorb_hash, payload_hash, bytes) in rows {
             out.entry(recipe_hash)
