@@ -125,6 +125,7 @@ pub async fn prepare_file_push_plans_with_progress(
             .await?;
     }
     if files.len() > 1 {
+        let mut verified_sequences = HashSet::new();
         let unique_file_chunks = unique_file_chunks.as_deref().ok_or_else(|| {
             StagingError::Internal("missing unique multi-file chunk collection".to_owned())
         })?;
@@ -138,6 +139,7 @@ pub async fn prepare_file_push_plans_with_progress(
                 &existing_refs,
                 build_xorb_builder,
                 summary.remote_lookup,
+                &mut verified_sequences,
                 cancel,
                 on_progress,
             )
@@ -150,11 +152,13 @@ pub async fn prepare_file_push_plans_with_progress(
             build_xorb_builder,
             &mut prepared_cache,
             summary,
+            &mut verified_sequences,
             cancel,
             on_progress,
         )
         .await;
     }
+    let mut verified_sequences = HashSet::new();
     for file in files {
         check_cancelled(cancel)?;
         let file_summary = prepare_one_file_plan(
@@ -163,6 +167,7 @@ pub async fn prepare_file_push_plans_with_progress(
             build_xorb_builder,
             remote_lookup,
             &mut prepared_cache,
+            &mut verified_sequences,
             cancel,
         )
         .await?;
@@ -200,6 +205,7 @@ async fn prepare_cached_file_plans_with_progress(
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     mut summary: AddPushPlanSummary,
+    verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
     cancel: &CancellationToken,
     mut on_progress: Option<&mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
 ) -> Result<AddPushPlanSummary> {
@@ -219,6 +225,7 @@ async fn prepare_cached_file_plans_with_progress(
             file_existing_refs,
             build_xorb_builder,
             prepared_cache,
+            verified_sequences,
             cancel,
         )
         .await?;
@@ -358,6 +365,7 @@ async fn prepare_uncached_file_plans_with_progress(
     existing_refs: &[Option<ExistingChunkCandidate>],
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     remote_lookup: bool,
+    verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
     cancel: &CancellationToken,
     mut on_progress: Option<&mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
 ) -> Result<AddPushPlanSummary> {
@@ -371,7 +379,10 @@ async fn prepare_uncached_file_plans_with_progress(
         let file_existing_refs = existing_refs.get(ref_offset..next_offset).ok_or_else(|| {
             StagingError::Internal("add push-plan remote lookup length changed".to_owned())
         })?;
-        file_plans.push(verified_uncached_file_plan(staging, file, file_existing_refs).await?);
+        file_plans.push(
+            verified_uncached_file_plan(staging, file, file_existing_refs, verified_sequences)
+                .await?,
+        );
         ref_offset = next_offset;
     }
     if ref_offset != existing_refs.len() {
@@ -472,17 +483,21 @@ async fn verified_uncached_file_plan<'a>(
     staging: &StagingArea,
     file: &'a AddPlanFile<'_>,
     existing_refs: &[Option<ExistingChunkCandidate>],
+    verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
 ) -> Result<UncachedFilePlan<'a>> {
     let file_hash = MerkleHash::from(file.file_hash);
     let mut plan = FilePushPlan::new_verified_staging(file_hash, file.size, file.chunks);
-    verified_staged_chunks(
-        staging,
-        file_hash,
-        file.size,
-        file.chunks,
-        plan.sequence_hash()?,
-    )
-    .await?;
+    let verification_key = (file_hash, plan.sequence_hash()?, file.size);
+    if verified_sequences.insert(verification_key) {
+        verified_staged_chunks(
+            staging,
+            file_hash,
+            file.size,
+            file.chunks,
+            plan.sequence_hash()?,
+        )
+        .await?;
+    }
     let mut uncovered_chunks = HashSet::new();
     for ((chunk_hash, size), existing_ref) in file.chunks.iter().zip(existing_refs.iter()) {
         if let Some(candidate) = existing_ref
@@ -670,6 +685,7 @@ async fn prepare_one_file_plan(
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     remote_lookup: Option<&dyn ExistingChunkLookup>,
     prepared_cache: &mut PreparedXorbCache,
+    verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
     cancel: &CancellationToken,
 ) -> Result<FilePlanSummary> {
     let existing_refs = lookup_existing_candidates(file.chunks, remote_lookup).await?;
@@ -679,6 +695,7 @@ async fn prepare_one_file_plan(
         &existing_refs,
         build_xorb_builder,
         prepared_cache,
+        verified_sequences,
         cancel,
     )
     .await?;
@@ -694,6 +711,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     existing_refs: &[Option<ExistingChunkCandidate>],
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
+    verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
     cancel: &CancellationToken,
 ) -> Result<PreparedFilePlan> {
     if existing_refs.len() != file.chunks.len() {
@@ -711,14 +729,17 @@ async fn prepare_one_file_plan_with_existing_refs(
         file.size,
         chunks,
     )?;
-    verified_staged_chunks(
-        staging,
-        file_hash,
-        file.size,
-        chunks,
-        recipe.sequence_hash(),
-    )
-    .await?;
+    let verification_key = (file_hash, recipe.sequence_hash(), file.size);
+    if verified_sequences.insert(verification_key) {
+        verified_staged_chunks(
+            staging,
+            file_hash,
+            file.size,
+            chunks,
+            recipe.sequence_hash(),
+        )
+        .await?;
+    }
     let mut plan = FilePushPlan::new_verified_recipe(&recipe);
     let recipe_hash = recipe.hash();
 
