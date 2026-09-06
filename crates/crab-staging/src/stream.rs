@@ -1376,11 +1376,10 @@ async fn flush_batch(
         ))
     })?;
     if xorb_builder.is_some() {
-        let mut pack = vec![false; batch.len()];
         let coordination = xorb_writer
             .as_ref()
             .and_then(|writer| writer.factory.coordination.as_ref());
-        if let Some(coordination) = coordination {
+        let to_pack = if let Some(coordination) = coordination {
             let misses = batch
                 .iter()
                 .zip(existing.iter())
@@ -1391,7 +1390,8 @@ async fn flush_batch(
             let claims =
                 staging.claim_prepared_chunks(&coordination.preparation_id, batch_id, &misses)?;
             let mut claims = claims.into_iter();
-            for (index, candidate) in existing.iter().enumerate() {
+            let mut to_pack = Vec::with_capacity(misses.len());
+            for ((hash, data), candidate) in batch.iter().zip(existing.iter()) {
                 if candidate.is_some() {
                     continue;
                 }
@@ -1400,32 +1400,38 @@ async fn flush_batch(
                         "prepared ownership claim cardinality was truncated".to_owned(),
                     )
                 })?;
-                pack[index] = matches!(claim, PreparedChunkClaim::Claimed);
+                if matches!(claim, PreparedChunkClaim::Claimed) {
+                    to_pack.push((
+                        Chunk {
+                            hash: *hash,
+                            data: data.clone(),
+                        },
+                        RunId(0),
+                    ));
+                }
             }
             if claims.next().is_some() {
                 return Err(CrabError::Internal(
                     "prepared ownership claim cardinality exceeded input".to_owned(),
                 ));
             }
+            to_pack
         } else {
-            for (index, candidate) in existing.iter().enumerate() {
-                pack[index] = candidate.is_none();
-            }
-        }
-        let to_pack: Vec<_> = batch
-            .iter()
-            .zip(pack)
-            .filter(|(_, should_pack)| *should_pack)
-            .map(|((hash, data), _)| {
-                (
-                    Chunk {
-                        hash: *hash,
-                        data: data.clone(),
-                    },
-                    RunId(0),
-                )
-            })
-            .collect();
+            batch
+                .iter()
+                .zip(existing.iter())
+                .filter(|(_, candidate)| candidate.is_none())
+                .map(|((hash, data), _)| {
+                    (
+                        Chunk {
+                            hash: *hash,
+                            data: data.clone(),
+                        },
+                        RunId(0),
+                    )
+                })
+                .collect()
+        };
         let mut builder = xorb_builder.take().ok_or_else(|| {
             CrabError::Internal("direct xorb builder disappeared before pack".to_owned())
         })?;
