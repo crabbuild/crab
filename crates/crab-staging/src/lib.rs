@@ -3038,6 +3038,16 @@ impl StagingArea {
         Ok(chunks.into_iter().map(StagedChunkLocator::from).collect())
     }
 
+    pub(crate) fn file_chunks_match(
+        &self,
+        file_hash: &MerkleHash,
+        expected: &[(MerkleHash, u64)],
+        expected_size: u64,
+    ) -> Result<bool> {
+        let fh: [u8; 32] = (*file_hash).into();
+        lock_index(&self.index)?.file_chunks_match(&fh, expected, expected_size)
+    }
+
     /// Register a file and its chunks in the index.
     ///
     /// For each chunk in the list, verifies it exists in `chunks` or

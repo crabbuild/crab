@@ -2105,6 +2105,86 @@ impl Index {
         Ok(chunks)
     }
 
+    /// Verify a file's ordered chunk hashes and sizes without materializing
+    /// segment locators or the complete staged row set.
+    pub(crate) fn file_chunks_match(
+        &self,
+        file_hash: &[u8; 32],
+        expected: &[(crab_xet::hash::MerkleHash, u64)],
+        expected_size: u64,
+    ) -> Result<bool> {
+        let fh: &[u8] = file_hash;
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "WITH combined AS (
+                     SELECT chunk_hash, size, chunk_index, 0 AS priority, rowid
+                     FROM chunks
+                     WHERE file_hash = ?1
+                     UNION ALL
+                     SELECT chunk_hash, size, chunk_index, 1 AS priority, rowid
+                     FROM pending_chunks
+                     WHERE file_hash = ?1
+                 )
+                 SELECT chunk_hash, size, chunk_index
+                 FROM combined c
+                 WHERE NOT EXISTS (
+                     SELECT 1
+                     FROM combined p
+                     WHERE p.chunk_index = c.chunk_index
+                       AND (
+                           p.priority < c.priority
+                           OR (p.priority = c.priority AND p.rowid < c.rowid)
+                       )
+                 )
+                 ORDER BY chunk_index",
+            )
+            .map_err(|error| {
+                StagingError::Internal(format!("prepare file chunk verification: {error}"))
+            })?;
+        let mut rows = statement.query(params![fh]).map_err(|error| {
+            StagingError::Internal(format!("query file chunk verification: {error}"))
+        })?;
+        let mut total_size = 0u64;
+        for (expected_index, (expected_hash, expected_chunk_size)) in expected.iter().enumerate() {
+            let Some(row) = rows.next().map_err(|error| {
+                StagingError::Internal(format!("read file chunk verification: {error}"))
+            })?
+            else {
+                return Ok(false);
+            };
+            let raw_hash = row.get::<_, Vec<u8>>(0).map_err(|error| {
+                StagingError::Internal(format!("decode file chunk hash: {error}"))
+            })?;
+            let size = row.get::<_, i64>(1).map_err(|error| {
+                StagingError::Internal(format!("decode file chunk size: {error}"))
+            })?;
+            let chunk_index = row.get::<_, i64>(2).map_err(|error| {
+                StagingError::Internal(format!("decode file chunk index: {error}"))
+            })?;
+            validate_chunk_index(expected_index, chunk_index)?;
+            let actual_hash = decode_chunk_hash_blob(raw_hash)?;
+            let actual_size = u64::try_from(size)
+                .map_err(|_| StagingError::StagingCorrupt("chunk size is negative".to_owned()))?;
+            if actual_hash != *expected_hash || actual_size != *expected_chunk_size {
+                return Ok(false);
+            }
+            total_size = total_size.checked_add(actual_size).ok_or_else(|| {
+                StagingError::StagingCorrupt("file chunk sizes overflow".to_owned())
+            })?;
+        }
+        if rows
+            .next()
+            .map_err(|error| {
+                StagingError::Internal(format!("read trailing file chunk row: {error}"))
+            })?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        Ok(total_size == expected_size)
+    }
+
     /// Insert a file row into the `files` table.
     ///
     /// Re-registering a file updates metadata in place so existing
@@ -11061,6 +11141,33 @@ mod tests {
         let chunks = idx.chunks_for_file_with_sizes(&fh).expect("chunks");
 
         assert_eq!(chunks, vec![(test_hash(0xC1), 40), (test_hash(0xC2), 60)]);
+    }
+
+    #[test]
+    fn file_chunks_match_streams_order_and_size_without_locators() {
+        let idx = open_in_memory();
+        let seg_id = idx.allocate_segment_id().expect("alloc");
+        let fh = test_hash(0xA4);
+        insert_test_file(&idx, &fh, 100);
+        idx.conn
+            .execute(
+                "INSERT INTO chunks (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
+                 VALUES (?1, ?2, 1, 60, ?3, 68), (?4, ?2, 0, 40, ?3, 0)",
+                params![
+                    test_hash(0xF2).as_slice(),
+                    fh.as_slice(),
+                    seg_id,
+                    test_hash(0xF1).as_slice()
+                ],
+            )
+            .expect("insert committed chunks");
+
+        let expected = vec![(test_hash(0xF1).into(), 40), (test_hash(0xF2).into(), 60)];
+
+        assert!(
+            idx.file_chunks_match(&fh, &expected, 100)
+                .expect("verify chunks")
+        );
     }
 
     #[test]

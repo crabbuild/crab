@@ -511,29 +511,9 @@ async fn verified_staged_chunks(
     {
         return Ok(());
     }
-    let located_chunks = staging.chunks_for_file_with_locators(&file_hash)?;
-    if located_chunks.len() != expected_chunks.len()
-        || located_chunks
-            .iter()
-            .zip(expected_chunks.iter())
-            .any(|(located, expected)| located.hash != expected.0 || located.size != expected.1)
-    {
+    if !staging.file_chunks_match(&file_hash, expected_chunks, file_size)? {
         return Err(StagingError::StagingCorrupt(format!(
             "staged chunk rows for file {} changed while preparing add push plan",
-            file_hash.hex()
-        )));
-    }
-    let planned_size = located_chunks.iter().try_fold(0u64, |acc, chunk| {
-        acc.checked_add(chunk.size).ok_or_else(|| {
-            StagingError::StagingCorrupt(format!(
-                "staged chunk sizes overflow for file {} while preparing add push plan",
-                file_hash.hex()
-            ))
-        })
-    })?;
-    if planned_size != file_size {
-        return Err(StagingError::StagingCorrupt(format!(
-            "staged chunk rows for file {} total {planned_size} bytes, expected {file_size}",
             file_hash.hex()
         )));
     }
