@@ -14465,7 +14465,16 @@ impl PushPipeline {
             }
         };
         if skipped_remote > 0 {
-            return Ok(Some((HashMap::new(), chunk_hashes.len())));
+            // Local and persistent tiers are already exact placements. Keep
+            // those hits even when the remote candidate phase is over budget;
+            // each retained ref still crosses the normal origin-proof check.
+            let hits = chunk_hashes
+                .iter()
+                .copied()
+                .zip(refs)
+                .filter_map(|(chunk_hash, xorb_ref)| xorb_ref.map(|value| (chunk_hash, value)))
+                .collect();
+            return Ok(Some((hits, skipped_remote)));
         }
 
         {
@@ -28887,6 +28896,65 @@ mod tests {
         assert!(lookup.refs.is_empty());
         assert!(lookup.lookup_unavailable);
         assert_eq!(lookup.skipped_after_unavailable, chunk_hashes.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verified_global_lookup_keeps_local_hits_when_remote_budget_is_exceeded() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "repo-bounded-local".to_owned());
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            Some(store.clone()),
+            None,
+            None,
+            "repo-bounded-local".to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        let (local_hash, xorb_bytes, xorb_hash, xorb_ref) =
+            test_single_chunk_xorb(b"bounded local global lookup");
+        store
+            .put(&router.xorb_path(&xorb_hash), xorb_bytes)
+            .await
+            .expect("seed durable xorb");
+        let guard = build_push_metadb_guard(
+            &store,
+            &router,
+            None,
+            &crate::core::config::MetaDbTomlConfig::default(),
+            false,
+        );
+        let chunk_store = guard.chunk_index().await.expect("chunk index store");
+        chunk_store
+            .warm_local_shard(
+                MerkleHash::from([0xB0, 0xD6, 0xE7, 0x01]),
+                &[(local_hash, xorb_ref)],
+            )
+            .await
+            .expect("warm local chunk index");
+        pipeline.install_metadb(guard);
+
+        let mut chunk_hashes = (0..=(GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE + 1))
+            .map(|index| MerkleHash::from([index as u64, 0xB0D6E7, 0xCA11, 0xD0]))
+            .collect::<Vec<_>>();
+        chunk_hashes[0] = local_hash;
+        let lookup = pipeline
+            .lookup_verified_global_chunk_refs(&chunk_hashes)
+            .await
+            .expect("bounded lookup");
+
+        assert_eq!(lookup.refs.get(&local_hash), Some(&xorb_ref));
+        assert!(lookup.lookup_unavailable);
+        assert_eq!(
+            lookup.skipped_after_unavailable,
+            chunk_hashes.len().saturating_sub(1)
+        );
+        pipeline.close_metadb().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
