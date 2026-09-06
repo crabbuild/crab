@@ -6210,7 +6210,7 @@ impl Index {
                     .collect::<Vec<_>>()
                     .join(",");
                 let coverage_batch_sql = format!(
-                    "SELECT chunk_hash, chunk_size
+                    "SELECT DISTINCT chunk_hash, chunk_size
                      FROM {coverage_table}
                      WHERE {owner_column} = ? AND chunk_hash IN ({placeholders})"
                 );
