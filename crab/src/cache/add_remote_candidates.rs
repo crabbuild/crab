@@ -22,6 +22,7 @@ const SCHEMA_VERSION: i64 = 1;
 const MEMORY_CAPACITY: usize = 65_536;
 const MAX_PERSISTENT_ENTRIES: i64 = 2_000_000;
 const LOOKUP_BATCH_SIZE: usize = 512;
+const PERSISTENT_UNION_LOOKUP_BATCH: usize = LOOKUP_BATCH_SIZE / 2;
 const PRUNE_EVERY_WRITES: u64 = 64;
 const NEGATIVE_TABLE: &str = "remote_candidate_misses_v1";
 const NEGATIVE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -150,7 +151,9 @@ impl AddRemoteCandidateCache {
             .lock()
             .map_err(|_| CrabError::Internal("add remote candidate database poisoned".into()))?;
         let mut out = HashMap::with_capacity(hashes.len());
-        for batch in hashes.chunks(LOOKUP_BATCH_SIZE) {
+        // The UNION repeats every hash list, so keep total bind variables below
+        // SQLite's default 999-variable limit.
+        for batch in hashes.chunks(PERSISTENT_UNION_LOOKUP_BATCH) {
             let placeholders = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
