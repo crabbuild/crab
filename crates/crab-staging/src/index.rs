@@ -3934,6 +3934,7 @@ impl Index {
                     recipe.chunk_count, recipe.sequence_hash,
                     recipe.page_count, recipe.page_root_hash, recipe.policy_id
              FROM file_recipes AS recipe
+             JOIN files AS file USING (file_hash)
              JOIN verified_recipes AS verified USING (recipe_hash)
              JOIN path_heads AS head USING (recipe_hash)
              JOIN staging_batches AS batch USING (batch_id)
