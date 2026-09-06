@@ -6791,12 +6791,12 @@ impl PushPipeline {
         file_hash: &MerkleHash,
         recipe: &FileRecipe,
         placement: &mut ChunkPlacementMap,
-        verified_existing: &ChunkPlacementMap,
+        fail_fast_on_missing: bool,
     ) -> Result<Vec<FileTerm>> {
         let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
         let mut chunk_index = 0usize;
         self.visit_recipe_chunks(recipe, |chunk_hash, _| {
-            if !placement.contains_key(&chunk_hash) && !verified_existing.is_empty() {
+            if fail_fast_on_missing && !placement.contains_key(&chunk_hash) {
                 match verified_existing.get(&chunk_hash) {
                     Some(existing) => {
                         placement.insert(chunk_hash, existing.clone());
@@ -12295,7 +12295,7 @@ impl PushPipeline {
                     file_hash,
                     recipe,
                     &mut merged_placement,
-                    &verified_existing,
+                    !verified_existing.is_empty(),
                 )?;
 
                 terms
