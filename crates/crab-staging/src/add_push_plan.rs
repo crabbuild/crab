@@ -568,6 +568,7 @@ async fn flush_uncached_read_batch(
         debug_assert_eq!(actual_hash, expected.0);
     }
     builder.push_batch(&scratch.to_pack)?;
+    scratch.to_pack.clear();
     read_batch.clear();
     Ok(())
 }
