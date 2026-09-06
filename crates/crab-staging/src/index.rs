@@ -2417,14 +2417,6 @@ impl Index {
                     "failed to prepare preparation payload retention: {error}"
                 ))
             })?;
-        let mut claim_query = tx
-            .prepare_cached(
-                "SELECT preparation_id, owner_batch_id, uncompressed_size
-                 FROM prepared_chunk_claims WHERE chunk_hash = ?1",
-            )
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to prepare payload claim lookup: {error}"))
-            })?;
         let mut placement_insert = tx
             .prepare_cached(
                 "INSERT INTO prepared_payload_chunks
@@ -2443,6 +2435,55 @@ impl Index {
             })?;
 
         for payload in payloads {
+            let mut claim_keys = HashMap::<[u8; 32], ()>::with_capacity(payload.placements.len());
+            for placement in &payload.placements {
+                claim_keys.insert(placement.chunk_hash, ());
+            }
+            let claim_hashes = claim_keys.keys().copied().collect::<Vec<_>>();
+            let mut claims =
+                HashMap::<[u8; 32], (String, String, i64)>::with_capacity(claim_hashes.len());
+            // Keep the IN-list below SQLite's default bound-parameter limit.
+            const CLAIM_BATCH_SIZE: usize = 512;
+            for batch in claim_hashes.chunks(CLAIM_BATCH_SIZE) {
+                let placeholders = vec!["?"; batch.len()].join(",");
+                let sql = format!(
+                    "SELECT chunk_hash, preparation_id, owner_batch_id, uncompressed_size
+                     FROM prepared_chunk_claims WHERE chunk_hash IN ({placeholders})"
+                );
+                let mut statement = tx.prepare_cached(&sql).map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare payload claim batch: {error}"
+                    ))
+                })?;
+                let rows = statement
+                    .query_map(
+                        params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                        |row| {
+                            Ok((
+                                row.get::<_, Vec<u8>>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, i64>(3)?,
+                            ))
+                        },
+                    )
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to query payload claim batch: {error}"
+                        ))
+                    })?;
+                for row in rows {
+                    let (chunk_hash, preparation, owner, size) = row.map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to read payload claim batch: {error}"
+                        ))
+                    })?;
+                    let chunk_hash =
+                        decode_hash_blob("prepared payload claim chunk hash", chunk_hash)?;
+                    claims.insert(chunk_hash, (preparation, owner, size));
+                }
+            }
+
             let xorb_hash = payload.xorb_hash.as_slice();
             let payload_hash = payload.payload_hash.as_slice();
             let bytes = sqlite_i64("prepared payload bytes", payload.bytes)?;
@@ -2473,23 +2514,15 @@ impl Index {
                 })?;
 
             for placement in &payload.placements {
-                let claim: Option<(String, String, i64)> = claim_query
-                    .query_row(params![placement.chunk_hash.as_slice()], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    })
-                    .optional()
-                    .map_err(|error| {
-                        StagingError::Internal(format!("failed to inspect payload claim: {error}"))
-                    })?;
-                let Some((claim_preparation, claim_owner, claim_size)) = claim else {
+                let Some(claim) = claims.get(&placement.chunk_hash) else {
                     return Err(StagingError::StagingCorrupt(format!(
                         "prepared payload chunk {} has no ownership claim",
                         crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
                     )));
                 };
-                if claim_preparation != preparation_id
-                    || claim_owner != owner_batch_id
-                    || claim_size != i64::from(placement.uncompressed_size)
+                if claim.0 != preparation_id
+                    || claim.1 != owner_batch_id
+                    || claim.2 != i64::from(placement.uncompressed_size)
                 {
                     return Err(StagingError::StagingCorrupt(format!(
                         "prepared payload chunk {} escaped its ownership claim",
@@ -2514,12 +2547,12 @@ impl Index {
                     .map_err(|error| {
                         StagingError::Internal(format!("failed to resolve prepared claim: {error}"))
                     })?;
+                claims.remove(&placement.chunk_hash);
             }
         }
         drop(payload_insert);
         drop(payload_verify);
         drop(preparation_payload_insert);
-        drop(claim_query);
         drop(placement_insert);
         drop(claim_delete);
         tx.commit().map_err(|error| {
