@@ -7107,7 +7107,8 @@ impl Index {
             .map_err(|error| {
                 StagingError::Internal(format!("failed to prepare recipe prepared xorbs: {error}"))
             })?;
-        let rows = statement
+        let mut rows = Vec::new();
+        let mapped_rows = statement
             .query_map(params![recipe_hash.as_slice()], |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
@@ -7117,23 +7118,18 @@ impl Index {
             })
             .map_err(|error| {
                 StagingError::Internal(format!("failed to query recipe prepared xorbs: {error}"))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to collect recipe prepared xorbs: {error}"))
             })?;
+        for row in mapped_rows {
+            let (xorb_hash, payload_hash, bytes) = row.map_err(|error| {
+                StagingError::Internal(format!("failed to read recipe prepared xorb: {error}"))
+            })?;
+            rows.push((
+                decode_hash_blob("recipe prepared xorb hash", xorb_hash)?,
+                decode_hash_blob("recipe prepared payload hash", payload_hash)?,
+                nonnegative_count("recipe prepared payload bytes", bytes)?,
+            ));
+        }
         drop(statement);
-
-        let rows = rows
-            .into_iter()
-            .map(|(xorb_hash, payload_hash, bytes)| {
-                Ok((
-                    decode_hash_blob("recipe prepared xorb hash", xorb_hash)?,
-                    decode_hash_blob("recipe prepared payload hash", payload_hash)?,
-                    nonnegative_count("recipe prepared payload bytes", bytes)?,
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
         let xorb_hashes = rows.iter().map(|(hash, _, _)| *hash).collect::<Vec<_>>();
         let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
         Ok(rows
