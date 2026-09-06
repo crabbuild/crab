@@ -12299,7 +12299,7 @@ impl PushPipeline {
                 )?;
 
                 terms
-                    .iter()
+                    .into_iter()
                     .map(|t| {
                         FileDataSequenceEntry::new(
                             t.xorb_hash,
