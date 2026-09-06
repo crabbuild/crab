@@ -6766,6 +6766,29 @@ impl PushPipeline {
             })
     }
 
+    async fn cached_recipe_snapshot(&self) -> HashMap<MerkleHash, Option<FileRecipe>> {
+        let cache = self.chunk_cache.lock().await;
+        cache
+            .iter()
+            .map(|(file_hash, cached)| (*file_hash, cached.recipe.clone()))
+            .collect()
+    }
+
+    fn recipe_from_snapshot<'a>(
+        snapshot: &'a HashMap<MerkleHash, Option<FileRecipe>>,
+        file_hash: &MerkleHash,
+    ) -> Result<Option<&'a FileRecipe>> {
+        snapshot
+            .get(file_hash)
+            .map(Option::as_ref)
+            .ok_or_else(|| {
+                CrabError::Internal(format!(
+                    "push pipeline invariant violated: verified recipe root missing for file {}; lookup_staging must run first",
+                    file_hash.hex()
+                ))
+            })
+    }
+
     fn recipe_page(
         &self,
         recipe: &FileRecipe,
@@ -10470,8 +10493,9 @@ impl PushPipeline {
         let mut residual_chunks = HashSet::new();
         let mut total_occurrence_bytes = 0u64;
         let mut total_occurrence_chunks = 0u64;
+        let recipe_cache = self.cached_recipe_snapshot().await;
         for (file_hash, pointer_size) in pointer_specs {
-            let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? else {
+            let Some(recipe) = Self::recipe_from_snapshot(&recipe_cache, &file_hash)? else {
                 continue;
             };
             if recipe.chunk_count() == 0 {
@@ -10926,9 +10950,10 @@ impl PushPipeline {
             .iter()
             .map(|pointer| MerkleHash::from(pointer.file_hash))
             .collect::<Vec<_>>();
+        let recipe_cache = self.cached_recipe_snapshot().await;
         let mut file_recipes = Vec::with_capacity(file_hashes.len());
         for file_hash in file_hashes {
-            if let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? {
+            if let Some(recipe) = Self::recipe_from_snapshot(&recipe_cache, &file_hash)? {
                 file_recipes.push(recipe);
             }
         }
@@ -11215,13 +11240,7 @@ impl PushPipeline {
         // Recipe roots are immutable after lookup_staging. Snapshot the
         // small per-file map once so the pack read schedule does not await
         // the cache mutex for every pointer in a large repository.
-        let recipe_cache = {
-            let cache = self.chunk_cache.lock().await;
-            cache
-                .iter()
-                .map(|(file_hash, cached)| (*file_hash, cached.recipe.clone()))
-                .collect::<HashMap<_, _>>()
-        };
+        let recipe_cache = self.cached_recipe_snapshot().await;
 
         let residual_add_plan_chunks = self
             .new_chunk_hashes
