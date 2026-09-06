@@ -318,8 +318,8 @@ export function App() {
           )}
         </main>
         <footer className="site-footer">
-          <span className="brand-small">Crab</span>
-          <span>Self-hosted Git repositories</span>
+          <span className="brand-small">Crab,</span>
+          <span>Git for any file at any scale</span>
         </footer>
       </BaseStyles>
     </ThemeProvider>
