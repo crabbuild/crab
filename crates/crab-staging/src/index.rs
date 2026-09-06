@@ -6495,7 +6495,7 @@ impl Index {
                  WHERE pc.chunk_hash IN ({placeholders})
                  ORDER BY px.xorb_hash"
             );
-            let mut stmt = self.conn.prepare(&sql).map_err(|e| {
+            let mut stmt = self.conn.prepare_cached(&sql).map_err(|e| {
                 StagingError::Internal(format!("prepare prepared xorb lookup: {e}"))
             })?;
             let mapped_rows = stmt
@@ -6686,7 +6686,7 @@ impl Index {
                  WHERE xorb_hash IN ({placeholders})
                  ORDER BY xorb_hash, chunk_index"
             );
-            let mut statement = self.conn.prepare(&sql).map_err(|error| {
+            let mut statement = self.conn.prepare_cached(&sql).map_err(|error| {
                 StagingError::Internal(format!(
                     "failed to prepare batched payload placements: {error}"
                 ))
