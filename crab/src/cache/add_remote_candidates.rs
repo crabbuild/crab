@@ -161,7 +161,7 @@ impl AddRemoteCandidateCache {
             );
             let values = batch
                 .iter()
-                .map(|hash| <[u8; 32]>::from(*hash).to_vec())
+                .map(|hash| <[u8; 32]>::from(*hash))
                 .collect::<Vec<_>>();
             let mut statement = connection
                 .prepare_cached(&query)
