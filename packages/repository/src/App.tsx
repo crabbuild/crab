@@ -1,10 +1,9 @@
 import { Suspense, lazy, useEffect, useLayoutEffect, useState } from "react";
 import {
-  ActionList,
-  ActionMenu,
   BaseStyles,
   Button,
   Label,
+  SegmentedControl,
   Spinner,
 } from "@primer/react";
 import { ThemeProvider } from "@primer/react/next";
@@ -209,7 +208,7 @@ export function App() {
               </Button>
             </div>
           )}
-          <ThemeControl theme={theme} setTheme={setTheme} resolved={resolved} />
+          <ThemeControl theme={theme} setTheme={setTheme} />
         </header>
         <main id="main" tabIndex={-1}>
           {sessionError && (
@@ -329,11 +328,9 @@ export function App() {
 function ThemeControl({
   theme,
   setTheme,
-  resolved,
 }: {
   theme: Theme;
   setTheme: (theme: Theme) => void;
-  resolved: "light" | "dark";
 }) {
   const choices = [
     { value: "auto", label: "System", icon: DeviceDesktopIcon },
@@ -342,31 +339,24 @@ function ThemeControl({
   ] as const;
   return (
     <div className="theme-control">
-      <ActionMenu>
-        <ActionMenu.Button
-          aria-label="Appearance"
-          leadingVisual={resolved === "dark" ? MoonIcon : SunIcon}
-          size="small"
-        >
-          {choices.find((choice) => choice.value === theme)?.label}
-        </ActionMenu.Button>
-        <ActionMenu.Overlay align="end" width="small">
-          <ActionList selectionVariant="single">
-            {choices.map((choice) => (
-              <ActionList.Item
-                key={choice.value}
-                selected={theme === choice.value}
-                onSelect={() => setTheme(choice.value)}
-              >
-                <ActionList.LeadingVisual>
-                  <choice.icon />
-                </ActionList.LeadingVisual>
-                {choice.label}
-              </ActionList.Item>
-            ))}
-          </ActionList>
-        </ActionMenu.Overlay>
-      </ActionMenu>
+      <SegmentedControl
+        aria-label="Appearance"
+        size="small"
+        onChange={(index) => {
+          const choice = choices[index];
+          if (choice) setTheme(choice.value);
+        }}
+      >
+        {choices.map((choice) => (
+          <SegmentedControl.IconButton
+            key={choice.value}
+            aria-label={choice.label}
+            description={`Use ${choice.label.toLowerCase()} appearance`}
+            icon={choice.icon}
+            selected={theme === choice.value}
+          />
+        ))}
+      </SegmentedControl>
     </div>
   );
 }
