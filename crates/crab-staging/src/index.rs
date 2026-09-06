@@ -7059,7 +7059,7 @@ impl Index {
         }
 
         let xorb_hashes = rows.iter().map(|(hash, _, _)| *hash).collect::<Vec<_>>();
-        let placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
+        let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
         Ok(rows
             .into_iter()
             .map(|(xorb_hash, payload_hash, bytes)| StoredPreparedXorb {
@@ -7188,7 +7188,7 @@ impl Index {
         }
         drop(statement);
         let xorb_hashes = rows.iter().map(|(hash, _, _)| *hash).collect::<Vec<_>>();
-        let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
+        let placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
         Ok(rows
             .into_iter()
             .map(|(xorb_hash, payload_hash, bytes)| StoredPreparedXorb {
