@@ -23439,7 +23439,7 @@ mod tests {
             )
             .await
             .expect("owner should publish visibility after locator coverage"),
-            Some(GitVisibilityPublication::Published)
+            Some(GitVisibilityPublication::Published | GitVisibilityPublication::CatalogBound,)
         ));
         let repaired = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
@@ -35946,6 +35946,7 @@ mod tests {
         let mut base = Manifest::default_for_repo("refs/heads/unborn");
         base.refs.insert("refs/tags/v1".into(), "a".repeat(40));
         base.seal_git_validation();
+        ensure_test_layout(&store, &router).await;
         create_manifest(&store, &router, &base).await.unwrap();
         let pipeline = PushPipeline::new(
             PushConfig::default(),

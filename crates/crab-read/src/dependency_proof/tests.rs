@@ -58,6 +58,9 @@ fn limits() -> DependencyProofLimits {
 
 async fn fixture(store: Store) -> (StoreLayout<Store>, RepositorySnapshot, PointerDependency) {
     let layout = StoreLayout::new(store.clone(), "dependency-test".to_owned());
+    crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+        .await
+        .unwrap();
     let file_hash = *blake3::hash(b"").as_bytes();
     let mut writer = ShardWriter::new();
     writer
