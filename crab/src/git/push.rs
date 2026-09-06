@@ -6805,17 +6805,41 @@ impl PushPipeline {
         Ok(())
     }
 
+    fn visit_recipe_chunks_cached(
+        &self,
+        recipe: &FileRecipe,
+        pages: &mut HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
+        mut visit: impl FnMut(MerkleHash, u64) -> Result<()>,
+    ) -> Result<()> {
+        let recipe_hash = recipe.hash();
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let page = match pages.entry((recipe_hash, next)) {
+                std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
+                std::collections::hash_map::Entry::Vacant(entry) => entry
+                    .insert(Arc::new(self.recipe_page(recipe, next)?))
+                    .clone(),
+            };
+            for chunk in &page.chunks {
+                visit(chunk.chunk_hash, chunk.len)?;
+            }
+            next = page.next_occurrence();
+        }
+        Ok(())
+    }
+
     fn build_file_terms_for_recipe(
         &self,
         file_hash: &MerkleHash,
         recipe: &FileRecipe,
+        pages: &mut HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
         placement: &mut ChunkPlacementMap,
         verified_existing: &ChunkPlacementMap,
         fail_fast_on_missing: bool,
     ) -> Result<Vec<FileTerm>> {
         let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
         let mut chunk_index = 0usize;
-        self.visit_recipe_chunks(recipe, |chunk_hash, _| {
+        self.visit_recipe_chunks_cached(recipe, pages, |chunk_hash, _| {
             if fail_fast_on_missing {
                 let resolved = if let Some(existing) = placement.get(&chunk_hash) {
                     Some(existing)
@@ -12203,13 +12227,18 @@ impl PushPipeline {
         // from the current proceeding ref set may enter the rebuilt shard.
         // Content-addressed uploads for removed refs can be reclaimed as
         // ordinary orphans, but must not become generation dependencies.
+        // The push reader snapshot pins these roots, so a page validated in
+        // the reachability pass remains immutable for term construction.
+        // Keep the cache local to bound its lifetime to shard assembly.
+        let mut recipe_pages = HashMap::new();
         let mut required_chunks = HashSet::new();
+        let mut seen_recipe_files = HashSet::new();
         for (file_hash, _) in &pointer_specs {
-            if remote_only.contains(file_hash) {
+            if remote_only.contains(file_hash) || !seen_recipe_files.insert(*file_hash) {
                 continue;
             }
             if let Some(recipe) = Self::recipe_from_snapshot(&recipe_snapshot, file_hash)? {
-                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+                self.visit_recipe_chunks_cached(&recipe, &mut recipe_pages, |chunk_hash, _| {
                     required_chunks.insert(chunk_hash);
                     Ok(())
                 })?;
@@ -12324,6 +12353,7 @@ impl PushPipeline {
                     let terms = self.build_file_terms_for_recipe(
                         file_hash,
                         recipe,
+                        &mut recipe_pages,
                         &mut merged_placement,
                         &verified_existing,
                         !verified_existing.is_empty(),
