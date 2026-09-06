@@ -7892,15 +7892,8 @@ impl PushPipeline {
                     .as_bytes(),
             );
         }
-        let staged_recipes = self
-            .chunk_cache
-            .lock()
-            .await
-            .values()
-            .filter_map(|cached| cached.recipe.clone())
-            .collect::<Vec<_>>();
         let mut staged_hashes = HashSet::new();
-        for recipe in &staged_recipes {
+        for recipe in recipe_snapshot.values().filter_map(Option::as_ref) {
             self.visit_recipe_chunks(recipe, |chunk_hash, _| {
                 staged_hashes.insert(chunk_hash);
                 Ok(())
