@@ -11405,8 +11405,9 @@ impl PushPipeline {
         let already_exist = head_batch(&planned_hashes, &head_store, &config).await?;
         let existing_candidates: Vec<RemoteXorbCandidate> = xorbs
             .iter()
-            .filter(|xorb| already_exist.existing.contains(&xorb.hash.hex()))
-            .map(|xorb| RemoteXorbCandidate {
+            .zip(planned_hashes.iter())
+            .filter(|(_, planned_hash)| already_exist.existing.contains(*planned_hash))
+            .map(|(xorb, _)| RemoteXorbCandidate {
                 hash: xorb.hash,
                 placements: xorb.placements.clone(),
             })
