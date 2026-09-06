@@ -2976,62 +2976,139 @@ impl Index {
                 path: format!("open staging batch {batch_id}"),
             });
         }
-        for chunk in chunks {
-            if chunk.placement_id == [0; 32] || chunk.origin_proof_id == [0; 32] {
-                return Err(StagingError::StagingCorrupt(
-                    "remote authority has an empty placement or origin proof id".to_owned(),
-                ));
+        // Seven parameters per row stay below SQLite's default limit.
+        const REMOTE_AUTHORITY_BATCH: usize = 128;
+        for batch in chunks.chunks(REMOTE_AUTHORITY_BATCH) {
+            for chunk in batch {
+                if chunk.placement_id == [0; 32] || chunk.origin_proof_id == [0; 32] {
+                    return Err(StagingError::StagingCorrupt(
+                        "remote authority has an empty placement or origin proof id".to_owned(),
+                    ));
+                }
             }
-            tx.execute(
+
+            let values_sql = std::iter::repeat_n("(?,?,?,?,?,?,?)", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let insert_sql = format!(
                 "INSERT OR IGNORE INTO recording_remote_chunks
                  (batch_id, chunk_hash, xorb_hash, chunk_index,
                   uncompressed_size, placement_id, origin_proof_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    batch_id,
-                    chunk.chunk_hash.as_slice(),
-                    chunk.xorb_hash.as_slice(),
-                    i64::from(chunk.chunk_index),
-                    i64::from(chunk.uncompressed_size),
-                    chunk.placement_id.as_slice(),
-                    chunk.origin_proof_id.as_slice(),
-                ],
-            )
-            .map_err(|error| {
+                 VALUES {values_sql}"
+            );
+            let mut insert_statement = tx.prepare_cached(&insert_sql).map_err(|error| {
                 StagingError::Internal(format!(
-                    "failed to append recording remote authority: {error}"
+                    "failed to prepare recording remote authority batch: {error}"
                 ))
             })?;
-            let matches: bool = tx
-                .query_row(
-                    "SELECT xorb_hash = ?3
-                            AND chunk_index = ?4
-                            AND uncompressed_size = ?5
-                            AND placement_id = ?6
-                            AND origin_proof_id = ?7
-                     FROM recording_remote_chunks
-                     WHERE batch_id = ?1 AND chunk_hash = ?2",
-                    params![
-                        batch_id,
-                        chunk.chunk_hash.as_slice(),
-                        chunk.xorb_hash.as_slice(),
-                        i64::from(chunk.chunk_index),
-                        i64::from(chunk.uncompressed_size),
-                        chunk.placement_id.as_slice(),
-                        chunk.origin_proof_id.as_slice(),
-                    ],
-                    |row| row.get(0),
-                )
+            let indices = batch
+                .iter()
+                .map(|chunk| i64::from(chunk.chunk_index))
+                .collect::<Vec<_>>();
+            let sizes = batch
+                .iter()
+                .map(|chunk| i64::from(chunk.uncompressed_size))
+                .collect::<Vec<_>>();
+            let mut values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 7);
+            for (index, chunk) in batch.iter().enumerate() {
+                values.push(batch_id);
+                values.push(chunk.chunk_hash.as_slice());
+                values.push(chunk.xorb_hash.as_slice());
+                values.push(&indices[index]);
+                values.push(&sizes[index]);
+                values.push(chunk.placement_id.as_slice());
+                values.push(chunk.origin_proof_id.as_slice());
+            }
+            insert_statement
+                .execute(params_from_iter(values))
                 .map_err(|error| {
                     StagingError::Internal(format!(
-                        "failed to verify recording remote authority: {error}"
+                        "failed to append recording remote authority batch: {error}"
                     ))
                 })?;
-            if !matches {
-                return Err(StagingError::StagingCorrupt(format!(
-                    "remote authority for chunk {} changed within one add",
-                    crab_xet::hash::MerkleHash::from(chunk.chunk_hash).hex()
-                )));
+            drop(insert_statement);
+
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let verify_sql = format!(
+                "SELECT chunk_hash, xorb_hash, chunk_index, uncompressed_size,
+                        placement_id, origin_proof_id
+                 FROM recording_remote_chunks
+                 WHERE batch_id = ? AND chunk_hash IN ({placeholders})"
+            );
+            let mut verify_statement = tx.prepare_cached(&verify_sql).map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare recording remote authority verification: {error}"
+                ))
+            })?;
+            let mut verify_values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() + 1);
+            verify_values.push(batch_id);
+            verify_values.extend(
+                batch
+                    .iter()
+                    .map(|chunk| chunk.chunk_hash.as_slice() as &dyn ToSql),
+            );
+            let rows = verify_statement
+                .query_map(params_from_iter(verify_values), |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                })
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to verify recording remote authority batch: {error}"
+                    ))
+                })?;
+            let mut stored =
+                HashMap::<[u8; 32], ([u8; 32], i64, i64, [u8; 32], [u8; 32])>::with_capacity(
+                    batch.len(),
+                );
+            for row in rows {
+                let (chunk_hash, xorb_hash, index, size, placement_id, origin_proof_id) = row
+                    .map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to read recording remote authority batch: {error}"
+                        ))
+                    })?;
+                stored.insert(
+                    decode_hash_blob("recording remote authority chunk hash", chunk_hash)?,
+                    (
+                        decode_hash_blob("recording remote authority xorb hash", xorb_hash)?,
+                        index,
+                        size,
+                        decode_hash_blob("recording remote authority placement id", placement_id)?,
+                        decode_hash_blob(
+                            "recording remote authority origin proof id",
+                            origin_proof_id,
+                        )?,
+                    ),
+                );
+            }
+            for chunk in batch {
+                let Some((stored_xorb, index, size, placement_id, origin_proof_id)) =
+                    stored.get(&chunk.chunk_hash)
+                else {
+                    return Err(StagingError::Internal(
+                        "recording remote authority row disappeared during verification".to_owned(),
+                    ));
+                };
+                if *stored_xorb != chunk.xorb_hash
+                    || *index != i64::from(chunk.chunk_index)
+                    || *size != i64::from(chunk.uncompressed_size)
+                    || *placement_id != chunk.placement_id
+                    || *origin_proof_id != chunk.origin_proof_id
+                {
+                    return Err(StagingError::StagingCorrupt(format!(
+                        "remote authority for chunk {} changed within one add",
+                        crab_xet::hash::MerkleHash::from(chunk.chunk_hash).hex()
+                    )));
+                }
             }
         }
         tx.commit().map_err(|error| {
