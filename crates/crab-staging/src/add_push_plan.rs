@@ -99,10 +99,7 @@ pub async fn prepare_file_push_plans_with_progress(
         return Ok(AddPushPlanSummary::default());
     }
 
-    let wanted_prepared_chunks: HashSet<MerkleHash> = files
-        .iter()
-        .flat_map(|file| file.chunks.iter().map(|(chunk_hash, _)| *chunk_hash))
-        .collect();
+    let (wanted_prepared_chunks, unique_file_chunks) = collect_unique_file_chunks(files);
     let mut summary = AddPushPlanSummary {
         remote_lookup: remote_lookup.is_some(),
         ..AddPushPlanSummary::default()
@@ -118,9 +115,10 @@ pub async fn prepare_file_push_plans_with_progress(
             .await?;
     }
     if files.len() > 1 {
-        let all_chunks = all_file_chunks(files);
-        let unique_existing_refs = lookup_existing_candidates(&all_chunks, remote_lookup).await?;
-        let existing_refs = expand_existing_refs(files, &all_chunks, &unique_existing_refs)?;
+        let unique_existing_refs =
+            lookup_existing_candidates(&unique_file_chunks, remote_lookup).await?;
+        let existing_refs =
+            expand_existing_refs(files, &unique_file_chunks, &unique_existing_refs)?;
         if prepared_cache.is_empty() {
             return prepare_uncached_file_plans_with_progress(
                 staging,
@@ -281,13 +279,19 @@ struct VerifiedStagedChunks {
     chunks: Vec<(MerkleHash, u64)>,
 }
 
-fn all_file_chunks(files: &[AddPlanFile<'_>]) -> Vec<(MerkleHash, u64)> {
-    let mut seen = HashSet::new();
-    files
-        .iter()
-        .flat_map(|file| file.chunks.iter().copied())
-        .filter(|(chunk_hash, _)| seen.insert(*chunk_hash))
-        .collect()
+fn collect_unique_file_chunks(
+    files: &[AddPlanFile<'_>],
+) -> (HashSet<MerkleHash>, Vec<(MerkleHash, u64)>) {
+    let mut wanted = HashSet::new();
+    let mut unique = Vec::new();
+    for file in files {
+        for &(chunk_hash, size) in file.chunks {
+            if wanted.insert(chunk_hash) {
+                unique.push((chunk_hash, size));
+            }
+        }
+    }
+    (wanted, unique)
 }
 
 fn expand_existing_refs(
@@ -1257,7 +1261,7 @@ mod tests {
                 chunks: &second_chunks,
             },
         ];
-        let unique = all_file_chunks(&files);
+        let (_, unique) = collect_unique_file_chunks(&files);
         assert_eq!(unique.len(), 3);
         assert_eq!(
             unique
