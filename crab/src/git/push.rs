@@ -4747,6 +4747,11 @@ impl CachedFileRecipe {
     }
 }
 
+struct ClassifiedChunkStats {
+    size: u64,
+    new_occurrences: u64,
+}
+
 async fn pack_decoded_chunk_group(
     ordered: Vec<(Chunk, RunId)>,
     mut builder: XorbBuilder,
@@ -10885,14 +10890,13 @@ impl PushPipeline {
             }
         }
         let mut occurrence_bytes = 0u64;
-        let mut chunk_sizes = HashMap::new();
+        let mut chunk_stats = HashMap::new();
 
         let mut total_chunks = 0u64;
         let mut existing = 0u64;
         let mut staged = 0u64;
         let mut new_chunks = 0u64;
         let mut new_set = std::collections::HashSet::new();
-        let mut new_counts = HashMap::new();
         let mut existing_candidates: HashMap<MerkleHash, (XorbRef, u64)> = HashMap::new();
 
         {
@@ -10915,14 +10919,18 @@ impl PushPipeline {
                                     .to_owned(),
                             )
                         })?;
-                    match chunk_sizes.insert(chunk_hash, chunk_size) {
-                        Some(existing) if existing != chunk_size => {
-                            return Err(CrabError::StagingCorrupt(format!(
-                                "chunk {} has conflicting staged sizes {existing} and {chunk_size}",
-                                chunk_hash.hex()
-                            )));
-                        }
-                        _ => {}
+                    let stats = chunk_stats
+                        .entry(chunk_hash)
+                        .or_insert(ClassifiedChunkStats {
+                            size: chunk_size,
+                            new_occurrences: 0,
+                        });
+                    if stats.size != chunk_size {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "chunk {} has conflicting staged sizes {} and {chunk_size}",
+                            chunk_hash.hex(),
+                            stats.size,
+                        )));
                     }
                     total_chunks += 1;
                     let class = classifier.classify_with_context(&chunk_hash, &dedup_ctx);
@@ -10937,7 +10945,7 @@ impl PushPipeline {
                         ChunkClass::New => {
                             new_chunks += 1;
                             new_set.insert(chunk_hash);
-                            *new_counts.entry(chunk_hash).or_insert(0) += 1;
+                            stats.new_occurrences += 1;
                         }
                     }
                     classifier.mark_seen(chunk_hash);
@@ -10959,7 +10967,9 @@ impl PushPipeline {
                 stale_existing += count;
                 if new_set.insert(chunk_hash) {
                     new_chunks += 1;
-                    new_counts.insert(chunk_hash, 1);
+                    if let Some(stats) = chunk_stats.get_mut(&chunk_hash) {
+                        stats.new_occurrences = 1;
+                    }
                 }
                 staged += count.saturating_sub(1);
             }
@@ -10980,7 +10990,10 @@ impl PushPipeline {
             let mut newly_existing = 0u64;
             for chunk_hash in verified_cache_service_hits.keys() {
                 if new_set.remove(chunk_hash) {
-                    let count = new_counts.remove(chunk_hash).unwrap_or(1);
+                    let count = chunk_stats
+                        .get_mut(chunk_hash)
+                        .map(|stats| std::mem::take(&mut stats.new_occurrences))
+                        .unwrap_or(1);
                     newly_existing += count;
                 }
             }
@@ -11013,7 +11026,10 @@ impl PushPipeline {
             let mut newly_existing = 0u64;
             for chunk_hash in verified_base_shard_hits.keys() {
                 if new_set.remove(chunk_hash) {
-                    let count = new_counts.remove(chunk_hash).unwrap_or(1);
+                    let count = chunk_stats
+                        .get_mut(chunk_hash)
+                        .map(|stats| std::mem::take(&mut stats.new_occurrences))
+                        .unwrap_or(1);
                     newly_existing += count;
                 }
             }
@@ -11043,13 +11059,16 @@ impl PushPipeline {
         let verified_global_hit_count = verified_global_hits.len();
         let global_dedup_bytes = verified_global_hits
             .keys()
-            .map(|hash| chunk_sizes.get(hash).copied().unwrap_or(0))
+            .map(|hash| chunk_stats.get(hash).map_or(0, |stats| stats.size))
             .sum::<u64>();
         if !verified_global_hits.is_empty() {
             let mut newly_existing = 0u64;
             for chunk_hash in verified_global_hits.keys() {
                 if new_set.remove(chunk_hash) {
-                    let count = new_counts.remove(chunk_hash).unwrap_or(1);
+                    let count = chunk_stats
+                        .get_mut(chunk_hash)
+                        .map(|stats| std::mem::take(&mut stats.new_occurrences))
+                        .unwrap_or(1);
                     newly_existing += count;
                 }
             }
@@ -11091,7 +11110,7 @@ impl PushPipeline {
         );
         let new_bytes = new_set
             .iter()
-            .map(|hash| chunk_sizes.get(hash).copied().unwrap_or(0))
+            .map(|hash| chunk_stats.get(hash).map_or(0, |stats| stats.size))
             .sum::<u64>();
         self.planned_xorb_bytes
             .store(new_bytes, std::sync::atomic::Ordering::Relaxed);
