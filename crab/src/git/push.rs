@@ -4395,15 +4395,16 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             && let Some(cache) = &self.candidate_cache
         {
             let mut remote_misses = Vec::with_capacity(misses.len());
+            let lookup_hashes = Arc::new(std::mem::take(&mut misses));
             let persistent_lookup = {
                 let cache = Arc::clone(cache);
-                let hashes = misses.clone();
-                tokio::task::spawn_blocking(move || cache.load_persistent(&hashes)).await
+                let hashes = Arc::clone(&lookup_hashes);
+                tokio::task::spawn_blocking(move || cache.load_persistent(hashes.as_slice())).await
             };
             match persistent_lookup {
                 Ok(Ok(persisted)) => {
                     let mut memory_updates = Vec::new();
-                    for chunk_hash in misses {
+                    for &chunk_hash in lookup_hashes.iter() {
                         match persisted.get(&chunk_hash).copied() {
                             Some(Some(candidate)) => {
                                 self.candidate_cache_hits
@@ -4428,11 +4429,11 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                 }
                 Ok(Err(error)) => {
                     warn!(error = %error, "add remote candidate persistent cache lookup failed");
-                    remote_misses = misses;
+                    remote_misses.extend(lookup_hashes.iter().copied());
                 }
                 Err(error) => {
                     warn!(error = %error, "add remote candidate persistent cache task failed");
-                    remote_misses = misses;
+                    remote_misses.extend(lookup_hashes.iter().copied());
                 }
             }
             misses = remote_misses;
