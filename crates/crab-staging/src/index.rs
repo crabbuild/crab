@@ -2907,7 +2907,7 @@ impl Index {
         let mut occurrence = start_occurrence;
         let mut offset = start_offset;
         for batch in chunks.chunks(RECIPE_RECORDING_BATCH) {
-            let mut hashes = Vec::with_capacity(batch.len());
+            let mut hashes: Vec<[u8; 32]> = Vec::with_capacity(batch.len());
             let mut occurrences = Vec::with_capacity(batch.len());
             let mut offsets = Vec::with_capacity(batch.len());
             let mut sizes = Vec::with_capacity(batch.len());
