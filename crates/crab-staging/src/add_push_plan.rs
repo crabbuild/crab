@@ -731,7 +731,6 @@ async fn prepare_one_file_plan_with_existing_refs(
         })
         .collect();
     let mut new_chunks = HashSet::new();
-    let mut seen = HashSet::new();
     let mut planned_prepared_xorbs = HashSet::new();
     let mut covered_by_prepared_cache = HashSet::new();
     let mut cache_chunks = 0u64;
@@ -746,14 +745,14 @@ async fn prepare_one_file_plan_with_existing_refs(
                 *chunk_hash,
                 *candidate,
             ));
-            seen.insert(*chunk_hash);
             continue;
         }
-        if !seen.insert(*chunk_hash) {
+        if remote_existing_chunks.contains(chunk_hash)
+            || covered_by_prepared_cache.contains(chunk_hash)
+        {
             continue;
         }
-
-        if covered_by_prepared_cache.contains(chunk_hash) {
+        if !new_chunks.insert(*chunk_hash) {
             continue;
         }
 
@@ -818,8 +817,6 @@ async fn prepare_one_file_plan_with_existing_refs(
         if used_cached_candidate {
             continue;
         }
-
-        new_chunks.insert(*chunk_hash);
     }
 
     let mut builder = build_xorb_builder();
