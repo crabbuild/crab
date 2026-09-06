@@ -550,7 +550,8 @@ async fn copy_prepared_xorb(
             return Ok(false);
         }
         let payload_hash = planned.payload_hash_bytes()?;
-        install_prepared_xorb_temp(&tmp, target, xorb_hash, &payload_hash, planned.bytes).await?;
+        install_prepared_xorb_temp(&tmp, target, xorb_hash, &payload_hash, planned.bytes, false)
+            .await?;
         tmp_guard.disarm();
         Ok(true)
     }
@@ -713,7 +714,7 @@ pub(crate) async fn write_prepared_xorb_with_payload_hash(
     file.write_all(&bytes).await?;
     file.sync_all().await?;
     drop(file);
-    install_prepared_xorb_temp(&tmp, &path, xorb_hash, &payload_hash, byte_count).await?;
+    install_prepared_xorb_temp(&tmp, &path, xorb_hash, &payload_hash, byte_count, false).await?;
     tmp_guard.disarm();
     Ok(byte_count)
 }
@@ -722,6 +723,7 @@ pub async fn move_prepared_xorb(
     root: &Path,
     xorb_hash: &MerkleHash,
     source_path: &Path,
+    expected_payload_hash: &[u8; 32],
 ) -> Result<u64> {
     let path = prepared_xorb_path(root, xorb_hash);
     let parent = path
@@ -733,6 +735,12 @@ pub async fn move_prepared_xorb(
     tokio::fs::rename(source_path, &tmp).await?;
     let bytes = tokio::fs::metadata(&tmp).await?.len();
     let payload_hash = hash_prepared_xorb_file_async(&tmp).await?;
+    if &payload_hash != expected_payload_hash {
+        return Err(StagingError::StagingCorrupt(format!(
+            "prepared xorb {} payload digest does not match its stream result",
+            xorb_hash.hex()
+        )));
+    }
     validate_prepared_xorb_file_identity(&tmp, xorb_hash, bytes).await?;
     if prepared_xorb_file_matches_identity(&path, xorb_hash, &payload_hash, bytes).await? {
         tokio::fs::remove_file(&tmp).await?;
@@ -741,7 +749,7 @@ pub async fn move_prepared_xorb(
     }
     fail_if_existing_prepared_xorb_is_corrupt(&path, xorb_hash).await?;
     tokio::fs::File::open(&tmp).await?.sync_all().await?;
-    install_prepared_xorb_temp(&tmp, &path, xorb_hash, &payload_hash, bytes).await?;
+    install_prepared_xorb_temp(&tmp, &path, xorb_hash, &payload_hash, bytes, true).await?;
     tmp_guard.disarm();
     Ok(bytes)
 }
@@ -763,14 +771,19 @@ async fn install_prepared_xorb_temp(
     xorb_hash: &MerkleHash,
     payload_hash: &[u8; 32],
     bytes: u64,
+    payload_hash_verified: bool,
 ) -> Result<()> {
     validate_prepared_xorb_file_identity(temp, xorb_hash, bytes).await?;
-    let actual_payload_hash = hash_prepared_xorb_file_async(temp).await?;
-    if &actual_payload_hash != payload_hash {
-        return Err(StagingError::StagingCorrupt(format!(
-            "prepared xorb {} temporary payload digest changed before sealing",
-            xorb_hash.hex()
-        )));
+    // Stream promotion hashes its private temp before this call; rehashing it
+    // here would reread every large xorb without adding a new validation step.
+    if !payload_hash_verified {
+        let actual_payload_hash = hash_prepared_xorb_file_async(temp).await?;
+        if &actual_payload_hash != payload_hash {
+            return Err(StagingError::StagingCorrupt(format!(
+                "prepared xorb {} temporary payload digest changed before sealing",
+                xorb_hash.hex()
+            )));
+        }
     }
 
     match tokio::fs::hard_link(temp, target).await {
@@ -1511,6 +1524,26 @@ mod tests {
 
         assert!(matches!(error, StagingError::StagingCorrupt(_)));
         assert_eq!(std::fs::read(path).expect("read collision"), b"corrupt");
+    }
+
+    #[tokio::test]
+    async fn move_prepared_xorb_rejects_stream_digest_mismatch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chunks = [(
+            compute_data_hash(b"stream payload"),
+            b"stream payload".to_vec(),
+        )];
+        let (bytes, xorb_hash, _) = xorb_with_chunks(&chunks);
+        let source = tmp.path().join("stream-prepared.xorb");
+        std::fs::write(&source, &bytes).expect("write source");
+
+        let error = move_prepared_xorb(tmp.path(), &xorb_hash, &source, &[0; 32])
+            .await
+            .expect_err("digest mismatch must fail closed");
+
+        assert!(matches!(error, StagingError::StagingCorrupt(_)));
+        assert!(!prepared_xorb_path(tmp.path(), &xorb_hash).exists());
+        assert!(!source.exists());
     }
 
     #[test]

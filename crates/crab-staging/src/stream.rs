@@ -1592,8 +1592,20 @@ async fn persist_stream_prepared_authority(
         if let Some(before_promote) = &hooks.before_prepared_xorb_promote {
             before_promote(&prepared.payload_path)?;
         }
-        let written =
-            move_prepared_xorb(staging.root(), &prepared.hash, &prepared.payload_path).await?;
+        let expected_payload_hash =
+            blake3::Hash::from_hex(&prepared.payload_hash).map_err(|error| {
+                CrabError::StagingCorrupt(format!(
+                    "stream-prepared xorb {} has an invalid payload digest: {error}",
+                    prepared.hash.hex()
+                ))
+            })?;
+        let written = move_prepared_xorb(
+            staging.root(),
+            &prepared.hash,
+            &prepared.payload_path,
+            expected_payload_hash.as_bytes(),
+        )
+        .await?;
         if written != prepared.bytes {
             return Err(CrabError::StagingCorrupt(format!(
                 "stream-prepared xorb {} changed size while becoming authoritative: expected {} bytes, found {written}",
