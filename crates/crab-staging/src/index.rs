@@ -6376,7 +6376,7 @@ impl Index {
             let mut stmt = self.conn.prepare(&sql).map_err(|e| {
                 StagingError::Internal(format!("prepare prepared xorb lookup: {e}"))
             })?;
-            let rows = stmt
+            let mapped_rows = stmt
                 .query_map(
                     params_from_iter(batch.iter().map(|hash| hash.as_slice())),
                     |row| {
@@ -6389,7 +6389,7 @@ impl Index {
                 )
                 .map_err(|e| StagingError::Internal(format!("query prepared xorb lookup: {e}")))?;
 
-            for row in rows {
+            for row in mapped_rows {
                 let (xorb_hash, payload_hash, bytes) = row
                     .map_err(|e| StagingError::Internal(format!("read prepared xorb row: {e}")))?;
                 let xorb_hash = decode_hash_blob("prepared xorb hash", xorb_hash)?;
@@ -6554,7 +6554,8 @@ impl Index {
         &self,
         xorb_hashes: &[[u8; 32]],
     ) -> Result<HashMap<[u8; 32], Vec<PreparedXorbPlacementWrite>>> {
-        let mut placements = HashMap::with_capacity(xorb_hashes.len());
+        let mut placements: HashMap<[u8; 32], Vec<PreparedXorbPlacementWrite>> =
+            HashMap::with_capacity(xorb_hashes.len());
         for batch in xorb_hashes.chunks(PREPARED_XORB_QUERY_BATCH) {
             let placeholders = vec!["?"; batch.len()].join(",");
             let sql = format!(
