@@ -164,7 +164,7 @@ impl AddRemoteCandidateCache {
                 .map(|hash| <[u8; 32]>::from(*hash).to_vec())
                 .collect::<Vec<_>>();
             let mut statement = connection
-                .prepare(&query)
+                .prepare_cached(&query)
                 .map_err(|error| database_error("prepare lookup", error))?;
             let rows = statement
                 .query_map(
@@ -217,7 +217,7 @@ impl AddRemoteCandidateCache {
                  WHERE chunk_hash IN ({placeholders})"
             );
             let mut statement = connection
-                .prepare(&negative_query)
+                .prepare_cached(&negative_query)
                 .map_err(|error| database_error("prepare negative lookup", error))?;
             let rows = statement
                 .query_map(
