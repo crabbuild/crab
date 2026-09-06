@@ -5996,7 +5996,7 @@ impl Index {
                         crab_xet::hash::MerkleHash::from(*file_hash).hex()
                     )));
                 }
-                insert_statement
+                let inserted = insert_statement
                     .execute(params![
                         owner,
                         chunk_hash,
@@ -6011,29 +6011,31 @@ impl Index {
                             "failed to store planned existing chunk: {error}"
                         ))
                     })?;
-                let matches: bool = verify_statement
-                    .query_row(
-                        params![
-                            owner,
-                            chunk_hash,
-                            existing.xorb_hash.as_slice(),
-                            i64::from(existing.chunk_index),
-                            i64::from(existing.uncompressed_size),
-                            existing.placement_id.as_slice(),
-                            existing.origin_proof_id.as_slice(),
-                        ],
-                        |row| row.get(0),
-                    )
-                    .map_err(|error| {
-                        StagingError::Internal(format!(
-                            "failed to verify planned existing chunk: {error}"
-                        ))
-                    })?;
-                if !matches {
-                    return Err(StagingError::StagingCorrupt(format!(
-                        "planned existing chunk {} has conflicting proof authority",
-                        crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex()
-                    )));
+                if inserted == 0 {
+                    let matches: bool = verify_statement
+                        .query_row(
+                            params![
+                                owner,
+                                chunk_hash,
+                                existing.xorb_hash.as_slice(),
+                                i64::from(existing.chunk_index),
+                                i64::from(existing.uncompressed_size),
+                                existing.placement_id.as_slice(),
+                                existing.origin_proof_id.as_slice(),
+                            ],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| {
+                            StagingError::Internal(format!(
+                                "failed to verify planned existing chunk: {error}"
+                            ))
+                        })?;
+                    if !matches {
+                        return Err(StagingError::StagingCorrupt(format!(
+                            "planned existing chunk {} has conflicting proof authority",
+                            crab_xet::hash::MerkleHash::from(existing.chunk_hash).hex()
+                        )));
+                    }
                 }
             }
             drop(coverage_statement);
@@ -6051,33 +6053,70 @@ impl Index {
                 })?;
             }
 
+            let mut payload_insert = tx
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO prepared_payloads
+                 (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare prepared payload insert: {e}"
+                    ))
+                })?;
+            let mut payload_verify = tx
+                .prepare_cached(
+                    "SELECT payload_hash = ?2 AND bytes = ?3
+                 FROM prepared_payloads WHERE xorb_hash = ?1",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare prepared payload verification: {e}"
+                    ))
+                })?;
+            let mut chunk_insert = tx
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO prepared_payload_chunks
+                 (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+                 VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare prepared payload chunk insert: {e}"
+                    ))
+                })?;
+            let mut chunk_verify = tx
+                .prepare_cached(
+                    "SELECT xorb_hash, chunk_index, uncompressed_size
+                 FROM prepared_payload_chunks WHERE chunk_hash = ?1",
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to prepare prepared payload chunk verification: {e}"
+                    ))
+                })?;
             for prepared in prepared_xorbs {
                 let xorb_hash: &[u8] = &prepared.xorb_hash;
                 let payload_hash: &[u8] = &prepared.payload_hash;
                 let bytes = sqlite_i64("prepared xorb bytes", prepared.bytes)?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO prepared_payloads
-                 (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
-                    params![xorb_hash, payload_hash, bytes],
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to store prepared payload: {e}"))
-                })?;
-                let payload_matches: bool = tx
-                    .query_row(
-                        "SELECT payload_hash = ?2 AND bytes = ?3
-                     FROM prepared_payloads WHERE xorb_hash = ?1",
-                        params![xorb_hash, payload_hash, bytes],
-                        |row| row.get(0),
-                    )
+                let inserted = payload_insert
+                    .execute(params![xorb_hash, payload_hash, bytes])
                     .map_err(|e| {
-                        StagingError::Internal(format!("failed to verify prepared payload: {e}"))
+                        StagingError::Internal(format!("failed to store prepared payload: {e}"))
                     })?;
-                if !payload_matches {
-                    return Err(StagingError::StagingCorrupt(format!(
-                        "prepared xorb payload identity collision for {}",
-                        crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex()
-                    )));
+                if inserted == 0 {
+                    let payload_matches: bool = payload_verify
+                        .query_row(params![xorb_hash, payload_hash, bytes], |row| row.get(0))
+                        .map_err(|e| {
+                            StagingError::Internal(format!(
+                                "failed to verify prepared payload: {e}"
+                            ))
+                        })?;
+                    if !payload_matches {
+                        return Err(StagingError::StagingCorrupt(format!(
+                            "prepared xorb payload identity collision for {}",
+                            crab_xet::hash::MerkleHash::from(prepared.xorb_hash).hex()
+                        )));
+                    }
                 }
                 let mut covers_recipe = false;
                 for placement in &prepared.placements {
@@ -6125,42 +6164,37 @@ impl Index {
                             })?
                         };
                     }
-                    tx.execute(
-                        "INSERT OR IGNORE INTO prepared_payload_chunks
-                     (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
-                     VALUES (?1, ?2, ?3, ?4)",
-                        params![
+                    let inserted = chunk_insert
+                        .execute(params![
                             xorb_hash,
                             i64::from(placement.chunk_index),
                             chunk_hash,
                             i64::from(placement.uncompressed_size),
-                        ],
-                    )
-                    .map_err(|e| {
-                        StagingError::Internal(format!(
-                            "failed to store prepared payload chunk: {e}"
-                        ))
-                    })?;
-                    let stored: (Vec<u8>, i64, i64) = tx
-                        .query_row(
-                            "SELECT xorb_hash, chunk_index, uncompressed_size
-                         FROM prepared_payload_chunks WHERE chunk_hash = ?1",
-                            params![chunk_hash],
-                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                        )
+                        ])
                         .map_err(|e| {
                             StagingError::Internal(format!(
-                                "failed to verify canonical prepared chunk placement: {e}"
+                                "failed to store prepared payload chunk: {e}"
                             ))
                         })?;
-                    if stored.0.as_slice() != xorb_hash
-                        || stored.1 != i64::from(placement.chunk_index)
-                        || stored.2 != i64::from(placement.uncompressed_size)
-                    {
-                        return Err(StagingError::StagingCorrupt(format!(
-                            "prepared chunk {} already belongs to another canonical xorb",
-                            crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
-                        )));
+                    if inserted == 0 {
+                        let stored: (Vec<u8>, i64, i64) = chunk_verify
+                            .query_row(params![chunk_hash], |row| {
+                                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                            })
+                            .map_err(|e| {
+                                StagingError::Internal(format!(
+                                    "failed to verify canonical prepared chunk placement: {e}"
+                                ))
+                            })?;
+                        if stored.0.as_slice() != xorb_hash
+                            || stored.1 != i64::from(placement.chunk_index)
+                            || stored.2 != i64::from(placement.uncompressed_size)
+                        {
+                            return Err(StagingError::StagingCorrupt(format!(
+                                "prepared chunk {} already belongs to another canonical xorb",
+                                crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
+                            )));
+                        }
                     }
                 }
                 if !covers_recipe {
@@ -6181,6 +6215,10 @@ impl Index {
                     })?;
                 }
             }
+            drop(payload_insert);
+            drop(payload_verify);
+            drop(chunk_insert);
+            drop(chunk_verify);
         }
         let removed_payloads = if cleanup_needed {
             // A single sweep avoids repeatedly scanning the global payload
