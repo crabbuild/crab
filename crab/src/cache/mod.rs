@@ -116,6 +116,9 @@ mod tests {
         let other = add_remote_candidate_cache_path(root, &bucket, "repo-b/.crab");
         assert_eq!(first, same);
         assert_ne!(first, other);
-        assert!(first.ends_with(".sqlite"));
+        assert_eq!(
+            first.extension().and_then(|extension| extension.to_str()),
+            Some("sqlite")
+        );
     }
 }

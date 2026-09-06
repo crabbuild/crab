@@ -1,6 +1,4 @@
 use std::collections::{HashMap, HashSet};
-#[cfg(test)]
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;

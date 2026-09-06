@@ -263,6 +263,7 @@ impl AddRemoteCandidateCache {
         Ok(out)
     }
 
+    #[cfg(test)]
     pub(crate) fn persist_results(
         &self,
         entries: &[(MerkleHash, Option<ExistingChunkCandidate>)],
