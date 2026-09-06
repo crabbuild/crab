@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::StagingArea;
-use crate::index::{PreparedChunkClaim, RecordingAuthorityState};
+use crate::index::{ExistingChunkWrite, PreparedChunkClaim, RecordingAuthorityState};
 use crate::push_plan::{ExistingChunkCandidate, ExistingChunkLookup, move_prepared_xorb};
 use crate::{Result, StagingError as CrabError};
 use crab_xet::chunker::GearChunker;
@@ -1161,7 +1161,7 @@ struct ChunkStageStats {
 #[derive(Default)]
 struct FlushBatchScratch {
     terms: Vec<(MerkleHash, u64)>,
-    remote_authority: Vec<(MerkleHash, ExistingChunkCandidate)>,
+    remote_authority: Vec<ExistingChunkWrite>,
     existing: Vec<Option<ExistingChunkCandidate>>,
 }
 
@@ -1333,7 +1333,14 @@ async fn flush_batch(
                 .iter()
                 .zip(existing.iter())
                 .filter_map(|((chunk_hash, _), candidate)| {
-                    candidate.map(|candidate| (*chunk_hash, candidate))
+                    candidate.map(|candidate| ExistingChunkWrite {
+                        chunk_hash: (*chunk_hash).into(),
+                        xorb_hash: candidate.xorb_ref.xorb_hash.into(),
+                        chunk_index: candidate.xorb_ref.chunk_index,
+                        uncompressed_size: candidate.xorb_ref.uncompressed_size,
+                        placement_id: candidate.placement_id,
+                        origin_proof_id: candidate.origin_proof_id,
+                    })
                 }),
         );
     if xorb_builder.is_none() {
