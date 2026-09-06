@@ -400,20 +400,51 @@ main {
 }
 .repo-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
   gap: 16px;
   margin-top: 24px;
 }
 .repo-card {
-  padding: 24px;
+  min-width: 0;
+  padding: 20px;
 }
-.repo-card h2 {
-  font-weight: 400;
+.repo-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.repo-card-heading > svg {
+  flex: 0 0 auto;
+  color: var(--fgColor-muted);
+}
+.repo-card-heading h2 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
   font-size: 18px;
-  margin-top: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-card-heading h2 a {
+  color: var(--fgColor-accent);
+}
+.repo-card-heading h2 strong {
+  color: var(--fgColor-default);
+  font-weight: 600;
+}
+.repo-card-heading > span {
+  flex: 0 0 auto;
 }
 .repo-card p {
-  margin-top: 16px;
+  margin: 12px 0 0 28px;
+  display: -webkit-box;
+  min-height: 42px;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 .commit-list {
   margin: 0;

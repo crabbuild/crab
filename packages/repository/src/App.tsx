@@ -281,13 +281,15 @@ export function App() {
                           className="panel repo-card"
                           key={`${repo.owner}/${repo.name}`}
                         >
-                          <RepoIcon size={20} />
-                          <h2>
-                            <Link href={repoHref(repo)}>
-                              {repo.owner} / <strong>{repo.name}</strong>
-                            </Link>
-                          </h2>
-                          {repo.archived && <Label>Archived</Label>}
+                          <div className="repo-card-heading">
+                            <RepoIcon size={18} aria-hidden="true" />
+                            <h2>
+                              <Link href={repoHref(repo)}>
+                                {repo.owner} / <strong>{repo.name}</strong>
+                              </Link>
+                            </h2>
+                            {repo.archived && <Label>Archived</Label>}
+                          </div>
                           <p className="muted">
                             {repo.description ||
                               "Browse files, history, and changes."}
