@@ -154,46 +154,54 @@ impl AddRemoteCandidateCache {
             let placeholders = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let query = format!(
-                "SELECT chunk_hash, xorb_hash, chunk_index, uncompressed_size,
-                        placement_id, origin_proof_id
-                 FROM remote_candidates_v1 WHERE chunk_hash IN ({placeholders})"
-            );
             let values = batch
                 .iter()
                 .map(|hash| <[u8; 32]>::from(*hash))
                 .collect::<Vec<_>>();
+            let query = format!(
+                "SELECT chunk_hash, xorb_hash, chunk_index, uncompressed_size,
+                        placement_id, origin_proof_id, 1 AS is_positive, NULL AS observed_at
+                 FROM remote_candidates_v1 WHERE chunk_hash IN ({placeholders})
+                 UNION ALL
+                 SELECT chunk_hash, NULL, NULL, NULL, NULL, NULL, 0 AS is_positive, observed_at
+                 FROM {NEGATIVE_TABLE} WHERE chunk_hash IN ({placeholders})"
+            );
             let mut statement = connection
                 .prepare_cached(&query)
                 .map_err(|error| database_error("prepare lookup", error))?;
             let rows = statement
                 .query_map(
-                    params_from_iter(values.iter().map(|value| value.as_slice())),
+                    params_from_iter(
+                        values
+                            .iter()
+                            .chain(values.iter())
+                            .map(|value| value.as_slice()),
+                    ),
                     |row| {
                         let chunk_hash = decode_hash(row.get(0)?)?;
-                        let xorb_hash = decode_hash(row.get(1)?)?;
-                        let chunk_index = row.get::<_, i64>(2)?;
-                        let uncompressed_size = row.get::<_, i64>(3)?;
-                        let placement_id = decode_hash(row.get(4)?)?;
-                        let origin_proof_id = decode_hash(row.get(5)?)?;
-                        let chunk_index = u32::try_from(chunk_index).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                2,
-                                rusqlite::types::Type::Integer,
-                                Box::new(error),
-                            )
-                        })?;
-                        let uncompressed_size =
-                            u32::try_from(uncompressed_size).map_err(|error| {
+                        let is_positive: bool = row.get(6)?;
+                        let candidate = if is_positive {
+                            let xorb_hash = decode_hash(row.get(1)?)?;
+                            let chunk_index = row.get::<_, i64>(2)?;
+                            let uncompressed_size = row.get::<_, i64>(3)?;
+                            let placement_id = decode_hash(row.get(4)?)?;
+                            let origin_proof_id = decode_hash(row.get(5)?)?;
+                            let chunk_index = u32::try_from(chunk_index).map_err(|error| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    3,
+                                    2,
                                     rusqlite::types::Type::Integer,
                                     Box::new(error),
                                 )
                             })?;
-                        Ok((
-                            chunk_hash,
-                            ExistingChunkCandidate {
+                            let uncompressed_size =
+                                u32::try_from(uncompressed_size).map_err(|error| {
+                                    rusqlite::Error::FromSqlConversionFailure(
+                                        3,
+                                        rusqlite::types::Type::Integer,
+                                        Box::new(error),
+                                    )
+                                })?;
+                            Some(ExistingChunkCandidate {
                                 xorb_ref: XorbRef {
                                     xorb_hash: xorb_hash.into(),
                                     chunk_index,
@@ -201,49 +209,45 @@ impl AddRemoteCandidateCache {
                                 },
                                 placement_id,
                                 origin_proof_id,
-                            },
-                        ))
+                            })
+                        } else {
+                            None
+                        };
+                        Ok((chunk_hash, candidate, row.get::<_, Option<i64>>(7)?))
                     },
                 )
                 .map_err(|error| database_error("lookup", error))?;
-            for row in rows {
-                let (chunk_hash, candidate) =
-                    row.map_err(|error| database_error("decode lookup", error))?;
-                out.insert(chunk_hash.into(), Some(candidate));
-            }
-
-            let negative_query = format!(
-                "SELECT chunk_hash, observed_at FROM {NEGATIVE_TABLE}
-                 WHERE chunk_hash IN ({placeholders})"
-            );
-            let mut statement = connection
-                .prepare_cached(&negative_query)
-                .map_err(|error| database_error("prepare negative lookup", error))?;
-            let rows = statement
-                .query_map(
-                    params_from_iter(values.iter().map(|value| value.as_slice())),
-                    |row| Ok((decode_hash(row.get(0)?)?, row.get::<_, i64>(1)?)),
-                )
-                .map_err(|error| database_error("negative lookup", error))?;
             let mut expired = Vec::new();
             for row in rows {
-                let (chunk_hash, observed_at) =
-                    row.map_err(|error| database_error("decode negative lookup", error))?;
-                if observed_at >= cutoff && observed_at <= now {
-                    out.entry(chunk_hash.into()).or_insert(None);
+                let (chunk_hash, candidate, observed_at) =
+                    row.map_err(|error| database_error("decode lookup", error))?;
+                if let Some(candidate) = candidate {
+                    out.insert(chunk_hash.into(), Some(candidate));
+                } else if let Some(observed_at) = observed_at {
+                    if observed_at >= cutoff && observed_at <= now {
+                        out.entry(chunk_hash.into()).or_insert(None);
+                    } else {
+                        expired.push(chunk_hash);
+                    }
                 } else {
-                    expired.push(chunk_hash);
+                    return Err(CrabError::Internal(
+                        "add remote candidate cache returned an invalid row".into(),
+                    ));
                 }
             }
             if !expired.is_empty() {
-                let mut statement = connection
-                    .prepare_cached(&format!(
-                        "DELETE FROM {NEGATIVE_TABLE} WHERE chunk_hash = ?1"
-                    ))
-                    .map_err(|error| database_error("prepare expired negative delete", error))?;
-                for chunk_hash in expired {
-                    statement
-                        .execute(params![chunk_hash.as_slice()])
+                for expired_batch in expired.chunks(LOOKUP_BATCH_SIZE) {
+                    let placeholders = std::iter::repeat_n("?", expired_batch.len())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let query = format!(
+                        "DELETE FROM {NEGATIVE_TABLE} WHERE chunk_hash IN ({placeholders})"
+                    );
+                    connection
+                        .execute(
+                            &query,
+                            params_from_iter(expired_batch.iter().map(|hash| hash.as_slice())),
+                        )
                         .map_err(|error| database_error("delete expired negative", error))?;
                 }
             }
