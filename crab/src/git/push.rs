@@ -15150,6 +15150,8 @@ impl PushPipeline {
         }
     }
 
+    // Post-commit consumers only need reachable chunks; filter while holding the
+    // source lock so orphan placements never get copied into a large snapshot.
     async fn verified_placement_snapshot_for<'a, I>(&self, required: I) -> ChunkPlacementMap
     where
         I: IntoIterator<Item = &'a MerkleHash>,
