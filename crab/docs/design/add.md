@@ -38,6 +38,7 @@ The important ownership boundaries are:
 | --- | --- |
 | `crab/src/cmd/add.rs` | CLI orchestration, candidate discovery, progress, rollback, pointer publication |
 | `crab/src/cache/add_validation.rs` | Per-worktree v1 proof cache for already-verified indexed content |
+| `crab/src/cache/add_remote_candidates.rs` | Bucket/global-prefix scoped advisory cache for proof-backed remote chunk candidates |
 | `crates/crab-staging/src/stream.rs` | Bounded file streaming, Blake3 hashing, CDC chunking, preparation-wide claims, provisional staging adoption |
 | `crates/crab-staging/src/lib.rs` | Segment writes, SQLite rows, flush/promotion, staged-file adoption and retirement |
 | `crates/crab-staging/src/add_push_plan.rs` | Add-time push-plan construction from staged chunk rows |
@@ -190,6 +191,12 @@ publishes a guess: add continues using local authority. The bucket-global
 SlateDB contains only committed, origin-bound receipts and is updated after a
 successful push CAS; it never stores add claims, local paths, or pending
 uploads.
+
+Successful proof-backed candidates are also retained in a bounded SQLite cache
+under the user's Crab cache. The cache removes repeated remote-index reads
+across `crab add` invocations, while push still revalidates each placement and
+origin proof. Cache failures, stale entries, and evictions are advisory misses;
+they cannot change the bytes selected for a push.
 
 Prepared bodies use one local content-addressed path:
 
