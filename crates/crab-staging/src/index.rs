@@ -293,6 +293,33 @@ fn validate_chunk_index(expected: usize, actual: i64) -> Result<()> {
     Ok(())
 }
 
+fn ensure_recording_batch_open(
+    tx: &rusqlite::Transaction<'_>,
+    batch_id: &str,
+    operation: &str,
+) -> Result<()> {
+    let batch_is_open: bool = tx
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM staging_batches
+                WHERE batch_id = ?1 AND state = 'open'
+             )",
+            params![batch_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            StagingError::Internal(format!(
+                "failed to inspect {operation} recording batch: {error}"
+            ))
+        })?;
+    if batch_is_open {
+        return Ok(());
+    }
+    Err(StagingError::NotFound {
+        path: format!("open staging batch {batch_id}"),
+    })
+}
+
 fn publication_intent_batch_ids(
     tx: &rusqlite::Transaction<'_>,
     intent_id: &str,
@@ -2894,23 +2921,27 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin recipe recording append: {e}"))
         })?;
-        let batch_is_open: bool = tx
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM staging_batches
-                    WHERE batch_id = ?1 AND state = 'open'
-                 )",
-                params![batch_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to inspect recipe recording batch: {e}"))
-            })?;
-        if !batch_is_open {
-            return Err(StagingError::NotFound {
-                path: format!("open staging batch {batch_id}"),
-            });
-        }
+        ensure_recording_batch_open(&tx, batch_id, "recipe")?;
+        Self::append_recipe_recording_terms_in_tx(
+            &tx,
+            batch_id,
+            start_occurrence,
+            start_offset,
+            chunks,
+        )?;
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!("failed to commit recipe recording append: {e}"))
+        })?;
+        Ok(())
+    }
+
+    fn append_recipe_recording_terms_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        batch_id: &str,
+        start_occurrence: u64,
+        start_offset: u64,
+        chunks: &[(crab_xet::hash::MerkleHash, u64)],
+    ) -> Result<()> {
         let (stored_count, stored_end): (i64, Option<i64>) = tx
             .query_row(
                 "SELECT COUNT(*), MAX(chunk_offset + chunk_size)
@@ -2981,9 +3012,6 @@ impl Index {
             })?;
             drop(statement);
         }
-        tx.commit().map_err(|e| {
-            StagingError::Internal(format!("failed to commit recipe recording append: {e}"))
-        })?;
         Ok(())
     }
 
@@ -3006,23 +3034,18 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|error| {
             StagingError::Internal(format!("failed to begin remote authority append: {error}"))
         })?;
-        let batch_is_open: bool = tx
-            .query_row(
-                "SELECT EXISTS(
-                    SELECT 1 FROM staging_batches
-                    WHERE batch_id = ?1 AND state = 'open'
-                 )",
-                params![batch_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to inspect remote authority batch: {error}"))
-            })?;
-        if !batch_is_open {
-            return Err(StagingError::NotFound {
-                path: format!("open staging batch {batch_id}"),
-            });
-        }
+        ensure_recording_batch_open(&tx, batch_id, "remote authority")?;
+        Self::append_recording_remote_chunks_in_tx(&tx, batch_id, chunks)?;
+        tx.commit().map_err(|error| {
+            StagingError::Internal(format!("failed to commit remote authority append: {error}"))
+        })
+    }
+
+    fn append_recording_remote_chunks_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        batch_id: &str,
+        chunks: &[ExistingChunkWrite],
+    ) -> Result<()> {
         // Seven parameters per row stay below SQLite's default limit.
         const REMOTE_AUTHORITY_BATCH: usize = 128;
         for batch in chunks.chunks(REMOTE_AUTHORITY_BATCH) {
@@ -3170,8 +3193,49 @@ impl Index {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Atomically append recipe terms and their proof-bearing remote authorities.
+    pub fn append_recording_batch(
+        &self,
+        batch_id: &str,
+        start_occurrence: u64,
+        start_offset: u64,
+        recipe_chunks: &[(crab_xet::hash::MerkleHash, u64)],
+        remote_chunks: &[ExistingChunkWrite],
+    ) -> Result<()> {
+        if recipe_chunks.is_empty() && remote_chunks.is_empty() {
+            return Ok(());
+        }
+        if recipe_chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+            return Err(StagingError::StagingCorrupt(format!(
+                "recipe recording append has {} terms, limit is {}",
+                recipe_chunks.len(),
+                super::stream::STAGE_BATCH_CHUNKS
+            )));
+        }
+        if remote_chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
+            return Err(StagingError::StagingCorrupt(format!(
+                "remote authority append has {} terms, limit is {}",
+                remote_chunks.len(),
+                super::stream::STAGE_BATCH_CHUNKS
+            )));
+        }
+        let tx = self.conn.unchecked_transaction().map_err(|error| {
+            StagingError::Internal(format!("failed to begin recording batch append: {error}"))
+        })?;
+        ensure_recording_batch_open(&tx, batch_id, "combined")?;
+        Self::append_recording_remote_chunks_in_tx(&tx, batch_id, remote_chunks)?;
+        Self::append_recipe_recording_terms_in_tx(
+            &tx,
+            batch_id,
+            start_occurrence,
+            start_offset,
+            recipe_chunks,
+        )?;
         tx.commit().map_err(|error| {
-            StagingError::Internal(format!("failed to commit remote authority append: {error}"))
+            StagingError::Internal(format!("failed to commit recording batch append: {error}"))
         })
     }
 
@@ -10713,6 +10777,56 @@ mod tests {
             ),
             "changed within one add",
         );
+    }
+
+    #[test]
+    fn recording_batch_commits_recipe_and_remote_authority_atomically() {
+        let idx = open_in_memory();
+        idx.insert_batch("combined-batch").expect("batch");
+        let first_hash = test_hash(0xF3);
+        let first_authority = ExistingChunkWrite {
+            chunk_hash: first_hash,
+            xorb_hash: test_hash(0xF4),
+            chunk_index: 0,
+            uncompressed_size: 8,
+            placement_id: test_hash(0xF5),
+            origin_proof_id: test_hash(0xF6),
+        };
+        idx.append_recording_batch(
+            "combined-batch",
+            0,
+            0,
+            &[(crab_xet::hash::MerkleHash::from(first_hash), 8)],
+            &[first_authority],
+        )
+        .expect("combined recording append");
+
+        let second_hash = test_hash(0xF7);
+        let second_authority = ExistingChunkWrite {
+            chunk_hash: second_hash,
+            ..first_authority
+        };
+        assert_staging_corrupt_contains(
+            idx.append_recording_batch(
+                "combined-batch",
+                9,
+                8,
+                &[(crab_xet::hash::MerkleHash::from(second_hash), 8)],
+                &[second_authority],
+            ),
+            "not contiguous",
+        );
+        let counts: (i64, i64) = idx
+            .conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM recipe_recording_terms),
+                    (SELECT COUNT(*) FROM recording_remote_chunks)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("combined recording counts");
+        assert_eq!(counts, (1, 1));
     }
 
     #[test]

@@ -2553,6 +2553,34 @@ impl StagingArea {
         lock_index(&self.index)?.append_recording_remote_chunks(batch_id.as_str(), &writes)
     }
 
+    pub(crate) fn append_recording_batch(
+        &self,
+        batch_id: &StagingBatchId,
+        start_occurrence: u64,
+        start_offset: u64,
+        recipe_chunks: &[(MerkleHash, u64)],
+        remote_chunks: &[(MerkleHash, push_plan::ExistingChunkCandidate)],
+    ) -> Result<()> {
+        let writes = remote_chunks
+            .iter()
+            .map(|(chunk_hash, candidate)| ExistingChunkWrite {
+                chunk_hash: (*chunk_hash).into(),
+                xorb_hash: candidate.xorb_ref.xorb_hash.into(),
+                chunk_index: candidate.xorb_ref.chunk_index,
+                uncompressed_size: candidate.xorb_ref.uncompressed_size,
+                placement_id: candidate.placement_id,
+                origin_proof_id: candidate.origin_proof_id,
+            })
+            .collect::<Vec<_>>();
+        lock_index(&self.index)?.append_recording_batch(
+            batch_id.as_str(),
+            start_occurrence,
+            start_offset,
+            recipe_chunks,
+            &writes,
+        )
+    }
+
     /// Persist an unverified immutable recipe and lease it to one native-byte path.
     ///
     /// The recipe remains invisible to push until the next staging open

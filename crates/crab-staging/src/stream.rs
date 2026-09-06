@@ -1311,13 +1311,6 @@ async fn flush_batch(
             candidate.map(|candidate| (*chunk_hash, candidate))
         })
         .collect::<Vec<_>>();
-    staging.append_recording_remote_chunks(batch_id, &remote_authority)?;
-    *remote_existing_chunks = remote_existing_chunks
-        .checked_add(remote_authority.len() as u64)
-        .ok_or_else(|| {
-            CrabError::StagingCorrupt("remote existing chunk count overflow".to_owned())
-        })?;
-
     if xorb_builder.is_none() {
         let mut start = 0usize;
         while start < batch.len() {
@@ -1349,12 +1342,18 @@ async fn flush_batch(
         .iter()
         .map(|(hash, data)| (*hash, data.len() as u64))
         .collect::<Vec<_>>();
-    staging.append_recipe_recording_terms(
+    staging.append_recording_batch(
         batch_id,
         *chunk_index_offset,
         *recipe_byte_offset,
         &recipe_terms,
+        &remote_authority,
     )?;
+    *remote_existing_chunks = remote_existing_chunks
+        .checked_add(remote_authority.len() as u64)
+        .ok_or_else(|| {
+            CrabError::StagingCorrupt("remote existing chunk count overflow".to_owned())
+        })?;
     *recipe_byte_offset =
         recipe_terms
             .iter()
