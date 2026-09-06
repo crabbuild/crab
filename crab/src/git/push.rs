@@ -4452,25 +4452,22 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                         "remote add classifier failed: {error}"
                     )),
                 })?;
-            let mut persistent = Vec::with_capacity(misses.len());
-            let mut memory_updates = Vec::with_capacity(misses.len());
+            let mut updates = Vec::with_capacity(misses.len());
             for chunk_hash in misses {
                 let candidate = fetched.get(&chunk_hash).copied();
-                if let Some(cache) = &self.candidate_cache {
-                    memory_updates.push((chunk_hash, candidate));
-                    persistent.push((chunk_hash, candidate));
+                if self.candidate_cache.is_some() {
+                    updates.push((chunk_hash, candidate));
                 }
                 if let Some(candidate) = candidate {
                     candidates.insert(chunk_hash, candidate);
                 }
             }
             if let Some(cache) = &self.candidate_cache {
-                if let Err(error) = cache.memory_insert_batch(&memory_updates) {
+                if let Err(error) = cache.memory_insert_batch(&updates) {
                     warn!(error = %error, "add remote candidate memory cache update failed");
                 }
                 let cache = Arc::clone(cache);
-                match tokio::task::spawn_blocking(move || cache.persist_results(&persistent)).await
-                {
+                match tokio::task::spawn_blocking(move || cache.persist_results(&updates)).await {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
                         warn!(error = %error, "add remote candidate persistent cache update failed");
