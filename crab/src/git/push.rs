@@ -4351,29 +4351,40 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
         &self,
         chunks: &[(MerkleHash, u64)],
     ) -> crab_staging::Result<Vec<Option<crab_staging::push_plan::ExistingChunkCandidate>>> {
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut candidates = HashMap::new();
-        let mut misses = Vec::new();
+        let mut unique_chunks = Vec::with_capacity(chunks.len());
         let mut seen = HashSet::with_capacity(chunks.len());
         for (chunk_hash, _) in chunks {
-            if !seen.insert(*chunk_hash) {
-                continue;
+            if seen.insert(*chunk_hash) {
+                unique_chunks.push(*chunk_hash);
             }
-            let Some(cache) = &self.candidate_cache else {
-                misses.push(*chunk_hash);
-                continue;
-            };
-            match cache.memory_get(chunk_hash) {
-                Ok(Some(candidate)) => {
-                    self.candidate_cache_hits
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if let Some(candidate) = candidate {
-                        candidates.insert(*chunk_hash, candidate);
+        }
+
+        let mut misses = unique_chunks.clone();
+        if let Some(cache) = &self.candidate_cache {
+            match cache.memory_get_batch(&unique_chunks) {
+                Ok(cached) => {
+                    misses.clear();
+                    for chunk_hash in &unique_chunks {
+                        match cached.get(chunk_hash).copied() {
+                            Some(Some(candidate)) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                candidates.insert(*chunk_hash, candidate);
+                            }
+                            Some(None) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            None => misses.push(*chunk_hash),
+                        }
                     }
                 }
-                Ok(None) => misses.push(*chunk_hash),
                 Err(error) => {
                     warn!(error = %error, "add remote candidate memory cache lookup failed");
-                    misses.push(*chunk_hash);
                 }
             }
         }
@@ -4387,29 +4398,28 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             };
             match persistent_lookup {
                 Ok(Ok(persisted)) => {
+                    let mut memory_updates = Vec::new();
                     for chunk_hash in misses {
                         match persisted.get(&chunk_hash).copied() {
                             Some(Some(candidate)) => {
                                 self.candidate_cache_hits
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if let Err(error) = cache.memory_insert(chunk_hash, Some(candidate))
-                                {
-                                    warn!(error = %error, "add remote candidate memory cache update failed");
-                                }
+                                memory_updates.push((chunk_hash, Some(candidate)));
                                 candidates.insert(chunk_hash, candidate);
                             }
                             Some(None) => {
                                 self.candidate_cache_hits
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                if let Err(error) = cache.memory_insert(chunk_hash, None) {
-                                    warn!(error = %error, "add remote candidate memory cache update failed");
-                                }
+                                memory_updates.push((chunk_hash, None));
                                 // A persisted negative is advisory: it only avoids
                                 // a duplicate lookup, and push still revalidates
                                 // every candidate it does receive.
                             }
                             None => remote_misses.push(chunk_hash),
                         }
+                    }
+                    if let Err(error) = cache.memory_insert_batch(&memory_updates) {
+                        warn!(error = %error, "add remote candidate memory cache update failed");
                     }
                 }
                 Ok(Err(error)) => {
@@ -4438,12 +4448,11 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                     )),
                 })?;
             let mut persistent = Vec::with_capacity(misses.len());
+            let mut memory_updates = Vec::with_capacity(misses.len());
             for chunk_hash in misses {
                 let candidate = fetched.get(&chunk_hash).copied();
                 if let Some(cache) = &self.candidate_cache {
-                    if let Err(error) = cache.memory_insert(chunk_hash, candidate) {
-                        warn!(error = %error, "add remote candidate memory cache update failed");
-                    }
+                    memory_updates.push((chunk_hash, candidate));
                     persistent.push((chunk_hash, candidate));
                 }
                 if let Some(candidate) = candidate {
@@ -4451,6 +4460,9 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                 }
             }
             if let Some(cache) = &self.candidate_cache {
+                if let Err(error) = cache.memory_insert_batch(&memory_updates) {
+                    warn!(error = %error, "add remote candidate memory cache update failed");
+                }
                 let cache = Arc::clone(cache);
                 match tokio::task::spawn_blocking(move || cache.persist_results(&persistent)).await
                 {

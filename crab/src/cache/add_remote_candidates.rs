@@ -108,6 +108,26 @@ impl AddRemoteCandidateCache {
         Ok(memory.get(hash).copied())
     }
 
+    pub(crate) fn memory_get_batch(
+        &self,
+        hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Option<ExistingChunkCandidate>>> {
+        if hashes.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut memory = self
+            .memory
+            .lock()
+            .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
+        let mut out = HashMap::with_capacity(hashes.len());
+        for hash in hashes {
+            if let Some(candidate) = memory.get(hash).copied() {
+                out.insert(*hash, candidate);
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) fn memory_insert(
         &self,
         hash: MerkleHash,
@@ -118,6 +138,23 @@ impl AddRemoteCandidateCache {
             .lock()
             .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
         memory.put(hash, candidate);
+        Ok(())
+    }
+
+    pub(crate) fn memory_insert_batch(
+        &self,
+        entries: &[(MerkleHash, Option<ExistingChunkCandidate>)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut memory = self
+            .memory
+            .lock()
+            .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
+        for (hash, candidate) in entries {
+            memory.put(*hash, *candidate);
+        }
         Ok(())
     }
 
@@ -525,6 +562,25 @@ mod tests {
         assert_eq!(cache.memory_get(&hash).expect("lookup"), None);
         cache.memory_insert(hash, None).expect("insert");
         assert_eq!(cache.memory_get(&hash).expect("lookup"), Some(None));
+    }
+
+    #[test]
+    fn memory_batch_cache_preserves_positive_negative_and_misses() {
+        let dir = tempdir().expect("tempdir");
+        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let positive_hash = MerkleHash::from([8; 32]);
+        let negative_hash = MerkleHash::from([9; 32]);
+        let missing_hash = MerkleHash::from([10; 32]);
+        cache
+            .memory_insert_batch(&[(positive_hash, Some(candidate(8))), (negative_hash, None)])
+            .expect("insert batch");
+
+        let loaded = cache
+            .memory_get_batch(&[positive_hash, negative_hash, missing_hash])
+            .expect("lookup batch");
+        assert_eq!(loaded.get(&positive_hash), Some(&Some(candidate(8))));
+        assert_eq!(loaded.get(&negative_hash), Some(&None));
+        assert!(!loaded.contains_key(&missing_hash));
     }
 
     #[test]
