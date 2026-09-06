@@ -131,7 +131,8 @@ pub async fn prepare_file_push_plans_with_progress(
         })?;
         let unique_existing_refs =
             lookup_existing_candidates(unique_file_chunks, remote_lookup).await?;
-        let existing_refs = index_existing_refs(unique_file_chunks, &unique_existing_refs)?;
+        let existing_refs =
+            index_existing_refs(unique_file_chunks, unique_existing_refs.as_deref())?;
         if prepared_cache.is_empty() {
             return prepare_uncached_file_plans_with_progress(
                 staging,
@@ -201,7 +202,7 @@ struct PreparedFilePlan {
 async fn prepare_cached_file_plans_with_progress(
     staging: &StagingArea,
     files: &[AddPlanFile<'_>],
-    existing_refs: &HashMap<MerkleHash, Option<ExistingChunkCandidate>>,
+    existing_refs: &Option<HashMap<MerkleHash, Option<ExistingChunkCandidate>>>,
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     mut summary: AddPushPlanSummary,
@@ -212,21 +213,31 @@ async fn prepare_cached_file_plans_with_progress(
     let mut prepared_plans = Vec::with_capacity(files.len());
     for file in files {
         check_cancelled(cancel)?;
-        let file_existing_refs = file
-            .chunks
-            .iter()
-            .map(|(chunk_hash, _)| {
-                existing_refs.get(chunk_hash).copied().ok_or_else(|| {
-                    StagingError::Internal(
-                        "existing chunk lookup lost a requested chunk".to_owned(),
-                    )
-                })
+        let file_existing_refs = existing_refs
+            .as_ref()
+            .map(|existing_refs| {
+                file.chunks
+                    .iter()
+                    .map(|(chunk_hash, _)| {
+                        existing_refs.get(chunk_hash).copied().ok_or_else(|| {
+                            StagingError::Internal(
+                                "existing chunk lookup lost a requested chunk".to_owned(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
             })
-            .collect::<Result<Vec<_>>>()?;
+            .transpose()?;
+        let file_existing_refs = file_existing_refs
+            .as_deref()
+            .map(ExistingRefs::Values)
+            .unwrap_or(ExistingRefs::Missing {
+                len: file.chunks.len(),
+            });
         let prepared = prepare_one_file_plan_with_existing_refs(
             staging,
             file,
-            &file_existing_refs,
+            file_existing_refs,
             build_xorb_builder,
             prepared_cache,
             verified_sequences,
@@ -292,6 +303,29 @@ struct FileChunkState {
     read_needed: bool,
 }
 
+#[derive(Clone, Copy)]
+// Keep all-missing lookups allocation-free when no remote classifier is configured.
+enum ExistingRefs<'a> {
+    Missing { len: usize },
+    Values(&'a [Option<ExistingChunkCandidate>]),
+}
+
+impl ExistingRefs<'_> {
+    fn len(self) -> usize {
+        match self {
+            Self::Missing { len } => len,
+            Self::Values(values) => values.len(),
+        }
+    }
+
+    fn at(self, index: usize) -> Option<Option<ExistingChunkCandidate>> {
+        match self {
+            Self::Missing { len } => (index < len).then_some(None),
+            Self::Values(values) => values.get(index).copied(),
+        }
+    }
+}
+
 struct ReadBatchScratch {
     hashes: Vec<MerkleHash>,
     to_pack: Vec<(Chunk, RunId)>,
@@ -330,24 +364,29 @@ fn collect_unique_file_chunks(
 
 fn index_existing_refs(
     unique_chunks: &[(MerkleHash, u64)],
-    unique_refs: &[Option<ExistingChunkCandidate>],
-) -> Result<HashMap<MerkleHash, Option<ExistingChunkCandidate>>> {
+    unique_refs: Option<&[Option<ExistingChunkCandidate>]>,
+) -> Result<Option<HashMap<MerkleHash, Option<ExistingChunkCandidate>>>> {
+    let Some(unique_refs) = unique_refs else {
+        return Ok(None);
+    };
     if unique_chunks.len() != unique_refs.len() {
         return Err(StagingError::Internal(
             "existing chunk lookup returned a different unique chunk count".to_owned(),
         ));
     }
-    Ok(unique_chunks
-        .iter()
-        .map(|(chunk_hash, _)| *chunk_hash)
-        .zip(unique_refs.iter().copied())
-        .collect())
+    Ok(Some(
+        unique_chunks
+            .iter()
+            .map(|(chunk_hash, _)| *chunk_hash)
+            .zip(unique_refs.iter().copied())
+            .collect(),
+    ))
 }
 
 async fn prepare_uncached_file_plans_with_progress(
     staging: &StagingArea,
     files: &[AddPlanFile<'_>],
-    existing_refs: &HashMap<MerkleHash, Option<ExistingChunkCandidate>>,
+    existing_refs: &Option<HashMap<MerkleHash, Option<ExistingChunkCandidate>>>,
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     remote_lookup: bool,
     verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
@@ -357,19 +396,29 @@ async fn prepare_uncached_file_plans_with_progress(
     let mut file_plans = Vec::with_capacity(files.len());
     for file in files {
         check_cancelled(cancel)?;
-        let file_existing_refs = file
-            .chunks
-            .iter()
-            .map(|(chunk_hash, _)| {
-                existing_refs.get(chunk_hash).copied().ok_or_else(|| {
-                    StagingError::Internal(
-                        "existing chunk lookup lost a requested chunk".to_owned(),
-                    )
-                })
+        let file_existing_refs = existing_refs
+            .as_ref()
+            .map(|existing_refs| {
+                file.chunks
+                    .iter()
+                    .map(|(chunk_hash, _)| {
+                        existing_refs.get(chunk_hash).copied().ok_or_else(|| {
+                            StagingError::Internal(
+                                "existing chunk lookup lost a requested chunk".to_owned(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()
             })
-            .collect::<Result<Vec<_>>>()?;
+            .transpose()?;
+        let file_existing_refs = file_existing_refs
+            .as_deref()
+            .map(ExistingRefs::Values)
+            .unwrap_or(ExistingRefs::Missing {
+                len: file.chunks.len(),
+            });
         file_plans.push(
-            verified_uncached_file_plan(staging, file, &file_existing_refs, verified_sequences)
+            verified_uncached_file_plan(staging, file, file_existing_refs, verified_sequences)
                 .await?,
         );
     }
@@ -465,9 +514,16 @@ async fn prepare_uncached_file_plans_with_progress(
 async fn verified_uncached_file_plan<'a>(
     staging: &StagingArea,
     file: &'a AddPlanFile<'_>,
-    existing_refs: &[Option<ExistingChunkCandidate>],
+    existing_refs: ExistingRefs<'_>,
     verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
 ) -> Result<UncachedFilePlan<'a>> {
+    if existing_refs.len() != file.chunks.len() {
+        return Err(StagingError::Internal(format!(
+            "add push-plan remote lookup returned {} candidates for {} requested chunks",
+            existing_refs.len(),
+            file.chunks.len()
+        )));
+    }
     let file_hash = MerkleHash::from(file.file_hash);
     let mut plan = FilePushPlan::new_verified_staging(file_hash, file.size, file.chunks);
     let verification_key = (file_hash, plan.sequence_hash()?, file.size);
@@ -482,7 +538,10 @@ async fn verified_uncached_file_plan<'a>(
         .await?;
     }
     let mut uncovered_chunks = HashSet::new();
-    for ((chunk_hash, size), existing_ref) in file.chunks.iter().zip(existing_refs.iter()) {
+    for (index, (chunk_hash, size)) in file.chunks.iter().enumerate() {
+        let existing_ref = existing_refs
+            .at(index)
+            .ok_or_else(|| StagingError::Internal("missing existing chunk candidate".to_owned()))?;
         if let Some(candidate) = existing_ref
             && u64::from(candidate.xorb_ref.uncompressed_size) == *size
         {
@@ -672,10 +731,16 @@ async fn prepare_one_file_plan(
     cancel: &CancellationToken,
 ) -> Result<FilePlanSummary> {
     let existing_refs = lookup_existing_candidates(file.chunks, remote_lookup).await?;
+    let existing_refs = existing_refs
+        .as_deref()
+        .map(ExistingRefs::Values)
+        .unwrap_or(ExistingRefs::Missing {
+            len: file.chunks.len(),
+        });
     let prepared = prepare_one_file_plan_with_existing_refs(
         staging,
         file,
-        &existing_refs,
+        existing_refs,
         build_xorb_builder,
         prepared_cache,
         verified_sequences,
@@ -691,7 +756,7 @@ async fn prepare_one_file_plan(
 async fn prepare_one_file_plan_with_existing_refs(
     staging: &StagingArea,
     file: &AddPlanFile<'_>,
-    existing_refs: &[Option<ExistingChunkCandidate>],
+    existing_refs: ExistingRefs<'_>,
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
@@ -733,7 +798,10 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut cache_link_misses = 0u64;
     let mut unusable_cached_xorb_sources = HashSet::new();
     let mut exclusive_payloads = HashMap::new();
-    for ((chunk_hash, size), existing_ref) in chunks.iter().zip(existing_refs.iter()) {
+    for (index, (chunk_hash, size)) in chunks.iter().enumerate() {
+        let existing_ref = existing_refs
+            .at(index)
+            .ok_or_else(|| StagingError::Internal("missing existing chunk candidate".to_owned()))?;
         let state = chunk_states.entry(*chunk_hash).or_insert(FileChunkState {
             size: *size,
             ..FileChunkState::default()
@@ -745,7 +813,10 @@ async fn prepare_one_file_plan_with_existing_refs(
             state.remote = true;
         }
     }
-    for ((chunk_hash, size), existing_ref) in chunks.iter().zip(existing_refs.iter()) {
+    for (index, (chunk_hash, size)) in chunks.iter().enumerate() {
+        let existing_ref = existing_refs
+            .at(index)
+            .ok_or_else(|| StagingError::Internal("missing existing chunk candidate".to_owned()))?;
         let state = chunk_states.entry(*chunk_hash).or_insert(FileChunkState {
             size: *size,
             ..FileChunkState::default()
@@ -1025,9 +1096,9 @@ async fn record_prepared_xorb(
 async fn lookup_existing_candidates(
     chunks: &[(MerkleHash, u64)],
     remote_lookup: Option<&dyn ExistingChunkLookup>,
-) -> Result<Vec<Option<ExistingChunkCandidate>>> {
+) -> Result<Option<Vec<Option<ExistingChunkCandidate>>>> {
     let Some(remote_lookup) = remote_lookup else {
-        return Ok(vec![None; chunks.len()]);
+        return Ok(None);
     };
     let refs = remote_lookup.lookup_existing_candidates(chunks).await?;
     if refs.len() != chunks.len() {
@@ -1037,7 +1108,7 @@ async fn lookup_existing_candidates(
             chunks.len()
         )));
     }
-    Ok(refs)
+    Ok(Some(refs))
 }
 
 #[cfg(test)]
@@ -1306,11 +1377,22 @@ mod tests {
                     .flatten()
             })
             .collect::<Vec<_>>();
-        let indexed = index_existing_refs(&unique, &unique_refs).expect("index refs");
+        let indexed = index_existing_refs(&unique, Some(&unique_refs))
+            .expect("index refs")
+            .expect("indexed refs");
         assert_eq!(indexed.len(), 3);
         assert_eq!(indexed.get(&shared), Some(&shared_candidate));
         assert_eq!(indexed.get(&first_only), Some(&None));
         assert_eq!(indexed.get(&second_only), Some(&None));
+    }
+
+    #[test]
+    fn absent_remote_lookup_keeps_candidate_index_unallocated() {
+        let unique = vec![(numbered_hash(9), 1)];
+
+        let indexed = index_existing_refs(&unique, None).expect("index refs");
+
+        assert!(indexed.is_none());
     }
 
     async fn stage_synthetic_file(
