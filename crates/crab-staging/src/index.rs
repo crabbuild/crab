@@ -2934,11 +2934,15 @@ impl Index {
             let mut statement = tx.prepare_cached(&insert_sql).map_err(|e| {
                 StagingError::Internal(format!("failed to prepare recipe recording insert: {e}"))
             })?;
+            let hash_slices = hashes
+                .iter()
+                .map(|hash| hash.as_slice())
+                .collect::<Vec<_>>();
             let mut values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 5);
             for index in 0..batch.len() {
-                values.push(batch_id);
+                values.push(&batch_id);
                 values.push(&occurrences[index]);
-                values.push(hashes[index].as_slice());
+                values.push(&hash_slices[index]);
                 values.push(&offsets[index]);
                 values.push(&sizes[index]);
             }
@@ -3022,15 +3026,31 @@ impl Index {
                 .iter()
                 .map(|chunk| i64::from(chunk.uncompressed_size))
                 .collect::<Vec<_>>();
+            let chunk_hashes = batch
+                .iter()
+                .map(|chunk| chunk.chunk_hash.as_slice())
+                .collect::<Vec<_>>();
+            let xorb_hashes = batch
+                .iter()
+                .map(|chunk| chunk.xorb_hash.as_slice())
+                .collect::<Vec<_>>();
+            let placement_ids = batch
+                .iter()
+                .map(|chunk| chunk.placement_id.as_slice())
+                .collect::<Vec<_>>();
+            let origin_proof_ids = batch
+                .iter()
+                .map(|chunk| chunk.origin_proof_id.as_slice())
+                .collect::<Vec<_>>();
             let mut values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 7);
-            for (index, chunk) in batch.iter().enumerate() {
-                values.push(batch_id);
-                values.push(chunk.chunk_hash.as_slice());
-                values.push(chunk.xorb_hash.as_slice());
+            for index in 0..batch.len() {
+                values.push(&batch_id);
+                values.push(&chunk_hashes[index]);
+                values.push(&xorb_hashes[index]);
                 values.push(&indices[index]);
                 values.push(&sizes[index]);
-                values.push(chunk.placement_id.as_slice());
-                values.push(chunk.origin_proof_id.as_slice());
+                values.push(&placement_ids[index]);
+                values.push(&origin_proof_ids[index]);
             }
             insert_statement
                 .execute(params_from_iter(values))
@@ -3056,12 +3076,8 @@ impl Index {
                 ))
             })?;
             let mut verify_values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() + 1);
-            verify_values.push(batch_id);
-            verify_values.extend(
-                batch
-                    .iter()
-                    .map(|chunk| chunk.chunk_hash.as_slice() as &dyn ToSql),
-            );
+            verify_values.push(&batch_id);
+            verify_values.extend(chunk_hashes.iter().map(|hash| hash as &dyn ToSql));
             let rows = verify_statement
                 .query_map(params_from_iter(verify_values), |row| {
                     Ok((
