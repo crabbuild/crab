@@ -2534,25 +2534,6 @@ impl StagingArea {
         )
     }
 
-    pub(crate) fn append_recording_remote_chunks(
-        &self,
-        batch_id: &StagingBatchId,
-        chunks: &[(MerkleHash, push_plan::ExistingChunkCandidate)],
-    ) -> Result<()> {
-        let writes = chunks
-            .iter()
-            .map(|(chunk_hash, candidate)| ExistingChunkWrite {
-                chunk_hash: (*chunk_hash).into(),
-                xorb_hash: candidate.xorb_ref.xorb_hash.into(),
-                chunk_index: candidate.xorb_ref.chunk_index,
-                uncompressed_size: candidate.xorb_ref.uncompressed_size,
-                placement_id: candidate.placement_id,
-                origin_proof_id: candidate.origin_proof_id,
-            })
-            .collect::<Vec<_>>();
-        lock_index(&self.index)?.append_recording_remote_chunks(batch_id.as_str(), &writes)
-    }
-
     pub(crate) fn append_recording_batch(
         &self,
         batch_id: &StagingBatchId,

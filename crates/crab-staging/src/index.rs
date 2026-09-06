@@ -3015,32 +3015,6 @@ impl Index {
         Ok(())
     }
 
-    /// Append a bounded set of generation-pinned remote payload authorities.
-    pub fn append_recording_remote_chunks(
-        &self,
-        batch_id: &str,
-        chunks: &[ExistingChunkWrite],
-    ) -> Result<()> {
-        if chunks.is_empty() {
-            return Ok(());
-        }
-        if chunks.len() > super::stream::STAGE_BATCH_CHUNKS {
-            return Err(StagingError::StagingCorrupt(format!(
-                "remote authority append has {} terms, limit is {}",
-                chunks.len(),
-                super::stream::STAGE_BATCH_CHUNKS
-            )));
-        }
-        let tx = self.conn.unchecked_transaction().map_err(|error| {
-            StagingError::Internal(format!("failed to begin remote authority append: {error}"))
-        })?;
-        ensure_recording_batch_open(&tx, batch_id, "remote authority")?;
-        Self::append_recording_remote_chunks_in_tx(&tx, batch_id, chunks)?;
-        tx.commit().map_err(|error| {
-            StagingError::Internal(format!("failed to commit remote authority append: {error}"))
-        })
-    }
-
     fn append_recording_remote_chunks_in_tx(
         tx: &rusqlite::Transaction<'_>,
         batch_id: &str,
@@ -10753,7 +10727,7 @@ mod tests {
     }
 
     #[test]
-    fn recording_remote_authority_batch_rejects_conflicting_duplicate() {
+    fn recording_batch_rejects_conflicting_remote_authority() {
         let idx = open_in_memory();
         idx.insert_batch("remote-batch").expect("batch");
         let authority = ExistingChunkWrite {
@@ -10765,11 +10739,14 @@ mod tests {
             origin_proof_id: test_hash(0xEA),
         };
 
-        idx.append_recording_remote_chunks("remote-batch", &[authority])
+        idx.append_recording_batch("remote-batch", 0, 0, &[], &[authority])
             .expect("initial authority");
         assert_staging_corrupt_contains(
-            idx.append_recording_remote_chunks(
+            idx.append_recording_batch(
                 "remote-batch",
+                0,
+                0,
+                &[],
                 &[ExistingChunkWrite {
                     chunk_hash: authority.chunk_hash,
                     xorb_hash: test_hash(0xEB),
