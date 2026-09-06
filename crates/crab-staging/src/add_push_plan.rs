@@ -956,13 +956,13 @@ async fn prepare_one_file_plan_with_existing_refs(
     })
 }
 
-fn ranked_prepared_candidates(
-    prepared_cache: &PreparedXorbCache,
+fn ranked_prepared_candidates<'a>(
+    prepared_cache: &'a PreparedXorbCache,
     chunk_hash: &MerkleHash,
     expected_size: u64,
     chunk_states: &HashMap<MerkleHash, FileChunkState>,
     unusable_cached_xorb_sources: &HashSet<(MerkleHash, PreparedXorbSource)>,
-) -> Vec<PreparedCandidateChoice<'_>> {
+) -> Vec<PreparedCandidateChoice<'a>> {
     let mut choices = Vec::new();
     for candidate in prepared_cache.candidates_for_chunk(chunk_hash) {
         if unusable_cached_xorb_sources.contains(&(candidate.xorb_hash, candidate.source.clone())) {
