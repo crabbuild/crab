@@ -4419,6 +4419,11 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
             };
             match persistent_lookup {
                 Ok(Ok(persisted)) => {
+                    if persisted.is_empty() {
+                        // Preserve the cold-cache all-miss fast path without
+                        // reserving this repository-sized buffer for warm hits.
+                        remote_misses.reserve(lookup_hashes.len());
+                    }
                     // Persisted misses are not inserted into memory; only grow
                     // this buffer for rows that actually came back from SQLite.
                     let mut memory_updates = Vec::new();
