@@ -10855,6 +10855,8 @@ impl PushPipeline {
                 )
             })
             .collect();
+        let mut segment_candidates_by_file: Vec<(MerkleHash, Vec<(MerkleHash, u64)>)> = Vec::new();
+        let mut all_segment_candidates = Vec::new();
         for (file_hash, _, _, chunks, _, remote_authority_hashes) in &needed_plans {
             let mut segment_candidates = Vec::new();
             for chunk_hash in remote_authority_hashes {
@@ -10879,7 +10881,13 @@ impl PushPipeline {
                 })?;
                 segment_candidates.push((*chunk_hash, size));
             }
-            let segment_payloads = staging.segment_payloads_exist(&segment_candidates)?;
+            if !segment_candidates.is_empty() {
+                all_segment_candidates.extend(segment_candidates.iter().copied());
+                segment_candidates_by_file.push((*file_hash, segment_candidates));
+            }
+        }
+        let segment_payloads = staging.segment_payloads_exist(&all_segment_candidates)?;
+        for (file_hash, segment_candidates) in segment_candidates_by_file {
             for (chunk_hash, _) in segment_candidates {
                 if !segment_payloads.contains(&chunk_hash) {
                     return Err(CrabError::StagingCorrupt(format!(
@@ -10889,6 +10897,8 @@ impl PushPipeline {
                     )));
                 }
             }
+        }
+        for (_, _, _, chunks, _, _) in &needed_plans {
             for chunk_hash in chunks {
                 if placement_map.contains_key(chunk_hash)
                     || verified_placement.contains_key(chunk_hash)
