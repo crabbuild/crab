@@ -1162,6 +1162,7 @@ struct ChunkStageStats {
 struct FlushBatchScratch {
     terms: Vec<(MerkleHash, u64)>,
     remote_authority: Vec<(MerkleHash, ExistingChunkCandidate)>,
+    existing: Vec<Option<ExistingChunkCandidate>>,
 }
 
 fn append_emitted_chunks(
@@ -1305,8 +1306,15 @@ async fn flush_batch(
 
     let batch_start = *chunk_index_offset;
     let lookup_start = Instant::now();
-    let mut existing =
-        classify_existing_batch(batch, existing_lookup, cancel, &mut scratch.terms).await?;
+    classify_existing_batch(
+        batch,
+        existing_lookup,
+        cancel,
+        &mut scratch.terms,
+        &mut scratch.existing,
+    )
+    .await?;
+    let existing = &mut scratch.existing;
     timings.remote_lookup = timings.remote_lookup.saturating_add(lookup_start.elapsed());
     for (candidate, (_, data)) in existing.iter_mut().zip(batch.iter()) {
         if candidate.as_ref().is_some_and(|candidate| {
@@ -1500,9 +1508,12 @@ async fn classify_existing_batch(
     lookup: Option<&dyn ExistingChunkLookup>,
     cancel: &CancellationToken,
     terms: &mut Vec<(MerkleHash, u64)>,
-) -> Result<Vec<Option<ExistingChunkCandidate>>> {
+    existing: &mut Vec<Option<ExistingChunkCandidate>>,
+) -> Result<()> {
+    existing.clear();
     let Some(lookup) = lookup else {
-        return Ok(vec![None; batch.len()]);
+        existing.resize(batch.len(), None);
+        return Ok(());
     };
     terms.clear();
     terms.extend(batch.iter().map(|(hash, data)| (*hash, data.len() as u64)));
@@ -1512,25 +1523,28 @@ async fn classify_existing_batch(
         result = lookup.lookup_existing_candidates(terms) => result,
     };
     match result {
-        Ok(candidates) if candidates.len() == batch.len() => Ok(candidates),
+        Ok(candidates) if candidates.len() == batch.len() => {
+            existing.extend(candidates);
+        }
         Ok(candidates) => {
             warn!(
                 returned = candidates.len(),
                 requested = batch.len(),
                 "remote chunk classifier returned malformed cardinality; packing batch locally"
             );
-            Ok(vec![None; batch.len()])
+            existing.resize(batch.len(), None);
         }
-        Err(CrabError::Cancelled) => Err(CrabError::Cancelled),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
         Err(error) => {
             warn!(
                 error = %error,
                 chunks = batch.len(),
                 "remote chunk classifier unavailable; packing batch locally"
             );
-            Ok(vec![None; batch.len()])
+            existing.resize(batch.len(), None);
         }
     }
+    Ok(())
 }
 
 async fn persist_stream_prepared_authority(
