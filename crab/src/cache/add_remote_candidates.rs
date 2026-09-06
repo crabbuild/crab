@@ -266,6 +266,42 @@ impl AddRemoteCandidateCache {
         let transaction = connection
             .transaction()
             .map_err(|error| database_error("begin update", error))?;
+        let mut positive_hashes = Vec::new();
+        let mut negative_hashes = Vec::new();
+        for (chunk_hash, candidate) in entries {
+            let chunk_hash = <[u8; 32]>::from(*chunk_hash);
+            if candidate.is_some() {
+                positive_hashes.push(chunk_hash);
+            } else {
+                negative_hashes.push(chunk_hash);
+            }
+        }
+        for batch in positive_hashes.chunks(LOOKUP_BATCH_SIZE) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query =
+                format!("DELETE FROM {NEGATIVE_TABLE} WHERE chunk_hash IN ({placeholders})");
+            transaction
+                .execute(
+                    &query,
+                    params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                )
+                .map_err(|error| database_error("delete stale negative entries", error))?;
+        }
+        for batch in negative_hashes.chunks(LOOKUP_BATCH_SIZE) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query =
+                format!("DELETE FROM remote_candidates_v1 WHERE chunk_hash IN ({placeholders})");
+            transaction
+                .execute(
+                    &query,
+                    params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                )
+                .map_err(|error| database_error("delete stale positive entries", error))?;
+        }
         {
             let mut positive_statement = transaction
                 .prepare_cached(
@@ -286,21 +322,12 @@ impl AddRemoteCandidateCache {
                         OR remote_candidates_v1.origin_proof_id != excluded.origin_proof_id",
                 )
                 .map_err(|error| database_error("prepare update", error))?;
-            let negative_table = NEGATIVE_TABLE;
             let mut negative_statement = transaction
-                .prepare_cached(&format!(
-                    "INSERT INTO {negative_table} (chunk_hash, observed_at) VALUES (?1, ?2)
+                .prepare_cached(
+                    "INSERT INTO remote_candidate_misses_v1 (chunk_hash, observed_at) VALUES (?1, ?2)
                      ON CONFLICT(chunk_hash) DO UPDATE SET observed_at = excluded.observed_at"
-                ))
+                )
                 .map_err(|error| database_error("prepare negative update", error))?;
-            let mut delete_negative_statement = transaction
-                .prepare_cached(&format!(
-                    "DELETE FROM {negative_table} WHERE chunk_hash = ?1"
-                ))
-                .map_err(|error| database_error("prepare negative delete", error))?;
-            let mut delete_positive_statement = transaction
-                .prepare_cached("DELETE FROM remote_candidates_v1 WHERE chunk_hash = ?1")
-                .map_err(|error| database_error("prepare positive delete", error))?;
             for (chunk_hash, candidate) in entries {
                 let chunk_hash = <[u8; 32]>::from(*chunk_hash);
                 if let Some(candidate) = candidate {
@@ -315,13 +342,7 @@ impl AddRemoteCandidateCache {
                             candidate.origin_proof_id.as_slice(),
                         ])
                         .map_err(|error| database_error("write update", error))?;
-                    delete_negative_statement
-                        .execute(params![chunk_hash.as_slice()])
-                        .map_err(|error| database_error("delete negative update", error))?;
                 } else {
-                    delete_positive_statement
-                        .execute(params![chunk_hash.as_slice()])
-                        .map_err(|error| database_error("delete positive update", error))?;
                     negative_statement
                         .execute(params![chunk_hash.as_slice(), observed_at])
                         .map_err(|error| database_error("write negative update", error))?;
@@ -490,6 +511,29 @@ mod tests {
         assert_eq!(
             cache.load_persistent(&[hash]).expect("load").get(&hash),
             Some(&Some(candidate(4)))
+        );
+    }
+
+    #[test]
+    fn persistent_duplicate_results_keep_input_order() {
+        let dir = tempdir().expect("tempdir");
+        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let hash = MerkleHash::from([6; 32]);
+
+        cache
+            .persist_results(&[(hash, Some(candidate(6))), (hash, None)])
+            .expect("persist negative last");
+        assert_eq!(
+            cache.load_persistent(&[hash]).expect("load").get(&hash),
+            Some(&None)
+        );
+
+        cache
+            .persist_results(&[(hash, None), (hash, Some(candidate(6)))])
+            .expect("persist positive last");
+        assert_eq!(
+            cache.load_persistent(&[hash]).expect("load").get(&hash),
+            Some(&Some(candidate(6)))
         );
     }
 
