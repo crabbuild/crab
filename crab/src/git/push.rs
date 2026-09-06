@@ -14925,6 +14925,28 @@ impl PushPipeline {
         let file_store = guard.file_index().await?;
         let chunk_store = guard.chunk_index().await?;
 
+        // Snapshot every recipe used by this file-index plan once. The same
+        // immutable roots feed file-index records, committed chunk receipts,
+        // and local cache warming; reacquiring the cache mutex per file would
+        // add scheduler overhead and repeat the recipe-page reads below.
+        let cached_recipes = {
+            let cache = self.chunk_cache.lock().await;
+            let mut recipes = HashMap::with_capacity(file_index_plan.len());
+            for (file_hash, _) in file_index_plan {
+                let recipe = cache
+                    .get(file_hash)
+                    .and_then(|cached| cached.recipe.clone())
+                    .ok_or_else(|| {
+                        CrabError::Internal(format!(
+                            "staged recipe root missing for {}",
+                            file_hash.hex()
+                        ))
+                    })?;
+                recipes.insert(*file_hash, recipe);
+            }
+            recipes
+        };
+
         let mut file_entries: Vec<(MerkleHash, crab_metadata::value_codec::CommittedFileRecord)> =
             Vec::with_capacity(file_index_plan.len());
         for (file_hash, idx) in file_index_plan {
@@ -14937,10 +14959,16 @@ impl PushPipeline {
                     example_chunk_index: u32::MAX,
                 });
             };
+            let recipe = cached_recipes.get(file_hash).ok_or_else(|| {
+                CrabError::Internal(format!(
+                    "staged recipe root missing for {}",
+                    file_hash.hex()
+                ))
+            })?;
             file_entries.push((
                 *file_hash,
                 crab_metadata::value_codec::CommittedFileRecord {
-                    recipe_hash: self.staged_recipe_hash(file_hash).await?,
+                    recipe_hash: recipe.hash(),
                     shard_hash: *shard_hash,
                     committed_generation: anchor.generation,
                     shard_index_hash: anchor.shard_index_hash,
@@ -14965,6 +14993,7 @@ impl PushPipeline {
             std::mem::take(&mut *verified)
         };
         let mut chunk_sources = HashMap::new();
+        let mut warm_hashes_by_shard: Vec<Vec<MerkleHash>> = vec![Vec::new(); shard_hashes.len()];
         for (file_hash, shard_index) in file_index_plan {
             let shard_hash = shard_hashes.get(*shard_index).ok_or_else(|| {
                 CrabError::IncompleteShardReconstruction {
@@ -14975,10 +15004,25 @@ impl PushPipeline {
                     example_chunk_index: u32::MAX,
                 }
             })?;
-            let Some(recipe) = self.cached_recipe_for_file(file_hash).await? else {
-                continue;
-            };
-            self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+            let recipe = cached_recipes.get(file_hash).ok_or_else(|| {
+                CrabError::Internal(format!(
+                    "staged recipe root missing for {}",
+                    file_hash.hex()
+                ))
+            })?;
+            let warm_bucket = warm_hashes_by_shard.get_mut(*shard_index).ok_or_else(|| {
+                CrabError::IncompleteShardReconstruction {
+                    file_hash: file_hash.hex(),
+                    path: None,
+                    uncovered_chunks: 0,
+                    example_chunk_hash: String::new(),
+                    example_chunk_index: u32::MAX,
+                }
+            })?;
+            self.visit_recipe_chunks(recipe, |chunk_hash, _| {
+                // Local shard markers must retain every shard membership even
+                // when one chunk hash occurs in multiple files or shards.
+                warm_bucket.push(chunk_hash);
                 // The global index is rebuildable acceleration. Re-publishing an
                 // already generation-pinned receipt only grows immutable history;
                 // if that source root later disappears, validation repacks or repair
@@ -14990,8 +15034,13 @@ impl PushPipeline {
                 Ok(())
             })?;
         }
+        let warm_required_chunks = warm_hashes_by_shard
+            .iter()
+            .flat_map(|hashes| hashes.iter())
+            .copied()
+            .collect::<HashSet<_>>();
         let placement_snapshot = self
-            .verified_placement_snapshot_for(chunk_sources.keys())
+            .verified_placement_snapshot_for(&warm_required_chunks)
             .await;
         for chunk_hash in chunk_sources.keys() {
             let placement = placement_snapshot.get(chunk_hash).ok_or_else(|| {
@@ -15105,7 +15154,6 @@ impl PushPipeline {
             .await?;
         }
         guard.flush_memtables().await?;
-        drop(placement_snapshot);
         drop(origin_receipts);
         self.pending_committed_receipt_tombstones
             .lock()
@@ -15126,8 +15174,13 @@ impl PushPipeline {
         // step 8. Failures are logged and swallowed — the remote
         // state is authoritative and the cache will refill on next
         // read.
-        self.warm_local_chunk_index(chunk_store, file_index_plan, shard_hashes)
-            .await;
+        self.warm_local_chunk_index(
+            chunk_store,
+            warm_hashes_by_shard,
+            &placement_snapshot,
+            shard_hashes,
+        )
+        .await;
 
         Ok(())
     }
@@ -15148,62 +15201,24 @@ impl PushPipeline {
     /// push uploaded.
     ///
     /// Called from [`Self::commit_metadb_and_warm_cache_with_guard`] after the
-    /// remote commit succeeds. Groups verified chunk placements by shard
-    /// index and calls [`ChunkIndexStore::warm_local_shard`] per
-    /// shard so the local cache's `shards_v1` presence marker and
-    /// chunk rows stay consistent with the shard metadata uploaded in
-    /// step 8.
+    /// remote commit succeeds. Converts the precomputed per-shard chunk
+    /// membership into verified placements and calls
+    /// [`ChunkIndexStore::warm_local_shard`] per shard so the local cache's
+    /// `shards_v1` presence marker and chunk rows stay consistent with the
+    /// shard metadata uploaded in step 8.
     ///
     /// Extracted into its own method so the outer `execute` state
     /// machine stays compact.
     async fn warm_local_chunk_index(
         &self,
         chunk_store: crate::metadata::ChunkIndexStore,
-        file_index_plan: &[(MerkleHash, usize)],
+        per_shard_hashes: Vec<Vec<MerkleHash>>,
+        placement_snapshot: &ChunkPlacementMap,
         shard_hashes: &[MerkleHash],
     ) {
-        let mut per_shard_hashes: Vec<Vec<MerkleHash>> = vec![Vec::new(); shard_hashes.len()];
         if self.staging.is_none() {
             return;
         }
-        let mut required_chunks = HashSet::new();
-        for (file_hash, shard_idx) in file_index_plan {
-            let recipe = match self.cached_recipe_for_file(file_hash).await {
-                Ok(Some(recipe)) => recipe,
-                Ok(None) => continue,
-                Err(e) => {
-                    warn!(
-                        file_hash = %file_hash.hex(),
-                        error = %e,
-                        "candidate metadata failed to resolve chunk list for warm grouping; skipping file"
-                    );
-                    continue;
-                }
-            };
-            let Some(bucket) = per_shard_hashes.get_mut(*shard_idx) else {
-                warn!(
-                    file_hash = %file_hash.hex(),
-                    shard_idx,
-                    shards = per_shard_hashes.len(),
-                    "candidate metadata file-index plan points past uploaded shard hashes, skipping local warm"
-                );
-                continue;
-            };
-            if let Err(error) = self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                required_chunks.insert(chunk_hash);
-                bucket.push(chunk_hash);
-                Ok(())
-            }) {
-                warn!(
-                    file_hash = %file_hash.hex(),
-                    error = %error,
-                    "candidate metadata failed to page recipe for warm grouping; skipping file"
-                );
-            }
-        }
-        let placement_snapshot = self
-            .verified_placement_snapshot_for(required_chunks.iter())
-            .await;
         let per_shard_chunks: Vec<Vec<(MerkleHash, XorbRef)>> = per_shard_hashes
             .into_iter()
             .map(|hashes| {
@@ -15237,11 +15252,10 @@ impl PushPipeline {
 
     // Post-commit consumers only need reachable chunks; filter while holding the
     // source lock so orphan placements never get copied into a large snapshot.
-    async fn verified_placement_snapshot_for<'a, I>(&self, required: I) -> ChunkPlacementMap
-    where
-        I: IntoIterator<Item = &'a MerkleHash>,
-    {
-        let required = required.into_iter().collect::<HashSet<_>>();
+    async fn verified_placement_snapshot_for(
+        &self,
+        required: &HashSet<MerkleHash>,
+    ) -> ChunkPlacementMap {
         if required.is_empty() {
             return ChunkPlacementMap::new();
         }
@@ -33323,9 +33337,18 @@ mod tests {
             },
         ));
         let chunk_store = guard.chunk_index().await.expect("chunk index store");
+        let required_chunks = HashSet::from([new_chunk, existing_chunk]);
+        let placement_snapshot = pipeline
+            .verified_placement_snapshot_for(&required_chunks)
+            .await;
 
         pipeline
-            .warm_local_chunk_index(chunk_store, &[(file_hash, 0)], &[shard_hash])
+            .warm_local_chunk_index(
+                chunk_store,
+                vec![required_chunks.to_vec()],
+                &placement_snapshot,
+                &[shard_hash],
+            )
             .await;
 
         let persistent = PersistentChunkIndex::open_or_create(&cache_path).expect("open sqlite");
