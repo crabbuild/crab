@@ -1927,25 +1927,33 @@ impl Index {
             return Ok(None);
         }
 
-        let placeholders = vec!["?"; chunk_indices.len()].join(",");
-        let sql = format!(
-            "SELECT chunk_index
-             FROM pending_chunks
-             WHERE file_hash = ? AND chunk_index IN ({placeholders})
-             ORDER BY chunk_index
-             LIMIT 1"
-        );
-        let fh: &[u8] = file_hash;
-        let mut query_params: Vec<&dyn ToSql> = Vec::with_capacity(chunk_indices.len() + 1);
-        query_params.push(&fh);
-        query_params.extend(chunk_indices.iter().map(|idx| idx as &dyn ToSql));
-
-        self.conn
-            .query_row(&sql, query_params.as_slice(), |row| row.get(0))
-            .optional()
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to query pending chunk positions: {e}"))
-            })
+        const POSITION_LOOKUP_BATCH: usize = 400;
+        let mut first = None;
+        for batch in chunk_indices.chunks(POSITION_LOOKUP_BATCH) {
+            let placeholders = vec!["?"; batch.len()].join(",");
+            let sql = format!(
+                "SELECT chunk_index
+                 FROM pending_chunks
+                 WHERE file_hash = ? AND chunk_index IN ({placeholders})
+                 ORDER BY chunk_index
+                 LIMIT 1"
+            );
+            let fh: &[u8] = file_hash;
+            let mut query_params: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() + 1);
+            query_params.push(&fh);
+            query_params.extend(batch.iter().map(|idx| idx as &dyn ToSql));
+            let found: Option<i64> = self
+                .conn
+                .query_row(&sql, query_params.as_slice(), |row| row.get(0))
+                .optional()
+                .map_err(|e| {
+                    StagingError::Internal(format!("failed to query pending chunk positions: {e}"))
+                })?;
+            if let Some(found) = found {
+                first = Some(first.map_or(found, |current| current.min(found)));
+            }
+        }
+        Ok(first)
     }
 
     /// Return the ordered list of chunk hashes for a given file.
@@ -9968,6 +9976,44 @@ mod tests {
             .expect("paged batch dedup check");
         assert!(existing.is_empty());
         assert_eq!(new_indices.len(), HASHES);
+    }
+
+    #[test]
+    fn first_pending_position_pages_large_probe() {
+        const POSITIONS: usize = 1024;
+
+        let idx = open_in_memory();
+        let segment_id = idx.allocate_segment_id().expect("alloc segment");
+        let file_hash = test_hash(0xF7);
+        insert_test_file(&idx, &file_hash, 16);
+        idx.insert_pending(&[
+            PendingRow {
+                chunk_hash: test_hash(0xC7),
+                file_hash,
+                chunk_index: 0,
+                size: 8,
+                segment_id,
+                segment_offset: 0,
+            },
+            PendingRow {
+                chunk_hash: test_hash(0xC8),
+                file_hash,
+                chunk_index: 1023,
+                size: 8,
+                segment_id,
+                segment_offset: 8,
+            },
+        ])
+        .expect("seed pending rows");
+        let positions = (0..POSITIONS)
+            .map(|position| i64::try_from(position).expect("position"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            idx.first_pending_position_for_file(&file_hash, &positions)
+                .expect("paged position lookup"),
+            Some(0)
+        );
     }
 
     #[test]
