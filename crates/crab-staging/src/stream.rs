@@ -43,7 +43,7 @@ pub const READ_BUF_SIZE: usize = 1024 * 1024;
 /// typical data batch closer to 64 MiB before touching the staging index.
 pub const STAGE_BATCH_CHUNKS: usize = 1024;
 pub const STAGE_BATCH_TARGET_BYTES: u64 = 64 * 1024 * 1024;
-const DIRECT_XORB_STAGE_BATCH_TARGET_BYTES: u64 = 32 * 1024 * 1024;
+const DIRECT_XORB_STAGE_BATCH_TARGET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Optional progress counters updated while streaming a file.
 #[derive(Clone, Default)]
@@ -1826,13 +1826,13 @@ mod tests {
             stage_batch_target_bytes(true),
             DIRECT_XORB_STAGE_BATCH_TARGET_BYTES
         );
-        let lengths = vec![1024 * 1024; 32];
+        let lengths = vec![1024 * 1024; 64];
         assert_eq!(
             batch_flush_prefix_from_lengths(
                 lengths.iter().copied(),
                 DIRECT_XORB_STAGE_BATCH_TARGET_BYTES,
             ),
-            (32, DIRECT_XORB_STAGE_BATCH_TARGET_BYTES)
+            (64, DIRECT_XORB_STAGE_BATCH_TARGET_BYTES)
         );
     }
 
