@@ -545,10 +545,8 @@ async fn verified_uncached_file_plan<'a>(
         if let Some(candidate) = existing_ref
             && u64::from(candidate.xorb_ref.uncompressed_size) == *size
         {
-            plan.existing.push(PlannedExistingChunk::from_candidate(
-                *chunk_hash,
-                *candidate,
-            ));
+            plan.existing
+                .push(PlannedExistingChunk::from_candidate(*chunk_hash, candidate));
             continue;
         }
         uncovered_chunks.insert(*chunk_hash);
@@ -824,10 +822,8 @@ async fn prepare_one_file_plan_with_existing_refs(
         if let Some(candidate) = existing_ref
             && u64::from(candidate.xorb_ref.uncompressed_size) == *size
         {
-            plan.existing.push(PlannedExistingChunk::from_candidate(
-                *chunk_hash,
-                *candidate,
-            ));
+            plan.existing
+                .push(PlannedExistingChunk::from_candidate(*chunk_hash, candidate));
             continue;
         }
         if state.remote || state.covered || state.read_needed {
