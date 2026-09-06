@@ -9510,12 +9510,27 @@ impl PushPipeline {
             }
         }
 
+        let file_hashes = unique_specs
+            .iter()
+            .map(|(file_hash, _)| *file_hash)
+            .collect::<Vec<_>>();
+        let published_recipes = Arc::new(staging.published_recipes_for_files(&file_hashes)?);
         let staging = Arc::clone(staging);
         let verify_results = futures_util::stream::iter(unique_specs.into_iter().map(
             |(file_hash, pointer_size)| {
                 let staging = Arc::clone(&staging);
+                let published_recipes = Arc::clone(&published_recipes);
                 async move {
-                    let Some(recipe) = staging.published_recipe_for_file(&file_hash)? else {
+                    let recipe = published_recipes
+                        .get(&file_hash)
+                        .cloned()
+                        .ok_or_else(|| {
+                            CrabError::Internal(format!(
+                                "staging recipe batch lookup omitted file {}",
+                                file_hash.hex()
+                            ))
+                        })?;
+                    let Some(recipe) = recipe else {
                         debug!(
                             file_hash = %file_hash.hex(),
                             "step 2: no published staging recipe for pointer"

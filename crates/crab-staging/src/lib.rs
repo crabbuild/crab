@@ -3933,6 +3933,22 @@ impl StagingAreaReadOnly {
         lock_index(&self.index)?.published_recipe_for_file(&file_hash)
     }
 
+    /// Return published immutable recipes for several file hashes in one index read.
+    pub fn published_recipes_for_files(
+        &self,
+        file_hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Option<crate::recipe::FileRecipe>>> {
+        let raw_hashes = file_hashes
+            .iter()
+            .map(|file_hash| (*file_hash).into())
+            .collect::<Vec<[u8; 32]>>();
+        Ok(lock_index(&self.index)?
+            .published_recipes_for_files(&raw_hashes)?
+            .into_iter()
+            .map(|(file_hash, recipe)| (MerkleHash::from(file_hash), recipe))
+            .collect())
+    }
+
     /// Read one bounded page from an indexed immutable recipe.
     pub fn recipe_page(
         &self,

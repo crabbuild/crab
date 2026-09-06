@@ -20,6 +20,7 @@ type ResidualAuthorityRow = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>)
 
 /// Canonical pre-release on-disk layout contract.
 const LAYOUT_VERSION: &str = "1";
+const PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE: usize = 512;
 
 const CANONICAL_TABLES: &[&str] = &[
     "add_preparation_batches",
@@ -3865,68 +3866,15 @@ impl Index {
         &self,
         file_hash: &[u8; 32],
     ) -> Result<Option<crate::recipe::FileRecipe>> {
-        let rows = {
-            let mut statement = self
-                .conn
-                .prepare_cached(
-                    "SELECT DISTINCT recipe.recipe_hash, recipe.file_size,
-                            recipe.chunk_count, recipe.sequence_hash,
-                            recipe.page_count, recipe.page_root_hash, recipe.policy_id
-                     FROM file_recipes AS recipe
-                     JOIN verified_recipes AS verified USING (recipe_hash)
-                     JOIN path_heads AS head USING (recipe_hash)
-                     JOIN staging_batches AS batch USING (batch_id)
-                     WHERE recipe.file_hash = ?1 AND batch.state = 'published'
-                     ORDER BY recipe.recipe_hash",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to prepare published recipe query: {e}"))
-                })?;
-            statement
-                .query_map(params![file_hash.as_slice()], |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, Vec<u8>>(5)?,
-                        row.get::<_, String>(6)?,
-                    ))
-                })
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to query published recipes: {e}"))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to collect published recipes: {e}"))
-                })?
-        };
-
         let mut selected = None;
-        for (
-            raw_recipe_hash,
-            raw_file_size,
-            raw_chunk_count,
-            raw_sequence_hash,
-            raw_page_count,
-            raw_page_root_hash,
-            policy_id,
-        ) in rows
+        for (returned_hash, recipe) in
+            self.load_published_recipe_rows(std::slice::from_ref(file_hash))?
         {
-            let stored_recipe_hash = decode_hash_blob("published recipe hash", raw_recipe_hash)?;
-            let recipe = self.load_stored_recipe(
-                &stored_recipe_hash,
-                file_hash,
-                (
-                    raw_file_size,
-                    raw_chunk_count,
-                    raw_sequence_hash,
-                    raw_page_count,
-                    raw_page_root_hash,
-                    policy_id,
-                ),
-            )?;
+            if returned_hash != *file_hash {
+                return Err(StagingError::StagingCorrupt(
+                    "published recipe query returned an unexpected file hash".to_owned(),
+                ));
+            }
             if let Some(prior) = &selected
                 && prior != &recipe
             {
@@ -3937,6 +3885,114 @@ impl Index {
             selected = Some(recipe);
         }
         Ok(selected)
+    }
+
+    /// Load published immutable recipes for several file hashes while holding
+    /// the staging index lock once. Every requested hash appears in the
+    /// result, with `None` for a hash that has no published recipe.
+    pub fn published_recipes_for_files(
+        &self,
+        file_hashes: &[[u8; 32]],
+    ) -> Result<HashMap<[u8; 32], Option<crate::recipe::FileRecipe>>> {
+        let mut recipes = HashMap::with_capacity(file_hashes.len());
+        for batch in file_hashes.chunks(PUBLISHED_RECIPE_LOOKUP_BATCH_SIZE) {
+            for file_hash in batch {
+                recipes.entry(*file_hash).or_insert(None);
+            }
+            for (file_hash, recipe) in self.load_published_recipe_rows(batch)? {
+                match recipes.get_mut(&file_hash) {
+                    Some(slot @ None) => *slot = Some(recipe),
+                    Some(Some(prior)) if prior == &recipe => {}
+                    Some(Some(_)) => {
+                        return Err(StagingError::StagingCorrupt(
+                            "one file hash has conflicting published recipes".to_owned(),
+                        ));
+                    }
+                    None => {
+                        return Err(StagingError::StagingCorrupt(
+                            "published recipe query returned an unexpected file hash".to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(recipes)
+    }
+
+    fn load_published_recipe_rows(
+        &self,
+        file_hashes: &[[u8; 32]],
+    ) -> Result<Vec<([u8; 32], crate::recipe::FileRecipe)>> {
+        if file_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = std::iter::repeat_n("?", file_hashes.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!(
+            "SELECT DISTINCT recipe.file_hash, recipe.recipe_hash, recipe.file_size,
+                    recipe.chunk_count, recipe.sequence_hash,
+                    recipe.page_count, recipe.page_root_hash, recipe.policy_id
+             FROM file_recipes AS recipe
+             JOIN verified_recipes AS verified USING (recipe_hash)
+             JOIN path_heads AS head USING (recipe_hash)
+             JOIN staging_batches AS batch USING (batch_id)
+             WHERE recipe.file_hash IN ({placeholders}) AND batch.state = 'published'
+             ORDER BY recipe.file_hash, recipe.recipe_hash"
+        );
+        let mut statement = self.conn.prepare_cached(&query).map_err(|e| {
+            StagingError::Internal(format!("failed to prepare published recipe query: {e}"))
+        })?;
+        let mut query_params: Vec<&dyn ToSql> = Vec::with_capacity(file_hashes.len());
+        query_params.extend(file_hashes.iter().map(|hash| hash.as_slice() as &dyn ToSql));
+        let rows = statement
+            .query_map(params_from_iter(query_params), |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(|e| StagingError::Internal(format!("failed to query published recipes: {e}")))?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to collect published recipes: {e}"))
+            })?;
+
+        let mut recipes = Vec::with_capacity(rows.len());
+        for (
+            raw_file_hash,
+            raw_recipe_hash,
+            raw_file_size,
+            raw_chunk_count,
+            raw_sequence_hash,
+            raw_page_count,
+            raw_page_root_hash,
+            policy_id,
+        ) in rows
+        {
+            let file_hash = decode_hash_blob("published recipe file hash", raw_file_hash)?;
+            let stored_recipe_hash = decode_hash_blob("published recipe hash", raw_recipe_hash)?;
+            let recipe = self.load_stored_recipe(
+                &stored_recipe_hash,
+                &file_hash,
+                (
+                    raw_file_size,
+                    raw_chunk_count,
+                    raw_sequence_hash,
+                    raw_page_count,
+                    raw_page_root_hash,
+                    policy_id,
+                ),
+            )?;
+            recipes.push((file_hash, recipe));
+        }
+        Ok(recipes)
     }
 
     /// Load the newest verified open recipe for a path when every chunk has
@@ -8833,6 +8889,21 @@ mod tests {
         idx.insert_recipe_lease(batch_id, path, &recipe, RecipeVerification::CallerVerified)
             .expect("recipe lease");
         recipe
+    }
+
+    #[test]
+    fn published_recipe_batch_returns_missing_and_published() {
+        let idx = open_in_memory();
+        let recipe = insert_test_recipe_lease(&idx, "batch-a", b"models/a.bin", 0xA1, 0xA2);
+        idx.mark_batch_published("batch-a").expect("publish batch");
+        let file_hash: [u8; 32] = recipe.file_hash().into();
+        let missing_hash = test_hash(0xFF);
+
+        let recipes = idx
+            .published_recipes_for_files(&[file_hash, missing_hash])
+            .expect("batch lookup");
+        assert_eq!(recipes.get(&file_hash), Some(&Some(recipe)));
+        assert_eq!(recipes.get(&missing_hash), Some(&None));
     }
 
     #[test]
