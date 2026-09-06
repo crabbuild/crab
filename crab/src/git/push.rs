@@ -6825,7 +6825,7 @@ impl PushPipeline {
                 let page = Arc::new(self.recipe_page(recipe, next)?);
                 let estimated_bytes = page
                     .chunks
-                    .len()
+                    .capacity()
                     .saturating_mul(std::mem::size_of::<crab_staging::recipe::RecipeChunk>())
                     .saturating_add(RECIPE_PAGE_CACHE_ENTRY_OVERHEAD);
                 if (*cached_bytes).saturating_add(estimated_bytes) <= RECIPE_PAGE_CACHE_BYTES {
