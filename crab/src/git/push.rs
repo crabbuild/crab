@@ -4130,8 +4130,9 @@ pub struct PushPipeline {
     /// through coordinator commit. Protected pushes use the receive service's
     /// equivalent fence and therefore do not populate this slot.
     gc_writer: tokio::sync::Mutex<Option<crate::maintenance::GcWriterLeases>>,
-    /// Shard bytes + hash pairs produced by step 8, consumed by step 9.
-    shard_results: tokio::sync::Mutex<Vec<(Vec<u8>, MerkleHash)>>,
+    /// Shard payloads + hashes produced by step 8, consumed by step 9.
+    /// `Bytes` keeps upload/cache readers zero-copy after shard construction.
+    shard_results: tokio::sync::Mutex<Vec<(Bytes, MerkleHash)>>,
     /// Maps file_hash → index into `shard_results`, so step 9 knows which
     /// shard contains each file's reconstruction info.
     file_shard_index: tokio::sync::Mutex<HashMap<MerkleHash, usize>>,
@@ -12280,7 +12281,13 @@ impl PushPipeline {
             current_shard_file_count += 1;
         }
 
-        let results = shard_session.finalize()?;
+        // Convert the finalized buffers without copying; step 9 and cache
+        // warming retain immutable `Bytes` handles to the same payload.
+        let results: Vec<(Bytes, MerkleHash)> = shard_session
+            .finalize()?
+            .into_iter()
+            .map(|(bytes, hash)| (Bytes::from(bytes), hash))
+            .collect();
         let shard_count = results.len();
         let total_shard_bytes: usize = results.iter().map(|(b, _)| b.len()).sum();
 
@@ -12315,7 +12322,7 @@ impl PushPipeline {
     async fn persist_shard_hints(
         &self,
         file_shard_idx: &HashMap<MerkleHash, usize>,
-        shard_results: &[(Vec<u8>, MerkleHash)],
+        shard_results: &[(Bytes, MerkleHash)],
     ) {
         if file_shard_idx.is_empty() || shard_results.is_empty() {
             return;
@@ -12412,7 +12419,7 @@ impl PushPipeline {
                     (
                         *shard_hash,
                         self.router.shard_path(shard_hash),
-                        Bytes::from(shard_bytes.clone()),
+                        shard_bytes.clone(),
                     )
                 })
                 .collect()
@@ -30747,7 +30754,7 @@ mod tests {
         let shard_results = pipeline.shard_results.lock().await;
         assert_eq!(shard_results.len(), 1);
         let (shard_bytes, shard_hash) = &shard_results[0];
-        let reader = ShardReader::from_bytes(Bytes::from(shard_bytes.clone()), *shard_hash);
+        let reader = ShardReader::from_bytes(shard_bytes.clone(), *shard_hash);
 
         let xorb_info = reader
             .get_xorb_info(&xorb_hash)
@@ -30838,7 +30845,7 @@ mod tests {
         drop(merged);
         let shards = pipeline.shard_results.lock().await;
         let (bytes, hash) = shards.first().expect("one rebuilt shard");
-        let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *hash);
+        let reader = ShardReader::from_bytes(bytes.clone(), *hash);
         assert!(
             reader
                 .get_file_info(&kept_file)
@@ -30935,7 +30942,7 @@ mod tests {
 
         let shards = pipeline.shard_results.lock().await;
         let (bytes, hash) = shards.first().expect("one rebuilt shard");
-        let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *hash);
+        let reader = ShardReader::from_bytes(bytes.clone(), *hash);
         let xorb_info = reader
             .get_xorb_info(&shared_xorb)
             .expect("read shared xorb")
@@ -32223,7 +32230,8 @@ mod tests {
             false,
         );
         pipeline.install_metadb(guard);
-        *pipeline.shard_results.lock().await = vec![(shard_bytes.to_vec(), shard_hash)];
+        *pipeline.shard_results.lock().await =
+            vec![(Bytes::from(shard_bytes.to_vec()), shard_hash)];
 
         pipeline
             .upload_shard_and_file_index()
@@ -35013,7 +35021,7 @@ mod tests {
         assert_eq!(first_results.len(), 2);
         let mut extracted_files = Vec::new();
         for (bytes, _) in &first_results {
-            let recipes = crab_xet::shard_parse::extract_file_recipes(&Bytes::from(bytes.clone()))
+            let recipes = crab_xet::shard_parse::extract_file_recipes(bytes)
                 .expect("each forced shard must be independently dependency closed");
             assert_eq!(recipes.len(), 1);
             extracted_files.push(recipes[0].file_hash);
@@ -35107,7 +35115,7 @@ mod tests {
         let shard_results = pipeline.shard_results.lock().await;
         assert_eq!(shard_results.len(), 1);
         let (bytes, shard_hash) = &shard_results[0];
-        let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *shard_hash);
+        let reader = ShardReader::from_bytes(bytes.clone(), *shard_hash);
         let file_info = reader
             .get_file_info(&file_hash)
             .expect("read shard file info")
