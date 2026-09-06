@@ -2417,23 +2417,6 @@ impl Index {
                     "failed to prepare preparation payload retention: {error}"
                 ))
             })?;
-        let mut placement_insert = tx
-            .prepare_cached(
-                "INSERT INTO prepared_payload_chunks
-                 (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
-                 VALUES (?1, ?2, ?3, ?4)",
-            )
-            .map_err(|error| {
-                StagingError::Internal(format!(
-                    "failed to prepare prepared payload placement insert: {error}"
-                ))
-            })?;
-        let mut claim_delete = tx
-            .prepare_cached("DELETE FROM prepared_chunk_claims WHERE chunk_hash = ?1")
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to prepare payload claim removal: {error}"))
-            })?;
-
         for payload in payloads {
             let mut claim_keys = HashMap::<[u8; 32], ()>::with_capacity(payload.placements.len());
             for placement in &payload.placements {
@@ -2529,32 +2512,79 @@ impl Index {
                         crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
                     )));
                 }
-                placement_insert
-                    .execute(params![
-                        xorb_hash,
-                        i64::from(placement.chunk_index),
-                        placement.chunk_hash.as_slice(),
-                        i64::from(placement.uncompressed_size),
-                    ])
+                claims.remove(&placement.chunk_hash);
+            }
+
+            // Four parameters per row keep 128-row inserts below SQLite's default limit.
+            const PREPARED_PLACEMENT_BATCH: usize = 128;
+            for batch in payload.placements.chunks(PREPARED_PLACEMENT_BATCH) {
+                let values_sql = std::iter::repeat_n("(?,?,?,?)", batch.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let insert_sql = format!(
+                    "INSERT INTO prepared_payload_chunks
+                     (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+                     VALUES {values_sql}"
+                );
+                let mut insert_statement = tx.prepare_cached(&insert_sql).map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare prepared payload placement batch: {error}"
+                    ))
+                })?;
+                let indices = batch
+                    .iter()
+                    .map(|placement| i64::from(placement.chunk_index))
+                    .collect::<Vec<_>>();
+                let sizes = batch
+                    .iter()
+                    .map(|placement| i64::from(placement.uncompressed_size))
+                    .collect::<Vec<_>>();
+                let chunk_hashes = batch
+                    .iter()
+                    .map(|placement| placement.chunk_hash.as_slice())
+                    .collect::<Vec<_>>();
+                let mut values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 4);
+                for index in 0..batch.len() {
+                    values.push(&xorb_hash);
+                    values.push(&indices[index]);
+                    values.push(&chunk_hashes[index]);
+                    values.push(&sizes[index]);
+                }
+                insert_statement
+                    .execute(params_from_iter(values))
                     .map_err(|error| {
                         StagingError::StagingCorrupt(format!(
-                            "failed to install canonical prepared placement for {}: {error}",
-                            crab_xet::hash::MerkleHash::from(placement.chunk_hash).hex()
+                            "failed to install canonical prepared placement batch: {error}"
                         ))
                     })?;
-                claim_delete
-                    .execute(params![placement.chunk_hash.as_slice()])
+                drop(insert_statement);
+
+                let placeholders = std::iter::repeat_n("?", batch.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let delete_sql = format!(
+                    "DELETE FROM prepared_chunk_claims WHERE chunk_hash IN ({placeholders})"
+                );
+                let mut delete_statement = tx.prepare_cached(&delete_sql).map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to prepare payload claim batch removal: {error}"
+                    ))
+                })?;
+                delete_statement
+                    .execute(params_from_iter(
+                        chunk_hashes.iter().map(|hash| hash as &dyn ToSql),
+                    ))
                     .map_err(|error| {
-                        StagingError::Internal(format!("failed to resolve prepared claim: {error}"))
+                        StagingError::Internal(format!(
+                            "failed to resolve prepared claim batch: {error}"
+                        ))
                     })?;
-                claims.remove(&placement.chunk_hash);
+                drop(delete_statement);
             }
         }
         drop(payload_insert);
         drop(payload_verify);
         drop(preparation_payload_insert);
-        drop(placement_insert);
-        drop(claim_delete);
         tx.commit().map_err(|error| {
             StagingError::Internal(format!("failed to commit prepared payload seal: {error}"))
         })?;
