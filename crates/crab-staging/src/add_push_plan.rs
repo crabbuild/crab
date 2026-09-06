@@ -282,13 +282,8 @@ struct PreparedCandidateChoice {
 struct UncachedFilePlan<'a> {
     file_hash: MerkleHash,
     chunks: &'a [(MerkleHash, u64)],
-    located_chunks: Vec<(MerkleHash, u64)>,
     uncovered_chunks: HashSet<MerkleHash>,
     plan: FilePushPlan,
-}
-
-struct VerifiedStagedChunks {
-    chunks: Vec<(MerkleHash, u64)>,
 }
 
 fn collect_unique_file_chunks(
@@ -369,8 +364,7 @@ async fn prepare_uncached_file_plans_with_progress(
     let mut read_batch = Vec::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
     for file_idx in 0..file_plans.len() {
         let run_id = RunId(file_idx as u64);
-        for chunk_idx in 0..file_plans[file_idx].located_chunks.len() {
-            let chunk = file_plans[file_idx].located_chunks[chunk_idx];
+        for &chunk in file_plans[file_idx].chunks {
             if !file_plans[file_idx].uncovered_chunks.contains(&chunk.0) {
                 continue;
             }
@@ -444,7 +438,7 @@ async fn verified_uncached_file_plan<'a>(
 ) -> Result<UncachedFilePlan<'a>> {
     let file_hash = MerkleHash::from(file.file_hash);
     let mut plan = FilePushPlan::new_verified_staging(file_hash, file.size, file.chunks);
-    let verified = verified_staged_chunks(
+    verified_staged_chunks(
         staging,
         file_hash,
         file.size,
@@ -468,7 +462,6 @@ async fn verified_uncached_file_plan<'a>(
     Ok(UncachedFilePlan {
         file_hash,
         chunks: file.chunks,
-        located_chunks: verified.chunks,
         uncovered_chunks,
         plan,
     })
@@ -480,15 +473,13 @@ async fn verified_staged_chunks(
     file_size: u64,
     expected_chunks: &[(MerkleHash, u64)],
     expected_sequence_hash: [u8; 32],
-) -> Result<VerifiedStagedChunks> {
+) -> Result<()> {
     if let Some(plan) = staging.load_file_push_plan(&file_hash).await?
         && plan.chunk_count == expected_chunks.len() as u64
         && plan.sequence_hash()? == expected_sequence_hash
         && plan.file_size == file_size
     {
-        return Ok(VerifiedStagedChunks {
-            chunks: expected_chunks.to_vec(),
-        });
+        return Ok(());
     }
     let located_chunks = staging.chunks_for_file_with_locators(&file_hash)?;
     if located_chunks.len() != expected_chunks.len()
@@ -516,12 +507,7 @@ async fn verified_staged_chunks(
             file_hash.hex()
         )));
     }
-    Ok(VerifiedStagedChunks {
-        chunks: located_chunks
-            .into_iter()
-            .map(|chunk| (chunk.hash, chunk.size))
-            .collect(),
-    })
+    Ok(())
 }
 
 async fn flush_uncached_read_batch(
@@ -705,7 +691,7 @@ async fn prepare_one_file_plan_with_existing_refs(
         file.size,
         chunks,
     )?;
-    let verified = verified_staged_chunks(
+    verified_staged_chunks(
         staging,
         file_hash,
         file.size,
@@ -713,7 +699,6 @@ async fn prepare_one_file_plan_with_existing_refs(
         recipe.sequence_hash(),
     )
     .await?;
-    let located_chunks = verified.chunks;
     let mut plan = FilePushPlan::new_verified_recipe(&recipe);
 
     let mut file_chunk_sizes = HashMap::new();
@@ -821,7 +806,7 @@ async fn prepare_one_file_plan_with_existing_refs(
 
     let mut builder = build_xorb_builder();
     let mut read_batch = Vec::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
-    for chunk in located_chunks {
+    for &chunk in chunks {
         if !new_chunks.remove(&chunk.0) {
             continue;
         }
@@ -1203,14 +1188,12 @@ mod tests {
             UncachedFilePlan {
                 file_hash: numbered_hash(10),
                 chunks: &[],
-                located_chunks: Vec::new(),
                 uncovered_chunks: first_chunks,
                 plan: FilePushPlan::new_verified_staging(numbered_hash(10), 0, &[]),
             },
             UncachedFilePlan {
                 file_hash: numbered_hash(11),
                 chunks: &[],
-                located_chunks: Vec::new(),
                 uncovered_chunks: second_chunks,
                 plan: FilePushPlan::new_verified_staging(numbered_hash(11), 0, &[]),
             },
