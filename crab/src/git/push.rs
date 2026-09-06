@@ -4255,6 +4255,9 @@ pub struct PushPipeline {
 /// Shared add-time classifier backed by the push pipeline's full proof path.
 pub(crate) struct AddRemoteChunkClassifier {
     pipeline: PushPipeline,
+    candidate_cache: Option<Arc<crate::cache::add_remote_candidates::AddRemoteCandidateCache>>,
+    candidate_cache_hits: std::sync::atomic::AtomicU64,
+    candidate_cache_misses: std::sync::atomic::AtomicU64,
 }
 
 impl AddRemoteChunkClassifier {
@@ -4291,10 +4294,44 @@ impl AddRemoteChunkClassifier {
             true,
         );
         pipeline.install_metadb(guard);
-        Self { pipeline }
+        let cache_path = crate::cache::add_remote_candidate_cache_path(
+            &crate::cache::default_cache_root(),
+            &store.bucket_identity(),
+            router.global_prefix(),
+        );
+        let candidate_cache =
+            match crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(&cache_path) {
+                Ok(cache) => Some(Arc::new(cache)),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        path = %cache_path.display(),
+                        "add remote candidate cache unavailable; using remote proof lookup"
+                    );
+                    None
+                }
+            };
+        Self {
+            pipeline,
+            candidate_cache,
+            candidate_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            candidate_cache_misses: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     pub(crate) async fn close(&self) {
+        let cache_hits = self
+            .candidate_cache_hits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let cache_misses = self
+            .candidate_cache_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cache_hits > 0 || cache_misses > 0 {
+            debug!(
+                cache_hits,
+                cache_misses, "add remote candidate cache summary"
+            );
+        }
         self.pipeline.close_metadb().await;
     }
 
@@ -4313,17 +4350,119 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
         &self,
         chunks: &[(MerkleHash, u64)],
     ) -> crab_staging::Result<Vec<Option<crab_staging::push_plan::ExistingChunkCandidate>>> {
-        let hashes = chunks.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-        let candidates = self
-            .pipeline
-            .lookup_proven_remote_chunks_for_add(&hashes)
-            .await
-            .map_err(|error| match error {
-                CrabError::Cancelled => crab_staging::StagingError::Cancelled,
-                error => crab_staging::StagingError::Internal(format!(
-                    "remote add classifier failed: {error}"
-                )),
-            })?;
+        let mut candidates = HashMap::new();
+        let mut misses = Vec::new();
+        let mut seen = HashSet::with_capacity(chunks.len());
+        for (chunk_hash, _) in chunks {
+            if !seen.insert(*chunk_hash) {
+                continue;
+            }
+            let Some(cache) = &self.candidate_cache else {
+                misses.push(*chunk_hash);
+                continue;
+            };
+            match cache.memory_get(chunk_hash) {
+                Ok(Some(candidate)) => {
+                    self.candidate_cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(candidate) = candidate {
+                        candidates.insert(*chunk_hash, candidate);
+                    }
+                }
+                Ok(None) => misses.push(*chunk_hash),
+                Err(error) => {
+                    warn!(error = %error, "add remote candidate memory cache lookup failed");
+                    misses.push(*chunk_hash);
+                }
+            }
+        }
+
+        if let Some(cache) = &self.candidate_cache {
+            let mut remote_misses = Vec::with_capacity(misses.len());
+            let persistent_lookup = {
+                let cache = Arc::clone(cache);
+                let hashes = misses.clone();
+                tokio::task::spawn_blocking(move || cache.load_persistent(&hashes)).await
+            };
+            match persistent_lookup {
+                Ok(Ok(persisted)) => {
+                    for chunk_hash in misses {
+                        match persisted.get(&chunk_hash).copied() {
+                            Some(Some(candidate)) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if let Err(error) = cache.memory_insert(chunk_hash, Some(candidate))
+                                {
+                                    warn!(error = %error, "add remote candidate memory cache update failed");
+                                }
+                                candidates.insert(chunk_hash, candidate);
+                            }
+                            Some(None) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if let Err(error) = cache.memory_insert(chunk_hash, None) {
+                                    warn!(error = %error, "add remote candidate memory cache update failed");
+                                }
+                                // A persisted negative is advisory: it only avoids
+                                // a duplicate lookup, and push still revalidates
+                                // every candidate it does receive.
+                            }
+                            None => remote_misses.push(chunk_hash),
+                        }
+                    }
+                }
+                Ok(Err(error)) => {
+                    warn!(error = %error, "add remote candidate persistent cache lookup failed");
+                    remote_misses = misses;
+                }
+                Err(error) => {
+                    warn!(error = %error, "add remote candidate persistent cache task failed");
+                    remote_misses = misses;
+                }
+            }
+            misses = remote_misses;
+        }
+
+        self.candidate_cache_misses
+            .fetch_add(misses.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        if !misses.is_empty() {
+            let fetched = self
+                .pipeline
+                .lookup_proven_remote_chunks_for_add(&misses)
+                .await
+                .map_err(|error| match error {
+                    CrabError::Cancelled => crab_staging::StagingError::Cancelled,
+                    error => crab_staging::StagingError::Internal(format!(
+                        "remote add classifier failed: {error}"
+                    )),
+                })?;
+            let mut persistent = Vec::with_capacity(misses.len());
+            for chunk_hash in misses {
+                let candidate = fetched.get(&chunk_hash).copied();
+                if let Some(cache) = &self.candidate_cache {
+                    if let Err(error) = cache.memory_insert(chunk_hash, candidate) {
+                        warn!(error = %error, "add remote candidate memory cache update failed");
+                    }
+                    persistent.push((chunk_hash, candidate));
+                }
+                if let Some(candidate) = candidate {
+                    candidates.insert(chunk_hash, candidate);
+                }
+            }
+            if let Some(cache) = &self.candidate_cache {
+                let cache = Arc::clone(cache);
+                match tokio::task::spawn_blocking(move || cache.persist_results(&persistent)).await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        warn!(error = %error, "add remote candidate persistent cache update failed");
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "add remote candidate persistent cache task failed");
+                    }
+                }
+            }
+        }
         Ok(chunks
             .iter()
             .map(|(chunk_hash, size)| {

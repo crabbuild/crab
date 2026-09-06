@@ -982,7 +982,7 @@ async fn execute_add(
     let filter = build_filter(&args.patterns, &[])?;
 
     // Walk the working tree and collect files to process.
-    let candidates = collect_candidates(&repo_root, &classifier, &filter, cancel)?;
+    let candidates = collect_candidates(&repo_root, &classifier, &filter, &args.patterns, cancel)?;
 
     if candidates.is_empty() {
         if args.dry_run {
@@ -2622,8 +2622,15 @@ fn collect_candidates(
     repo_root: &Path,
     classifier: &TrackedClassifier,
     filter: &PatternFilter,
+    patterns: &[String],
     cancel: &CancellationToken,
 ) -> Result<Vec<(PathBuf, u64)>> {
+    if let Some(candidates) =
+        collect_literal_candidates(repo_root, classifier, filter, patterns, cancel)?
+    {
+        return Ok(candidates);
+    }
+
     let mut candidates = Vec::new();
 
     #[cfg(feature = "gix-pathmatch")]
@@ -2651,6 +2658,207 @@ fn collect_candidates(
     )?;
 
     Ok(candidates)
+}
+
+/// Return direct candidates when every selector names a repo-relative file or
+/// directory. A literal basename can match files at any depth, so it
+/// deliberately falls back to the walker; path-qualified selectors are
+/// unambiguous.
+fn collect_literal_candidates(
+    repo_root: &Path,
+    classifier: &TrackedClassifier,
+    filter: &PatternFilter,
+    patterns: &[String],
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<(PathBuf, u64)>>> {
+    if patterns.is_empty() || patterns.iter().any(|pattern| !is_literal_path(pattern)) {
+        return Ok(None);
+    }
+
+    let mut candidates = Vec::with_capacity(patterns.len());
+    let mut seen_files = HashSet::with_capacity(patterns.len());
+    let mut direct_files = Vec::with_capacity(patterns.len());
+    let mut direct_dirs = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        error::check_cancelled(cancel)?;
+        let Some(rel_path) = literal_relative_path(pattern) else {
+            return Ok(None);
+        };
+        let abs_path = repo_root.join(&rel_path);
+        let metadata = match std::fs::symlink_metadata(&abs_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_file() {
+            if literal_path_has_hidden_parent(&rel_path) || !seen_files.insert(rel_path.clone()) {
+                continue;
+            }
+            direct_files.push((rel_path, abs_path, metadata.len()));
+        } else if metadata.file_type().is_dir() {
+            if rel_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::Normal(name) if name.to_string_lossy().starts_with('.')))
+            {
+                continue;
+            }
+            direct_dirs.push((rel_path, abs_path));
+        } else {
+            return Ok(None);
+        }
+    }
+
+    for (rel_path, abs_path, file_size) in direct_files {
+        error::check_cancelled(cancel)?;
+
+        #[cfg(feature = "gix-pathmatch")]
+        if literal_candidate_is_ignored(repo_root, &rel_path)? {
+            continue;
+        }
+        if !classifier.is_tracked(&rel_path) {
+            continue;
+        }
+        let rel_str = rel_path.to_string_lossy();
+        if !filter.matches(&rel_str)
+            || crate::engine::pointer::is_working_tree_pointer(&abs_path).unwrap_or(false)
+        {
+            continue;
+        }
+        candidates.push((abs_path, file_size));
+    }
+
+    direct_dirs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    direct_dirs.dedup_by(|(left, _), (right, _)| left == right);
+    let mut selected_dirs = Vec::with_capacity(direct_dirs.len());
+    for (rel_path, abs_path) in direct_dirs {
+        if selected_dirs
+            .iter()
+            .any(|(parent, _)| rel_path.starts_with(parent))
+        {
+            continue;
+        }
+        selected_dirs.push((rel_path, abs_path));
+    }
+
+    let mut seen_paths = candidates
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<HashSet<_>>();
+    for (rel_path, abs_path) in selected_dirs {
+        error::check_cancelled(cancel)?;
+        let mut directory_candidates = Vec::new();
+        #[cfg(feature = "gix-pathmatch")]
+        {
+            let ignore = crate::core::attrs::IgnoreReader::open(repo_root)?;
+            if literal_directory_is_ignored(repo_root, &rel_path, &ignore)? {
+                continue;
+            }
+            walk_candidates(
+                repo_root,
+                &abs_path,
+                classifier,
+                filter,
+                Some(&ignore),
+                cancel,
+                &mut directory_candidates,
+            )?;
+        }
+        #[cfg(not(feature = "gix-pathmatch"))]
+        walk_candidates(
+            repo_root,
+            &abs_path,
+            classifier,
+            filter,
+            cancel,
+            &mut directory_candidates,
+        )?;
+        for (path, size) in directory_candidates {
+            if seen_paths.insert(path.clone()) {
+                candidates.push((path, size));
+            }
+        }
+    }
+
+    Ok(Some(candidates))
+}
+
+fn is_literal_path(pattern: &str) -> bool {
+    pattern.contains('/')
+        && !pattern.starts_with(':')
+        && !pattern.contains('*')
+        && !pattern.contains('?')
+        && !pattern.contains('[')
+}
+
+fn literal_relative_path(pattern: &str) -> Option<PathBuf> {
+    let path = Path::new(pattern);
+    if path.is_absolute() {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!relative.as_os_str().is_empty()).then_some(relative)
+}
+
+fn literal_path_has_hidden_parent(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    components
+        .iter()
+        .take(components.len().saturating_sub(1))
+        .any(|component| {
+            matches!(component, std::path::Component::Normal(name)
+                if name.to_string_lossy().starts_with('.'))
+        })
+}
+
+#[cfg(feature = "gix-pathmatch")]
+fn literal_directory_is_ignored(
+    repo_root: &Path,
+    rel_path: &Path,
+    ignore: &crate::core::attrs::IgnoreReader,
+) -> Result<bool> {
+    let mut current = repo_root.to_path_buf();
+    let mut relative = PathBuf::new();
+    for component in rel_path.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        relative.push(name);
+        if ignore.is_ignored(&relative.to_string_lossy(), true) {
+            return Ok(true);
+        }
+        current.push(name);
+        ignore.append_patterns_from_file(&current.join(".gitignore"), Some(repo_root));
+    }
+    Ok(false)
+}
+
+#[cfg(feature = "gix-pathmatch")]
+fn literal_candidate_is_ignored(repo_root: &Path, rel_path: &Path) -> Result<bool> {
+    let ignore = crate::core::attrs::IgnoreReader::open(repo_root)?;
+    let mut current = repo_root.to_path_buf();
+    let mut relative = PathBuf::new();
+    let components = rel_path.components().collect::<Vec<_>>();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        relative.push(name);
+        if ignore.is_ignored(&relative.to_string_lossy(), true) {
+            return Ok(true);
+        }
+        current.push(name);
+        ignore.append_patterns_from_file(&current.join(".gitignore"), Some(repo_root));
+    }
+    Ok(ignore.is_ignored(&rel_path.to_string_lossy(), false))
 }
 
 async fn filter_clean_indexed_candidates(
@@ -2974,8 +3182,7 @@ fn walk_candidates(
         }
 
         // Get file size for reporting.
-        let metadata = std::fs::metadata(&path)?;
-        let file_size = metadata.len();
+        let file_size = entry.metadata()?.len();
 
         // Skip files that are already pointers (e.g. lazy-checkout left
         // the pointer on disk, or `crab dehydrate` was run). These don't
@@ -3048,8 +3255,7 @@ fn walk_candidates(
         }
 
         // Get file size for reporting.
-        let metadata = std::fs::metadata(&path)?;
-        let file_size = metadata.len();
+        let file_size = entry.metadata()?.len();
 
         // Skip files that are already pointers (e.g. lazy-checkout left
         // the pointer on disk, or `crab dehydrate` was run). These don't
@@ -4035,6 +4241,39 @@ mod tests {
 
         assert!(cls.is_tracked(Path::new("qualification/model.bin")));
         assert!(!cls.is_tracked(Path::new("other/model.bin")));
+    }
+
+    #[test]
+    fn literal_path_candidates_avoid_repository_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::create_dir_all(dir.path().join("other")).unwrap();
+        std::fs::write(dir.path().join(".gitattributes"), "*.bin filter=crab\n").unwrap();
+        std::fs::write(dir.path().join("models/a.bin"), b"model").unwrap();
+        std::fs::write(dir.path().join("other/a.bin"), b"other").unwrap();
+
+        let classifier = TrackedClassifier::open(dir.path()).unwrap();
+        let filter = build_filter(&["models/a.bin".to_owned()], &[]).unwrap();
+        let candidates = collect_candidates(
+            dir.path(),
+            &classifier,
+            &filter,
+            &["models/a.bin".to_owned()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(candidates, vec![(dir.path().join("models/a.bin"), 5)]);
+    }
+
+    #[test]
+    fn literal_path_detection_rejects_ambiguous_selectors() {
+        assert!(is_literal_path("models/a.bin"));
+        assert!(!is_literal_path("a.bin"));
+        assert!(!is_literal_path("models/*.bin"));
+        assert!(literal_relative_path("./models/a.bin").is_some());
+        assert!(literal_relative_path("../outside.bin").is_none());
+        assert!(literal_relative_path("/outside.bin").is_none());
     }
 
     #[test]

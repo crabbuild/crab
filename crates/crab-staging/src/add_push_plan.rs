@@ -300,6 +300,7 @@ async fn prepare_uncached_file_plans_with_progress(
     }
 
     let mut builder = build_xorb_builder();
+    let chunk_owners = build_uncached_chunk_owners(&file_plans);
     let mut queued_chunks = HashSet::new();
     let mut read_batch = Vec::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
     for file_idx in 0..file_plans.len() {
@@ -315,14 +316,20 @@ async fn prepare_uncached_file_plans_with_progress(
             read_batch.push((chunk, run_id));
             if read_batch.len() >= ADD_PLAN_READ_BATCH_CHUNKS {
                 flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
-                write_completed_uncached_xorbs(staging, &mut file_plans, &mut builder).await?;
+                write_completed_uncached_xorbs(
+                    staging,
+                    &mut file_plans,
+                    &chunk_owners,
+                    &mut builder,
+                )
+                .await?;
             }
         }
     }
     flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
-    write_completed_uncached_xorbs(staging, &mut file_plans, &mut builder).await?;
+    write_completed_uncached_xorbs(staging, &mut file_plans, &chunk_owners, &mut builder).await?;
     for result in builder.finalize()? {
-        record_uncached_prepared_xorb(staging, &mut file_plans, result).await?;
+        record_uncached_prepared_xorb(staging, &mut file_plans, &chunk_owners, result).await?;
     }
 
     let mut summary = AddPushPlanSummary {
@@ -469,17 +476,34 @@ async fn flush_uncached_read_batch(
 async fn write_completed_uncached_xorbs(
     staging: &StagingArea,
     file_plans: &mut [UncachedFilePlan<'_>],
+    chunk_owners: &HashMap<MerkleHash, Vec<usize>>,
     builder: &mut XorbBuilder,
 ) -> Result<()> {
     while let Some(result) = builder.take_completed() {
-        record_uncached_prepared_xorb(staging, file_plans, result).await?;
+        record_uncached_prepared_xorb(staging, file_plans, chunk_owners, result).await?;
     }
     Ok(())
+}
+
+fn build_uncached_chunk_owners(
+    file_plans: &[UncachedFilePlan<'_>],
+) -> HashMap<MerkleHash, Vec<usize>> {
+    let mut owners = HashMap::new();
+    for (file_idx, file_plan) in file_plans.iter().enumerate() {
+        for chunk_hash in &file_plan.uncovered_chunks {
+            owners
+                .entry(*chunk_hash)
+                .or_insert_with(Vec::new)
+                .push(file_idx);
+        }
+    }
+    owners
 }
 
 async fn record_uncached_prepared_xorb(
     staging: &StagingArea,
     file_plans: &mut [UncachedFilePlan<'_>],
+    chunk_owners: &HashMap<MerkleHash, Vec<usize>>,
     result: crab_xet::xorb::builder::XorbResult,
 ) -> Result<()> {
     let bytes = result.bytes.len() as u64;
@@ -497,32 +521,52 @@ async fn record_uncached_prepared_xorb(
         placements,
     };
 
-    let recipients: Vec<usize> = file_plans
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, file_plan)| {
-            result
-                .placements
-                .iter()
-                .any(|placement| file_plan.uncovered_chunks.contains(&placement.chunk_hash))
-                .then_some(idx)
-        })
-        .collect();
+    let recipients = recipient_indices(file_plans.len(), &result.placements, chunk_owners);
     let Some((&owner_idx, linked_idxs)) = recipients.split_first() else {
         return Err(StagingError::Internal(
             "prepared xorb has no owning add file".to_owned(),
         ));
     };
-    write_prepared_xorb(staging.root(), &result.hash, result.bytes.clone()).await?;
-    file_plans[owner_idx]
-        .plan
-        .prepared_xorbs
-        .push(planned.clone());
+    write_prepared_xorb(staging.root(), &result.hash, result.bytes).await?;
+    file_plans[owner_idx].plan.prepared_xorbs.push(planned);
 
-    for idx in linked_idxs {
-        file_plans[*idx].plan.prepared_xorbs.push(planned.clone());
+    if !linked_idxs.is_empty() {
+        let linked_plan = file_plans[owner_idx]
+            .plan
+            .prepared_xorbs
+            .last()
+            .cloned()
+            .ok_or_else(|| {
+                StagingError::Internal("prepared xorb owner record disappeared".to_owned())
+            })?;
+        for idx in linked_idxs {
+            file_plans[*idx]
+                .plan
+                .prepared_xorbs
+                .push(linked_plan.clone());
+        }
     }
     Ok(())
+}
+
+fn recipient_indices(
+    file_count: usize,
+    placements: &[crab_xet::xorb::format::ChunkPlacement],
+    chunk_owners: &HashMap<MerkleHash, Vec<usize>>,
+) -> Vec<usize> {
+    let mut recipient_flags = vec![false; file_count];
+    for placement in placements {
+        if let Some(owners) = chunk_owners.get(&placement.chunk_hash) {
+            for &owner in owners {
+                recipient_flags[owner] = true;
+            }
+        }
+    }
+    recipient_flags
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, is_recipient)| is_recipient.then_some(idx))
+        .collect()
 }
 
 async fn prepare_one_file_plan(
@@ -1052,6 +1096,54 @@ mod tests {
             placement_id: numbered_hash(seed + 2_000_000).into(),
             origin_proof_id: numbered_hash(seed + 3_000_000).into(),
         }
+    }
+
+    #[test]
+    fn uncached_xorb_recipients_follow_chunk_ownership() {
+        let shared = numbered_hash(1);
+        let first_only = numbered_hash(2);
+        let mut first_chunks = HashSet::new();
+        first_chunks.insert(shared);
+        first_chunks.insert(first_only);
+        let mut second_chunks = HashSet::new();
+        second_chunks.insert(shared);
+        let file_plans = vec![
+            UncachedFilePlan {
+                file_hash: numbered_hash(10),
+                chunks: &[],
+                located_chunks: Vec::new(),
+                uncovered_chunks: first_chunks,
+                plan: FilePushPlan::new_verified_staging(numbered_hash(10), 0, &[]),
+            },
+            UncachedFilePlan {
+                file_hash: numbered_hash(11),
+                chunks: &[],
+                located_chunks: Vec::new(),
+                uncovered_chunks: second_chunks,
+                plan: FilePushPlan::new_verified_staging(numbered_hash(11), 0, &[]),
+            },
+        ];
+        let owners = build_uncached_chunk_owners(&file_plans);
+        let placements = vec![
+            crab_xet::xorb::format::ChunkPlacement {
+                chunk_hash: shared,
+                xorb_hash: numbered_hash(20),
+                chunk_index: 0,
+                uncompressed_size: 1,
+            },
+            crab_xet::xorb::format::ChunkPlacement {
+                chunk_hash: first_only,
+                xorb_hash: numbered_hash(20),
+                chunk_index: 1,
+                uncompressed_size: 1,
+            },
+        ];
+
+        assert_eq!(owners.get(&shared), Some(&vec![0, 1]));
+        assert_eq!(
+            recipient_indices(file_plans.len(), &placements, &owners),
+            vec![0, 1]
+        );
     }
 
     async fn stage_synthetic_file(
