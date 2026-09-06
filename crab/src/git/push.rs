@@ -10851,13 +10851,13 @@ impl PushPipeline {
             );
         }
 
-        let cache_lookup_candidates: Vec<MerkleHash> = expected_sizes
+        let mut lookup_candidates: Vec<MerkleHash> = expected_sizes
             .keys()
             .filter(|chunk_hash| !verified_refs.contains_key(chunk_hash))
             .copied()
             .collect();
         let verified_cache_service_hits = self
-            .lookup_cache_service_chunk_refs(&cache_lookup_candidates)
+            .lookup_cache_service_chunk_refs(&lookup_candidates)
             .await?;
         let verified_cache_service_hit_count = verified_cache_service_hits.len();
         if !verified_cache_service_hits.is_empty() {
@@ -10867,17 +10867,12 @@ impl PushPipeline {
                     chunk_index.insert(*chunk_hash, *xorb_ref);
                 }
             }
-            {}
             verified_refs.extend(verified_cache_service_hits);
         }
 
-        let global_lookup_candidates: Vec<MerkleHash> = expected_sizes
-            .keys()
-            .filter(|chunk_hash| !verified_refs.contains_key(chunk_hash))
-            .copied()
-            .collect();
+        lookup_candidates.retain(|chunk_hash| !verified_refs.contains_key(chunk_hash));
         let global_lookup = self
-            .lookup_verified_global_chunk_refs(&global_lookup_candidates)
+            .lookup_verified_global_chunk_refs(&lookup_candidates)
             .await?;
         if global_lookup.stale_hits > 0 {
             warn!(
