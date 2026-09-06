@@ -442,21 +442,29 @@ pub(crate) fn page_hash(
     start_offset: u64,
     chunks: &[(MerkleHash, u64)],
 ) -> Result<[u8; 32]> {
-    if chunks.is_empty() || chunks.len() > RECIPE_PAGE_ENTRIES {
+    let mut hasher = page_hasher(start_occurrence, start_offset, chunks.len())?;
+    for (chunk_hash, size) in chunks {
+        update_sequence_hasher(&mut hasher, *chunk_hash, *size);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+pub(crate) fn page_hasher(
+    start_occurrence: u64,
+    start_offset: u64,
+    term_count: usize,
+) -> Result<blake3::Hasher> {
+    if term_count == 0 || term_count > RECIPE_PAGE_ENTRIES {
         return Err(StagingError::StagingCorrupt(format!(
-            "recipe page has invalid term count {}",
-            chunks.len()
+            "recipe page has invalid term count {term_count}"
         )));
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(PAGE_DOMAIN);
     hasher.update(&start_occurrence.to_le_bytes());
     hasher.update(&start_offset.to_le_bytes());
-    hasher.update(&(chunks.len() as u64).to_le_bytes());
-    for (chunk_hash, size) in chunks {
-        update_sequence_hasher(&mut hasher, *chunk_hash, *size);
-    }
-    Ok(*hasher.finalize().as_bytes())
+    hasher.update(&(term_count as u64).to_le_bytes());
+    Ok(hasher)
 }
 
 pub(crate) fn new_page_root_hasher() -> blake3::Hasher {

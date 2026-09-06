@@ -4271,6 +4271,8 @@ impl Index {
                 StagingError::Internal(format!("failed to query recipe page terms: {e}"))
             })?;
         let mut chunks = Vec::with_capacity(occurrence_count as usize);
+        let mut page_hasher =
+            crate::recipe::page_hasher(start_occurrence, start_offset, occurrence_count as usize)?;
         let mut expected_occurrence = start_occurrence;
         let mut expected_offset = start_offset;
         for row in rows {
@@ -4289,6 +4291,7 @@ impl Index {
                 "recipe occurrence hash",
                 raw_hash,
             )?);
+            crate::recipe::update_sequence_hasher(&mut page_hasher, chunk_hash, size);
             chunks.push(crab_diff::chunk_sequence::ChunkSpan {
                 chunk_hash,
                 offset: expected_offset,
@@ -4312,13 +4315,7 @@ impl Index {
                 "recipe page coverage does not match its metadata".to_owned(),
             ));
         }
-        let page_terms = chunks
-            .iter()
-            .map(|chunk| (chunk.chunk_hash, chunk.len))
-            .collect::<Vec<_>>();
-        if crate::recipe::page_hash(start_occurrence, start_offset, &page_terms)?
-            != stored_page_hash
-        {
+        if *page_hasher.finalize().as_bytes() != stored_page_hash {
             return Err(StagingError::StagingCorrupt(
                 "recipe page digest does not match its terms".to_owned(),
             ));
