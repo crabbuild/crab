@@ -13769,9 +13769,18 @@ impl PushPipeline {
             if candidates.placements.is_empty() {
                 return HashMap::new();
             }
-            candidates
-                .source_anchors
-                .values()
+            let referenced_anchor_ids = placements
+                .keys()
+                .filter_map(|chunk_hash| {
+                    candidates
+                        .placements
+                        .get(chunk_hash)
+                        .map(|placement| placement.source_anchor_id)
+                })
+                .collect::<HashSet<_>>();
+            referenced_anchor_ids
+                .into_iter()
+                .filter_map(|anchor_id| candidates.source_anchors.get(&anchor_id))
                 .map(|anchor| {
                     (
                         anchor.source_repo_prefix.clone(),
