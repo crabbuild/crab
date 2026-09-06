@@ -2261,10 +2261,11 @@ impl Index {
             }
         }
         let unique_hashes = sizes.keys().copied().collect::<Vec<_>>();
-        let placeholders = vec!["?"; unique_hashes.len()].join(",");
+        const CLAIM_LOOKUP_BATCH: usize = 400;
 
         let mut prepared = HashMap::<[u8; 32], PreparedChunkLocator>::new();
-        {
+        for hash_batch in unique_hashes.chunks(CLAIM_LOOKUP_BATCH) {
+            let placeholders = vec!["?"; hash_batch.len()].join(",");
             let sql = format!(
                 "SELECT chunk.chunk_hash, chunk.xorb_hash, payload.payload_hash,
                         payload.bytes, chunk.chunk_index, chunk.uncompressed_size
@@ -2279,7 +2280,7 @@ impl Index {
             })?;
             let rows = statement
                 .query_map(
-                    params_from_iter(unique_hashes.iter().map(|hash| hash.as_slice())),
+                    params_from_iter(hash_batch.iter().map(|hash| hash.as_slice())),
                     |row| {
                         Ok((
                             row.get::<_, Vec<u8>>(0)?,
@@ -2329,7 +2330,8 @@ impl Index {
         }
 
         let mut segments = HashMap::<[u8; 32], u64>::new();
-        {
+        for hash_batch in unique_hashes.chunks(CLAIM_LOOKUP_BATCH) {
+            let placeholders = vec!["?"; hash_batch.len()].join(",");
             let sql = format!(
                 "SELECT chunk_hash, size FROM chunk_payloads
                  WHERE chunk_hash IN ({placeholders})"
@@ -2341,7 +2343,7 @@ impl Index {
             })?;
             let rows = statement
                 .query_map(
-                    params_from_iter(unique_hashes.iter().map(|hash| hash.as_slice())),
+                    params_from_iter(hash_batch.iter().map(|hash| hash.as_slice())),
                     |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .map_err(|error| {
@@ -2363,7 +2365,8 @@ impl Index {
         }
 
         let mut claims = HashMap::<[u8; 32], (String, u64)>::new();
-        {
+        for hash_batch in unique_hashes.chunks(CLAIM_LOOKUP_BATCH) {
+            let placeholders = vec!["?"; hash_batch.len()].join(",");
             let sql = format!(
                 "SELECT chunk_hash, preparation_id, uncompressed_size
                  FROM prepared_chunk_claims WHERE chunk_hash IN ({placeholders})"
@@ -2373,7 +2376,7 @@ impl Index {
             })?;
             let rows = statement
                 .query_map(
-                    params_from_iter(unique_hashes.iter().map(|hash| hash.as_slice())),
+                    params_from_iter(hash_batch.iter().map(|hash| hash.as_slice())),
                     |row| {
                         Ok((
                             row.get::<_, Vec<u8>>(0)?,
@@ -8962,6 +8965,35 @@ mod tests {
             )
             .expect("claim repeated chunk"),
             vec![PreparedChunkClaim::Claimed, PreparedChunkClaim::Pending]
+        );
+    }
+
+    #[test]
+    fn prepared_claim_pages_large_unique_batch() {
+        const CLAIMS: usize = 1024;
+
+        let idx = open_in_memory();
+        idx.insert_add_preparation("preparation-large")
+            .expect("preparation");
+        idx.insert_batch("batch-large").expect("batch");
+        idx.attach_add_preparation_batch("preparation-large", "batch-large")
+            .expect("attach batch");
+        let chunks = (0..CLAIMS)
+            .map(|index| {
+                let mut hash = [0; 32];
+                hash[..8].copy_from_slice(&u64::try_from(index).expect("hash index").to_le_bytes());
+                (hash, 8)
+            })
+            .collect::<Vec<_>>();
+
+        let outcomes = idx
+            .claim_prepared_chunks("preparation-large", "batch-large", &chunks)
+            .expect("paged prepared claims");
+        assert_eq!(outcomes.len(), CLAIMS);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| *outcome == PreparedChunkClaim::Claimed)
         );
     }
 
