@@ -427,8 +427,15 @@ async fn verified_uncached_file_plan<'a>(
     existing_refs: &[Option<ExistingChunkCandidate>],
 ) -> Result<UncachedFilePlan<'a>> {
     let file_hash = MerkleHash::from(file.file_hash);
-    let verified = verified_staged_chunks(staging, file_hash, file.size, file.chunks).await?;
     let mut plan = FilePushPlan::new_verified_staging(file_hash, file.size, file.chunks);
+    let verified = verified_staged_chunks(
+        staging,
+        file_hash,
+        file.size,
+        file.chunks,
+        plan.sequence_hash()?,
+    )
+    .await?;
     let mut uncovered_chunks = HashSet::new();
     for ((chunk_hash, size), existing_ref) in file.chunks.iter().zip(existing_refs.iter()) {
         if let Some(candidate) = existing_ref
@@ -456,10 +463,11 @@ async fn verified_staged_chunks(
     file_hash: MerkleHash,
     file_size: u64,
     expected_chunks: &[(MerkleHash, u64)],
+    expected_sequence_hash: [u8; 32],
 ) -> Result<VerifiedStagedChunks> {
     if let Some(plan) = staging.load_file_push_plan(&file_hash).await?
         && plan.chunk_count == expected_chunks.len() as u64
-        && plan.sequence_hash()? == crate::push_plan::chunk_sequence_hash(expected_chunks)
+        && plan.sequence_hash()? == expected_sequence_hash
         && plan.file_size == file_size
     {
         return Ok(VerifiedStagedChunks {
@@ -675,15 +683,22 @@ async fn prepare_one_file_plan_with_existing_refs(
     }
     let file_hash = MerkleHash::from(file.file_hash);
     let chunks = file.chunks;
-    let verified = verified_staged_chunks(staging, file_hash, file.size, chunks).await?;
-    let located_chunks = verified.chunks;
-    let mut plan = FilePushPlan::new_verified_staging(file_hash, file.size, chunks);
     let recipe = crate::recipe::FileRecipe::from_staged_chunks(
         crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
         file_hash,
         file.size,
         chunks,
     )?;
+    let verified = verified_staged_chunks(
+        staging,
+        file_hash,
+        file.size,
+        chunks,
+        recipe.sequence_hash(),
+    )
+    .await?;
+    let located_chunks = verified.chunks;
+    let mut plan = FilePushPlan::new_verified_recipe(&recipe);
 
     let mut file_chunk_sizes = HashMap::new();
     for (chunk_hash, size) in chunks {
