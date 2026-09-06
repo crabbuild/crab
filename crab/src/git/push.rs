@@ -14863,8 +14863,6 @@ impl PushPipeline {
             ));
         }
 
-        let placement_snapshot = self.verified_placement_snapshot().await;
-
         let gc_registry_generation = self
             .push_commit_receipt
             .lock()
@@ -14907,6 +14905,9 @@ impl PushPipeline {
                 Ok(())
             })?;
         }
+        let placement_snapshot = self
+            .verified_placement_snapshot_for(chunk_sources.keys())
+            .await;
         for chunk_hash in chunk_sources.keys() {
             let placement = placement_snapshot.get(chunk_hash).ok_or_else(|| {
                 CrabError::IncompleteShardReconstruction {
@@ -15076,13 +15077,11 @@ impl PushPipeline {
         file_index_plan: &[(MerkleHash, usize)],
         shard_hashes: &[MerkleHash],
     ) {
-        let mut per_shard_chunks: Vec<Vec<(MerkleHash, XorbRef)>> =
-            vec![Vec::new(); shard_hashes.len()];
+        let mut per_shard_hashes: Vec<Vec<MerkleHash>> = vec![Vec::new(); shard_hashes.len()];
         if self.staging.is_none() {
             return;
         }
-        let placement_snapshot = self.verified_placement_snapshot().await;
-
+        let mut required_chunks = HashSet::new();
         for (file_hash, shard_idx) in file_index_plan {
             let recipe = match self.cached_recipe_for_file(file_hash).await {
                 Ok(Some(recipe)) => recipe,
@@ -15096,19 +15095,18 @@ impl PushPipeline {
                     continue;
                 }
             };
-            let Some(bucket) = per_shard_chunks.get_mut(*shard_idx) else {
+            let Some(bucket) = per_shard_hashes.get_mut(*shard_idx) else {
                 warn!(
                     file_hash = %file_hash.hex(),
                     shard_idx,
-                    shards = per_shard_chunks.len(),
+                    shards = per_shard_hashes.len(),
                     "candidate metadata file-index plan points past uploaded shard hashes, skipping local warm"
                 );
                 continue;
             };
             if let Err(error) = self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                if let Some(p) = placement_snapshot.get(&chunk_hash) {
-                    bucket.push((chunk_hash, Self::xorb_ref_from_placement(p)));
-                }
+                required_chunks.insert(chunk_hash);
+                bucket.push(chunk_hash);
                 Ok(())
             }) {
                 warn!(
@@ -15118,14 +15116,24 @@ impl PushPipeline {
                 );
             }
         }
-        // De-dup within each shard bucket so `install_shard` doesn't
-        // re-register the same chunk→xorb_ref pair multiple times.
-        for bucket in &mut per_shard_chunks {
-            let mut seen: std::collections::HashSet<MerkleHash> =
-                std::collections::HashSet::with_capacity(bucket.len());
-            bucket.retain(|(h, _)| seen.insert(*h));
-        }
-
+        let placement_snapshot = self
+            .verified_placement_snapshot_for(required_chunks.iter())
+            .await;
+        let per_shard_chunks: Vec<Vec<(MerkleHash, XorbRef)>> = per_shard_hashes
+            .into_iter()
+            .map(|hashes| {
+                let mut seen = HashSet::with_capacity(hashes.len());
+                hashes
+                    .into_iter()
+                    .filter(|chunk_hash| seen.insert(*chunk_hash))
+                    .filter_map(|chunk_hash| {
+                        placement_snapshot
+                            .get(&chunk_hash)
+                            .map(|placement| (chunk_hash, Self::xorb_ref_from_placement(placement)))
+                    })
+                    .collect()
+            })
+            .collect();
         for (idx, shard_hash) in shard_hashes.iter().enumerate() {
             let entries = &per_shard_chunks[idx];
             if entries.is_empty() {
@@ -15142,14 +15150,31 @@ impl PushPipeline {
         }
     }
 
-    async fn verified_placement_snapshot(&self) -> ChunkPlacementMap {
+    async fn verified_placement_snapshot_for<'a, I>(&self, required: I) -> ChunkPlacementMap
+    where
+        I: IntoIterator<Item = &'a MerkleHash>,
+    {
+        let required = required.into_iter().collect::<HashSet<_>>();
+        if required.is_empty() {
+            return ChunkPlacementMap::new();
+        }
         let merged = self.merged_placement.lock().await;
         if !merged.is_empty() {
-            return merged.clone();
+            return merged
+                .iter()
+                .filter(|(chunk_hash, _)| required.contains(chunk_hash))
+                .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+                .collect();
         }
         drop(merged);
 
-        self.chunk_placement.lock().await.clone()
+        self.chunk_placement
+            .lock()
+            .await
+            .iter()
+            .filter(|(chunk_hash, _)| required.contains(chunk_hash))
+            .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+            .collect()
     }
 
     /// Step 10b: Verify every object reachable from each ref tip exists
