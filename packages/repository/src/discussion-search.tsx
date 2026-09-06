@@ -40,7 +40,6 @@ export function DiscussionSearch({
       <Button
         className="discussion-search-submit"
         type="submit"
-        size="small"
         aria-label="Search"
         title={label}
       >
