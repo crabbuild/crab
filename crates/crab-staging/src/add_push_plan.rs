@@ -980,8 +980,8 @@ fn ranked_prepared_candidates<'a>(
             .then_with(|| {
                 left.candidate
                     .xorb_hash
-                    .hex()
-                    .cmp(&right.candidate.xorb_hash.hex())
+                    .as_bytes()
+                    .cmp(right.candidate.xorb_hash.as_bytes())
             })
     });
     choices
