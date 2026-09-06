@@ -782,6 +782,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut cache_xorbs = 0u64;
     let mut cache_link_misses = 0u64;
     let mut unusable_cached_candidates = HashSet::new();
+    let mut matching_scratch = HashSet::new();
     let mut exclusive_payloads = HashMap::new();
     for (index, (chunk_hash, size)) in chunks.iter().enumerate() {
         let existing_ref = existing_refs
@@ -818,12 +819,13 @@ async fn prepare_one_file_plan_with_existing_refs(
         }
         state.read_needed = true;
 
-        let choices = ranked_prepared_candidates(
+        let choices = ranked_prepared_candidates_with_scratch(
             prepared_cache,
             chunk_hash,
             *size,
             &chunk_states,
             &unusable_cached_candidates,
+            &mut matching_scratch,
         );
         let mut used_cached_candidate = false;
         for choice in choices {
@@ -949,6 +951,25 @@ fn ranked_prepared_candidates<'a>(
     chunk_states: &HashMap<MerkleHash, FileChunkState>,
     unusable_cached_candidates: &HashSet<*const PreparedXorbCandidate>,
 ) -> Vec<PreparedCandidateChoice<'a>> {
+    let mut matching_scratch = HashSet::new();
+    ranked_prepared_candidates_with_scratch(
+        prepared_cache,
+        chunk_hash,
+        expected_size,
+        chunk_states,
+        unusable_cached_candidates,
+        &mut matching_scratch,
+    )
+}
+
+fn ranked_prepared_candidates_with_scratch<'a>(
+    prepared_cache: &'a PreparedXorbCache,
+    chunk_hash: &MerkleHash,
+    expected_size: u64,
+    chunk_states: &HashMap<MerkleHash, FileChunkState>,
+    unusable_cached_candidates: &HashSet<*const PreparedXorbCandidate>,
+    matching_scratch: &mut HashSet<MerkleHash>,
+) -> Vec<PreparedCandidateChoice<'a>> {
     let mut choices = Vec::new();
     for (candidate, placement) in prepared_cache.candidate_placements_for_chunk(chunk_hash) {
         if unusable_cached_candidates.contains(&prepared_candidate_id(candidate)) {
@@ -957,7 +978,7 @@ fn ranked_prepared_candidates<'a>(
         if u64::from(placement.uncompressed_size) != expected_size {
             continue;
         }
-        let covered_chunks = matching_file_chunks(candidate, chunk_states);
+        let covered_chunks = matching_file_chunks(candidate, chunk_states, matching_scratch);
         if covered_chunks.is_empty() {
             continue;
         }
@@ -996,8 +1017,9 @@ fn prepared_candidate_id(candidate: &PreparedXorbCandidate) -> *const PreparedXo
 fn matching_file_chunks(
     candidate: &PreparedXorbCandidate,
     chunk_states: &HashMap<MerkleHash, FileChunkState>,
+    seen: &mut HashSet<MerkleHash>,
 ) -> Vec<MerkleHash> {
-    let mut seen = HashSet::new();
+    seen.clear();
     let mut covered = Vec::new();
     for placement in &candidate.placements {
         if !seen.insert(placement.chunk_hash) {
