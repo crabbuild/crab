@@ -21,6 +21,8 @@ const REF_JOURNAL_MARKER_RETRY_POLICY: crab_storage::RetryPolicy = crab_storage:
     base: std::time::Duration::ZERO,
     cap: std::time::Duration::ZERO,
 };
+const REF_JOURNAL_MARKER_OPERATION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 #[path = "ref_journal/commit_tests.rs"]
@@ -312,7 +314,11 @@ async fn commit_ref_transaction_inner(
     // After attempting the marker, cancellation cannot prove rejection. Finish
     // outcome recovery and promotion under the same rule as a lost write reply.
     if let Err(source) = marker_store
-        .put_exact(&marker_path, marker_body.clone())
+        .put_exact_with_timeout(
+            &marker_path,
+            marker_body.clone(),
+            REF_JOURNAL_MARKER_OPERATION_TIMEOUT,
+        )
         .await
     {
         // A lost write response is not a rejected transaction. Confirm only the

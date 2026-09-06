@@ -20,6 +20,7 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::Stream;
@@ -671,6 +672,27 @@ impl Store {
             }
         })
         .await
+    }
+
+    /// Writes one exact object while bounding the complete transport attempt.
+    ///
+    /// This is for visibility boundaries whose outcome has an explicit
+    /// readback protocol. The timeout also covers provider-client retries,
+    /// which may otherwise outlive this store's retry policy.
+    pub async fn put_exact_with_timeout(
+        &self,
+        path: &Path,
+        bytes: Bytes,
+        timeout: Duration,
+    ) -> Result<()> {
+        tokio::time::timeout(timeout, self.put_exact(path, bytes))
+            .await
+            .map_err(|_| StorageError::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("exact object write exceeded {timeout:?}: {path}"),
+                ),
+            })?
     }
 
     fn exact_write_target(&self, path: &Path) -> (Path, Arc<dyn ObjectStore>, bool) {
