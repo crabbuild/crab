@@ -2904,37 +2904,40 @@ async fn filter_clean_indexed_candidates(
     };
     let honor_filemode = git_honors_filemode(repo_root);
     let cache_path = crate::cache::add_validation::cache_path_for_context(&ctx);
-    let validation_cache = match crate::cache::add_validation::AddValidationCache::open(&cache_path)
-    {
-        Ok(cache) => Some(cache),
-        Err(error) => {
-            debug!(
-                path = %cache_path.display(),
-                error = %error,
-                "clean-index add validation cache unavailable; hashing candidates"
-            );
-            None
-        }
-    };
     let mut prepared = Vec::with_capacity(candidates.len());
     for (abs_path, size) in candidates {
         let indexed =
             clean_index_pointer(repo_root, &repo, &index, &abs_path, size, honor_filemode);
         prepared.push((abs_path, size, indexed));
     }
+    let lookup_entries = prepared
+        .iter()
+        .filter_map(|(_, _, indexed)| {
+            indexed.as_ref().and_then(|indexed| {
+                indexed
+                    .validation_token
+                    .as_ref()
+                    .map(|token| (indexed.path_bytes.as_slice(), token))
+            })
+        })
+        .collect::<Vec<_>>();
+    let validation_cache = if lookup_entries.is_empty() {
+        None
+    } else {
+        match crate::cache::add_validation::AddValidationCache::open(&cache_path) {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                debug!(
+                    path = %cache_path.display(),
+                    error = %error,
+                    "clean-index add validation cache unavailable; hashing candidates"
+                );
+                None
+            }
+        }
+    };
     let mut cache_hits = HashSet::new();
     if let Some(cache) = validation_cache.as_ref() {
-        let lookup_entries = prepared
-            .iter()
-            .filter_map(|(_, _, indexed)| {
-                indexed.as_ref().and_then(|indexed| {
-                    indexed
-                        .validation_token
-                        .as_ref()
-                        .map(|token| (indexed.path_bytes.as_slice(), token))
-                })
-            })
-            .collect::<Vec<_>>();
         match cache.contains_batch(&lookup_entries) {
             Ok(hits) => cache_hits = hits,
             Err(error) => {
