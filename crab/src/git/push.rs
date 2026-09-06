@@ -10732,6 +10732,7 @@ impl PushPipeline {
             })
             .collect();
         for (file_hash, _, _, chunks, _, remote_authority_hashes) in &needed_plans {
+            let mut segment_candidates = Vec::new();
             for chunk_hash in remote_authority_hashes {
                 if verified_placement.contains_key(chunk_hash)
                     || placement_map.contains_key(chunk_hash)
@@ -10745,7 +10746,11 @@ impl PushPipeline {
                         file_hash.hex()
                     ))
                 })?;
-                if !staging.has_segment_payload(chunk_hash, size)? {
+                segment_candidates.push((*chunk_hash, size));
+            }
+            let segment_payloads = staging.segment_payloads_exist(&segment_candidates)?;
+            for (chunk_hash, _) in segment_candidates {
+                if !segment_payloads.contains(&chunk_hash) {
                     return Err(CrabError::StagingCorrupt(format!(
                         "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
                         chunk_hash.hex(),

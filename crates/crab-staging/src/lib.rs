@@ -2867,6 +2867,22 @@ impl StagingArea {
         lock_index(&self.index)?.chunk_payload_exists(&chunk_hash, size)
     }
 
+    /// Return requested chunk hashes whose exact raw segment payload remains locally readable.
+    pub fn segment_payloads_exist(
+        &self,
+        chunks: &[(MerkleHash, u64)],
+    ) -> Result<HashSet<MerkleHash>> {
+        let raw_chunks = chunks
+            .iter()
+            .map(|(hash, size)| ((*hash).into(), *size))
+            .collect::<Vec<_>>();
+        Ok(lock_index(&self.index)?
+            .chunk_payloads_exist(&raw_chunks)?
+            .into_iter()
+            .map(MerkleHash::from)
+            .collect())
+    }
+
     /// Return the immutable recipe owned by a published staging batch.
     pub fn published_recipe_for_file(
         &self,
@@ -3892,6 +3908,22 @@ impl StagingAreaReadOnly {
     pub fn has_segment_payload(&self, chunk_hash: &MerkleHash, size: u64) -> Result<bool> {
         let chunk_hash: [u8; 32] = (*chunk_hash).into();
         lock_index(&self.index)?.chunk_payload_exists(&chunk_hash, size)
+    }
+
+    /// Return requested chunk hashes whose exact raw segment payload remains locally readable.
+    pub fn segment_payloads_exist(
+        &self,
+        chunks: &[(MerkleHash, u64)],
+    ) -> Result<HashSet<MerkleHash>> {
+        let raw_chunks = chunks
+            .iter()
+            .map(|(hash, size)| ((*hash).into(), *size))
+            .collect::<Vec<_>>();
+        Ok(lock_index(&self.index)?
+            .chunk_payloads_exist(&raw_chunks)?
+            .into_iter()
+            .map(MerkleHash::from)
+            .collect())
     }
 
     /// Return the immutable recipe owned by a published staging batch.

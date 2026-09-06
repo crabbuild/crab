@@ -5,7 +5,7 @@
 //! `rusqlite::Connection` in WAL mode with foreign key enforcement.
 
 use rusqlite::{Connection, OptionalExtension, ToSql, params, params_from_iter};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::debug;
 
@@ -6067,6 +6067,50 @@ impl Index {
             })
     }
 
+    /// Return the requested chunk hashes whose exact payload size is staged.
+    pub fn chunk_payloads_exist(&self, chunks: &[([u8; 32], u64)]) -> Result<HashSet<[u8; 32]>> {
+        if chunks.is_empty() {
+            return Ok(HashSet::new());
+        }
+        const LOOKUP_BATCH_SIZE: usize = 512;
+        let mut found = HashSet::new();
+        for batch in chunks.chunks(LOOKUP_BATCH_SIZE) {
+            let expected = batch.iter().copied().collect::<HashMap<_, _>>();
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "SELECT chunk_hash, size FROM chunk_payloads WHERE chunk_hash IN ({placeholders})"
+            );
+            let mut statement = self.conn.prepare_cached(&query).map_err(|error| {
+                StagingError::Internal(format!("failed to prepare staged payload lookup: {error}"))
+            })?;
+            let hashes = batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            let rows = statement
+                .query_map(
+                    params_from_iter(hashes.iter().map(|hash| hash.as_slice())),
+                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!("failed to query staged payloads: {error}"))
+                })?;
+            for row in rows {
+                let (hash, size) = row.map_err(|error| {
+                    StagingError::Internal(format!("failed to read staged payload row: {error}"))
+                })?;
+                let hash = decode_hash_blob("staged payload chunk hash", hash)?;
+                let size = nonnegative_count("staged payload size", size)?;
+                if expected
+                    .get(&hash)
+                    .is_some_and(|expected_size| *expected_size == size)
+                {
+                    found.insert(hash);
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Replace one recipe's normalized remote and prepared authority.
     pub fn insert_file_push_plan(&self, write: FilePushPlanWrite<'_>) -> Result<Vec<[u8; 32]>> {
         self.insert_file_push_plans(std::slice::from_ref(&write))
@@ -9703,6 +9747,37 @@ mod tests {
             idx.chunks_for_file(&fh).expect("chunks"),
             vec![test_hash(0xC4)]
         );
+    }
+
+    #[test]
+    fn chunk_payload_batch_lookup_checks_exact_sizes() {
+        let idx = open_in_memory();
+        let requested = (0..600_u16)
+            .map(|index| {
+                let mut hash = [0; 32];
+                hash[..2].copy_from_slice(&index.to_le_bytes());
+                let size = u64::from(index) + 1;
+                idx.conn
+                    .execute(
+                        "INSERT INTO chunk_payloads
+                         (chunk_hash, size, segment_id, segment_offset)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![hash.as_slice(), size as i64, 1_i64, index as i64],
+                    )
+                    .expect("insert payload");
+                (hash, size)
+            })
+            .collect::<Vec<_>>();
+        let mut requested = requested;
+        requested[0].1 += 1;
+
+        let found = idx
+            .chunk_payloads_exist(&requested)
+            .expect("batch payload lookup");
+
+        assert_eq!(found.len(), 599);
+        assert!(!found.contains(&requested[0].0));
+        assert!(requested[1..].iter().all(|(hash, _)| found.contains(hash)));
     }
 
     #[test]
