@@ -781,7 +781,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut cache_chunks = 0u64;
     let mut cache_xorbs = 0u64;
     let mut cache_link_misses = 0u64;
-    let mut unusable_cached_xorb_sources = HashSet::new();
+    let mut unusable_cached_candidates = HashSet::new();
     let mut exclusive_payloads = HashMap::new();
     for (index, (chunk_hash, size)) in chunks.iter().enumerate() {
         let existing_ref = existing_refs
@@ -823,7 +823,7 @@ async fn prepare_one_file_plan_with_existing_refs(
             chunk_hash,
             *size,
             &chunk_states,
-            &unusable_cached_xorb_sources,
+            &unusable_cached_candidates,
         );
         let mut used_cached_candidate = false;
         for choice in choices {
@@ -875,7 +875,7 @@ async fn prepare_one_file_plan_with_existing_refs(
                 break;
             }
 
-            unusable_cached_xorb_sources.insert((candidate.xorb_hash, candidate.source.clone()));
+            unusable_cached_candidates.insert(prepared_candidate_id(candidate));
             cache_link_misses += 1;
         }
         if used_cached_candidate {
@@ -947,11 +947,11 @@ fn ranked_prepared_candidates<'a>(
     chunk_hash: &MerkleHash,
     expected_size: u64,
     chunk_states: &HashMap<MerkleHash, FileChunkState>,
-    unusable_cached_xorb_sources: &HashSet<(MerkleHash, PreparedXorbSource)>,
+    unusable_cached_candidates: &HashSet<*const PreparedXorbCandidate>,
 ) -> Vec<PreparedCandidateChoice<'a>> {
     let mut choices = Vec::new();
     for candidate in prepared_cache.candidates_for_chunk(chunk_hash) {
-        if unusable_cached_xorb_sources.contains(&(candidate.xorb_hash, candidate.source.clone())) {
+        if unusable_cached_candidates.contains(&prepared_candidate_id(candidate)) {
             continue;
         }
         let Some(placement) = candidate.placement_for(chunk_hash) else {
@@ -988,6 +988,12 @@ fn ranked_prepared_candidates<'a>(
             })
     });
     choices
+}
+
+fn prepared_candidate_id(candidate: &PreparedXorbCandidate) -> *const PreparedXorbCandidate {
+    // Candidates live in Arc allocations owned by the cache for this plan;
+    // identity avoids cloning LocalCache paths on every chunk lookup.
+    std::ptr::from_ref(candidate)
 }
 
 fn matching_file_chunks(
@@ -1705,13 +1711,18 @@ mod tests {
         let choices =
             ranked_prepared_candidates(&cache, &chunk_hash, 10, &chunk_states, &HashSet::new());
         assert_eq!(choices.len(), 2);
+        let first_candidate = choices
+            .iter()
+            .find(|choice| choice.candidate.source == first_source)
+            .expect("first source candidate")
+            .candidate;
 
         let filtered = ranked_prepared_candidates(
             &cache,
             &chunk_hash,
             10,
             &chunk_states,
-            &HashSet::from([(xorb_hash, first_source.clone())]),
+            &HashSet::from([prepared_candidate_id(first_candidate)]),
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].candidate.source, second_source);
