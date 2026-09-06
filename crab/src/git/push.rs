@@ -10429,7 +10429,7 @@ impl PushPipeline {
             if recipe.chunk_count() == 0 {
                 continue;
             }
-            let mut file_sizes = HashMap::new();
+            let mut file_chunks = HashSet::new();
             self.visit_recipe_chunks(&recipe, |chunk_hash, size| {
                 total_occurrence_bytes = total_occurrence_bytes.saturating_add(size);
                 total_occurrence_chunks = total_occurrence_chunks.saturating_add(1);
@@ -10442,13 +10442,8 @@ impl PushPipeline {
                     }
                     _ => {}
                 }
-                match file_sizes.insert(chunk_hash, size) {
-                    Some(existing) if existing != size => Err(CrabError::StagingCorrupt(format!(
-                        "chunk {} has conflicting sizes within one recipe",
-                        chunk_hash.hex()
-                    ))),
-                    _ => Ok(()),
-                }
+                file_chunks.insert(chunk_hash);
+                Ok(())
             })?;
 
             let Some(plan) = plans.remove(&file_hash) else {
@@ -10457,7 +10452,7 @@ impl PushPipeline {
                     file_hash = %file_hash.hex(),
                     "step 4: no add-time push plan for staged pointer; classifying only this file normally"
                 );
-                residual_chunks.extend(file_sizes.keys().copied());
+                residual_chunks.extend(file_chunks.iter().copied());
                 continue;
             };
             if !add_push_plan_matches_staging(&plan, &file_hash, pointer_size, &recipe) {
@@ -10472,7 +10467,7 @@ impl PushPipeline {
                     file_hash = %file_hash.hex(),
                     "step 4: add-time push plan no longer matches staging; classifying only this file normally"
                 );
-                residual_chunks.extend(file_sizes.keys().copied());
+                residual_chunks.extend(file_chunks.iter().copied());
                 continue;
             }
 
@@ -10516,7 +10511,7 @@ impl PushPipeline {
                     &recipe,
                     "contains malformed prepared-xorb metadata",
                 )?;
-                residual_chunks.extend(file_sizes.keys().copied());
+                residual_chunks.extend(file_chunks.iter().copied());
                 continue;
             }
 
@@ -10526,14 +10521,21 @@ impl PushPipeline {
                 for (chunk_hash, candidate) in
                     staging.recipe_remote_chunk_page(&recipe, next_occurrence)?
                 {
-                    let size = file_sizes.get(&chunk_hash).ok_or_else(|| {
+                    let size = expected_sizes.get(&chunk_hash).copied().ok_or_else(|| {
                         CrabError::StagingCorrupt(format!(
                             "remote authority for chunk {} escaped file {} recipe coverage",
                             chunk_hash.hex(),
                             file_hash.hex()
                         ))
                     })?;
-                    if u64::from(candidate.xorb_ref.uncompressed_size) != *size {
+                    if !file_chunks.contains(&chunk_hash) {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "remote authority for chunk {} escaped file {} recipe coverage",
+                            chunk_hash.hex(),
+                            file_hash.hex()
+                        )));
+                    }
+                    if u64::from(candidate.xorb_ref.uncompressed_size) != size {
                         return Err(CrabError::StagingCorrupt(format!(
                             "remote authority for chunk {} in file {} has size {}, expected {size}",
                             chunk_hash.hex(),
@@ -10565,7 +10567,7 @@ impl PushPipeline {
                 file_hash,
                 recipe,
                 plan,
-                file_sizes,
+                file_chunks,
                 prepared,
                 remote_authority_hashes,
             ));
@@ -10700,7 +10702,7 @@ impl PushPipeline {
                         );
                         unusable_prepared_xorbs += 1;
                         for placement in planned_placements {
-                            if !chunks.contains_key(&placement.chunk_hash) {
+                            if !chunks.contains(&placement.chunk_hash) {
                                 continue;
                             }
                             residual_chunks.insert(placement.chunk_hash);
@@ -10742,7 +10744,14 @@ impl PushPipeline {
                 {
                     continue;
                 }
-                let size = chunks.get(chunk_hash).copied().ok_or_else(|| {
+                if !chunks.contains(chunk_hash) {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "remote authority for chunk {} escaped file {} recipe coverage",
+                        chunk_hash.hex(),
+                        file_hash.hex()
+                    )));
+                }
+                let size = expected_sizes.get(chunk_hash).copied().ok_or_else(|| {
                     CrabError::StagingCorrupt(format!(
                         "remote authority for chunk {} escaped file {} recipe coverage",
                         chunk_hash.hex(),
@@ -10761,7 +10770,7 @@ impl PushPipeline {
                     )));
                 }
             }
-            for chunk_hash in chunks.keys() {
+            for chunk_hash in chunks {
                 if placement_map.contains_key(chunk_hash)
                     || verified_placement.contains_key(chunk_hash)
                 {
