@@ -287,6 +287,7 @@ async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -
 
 const GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE: usize = 4_096;
 const GLOBAL_CHUNK_LOOKUP_BUDGET: Duration = Duration::from_secs(120);
+const ADD_REMOTE_CLASSIFIER_INITIAL_CAPACITY: usize = 65_536;
 const BASE_SHARD_LOOKUP_LIMIT: usize = 4_096;
 const CANDIDATE_METADATA_BATCH_SIZE: usize = 2_048;
 const STAGING_VERIFY_CONCURRENCY: usize = 4;
@@ -4365,15 +4366,16 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
         if chunks.is_empty() {
             return Ok(Vec::new());
         }
-        let mut candidates = HashMap::with_capacity(chunks.len());
-        let mut unique_chunks = Vec::with_capacity(chunks.len());
-        let mut seen = HashSet::with_capacity(chunks.len());
+        let initial_capacity = chunks.len().min(ADD_REMOTE_CLASSIFIER_INITIAL_CAPACITY);
+        let mut unique_chunks = Vec::with_capacity(initial_capacity);
+        let mut seen = HashSet::with_capacity(initial_capacity);
         for (chunk_hash, _) in chunks {
             if seen.insert(*chunk_hash) {
                 unique_chunks.push(*chunk_hash);
             }
         }
 
+        let mut candidates = HashMap::with_capacity(unique_chunks.len());
         let mut misses = Vec::with_capacity(unique_chunks.len());
         if let Some(cache) = &self.candidate_cache {
             match cache.memory_get_batch(&unique_chunks) {
