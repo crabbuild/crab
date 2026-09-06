@@ -493,20 +493,90 @@ main {
 .diff-panel {
   margin-top: 24px;
 }
-.blame-list {
-  max-height: 300px;
-  overflow: auto;
-  border-bottom: 1px solid var(--borderColor-default);
-}
-.blame-list > div {
-  display: flex;
-  gap: 12px;
+.blame-annotation {
+  color: var(--fgColor-muted);
+  background: var(--bgColor-muted);
+  border-block: 1px solid var(--borderColor-default);
   font-size: 12px;
+}
+.blame-annotation-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--borderColor-muted);
+}
+.blame-age-legend,
+.blame-contributors {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.blame-age-scale {
+  width: 104px;
+  height: 12px;
+  background: linear-gradient(
+    90deg,
+    color-mix(
+      in srgb,
+      var(--bgColor-attention-muted) 35%,
+      var(--bgColor-default)
+    ),
+    var(--bgColor-attention-muted)
+  );
+  border-radius: 2px;
+}
+.blame-contributors strong {
+  display: inline-grid;
+  min-width: 24px;
+  min-height: 24px;
+  padding-inline: 6px;
+  place-items: center;
+  color: var(--fgColor-default);
+  background: var(--bgColor-default);
+  border: 1px solid var(--borderColor-default);
+  border-radius: 999px;
+  font-size: 11px;
+}
+.blame-annotation-rows {
+  display: grid;
+}
+.blame-annotation-row {
+  display: grid;
+  grid-template-columns:
+    minmax(58px, auto) minmax(56px, auto) minmax(120px, 0.5fr)
+    minmax(180px, 2fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
   padding: 8px 16px;
   border-bottom: 1px solid var(--borderColor-muted);
 }
-.blame-list code {
-  min-width: 70px;
+.blame-annotation-row:last-child {
+  border-bottom: 0;
+}
+.blame-annotation-row > a {
+  color: var(--fgColor-accent);
+  font-family: var(--fontStack-monospace);
+  font-weight: 600;
+  text-decoration: none;
+}
+.blame-annotation-row > a:hover {
+  text-decoration: underline;
+}
+.blame-annotation-row code,
+.blame-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.blame-author {
+  overflow: hidden;
+  color: var(--fgColor-default);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .site-footer {
   display: flex;
