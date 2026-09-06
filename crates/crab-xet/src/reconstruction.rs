@@ -66,13 +66,22 @@ impl FileTermBuilder {
 
     /// Consume one ordered recipe occurrence.
     pub fn push(&mut self, chunk_hash: MerkleHash, placement: &ChunkPlacementMap) -> Result<()> {
+        self.push_with_placement(chunk_hash, placement.get(&chunk_hash))
+    }
+
+    /// Consume one occurrence using a placement lookup performed by the caller.
+    pub fn push_with_placement(
+        &mut self,
+        chunk_hash: MerkleHash,
+        placement: Option<&ChunkPlacement>,
+    ) -> Result<()> {
         let file_index = u32::try_from(self.chunk_count)
             .map_err(|_| shard_format_overflow("file chunk index", self.chunk_count))?;
         self.chunk_count = self
             .chunk_count
             .checked_add(1)
             .ok_or_else(|| shard_format_overflow("file chunk count", u64::MAX))?;
-        let Some(p) = placement.get(&chunk_hash) else {
+        let Some(p) = placement else {
             self.uncovered = self.uncovered.saturating_add(1);
             self.first_miss.get_or_insert((file_index, chunk_hash));
             return Ok(());

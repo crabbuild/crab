@@ -6791,33 +6791,43 @@ impl PushPipeline {
         file_hash: &MerkleHash,
         recipe: &FileRecipe,
         placement: &mut ChunkPlacementMap,
+        verified_existing: &ChunkPlacementMap,
         fail_fast_on_missing: bool,
     ) -> Result<Vec<FileTerm>> {
         let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
         let mut chunk_index = 0usize;
         self.visit_recipe_chunks(recipe, |chunk_hash, _| {
-            if fail_fast_on_missing && !placement.contains_key(&chunk_hash) {
-                match verified_existing.get(&chunk_hash) {
-                    Some(existing) => {
-                        placement.insert(chunk_hash, existing.clone());
+            if fail_fast_on_missing {
+                let resolved = if let Some(existing) = placement.get(&chunk_hash) {
+                    Some(existing)
+                } else {
+                    match verified_existing.get(&chunk_hash) {
+                        Some(existing) => {
+                            placement.insert(chunk_hash, existing.clone());
+                            placement.get(&chunk_hash)
+                        }
+                        None => {
+                            return Err(CrabError::IncompleteShardReconstruction {
+                                file_hash: file_hash.hex(),
+                                path: None,
+                                uncovered_chunks: 1,
+                                example_chunk_hash: chunk_hash.hex(),
+                                example_chunk_index: usize_to_shard_u32(
+                                    "file chunk index",
+                                    chunk_index,
+                                )?,
+                            });
+                        }
                     }
-                    None => {
-                        return Err(CrabError::IncompleteShardReconstruction {
-                            file_hash: file_hash.hex(),
-                            path: None,
-                            uncovered_chunks: 1,
-                            example_chunk_hash: chunk_hash.hex(),
-                            example_chunk_index: usize_to_shard_u32(
-                                "file chunk index",
-                                chunk_index,
-                            )?,
-                        });
-                    }
-                }
+                };
+                builder
+                    .push_with_placement(chunk_hash, resolved)
+                    .map_err(CrabError::from)?;
+            } else {
+                builder
+                    .push(chunk_hash, placement)
+                    .map_err(CrabError::from)?;
             }
-            builder
-                .push(chunk_hash, placement)
-                .map_err(CrabError::from)?;
             chunk_index = chunk_index.saturating_add(1);
             Ok(())
         })?;
@@ -12295,6 +12305,7 @@ impl PushPipeline {
                     file_hash,
                     recipe,
                     &mut merged_placement,
+                    &verified_existing,
                     !verified_existing.is_empty(),
                 )?;
 
