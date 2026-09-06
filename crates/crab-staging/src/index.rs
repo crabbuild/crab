@@ -6716,6 +6716,33 @@ impl Index {
 
             if recipe_is_indexed {
                 cleanup_needed = true;
+                // Release only the replaced recipe's canonical rows. The
+                // chunk hash is globally unique, so an unleased old row would
+                // reject the replacement as an ownership conflict; narrowing
+                // by the old leases avoids scanning every prepared chunk for
+                // each file in a multi-file replacement batch.
+                tx.execute(
+                    "DELETE FROM prepared_payload_chunks
+                     WHERE xorb_hash IN (
+                               SELECT xorb_hash FROM prepared_leases
+                               WHERE recipe_hash = ?1
+                           )
+                       AND NOT EXISTS (
+                               SELECT 1 FROM prepared_leases AS other
+                               WHERE other.xorb_hash = prepared_payload_chunks.xorb_hash
+                                 AND other.recipe_hash != ?1
+                           )
+                       AND NOT EXISTS (
+                               SELECT 1 FROM preparation_payloads
+                               WHERE preparation_payloads.xorb_hash = prepared_payload_chunks.xorb_hash
+                           )",
+                    params![recipe_hash.as_slice()],
+                )
+                .map_err(|e| {
+                    StagingError::Internal(format!(
+                        "failed to release replaced prepared chunks: {e}"
+                    ))
+                })?;
                 tx.execute(
                     "DELETE FROM prepared_leases WHERE recipe_hash = ?1",
                     params![recipe_hash.as_slice()],
@@ -10034,6 +10061,17 @@ mod tests {
         let second_xorb = test_hash(0xD2);
         let first_chunk = test_hash(0xE1);
         let second_chunk = test_hash(0xE2);
+        for recipe_hash in [first_recipe, second_recipe] {
+            idx.conn
+                .execute(
+                    "INSERT INTO file_recipes
+                     (recipe_hash, file_hash, file_size, chunk_count, sequence_hash,
+                      page_count, page_root_hash, policy_id)
+                     VALUES (?1, ?1, 0, 0, ?1, 0, ?1, 'test')",
+                    params![recipe_hash.as_slice()],
+                )
+                .expect("file recipe");
+        }
         for (recipe_hash, xorb_hash, chunk_hash) in [
             (first_recipe, first_xorb, first_chunk),
             (second_recipe, second_xorb, second_chunk),
@@ -10084,7 +10122,7 @@ mod tests {
         );
         assert_eq!(grouped[&second_recipe][1].xorb_hash, second_xorb);
         assert_eq!(
-            grouped[&second_recipe][0].placements[0].chunk_hash,
+            grouped[&second_recipe][1].placements[0].chunk_hash,
             second_chunk
         );
     }
