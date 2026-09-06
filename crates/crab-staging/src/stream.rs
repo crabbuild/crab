@@ -1163,6 +1163,8 @@ struct FlushBatchScratch {
     terms: Vec<(MerkleHash, u64)>,
     remote_authority: Vec<ExistingChunkWrite>,
     existing: Vec<Option<ExistingChunkCandidate>>,
+    misses: Vec<(MerkleHash, u64)>,
+    to_pack: Vec<(Chunk, RunId)>,
 }
 
 fn append_emitted_chunks(
@@ -1411,18 +1413,23 @@ async fn flush_batch(
         let coordination = xorb_writer
             .as_ref()
             .and_then(|writer| writer.factory.coordination.as_ref());
+        let mut to_pack = std::mem::take(&mut scratch.to_pack);
+        to_pack.clear();
         let to_pack = if let Some(coordination) = coordination {
-            let misses = batch
-                .iter()
-                .zip(existing.iter())
-                .filter_map(|((hash, data), candidate)| {
-                    candidate.is_none().then_some((*hash, data.len() as u64))
-                })
-                .collect::<Vec<_>>();
-            let claims =
-                staging.claim_prepared_chunks(&coordination.preparation_id, batch_id, &misses)?;
+            scratch.misses.clear();
+            scratch
+                .misses
+                .extend(batch.iter().zip(existing.iter()).filter_map(
+                    |((hash, data), candidate)| {
+                        candidate.is_none().then_some((*hash, data.len() as u64))
+                    },
+                ));
+            let claims = staging.claim_prepared_chunks(
+                &coordination.preparation_id,
+                batch_id,
+                &scratch.misses,
+            )?;
             let mut claims = claims.into_iter();
-            let mut to_pack = Vec::with_capacity(misses.len());
             for ((hash, data), candidate) in batch.iter().zip(existing.iter()) {
                 if candidate.is_some() {
                     continue;
@@ -1449,20 +1456,22 @@ async fn flush_batch(
             }
             to_pack
         } else {
-            batch
-                .iter()
-                .zip(existing.iter())
-                .filter(|(_, candidate)| candidate.is_none())
-                .map(|((hash, data), _)| {
-                    (
-                        Chunk {
-                            hash: *hash,
-                            data: data.clone(),
-                        },
-                        RunId(0),
-                    )
-                })
-                .collect()
+            to_pack.extend(
+                batch
+                    .iter()
+                    .zip(existing.iter())
+                    .filter(|(_, candidate)| candidate.is_none())
+                    .map(|((hash, data), _)| {
+                        (
+                            Chunk {
+                                hash: *hash,
+                                data: data.clone(),
+                            },
+                            RunId(0),
+                        )
+                    }),
+            );
+            to_pack
         };
         let mut builder = xorb_builder.take().ok_or_else(|| {
             CrabError::Internal("direct xorb builder disappeared before pack".to_owned())
@@ -1478,29 +1487,34 @@ async fn flush_batch(
         let runtime = tokio::runtime::Handle::current();
         let pack_cancel = cancel.clone();
         let compression_start = Instant::now();
-        let (returned_builder, returned_sequence) = tokio::task::spawn_blocking(move || {
-            builder.push_batch_with_rollover_admission(
-                &to_pack,
-                || runtime.block_on(writer_factory.acquire_materialization(&pack_cancel)),
-                |result, permit| {
-                    StreamPreparedXorbWriter::submit_reserved_blocking(
-                        &sender,
-                        &mut next_sequence,
-                        result,
-                        permit,
-                    )
-                },
-            )?;
-            Ok::<_, CrabError>((builder, next_sequence))
-        })
-        .await
-        .map_err(|error| CrabError::Internal(format!("direct xorb pack task failed: {error}")))??;
+        let (returned_builder, returned_sequence, returned_to_pack) =
+            tokio::task::spawn_blocking(move || {
+                builder.push_batch_with_rollover_admission(
+                    &to_pack,
+                    || runtime.block_on(writer_factory.acquire_materialization(&pack_cancel)),
+                    |result, permit| {
+                        StreamPreparedXorbWriter::submit_reserved_blocking(
+                            &sender,
+                            &mut next_sequence,
+                            result,
+                            permit,
+                        )
+                    },
+                )?;
+                Ok::<_, CrabError>((builder, next_sequence, to_pack))
+            })
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("direct xorb pack task failed: {error}"))
+            })??;
         timings.compression = timings
             .compression
             .saturating_add(compression_start.elapsed());
         *xorb_builder = Some(returned_builder);
         writer.next_sequence = returned_sequence;
         *xorb_writer = Some(writer);
+        scratch.to_pack = returned_to_pack;
+        scratch.to_pack.clear();
     }
     batch.clear();
     *batch_payload_bytes = 0;
