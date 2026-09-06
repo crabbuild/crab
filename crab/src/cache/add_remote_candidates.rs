@@ -23,6 +23,7 @@ const MEMORY_CAPACITY: usize = 65_536;
 const MAX_PERSISTENT_ENTRIES: i64 = 2_000_000;
 const LOOKUP_BATCH_SIZE: usize = 512;
 const PERSISTENT_UNION_LOOKUP_BATCH: usize = LOOKUP_BATCH_SIZE / 2;
+const PERSIST_DEDUP_BATCH_SIZE: usize = MEMORY_CAPACITY;
 const PRUNE_EVERY_WRITES: u64 = 64;
 const NEGATIVE_TABLE: &str = "remote_candidate_misses_v1";
 const NEGATIVE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -263,6 +264,15 @@ impl AddRemoteCandidateCache {
         entries: &[(MerkleHash, Option<ExistingChunkCandidate>)],
     ) -> Result<()> {
         if entries.is_empty() {
+            return Ok(());
+        }
+        if entries.len() > PERSIST_DEDUP_BATCH_SIZE {
+            // The cache is advisory, so page oversized writes. Processing
+            // pages in input order preserves last-result-wins semantics while
+            // avoiding a repository-sized deduplication map.
+            for batch in entries.chunks(PERSIST_DEDUP_BATCH_SIZE) {
+                self.persist_results(batch)?;
+            }
             return Ok(());
         }
         let observed_at = current_unix_timestamp()?;
