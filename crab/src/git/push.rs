@@ -10062,8 +10062,8 @@ impl PushPipeline {
     }
 
     async fn prove_all_origin_xorbs_for_publish(&self) -> Result<()> {
-        let placements = self.merged_placement.lock().await.clone();
-        if placements.is_empty() {
+        let by_xorb = self.snapshot_placements_by_xorb().await;
+        if by_xorb.is_empty() {
             self.origin_receipts.lock().await.clear();
             return Ok(());
         }
@@ -10074,13 +10074,6 @@ impl PushPipeline {
                 key: "push store".to_owned(),
                 origin: "canonical-origin proof requires a remote store".to_owned(),
             })?;
-        let mut by_xorb: HashMap<MerkleHash, Vec<ChunkPlacement>> = HashMap::new();
-        for placement in placements.values() {
-            by_xorb
-                .entry(placement.xorb_hash)
-                .or_default()
-                .push(placement.clone());
-        }
         let mut candidates = by_xorb
             .into_iter()
             .map(|(hash, placements)| RemoteXorbCandidate { hash, placements })
@@ -10112,8 +10105,8 @@ impl PushPipeline {
     }
 
     async fn prove_all_xorbs_for_protected_push(&self) -> Result<()> {
-        let placements = self.merged_placement.lock().await.clone();
-        if placements.is_empty() {
+        let by_xorb = self.snapshot_placements_by_xorb().await;
+        if by_xorb.is_empty() {
             self.origin_receipts.lock().await.clear();
             return Ok(());
         }
@@ -10129,13 +10122,7 @@ impl PushPipeline {
             .into_iter()
             .map(|write| (write.canonical_key.clone(), write))
             .collect::<HashMap<_, _>>();
-        let mut by_xorb: HashMap<MerkleHash, Vec<ChunkPlacement>> = HashMap::new();
-        for placement in placements.values() {
-            by_xorb
-                .entry(placement.xorb_hash)
-                .or_default()
-                .push(placement.clone());
-        }
+        let required_xorb_count = by_xorb.len();
         let mut canonical_candidates = Vec::new();
         let mut receipts = HashMap::new();
         for (hash, placements) in by_xorb {
@@ -10195,11 +10182,7 @@ impl PushPipeline {
         )
         .await?;
         receipts.extend(canonical);
-        let required = placements
-            .values()
-            .map(|placement| placement.xorb_hash)
-            .collect::<HashSet<_>>();
-        if receipts.len() != required.len() {
+        if receipts.len() != required_xorb_count {
             return Err(CrabError::CorruptObject {
                 path: self.router.repo_prefix().to_owned(),
                 reason: "protected push lacks staged or canonical proof for a candidate xorb"
@@ -10208,6 +10191,18 @@ impl PushPipeline {
         }
         *self.origin_receipts.lock().await = receipts;
         Ok(())
+    }
+
+    async fn snapshot_placements_by_xorb(&self) -> HashMap<MerkleHash, Vec<ChunkPlacement>> {
+        let placements = self.merged_placement.lock().await;
+        let mut by_xorb = HashMap::new();
+        for placement in placements.values() {
+            by_xorb
+                .entry(placement.xorb_hash)
+                .or_insert_with(Vec::new)
+                .push(placement.clone());
+        }
+        by_xorb
     }
 
     async fn verify_cache_service_xorb_refs(
