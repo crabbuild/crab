@@ -5864,6 +5864,45 @@ impl Index {
         // Defer retirement until every plan in this transaction has restored
         // its leases; shared prepared xorbs can move between files in a batch.
         let mut cleanup_needed = false;
+        let mut payload_insert = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO prepared_payloads
+             (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!("failed to prepare prepared payload insert: {e}"))
+            })?;
+        let mut payload_verify = tx
+            .prepare_cached(
+                "SELECT payload_hash = ?2 AND bytes = ?3
+             FROM prepared_payloads WHERE xorb_hash = ?1",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to prepare prepared payload verification: {e}"
+                ))
+            })?;
+        let mut chunk_insert = tx
+            .prepare_cached(
+                "INSERT OR IGNORE INTO prepared_payload_chunks
+             (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+             VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to prepare prepared payload chunk insert: {e}"
+                ))
+            })?;
+        let mut chunk_verify = tx
+            .prepare_cached(
+                "SELECT xorb_hash, chunk_index, uncompressed_size
+             FROM prepared_payload_chunks WHERE chunk_hash = ?1",
+            )
+            .map_err(|e| {
+                StagingError::Internal(format!(
+                    "failed to prepare prepared payload chunk verification: {e}"
+                ))
+            })?;
         for write in writes {
             let FilePushPlanWrite {
                 file_hash,
@@ -6053,47 +6092,6 @@ impl Index {
                 })?;
             }
 
-            let mut payload_insert = tx
-                .prepare_cached(
-                    "INSERT OR IGNORE INTO prepared_payloads
-                 (xorb_hash, payload_hash, bytes) VALUES (?1, ?2, ?3)",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to prepare prepared payload insert: {e}"
-                    ))
-                })?;
-            let mut payload_verify = tx
-                .prepare_cached(
-                    "SELECT payload_hash = ?2 AND bytes = ?3
-                 FROM prepared_payloads WHERE xorb_hash = ?1",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to prepare prepared payload verification: {e}"
-                    ))
-                })?;
-            let mut chunk_insert = tx
-                .prepare_cached(
-                    "INSERT OR IGNORE INTO prepared_payload_chunks
-                 (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
-                 VALUES (?1, ?2, ?3, ?4)",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to prepare prepared payload chunk insert: {e}"
-                    ))
-                })?;
-            let mut chunk_verify = tx
-                .prepare_cached(
-                    "SELECT xorb_hash, chunk_index, uncompressed_size
-                 FROM prepared_payload_chunks WHERE chunk_hash = ?1",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to prepare prepared payload chunk verification: {e}"
-                    ))
-                })?;
             for prepared in prepared_xorbs {
                 let xorb_hash: &[u8] = &prepared.xorb_hash;
                 let payload_hash: &[u8] = &prepared.payload_hash;
@@ -6215,11 +6213,11 @@ impl Index {
                     })?;
                 }
             }
-            drop(payload_insert);
-            drop(payload_verify);
-            drop(chunk_insert);
-            drop(chunk_verify);
         }
+        drop(payload_insert);
+        drop(payload_verify);
+        drop(chunk_insert);
+        drop(chunk_verify);
         let removed_payloads = if cleanup_needed {
             // A single sweep avoids repeatedly scanning the global payload
             // table and cannot retire a body that another plan in this batch
