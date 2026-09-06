@@ -66,6 +66,7 @@ const CANONICAL_INDEXES: &[&str] = &[
     "pending_by_hash",
     "preparation_payloads_by_xorb",
     "prepared_claims_by_preparation",
+    "prepared_leases_by_xorb",
     "publication_entries_by_batch",
     "recipe_occurrences_by_chunk",
     "recipe_payload_leases_by_chunk",
@@ -1004,6 +1005,9 @@ impl Index {
                         ON DELETE CASCADE,
                     FOREIGN KEY (xorb_hash) REFERENCES prepared_payloads(xorb_hash)
                 );
+
+                CREATE INDEX IF NOT EXISTS prepared_leases_by_xorb
+                    ON prepared_leases(xorb_hash);
 
                 CREATE TABLE IF NOT EXISTS push_snapshots (
                     snapshot_id TEXT PRIMARY KEY,
