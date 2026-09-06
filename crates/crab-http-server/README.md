@@ -36,6 +36,31 @@ default_branch = "main"
 description = "Our project"
 ```
 
+Multiple repositories may share one object-storage bucket. Give every
+repository a distinct prefix; Crab shares immutable content-addressed objects
+under `.crab/` and isolates refs, manifests, locks, settings, and Git packs
+under each configured prefix. The server reuses one object-store client per
+bucket while keeping each repository's layout and maintenance state separate:
+
+```toml
+[[repositories]]
+owner = "my-team"
+name = "service"
+bucket = "my-git-bucket"
+prefix = "repositories/my-team/service"
+
+[[repositories]]
+owner = "my-team"
+name = "docs"
+bucket = "my-git-bucket"
+prefix = "repositories/my-team/docs"
+```
+
+Crab rejects duplicate bucket and prefix pairs because they would make two
+repository names share mutable Git state. Prefixes are storage namespaces,
+not display names, so keep them stable when renaming a repository in the
+catalog.
+
 Configure credentials using Crab's existing S3 environment provider. For local
 RustFS, set `AWS_ENDPOINT_URL`, `AWS_ALLOW_HTTP=true`, and
 `AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false`, plus credentials in a private environment

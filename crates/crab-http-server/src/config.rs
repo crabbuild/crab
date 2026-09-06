@@ -99,6 +99,7 @@ impl Config {
             return Err(Error::Config("configure at least one repository"));
         }
         let mut names = HashSet::new();
+        let mut storage_locations = HashSet::new();
         for repository in &self.repositories {
             let mut subjects = HashSet::new();
             let mut member_names = HashSet::new();
@@ -144,6 +145,11 @@ impl Config {
             }
             if repository.bucket.is_empty() || repository.prefix.is_empty() {
                 return Err(Error::Config("repository bucket and prefix are required"));
+            }
+            if !storage_locations.insert((&repository.bucket, &repository.prefix)) {
+                return Err(Error::Config(
+                    "repository bucket and prefix must identify a unique storage location",
+                ));
             }
             let default_ref = format!("refs/heads/{}", repository.default_branch);
             if repository.default_branch.starts_with("refs/")
@@ -268,6 +274,21 @@ mod tests {
         )
         .unwrap();
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn repositories_can_share_a_bucket_when_prefixes_are_distinct() {
+        let config: Config = toml::from_str(
+            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='shared'\nprefix='team/project'\n[[repositories]]\nowner='team'\nname='docs'\nbucket='shared'\nprefix='team/docs'",
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
+
+        let duplicate: Config = toml::from_str(
+            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='shared'\nprefix='team/project'\n[[repositories]]\nowner='other'\nname='project'\nbucket='shared'\nprefix='team/project'",
+        )
+        .unwrap();
+        assert!(duplicate.validate().is_err());
     }
 
     #[test]

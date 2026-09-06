@@ -188,8 +188,15 @@ pub async fn serve(config: Config) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let port = listener.local_addr()?.port();
     let mut repositories = BTreeMap::new();
+    let mut stores: BTreeMap<String, Store> = BTreeMap::new();
     for entry in config.repositories {
-        let store = build_static_env_store(&entry.bucket, StorageProviderKind::S3)?;
+        let store = if let Some(store) = stores.get(&entry.bucket) {
+            store.clone()
+        } else {
+            let store = build_static_env_store(&entry.bucket, StorageProviderKind::S3)?;
+            stores.insert(entry.bucket.clone(), store.clone());
+            store
+        };
         let configured_protections = BranchProtections::configured(&entry.protected_branches);
         let repository = Repository {
             layout: StoreLayout::new(store.clone(), entry.prefix.clone()),
