@@ -101,9 +101,17 @@ impl AddValidationCache {
                 .map_err(|error| database_error("prepare add validation cache update", error))?;
             let mut values: Vec<&dyn rusqlite::ToSql> =
                 Vec::with_capacity(batch.len().saturating_mul(2));
-            for (path, token) in batch {
-                values.push(path.as_slice() as &dyn rusqlite::ToSql);
-                values.push(token.as_slice() as &dyn rusqlite::ToSql);
+            let paths = batch
+                .iter()
+                .map(|(path, _)| path.as_slice())
+                .collect::<Vec<_>>();
+            let tokens = batch
+                .iter()
+                .map(|(_, token)| token.as_slice())
+                .collect::<Vec<_>>();
+            for index in 0..batch.len() {
+                values.push(&paths[index] as &dyn rusqlite::ToSql);
+                values.push(&tokens[index] as &dyn rusqlite::ToSql);
             }
             statement
                 .execute(params_from_iter(values))
