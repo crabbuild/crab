@@ -1040,8 +1040,22 @@ fn indexed_recipe_remote_chunk_page(
     recipe: &crate::recipe::FileRecipe,
     start_occurrence: u64,
 ) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
+    let end_occurrence = start_occurrence
+        .checked_add(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
+        .ok_or_else(|| {
+            StagingError::StagingCorrupt("remote authority page range overflow".to_owned())
+        })?;
+    indexed_recipe_remote_chunk_range(index, recipe, start_occurrence, end_occurrence)
+}
+
+fn indexed_recipe_remote_chunk_range(
+    index: &Mutex<Index>,
+    recipe: &crate::recipe::FileRecipe,
+    start_occurrence: u64,
+    end_occurrence: u64,
+) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
     lock_index(index)?
-        .recipe_remote_chunk_page(&recipe.hash(), start_occurrence)?
+        .recipe_remote_chunk_range(&recipe.hash(), start_occurrence, end_occurrence)?
         .into_iter()
         .map(|existing| {
             Ok((
@@ -3965,6 +3979,16 @@ impl StagingAreaReadOnly {
         start_occurrence: u64,
     ) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
         indexed_recipe_remote_chunk_page(&self.index, recipe, start_occurrence)
+    }
+
+    /// Load a bounded range of proof-bearing remote authority for an immutable recipe.
+    pub fn recipe_remote_chunk_range(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+        end_occurrence: u64,
+    ) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
+        indexed_recipe_remote_chunk_range(&self.index, recipe, start_occurrence, end_occurrence)
     }
 
     /// Load the indexed add-time push plan for a file.

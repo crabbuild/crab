@@ -6906,6 +6906,20 @@ impl Index {
             .ok_or_else(|| {
                 StagingError::StagingCorrupt("remote authority page range overflow".to_owned())
             })?;
+        self.recipe_remote_chunk_range(recipe_hash, start_occurrence, end_occurrence)
+    }
+
+    pub fn recipe_remote_chunk_range(
+        &self,
+        recipe_hash: &[u8; 32],
+        start_occurrence: u64,
+        end_occurrence: u64,
+    ) -> Result<Vec<ExistingChunkWrite>> {
+        if end_occurrence < start_occurrence {
+            return Err(StagingError::StagingCorrupt(
+                "remote authority range ends before it starts".to_owned(),
+            ));
+        }
         let start_occurrence = i64::try_from(start_occurrence).map_err(|_| {
             StagingError::StagingCorrupt("remote authority page start is too large".to_owned())
         })?;
@@ -6949,7 +6963,9 @@ impl Index {
             .map_err(|error| {
                 StagingError::Internal(format!("failed to query recipe remote authority: {error}"))
             })?;
-        let mut out = Vec::with_capacity(crate::recipe::RECIPE_PAGE_ENTRIES);
+        let capacity = usize::try_from(end_occurrence.saturating_sub(start_occurrence))
+            .unwrap_or(crate::recipe::RECIPE_PAGE_ENTRIES);
+        let mut out = Vec::with_capacity(capacity);
         for row in rows {
             let (
                 chunk_hash,

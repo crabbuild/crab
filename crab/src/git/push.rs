@@ -10636,9 +10636,24 @@ impl PushPipeline {
 
             let mut remote_authority_hashes = Vec::new();
             let mut next_occurrence = 0u64;
+            const REMOTE_AUTHORITY_BATCH_PAGES: u64 = 16;
+            let page_entries = crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64;
+            let batch_entries = page_entries
+                .checked_mul(REMOTE_AUTHORITY_BATCH_PAGES)
+                .ok_or_else(|| {
+                    CrabError::StagingCorrupt("remote authority batch range overflow".to_owned())
+                })?;
             while next_occurrence < recipe.chunk_count() {
+                let end_occurrence = next_occurrence
+                    .checked_add(batch_entries)
+                    .ok_or_else(|| {
+                        CrabError::StagingCorrupt(
+                            "remote authority batch range overflow".to_owned(),
+                        )
+                    })?
+                    .min(recipe.chunk_count());
                 for (chunk_hash, candidate) in
-                    staging.recipe_remote_chunk_page(&recipe, next_occurrence)?
+                    staging.recipe_remote_chunk_range(&recipe, next_occurrence, end_occurrence)?
                 {
                     let size = expected_sizes.get(&chunk_hash).copied().ok_or_else(|| {
                         CrabError::StagingCorrupt(format!(
@@ -10673,13 +10688,7 @@ impl PushPipeline {
                         }
                     }
                 }
-                next_occurrence = next_occurrence
-                    .checked_add(crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64)
-                    .ok_or_else(|| {
-                        CrabError::StagingCorrupt(
-                            "remote authority recipe page overflow".to_owned(),
-                        )
-                    })?;
+                next_occurrence = end_occurrence;
             }
             self.record_add_plan_adopted();
             needed_plans.push((
