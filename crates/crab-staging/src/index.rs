@@ -2163,7 +2163,7 @@ impl Index {
                 StagingError::Internal(format!("decode file chunk index: {error}"))
             })?;
             validate_chunk_index(expected_index, chunk_index)?;
-            let actual_hash = decode_chunk_hash_blob(raw_hash)?;
+            let actual_hash = crab_xet::hash::MerkleHash::from(decode_chunk_hash_blob(raw_hash)?);
             let actual_size = u64::try_from(size)
                 .map_err(|_| StagingError::StagingCorrupt("chunk size is negative".to_owned()))?;
             if actual_hash != *expected_hash || actual_size != *expected_chunk_size {
