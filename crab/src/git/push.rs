@@ -5059,6 +5059,8 @@ impl UploadedXorb {
     }
 }
 
+const PREPARED_XORB_VERIFY_BUFFER_BYTES: usize = 1024 * 1024;
+
 async fn verify_prepared_xorb_plan(
     path: &Path,
     file_hash: &MerkleHash,
@@ -5091,12 +5093,19 @@ async fn verify_prepared_xorb_plan(
             CrabError::Internal("prepared xorb metadata length does not fit u64".to_owned())
         })?)
         .ok_or_else(|| CrabError::Internal("prepared xorb metadata range overflow".to_owned()))?;
+    let expected_len = u64::try_from(len)
+        .map_err(|_| CrabError::Internal("prepared xorb length does not fit u64".to_owned()))?;
+    if metadata_end > expected_len {
+        return Err(CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} has metadata outside its payload",
+            xorb_hash.hex(),
+            file_hash.hex()
+        )));
+    }
 
     file.seek(SeekFrom::Start(0)).await?;
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0u8; 1024 * 1024];
-    let expected_len = u64::try_from(len)
-        .map_err(|_| CrabError::Internal("prepared xorb length does not fit u64".to_owned()))?;
+    let mut buffer = vec![0u8; PREPARED_XORB_VERIFY_BUFFER_BYTES];
     let mut offset = 0u64;
     loop {
         let read = file.read(&mut buffer).await?;
