@@ -242,7 +242,7 @@ impl CachingStore {
         };
 
         #[cfg(feature = "remote-client")]
-        if self.dedup_enabled() && self.cache_client.is_some() {
+        {
             let mut cs = cs;
             // Health-check the remote cache service. If unhealthy, disable
             // the remote client but keep the local cache active.
@@ -921,7 +921,7 @@ impl CachingStore {
         let _ = repo_path;
 
         #[cfg(feature = "remote-client")]
-        {
+        if self.dedup_enabled() && self.cache_client.is_some() {
             let mut unique_indexes: HashMap<[u8; 32], usize> = HashMap::with_capacity(hashes.len());
             let mut unique_hashes = Vec::with_capacity(hashes.len());
             let mut input_indexes: Vec<Vec<usize>> = Vec::with_capacity(hashes.len());
