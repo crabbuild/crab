@@ -149,6 +149,7 @@ pub async fn prepare_file_push_plans_with_progress(
         .await;
     }
     let mut verified_sequences = HashSet::new();
+    let mut ownership_cache = HashMap::new();
     for file in files {
         check_cancelled(cancel)?;
         let file_summary = prepare_one_file_plan(
@@ -158,6 +159,7 @@ pub async fn prepare_file_push_plans_with_progress(
             remote_lookup,
             &mut prepared_cache,
             &mut verified_sequences,
+            &mut ownership_cache,
             cancel,
         )
         .await?;
@@ -200,6 +202,7 @@ async fn prepare_cached_file_plans_with_progress(
     mut on_progress: Option<&mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
 ) -> Result<AddPushPlanSummary> {
     let mut prepared_plans = Vec::with_capacity(files.len());
+    let mut ownership_cache = HashMap::new();
     for file in files {
         check_cancelled(cancel)?;
         let file_existing_refs = existing_refs
@@ -230,6 +233,7 @@ async fn prepare_cached_file_plans_with_progress(
             build_xorb_builder,
             prepared_cache,
             verified_sequences,
+            &mut ownership_cache,
             cancel,
         )
         .await?;
@@ -713,6 +717,7 @@ async fn prepare_one_file_plan(
     remote_lookup: Option<&dyn ExistingChunkLookup>,
     prepared_cache: &mut PreparedXorbCache,
     verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
+    ownership_cache: &mut HashMap<(MerkleHash, MerkleHash), bool>,
     cancel: &CancellationToken,
 ) -> Result<FilePlanSummary> {
     let existing_refs = lookup_existing_candidates(file.chunks, remote_lookup).await?;
@@ -729,6 +734,7 @@ async fn prepare_one_file_plan(
         build_xorb_builder,
         prepared_cache,
         verified_sequences,
+        ownership_cache,
         cancel,
     )
     .await?;
@@ -745,6 +751,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
     prepared_cache: &mut PreparedXorbCache,
     verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
+    ownership_cache: &mut HashMap<(MerkleHash, MerkleHash), bool>,
     cancel: &CancellationToken,
 ) -> Result<PreparedFilePlan> {
     if existing_refs.len() != file.chunks.len() {
@@ -783,7 +790,6 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut cache_link_misses = 0u64;
     let mut unusable_cached_candidates = HashSet::new();
     let mut matching_scratch = HashSet::new();
-    let mut exclusive_payloads = HashMap::new();
     for (index, (chunk_hash, size)) in chunks.iter().enumerate() {
         let existing_ref = existing_refs
             .at(index)
@@ -836,12 +842,13 @@ async fn prepare_one_file_plan_with_existing_refs(
                     .is_some_and(|state| state.remote)
             });
             let exclusive = if contains_remote {
-                if let Some(exclusive) = exclusive_payloads.get(&candidate.xorb_hash) {
+                let key = (candidate.xorb_hash, recipe_hash);
+                if let Some(exclusive) = ownership_cache.get(&key) {
                     *exclusive
                 } else {
                     let exclusive = staging
                         .prepared_payload_exclusive_to_recipe(&candidate.xorb_hash, &recipe_hash)?;
-                    exclusive_payloads.insert(candidate.xorb_hash, exclusive);
+                    ownership_cache.insert(key, exclusive);
                     exclusive
                 }
             } else {
