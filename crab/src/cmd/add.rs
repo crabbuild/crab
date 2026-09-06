@@ -5251,6 +5251,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clean_index_filter_defers_cache_setup_without_indexed_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("new-model.bin");
+        let payload = b"new model payload";
+        std::fs::write(&path, payload).unwrap();
+        let context = crate::git::worktree::WorktreeContext::resolve_from_path(dir.path()).unwrap();
+        let cache_path = crate::cache::add_validation::cache_path_for_context(&context);
+        assert!(!cache_path.exists());
+
+        let (to_process, skipped) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, payload.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(to_process.len(), 1);
+        assert_eq!(skipped.files, 0);
+        assert!(!cache_path.exists());
+    }
+
+    #[tokio::test]
     #[cfg(unix)]
     async fn clean_index_filter_reuses_verified_add_validation() {
         let dir = tempfile::tempdir().unwrap();
