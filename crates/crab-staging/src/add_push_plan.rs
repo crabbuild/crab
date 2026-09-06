@@ -732,6 +732,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     )
     .await?;
     let mut plan = FilePushPlan::new_verified_recipe(&recipe);
+    let recipe_hash = recipe.hash();
 
     let mut file_chunk_sizes = HashMap::new();
     for (chunk_hash, size) in chunks {
@@ -754,6 +755,7 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut cache_xorbs = 0u64;
     let mut cache_link_misses = 0u64;
     let mut unusable_cached_xorb_sources = HashSet::new();
+    let mut exclusive_payloads = HashMap::new();
     for ((chunk_hash, size), existing_ref) in chunks.iter().zip(existing_refs.iter()) {
         if let Some(candidate) = existing_ref
             && u64::from(candidate.xorb_ref.uncompressed_size) == *size
@@ -789,10 +791,19 @@ async fn prepare_one_file_plan_with_existing_refs(
                 .placements
                 .iter()
                 .any(|placement| remote_existing_chunks.contains(&placement.chunk_hash));
-            if contains_remote
-                && staging
-                    .prepared_payload_exclusive_to_recipe(&candidate.xorb_hash, &recipe.hash())?
-            {
+            let exclusive = if contains_remote {
+                if let Some(exclusive) = exclusive_payloads.get(&candidate.xorb_hash) {
+                    *exclusive
+                } else {
+                    let exclusive = staging
+                        .prepared_payload_exclusive_to_recipe(&candidate.xorb_hash, &recipe_hash)?;
+                    exclusive_payloads.insert(candidate.xorb_hash, exclusive);
+                    exclusive
+                }
+            } else {
+                false
+            };
+            if exclusive {
                 continue;
             }
             if planned_prepared_xorbs.contains(&candidate.xorb_hash) {
