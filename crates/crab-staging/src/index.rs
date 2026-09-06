@@ -2902,38 +2902,51 @@ impl Index {
             )));
         }
 
-        let mut statement = tx
-            .prepare_cached(
-                "INSERT INTO recipe_recording_terms
-                 (batch_id, occurrence, chunk_hash, chunk_offset, chunk_size)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            )
-            .map_err(|e| {
-                StagingError::Internal(format!("failed to prepare recipe recording insert: {e}"))
-            })?;
+        // Five parameters per row keep 128-row inserts below SQLite's default limit.
+        const RECIPE_RECORDING_BATCH: usize = 128;
         let mut occurrence = start_occurrence;
         let mut offset = start_offset;
-        for (chunk_hash, size) in chunks {
-            let raw_hash: [u8; 32] = (*chunk_hash).into();
-            statement
-                .execute(params![
-                    batch_id,
-                    sqlite_i64("recipe recording occurrence", occurrence)?,
-                    raw_hash.as_slice(),
-                    sqlite_i64("recipe recording offset", offset)?,
-                    sqlite_i64("recipe recording size", *size)?,
-                ])
-                .map_err(|e| {
-                    StagingError::Internal(format!("failed to append recipe recording term: {e}"))
+        for batch in chunks.chunks(RECIPE_RECORDING_BATCH) {
+            let mut hashes = Vec::with_capacity(batch.len());
+            let mut occurrences = Vec::with_capacity(batch.len());
+            let mut offsets = Vec::with_capacity(batch.len());
+            let mut sizes = Vec::with_capacity(batch.len());
+            for (chunk_hash, size) in batch {
+                hashes.push((*chunk_hash).into());
+                occurrences.push(sqlite_i64("recipe recording occurrence", occurrence)?);
+                offsets.push(sqlite_i64("recipe recording offset", offset)?);
+                sizes.push(sqlite_i64("recipe recording size", *size)?);
+                occurrence = occurrence.checked_add(1).ok_or_else(|| {
+                    StagingError::StagingCorrupt("recipe recording occurrence overflow".to_owned())
                 })?;
-            occurrence = occurrence.checked_add(1).ok_or_else(|| {
-                StagingError::StagingCorrupt("recipe recording occurrence overflow".to_owned())
+                offset = offset.checked_add(*size).ok_or_else(|| {
+                    StagingError::StagingCorrupt("recipe recording byte offset overflow".to_owned())
+                })?;
+            }
+            let values_sql = std::iter::repeat_n("(?,?,?,?,?)", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let insert_sql = format!(
+                "INSERT INTO recipe_recording_terms
+                 (batch_id, occurrence, chunk_hash, chunk_offset, chunk_size)
+                 VALUES {values_sql}"
+            );
+            let mut statement = tx.prepare_cached(&insert_sql).map_err(|e| {
+                StagingError::Internal(format!("failed to prepare recipe recording insert: {e}"))
             })?;
-            offset = offset.checked_add(*size).ok_or_else(|| {
-                StagingError::StagingCorrupt("recipe recording byte offset overflow".to_owned())
+            let mut values: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 5);
+            for index in 0..batch.len() {
+                values.push(batch_id);
+                values.push(&occurrences[index]);
+                values.push(hashes[index].as_slice());
+                values.push(&offsets[index]);
+                values.push(&sizes[index]);
+            }
+            statement.execute(params_from_iter(values)).map_err(|e| {
+                StagingError::Internal(format!("failed to append recipe recording term batch: {e}"))
             })?;
+            drop(statement);
         }
-        drop(statement);
         tx.commit().map_err(|e| {
             StagingError::Internal(format!("failed to commit recipe recording append: {e}"))
         })?;
