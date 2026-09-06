@@ -4485,7 +4485,9 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                     warn!(error = %error, "add remote candidate memory cache update failed");
                 }
                 let cache = Arc::clone(cache);
-                match tokio::task::spawn_blocking(move || cache.persist_results(&updates)).await {
+                match tokio::task::spawn_blocking(move || cache.persist_unique_results(&updates))
+                    .await
+                {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
                         warn!(error = %error, "add remote candidate persistent cache update failed");

@@ -267,6 +267,25 @@ impl AddRemoteCandidateCache {
         &self,
         entries: &[(MerkleHash, Option<ExistingChunkCandidate>)],
     ) -> Result<()> {
+        self.persist_results_inner(entries, true)
+    }
+
+    /// Persist entries whose chunk hashes are unique within the batch.
+    ///
+    /// The add classifier already deduplicates lookup inputs, so this path can
+    /// skip the repository-sized last-result map used by the general helper.
+    pub(crate) fn persist_unique_results(
+        &self,
+        entries: &[(MerkleHash, Option<ExistingChunkCandidate>)],
+    ) -> Result<()> {
+        self.persist_results_inner(entries, false)
+    }
+
+    fn persist_results_inner(
+        &self,
+        entries: &[(MerkleHash, Option<ExistingChunkCandidate>)],
+        deduplicate: bool,
+    ) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -275,7 +294,7 @@ impl AddRemoteCandidateCache {
             // pages in input order preserves last-result-wins semantics while
             // avoiding a repository-sized deduplication map.
             for batch in entries.chunks(PERSIST_DEDUP_BATCH_SIZE) {
-                self.persist_results(batch)?;
+                self.persist_results_inner(batch, deduplicate)?;
             }
             return Ok(());
         }
@@ -287,17 +306,27 @@ impl AddRemoteCandidateCache {
         let transaction = connection
             .transaction()
             .map_err(|error| database_error("begin update", error))?;
-        let mut latest = HashMap::with_capacity(entries.len());
-        for (chunk_hash, candidate) in entries {
-            latest.insert(<[u8; 32]>::from(*chunk_hash), *candidate);
-        }
         let mut positive_entries = Vec::new();
         let mut negative_hashes = Vec::new();
-        for (chunk_hash, candidate) in latest {
-            if let Some(candidate) = candidate {
-                positive_entries.push((chunk_hash, candidate));
-            } else {
-                negative_hashes.push(chunk_hash);
+        if deduplicate {
+            let mut latest = HashMap::with_capacity(entries.len());
+            for (chunk_hash, candidate) in entries {
+                latest.insert(<[u8; 32]>::from(*chunk_hash), *candidate);
+            }
+            for (chunk_hash, candidate) in latest {
+                if let Some(candidate) = candidate {
+                    positive_entries.push((chunk_hash, candidate));
+                } else {
+                    negative_hashes.push(chunk_hash);
+                }
+            }
+        } else {
+            for (chunk_hash, candidate) in entries {
+                if let Some(candidate) = candidate {
+                    positive_entries.push((<[u8; 32]>::from(*chunk_hash), *candidate));
+                } else {
+                    negative_hashes.push(<[u8; 32]>::from(*chunk_hash));
+                }
             }
         }
         let positive_hashes = positive_entries
@@ -707,7 +736,9 @@ mod tests {
             .into_iter()
             .map(|(hash, candidate)| (hash, Some(candidate)))
             .collect::<Vec<_>>();
-        cache.persist_results(&entries).expect("persist");
+        cache
+            .persist_unique_results(&entries)
+            .expect("persist unique");
         let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
         assert_eq!(cache.load_persistent(&hashes).expect("load").len(), 600);
     }
@@ -723,7 +754,9 @@ mod tests {
                 (MerkleHash::from(bytes), None)
             })
             .collect::<Vec<_>>();
-        cache.persist_results(&entries).expect("persist negatives");
+        cache
+            .persist_unique_results(&entries)
+            .expect("persist unique negatives");
         let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
         let loaded = cache.load_persistent(&hashes).expect("load negatives");
         assert_eq!(loaded.len(), 600);
