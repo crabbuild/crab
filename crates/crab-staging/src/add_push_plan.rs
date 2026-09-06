@@ -279,6 +279,20 @@ struct PreparedCandidateChoice {
     covered_chunks: Vec<MerkleHash>,
 }
 
+struct ReadBatchScratch {
+    hashes: Vec<MerkleHash>,
+    to_pack: Vec<(Chunk, RunId)>,
+}
+
+impl ReadBatchScratch {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            hashes: Vec::with_capacity(capacity),
+            to_pack: Vec::with_capacity(capacity),
+        }
+    }
+}
+
 struct UncachedFilePlan<'a> {
     file_hash: MerkleHash,
     chunks: &'a [(MerkleHash, u64)],
@@ -362,6 +376,7 @@ async fn prepare_uncached_file_plans_with_progress(
     let chunk_owners = build_uncached_chunk_owners(&file_plans);
     let mut queued_chunks = HashSet::new();
     let mut read_batch = Vec::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
+    let mut read_scratch = ReadBatchScratch::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
     for file_idx in 0..file_plans.len() {
         let run_id = RunId(file_idx as u64);
         for &chunk in file_plans[file_idx].chunks {
@@ -373,7 +388,14 @@ async fn prepare_uncached_file_plans_with_progress(
             }
             read_batch.push((chunk, run_id));
             if read_batch.len() >= ADD_PLAN_READ_BATCH_CHUNKS {
-                flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
+                flush_uncached_read_batch(
+                    staging,
+                    &mut read_batch,
+                    &mut read_scratch,
+                    &mut builder,
+                    cancel,
+                )
+                .await?;
                 write_completed_uncached_xorbs(
                     staging,
                     &mut file_plans,
@@ -384,7 +406,14 @@ async fn prepare_uncached_file_plans_with_progress(
             }
         }
     }
-    flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
+    flush_uncached_read_batch(
+        staging,
+        &mut read_batch,
+        &mut read_scratch,
+        &mut builder,
+        cancel,
+    )
+    .await?;
     write_completed_uncached_xorbs(staging, &mut file_plans, &chunk_owners, &mut builder).await?;
     for result in builder.finalize()? {
         record_uncached_prepared_xorb(staging, &mut file_plans, &chunk_owners, result).await?;
@@ -514,6 +543,7 @@ async fn verified_staged_chunks(
 async fn flush_uncached_read_batch(
     staging: &StagingArea,
     read_batch: &mut Vec<((MerkleHash, u64), RunId)>,
+    scratch: &mut ReadBatchScratch,
     builder: &mut XorbBuilder,
     cancel: &CancellationToken,
 ) -> Result<()> {
@@ -521,14 +551,14 @@ async fn flush_uncached_read_batch(
         return Ok(());
     }
     check_cancelled(cancel)?;
-    let hashes = read_batch
-        .iter()
-        .map(|((hash, _), _)| *hash)
-        .collect::<Vec<_>>();
-    let payloads = staging.get_chunks_batch(&hashes).await?;
-    let mut to_pack = Vec::with_capacity(read_batch.len());
+    scratch.hashes.clear();
+    scratch
+        .hashes
+        .extend(read_batch.iter().map(|((hash, _), _)| *hash));
+    let payloads = staging.get_chunks_batch(&scratch.hashes).await?;
+    scratch.to_pack.clear();
     for ((expected, run_id), (actual_hash, data)) in read_batch.iter().zip(payloads) {
-        to_pack.push((
+        scratch.to_pack.push((
             Chunk {
                 hash: actual_hash,
                 data,
@@ -537,7 +567,7 @@ async fn flush_uncached_read_batch(
         ));
         debug_assert_eq!(actual_hash, expected.0);
     }
-    builder.push_batch(&to_pack)?;
+    builder.push_batch(&scratch.to_pack)?;
     read_batch.clear();
     Ok(())
 }
@@ -807,19 +837,34 @@ async fn prepare_one_file_plan_with_existing_refs(
 
     let mut builder = build_xorb_builder();
     let mut read_batch = Vec::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
+    let mut read_scratch = ReadBatchScratch::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
     for &chunk in chunks {
         if !new_chunks.remove(&chunk.0) {
             continue;
         }
         read_batch.push((chunk, RunId(0)));
         if read_batch.len() == ADD_PLAN_READ_BATCH_CHUNKS {
-            flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
+            flush_uncached_read_batch(
+                staging,
+                &mut read_batch,
+                &mut read_scratch,
+                &mut builder,
+                cancel,
+            )
+            .await?;
             write_completed_xorbs(staging, &mut builder, &mut plan, prepared_cache).await?;
         }
     }
 
     if !read_batch.is_empty() {
-        flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
+        flush_uncached_read_batch(
+            staging,
+            &mut read_batch,
+            &mut read_scratch,
+            &mut builder,
+            cancel,
+        )
+        .await?;
         write_completed_xorbs(staging, &mut builder, &mut plan, prepared_cache).await?;
     }
 
