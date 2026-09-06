@@ -11212,6 +11212,17 @@ impl PushPipeline {
             return Ok(XorbPackSummary::default());
         }
 
+        // Recipe roots are immutable after lookup_staging. Snapshot the
+        // small per-file map once so the pack read schedule does not await
+        // the cache mutex for every pointer in a large repository.
+        let recipe_cache = {
+            let cache = self.chunk_cache.lock().await;
+            cache
+                .iter()
+                .map(|(file_hash, cached)| (*file_hash, cached.recipe.clone()))
+                .collect::<HashMap<_, _>>()
+        };
+
         let residual_add_plan_chunks = self
             .new_chunk_hashes
             .lock()
@@ -11268,7 +11279,13 @@ impl PushPipeline {
             for (file_idx, ptr) in pointers.iter().enumerate() {
                 check_cancelled(&self.cancel)?;
                 let file_hash = MerkleHash::from(ptr.file_hash);
-                let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? else {
+                let cached = recipe_cache.get(&file_hash).ok_or_else(|| {
+                    CrabError::Internal(format!(
+                        "push pipeline invariant violated: verified recipe root missing for file {}; lookup_staging must run first",
+                        file_hash.hex()
+                    ))
+                })?;
+                let Some(recipe) = cached else {
                     debug!(file_hash = %file_hash.hex(), "no staged chunks for pointer, skipping");
                     if let Some(ref p) = self.progress {
                         p.inc_pack_file();
