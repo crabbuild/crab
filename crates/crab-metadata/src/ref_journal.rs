@@ -1152,7 +1152,7 @@ mod tests {
         let ref_name = "refs/heads/main";
         if existing {
             let (initial, heads) = transaction_for(store, layout, vec![edit(ref_name, 'a')]).await;
-            commit_ref_transaction(store, layout, &initial, &heads)
+            commit_ref_transaction(store, layout, &initial, &heads, || false)
                 .await
                 .unwrap();
         }
@@ -1168,7 +1168,7 @@ mod tests {
         let mut successor_edit = edit(ref_name, 'c');
         successor_edit.old_oid = existing.then(|| "a".repeat(40));
         let (successor, heads) = transaction_for(store, layout, vec![successor_edit]).await;
-        commit_ref_transaction(store, layout, &successor, &heads)
+        commit_ref_transaction(store, layout, &successor, &heads, || false)
             .await
             .unwrap();
         let successor_head = read_ref_head(store, layout, ref_name).await.unwrap();
@@ -1180,7 +1180,7 @@ mod tests {
         let mut next_edit = edit(ref_name, 'd');
         next_edit.old_oid = Some("c".repeat(40));
         let (next, heads) = transaction_for(store, layout, vec![next_edit]).await;
-        commit_ref_transaction(store, layout, &next, &heads)
+        commit_ref_transaction(store, layout, &next, &heads, || false)
             .await
             .unwrap();
         let visible = materialize(store, layout, &Manifest::default_for_repo(ref_name)).await;
@@ -1203,12 +1203,12 @@ mod tests {
         let (transaction, stale_heads) =
             transaction_for(&store, &layout, vec![edit(left, 'a'), edit(right, 'b')]).await;
         let (winner, heads) = transaction_for(&store, &layout, vec![edit(right, 'c')]).await;
-        commit_ref_transaction(&store, &layout, &winner, &heads)
+        commit_ref_transaction(&store, &layout, &winner, &heads, || false)
             .await
             .unwrap();
 
         assert!(
-            commit_ref_transaction(&store, &layout, &transaction, &stale_heads)
+            commit_ref_transaction(&store, &layout, &transaction, &stale_heads, || false)
                 .await
                 .is_err()
         );
@@ -1231,7 +1231,7 @@ mod tests {
         );
 
         let (next, heads) = transaction_for(&store, &layout, vec![edit(left, 'd')]).await;
-        commit_ref_transaction(&store, &layout, &next, &heads)
+        commit_ref_transaction(&store, &layout, &next, &heads, || false)
             .await
             .unwrap();
         let after = materialize(&store, &layout, &Manifest::default_for_repo(right)).await;
@@ -1362,7 +1362,7 @@ mod tests {
         let (store, layout) = fixture();
         let ref_name = "refs/heads/main";
         let (initial, heads) = transaction_for(&store, &layout, vec![edit(ref_name, 'a')]).await;
-        commit_ref_transaction(&store, &layout, &initial, &heads)
+        commit_ref_transaction(&store, &layout, &initial, &heads, || false)
             .await
             .unwrap();
         let original = read_ref_head(&store, &layout, ref_name).await.unwrap();

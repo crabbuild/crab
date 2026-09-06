@@ -770,7 +770,7 @@ mod tests {
             .unwrap();
 
         let (successor, heads) = transaction(&store, &router, ref_name, 'b').await;
-        let successor = commit_ref_transaction(&store, &router, &successor, &heads)
+        let successor = commit_ref_transaction(&store, &router, &successor, &heads, || false)
             .await
             .unwrap();
         store
