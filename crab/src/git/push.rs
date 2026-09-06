@@ -10517,6 +10517,7 @@ impl PushPipeline {
                 continue;
             }
 
+            let mut remote_authority_hashes = Vec::new();
             let mut next_occurrence = 0u64;
             while next_occurrence < recipe.chunk_count() {
                 for (chunk_hash, candidate) in
@@ -10537,13 +10538,15 @@ impl PushPipeline {
                             candidate.xorb_ref.uncompressed_size
                         )));
                     }
-                    if let Some(existing) = candidate_refs.insert(chunk_hash, candidate)
-                        && existing != candidate
-                    {
-                        return Err(CrabError::StagingCorrupt(format!(
-                            "add-time push plans disagree on remote placement proof for chunk {}",
-                            chunk_hash.hex()
-                        )));
+                    match candidate_refs.insert(chunk_hash, candidate) {
+                        None => remote_authority_hashes.push(chunk_hash),
+                        Some(existing) if existing == candidate => {}
+                        Some(_) => {
+                            return Err(CrabError::StagingCorrupt(format!(
+                                "add-time push plans disagree on remote placement proof for chunk {}",
+                                chunk_hash.hex()
+                            )));
+                        }
                     }
                 }
                 next_occurrence = next_occurrence
@@ -10555,7 +10558,14 @@ impl PushPipeline {
                     })?;
             }
             self.record_add_plan_adopted();
-            needed_plans.push((file_hash, recipe, plan, file_sizes, prepared));
+            needed_plans.push((
+                file_hash,
+                recipe,
+                plan,
+                file_sizes,
+                prepared,
+                remote_authority_hashes,
+            ));
         }
         if needed_plans.is_empty() {
             return Ok(false);
@@ -10632,7 +10642,7 @@ impl PushPipeline {
         let mut placement_map = HashMap::new();
         let mut unusable_prepared_xorbs = 0usize;
         let mut skipped_existing_prepared_xorbs = 0usize;
-        for (file_hash, recipe, plan, chunks, prepared) in &needed_plans {
+        for (file_hash, recipe, plan, chunks, prepared, _) in &needed_plans {
             for (planned_xorb, (prepared_hash, planned_placements)) in plan
                 .prepared_xorbs
                 .iter()
@@ -10721,37 +10731,27 @@ impl PushPipeline {
                 )
             })
             .collect();
-        for (file_hash, recipe, _, chunks, _) in &needed_plans {
-            let mut next_occurrence = 0u64;
-            while next_occurrence < recipe.chunk_count() {
-                for (chunk_hash, _) in staging.recipe_remote_chunk_page(recipe, next_occurrence)? {
-                    if verified_placement.contains_key(&chunk_hash)
-                        || placement_map.contains_key(&chunk_hash)
-                    {
-                        continue;
-                    }
-                    let size = chunks.get(&chunk_hash).copied().ok_or_else(|| {
-                        CrabError::StagingCorrupt(format!(
-                            "remote authority for chunk {} escaped file {} recipe coverage",
-                            chunk_hash.hex(),
-                            file_hash.hex()
-                        ))
-                    })?;
-                    if !staging.has_segment_payload(&chunk_hash, size)? {
-                        return Err(CrabError::StagingCorrupt(format!(
-                            "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
-                            chunk_hash.hex(),
-                            file_hash.hex()
-                        )));
-                    }
+        for (file_hash, _, _, chunks, _, remote_authority_hashes) in &needed_plans {
+            for chunk_hash in remote_authority_hashes {
+                if verified_placement.contains_key(chunk_hash)
+                    || placement_map.contains_key(chunk_hash)
+                {
+                    continue;
                 }
-                next_occurrence = next_occurrence
-                    .checked_add(crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64)
-                    .ok_or_else(|| {
-                        CrabError::StagingCorrupt(
-                            "remote authority recipe page overflow".to_owned(),
-                        )
-                    })?;
+                let size = chunks.get(chunk_hash).copied().ok_or_else(|| {
+                    CrabError::StagingCorrupt(format!(
+                        "remote authority for chunk {} escaped file {} recipe coverage",
+                        chunk_hash.hex(),
+                        file_hash.hex()
+                    ))
+                })?;
+                if !staging.has_segment_payload(chunk_hash, size)? {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
+                        chunk_hash.hex(),
+                        file_hash.hex()
+                    )));
+                }
             }
             for chunk_hash in chunks.keys() {
                 if placement_map.contains_key(chunk_hash)
