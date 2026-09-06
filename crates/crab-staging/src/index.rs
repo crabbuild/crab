@@ -7518,7 +7518,7 @@ impl Index {
 
     /// Batch locator lookup across `chunks` and `pending_chunks`.
     ///
-    /// Issues a single `WHERE chunk_hash IN (?, ?, ...)` query per table
+    /// Issues bounded `WHERE chunk_hash IN (?, ?, ...)` queries per table
     /// instead of one round-trip per hash. Returns locators in the same
     /// order as `hashes`, with `None` for chunks absent from both tables.
     ///
