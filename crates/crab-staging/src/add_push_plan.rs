@@ -279,6 +279,14 @@ struct PreparedCandidateChoice {
     covered_chunks: Vec<MerkleHash>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct FileChunkState {
+    size: u64,
+    remote: bool,
+    covered: bool,
+    read_needed: bool,
+}
+
 struct ReadBatchScratch {
     hashes: Vec<MerkleHash>,
     to_pack: Vec<(Chunk, RunId)>,
@@ -714,29 +722,30 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut plan = FilePushPlan::new_verified_recipe(&recipe);
     let recipe_hash = recipe.hash();
 
-    let mut file_chunk_sizes = HashMap::new();
-    for (chunk_hash, size) in chunks {
-        file_chunk_sizes.entry(*chunk_hash).or_insert(*size);
-    }
-    let remote_existing_chunks: HashSet<MerkleHash> = chunks
-        .iter()
-        .zip(existing_refs.iter())
-        .filter_map(|((chunk_hash, size), existing_ref)| {
-            existing_ref
-                .as_ref()
-                .filter(|candidate| u64::from(candidate.xorb_ref.uncompressed_size) == *size)
-                .map(|_| *chunk_hash)
-        })
-        .collect();
-    let mut new_chunks = HashSet::new();
+    let mut chunk_states = HashMap::<MerkleHash, FileChunkState>::new();
     let mut planned_prepared_xorbs = HashSet::new();
-    let mut covered_by_prepared_cache = HashSet::new();
     let mut cache_chunks = 0u64;
     let mut cache_xorbs = 0u64;
     let mut cache_link_misses = 0u64;
     let mut unusable_cached_xorb_sources = HashSet::new();
     let mut exclusive_payloads = HashMap::new();
     for ((chunk_hash, size), existing_ref) in chunks.iter().zip(existing_refs.iter()) {
+        let state = chunk_states.entry(*chunk_hash).or_insert(FileChunkState {
+            size: *size,
+            ..FileChunkState::default()
+        });
+        if existing_ref
+            .as_ref()
+            .is_some_and(|candidate| u64::from(candidate.xorb_ref.uncompressed_size) == *size)
+        {
+            state.remote = true;
+        }
+    }
+    for ((chunk_hash, size), existing_ref) in chunks.iter().zip(existing_refs.iter()) {
+        let state = chunk_states.entry(*chunk_hash).or_insert(FileChunkState {
+            size: *size,
+            ..FileChunkState::default()
+        });
         if let Some(candidate) = existing_ref
             && u64::from(candidate.xorb_ref.uncompressed_size) == *size
         {
@@ -746,31 +755,26 @@ async fn prepare_one_file_plan_with_existing_refs(
             ));
             continue;
         }
-        if remote_existing_chunks.contains(chunk_hash)
-            || covered_by_prepared_cache.contains(chunk_hash)
-        {
+        if state.remote || state.covered || state.read_needed {
             continue;
         }
-        if !new_chunks.insert(*chunk_hash) {
-            continue;
-        }
+        state.read_needed = true;
 
         let choices = ranked_prepared_candidates(
             prepared_cache,
             chunk_hash,
             *size,
-            &file_chunk_sizes,
-            &remote_existing_chunks,
-            &covered_by_prepared_cache,
+            &chunk_states,
             &unusable_cached_xorb_sources,
         );
         let mut used_cached_candidate = false;
         for choice in choices {
             let candidate = choice.candidate;
-            let contains_remote = candidate
-                .placements
-                .iter()
-                .any(|placement| remote_existing_chunks.contains(&placement.chunk_hash));
+            let contains_remote = candidate.placements.iter().any(|placement| {
+                chunk_states
+                    .get(&placement.chunk_hash)
+                    .is_some_and(|state| state.remote)
+            });
             let exclusive = if contains_remote {
                 if let Some(exclusive) = exclusive_payloads.get(&candidate.xorb_hash) {
                     *exclusive
@@ -787,11 +791,8 @@ async fn prepare_one_file_plan_with_existing_refs(
                 continue;
             }
             if planned_prepared_xorbs.contains(&candidate.xorb_hash) {
-                cache_chunks += mark_prepared_cache_coverage(
-                    &choice.covered_chunks,
-                    &mut covered_by_prepared_cache,
-                    &mut new_chunks,
-                );
+                cache_chunks +=
+                    mark_prepared_cache_coverage(&choice.covered_chunks, &mut chunk_states);
                 used_cached_candidate = true;
                 break;
             }
@@ -809,11 +810,8 @@ async fn prepare_one_file_plan_with_existing_refs(
                     plan.prepared_xorbs.push(planned);
                 }
                 planned_prepared_xorbs.insert(candidate.xorb_hash);
-                cache_chunks += mark_prepared_cache_coverage(
-                    &choice.covered_chunks,
-                    &mut covered_by_prepared_cache,
-                    &mut new_chunks,
-                );
+                cache_chunks +=
+                    mark_prepared_cache_coverage(&choice.covered_chunks, &mut chunk_states);
                 cache_xorbs += 1;
                 used_cached_candidate = true;
                 break;
@@ -831,9 +829,15 @@ async fn prepare_one_file_plan_with_existing_refs(
     let mut read_batch = Vec::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
     let mut read_scratch = ReadBatchScratch::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
     for &chunk in chunks {
-        if !new_chunks.remove(&chunk.0) {
+        let Some(state) = chunk_states.get_mut(&chunk.0) else {
+            return Err(StagingError::Internal(
+                "add push-plan chunk state disappeared".to_owned(),
+            ));
+        };
+        if !state.read_needed {
             continue;
         }
+        state.read_needed = false;
         read_batch.push((chunk, RunId(0)));
         if read_batch.len() == ADD_PLAN_READ_BATCH_CHUNKS {
             flush_uncached_read_batch(
@@ -884,9 +888,7 @@ fn ranked_prepared_candidates(
     prepared_cache: &PreparedXorbCache,
     chunk_hash: &MerkleHash,
     expected_size: u64,
-    file_chunk_sizes: &HashMap<MerkleHash, u64>,
-    remote_existing_chunks: &HashSet<MerkleHash>,
-    covered_by_prepared_cache: &HashSet<MerkleHash>,
+    chunk_states: &HashMap<MerkleHash, FileChunkState>,
     unusable_cached_xorb_sources: &HashSet<(MerkleHash, PreparedXorbSource)>,
 ) -> Vec<PreparedCandidateChoice> {
     let mut choices = Vec::new();
@@ -900,12 +902,7 @@ fn ranked_prepared_candidates(
         if u64::from(placement.uncompressed_size) != expected_size {
             continue;
         }
-        let covered_chunks = matching_file_chunks(
-            &candidate,
-            file_chunk_sizes,
-            remote_existing_chunks,
-            covered_by_prepared_cache,
-        );
+        let covered_chunks = matching_file_chunks(&candidate, chunk_states);
         if covered_chunks.is_empty() {
             continue;
         }
@@ -937,23 +934,21 @@ fn ranked_prepared_candidates(
 
 fn matching_file_chunks(
     candidate: &PreparedXorbCandidate,
-    file_chunk_sizes: &HashMap<MerkleHash, u64>,
-    remote_existing_chunks: &HashSet<MerkleHash>,
-    covered_by_prepared_cache: &HashSet<MerkleHash>,
+    chunk_states: &HashMap<MerkleHash, FileChunkState>,
 ) -> Vec<MerkleHash> {
     let mut seen = HashSet::new();
     let mut covered = Vec::new();
     for placement in &candidate.placements {
-        if !seen.insert(placement.chunk_hash)
-            || remote_existing_chunks.contains(&placement.chunk_hash)
-            || covered_by_prepared_cache.contains(&placement.chunk_hash)
-        {
+        if !seen.insert(placement.chunk_hash) {
             continue;
         }
-        let Some(expected_size) = file_chunk_sizes.get(&placement.chunk_hash) else {
+        let Some(state) = chunk_states.get(&placement.chunk_hash) else {
             continue;
         };
-        if u64::from(placement.uncompressed_size) == *expected_size {
+        if state.remote || state.covered {
+            continue;
+        }
+        if u64::from(placement.uncompressed_size) == state.size {
             covered.push(placement.chunk_hash);
         }
     }
@@ -962,13 +957,16 @@ fn matching_file_chunks(
 
 fn mark_prepared_cache_coverage(
     covered_chunks: &[MerkleHash],
-    covered_by_prepared_cache: &mut HashSet<MerkleHash>,
-    new_chunks: &mut HashSet<MerkleHash>,
+    chunk_states: &mut HashMap<MerkleHash, FileChunkState>,
 ) -> u64 {
     let mut newly_covered = 0;
     for chunk_hash in covered_chunks {
-        if covered_by_prepared_cache.insert(*chunk_hash) {
-            new_chunks.remove(chunk_hash);
+        let Some(state) = chunk_states.get_mut(chunk_hash) else {
+            continue;
+        };
+        if !state.covered {
+            state.covered = true;
+            state.read_needed = false;
             newly_covered += 1;
         }
     }
@@ -1627,26 +1625,22 @@ mod tests {
             .insert_cached_xorb("second.xorb".into(), &planned)
             .expect("insert second source");
 
-        let file_chunk_sizes = HashMap::from([(chunk_hash, 10)]);
-        let empty_chunks = HashSet::new();
-        let choices = ranked_prepared_candidates(
-            &cache,
-            &chunk_hash,
-            10,
-            &file_chunk_sizes,
-            &empty_chunks,
-            &empty_chunks,
-            &HashSet::new(),
-        );
+        let chunk_states = HashMap::from([(
+            chunk_hash,
+            FileChunkState {
+                size: 10,
+                ..FileChunkState::default()
+            },
+        )]);
+        let choices =
+            ranked_prepared_candidates(&cache, &chunk_hash, 10, &chunk_states, &HashSet::new());
         assert_eq!(choices.len(), 2);
 
         let filtered = ranked_prepared_candidates(
             &cache,
             &chunk_hash,
             10,
-            &file_chunk_sizes,
-            &empty_chunks,
-            &empty_chunks,
+            &chunk_states,
             &HashSet::from([(xorb_hash, first_source.clone())]),
         );
         assert_eq!(filtered.len(), 1);
