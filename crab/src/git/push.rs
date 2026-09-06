@@ -12025,31 +12025,33 @@ impl PushPipeline {
                 .collect()
         };
         pointer_specs.sort_unstable();
-        let mut placement_map = self.chunk_placement.lock().await.clone();
-        let mut verified_existing = self.verified_existing_placement.lock().await.clone();
         let verified_existing_xorb_info = self.verified_existing_xorb_info.lock().await.clone();
         let mut packed_xorb_info = self.packed_xorb_info.lock().await.clone();
-        let mut uncaptured_placements = ChunkPlacementMap::new();
-        for (chunk_hash, placement) in &placement_map {
-            if let Some(info) = packed_xorb_info.get(&placement.xorb_hash) {
-                let entry = usize::try_from(placement.chunk_index)
-                    .ok()
-                    .and_then(|index| info.chunks.get(index));
-                if !entry.is_some_and(|entry| {
-                    entry.chunk_hash == *chunk_hash
-                        && entry.unpacked_segment_bytes == placement.uncompressed_size
-                }) {
-                    return Err(CrabError::StagingCorrupt(format!(
-                        "packed xorb metadata {} does not cover current chunk {} at index {}",
-                        placement.xorb_hash.hex(),
-                        chunk_hash.hex(),
-                        placement.chunk_index
-                    )));
+        let uncaptured_placements = {
+            let placement_map = self.chunk_placement.lock().await;
+            let mut uncaptured = ChunkPlacementMap::new();
+            for (chunk_hash, placement) in placement_map.iter() {
+                if let Some(info) = packed_xorb_info.get(&placement.xorb_hash) {
+                    let entry = usize::try_from(placement.chunk_index)
+                        .ok()
+                        .and_then(|index| info.chunks.get(index));
+                    if !entry.is_some_and(|entry| {
+                        entry.chunk_hash == *chunk_hash
+                            && entry.unpacked_segment_bytes == placement.uncompressed_size
+                    }) {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "packed xorb metadata {} does not cover current chunk {} at index {}",
+                            placement.xorb_hash.hex(),
+                            chunk_hash.hex(),
+                            placement.chunk_index
+                        )));
+                    }
+                } else {
+                    uncaptured.insert(*chunk_hash, placement.clone());
                 }
-            } else {
-                uncaptured_placements.insert(*chunk_hash, placement.clone());
             }
-        }
+            uncaptured
+        };
         packed_xorb_info.extend(
             build_complete_xorb_info_map(&uncaptured_placements)?
                 .into_iter()
@@ -12079,15 +12081,27 @@ impl PushPipeline {
                 })?;
             }
         }
-        placement_map.retain(|chunk_hash, _| required_chunks.contains(chunk_hash));
-        verified_existing.retain(|chunk_hash, _| required_chunks.contains(chunk_hash));
-
         // Build a merged placement map that includes both new chunks and
         // existing chunks whose referenced xorbs were confirmed present in
         // step 4. Advisory local indexes are not read here; a stale entry
         // must repack, not publish metadata pointing at a missing xorb.
-        let placement_new = placement_map.len();
-        let mut merged_placement: ChunkPlacementMap = placement_map;
+        let mut merged_placement = {
+            let placement_map = self.chunk_placement.lock().await;
+            placement_map
+                .iter()
+                .filter(|(chunk_hash, _)| required_chunks.contains(chunk_hash))
+                .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+                .collect::<ChunkPlacementMap>()
+        };
+        let placement_new = merged_placement.len();
+        let verified_existing = {
+            let verified_existing = self.verified_existing_placement.lock().await;
+            verified_existing
+                .iter()
+                .filter(|(chunk_hash, _)| required_chunks.contains(chunk_hash))
+                .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+                .collect::<ChunkPlacementMap>()
+        };
         let mut merged_from_index = 0u64;
         if !verified_existing.is_empty() {
             for (file_hash, _) in &pointer_specs {
