@@ -6954,9 +6954,17 @@ impl Index {
             return Ok(Vec::new());
         }
 
-        let mut seen = std::collections::HashSet::new();
+        let mut unique_chunk_hashes = Vec::with_capacity(chunk_hashes.len());
+        let mut requested = HashSet::with_capacity(chunk_hashes.len());
+        for hash in chunk_hashes {
+            if requested.insert(*hash) {
+                unique_chunk_hashes.push(*hash);
+            }
+        }
+
+        let mut seen = HashSet::new();
         let mut rows = Vec::new();
-        for batch in chunk_hashes.chunks(PREPARED_XORB_QUERY_BATCH) {
+        for batch in unique_chunk_hashes.chunks(PREPARED_XORB_QUERY_BATCH) {
             let placeholders = vec!["?"; batch.len()].join(",");
             let sql = format!(
                 "SELECT DISTINCT px.xorb_hash, px.payload_hash, px.bytes
@@ -9758,7 +9766,7 @@ mod tests {
         }
 
         let stored = idx
-            .prepared_xorbs_for_chunks(&[first_chunk, second_chunk])
+            .prepared_xorbs_for_chunks(&[first_chunk, second_chunk, first_chunk])
             .expect("prepared xorb lookup");
         assert_eq!(stored.len(), 2);
         assert_eq!(stored[0].xorb_hash, first_xorb);
