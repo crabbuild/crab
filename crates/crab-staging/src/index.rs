@@ -10372,4 +10372,31 @@ mod tests {
 
         assert!(chunks.is_empty());
     }
+
+    #[test]
+    fn recording_remote_authority_batch_rejects_conflicting_duplicate() {
+        let idx = open_in_memory();
+        idx.insert_batch("remote-batch").expect("batch");
+        let authority = ExistingChunkWrite {
+            chunk_hash: test_hash(0xE7),
+            xorb_hash: test_hash(0xE8),
+            chunk_index: 3,
+            uncompressed_size: 4096,
+            placement_id: test_hash(0xE9),
+            origin_proof_id: test_hash(0xEA),
+        };
+
+        idx.append_recording_remote_chunks("remote-batch", &[authority])
+            .expect("initial authority");
+        assert_staging_corrupt_contains(
+            idx.append_recording_remote_chunks(
+                "remote-batch",
+                &[ExistingChunkWrite {
+                    xorb_hash: test_hash(0xEB),
+                    ..authority
+                }],
+            ),
+            "changed within one add",
+        );
+    }
 }
