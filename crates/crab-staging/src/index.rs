@@ -5861,6 +5861,8 @@ impl Index {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin file push plan tx: {e}"))
         })?;
+        // Defer retirement until every plan in this transaction has restored
+        // its leases; shared prepared xorbs can move between files in a batch.
         let mut cleanup_needed = false;
         for write in writes {
             let FilePushPlanWrite {
@@ -6181,6 +6183,9 @@ impl Index {
             }
         }
         let removed_payloads = if cleanup_needed {
+            // A single sweep avoids repeatedly scanning the global payload
+            // table and cannot retire a body that another plan in this batch
+            // has just leased.
             let mut statement = tx
                 .prepare_cached(
                     "SELECT xorb_hash
