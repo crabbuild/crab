@@ -222,7 +222,7 @@ pub(crate) struct StoredPublicationIntent {
 pub(crate) type BatchDedupExisting = (usize, [u8; 32], ChunkLocator, bool);
 pub(crate) type BatchDedupResult = (Vec<BatchDedupExisting>, Vec<usize>);
 
-const PREPARED_XORB_QUERY_CHUNK_BATCH: usize = 500;
+const PREPARED_XORB_QUERY_BATCH: usize = 500;
 
 /// Per-file staging information returned by [`Index::list_files_with_chunks`].
 #[derive(Debug, Clone)]
@@ -6363,8 +6363,8 @@ impl Index {
         }
 
         let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for batch in chunk_hashes.chunks(PREPARED_XORB_QUERY_CHUNK_BATCH) {
+        let mut rows = Vec::new();
+        for batch in chunk_hashes.chunks(PREPARED_XORB_QUERY_BATCH) {
             let placeholders = vec!["?"; batch.len()].join(",");
             let sql = format!(
                 "SELECT DISTINCT px.xorb_hash, px.payload_hash, px.bytes
@@ -6396,16 +6396,25 @@ impl Index {
                 if !seen.insert(xorb_hash) {
                     continue;
                 }
-                out.push(StoredPreparedXorb {
+                rows.push((
                     xorb_hash,
-                    payload_hash: decode_hash_blob("prepared xorb payload hash", payload_hash)?,
-                    bytes: nonnegative_count("prepared xorb bytes", bytes)?,
-                    placements: self.prepared_payload_placements(&xorb_hash)?,
-                });
+                    decode_hash_blob("prepared xorb payload hash", payload_hash)?,
+                    nonnegative_count("prepared xorb bytes", bytes)?,
+                ));
             }
         }
 
-        Ok(out)
+        let xorb_hashes = rows.iter().map(|(hash, _, _)| *hash).collect::<Vec<_>>();
+        let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
+        Ok(rows
+            .into_iter()
+            .map(|(xorb_hash, payload_hash, bytes)| StoredPreparedXorb {
+                placements: placements.remove(&xorb_hash).unwrap_or_default(),
+                xorb_hash,
+                payload_hash,
+                bytes,
+            })
+            .collect())
     }
 
     pub fn prepared_payload_exclusive_to_recipe(
@@ -6518,50 +6527,73 @@ impl Index {
             })?;
         drop(statement);
 
-        let mut out = Vec::with_capacity(rows.len());
-        for (xorb_hash, payload_hash, bytes) in rows {
-            let xorb_hash = decode_hash_blob("recipe prepared xorb hash", xorb_hash)?;
-            out.push(StoredPreparedXorb {
-                xorb_hash,
-                payload_hash: decode_hash_blob("recipe prepared payload hash", payload_hash)?,
-                bytes: nonnegative_count("recipe prepared payload bytes", bytes)?,
-                placements: self.prepared_payload_placements(&xorb_hash)?,
-            });
-        }
-        Ok(out)
-    }
-
-    fn prepared_payload_placements(
-        &self,
-        xorb_hash: &[u8; 32],
-    ) -> Result<Vec<PreparedXorbPlacementWrite>> {
-        let mut statement = self
-            .conn
-            .prepare_cached(
-                "SELECT chunk_hash, chunk_index, uncompressed_size
-                 FROM prepared_payload_chunks
-                 WHERE xorb_hash = ?1
-                 ORDER BY chunk_index",
-            )
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to prepare payload placements: {error}"))
-            })?;
-        statement
-            .query_map(params![xorb_hash.as_slice()], |row| {
+        let rows = rows
+            .into_iter()
+            .map(|(xorb_hash, payload_hash, bytes)| {
                 Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
+                    decode_hash_blob("recipe prepared xorb hash", xorb_hash)?,
+                    decode_hash_blob("recipe prepared payload hash", payload_hash)?,
+                    nonnegative_count("recipe prepared payload bytes", bytes)?,
                 ))
             })
-            .map_err(|error| {
-                StagingError::Internal(format!("failed to query payload placements: {error}"))
-            })?
-            .map(|row| {
-                let (chunk_hash, chunk_index, uncompressed_size) = row.map_err(|error| {
-                    StagingError::Internal(format!("failed to read payload placement: {error}"))
+            .collect::<Result<Vec<_>>>()?;
+        let xorb_hashes = rows.iter().map(|(hash, _, _)| *hash).collect::<Vec<_>>();
+        let mut placements = self.prepared_payload_placements_for_xorbs(&xorb_hashes)?;
+        Ok(rows
+            .into_iter()
+            .map(|(xorb_hash, payload_hash, bytes)| StoredPreparedXorb {
+                placements: placements.remove(&xorb_hash).unwrap_or_default(),
+                xorb_hash,
+                payload_hash,
+                bytes,
+            })
+            .collect())
+    }
+
+    fn prepared_payload_placements_for_xorbs(
+        &self,
+        xorb_hashes: &[[u8; 32]],
+    ) -> Result<HashMap<[u8; 32], Vec<PreparedXorbPlacementWrite>>> {
+        let mut placements = HashMap::with_capacity(xorb_hashes.len());
+        for batch in xorb_hashes.chunks(PREPARED_XORB_QUERY_BATCH) {
+            let placeholders = vec!["?"; batch.len()].join(",");
+            let sql = format!(
+                "SELECT xorb_hash, chunk_hash, chunk_index, uncompressed_size
+                 FROM prepared_payload_chunks
+                 WHERE xorb_hash IN ({placeholders})
+                 ORDER BY xorb_hash, chunk_index"
+            );
+            let mut statement = self.conn.prepare(&sql).map_err(|error| {
+                StagingError::Internal(format!(
+                    "failed to prepare batched payload placements: {error}"
+                ))
+            })?;
+            let rows = statement
+                .query_map(
+                    params_from_iter(batch.iter().map(|hash| hash.as_slice())),
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .map_err(|error| {
+                    StagingError::Internal(format!(
+                        "failed to query batched payload placements: {error}"
+                    ))
                 })?;
-                Ok(PreparedXorbPlacementWrite {
+            for row in rows {
+                let (xorb_hash, chunk_hash, chunk_index, uncompressed_size) =
+                    row.map_err(|error| {
+                        StagingError::Internal(format!(
+                            "failed to read batched payload placement: {error}"
+                        ))
+                    })?;
+                let xorb_hash = decode_hash_blob("prepared placement xorb hash", xorb_hash)?;
+                let placement = PreparedXorbPlacementWrite {
                     chunk_hash: decode_hash_blob("prepared placement chunk hash", chunk_hash)?,
                     chunk_index: u32::try_from(chunk_index).map_err(|_| {
                         StagingError::StagingCorrupt(
@@ -6573,9 +6605,11 @@ impl Index {
                             "prepared placement size is invalid".to_owned(),
                         )
                     })?,
-                })
-            })
-            .collect()
+                };
+                placements.entry(xorb_hash).or_default().push(placement);
+            }
+        }
+        Ok(placements)
     }
 
     /// Insert chunk rows for a file, linking them to their segment locators.
@@ -9033,6 +9067,43 @@ mod tests {
             )
             .expect("remaining ownership rows");
         assert_eq!(remaining, (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn prepared_xorb_chunk_lookup_returns_batched_placements() {
+        let idx = open_in_memory();
+        let first_xorb = test_hash(0xA1);
+        let second_xorb = test_hash(0xA2);
+        let first_chunk = test_hash(0xB1);
+        let second_chunk = test_hash(0xB2);
+        for (xorb_hash, chunk_hash) in [(first_xorb, first_chunk), (second_xorb, second_chunk)] {
+            idx.conn
+                .execute(
+                    "INSERT INTO prepared_payloads (xorb_hash, payload_hash, bytes)
+                     VALUES (?1, ?2, 64)",
+                    params![xorb_hash.as_slice(), xorb_hash.as_slice()],
+                )
+                .expect("prepared payload");
+            idx.conn
+                .execute(
+                    "INSERT INTO prepared_payload_chunks
+                     (xorb_hash, chunk_index, chunk_hash, uncompressed_size)
+                     VALUES (?1, 0, ?2, 32)",
+                    params![xorb_hash.as_slice(), chunk_hash.as_slice()],
+                )
+                .expect("prepared placement");
+        }
+
+        let stored = idx
+            .prepared_xorbs_for_chunks(&[first_chunk, second_chunk])
+            .expect("prepared xorb lookup");
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].xorb_hash, first_xorb);
+        assert_eq!(stored[0].placements.len(), 1);
+        assert_eq!(stored[0].placements[0].chunk_hash, first_chunk);
+        assert_eq!(stored[1].xorb_hash, second_xorb);
+        assert_eq!(stored[1].placements.len(), 1);
+        assert_eq!(stored[1].placements[0].chunk_hash, second_chunk);
     }
 
     #[test]
