@@ -145,10 +145,10 @@ function ReleaseAssetsEditor({
                     current,
                     file,
                   );
-                  setAssets(updated.assets);
+                  setAssets(updated.assets ?? []);
                   setVersion(updated.version);
                   current.version = updated.version;
-                  current.assets = updated.assets;
+                  current.assets = updated.assets ?? [];
                 }
               } catch (failure) {
                 setError(
@@ -192,10 +192,10 @@ function ReleaseAssetsEditor({
                       current,
                       asset.id,
                     );
-                    setAssets(updated.assets);
+                    setAssets(updated.assets ?? []);
                     setVersion(updated.version);
                     current.version = updated.version;
-                    current.assets = updated.assets;
+                    current.assets = updated.assets ?? [];
                   } catch (failure) {
                     setError(
                       failure instanceof Error
@@ -231,7 +231,7 @@ function EditReleaseForm({
   const [title, setTitle] = useState(release.title);
   const [body, setBody] = useState(release.body);
   const [prerelease, setPrerelease] = useState(release.prerelease);
-  const [assets, setAssets] = useState(release.assets);
+  const [assets, setAssets] = useState(release.assets ?? []);
   const [version, setVersion] = useState(release.version);
   const [pendingAction, setPendingAction] = useState<"draft" | "publish">();
   const [error, setError] = useState<string>();

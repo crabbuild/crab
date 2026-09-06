@@ -99,10 +99,11 @@ function SourceArchive({
   repo: Repository;
   release: Release;
 }) {
+  const assets = release.assets ?? [];
   return (
     <details className="release-assets" open>
       <summary>
-        Assets <span>{release.assets.length + 1}</span>
+        Assets <span>{assets.length + 1}</span>
       </summary>
       <a
         href={endpoint(repo, "archive", {
@@ -112,7 +113,7 @@ function SourceArchive({
       >
         <DownloadIcon /> Source code (zip)
       </a>
-      {release.assets.map((asset) => (
+      {assets.map((asset) => (
         <a
           key={asset.id}
           href={endpoint(

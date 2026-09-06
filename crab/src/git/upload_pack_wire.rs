@@ -1920,6 +1920,45 @@ fn protocol(message: impl Into<String>) -> CrabError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Packet {
+        Data(Vec<u8>),
+        Flush,
+        Delimiter,
+        ResponseEnd,
+    }
+
+    async fn read_packet<R: AsyncBufRead + Unpin>(
+        reader: &mut R,
+        _cancellation: &CancellationToken,
+    ) -> std::io::Result<Packet> {
+        let mut header = [0; 4];
+        reader.read_exact(&mut header).await?;
+        match &header {
+            b"0000" => Ok(Packet::Flush),
+            b"0001" => Ok(Packet::Delimiter),
+            b"0002" => Ok(Packet::ResponseEnd),
+            _ => {
+                let length = usize::from_str_radix(
+                    std::str::from_utf8(&header).map_err(std::io::Error::other)?,
+                    16,
+                )
+                .map_err(std::io::Error::other)?;
+                if length < 4 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "packet length is shorter than its header",
+                    ));
+                }
+                let mut payload = vec![0; length - 4];
+                reader.read_exact(&mut payload).await?;
+                Ok(Packet::Data(payload))
+            }
+        }
+    }
 
     fn packet(data: &[u8]) -> Vec<u8> {
         let length = data.len() + 4;
