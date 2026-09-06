@@ -10639,4 +10639,87 @@ mod tests {
             "changed within one add",
         );
     }
+
+    #[test]
+    fn planned_existing_authority_batch_round_trips_large_file() {
+        const CHUNK_COUNT: usize = 129;
+
+        let idx = open_in_memory();
+        let segment_id = idx.allocate_segment_id().expect("allocate segment");
+        let file_hash = test_hash(0xF0);
+        insert_test_file(
+            &idx,
+            &file_hash,
+            i64::try_from(CHUNK_COUNT * 8).expect("file size"),
+        );
+        let chunks = (0..CHUNK_COUNT)
+            .map(|index| {
+                let chunk_hash = test_hash(u8::try_from(index + 1).expect("chunk seed"));
+                idx.conn
+                    .execute(
+                        "INSERT INTO chunks
+                         (chunk_hash, file_hash, chunk_index, size, segment_id, segment_offset)
+                         VALUES (?1, ?2, ?3, 8, ?4, ?5)",
+                        params![
+                            chunk_hash.as_slice(),
+                            file_hash.as_slice(),
+                            i64::try_from(index).expect("chunk index"),
+                            segment_id,
+                            i64::try_from(index * 8).expect("chunk offset")
+                        ],
+                    )
+                    .expect("insert chunk");
+                (crab_xet::hash::MerkleHash::from(chunk_hash), 8)
+            })
+            .collect::<Vec<_>>();
+        let recipe = crate::recipe::FileRecipe::from_staged_chunks(
+            crate::recipe::ChunkingPolicyId::XetGearV1_64KiB,
+            crab_xet::hash::MerkleHash::from(file_hash),
+            u64::try_from(CHUNK_COUNT * 8).expect("file size"),
+            &chunks,
+        )
+        .expect("recipe");
+        idx.insert_batch("planned-batch").expect("batch");
+        idx.append_recipe_recording_terms("planned-batch", 0, 0, &chunks)
+            .expect("record recipe terms");
+        idx.insert_recipe_lease(
+            "planned-batch",
+            b"large.bin",
+            &recipe,
+            RecipeVerification::CallerVerified,
+        )
+        .expect("recipe lease");
+
+        let existing = chunks
+            .iter()
+            .enumerate()
+            .map(|(index, (chunk_hash, size))| ExistingChunkWrite {
+                chunk_hash: (*chunk_hash).into(),
+                xorb_hash: test_hash(0xD0),
+                chunk_index: u32::try_from(index).expect("chunk index"),
+                uncompressed_size: u32::try_from(*size).expect("chunk size"),
+                placement_id: test_hash(0xD1),
+                origin_proof_id: test_hash(0xD2),
+            })
+            .collect::<Vec<_>>();
+        let recipe_hash: [u8; 32] = recipe.hash().into();
+        idx.insert_file_push_plan(FilePushPlanWrite {
+            file_hash: &file_hash,
+            recipe_hash: &recipe_hash,
+            recording_batch_id: None,
+            existing_chunks: &existing,
+            prepared_xorbs: &[],
+        })
+        .expect("planned existing authority");
+
+        let stored: i64 = idx
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM recipe_remote_chunks WHERE recipe_hash = ?1",
+                params![recipe_hash.as_slice()],
+                |row| row.get(0),
+            )
+            .expect("count planned existing authorities");
+        assert_eq!(stored, i64::try_from(CHUNK_COUNT).expect("chunk count"));
+    }
 }
