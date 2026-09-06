@@ -11252,10 +11252,10 @@ impl PushPipeline {
             );
         }
 
-        let verified_cache_service_hits = {
-            let candidates: Vec<MerkleHash> = new_set.iter().copied().collect();
-            self.lookup_cache_service_chunk_refs(&candidates).await?
-        };
+        let mut lookup_candidates: Vec<MerkleHash> = new_set.iter().copied().collect();
+        let verified_cache_service_hits = self
+            .lookup_cache_service_chunk_refs(&lookup_candidates)
+            .await?;
         let verified_cache_service_hit_count = verified_cache_service_hits.len();
         if !verified_cache_service_hits.is_empty() {
             let mut newly_existing = 0u64;
@@ -11309,10 +11309,10 @@ impl PushPipeline {
             verified_refs.extend(verified_base_shard_hits);
         }
 
-        let global_lookup = {
-            let candidates: Vec<MerkleHash> = new_set.iter().copied().collect();
-            self.lookup_verified_global_chunk_refs(&candidates).await?
-        };
+        lookup_candidates.retain(|chunk_hash| new_set.contains(chunk_hash));
+        let global_lookup = self
+            .lookup_verified_global_chunk_refs(&lookup_candidates)
+            .await?;
         let stale_global_hits = global_lookup.stale_hits;
         if stale_global_hits > 0 {
             warn!(
