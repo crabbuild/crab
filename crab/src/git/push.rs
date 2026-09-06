@@ -6816,7 +6816,7 @@ impl PushPipeline {
         &self,
         recipe: &FileRecipe,
         start_occurrence: u64,
-    ) -> Result<crab_staging::recipe::RecipePage> {
+    ) -> Result<Arc<crab_staging::recipe::RecipePage>> {
         let key = (recipe.hash(), start_occurrence);
         if let Some(page) = self
             .recipe_page_cache
@@ -6826,7 +6826,7 @@ impl PushPipeline {
             .get(&key)
             .cloned()
         {
-            return Ok((*page).clone());
+            return Ok(page);
         }
         let page = self
             .staging
@@ -6836,11 +6836,12 @@ impl PushPipeline {
             })?
             .recipe_page(recipe, start_occurrence)
             .map_err(CrabError::from)?;
+        let page = Arc::new(page);
         let mut cache = self
             .recipe_page_cache
             .lock()
             .map_err(|_| CrabError::Internal("recipe page cache poisoned".to_owned()))?;
-        cache.insert(key, Arc::new(page.clone()));
+        cache.insert(key, Arc::clone(&page));
         Ok(page)
     }
 
@@ -6874,7 +6875,7 @@ impl PushPipeline {
             let page = if let Some(page) = pages.get(&key) {
                 Arc::clone(page)
             } else {
-                let page = Arc::new(self.recipe_page(recipe, next)?);
+                let page = self.recipe_page(recipe, next)?;
                 let estimated_bytes = page
                     .chunks
                     .capacity()
