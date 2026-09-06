@@ -6959,8 +6959,8 @@ impl Index {
             }
         }
 
-        let mut seen = HashSet::new();
-        let mut rows = Vec::new();
+        let mut seen = HashSet::with_capacity(unique_chunk_hashes.len());
+        let mut rows = Vec::with_capacity(unique_chunk_hashes.len());
         for batch in unique_chunk_hashes.chunks(PREPARED_XORB_QUERY_BATCH) {
             let placeholders = vec!["?"; batch.len()].join(",");
             let sql = format!(
