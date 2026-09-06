@@ -1969,25 +1969,22 @@ impl Index {
             .conn
             .prepare_cached(
                 "WITH combined AS (
-                     SELECT chunk_hash, chunk_index, 0 AS priority, rowid
+                     SELECT chunk_hash, chunk_index
                      FROM chunks
                      WHERE file_hash = ?1
                      UNION ALL
-                     SELECT chunk_hash, chunk_index, 1 AS priority, rowid
-                     FROM pending_chunks
-                     WHERE file_hash = ?1
-                 )
-                 SELECT chunk_hash, chunk_index
-                 FROM combined c
-                 WHERE NOT EXISTS (
-                     SELECT 1
-                     FROM combined p
-                     WHERE p.chunk_index = c.chunk_index
-                       AND (
-                           p.priority < c.priority
-                           OR (p.priority = c.priority AND p.rowid < c.rowid)
+                     SELECT pending.chunk_hash, pending.chunk_index
+                     FROM pending_chunks AS pending
+                     WHERE pending.file_hash = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM chunks AS committed
+                           WHERE committed.file_hash = pending.file_hash
+                             AND committed.chunk_index = pending.chunk_index
                        )
                  )
+                 SELECT chunk_hash, chunk_index
+                 FROM combined
                  ORDER BY chunk_index",
             )
             .map_err(|e| StagingError::Internal(format!("prepare chunks_for_file: {e}")))?;
@@ -2037,25 +2034,23 @@ impl Index {
             .conn
             .prepare_cached(
                 "WITH combined AS (
-                     SELECT chunk_hash, size, segment_id, segment_offset, chunk_index, 0 AS priority, rowid
+                     SELECT chunk_hash, size, segment_id, segment_offset, chunk_index
                      FROM chunks
                      WHERE file_hash = ?1
                      UNION ALL
-                     SELECT chunk_hash, size, segment_id, segment_offset, chunk_index, 1 AS priority, rowid
-                     FROM pending_chunks
-                     WHERE file_hash = ?1
-                 )
-                 SELECT chunk_hash, size, segment_id, segment_offset, chunk_index
-                 FROM combined c
-                 WHERE NOT EXISTS (
-                     SELECT 1
-                     FROM combined p
-                     WHERE p.chunk_index = c.chunk_index
-                       AND (
-                           p.priority < c.priority
-                           OR (p.priority = c.priority AND p.rowid < c.rowid)
+                     SELECT pending.chunk_hash, pending.size, pending.segment_id,
+                            pending.segment_offset, pending.chunk_index
+                     FROM pending_chunks AS pending
+                     WHERE pending.file_hash = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM chunks AS committed
+                           WHERE committed.file_hash = pending.file_hash
+                             AND committed.chunk_index = pending.chunk_index
                        )
                  )
+                 SELECT chunk_hash, size, segment_id, segment_offset, chunk_index
+                 FROM combined
                  ORDER BY chunk_index",
             )
             .map_err(|e| {
@@ -2118,25 +2113,22 @@ impl Index {
             .conn
             .prepare_cached(
                 "WITH combined AS (
-                     SELECT chunk_hash, size, chunk_index, 0 AS priority, rowid
+                     SELECT chunk_hash, size, chunk_index
                      FROM chunks
                      WHERE file_hash = ?1
                      UNION ALL
-                     SELECT chunk_hash, size, chunk_index, 1 AS priority, rowid
-                     FROM pending_chunks
-                     WHERE file_hash = ?1
-                 )
-                 SELECT chunk_hash, size, chunk_index
-                 FROM combined c
-                 WHERE NOT EXISTS (
-                     SELECT 1
-                     FROM combined p
-                     WHERE p.chunk_index = c.chunk_index
-                       AND (
-                           p.priority < c.priority
-                           OR (p.priority = c.priority AND p.rowid < c.rowid)
+                     SELECT pending.chunk_hash, pending.size, pending.chunk_index
+                     FROM pending_chunks AS pending
+                     WHERE pending.file_hash = ?1
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM chunks AS committed
+                           WHERE committed.file_hash = pending.file_hash
+                             AND committed.chunk_index = pending.chunk_index
                        )
                  )
+                 SELECT chunk_hash, size, chunk_index
+                 FROM combined
                  ORDER BY chunk_index",
             )
             .map_err(|error| {
@@ -4481,28 +4473,24 @@ impl Index {
             .conn
             .prepare_cached(
                 "WITH combined AS (
-                     SELECT chunk_hash, size, chunk_index, 0 AS priority, rowid
+                     SELECT chunk_hash, size, chunk_index
                      FROM chunks
                      WHERE file_hash = ?1 AND chunk_index >= ?2 AND chunk_index < ?3
                      UNION ALL
-                     SELECT chunk_hash, size, chunk_index, 1 AS priority, rowid
-                     FROM pending_chunks
-                     WHERE file_hash = ?1 AND chunk_index >= ?2 AND chunk_index < ?3
-                 )
-                 SELECT chunk_index, chunk_hash, size
-                 FROM combined AS candidate
-                 WHERE NOT EXISTS (
-                     SELECT 1
-                     FROM combined AS preferred
-                     WHERE preferred.chunk_index = candidate.chunk_index
-                       AND (
-                           preferred.priority < candidate.priority
-                           OR (
-                               preferred.priority = candidate.priority
-                               AND preferred.rowid < candidate.rowid
-                           )
+                     SELECT pending.chunk_hash, pending.size, pending.chunk_index
+                     FROM pending_chunks AS pending
+                     WHERE pending.file_hash = ?1
+                       AND pending.chunk_index >= ?2
+                       AND pending.chunk_index < ?3
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM chunks AS committed
+                           WHERE committed.file_hash = pending.file_hash
+                             AND committed.chunk_index = pending.chunk_index
                        )
                  )
+                 SELECT chunk_index, chunk_hash, size
+                 FROM combined
                  ORDER BY chunk_index",
             )
             .map_err(|e| {
