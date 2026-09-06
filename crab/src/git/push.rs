@@ -95,6 +95,9 @@ use crab_xet::xorb::format::{
 };
 use crab_xet::xorb::parser::{XorbParser, xorb_metadata_region};
 
+const RECIPE_PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const RECIPE_PAGE_CACHE_ENTRY_OVERHEAD: usize = 128;
+
 fn bulk_data_bytes(bulk: &BulkData) -> u64 {
     let shard_segment_bytes: u64 = bulk
         .shard_index
@@ -6809,16 +6812,27 @@ impl PushPipeline {
         &self,
         recipe: &FileRecipe,
         pages: &mut HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
+        cached_bytes: &mut usize,
         mut visit: impl FnMut(MerkleHash, u64) -> Result<()>,
     ) -> Result<()> {
         let recipe_hash = recipe.hash();
         let mut next = 0u64;
         while next < recipe.chunk_count() {
-            let page = match pages.entry((recipe_hash, next)) {
-                std::collections::hash_map::Entry::Occupied(entry) => Arc::clone(entry.get()),
-                std::collections::hash_map::Entry::Vacant(entry) => entry
-                    .insert(Arc::new(self.recipe_page(recipe, next)?))
-                    .clone(),
+            let key = (recipe_hash, next);
+            let page = if let Some(page) = pages.get(&key) {
+                Arc::clone(page)
+            } else {
+                let page = Arc::new(self.recipe_page(recipe, next)?);
+                let estimated_bytes = page
+                    .chunks
+                    .len()
+                    .saturating_mul(std::mem::size_of::<crab_staging::recipe::RecipeChunk>())
+                    .saturating_add(RECIPE_PAGE_CACHE_ENTRY_OVERHEAD);
+                if (*cached_bytes).saturating_add(estimated_bytes) <= RECIPE_PAGE_CACHE_BYTES {
+                    *cached_bytes = (*cached_bytes).saturating_add(estimated_bytes);
+                    pages.insert(key, Arc::clone(&page));
+                }
+                page
             };
             for chunk in &page.chunks {
                 visit(chunk.chunk_hash, chunk.len)?;
@@ -6833,13 +6847,14 @@ impl PushPipeline {
         file_hash: &MerkleHash,
         recipe: &FileRecipe,
         pages: &mut HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
+        cached_bytes: &mut usize,
         placement: &mut ChunkPlacementMap,
         verified_existing: &ChunkPlacementMap,
         fail_fast_on_missing: bool,
     ) -> Result<Vec<FileTerm>> {
         let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
         let mut chunk_index = 0usize;
-        self.visit_recipe_chunks_cached(recipe, pages, |chunk_hash, _| {
+        self.visit_recipe_chunks_cached(recipe, pages, cached_bytes, |chunk_hash, _| {
             if fail_fast_on_missing {
                 let resolved = if let Some(existing) = placement.get(&chunk_hash) {
                     Some(existing)
@@ -12229,8 +12244,9 @@ impl PushPipeline {
         // ordinary orphans, but must not become generation dependencies.
         // The push reader snapshot pins these roots, so a page validated in
         // the reachability pass remains immutable for term construction.
-        // Keep the cache local to bound its lifetime to shard assembly.
+        // Keep the cache local and budgeted to bound its lifetime and memory.
         let mut recipe_pages = HashMap::new();
+        let mut recipe_page_cache_bytes = 0usize;
         let mut required_chunks = HashSet::new();
         let mut seen_recipe_files = HashSet::new();
         for (file_hash, _) in &pointer_specs {
@@ -12238,10 +12254,15 @@ impl PushPipeline {
                 continue;
             }
             if let Some(recipe) = Self::recipe_from_snapshot(&recipe_snapshot, file_hash)? {
-                self.visit_recipe_chunks_cached(&recipe, &mut recipe_pages, |chunk_hash, _| {
-                    required_chunks.insert(chunk_hash);
-                    Ok(())
-                })?;
+                self.visit_recipe_chunks_cached(
+                    &recipe,
+                    &mut recipe_pages,
+                    &mut recipe_page_cache_bytes,
+                    |chunk_hash, _| {
+                        required_chunks.insert(chunk_hash);
+                        Ok(())
+                    },
+                )?;
             }
         }
         // Build a merged placement map that includes both new chunks and
@@ -12354,6 +12375,7 @@ impl PushPipeline {
                         file_hash,
                         recipe,
                         &mut recipe_pages,
+                        &mut recipe_page_cache_bytes,
                         &mut merged_placement,
                         &verified_existing,
                         !verified_existing.is_empty(),
