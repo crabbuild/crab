@@ -270,16 +270,23 @@ impl AddRemoteCandidateCache {
         let transaction = connection
             .transaction()
             .map_err(|error| database_error("begin update", error))?;
-        let mut positive_hashes = Vec::new();
-        let mut negative_hashes = Vec::new();
+        let mut latest = HashMap::with_capacity(entries.len());
         for (chunk_hash, candidate) in entries {
-            let chunk_hash = <[u8; 32]>::from(*chunk_hash);
-            if candidate.is_some() {
-                positive_hashes.push(chunk_hash);
+            latest.insert(<[u8; 32]>::from(*chunk_hash), *candidate);
+        }
+        let mut positive_entries = Vec::new();
+        let mut negative_hashes = Vec::new();
+        for (chunk_hash, candidate) in latest {
+            if let Some(candidate) = candidate {
+                positive_entries.push((chunk_hash, candidate));
             } else {
                 negative_hashes.push(chunk_hash);
             }
         }
+        let positive_hashes = positive_entries
+            .iter()
+            .map(|(chunk_hash, _)| *chunk_hash)
+            .collect::<Vec<_>>();
         for batch in positive_hashes.chunks(LOOKUP_BATCH_SIZE) {
             let placeholders = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
@@ -306,52 +313,105 @@ impl AddRemoteCandidateCache {
                 )
                 .map_err(|error| database_error("delete stale positive entries", error))?;
         }
-        {
-            let mut positive_statement = transaction
-                .prepare_cached(
-                    "INSERT INTO remote_candidates_v1
-                         (chunk_hash, xorb_hash, chunk_index, uncompressed_size,
-                          placement_id, origin_proof_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(chunk_hash) DO UPDATE SET
-                         xorb_hash = excluded.xorb_hash,
-                         chunk_index = excluded.chunk_index,
-                         uncompressed_size = excluded.uncompressed_size,
-                         placement_id = excluded.placement_id,
-                         origin_proof_id = excluded.origin_proof_id
-                     WHERE remote_candidates_v1.xorb_hash != excluded.xorb_hash
-                        OR remote_candidates_v1.chunk_index != excluded.chunk_index
-                        OR remote_candidates_v1.uncompressed_size != excluded.uncompressed_size
-                        OR remote_candidates_v1.placement_id != excluded.placement_id
-                        OR remote_candidates_v1.origin_proof_id != excluded.origin_proof_id",
-                )
-                .map_err(|error| database_error("prepare update", error))?;
-            let mut negative_statement = transaction
-                .prepare_cached(
-                    "INSERT INTO remote_candidate_misses_v1 (chunk_hash, observed_at) VALUES (?1, ?2)
-                     ON CONFLICT(chunk_hash) DO UPDATE SET observed_at = excluded.observed_at"
-                )
-                .map_err(|error| database_error("prepare negative update", error))?;
-            for (chunk_hash, candidate) in entries {
-                let chunk_hash = <[u8; 32]>::from(*chunk_hash);
-                if let Some(candidate) = candidate {
-                    let xorb_hash = <[u8; 32]>::from(candidate.xorb_ref.xorb_hash);
-                    positive_statement
-                        .execute(params![
-                            chunk_hash.as_slice(),
-                            xorb_hash.as_slice(),
-                            i64::from(candidate.xorb_ref.chunk_index),
-                            i64::from(candidate.xorb_ref.uncompressed_size),
-                            candidate.placement_id.as_slice(),
-                            candidate.origin_proof_id.as_slice(),
-                        ])
-                        .map_err(|error| database_error("write update", error))?;
-                } else {
-                    negative_statement
-                        .execute(params![chunk_hash.as_slice(), observed_at])
-                        .map_err(|error| database_error("write negative update", error))?;
-                }
+        // Six parameters per row keep positive batches below SQLite's default limit.
+        const POSITIVE_WRITE_BATCH: usize = 128;
+        for batch in positive_entries.chunks(POSITIVE_WRITE_BATCH) {
+            let values_sql = std::iter::repeat_n("(?,?,?,?,?,?)", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "INSERT INTO remote_candidates_v1
+                     (chunk_hash, xorb_hash, chunk_index, uncompressed_size,
+                      placement_id, origin_proof_id)
+                 VALUES {values_sql}
+                 ON CONFLICT(chunk_hash) DO UPDATE SET
+                     xorb_hash = excluded.xorb_hash,
+                     chunk_index = excluded.chunk_index,
+                     uncompressed_size = excluded.uncompressed_size,
+                     placement_id = excluded.placement_id,
+                     origin_proof_id = excluded.origin_proof_id
+                 WHERE remote_candidates_v1.xorb_hash != excluded.xorb_hash
+                    OR remote_candidates_v1.chunk_index != excluded.chunk_index
+                    OR remote_candidates_v1.uncompressed_size != excluded.uncompressed_size
+                    OR remote_candidates_v1.placement_id != excluded.placement_id
+                    OR remote_candidates_v1.origin_proof_id != excluded.origin_proof_id"
+            );
+            let mut statement = transaction
+                .prepare_cached(&query)
+                .map_err(|error| database_error("prepare update batch", error))?;
+            let chunk_hashes = batch
+                .iter()
+                .map(|(chunk_hash, _)| chunk_hash.as_slice())
+                .collect::<Vec<_>>();
+            let xorb_hashes = batch
+                .iter()
+                .map(|(_, candidate)| <[u8; 32]>::from(candidate.xorb_ref.xorb_hash))
+                .collect::<Vec<_>>();
+            let indices = batch
+                .iter()
+                .map(|(_, candidate)| i64::from(candidate.xorb_ref.chunk_index))
+                .collect::<Vec<_>>();
+            let sizes = batch
+                .iter()
+                .map(|(_, candidate)| i64::from(candidate.xorb_ref.uncompressed_size))
+                .collect::<Vec<_>>();
+            let placement_ids = batch
+                .iter()
+                .map(|(_, candidate)| candidate.placement_id)
+                .collect::<Vec<_>>();
+            let origin_proof_ids = batch
+                .iter()
+                .map(|(_, candidate)| candidate.origin_proof_id)
+                .collect::<Vec<_>>();
+            let xorb_slices = xorb_hashes
+                .iter()
+                .map(|hash| hash.as_slice())
+                .collect::<Vec<_>>();
+            let placement_slices = placement_ids
+                .iter()
+                .map(|hash| hash.as_slice())
+                .collect::<Vec<_>>();
+            let origin_proof_slices = origin_proof_ids
+                .iter()
+                .map(|hash| hash.as_slice())
+                .collect::<Vec<_>>();
+            let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(batch.len() * 6);
+            for index in 0..batch.len() {
+                values.push(&chunk_hashes[index]);
+                values.push(&xorb_slices[index]);
+                values.push(&indices[index]);
+                values.push(&sizes[index]);
+                values.push(&placement_slices[index]);
+                values.push(&origin_proof_slices[index]);
             }
+            statement
+                .execute(params_from_iter(values))
+                .map_err(|error| database_error("write update batch", error))?;
+        }
+
+        // Two parameters per row keep negative batches below SQLite's default limit.
+        const NEGATIVE_WRITE_BATCH: usize = 256;
+        for batch in negative_hashes.chunks(NEGATIVE_WRITE_BATCH) {
+            let values_sql = std::iter::repeat_n("(?,?)", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "INSERT INTO remote_candidate_misses_v1 (chunk_hash, observed_at)
+                 VALUES {values_sql}
+                 ON CONFLICT(chunk_hash) DO UPDATE SET observed_at = excluded.observed_at"
+            );
+            let mut statement = transaction
+                .prepare_cached(&query)
+                .map_err(|error| database_error("prepare negative update batch", error))?;
+            let hash_slices = batch.iter().map(|hash| hash.as_slice()).collect::<Vec<_>>();
+            let mut values: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(batch.len() * 2);
+            for hash in &hash_slices {
+                values.push(hash);
+                values.push(&observed_at);
+            }
+            statement
+                .execute(params_from_iter(values))
+                .map_err(|error| database_error("write negative update batch", error))?;
         }
         transaction
             .commit()
