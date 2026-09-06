@@ -820,33 +820,21 @@ async fn prepare_one_file_plan_with_existing_refs(
     }
 
     let mut builder = build_xorb_builder();
-
-    let mut pending_new_chunks = Vec::with_capacity(new_chunks.len());
+    let mut read_batch = Vec::with_capacity(ADD_PLAN_READ_BATCH_CHUNKS);
     for chunk in located_chunks {
-        if new_chunks.remove(&chunk.0) {
-            pending_new_chunks.push(chunk);
+        if !new_chunks.remove(&chunk.0) {
+            continue;
+        }
+        read_batch.push((chunk, RunId(0)));
+        if read_batch.len() == ADD_PLAN_READ_BATCH_CHUNKS {
+            flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
+            write_completed_xorbs(staging, &mut builder, &mut plan, prepared_cache).await?;
         }
     }
 
-    for batch in pending_new_chunks.chunks(ADD_PLAN_READ_BATCH_CHUNKS) {
-        check_cancelled(cancel)?;
-        let hashes = batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-        let payloads = staging.get_chunks_batch(&hashes).await?;
-        let mut to_pack = Vec::with_capacity(payloads.len());
-        for (actual_hash, data) in payloads {
-            to_pack.push((
-                Chunk {
-                    hash: actual_hash,
-                    data,
-                },
-                RunId(0),
-            ));
-        }
-
-        if !to_pack.is_empty() {
-            builder.push_batch(&to_pack)?;
-            write_completed_xorbs(staging, &mut builder, &mut plan, prepared_cache).await?;
-        }
+    if !read_batch.is_empty() {
+        flush_uncached_read_batch(staging, &mut read_batch, &mut builder, cancel).await?;
+        write_completed_xorbs(staging, &mut builder, &mut plan, prepared_cache).await?;
     }
 
     for result in builder.finalize()? {
