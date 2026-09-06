@@ -85,10 +85,10 @@ impl AddValidationCache {
         if entries.is_empty() {
             return Ok(HashSet::new());
         }
-        let expected = entries.iter().copied().collect::<HashMap<_, _>>();
         let mut hits = HashSet::new();
         const LOOKUP_BATCH_SIZE: usize = 512;
         for batch in entries.chunks(LOOKUP_BATCH_SIZE) {
+            let expected = batch.iter().copied().collect::<HashMap<_, _>>();
             let placeholders = std::iter::repeat_n("?", batch.len())
                 .collect::<Vec<_>>()
                 .join(",");
