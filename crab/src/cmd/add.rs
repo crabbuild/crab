@@ -3554,6 +3554,10 @@ fn write_pointers_and_tracking_to_git_index(
             )))
         })?)
     };
+    // Identical files produce identical pointer payloads. Git's object store
+    // is content-addressed, so one blob write per unique payload is enough;
+    // reusing the OID avoids repeated filesystem work for duplicate paths.
+    let mut pointer_oids = HashMap::<Vec<u8>, String>::new();
 
     for entry in entries {
         // The cache may not contain this file on the first push; the
@@ -3565,8 +3569,14 @@ fn write_pointers_and_tracking_to_git_index(
                 "pointer repository was not opened for non-empty publication".to_owned(),
             ))
         })?;
-        let sha = write_pointer_blob_to_repo(pointer_repo, &payload)
-            .map_err(GitIndexWriteError::BeforeIndexMutation)?;
+        let sha = if let Some(sha) = pointer_oids.get(&payload) {
+            sha.clone()
+        } else {
+            let sha = write_pointer_blob_to_repo(pointer_repo, &payload)
+                .map_err(GitIndexWriteError::BeforeIndexMutation)?;
+            pointer_oids.insert(payload, sha.clone());
+            sha
+        };
 
         // The index-info record bypasses git's normal worktree mode detection,
         // so compute the regular-file mode here to match `git add`.
