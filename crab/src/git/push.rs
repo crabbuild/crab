@@ -4189,6 +4189,10 @@ pub struct PushPipeline {
     /// Per-file immutable recipe-root cache populated by step 2.
     /// Ordered terms remain indexed in staging and are consumed in fixed pages.
     chunk_cache: tokio::sync::Mutex<HashMap<MerkleHash, CachedFileRecipe>>,
+    /// Bounded cross-phase cache for immutable recipe pages. It is cleared
+    /// whenever step 2 rebuilds the recipe snapshot, so retries cannot reuse
+    /// pages from a prior staging view.
+    recipe_page_cache: std::sync::Mutex<RecipePageCache>,
     /// Add-time push plans that matched an exact published recipe during step 2.
     ///
     /// These are advisory until step 4 re-proves every remote placement
@@ -4748,6 +4752,35 @@ struct CachedFileRecipe {
 impl CachedFileRecipe {
     fn new(recipe: Option<FileRecipe>) -> Self {
         Self { recipe }
+    }
+}
+
+#[derive(Default)]
+struct RecipePageCache {
+    pages: HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
+    bytes: usize,
+}
+
+impl RecipePageCache {
+    fn clear(&mut self) {
+        self.pages.clear();
+        self.bytes = 0;
+    }
+
+    fn insert(&mut self, key: ([u8; 32], u64), page: Arc<crab_staging::recipe::RecipePage>) {
+        if self.pages.contains_key(&key) {
+            return;
+        }
+        let page_bytes = page
+            .chunks
+            .capacity()
+            .saturating_mul(std::mem::size_of::<crab_staging::recipe::RecipeChunk>());
+        let entry_bytes = page_bytes.saturating_add(RECIPE_PAGE_CACHE_ENTRY_OVERHEAD);
+        if entry_bytes > RECIPE_PAGE_CACHE_BYTES.saturating_sub(self.bytes) {
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(entry_bytes);
+        self.pages.insert(key, page);
     }
 }
 
@@ -6688,6 +6721,7 @@ impl PushPipeline {
             planned_git_bytes: std::sync::atomic::AtomicU64::new(0),
             uploaded_xorbs: tokio::sync::Mutex::new(Vec::new()),
             chunk_cache: tokio::sync::Mutex::new(HashMap::new()),
+            recipe_page_cache: std::sync::Mutex::new(RecipePageCache::default()),
             add_push_plans: tokio::sync::Mutex::new(HashMap::new()),
             staging_push_id: uuid::Uuid::now_v7().to_string(),
             staging_push_marked: tokio::sync::Mutex::new(false),
@@ -6783,13 +6817,31 @@ impl PushPipeline {
         recipe: &FileRecipe,
         start_occurrence: u64,
     ) -> Result<crab_staging::recipe::RecipePage> {
-        self.staging
+        let key = (recipe.hash(), start_occurrence);
+        if let Some(page) = self
+            .recipe_page_cache
+            .lock()
+            .map_err(|_| CrabError::Internal("recipe page cache poisoned".to_owned()))?
+            .pages
+            .get(&key)
+            .cloned()
+        {
+            return Ok((*page).clone());
+        }
+        let page = self
+            .staging
             .as_ref()
             .ok_or_else(|| {
                 CrabError::Internal("staging disappeared during recipe read".to_owned())
             })?
             .recipe_page(recipe, start_occurrence)
-            .map_err(CrabError::from)
+            .map_err(CrabError::from)?;
+        let mut cache = self
+            .recipe_page_cache
+            .lock()
+            .map_err(|_| CrabError::Internal("recipe page cache poisoned".to_owned()))?;
+        cache.insert(key, Arc::new(page.clone()));
+        Ok(page)
     }
 
     fn visit_recipe_chunks(
@@ -9442,6 +9494,10 @@ impl PushPipeline {
         // recipe-derived set from the surviving refs so a rejected sibling
         // cannot contribute payload, proof, or receipt state to the retry.
         self.chunk_cache.lock().await.clear();
+        self.recipe_page_cache
+            .lock()
+            .map_err(|_| CrabError::Internal("recipe page cache poisoned".to_owned()))?
+            .clear();
         self.add_push_plans.lock().await.clear();
         self.remote_only_pointers.lock().await.clear();
         self.remote_file_recipe_hashes.lock().await.clear();
