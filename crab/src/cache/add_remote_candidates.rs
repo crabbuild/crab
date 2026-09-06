@@ -97,17 +97,6 @@ impl AddRemoteCandidateCache {
         })
     }
 
-    pub(crate) fn memory_get(
-        &self,
-        hash: &MerkleHash,
-    ) -> Result<Option<Option<ExistingChunkCandidate>>> {
-        let mut memory = self
-            .memory
-            .lock()
-            .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
-        Ok(memory.get(hash).copied())
-    }
-
     pub(crate) fn memory_get_batch(
         &self,
         hashes: &[MerkleHash],
@@ -126,19 +115,6 @@ impl AddRemoteCandidateCache {
             }
         }
         Ok(out)
-    }
-
-    pub(crate) fn memory_insert(
-        &self,
-        hash: MerkleHash,
-        candidate: Option<ExistingChunkCandidate>,
-    ) -> Result<()> {
-        let mut memory = self
-            .memory
-            .lock()
-            .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
-        memory.put(hash, candidate);
-        Ok(())
     }
 
     pub(crate) fn memory_insert_batch(
@@ -559,9 +535,17 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
         let hash = MerkleHash::from([3; 32]);
-        assert_eq!(cache.memory_get(&hash).expect("lookup"), None);
-        cache.memory_insert(hash, None).expect("insert");
-        assert_eq!(cache.memory_get(&hash).expect("lookup"), Some(None));
+        assert!(
+            !cache
+                .memory_get_batch(&[hash])
+                .expect("lookup")
+                .contains_key(&hash)
+        );
+        cache.memory_insert_batch(&[(hash, None)]).expect("insert");
+        assert_eq!(
+            cache.memory_get_batch(&[hash]).expect("lookup").get(&hash),
+            Some(&None)
+        );
     }
 
     #[test]
