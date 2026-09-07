@@ -41,7 +41,12 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
   Source: `crates/crab-read/src/term_resolver.rs`.
 - Reuse metadata's SharedFileIndexLookup for term batches; do not duplicate lazy
   session ownership or depend on unique Arc ownership to close it.
-- Drain every spawned term-resolution worker before closing the shared file-index lookup session, including cancellation and strict errors. Await batch futures through cancellation; dropping a future does not perform asynchronous cleanup.
+- Batch cancellation uses a child token and drop guard: abandonment must
+  release admission waiters without cancelling the caller or sibling batches.
+- Drain every spawned term-resolution worker before closing the shared
+  file-index lookup session, including cancellation and strict errors. Await
+  batch futures through cancellation; dropping a future does not join admitted
+  reads or perform asynchronous session cleanup.
   Source: `crates/crab-read/src/term_resolver.rs`.
 - Preserve typed worker join failures through `ReadError::ResolutionTask` and
   consumer conversions. Strict resolution must not stringify away JoinError;

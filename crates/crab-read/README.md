@@ -143,8 +143,10 @@ clones remain.
 Cancellation stops admission and drains workers before closing the shared
 file-index lookup session. Workers waiting for a concurrency permit observe the
 cancellation token; already admitted metadata reads finish before cleanup.
-Await the batch through cancellation. Dropping the future does not join its
-spawned workers or close the session asynchronously.
+Dropping the batch cancels its own admission waiters without cancelling the
+caller's token or sibling batches. It does not join already admitted reads or
+close their session asynchronously; await the batch through cancellation for
+that cleanup.
 
 Strict batches retain worker join failures as `ReadError::ResolutionTask`.
 Its error source is Tokio's `JoinError`, so diagnostic consumers can distinguish

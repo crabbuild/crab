@@ -3757,3 +3757,33 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   eviction, stale retry, or temporary overflow. This supports lease reuse for
   that fixture, not efficient-read or historical cached-throughput parity.
 - Run: https://github.com/crabbuild/crab/actions/runs/34160586825
+
+
+### Cancel abandoned term admission without cancelling sibling work
+
+- A dropped batch left its spawned workers waiting on the resolver's semaphore
+  indefinitely when the caller kept its token live. The regression holds real
+  resolver capacity, polls a batch and its worker, then drops only the batch;
+  the prior implementation retains the worker's cache ownership.
+- Both term and sequence implementations now derive an operation child token
+  and hold its drop guard. Abandonment wakes admission waiters; completed calls
+  also release their private token without affecting the caller or siblings.
+  Existing parent-token cancellation still drains awaited batches.
+- Dependency evidence: tokio-util 0.7.18 child_token propagates cancellation
+  downward only; DropGuard::drop cancels the child. The semaphore select and
+  subsequent cancellation check prevent a newly released permit from admitting
+  abandoned work. Tokio JoinHandle drop remains detached, so this change does
+  not imply worker joining or reader cleanup after an abandoned admitted read.
+- Caller/sibling proof: CLI diff and diff-driver await the sequence facade;
+  all three shared batch APIs use the two updated implementations. Hydration
+  and dependency proofs already use child-token drop guards for operation-local
+  cancellation. No public API, dependency, configuration, or format change.
+- Tests cover abandonment and an untouched parent token for all three APIs,
+  while the existing 1,000-input tests retain capacity and explicit-cancellation
+  coverage. Eight term-resolution tests and the stored-index/shard integration
+  pass; strict Clippy/rustdoc and the CLI build pass. The build retains the
+  previously recorded macOS debug unwind-size warning.
+- Production growth is eight lines establishing cancellation ownership in two
+  batch paths. The remaining admitted-reader abandonment gap needs an explicit
+  asynchronous owner and runtime shutdown proof; cancellation signalling alone
+  does not satisfy the session-close invariant.

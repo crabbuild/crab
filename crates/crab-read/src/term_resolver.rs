@@ -98,8 +98,9 @@ impl TermResolver {
     /// handles graceful degradation.
     ///
     /// Cancellation stops admission, drains admitted work, and closes the shared
-    /// file-index session before returning. Await this future to completion;
-    /// dropping it cannot perform asynchronous cleanup.
+    /// file-index session before returning. Dropping this future cancels its
+    /// admission waiters without cancelling the caller's token. Await it through
+    /// cancellation to join admitted reads and close their file-index session.
     pub async fn resolve_batch(
         &self,
         file_hashes: &[(MerkleHash, Option<MerkleHash>)],
@@ -109,6 +110,10 @@ impl TermResolver {
             return Ok(HashMap::new());
         }
 
+        // A dropped batch must release its admission waiters without cancelling
+        // sibling operations that share the caller's token.
+        let cancel = cancel.child_token();
+        let _cancel_on_drop = cancel.clone().drop_guard();
         let semaphore = Arc::clone(&self.semaphore);
         let shard_readers: Arc<Mutex<HashMap<MerkleHash, Arc<ShardReader>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -190,7 +195,7 @@ impl TermResolver {
 
         let outcome = drain_resolution_tasks(handles, outcome).await;
         close_file_index_lookup(file_index_lookup).await;
-        check_cancelled(cancel)?;
+        check_cancelled(&cancel)?;
         outcome?;
 
         let map = match Arc::try_unwrap(results) {
@@ -242,6 +247,10 @@ impl TermResolver {
             return Ok(HashMap::new());
         }
 
+        // A dropped batch must release its admission waiters without cancelling
+        // sibling operations that share the caller's token.
+        let cancel = cancel.child_token();
+        let _cancel_on_drop = cancel.clone().drop_guard();
         let semaphore = Arc::clone(&self.semaphore);
         let shard_readers: Arc<Mutex<HashMap<MerkleHash, Arc<ShardReader>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -327,7 +336,7 @@ impl TermResolver {
 
         let outcome = drain_resolution_tasks(handles, outcome).await;
         close_file_index_lookup(file_index_lookup).await;
-        check_cancelled(cancel)?;
+        check_cancelled(&cancel)?;
         outcome?;
 
         let map = match Arc::try_unwrap(results) {
@@ -955,6 +964,62 @@ mod tests {
                 retained <= 2,
                 "{mode} retained {retained} worker owners for one permit"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_batches_release_admission_waiters_without_cancelling_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(temp.path().join("cache")));
+        let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(origin.clone(), "org/repo".into());
+        let store = CachingStore::new_with_local_cache(
+            origin,
+            crab_cache_store::CacheConfig::default(),
+            Arc::clone(&cache),
+        )
+        .unwrap();
+        let resolver = TermResolver::new(store, router, cache, 1).unwrap();
+        let _occupied = resolver.semaphore.acquire().await.unwrap();
+        for mode in ["terms", "sequences", "strict"] {
+            let cancel = CancellationToken::new();
+            let owner_count = Arc::strong_count(&resolver.cache);
+            let mut batch = Box::pin(async {
+                let hash = MerkleHash::default();
+                let files = [(hash, None, 0)];
+                let terms = [(hash, None)];
+                let source = ChunkSequenceSourceKind::Committed;
+                match mode {
+                    "terms" => resolver.resolve_batch(&terms, &cancel).await.map(|_| ()),
+                    "sequences" => resolver
+                        .resolve_sequences_batch(&files, source, &cancel)
+                        .await
+                        .map(|_| ()),
+                    _ => resolver
+                        .resolve_sequences_batch_strict(&files, source, &cancel)
+                        .await
+                        .map(|_| ()),
+                }
+            });
+            assert!(futures_util::poll!(&mut batch).is_pending());
+            tokio::task::yield_now().await;
+            drop(batch);
+
+            let released = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while Arc::strong_count(&resolver.cache) > owner_count {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            let parent_untouched = !cancel.is_cancelled();
+            // Cancel any remaining waiter before an assertion can end the test.
+            cancel.cancel();
+            tokio::task::yield_now().await;
+            assert!(
+                released.is_ok(),
+                "{mode} retained an abandoned admission waiter"
+            );
+            assert!(parent_untouched, "{mode} cancelled the caller's token");
         }
     }
 
