@@ -113,6 +113,11 @@ Batch eviction sums actual removal results instead of counting stale candidates.
 
 ## Shutdown ownership
 
+Periodic eviction runs disk/SQLite work on a blocking worker, one batch at a
+time. Evictor shutdown stops polling and waits for any admitted batch before
+releasing its cache reference. A shutdown signal takes priority over a queued
+nudge. Dropping the handle alone does not request shutdown.
+
 Signal registration happens before runtime dependencies are prepared. A
 registration error returns through the server error path. TLS keeps signal
 waiting inside the serving future, so a failed bind leaves no signal task.

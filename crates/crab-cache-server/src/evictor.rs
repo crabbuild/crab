@@ -21,6 +21,7 @@ use crate::cache_store::CacheStore;
 pub struct EvictorHandle {
     /// Notify the evictor to run immediately (e.g. after a large write).
     notify: Arc<Notify>,
+    shutdown_notify: Arc<Notify>,
     /// Join handle for the background task.
     join: tokio::task::JoinHandle<()>,
 }
@@ -37,9 +38,9 @@ impl EvictorHandle {
         Arc::clone(&self.notify)
     }
 
-    /// Shut down the evictor task and wait for it to finish.
+    /// Stop polling and wait for any admitted blocking eviction to finish.
     pub async fn shutdown(self) {
-        self.join.abort();
+        self.shutdown_notify.notify_one();
         let _ = self.join.await;
     }
 }
@@ -56,6 +57,8 @@ pub fn start_evictor_task(
 ) -> EvictorHandle {
     let notify = Arc::new(Notify::new());
     let notify_clone = Arc::clone(&notify);
+    let shutdown_notify = Arc::new(Notify::new());
+    let shutdown_clone = Arc::clone(&shutdown_notify);
 
     let join = tokio::spawn(async move {
         info!(
@@ -66,8 +69,9 @@ pub fn start_evictor_task(
         );
 
         loop {
-            // Wait for either the poll interval or an explicit nudge.
             tokio::select! {
+                biased;
+                () = shutdown_clone.notified() => break,
                 () = tokio::time::sleep(poll_interval) => {}
                 () = notify_clone.notified() => {}
             }
@@ -88,8 +92,15 @@ pub fn start_evictor_task(
                 high_water, "above high-water mark, running eviction"
             );
 
-            match cache_store.evict_to_budget(high_water_ratio, low_water_ratio) {
-                Ok(stats) => {
+            // Disk and SQLite work can wait on locks. Keep it off async workers,
+            // and retain its join handle so shutdown cannot detach a mutation.
+            let store = Arc::clone(&cache_store);
+            let eviction = tokio::task::spawn_blocking(move || {
+                store.evict_to_budget(high_water_ratio, low_water_ratio)
+            })
+            .await;
+            match eviction {
+                Ok(Ok(stats)) => {
                     if stats.evicted_count > 0 {
                         info!(
                             evicted_count = stats.evicted_count,
@@ -99,19 +110,30 @@ pub fn start_evictor_task(
                         );
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!(error = %e, "eviction run failed");
+                }
+                Err(e) => {
+                    warn!(error = %e, "eviction worker failed");
+                    break;
                 }
             }
         }
     });
 
-    EvictorHandle { notify, join }
+    EvictorHandle {
+        notify,
+        shutdown_notify,
+        join,
+    }
 }
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use crate::cache_store::{CacheStore, ObjectType, ServerObjectKey};
     use crate::db::{CACHE_DB_FILE, CacheDb};
     use bytes::Bytes;
@@ -237,6 +259,23 @@ mod tests {
         let removed = store.remove_object(&meta_key).unwrap();
         assert_eq!(removed.evicted_count, 0);
         assert_eq!(removed.evicted_bytes, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_precedes_queued_nudge() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_or_create(&directory.path().join(CACHE_DB_FILE)).unwrap();
+        let store = Arc::new(
+            CacheStore::open(directory.path().to_path_buf(), 32, db.connect().unwrap()).unwrap(),
+        );
+        put_object(&store, b"stored cache bytes", ObjectType::Xorb);
+        let evictor =
+            super::start_evictor_task(Arc::clone(&store), 0.4, 0.2, Duration::from_secs(60));
+        evictor.nudge();
+        tokio::time::timeout(Duration::from_secs(1), evictor.shutdown())
+            .await
+            .unwrap();
+        assert_eq!(store.current_bytes(), 18);
     }
 
     #[test]

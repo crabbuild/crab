@@ -3372,3 +3372,42 @@ strict all-target Clippy, rustdoc and the cache-server binary build. The
 crab-cache-store test-target compilation also passes with its cache-server
 fixture dependency. Scheduling/shutdown and aggregate candidate-memory work
 remain open; the all-crate objective is not complete.
+
+
+### Background eviction scheduling and drain
+
+The periodic evictor called synchronous CacheStore::evict_to_budget directly
+inside a Tokio task, also present on origin/main a371fb7d002. A current-thread
+runtime regression holds the real cache mutation lock from a bounded helper
+thread. Before the fix, a heartbeat cannot progress and the three-second
+watchdog releases the lock; the test fails for blocking the async executor.
+
+Each admitted periodic batch now runs in spawn_blocking, with one outstanding
+batch per evictor. Shutdown notifies the loop and awaits its join instead of
+aborting it. The loop awaits the blocking batch before observing the shutdown
+signal, and shutdown has priority over a simultaneously queued nudge. Ordinary
+cache errors retain warning-and-retry-on-next-wake behavior; a worker JoinError
+stops the maintenance loop. Dropping an unused handle still does not stop it.
+No new dependency, feature, configuration option or public signature is added.
+
+Tokio 1.52.1 documents that a started blocking task cannot be aborted. Its Notify
+implementation retains notify_one permits when there is no waiter and transfers
+an unconsumed notification when a waiter is dropped. Thus shutdown notification
+survives an in-flight batch or a cancelled select branch. Awaiting the parent
+loop retains cache ownership until its blocking mutation finishes.
+
+The regression now proves the heartbeat progresses while the mutation lock is
+held, shutdown remains pending until release, and eviction is complete when
+shutdown returns. A second current-thread test queues a nudge before shutdown
+and verifies no batch is run. All 44 cache-store, seven evictor, four service-owner
+and two HTTP eviction tests pass, along with strict all-target Clippy,
+rustdoc and the cache-server binary build.
+
+Consumer: PreparedServer::shutdown awaits EvictorHandle::shutdown after serving;
+the loopback service fixture does likewise. Sibling paths remain explicit work:
+startup, admin and emergency-admission eviction still call synchronous storage
+operations and need their own cancellation/ownership review before offloading.
+This batch does not qualify abandoned server futures, whole-process shutdown,
+or aggregate candidate memory. The added production state is one shutdown
+notification and the blocking-task join boundary; no parallel eviction API or
+worker abstraction was introduced.

@@ -60,6 +60,9 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
 - Use removal's `EvictStats` for both count and bytes. Zero bytes can mean an
   empty object; a stale candidate contributes no eviction. Source:
   `crates/crab-cache-server/src/cache_store.rs`.
+- Periodic eviction runs blocking work off the async executor. Shutdown signals
+  the loop and joins the admitted batch; do not abort its outer task and detach
+  a mutation. Source: `crates/crab-cache-server/src/evictor.rs`.
 
 ## Features and platform
 

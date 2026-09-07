@@ -2390,6 +2390,65 @@ mod tests {
         assert_eq!(store.eviction_stats().total, 1);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_eviction_yields_and_shutdown_drains_it() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_or_create(&directory.path().join(CACHE_DB_FILE)).unwrap();
+        let store = Arc::new(
+            CacheStore::open(directory.path().to_path_buf(), 32, db.connect().unwrap()).unwrap(),
+        );
+        let data = Bytes::from_static(b"stored cache bytes");
+        let hash = blake3::hash(&data);
+        store
+            .put(&test_key(hash.to_hex().as_ref()), data, hash.as_bytes())
+            .unwrap();
+
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let locked_store = Arc::clone(&store);
+        let blocker = std::thread::spawn(move || {
+            let _guard = locked_store.mutation_guard().unwrap();
+            locked.send(()).unwrap();
+            // Bound failures even if eviction blocks the only async worker.
+            let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            if responsive {
+                let _ = release_rx.recv_timeout(Duration::from_secs(3));
+            }
+            responsive
+        });
+        ready.await.unwrap();
+
+        let evictor = crate::evictor::start_evictor_task(
+            Arc::clone(&store),
+            0.4,
+            0.2,
+            Duration::from_secs(60),
+        );
+        evictor.nudge();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = heartbeat.send(());
+
+        let mut shutdown = Box::pin(evictor.shutdown());
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err();
+        let _ = release.send(());
+        let responsive = blocker.join().unwrap();
+        if waited {
+            shutdown.await;
+        }
+        assert!(
+            responsive,
+            "cache lock contention blocked the async executor"
+        );
+        assert!(waited, "shutdown detached the admitted eviction");
+        assert_eq!(store.current_bytes(), 0);
+    }
+
     #[test]
     fn open_computes_initial_bytes_from_db() {
         let dir = tempfile::tempdir().unwrap();
