@@ -323,17 +323,29 @@ async fn commit_ref_transaction_inner(
     {
         // A lost write response is not a rejected transaction. Confirm only the
         // exact marker; never roll back prepared heads after attempting commit.
-        let verification = match marker_store
-            .get_with_etag_bounded(&marker_path, marker_body.len() as u64)
-            .await
+        let verification = match tokio::time::timeout(
+            REF_JOURNAL_MARKER_OPERATION_TIMEOUT,
+            marker_store.get_with_etag_bounded(&marker_path, marker_body.len() as u64),
+        )
+        .await
         {
-            Ok((body, _)) if body == marker_body => Ok(()),
-            Ok(_) => Err(Some(StorageError::CorruptObject {
-                path: marker_path.to_string(),
-                reason: "commit marker differs from the submitted transaction".to_owned(),
+            Err(_) => Err(Some(StorageError::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "marker readback exceeded {REF_JOURNAL_MARKER_OPERATION_TIMEOUT:?}: {marker_path}"
+                    ),
+                ),
             })),
-            Err(StorageError::NotFound { .. }) => Err(None),
-            Err(error) => Err(Some(error)),
+            Ok(result) => match result {
+                Ok((body, _)) if body == marker_body => Ok(()),
+                Ok(_) => Err(Some(StorageError::CorruptObject {
+                    path: marker_path.to_string(),
+                    reason: "commit marker differs from the submitted transaction".to_owned(),
+                })),
+                Err(StorageError::NotFound { .. }) => Err(None),
+                Err(error) => Err(Some(error)),
+            },
         };
         if let Err(verification) = verification {
             return Err(MetadataError::RefJournalCommitUncertain {
