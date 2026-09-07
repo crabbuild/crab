@@ -3875,3 +3875,25 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
 - Dependency references: [Start-Job](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/start-job?view=powershell-7.5),
   [Stop-Job](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/stop-job?view=powershell-7.5),
   [Win32_Process](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process).
+
+
+### Read documentation: retire the superseded source-loss warning
+
+- The README still described the pre-repair availability-source failure. The
+  operation-owned failure capture and writer-close ordering already landed in
+  #147; this checkpoint changes documentation only, not reconstruction behavior.
+- Rechecked error/source precedence, terminal adapter capture, and output-owner
+  closure in error.rs, store_client.rs, hydrator.rs, and hydrator/output.rs.
+  Those modules are unchanged from b8b81728944. Plan 017's “Crab-owned
+  reconstruction failures” checkpoint records the repair; older failing
+  checkpoints remain historical evidence.
+- Protocol job 101869122360 on b8b81728944 passes the availability and origin
+  integrity reconstruction tests, the 256-attempt availability regression,
+  secondary-Xet-failure source retention, and writer-versus-cancellation
+  precedence. Verified the named successful test lines in the completed log.
+  https://github.com/crabbuild/crab/actions/runs/34163225963/job/101869122360
+- PR Rust quality run 34163225973 also completed successfully on b8b81728944.
+  The PR snapshot reports 31 successful and 11 skipped checks. Newer local
+  lookup/cleanup commits still need their own CI; this is not full-crate proof.
+- Documentation validation: reviewed the corrected contract against source and
+  completed regression evidence; cargo fmt --all and git diff --check pass.

@@ -59,16 +59,18 @@ Cancellation/drop stops pending write attempts. This is not a persistence
 promise when caching is unavailable, over budget, or concurrently evicted,
 nor an aggregate filesystem-latency bound.
 
-`ReadError::Reconstruction` retains the typed failure returned by Xet. Its
-source wrapper exposes the nested client/writer errors that Xet 1.6 keeps
-behind `Arc` without `Error::source` annotations. The store adapter passes
-typed errors into Xet instead of formatting them; consumers can walk the
-standard source chain to distinguish origin integrity, availability hooks,
-and writer I/O. Caller-token and source-reported cancellation return
-`ReadError::Cancelled`. Runtime initialization errors also retain their source.
-An intermittent protocol CI failure still loses the availability source through
-actual reconstruction. The typed-source contract is not fully qualified; see
-Plan 017's direct read-through checkpoint for the failing job and investigation.
+`ReadError::Reconstruction` retains Xet's failure and the operation's first
+terminal read and writer failures. Crab records typed adapter errors before
+passing them to Xet, preserving their sources even when Xet reports a secondary
+channel error. Recovered hint/cache failures do not become the operation's cause.
+Consumers can walk the standard source chain to distinguish origin integrity,
+availability hooks, and writer I/O.
+
+A completed writer failure takes precedence over read failure or cancellation.
+Otherwise, caller-token and source-reported cancellation return
+`ReadError::Cancelled`. The output owner closes the writer before taking the
+failure snapshot, preventing late writes from changing it. Runtime initialization
+errors also retain their source.
 
 CLI/server adapters own user-facing classification. They must preserve this
 chain; converting only its display text loses recovery information. The CLI
