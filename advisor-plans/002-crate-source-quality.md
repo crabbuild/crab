@@ -657,3 +657,35 @@ Open evidence: ownership of foreground read futures during native unmount,
 error ordering when unmount fails, and mount-removal races in daemon startup.
 Inspect those before changing cancellation timing. This section specifies the
 required implementation; it does not claim that runtime shutdown is repaired.
+
+## Daemon task completion before cache release
+
+DaemonService::teardown_runtime now joins its refresh/watcher tasks after abort,
+then unmounts the backend, aborts all queue workers and joins them before dropping
+snapshot/overlay/resolver/cache-lock ownership. Backend errors are still retained
+until cleanup finishes. Tokio 1.52.1 JoinHandle documents abort as a cancellation
+request; it does not establish completion. The regression retained four Arc
+guards after baseline teardown and only the observer after the fix.
+
+All 36 daemon tests pass with nfs, including the regression. No new runtime
+abstraction or dependency. Awaiting cancellation may wait for a synchronous step
+to return; no hard shutdown deadline is claimed. This function serves both
+backend variants, but fuse compilation/native teardown proof remains pending.
+Coordinator, failed startup and NFS task handles still need equivalent ownership
+work. Detached read-window prefetch is outside these daemon-owned handles and
+still requires the admission/tracking consolidation specified above.
+
+Validation limitation: strict all-target VFS Clippy with nfs failed with 418
+lib-test diagnostics, including existing literal/style/test-panic issues across
+several modules. Baseline comparison and attribution of new diagnostics are
+pending. The daemon runtime change remains uncommitted/unpublished until its
+lint impact is isolated; the 36 passing tests are not a clean quality gate.
+
+Clippy attribution completed: structured diagnostics compared by lint code,
+message, primary source file, and source text (ignoring shifted line numbers).
+The first test version added one no-effect binding warning; the guard now stays
+owned until an explicit drop after the pending future. The final current and
+committed baseline each have 417 error diagnostics, with zero added or removed
+fingerprints. Baseline daemon.rs is identical to origin/main. The corrected
+regression passes again. No lint suppression was added. Strict VFS Clippy is
+still not clean; the backlog remains part of the all-crate quality work.

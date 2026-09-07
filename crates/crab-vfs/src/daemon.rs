@@ -1204,12 +1204,14 @@ impl DaemonService {
         // 1. Cancel refresh loop.
         if let Some(handle) = rt.refresh_handle.take() {
             handle.abort();
+            let _ = handle.await;
             debug!(name = %name, "refresh loop cancelled");
         }
 
         // 2. Stop HEAD watcher.
         if let Some(handle) = rt.watcher_handle.take() {
             handle.abort();
+            let _ = handle.await;
             debug!(name = %name, "watcher stopped");
         }
 
@@ -1219,9 +1221,14 @@ impl DaemonService {
             None => Ok(()),
         };
 
-        // 4. Stop hydration workers.
-        for handle in rt.hydrator_handles.drain(..) {
+        // Abort requests cancellation; joining releases task-owned cache state
+        // before this runtime gives up its cache lock.
+        // Stop all workers before waiting so one slow exit cannot admit more work.
+        for handle in &rt.hydrator_handles {
             handle.abort();
+        }
+        for handle in rt.hydrator_handles.drain(..) {
+            let _ = handle.await;
         }
         debug!(name = %name, "hydration workers stopped");
 
@@ -2094,6 +2101,37 @@ mod tests {
             read_only: false,
             backend: DaemonMountBackend::Fuse,
         }
+    }
+
+    #[tokio::test]
+    async fn teardown_joins_owned_background_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(dir.path().to_owned(), CancellationToken::new()).unwrap();
+        let ownership = Arc::new(());
+        let spawn = || {
+            let guard = Arc::clone(&ownership);
+            tokio::spawn(async move {
+                std::future::pending::<()>().await;
+                drop(guard);
+            })
+        };
+        let mut runtime = RepoRuntime {
+            config: sample_config("teardown"),
+            state: RepoRuntimeState::Initializing,
+            head_oid: None,
+            snapshot: None,
+            overlay: None,
+            hydrator_handles: vec![spawn(), spawn()],
+            resolver: None,
+            mount_session: None,
+            watcher_handle: Some(spawn()),
+            refresh_handle: Some(spawn()),
+            repo_cancel: CancellationToken::new(),
+            paths: None,
+            cache_lock: None,
+        };
+        service.teardown_runtime(&mut runtime).await.unwrap();
+        assert_eq!(Arc::strong_count(&ownership), 1);
     }
 
     #[test]

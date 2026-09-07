@@ -71,7 +71,7 @@ tests are not native mounted-filesystem or whole-process resource proof.
 Cancellation is cooperative. A queue worker observes it between synchronous
 hydration steps; requesting abort does not prove that a running step has ended.
 The coordinator currently bounds its wait with a grace period, while daemon
-teardown requests worker aborts. Neither path establishes completion of detached
+teardown aborts and joins its refresh, watcher, and queue-worker tasks. Neither path establishes completion of detached
 read-window prefetch. Full teardown qualification remains outstanding.
 
 ## Usage
