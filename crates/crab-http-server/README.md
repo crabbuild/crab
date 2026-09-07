@@ -120,6 +120,10 @@ in for transfer deadlines or worker cleanup after a response has been returned.
 The production server initializes eight application slots and four shared Git
 transfer slots in [server.rs](src/server.rs); test fixtures use smaller limits.
 
+Archive downloads in [archive.rs](src/archive.rs) use a channel-backed ZIP body.
+Traversal cancellation must fail that body: finalizing ZIP state for cleanup
+must not turn an incomplete archive into a successful download.
+
 ## Work on this crate
 
 Start with [AGENTS.md](AGENTS.md) for entry points, ownership, and invariants.

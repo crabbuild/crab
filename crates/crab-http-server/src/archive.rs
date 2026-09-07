@@ -124,7 +124,7 @@ impl IntoResponse for Error {
 enum ArchiveMessage {
     Entry(ArchiveEntry),
     Finish,
-    Abort { cancelled: bool },
+    Abort,
 }
 
 struct ChannelWriter {
@@ -263,7 +263,7 @@ fn spawn_archive_reader(
                     if !cancelled {
                         tracing::error!(error = ?error, "repository archive traversal failed");
                     }
-                    let _ = sender.send(ArchiveMessage::Abort { cancelled }).await;
+                    let _ = sender.send(ArchiveMessage::Abort).await;
                     return;
                 }
             }
@@ -334,11 +334,10 @@ fn write_zip(
                 writer.finish().map_err(zip_error)?;
                 return Ok(());
             }
-            Some(ArchiveMessage::Abort { cancelled }) => {
+            Some(ArchiveMessage::Abort) => {
+                // Finalization releases ZIP state; incomplete traversal must still
+                // fail the HTTP body so clients cannot accept a partial archive.
                 writer.finish().map_err(zip_error)?;
-                if cancelled {
-                    return Ok(());
-                }
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "repository archive traversal failed",
@@ -489,6 +488,28 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_archive_does_not_complete_the_response_body() {
+        use http_body_util::BodyExt;
+
+        let (messages, entries) = mpsc::channel(1);
+        let (output, receiver) = mpsc::channel(1);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+        let cancellation = CancellationToken::new();
+        spawn_zip_writer("repo-1111111".into(), entries, output);
+        messages.send(ArchiveMessage::Abort).await.unwrap();
+        drop(messages);
+        let result = response_body(receiver, permit, cancellation.drop_guard())
+            .collect()
+            .await;
+        assert!(
+            result.is_err(),
+            "an aborted traversal must not become a successful partial ZIP response"
+        );
+        assert_eq!(semaphore.available_permits(), 1);
     }
 
     #[tokio::test]

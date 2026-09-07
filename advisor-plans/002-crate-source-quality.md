@@ -1637,3 +1637,28 @@ server is executed by that failing test. This is source-level isolation evidence
 not a fresh runtime reproduction on main. The check remains red; no UI test,
 threshold, snapshot, or baseline was changed. Other qualification jobs continue,
 so local commits remain unpublished to preserve their running head.
+
+### Archive cancellation must fail the response body
+
+Current main distinguishes cancelled traversal from other traversal errors in
+`archive::write_zip`: it finalizes the ZIP and returns success for cancellation.
+The download handler sends no Content-Length, so the LFS length-framing proof
+cannot protect this response. The remote-git archive stream propagates operation
+errors to `spawn_archive_reader`, which sends the terminal abort message.
+
+The writer now treats every abort as unsuccessful traversal. ZIP finalization
+still runs for cleanup, then the output channel carries an Interrupted error to
+the Axum body. Cancellation remains quiet in logs. Removing the cancelled flag
+from the private message keeps the decision at the traversal boundary without
+maintaining two completion policies. Successful Finish and disconnected-client
+cleanup retain their existing paths; release and LFS bodies have separate
+stream implementations and are unaffected.
+
+A regression drives the real ZIP worker and response body: the old cancelled
+abort returns a successful collected body, while the corrected path errors and
+releases its transfer permit. All five archive tests pass, including closed
+receiver cleanup and response-size enforcement; strict all-target HTTP-server
+Clippy passes. The frontend was built before these checks. This is worker/body
+integration proof, not a live HTTP archive download or cloud qualification.
+Detached archive-worker draining and the timing of permit release relative to
+worker completion remain separate open lifecycle work.
