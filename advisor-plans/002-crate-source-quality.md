@@ -2239,3 +2239,40 @@ formatting and diff checks pass. No runtime test expansion is needed for this
 prose-only batch. Published c808a1553d2 CI currently has two running and 19
 queued checks; keep that head stable while qualification runs and include this
 local documentation commit in the next grouped publication.
+
+
+### Remote Git range admission boundaries
+
+Inspected the packed batch reader, coalescing, range fetch/slicing, operation
+caller, and single-entry reader siblings. Individual entry limits precede
+coalescing. Range fetches charge aggregate storage and byte budgets and require
+an exact returned byte count; entry slicing preserves CRC verification before
+decode. Operation callers charge logical-object work separately.
+
+The source comment conflated the 8 MiB merge threshold with a response-memory
+bound. An individually admitted entry can exceed that threshold (the default
+packed-entry limit is 64 MiB). The comment and scoped guide now distinguish
+merge policy from individual and aggregate admission. No runtime policy changes.
+
+Retained boundary coverage checks exact and exceeded merge/gap thresholds,
+unsorted input, preservation of complete entries larger than the merge threshold,
+the last addressable range, and overflow rejection. It constructs metadata only,
+not large payload allocations. Existing nearby-entry/multiple-pack coverage
+remains. Current origin/main implements the same policy; these are contract
+qualification tests, not a claim of a reproduced runtime defect.
+
+Evidence map: OperationContext::read_packed_entries_with_locators and the reader's
+batch object/materialization path -> read_packed_many_with_session_and_locators
+-> coalesce_ranges -> read_coalesced_range -> Store::range_get. The single-entry
+path retains its own packed-entry limit and checked end offset. The existing
+repository fixture test rejects_entry_before_fetch_when_packed_budget_is_too_small
+covers the configured limit, but was inspected rather than rerun in this batch.
+No dependency contract or wire format changes. Broader real-range provider and
+consumer qualification remains open.
+
+Validation: both final reader coalescing tests pass, including all added cases;
+strict all-target crab-remote-git Clippy passes. Formatting and diff checks pass.
+Production changes are comments only; test growth protects distinct admission
+boundaries and entry preservation. No binary rebuild is required for these
+comment/test changes. Keep this local commit for the next grouped PR update
+rather than cancelling the current published-head qualification.
