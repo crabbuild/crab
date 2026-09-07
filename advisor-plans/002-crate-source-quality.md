@@ -550,3 +550,18 @@ pre-existing dead-code warnings in ref_registry and shallow_closure; feature-gat
 cleanup remains a separate quality item. HTTP contents and macOS auth keychain
 hex decoding still need completion of their caller and regression proof.
 Strict all-target metadata Clippy with remote-index passes.
+
+## Auth Keychain decoder
+
+The macOS hex_to_key helper accepted a 64-byte string before two-byte slicing.
+A synthetic multibyte regression panicked before the fix. It now returns a
+KeyStore error without key material. Valid upper/lowercase hex still decodes.
+The caller keychain_load_key reads security CLI output; load_or_create_key
+already handles key-store errors through file_based_key. No fallback policy,
+keychain command, crypto format, or public signature changed. The sibling
+read_key_file checks raw byte length and copies bytes, so it has no UTF-8 slicing.
+
+All 18 token-cache tests pass on macOS, including encrypted persistence and
+concurrent store/load. Tests construct synthetic keys and temporary directories;
+no live Keychain command was run. HTTP contents decoding remains pending.
+Strict all-target auth Clippy with default features passes.

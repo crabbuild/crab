@@ -451,6 +451,11 @@ fn hex_to_key(hex: &str) -> Result<[u8; 32]> {
             hex.len()
         )));
     }
+    if !hex.is_ascii() {
+        return Err(AuthError::KeyStore(
+            "keychain key contains non-ASCII hex characters".to_owned(),
+        ));
+    }
     let mut key = [0u8; 32];
     for (i, byte) in key.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
@@ -593,6 +598,25 @@ impl Drop for FlockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_hex_accepts_both_cases() {
+        for value in ["ab".repeat(32), "AB".repeat(32)] {
+            assert_eq!(hex_to_key(&value).unwrap(), [0xab; 32]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_hex_rejects_multibyte_input() {
+        for value in [
+            format!("€{}", "0".repeat(61)),
+            format!("0é{}", "0".repeat(61)),
+        ] {
+            assert!(matches!(hex_to_key(&value), Err(AuthError::KeyStore(_))));
+        }
+    }
 
     /// Build a minimal JWT with the given claims JSON as the payload.
     fn make_jwt(claims_json: &str) -> String {

@@ -82,6 +82,16 @@ Credential and token types omit secrets from `Debug` output. Their string fields
 and serialized payloads still contain credentials: pass resolutions directly to
 the storage adapter and keep those fields out of logs.
 
+## Token-cache key handling
+
+| Source | Representation | Invalid input |
+| --- | --- | --- |
+| macOS Keychain | 64 ASCII hex characters | Returns a key-store error; initialization follows its existing key-file path |
+| Key file | Exactly 32 raw bytes | Returns a key-store error for an incorrect length |
+
+Decoder errors never include the supplied key. Token-cache tests use synthetic
+keys and temporary directories; they do not qualify live Keychain integration.
+
 ## Boundaries
 
 - Use [`crab-types`](../crab-types/README.md) for shared storage and scope
