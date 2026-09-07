@@ -441,6 +441,99 @@ async fn batch_get_reconstruction_empty_is_empty() {
 }
 
 #[tokio::test]
+async fn abandoned_term_batches_remove_managed_reader_checkpoints() {
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    for (mode, during_cleanup) in [
+        ("terms", false),
+        ("terms", true),
+        ("sequences", false),
+        ("sequences", true),
+        ("strict", false),
+        ("strict", true),
+    ] {
+        let (client, _tmp) = test_client();
+        let file_hash = hash_from_seed(42);
+        seed_file_index(&client, &[(file_hash, hash_from_seed(43))]).await;
+        let inner = Arc::clone(client.store.origin().inner());
+        let admin = slatedb::admin::Admin::builder(
+            format!("{}/file_index_db/", client.router.repo_prefix()),
+            Arc::clone(&inner),
+        )
+        .build();
+        assert!(admin.list_checkpoints(None).await.unwrap().is_empty());
+        // Keep origin reads pending long enough to observe reader ownership,
+        // without changing the caller's cancellation token or the stored index.
+        let throttled = Arc::new(ThrottledStore::new(
+            inner,
+            ThrottleConfig {
+                wait_get_per_call: Duration::from_millis(20),
+                ..ThrottleConfig::default()
+            },
+        ));
+        let origin = Store::new(throttled.clone());
+        let cache = Arc::clone(client.store.local_cache());
+        let store = CachingStore::new_with_local_cache(
+            origin.clone(),
+            CacheConfig::default(),
+            Arc::clone(&cache),
+        )
+        .unwrap();
+        let layout = StoreLayout::new(origin, client.router.repo_prefix().to_owned());
+        let resolver = crate::TermResolver::new(store, layout, cache, 1).unwrap();
+        let cache_owners = Arc::strong_count(client.store.local_cache());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut batch = Box::pin(async {
+            let terms = [(file_hash, None)];
+            let files = [(file_hash, None, 16)];
+            let source = crab_diff::types::ChunkSequenceSourceKind::Committed;
+            match mode {
+                "terms" => resolver.resolve_batch(&terms, &cancel).await.map(|_| ()),
+                "sequences" => resolver
+                    .resolve_sequences_batch(&files, source, &cancel)
+                    .await
+                    .map(|_| ()),
+                _ => resolver
+                    .resolve_sequences_batch_strict(&files, source, &cancel)
+                    .await
+                    .map(|_| ()),
+            }
+        });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut batch => panic!("batch ended before checkpoint observation: {result:?}"),
+                    checkpoints = admin.list_checkpoints(None) => {
+                        let workers_released = Arc::strong_count(client.store.local_cache()) == cache_owners;
+                        if !checkpoints.unwrap().is_empty() && (!during_cleanup || workers_released) {
+                            break;
+                        }
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reader reached the requested abandonment phase");
+        drop(batch);
+        throttled.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+        timeout(Duration::from_secs(2), async {
+            while !admin.list_checkpoints(None).await.unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{mode} abandoned its managed reader checkpoint (during_cleanup={during_cleanup})"
+            )
+        });
+    }
+}
+
+#[tokio::test]
 async fn file_index_resolution_agrees_between_term_and_reconstruction_batches() {
     let (client, _tmp) = test_client();
     let file_hash = hash_from_seed(42);

@@ -51,7 +51,7 @@ not claims that the named code is defective.
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
 | crab-cache | Broader cache-key and invalidation qualification remain | Diagnostics, exact cached-file ranges, repair/accounting, and README navigation verified |
 | crab-cache-store | Broader source-chain integrity and deployed-service qualification remain | Warm ranges, conditional/versioned bypass, metadata authority, and corruption provenance verified |
-| crab-read | Dropped-batch session cleanup and aggregate memory/source-chain qualification remain | Bounded workers, canonical lookup ownership, typed join sources, and awaited batch cleanup verified |
+| crab-read | Aggregate memory/source-chain, sibling close ownership, and runtime-shutdown qualification remain | Bounded workers, canonical lookup ownership, typed join sources, and abandoned-batch checkpoint cleanup verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Provider ranges, aggregate resource limits, and broader consumer qualification remain | Lifecycle documentation, README navigation, and coalescing admission boundaries verified |
 | crab-vfs | Native backend/dependency child tasks and abandoned-future cleanup remain | Hydration and refresh ownership regressions, feature checks, lint/docs, and CLI build pass |
@@ -3787,3 +3787,67 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   batch paths. The remaining admitted-reader abandonment gap needs an explicit
   asynchronous owner and runtime shutdown proof; cancellation signalling alone
   does not satisfy the session-close invariant.
+
+
+### Retain term-batch cleanup after caller abandonment
+
+- Reproduced the admitted-reader leak through SlateDB's stored state, not just
+  Arc counts. After a batch established a managed checkpoint, dropping its
+  future left that checkpoint present after the worker finished. The fixture
+  uses a real generation-pinned index and a missing payload; read failures must
+  release database ownership too.
+- Each batch now has one cleanup task and a TaskTracker. A token keeps the
+  tracker nonempty throughout admission. Tracked workers drop their future
+  state before their tracker token; only after all tokens disappear does the
+  cleanup task close the metadata-owned lookup. Both normal completion and
+  abandonment use this same close owner. Normal completion awaits it.
+- A batch dropped during the cleanup await cannot cancel that task's close.
+  No copied input batch, unbounded task channel, Drop-time spawning, new public
+  lifecycle API, or dependency change. The existing rt feature supplies tracking.
+  Production growth buys one explicit asynchronous close owner per batch.
+- Dependency proof: tokio-util 0.7.18 TaskTracker::close does not reject later
+  tasks, so the admission token prevents premature empty/closed completion.
+  TrackedFuture owns its future before its token; worker outputs do not own the
+  lookup session. SlateDB 0.15 reader shutdown cancels/joins its dispatcher and
+  its managed-reader cleanup deletes the established checkpoint. Dropping a
+  Tokio JoinHandle detaches rather than aborting the cleanup task.
+- Evidence map: both term loops use tracked spawn; admission and drain precede
+  cleanup await; the shared metadata owner closes without unique Arc ownership.
+  CLI diff/diff-driver still await the facade. Hydration and prefetch retain
+  their existing explicit close paths; abrupt abandonment of those sibling
+  owners remains separate follow-up work, not qualified by this term fix.
+- The checkpoint regression covers all three batch APIs, both while a worker
+  owns state and after workers finish during the cleanup await. All six cases
+  remove their managed checkpoint after abandonment. Eight term tests and the
+  stored-index/shard agreement test also pass; strict all-target Clippy,
+  rustdoc, CLI build, formatting and diff checks pass. The CLI build retains
+  the known macOS debug unwind-size warning.
+- Cleanup after abandonment requires a live Tokio runtime. Await the batch
+  through cancellation before runtime shutdown. Transport deadlines, aggregate
+  memory limits, close-error policy, and sibling-owner shutdown remain open
+  qualification work; this is not a process-crash durability guarantee.
+
+### Published cache-service qualification at b8b81728944
+
+- Run 34163225980 completed successfully, including cache-service build/tests,
+  RustFS smoke, evidence verification and the workflow's remaining checks.
+  This qualifies the published request/result cleanup and bounded-worker head,
+  not the newer local lookup/abandonment commits.
+- Run: https://github.com/crabbuild/crab/actions/runs/34163225980
+
+
+### Native Windows checkpoint: command pipeline still does not return
+
+- Native run 34160586825 is terminal: Windows job 101863398417 was cancelled
+  at its one-hour deadline; retained-evidence job 101875538184 fails because
+  mount-nfs-windows is missing. Linux and macOS remain successful on b6755c4b503.
+- Filtered Windows job output reports mount readiness at 21:20:15 UTC and
+  cancellation at 22:05:54 UTC. The new post-Invoke-Native phase message never
+  appears. The retained artifact again has mount.log but no completed report.
+- This narrows the stall to Invoke-Native's native-command/Tee pipeline before
+  Wait-ForPath. It does not distinguish a live CLI process from an inherited
+  output handle. spawn_nfs_background prints readiness immediately before its
+  successful return and redirects the helper's stdio to its own private log;
+  process/runtime exit still needs Windows-specific evidence.
+- No private helper log or control token was printed or added to evidence.
+  No new Windows fix, retry, or assertion relaxation is claimed.

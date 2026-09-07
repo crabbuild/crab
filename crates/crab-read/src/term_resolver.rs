@@ -23,6 +23,7 @@ use crab_xet::shard::ShardReader;
 use crab_xet::shard::{FileDataSequenceEntry, XorbChunkSequenceEntry};
 use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::{ReadError, ReadStoreLayout as StoreLayout};
 
@@ -99,8 +100,9 @@ impl TermResolver {
     ///
     /// Cancellation stops admission, drains admitted work, and closes the shared
     /// file-index session before returning. Dropping this future cancels its
-    /// admission waiters without cancelling the caller's token. Await it through
-    /// cancellation to join admitted reads and close their file-index session.
+    /// admission waiters without cancelling the caller's token; a cleanup task
+    /// waits for admitted workers and closes the session. Await this future
+    /// through cancellation before shutting down the Tokio runtime.
     pub async fn resolve_batch(
         &self,
         file_hashes: &[(MerkleHash, Option<MerkleHash>)],
@@ -121,6 +123,12 @@ impl TermResolver {
             Arc::new(Mutex::new(HashMap::with_capacity(file_hashes.len())));
         let file_index_lookup =
             SharedFileIndexLookup::new_for_storage(self.store.origin(), self.router.repo_prefix());
+        let worker_tasks = TaskTracker::new();
+        // Keep the tracker nonempty until admission ends; otherwise cleanup
+        // could close the reader before a later worker is registered.
+        let admission = worker_tasks.token();
+        let cleanup =
+            close_file_index_after_workers(file_index_lookup.clone(), worker_tasks.clone());
 
         let mut handles = FuturesUnordered::new();
         let mut outcome = ResolutionOutcome {
@@ -147,7 +155,7 @@ impl TermResolver {
             let cache = Arc::clone(&self.cache);
             let file_index_lookup = file_index_lookup.clone();
 
-            let handle = tokio::spawn(async move {
+            let handle = worker_tasks.spawn(async move {
                 let _permit = tokio::select! {
                     permit = semaphore.acquire() => permit.map_err(|_| ReadError::Cancelled)?,
                     () = cancel.cancelled() => return Err(ReadError::Cancelled),
@@ -194,9 +202,11 @@ impl TermResolver {
         }
 
         let outcome = drain_resolution_tasks(handles, outcome).await;
-        close_file_index_lookup(file_index_lookup).await;
+        drop(admission);
+        let cleanup_result = cleanup.await;
         check_cancelled(&cancel)?;
         outcome?;
+        cleanup_result.map_err(ReadError::ResolutionTask)?;
 
         let map = match Arc::try_unwrap(results) {
             Ok(mutex) => mutex.into_inner(),
@@ -260,6 +270,12 @@ impl TermResolver {
             Arc::new(Mutex::new(HashMap::with_capacity(files.len())));
         let file_index_lookup =
             SharedFileIndexLookup::new_for_storage(self.store.origin(), self.router.repo_prefix());
+        let worker_tasks = TaskTracker::new();
+        // Keep the tracker nonempty until admission ends; otherwise cleanup
+        // could close the reader before a later worker is registered.
+        let admission = worker_tasks.token();
+        let cleanup =
+            close_file_index_after_workers(file_index_lookup.clone(), worker_tasks.clone());
 
         let mut handles = FuturesUnordered::new();
         let mut outcome = ResolutionOutcome {
@@ -287,7 +303,7 @@ impl TermResolver {
             let cache = Arc::clone(&self.cache);
             let file_index_lookup = file_index_lookup.clone();
 
-            let handle = tokio::spawn(async move {
+            let handle = worker_tasks.spawn(async move {
                 let _permit = tokio::select! {
                     permit = semaphore.acquire() => permit.map_err(|_| ReadError::Cancelled)?,
                     () = cancel.cancelled() => return Err(ReadError::Cancelled),
@@ -335,9 +351,11 @@ impl TermResolver {
         }
 
         let outcome = drain_resolution_tasks(handles, outcome).await;
-        close_file_index_lookup(file_index_lookup).await;
+        drop(admission);
+        let cleanup_result = cleanup.await;
         check_cancelled(&cancel)?;
         outcome?;
+        cleanup_result.map_err(ReadError::ResolutionTask)?;
 
         let map = match Arc::try_unwrap(results) {
             Ok(mutex) => mutex.into_inner(),
@@ -481,10 +499,19 @@ async fn resolve_file_index(
     }
 }
 
-async fn close_file_index_lookup(file_index_lookup: SharedFileIndexLookup) {
-    if let Err(e) = file_index_lookup.close().await {
-        warn!(err = %e, "diff file-index lookup session close failed");
-    }
+fn close_file_index_after_workers(
+    file_index_lookup: SharedFileIndexLookup,
+    workers: TaskTracker,
+) -> tokio::task::JoinHandle<()> {
+    workers.close();
+    // This task owns close even if the batch future or its cleanup await is
+    // dropped. The admission token and tracked workers protect reader lifetime.
+    tokio::spawn(async move {
+        workers.wait().await;
+        if let Err(e) = file_index_lookup.close().await {
+            warn!(err = %e, "diff file-index lookup session close failed");
+        }
+    })
 }
 
 /// Try to get file reconstruction terms from a specific shard.

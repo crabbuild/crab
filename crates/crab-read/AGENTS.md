@@ -43,10 +43,12 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
   session ownership or depend on unique Arc ownership to close it.
 - Batch cancellation uses a child token and drop guard: abandonment must
   release admission waiters without cancelling the caller or sibling batches.
-- Drain every spawned term-resolution worker before closing the shared
-  file-index lookup session, including cancellation and strict errors. Await
-  batch futures through cancellation; dropping a future does not join admitted
-  reads or perform asynchronous session cleanup.
+- A batch admission token keeps its closed TaskTracker nonempty while workers
+  can still register. The cleanup task waits for that token and every tracked
+  worker before closing the file-index session. Normal and abandoned batches
+  share this owner; dropping a cleanup await must not interrupt close.
+- Await batch futures through cancellation before shutting down Tokio; cleanup
+  after abandonment requires the runtime to remain alive.
   Source: `crates/crab-read/src/term_resolver.rs`.
 - Preserve typed worker join failures through `ReadError::ResolutionTask` and
   consumer conversions. Strict resolution must not stringify away JoinError;

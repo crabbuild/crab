@@ -144,9 +144,12 @@ Cancellation stops admission and drains workers before closing the shared
 file-index lookup session. Workers waiting for a concurrency permit observe the
 cancellation token; already admitted metadata reads finish before cleanup.
 Dropping the batch cancels its own admission waiters without cancelling the
-caller's token or sibling batches. It does not join already admitted reads or
-close their session asynchronously; await the batch through cancellation for
-that cleanup.
+caller's token or sibling batches. A per-batch cleanup task waits for admission
+to end and tracked workers to release their state, then closes the session.
+Normal completion awaits that same task. Dropping the batch during cleanup
+does not interrupt it, but shutting down the runtime can: await the batch
+through cancellation before stopping Tokio. Admitted origin reads still need
+their own transport deadlines.
 
 Strict batches retain worker join failures as `ReadError::ResolutionTask`.
 Its error source is Tokio's `JoinError`, so diagnostic consumers can distinguish
