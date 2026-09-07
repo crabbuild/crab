@@ -4614,6 +4614,12 @@ struct CommittedChunkCandidates {
     source_anchors: HashMap<[u8; 32], crab_metadata::receipts::SourceAnchor>,
 }
 
+#[derive(Default)]
+struct ValidatedCommittedChunkReceipts {
+    origins: HashMap<XorbHash, crab_metadata::receipts::OriginReceipt>,
+    placements: HashMap<MerkleHash, [u8; 32]>,
+}
+
 #[derive(Debug, Clone)]
 struct PlannedChunkDependency {
     chunk_hash: MerkleHash,
@@ -14019,18 +14025,28 @@ impl PushPipeline {
         &self,
         placements: &HashMap<MerkleHash, XorbRef>,
     ) -> HashMap<XorbHash, crab_metadata::receipts::OriginReceipt> {
-        self.verified_committed_chunk_receipts.lock().await.clear();
-        if placements.is_empty() {
-            return HashMap::new();
+        let candidates = std::mem::take(&mut *self.committed_chunk_receipt_candidates.lock().await);
+        let validated = self
+            .validate_committed_chunk_candidates(placements, candidates)
+            .await;
+        *self.verified_committed_chunk_receipts.lock().await = validated.placements;
+        validated.origins
+    }
+
+    async fn validate_committed_chunk_candidates(
+        &self,
+        placements: &HashMap<MerkleHash, XorbRef>,
+        candidates: CommittedChunkCandidates,
+    ) -> ValidatedCommittedChunkReceipts {
+        // Add calls this concurrently. Own the entire proof snapshot and result
+        // across awaits so another file cannot replace or clear this lookup.
+        if placements.is_empty() || candidates.placements.is_empty() {
+            return ValidatedCommittedChunkReceipts::default();
         }
         let Some(store) = &self.store else {
-            return HashMap::new();
+            return ValidatedCommittedChunkReceipts::default();
         };
         let source_roots = {
-            let candidates = self.committed_chunk_receipt_candidates.lock().await;
-            if candidates.placements.is_empty() {
-                return HashMap::new();
-            }
             let referenced_anchor_ids = placements
                 .keys()
                 .filter_map(|chunk_hash| {
@@ -14134,7 +14150,6 @@ impl PushPipeline {
             }
         }
 
-        let candidates = self.committed_chunk_receipt_candidates.lock().await;
         let candidate_count = candidates.placements.len();
         let mut verified = HashMap::new();
         let mut verified_origins = HashMap::new();
@@ -14197,12 +14212,12 @@ impl PushPipeline {
             verified_chunks = verified.len(),
             "generation-pinned committed chunk receipt validation complete"
         );
-        drop(candidates);
-        *self.committed_chunk_receipt_candidates.lock().await = CommittedChunkCandidates::default();
-        *self.verified_committed_chunk_receipts.lock().await = verified;
         self.tombstone_stale_committed_chunk_receipts(&stale_receipts)
             .await;
-        verified_origins
+        ValidatedCommittedChunkReceipts {
+            origins: verified_origins,
+            placements: verified,
+        }
     }
 
     // A staging miss is acceptable only with a recipe in the captured journal
@@ -14797,21 +14812,22 @@ impl PushPipeline {
                 (placement.placement_id(), placement.origin_proof_id),
             );
         }
-        *self.committed_chunk_receipt_candidates.lock().await = CommittedChunkCandidates {
+        let candidates = CommittedChunkCandidates {
             placements: remote_candidates.placements,
             origin_proofs: remote_candidates.origin_proofs,
             source_anchors: remote_candidates.source_anchors,
         };
-        let committed_receipts = self.validate_committed_chunk_receipts(&refs).await;
-        let validated = self.verified_committed_chunk_receipts.lock().await.clone();
+        let validated = self
+            .validate_committed_chunk_candidates(&refs, candidates)
+            .await;
         let verified = self
-            .verify_xorb_refs_with_committed_receipts(&refs, &committed_receipts)
+            .verify_xorb_refs_with_committed_receipts(&refs, &validated.origins)
             .await?;
         Ok(verified
             .into_iter()
             .filter_map(|(chunk_hash, xorb_ref)| {
                 let (placement_id, origin_proof_id) = proof_ids.get(&chunk_hash).copied()?;
-                (validated.get(&chunk_hash) == Some(&placement_id)).then_some((
+                (validated.placements.get(&chunk_hash) == Some(&placement_id)).then_some((
                     chunk_hash,
                     crab_staging::push_plan::ExistingChunkCandidate {
                         xorb_ref,

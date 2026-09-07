@@ -203,6 +203,11 @@ SlateDB contains only committed, origin-bound receipts and is updated after a
 successful push CAS; it never stores add claims, local paths, or pending
 uploads.
 
+Concurrent add lookups own their receipt snapshot and validation result across
+remote awaits. They share keyed advisory caches, not the push pipeline's
+mutable per-push proof accumulator; otherwise one file can erase another's
+valid proof and cause unnecessary local payload preparation.
+
 Successful proof-backed candidates and confirmed remote misses are retained in
 a bounded SQLite cache under the user's Crab cache. Persisting misses avoids
 repeating remote-index reads for newly-seen chunks across `crab add`

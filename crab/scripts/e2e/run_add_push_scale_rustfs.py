@@ -23,6 +23,24 @@ from run_add_commit_push_rustfs_smoke import AddCommitPushSmoke, sha256_file
 MIB = 1024 * 1024
 
 
+def verify_parallel_proofs(runner: AddCommitPushSmoke, paths: list[Path]) -> None:
+    source_cache = runner.env["CRAB_CACHE_DIR"]
+    inventories = []
+    for jobs in (1, 4):
+        runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / f"proof-cache-{jobs}")
+        repo, _, _ = runner.prepare_repo(f"proof-workers-{jobs}")
+        for index, path in enumerate(paths[:4]):
+            with path.open("rb") as source:
+                (repo / f"probe-{index}.bin").write_bytes(source.read(16 * MIB))
+        runner.run_crab(repo, ["add", "--jobs", str(jobs), "--jsonl", "*.bin"],
+                        name=f"proof classification with {jobs} workers")
+        inventories.append(runner.staging_payload_inventory(repo))
+    runner.env["CRAB_CACHE_DIR"] = source_cache
+    runner.check("parallel-proof-classification-preserves-serial-coverage",
+                 inventories[0]["recipe_remote_chunks"] > 0 and inventories[0] == inventories[1],
+                 {"serial": inventories[0], "parallel": inventories[1]})
+
+
 def run(args: argparse.Namespace) -> None:
     runner = AddCommitPushSmoke(args)
     if runner.run_root.exists():
@@ -103,6 +121,8 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
         runner.run_git(repo, ["commit", "-m", f"version {version}"])
         runner.run_crab(repo, ["push", "--jsonl", "origin", "HEAD:refs/heads/main"],
                         name=f"v{version} push", timeout=args.push_timeout)
+        if version == 0:
+            verify_parallel_proofs(runner, paths)
 
     expected = {str(path.relative_to(repo)): sha256_file(path)
                 for path in [*paths, *sorted(code.iterdir())]}
@@ -152,7 +172,9 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
         # All targets were created by this invocation; retain reports and logs.
         for path in (repo.parent, consumer.parent, clone, consumer_clone,
                      runner.cache_dir, runner.run_root / "consumer-cache",
-                     runner.run_root / "consumer-clone-cache", runner.run_root / "cold-clone-cache", outside):
+                     runner.run_root / "consumer-clone-cache", runner.run_root / "cold-clone-cache", outside,
+                     runner.run_root / "proof-cache-1", runner.run_root / "proof-cache-4",
+                     runner.run_root / "proof-workers-1", runner.run_root / "proof-workers-4"):
             if path.exists():
                 shutil.rmtree(path)
         runner.run_cmd("clean isolated bucket", ["aws", "--endpoint-url", args.endpoint_url,
