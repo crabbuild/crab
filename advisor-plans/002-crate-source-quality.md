@@ -1,6 +1,7 @@
 # Rust crate source quality
 
 Status: in progress. Scope: all 21 crates under `crates/`.
+Review: [PR #159](https://github.com/crabbuild/crab/pull/159).
 
 The agent-guide work is complete in PR #158. This follow-up addresses source
 correctness, ownership, diagnostics, readability, and executable documentation.
@@ -14,6 +15,8 @@ Verified source batches:
 - shared Git delta instruction decoder.
 - refresh adapter API and retry-boundary documentation.
 - LFS upload file error causes.
+- cache credential Debug redaction.
+- retry-policy validation before execution.
 
 These commits cover specific invariants, not completion of the all-crate goal.
 
@@ -46,7 +49,7 @@ not claims that the named code is defective.
 | crab-staging | Flush-before-publication and recovery ownership | Pending |
 | crab-coordination | Renewal cancellation and lock release ownership | Pending |
 | crab-lfs | Upload I/O causes; integrity and lock ownership remain | Upload diagnostic slice verified |
-| crab-cache | Cache keys, token/path diagnostics, cache invalidation | Pending |
+| crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
 | crab-cache-store | Origin authority, corrupt-cache repair, range validation | Pending |
 | crab-read | Hydration integrity and error propagation to consumers | Pending |
 | crab-write | Commit uncertainty and generation cleanup | Pending |
@@ -57,7 +60,7 @@ not claims that the named code is defective.
 | crab-auth-server | Receive cleanup and error-to-response mapping | Pending |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Pending |
 | crab-http-server | Request validation, embedded assets, service errors | Pending |
-| crab-workflow | Execution cancellation, cache identity, resume state | Pending |
+| crab-workflow | Retry validation; cancellation, cache identity, resume remain | Retry parsing slice verified |
 
 ## Pointer diagnostic change
 
@@ -207,3 +210,39 @@ shared handles, and target/destination rejection. The locked object_store 0.14.1
 MultipartUpload contract confirms that its returned handle owns subsequent
 part/completion/abort calls. This is documentation of current behavior; no
 refresh policy was changed or newly qualified against a live identity service.
+
+## Workflow retry validation investigation
+
+The previous semantic validator checked `backoff_multiplier < 0.0`, missing NaN
+and positive infinity. The locked serde_yaml parser explicitly accepts `.nan`
+and `.inf`. Retry planning then normalizes NaN through `max(1.0)` and handles
+infinity through its non-finite backoff branch, hiding invalid configuration.
+
+The semantic-validation regression fails on the baseline: `.nan` is accepted.
+Caller inspection found that `crab run --validate` invokes semantic validation,
+while execution paths parse separately. A validator-only patch would therefore
+be incomplete. `RawRetry::into_policy` is shared by stage-local and default
+retry declarations. It now uses the same private range validator as semantic
+validation. Both reject invalid policies; finite nonnegative multipliers retain
+their existing behavior. All 91 YAML tests pass, covering stage/default policies,
+programmatic invalid policies, templates, overrides, and existing parsing rules.
+Strict all-target Clippy passes. The parser returns the first invalid policy
+error; aggregate validation still collects errors for programmatically
+constructed workflows. Product execution proof remains for CI.
+
+## Cache credential diagnostics investigation
+
+Before the fix, three derived Debug surfaces exposed cache credentials: `CacheServiceAuth`,
+`ActiveProbeAuth`, and `CacheClient`'s stored header string. Redacting only the
+first enum would leave the other two exposed. Config Debug in crab-cache-store
+and the CLI nests CacheServiceAuth; doctor and cache-server onboarding use the
+borrowed active-probe enum. Header construction consumes the original values.
+
+Added synthetic integration regressions for normal and pretty Debug. Coverage
+is feature-gated to the base contract, active probe, and remote client. The
+client constructor builds configuration without issuing requests. Baseline
+execution fails for all three credential surfaces. Selective Debug implementations
+now pass all three regressions; four existing request-header tests also pass,
+confirming PSK/bearer values still reach requests and no-auth/mTLS add no headers.
+The base credential regression also passes without default features. Strict
+all-target Clippy passes for crab-cache (remote-client) and crab-workflow.
