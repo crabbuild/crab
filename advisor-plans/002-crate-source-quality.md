@@ -2883,3 +2883,54 @@ TLS signal validation completed: four server tests,16 preflight tests, strict
 all-target Clippy, strict rustdoc, and the cache-server binary build pass.
 Published PR head d58bcf91151 has no reported failures; its Windows workflow
 test job is the only remaining PR check at this observation.
+
+
+### Native NFS evidence and read-pool ownership follow-up
+
+Run34148861825 on published d58bcf91151 passed Linux native smoke and Linux
+RustFS/Xet E2E. macOS failed the retained positive read-lease-hit assertion;
+Windows remains running at this observation. The macOS benchmark returned8MiB
+to userspace over two4MiB passes, while NFS recorded four READ RPCs totaling4MiB,
+four lease misses, zero hits, and zero benchmark-time evictions. These counters
+do not prove a broken cache: concurrent first misses and kernel read caching
+must be distinguished from sequential adapter reuse. The smoke assertion and
+workload remain unchanged pending that qualification.
+
+Separately, source inspection found an entry-lifetime defect already present on
+origin/main: ReadLeasePin drops unpin by file ID alone. NFS refresh/switch clears
+entries, and mutation/stale-read paths evict individual IDs. If an active old
+pin survives removal and the same ID is reinserted, its eventual drop decrements
+the replacement's count. Under budget pressure the pool can then evict a still
+pinned replacement. The regression exercises both evict and invalidate_all,
+reinsertion, and actual LRU pressure; it does not assume concurrent scheduling.
+FUSE uses handle-owned VfsReadLease values, not this pool. The engine source
+cache has no pin/drop accounting and is unaffected by this particular defect.
+This finding is separate from the native macOS positive-hit failure.
+
+
+Read-pool regression failed before the fix (session10780, exit101). Entry
+identity now uses an Arc token shared by the cached entry and its pins. The
+pool retains the same identity when concurrent opens replace a still-present
+entry; explicit removal creates a new identity on reinsertion. Arc::ptr_eq
+checks that lifetime under the existing mutex before decrementing pin counts.
+The extra private token allocation per entry avoids numeric generation rollover
+and adds no public API, dependency, or storage-format surface.
+
+Nine pool tests, nine NFS read/readdir/readlink tests, and the control-generation
+invalidation test pass. Strict all-target NFS-feature Clippy and strict rustdoc
+pass. CLI build remains running in session57813 at this observation.
+
+Retained main-run34136668045 macOS evidence used the identical benchmark script:
+four READ RPCs and4MiB at the protocol boundary, with three benchmark lease
+misses and one hit. The PR run instead has four misses and zero hits. This
+supports a first-open scheduling difference but is not a complete causal proof.
+The main workflow was cancelled overall and its retained-evidence verification
+failed; only its completed macOS native job is cited as successful here.
+
+
+Read-pool consumer build completed successfully (session57813, exit0). The
+macOS debug linker emits the previously observed large-unwind-section warning.
+Formatting and git diff --check pass. Production code grows17 net lines to
+carry entry identity through pin admission and release; the regression and
+short ownership documentation explain the payoff. PR checks on d58bcf91151 are
+now terminal with no failures; its separate Windows native job remains live.

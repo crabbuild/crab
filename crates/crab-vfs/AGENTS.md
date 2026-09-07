@@ -50,6 +50,9 @@ mount/control owners consume the pipeline output separately.
   Inspect coordinator, daemon, and interactive NFS owners together.
   Sources: `crates/crab-vfs/src/coordinator.rs`, `crates/crab-vfs/src/daemon.rs`,
   `crates/crab-vfs/src/nfs_mount.rs`.
+- Read-pool pins belong to an entry lifetime, not just a reusable protocol file
+  ID. Invalidation may retire active pins; their drops must not unpin a replacement.
+  Source: `crates/crab-vfs/src/read_lease_pool.rs`.
 - Review cancellation, hydration worker shutdown, leases, and control resources in both FUSE and NFS owners before changing teardown.
   Source: `crates/crab-vfs/src/nfs_mount.rs`.
 

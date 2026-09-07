@@ -61,6 +61,15 @@ its failure isolation, per-read verification, private filesystem access, and
 budget/lifetime ownership remain Plan 017 work. Startup and in-memory-origin
 tests are not native mounted-filesystem or whole-process resource proof.
 
+## Protocol read leases
+
+NFS has no file-open/file-close lifecycle, so `ReadLeasePool` retains bounded
+leases between READ requests. A pin protects its cached entry from ordinary
+budget eviction while a request uses it. Refresh and mutations may explicitly
+invalidate entries; existing reads keep their owned lease until completion.
+Pins identify an entry lifetime as well as a file ID, so a late release cannot
+unpin a replacement inserted after invalidation.
+
 ## Task ownership
 
 | Task | Handle owner | Completion boundary |
