@@ -421,13 +421,33 @@ fn decompress_chunk_data<'a>(
     compressed: &'a [u8],
 ) -> Result<std::borrow::Cow<'a, [u8]>> {
     validate_chunk_size(meta.uncompressed_len)?;
-    let decompressed = meta
-        .scheme
-        .decompress_from_slice(compressed)
-        .map_err(|source| XetError::Decompress {
-            scheme: meta.scheme.into(),
-            source,
-        })?;
+    let decompressed = if meta.scheme == CompressionScheme::None {
+        std::borrow::Cow::Borrowed(compressed)
+    } else {
+        let mut output = DecodedChunkBuffer {
+            bytes: Vec::new(),
+            limit: meta.uncompressed_len as usize,
+        };
+        // BG4's upstream reader buffers before writing. Decode its LZ4 frame
+        // through the same bound first, then regroup the accepted bytes.
+        let frame_scheme = if meta.scheme == CompressionScheme::ByteGrouping4LZ4 {
+            CompressionScheme::LZ4
+        } else {
+            meta.scheme
+        };
+        frame_scheme
+            .decompress_from_reader(&mut std::io::Cursor::new(compressed), &mut output)
+            .map_err(|source| XetError::Decompress {
+                scheme: meta.scheme.into(),
+                source,
+            })?;
+        let bytes = if meta.scheme == CompressionScheme::ByteGrouping4LZ4 {
+            xet_core_structures::xorb_object::byte_grouping::bg4::bg4_regroup(&output.bytes)
+        } else {
+            output.bytes
+        };
+        std::borrow::Cow::Owned(bytes)
+    };
     if decompressed.len() != meta.uncompressed_len as usize {
         return Err(corrupt(format!(
             "decompressed chunk length {} does not match metadata length {}",
@@ -443,6 +463,36 @@ fn decompress_chunk_data<'a>(
         });
     }
     Ok(decompressed)
+}
+
+struct DecodedChunkBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for DecodedChunkBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|len| len > self.limit)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "decoded chunk exceeds declared length of {} bytes",
+                    self.limit
+                ),
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn extend_decoded_size(total: u32, chunk_len: u32) -> Result<u32> {
@@ -762,6 +812,36 @@ mod tests {
             assert!(
                 decode_chunk_range_bytes(std::slice::from_ref(meta), payload).is_err(),
                 "{scheme}: detached range"
+            );
+        }
+    }
+
+    #[test]
+    fn compressed_chunks_stop_when_output_exceeds_declared_length() {
+        for scheme in [CompressionScheme::LZ4, CompressionScheme::ByteGrouping4LZ4] {
+            let original = make_chunk(17, 1024 * 1024);
+            let compressed = scheme.compress_from_slice(&original.data).unwrap();
+            let meta = ChunkMeta {
+                hash: original.hash,
+                offset: 0,
+                compressed_len: compressed.len() as u32,
+                uncompressed_len: 128,
+                scheme,
+            };
+            let valid = ChunkMeta {
+                uncompressed_len: original.data.len() as u32,
+                ..meta
+            };
+            verify_compressed_chunk(&valid, &compressed).unwrap();
+            let error = verify_compressed_chunk(&meta, &compressed).unwrap_err();
+            let XetError::Decompress { source, .. } = error else {
+                panic!("{scheme}: expansion must stop in the streaming decoder: {error}");
+            };
+            assert!(
+                matches!(source, xet_core_structures::CoreError::Io(ref error)
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string().contains("exceeds declared length")),
+                "{source}"
             );
         }
     }

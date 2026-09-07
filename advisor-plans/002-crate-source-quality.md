@@ -2162,3 +2162,51 @@ The debug CLI build passes through data-plane consumers, with the existing
 macOS unwind-size warning. Formatting and diff checks pass. Publication waits
 for the currently running Windows workflow check on dc28b041ca0; this local
 commit is not yet covered by that published-head CI.
+
+### Bound compressed chunk output before accumulation
+
+The shared decoder previously expanded the entire compressed chunk before
+checking its declared length. A retained regression uses valid 1 MiB LZ4 and
+BG4 frames with metadata declaring 128 bytes: the old implementation reports
+a length mismatch only after producing all 1 MiB. Both schemes now fail in the
+streaming output sink when a write would exceed the declared length. The same
+frames with correct metadata remain valid.
+
+Evidence map: all parser chunk readers and verify_compressed_chunk share
+this decoder; local-cache verification, cache-store selective reads, and
+cache-server verification consume those entry points. Pinned
+xet-core-structures 1.6.0 LZ4 decoding streams into Write, but its BG4 reader
+buffers the complete frame internally before writing. BG4 therefore uses the
+same bounded LZ4 decoding followed by the upstream public, length-preserving
+bg4_regroup function. The upstream BG4 benchmark counters have no workspace
+consumers and are not updated by this path. No dependency or wire-format
+changes are required. Raw bytes retain the borrowed/zero-copy path.
+
+The decompression error retains its CoreError source and original compression
+scheme. Cache verification already classifies decompression failures as corrupt
+cache content; cache-store preserves origin integrity provenance and cache
+service repair behavior. Those consumers do not require a CorruptObject error
+for excess output. Current main's slice decompressor has the same unbounded
+output accumulation reproduced by the regression.
+
+Is this the best fix? A bounded writer uses the existing decoder and rejects
+excess bytes before extending the result. Wrapping the BG4 reader directly
+would not bound its internal full-frame buffer. Reimplementing the codec or
+adding a dependency would add unnecessary ownership and compatibility risk.
+The private writer adds a real admission boundary shared by every reader.
+
+Proof: 21 parser tests pass, including valid compressed positive controls,
+malformed lengths, hashes, offsets, and zero-copy reads. Both remote-client
+cache-store corruption/provenance tests pass. Strict all-target Xet Clippy and
+warnings-denied rustdoc pass. The regression fails on the previous source.
+
+Limits: this bounds accepted decoded bytes, not decoder block buffers, Vec
+capacity, BG4 regrouping allocations, CPU time, or total process memory. No
+allocator instrumentation or deployed-service qualification is claimed.
+
+The debug CLI build passes through the affected consumers (existing macOS
+linker unwind warning). Formatting and diff checks pass. All 21 crate guides
+and their CLAUDE.md symlink targets are verified. Prior published dc28b041ca0
+CI is terminal: 29 success, 11 skipped, two failures described above (browser
+contrast and rollback-artifact HTTP 504). New grouped changes require fresh CI;
+this evidence is not a full-workspace green verdict.

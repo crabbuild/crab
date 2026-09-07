@@ -82,6 +82,12 @@ Parsing alone does not verify payload bytes. Raw chunk reads retain slices of
 the original allocation; compressed reads return owned decoded data. Both use
 the same length and hash checks.
 
+LZ4 output streams through a sink that rejects bytes beyond the recorded
+chunk length. BG4 applies its regrouping transform after bounded LZ4 decoding;
+the upstream BG4 reader would buffer before reaching a caller's sink. Decoder
+block buffers, vector capacity, and the BG4 regrouping allocation are additional
+memory costs, so this is not a whole-process memory limit.
+
 The builder and parser share the `u32` decoded-offset limit. Range assembly
 grows after validating decoded chunks instead of reserving an untrusted
 advertised total. These format checks are separate from request admission and
