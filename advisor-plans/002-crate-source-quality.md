@@ -615,3 +615,45 @@ Corrected rustdoc and README to distinguish queue-worker completion from total
 hydration completion, and fixed the constructor's worker-method link. Runtime
 behavior is unchanged. Follow-up must consolidate task ownership across all
 mount owners and qualify real teardown before claiming resource release.
+
+## VFS shutdown implementation contract
+
+Further owner tracing confirms PipelineOutput retains HydrationService, whereas
+RepoRuntime currently retains only worker handles; NfsMountedSession retains the
+engine. Production worker startup occurs in pipeline and daemon. Coordinator
+also has synchronous shutdown/Drop paths that cannot await. This requires a
+cross-owner change, not just replacing one spawn call.
+
+Locked tokio-util 0.7.18 TaskTracker::close explicitly permits subsequent spawns;
+wait completes on closed-and-empty. A cancellation check followed by spawn is
+therefore insufficient admission control. The implementation must serialize
+registration with shutdown admission closure (short synchronous critical section,
+no await under its lock), register all queue/prefetch work, cancel, then drain.
+No new dependency is needed: crab-vfs already enables tokio-util/rt.
+
+Implementation order and acceptance evidence:
+
+1. Give HydrationService one background-task owner with an admission-closed state.
+   Register work before releasing admission protection. Reject queue/prefetch
+   scheduling after closure; preserve foreground-read behavior until backend
+   unmount has completed. Test shutdown racing registration and a held task:
+   completion must wait for task release, and no task may register afterward.
+2. Replace production raw worker-handle ownership with retained service ownership
+   in pipeline/daemon/coordinator. Keep one shutdown method; remove redundant
+   vectors when all callers migrate. Test duplicate startup and shutdown calls.
+3. Preserve backend ordering: NFS journal sync and native unmount need a serving
+   backend. Stop admission to new backend requests before final hydration drain;
+   never cancel reads needed by unmount first. Await refresh/control/server aborts
+   before releasing their state. Cover backend-error cleanup as well as success.
+4. Coordinator grace-period expiry must retain completion ownership. It must not
+   drop JoinHandles and then describe resources as released. Synchronous Drop
+   cannot promise async completion; document its limited request-only contract,
+   and qualify explicit async shutdown as the supported completion path.
+5. Exercise nfs and fuse feature builds and lifecycle fixtures, then native mount
+   read/unmount tests in their dedicated environments. Queue tests alone cannot
+   prove prefetch or kernel-request teardown.
+
+Open evidence: ownership of foreground read futures during native unmount,
+error ordering when unmount fails, and mount-removal races in daemon startup.
+Inspect those before changing cancellation timing. This section specifies the
+required implementation; it does not claim that runtime shutdown is repaired.
