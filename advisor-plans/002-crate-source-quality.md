@@ -2486,3 +2486,24 @@ Fetched origin/main has advanced to a371fb7d002 (add/push hardening, #156),
 affecting staging, cache-store, and product callers. Its Cargo.lock diff only
 reorders an existing windows-sys dependency. Rebase and overlap qualification
 are required before publication; the above consumer results precede that rebase.
+
+### Rebase overlap and guide checks
+
+Rebased onto a371fb7d002 without conflicts. Range-diff matches all 83 patches
+unchanged; this preserves the authored changes but does not replace validation
+against the new base. The 12 multipart journal tests, warm-cache range regression,
+and conditional/versioned-read regression pass on the combined source. The
+post-rebase CLI build passes with the existing macOS linker warning.
+
+All 21 per-crate AGENTS.md files and sibling CLAUDE.md symlink targets are
+present. All 457 repository-relative source paths found in those guides resolve,
+as do 129 local file links in crate READMEs/references. These checks establish
+path/link integrity, not semantic correctness of every linked implementation
+or external website availability. No baseline or ignore file was changed.
+
+
+Post-rebase validation is complete for the selected overlap checks and CLI
+build. Broad qualification of the new combined head still requires fresh CI.
+The published review branch remains c808a1553d2 while its Windows workflow job
+101789745148 finishes. Updating that branch after the rebase requires an exact
+force-with-lease against the verified published head, rather than a fast-forward.
