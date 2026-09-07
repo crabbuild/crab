@@ -91,6 +91,10 @@ Use `crab-workflow` for parsing, planning, hashing, and state contracts. The
 product command owns user-facing repository discovery and chooses when to
 invoke the executor, scheduler, or status renderer.
 
+Cached artifact paths are repository-relative and already include stage `wdir`.
+The product materializer resolves them against the invocation repository, so
+experiment worktrees do not publish cache hits into the caller’s directory.
+
 ## Retry policy
 
 Retry policy counts the initial execution in `max_attempts`. Configure both

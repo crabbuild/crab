@@ -1920,3 +1920,60 @@ CLI library Clippy remains 489 warnings versus 494 on the recorded main
 baseline: 484 unchanged-source matches and the same five large-future messages.
 No new diagnostic is observed. Formatting and diff checks pass. All 21 crate
 AGENTS guides and matching CLAUDE symlinks are present.
+
+### Cache materialization belongs to the invocation repository
+
+The executor records relative artifact paths with any stage `wdir` prefix
+already included. `store_local_xorbs` resolves these against its working root.
+The product cache-hit materializer instead passed raw paths to inspection,
+file reads, atomic writes, and directory reconstruction. Therefore an explicit
+`run_in` repository different from process cwd could publish into the wrong
+worktree. This is a production boundary: experiment execution calls
+`run_in_with_options` with its temporary worktree.
+
+A regression with distinct process and invocation roots reproduced writes into
+process cwd before the fix. Its disposable fixture contains both possible
+destinations; it does not mutate global cwd. The directory fixture uses the
+canonical tree hasher rather than an invented directory digest.
+
+The materializer now resolves each cached path once against a required
+repository root. File/stdout inspection, overwrite policy, verified on-disk
+fallback reads, atomic writes, and directory materialization use that target.
+Stage wdir is not applied again. Inline execution, parallel DAG execution,
+single-stage/watch execution, and local/remote cache-only replay all pass the
+same invocation root. Cache-only context no longer represents this required
+root as an optional working directory. Serialized paths and cache identities
+are unchanged.
+
+Evidence map: `exp::run_exp_run_with_id`'s call to `run_in_with_options` and direct
+`run_in` callers -> run dispatch -> shared product `materialize_hit` /
+`materialize_hit_with_flags` -> shared `materialize_directory`, `write_atomic`,
+`overwrite_policy`, and verified cached-file reads. Executor artifact recording
+in `crates/crab-workflow/src/executor.rs` and `store_local_xorbs` are sibling
+contracts for interpreting these repository-relative paths. Main has the same
+raw-path materializer, so this is not limited to the new YAML replay route.
+
+Is this the best fix? Requiring and threading the owning repository through
+the canonical materializer covers all existing callers. Changing process cwd
+would introduce cross-task global state; changing stored paths would alter a
+persistent contract. Neither is needed. Production growth consists of root
+arguments and one target resolution, with no new adapter or fallback policy.
+
+Four focused YAML cache tests pass. The new regression covers file, stdout,
+and directory artifacts, nested recorded paths, verified reuse after content
+cache eviction, and local-edit preservation with no-overwrite. Existing inline
+execution/cache-hit and two-mode lock-contention tests also pass. Guide and
+public entry-point docs now state artifact-root ownership.
+
+Limits: no claim that every workflow path is cwd-independent; dependency
+resolution, cleanup, remote outputs, and other product operations need their
+own qualification. No new native experiment/cloud E2E claim. This change fixes
+cache-hit materialization's root contract, not unrelated directory overwrite
+policy or concurrent symlink replacement.
+
+The debug CLI builds; its native YAML and inline replay/lock smoke tests pass.
+The existing macOS debug unwind-size warning remains. CLI library Clippy has
+489 diagnostics, identical by file/lint/message to the preceding YAML batch;
+no new diagnostic is observed. The previously recorded main count is 494.
+Formatting and diff checks pass. Keep this batch local while the current
+published head's CI completes, then include it in the next grouped PR update.

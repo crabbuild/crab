@@ -462,7 +462,10 @@ pub async fn exec(args: RunArgs) -> Result<()> {
     run_in(&args, &cwd, mode).await
 }
 
-/// Testable entry point that accepts a working directory explicitly.
+/// Run workflows for an explicitly selected repository.
+///
+/// Cached artifacts resolve against `repo_root`, including any stage working
+/// directory prefix already recorded in the cache entry.
 pub async fn run_in(args: &RunArgs, repo_root: &Path, mode: OutputMode) -> Result<()> {
     run_in_with_options(args, repo_root, mode, RunInvocationOptions::default()).await
 }
@@ -669,7 +672,7 @@ async fn run_inline_single_stage(
             artifact_stores: remote_artifact_stores.as_ref(),
             remote: CacheOnlyRemote::from_remote(remote.as_ref()),
             cache_root: &cache_root,
-            working_dir: Some(repo_root),
+            repo_root,
         };
         let result =
             cache_only_path(&stage_name, &stage_hash, cached.as_ref(), cache_only_ctx).await?;
@@ -832,7 +835,7 @@ async fn run_inline_single_stage(
             // Cache hit path: materialize outs via the atomic sidecar
             // write, respecting overwrite policy from task 1.16.
             if used_cache {
-                materialize_hit(&stage_name, run_id, &entry, &cache_root, args)?;
+                materialize_hit(&stage_name, run_id, &entry, &cache_root, repo_root, args)?;
 
                 // P7: on_cache_hit hook execution for inline stages.
                 if stage.side_effects {
@@ -1082,7 +1085,7 @@ async fn replay_yaml_cache(
                 .and_then(|remote| remote.artifact_stores.as_ref()),
             remote: CacheOnlyRemote::from_remote(remote.as_ref()),
             cache_root: &cache_root,
-            working_dir: Some(repo_root),
+            repo_root,
         };
         results.push(cache_only_path(&name, &recorded.stage_hash, cached.as_ref(), context).await?);
         succeeded.insert(name);
@@ -2258,7 +2261,9 @@ async fn execute_stage_parallel(
                     force,
                     no_overwrite: false,
                 };
-                materialize_hit_with_flags(stage_name, run_id, &entry, cache_root, flags)?;
+                materialize_hit_with_flags(
+                    stage_name, run_id, &entry, cache_root, repo_root, flags,
+                )?;
 
                 // P7: on_cache_hit hook.
                 if stage.side_effects
@@ -2628,7 +2633,7 @@ struct CacheOnlyContext<'a> {
     artifact_stores: Option<&'a RemoteArtifactStores>,
     remote: CacheOnlyRemote<'a>,
     cache_root: &'a Path,
-    working_dir: Option<&'a Path>,
+    repo_root: &'a Path,
 }
 
 /// Build a remote store for workflow cache operations.
@@ -2889,7 +2894,14 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     match exec_result {
         Ok(entry) => {
             if cache_hit {
-                materialize_hit(stage_name, run_id, &entry, &executor_cfg.cache_root, args)?;
+                materialize_hit(
+                    stage_name,
+                    run_id,
+                    &entry,
+                    &executor_cfg.cache_root,
+                    repo_root,
+                    args,
+                )?;
 
                 // P7: on_cache_hit hook execution. Fires only on
                 // cache hits, never on the miss path or during
@@ -3184,7 +3196,7 @@ async fn cache_only_path(
                 ctx.artifact_stores,
                 stage_hash,
                 ctx.cache_root,
-                ctx.working_dir,
+                Some(ctx.repo_root),
             )
             .await
             {
@@ -3199,6 +3211,7 @@ async fn cache_only_path(
                         stage_name,
                         ctx.args,
                         ctx.cache_root,
+                        ctx.repo_root,
                         remote_entry,
                         true,
                     );
@@ -3228,20 +3241,28 @@ async fn cache_only_path(
         });
     };
 
-    cache_only_materialize_hit(stage_name, ctx.args, ctx.cache_root, entry, from_remote)
+    cache_only_materialize_hit(
+        stage_name,
+        ctx.args,
+        ctx.cache_root,
+        ctx.repo_root,
+        entry,
+        from_remote,
+    )
 }
 
 fn cache_only_materialize_hit(
     stage_name: &StageName,
     args: &RunArgs,
     cache_root: &Path,
+    repo_root: &Path,
     entry: StageCacheEntry,
     from_remote: bool,
 ) -> Result<WorkflowStageResult> {
     // Even without a journal, we still run the materialization through
     // the same sidecar path — it's what makes the hit atomic.
     let run_id = Uuid::now_v7();
-    materialize_hit(stage_name, run_id, &entry, cache_root, args)?;
+    materialize_hit(stage_name, run_id, &entry, cache_root, repo_root, args)?;
 
     let duration_ms = 0;
     let mut result = build_stage_result(stage_name.as_str(), &entry, true, duration_ms);
@@ -3259,13 +3280,14 @@ fn materialize_hit(
     run_id: Uuid,
     entry: &StageCacheEntry,
     cache_root: &Path,
+    repo_root: &Path,
     args: &RunArgs,
 ) -> Result<()> {
     let flags = OverwriteFlags {
         force: args.force,
         no_overwrite: args.no_overwrite,
     };
-    materialize_hit_with_flags(stage_name, run_id, entry, cache_root, flags)
+    materialize_hit_with_flags(stage_name, run_id, entry, cache_root, repo_root, flags)
 }
 
 fn materialize_hit_with_flags(
@@ -3273,15 +3295,19 @@ fn materialize_hit_with_flags(
     run_id: Uuid,
     entry: &StageCacheEntry,
     cache_root: &Path,
+    repo_root: &Path,
     flags: OverwriteFlags,
 ) -> Result<()> {
     for out in cached_artifacts(entry) {
+        // Cached paths already include the stage wdir. Resolve once so reads,
+        // overwrite decisions, and publication cannot use different roots.
+        let target = repo_root.join(&out.path);
         match out.kind {
             OutKind::Directory => {
                 // Directory out: materialize from the tree manifest.
                 if let Some(ref manifest) = out.tree_manifest {
                     crate::workflow::materialize::materialize_directory(
-                        &out.path, manifest, cache_root, run_id,
+                        &target, manifest, cache_root, run_id,
                     )?;
                 } else {
                     // Legacy cache entry without tree manifest — the
@@ -3295,9 +3321,9 @@ fn materialize_hit_with_flags(
                 }
             }
             OutKind::File | OutKind::Stdout => {
-                let current = inspect_existing(&out.path);
+                let current = inspect_existing(&target);
                 let decision =
-                    overwrite_policy(stage_name.as_str(), &out.path, out, current.as_ref(), flags)?;
+                    overwrite_policy(stage_name.as_str(), &target, out, current.as_ref(), flags)?;
 
                 if decision == OverwriteDecision::NoOp {
                     debug!(
@@ -3308,8 +3334,8 @@ fn materialize_hit_with_flags(
                     continue;
                 }
 
-                let bytes = cached_file_bytes(stage_name, cache_root, out)?;
-                write_atomic(&out.path, &bytes, run_id, out.mode)?;
+                let bytes = cached_file_bytes(stage_name, cache_root, &target, out)?;
+                write_atomic(&target, &bytes, run_id, out.mode)?;
             }
         }
     }
@@ -3319,12 +3345,13 @@ fn materialize_hit_with_flags(
 fn cached_file_bytes(
     stage_name: &StageName,
     cache_root: &Path,
+    source: &Path,
     out: &crate::workflow::cache::CachedOut,
 ) -> Result<Vec<u8>> {
     let bytes = if let Some(bytes) = read_local_xorb(cache_root, &out.file_hash)? {
         bytes
     } else {
-        std::fs::read(&out.path).map_err(|e| {
+        std::fs::read(source).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CrabError::StageCacheMiss {
                 stage: stage_name.as_str().to_owned(),
@@ -6271,6 +6298,165 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read(&lock_path).unwrap(), recorded_bytes);
         assert!(!tmp.path().join(".crab/workflow/runs").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_replay_anchors_artifacts_to_repository_root() {
+        // Both possible destinations stay inside this disposable fixture. No
+        // process-wide cwd mutation is needed to expose the wrong-root write.
+        let cwd = std::env::current_dir().unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replay-root-")
+            .tempdir_in(&cwd)
+            .unwrap();
+        let repo_root = fixture.path().join("repo");
+        fs::create_dir(&repo_root).unwrap();
+        let relative = PathBuf::from(fixture.path().file_name().unwrap()).join("nested/output");
+        let bytes = b"repository-owned artifact";
+        let hash = format!("b3:{}", blake3::hash(bytes).to_hex());
+        let mut outs = Vec::new();
+        for (suffix, kind) in [
+            ("file", OutKind::File),
+            ("stdout", OutKind::Stdout),
+            ("directory", OutKind::Directory),
+        ] {
+            let path = relative.join(suffix);
+            let target = repo_root.join(&path);
+            let manifest = if kind == OutKind::Directory {
+                fs::create_dir_all(&target).unwrap();
+                fs::write(target.join("child"), bytes).unwrap();
+                Some(vec![crate::workflow::cache::TreeManifestEntry {
+                    path: "child".into(),
+                    kind: "file".into(),
+                    hash: hash.clone(),
+                    size: bytes.len() as u64,
+                    mode: 0o644,
+                }])
+            } else {
+                fs::create_dir_all(target.parent().unwrap()).unwrap();
+                fs::write(&target, bytes).unwrap();
+                None
+            };
+            let output_hash = if kind == OutKind::Directory {
+                let tree_hash = crate::workflow::hasher::hash_tree_entries(&[
+                    crate::workflow::hasher::TreeEntry {
+                        path: "child".into(),
+                        kind: crate::workflow::hasher::TreeEntryKind::File,
+                        file_hash: *blake3::hash(bytes).as_bytes(),
+                        size: bytes.len() as u64,
+                        mode: 0o644,
+                    },
+                ]);
+                format!("b3:{}", hex_lower(&tree_hash))
+            } else {
+                hash.clone()
+            };
+            outs.push(crate::workflow::cache::CachedOut {
+                path,
+                kind,
+                push: true,
+                remote: None,
+                file_hash: output_hash,
+                size: bytes.len() as u64,
+                mode: 0o644,
+                tree_manifest: manifest,
+            });
+        }
+        let mut entry = StageCacheEntry {
+            schema_version: crate::workflow::cache::ENTRY_SCHEMA_VERSION,
+            stage_hash: StageHash([19; 32]),
+            stage_name: "build".into(),
+            cmd: crate::workflow::cache::CachedCmd::Shell {
+                shell: "false".into(),
+            },
+            outs,
+            metrics: Vec::new(),
+            plots: Vec::new(),
+            executed_at: "2026-09-07T00:00:00.000Z".into(),
+            duration_ms: 0,
+            exec_id: None,
+            attempts: 1,
+            host_fingerprint: "test".into(),
+        };
+        let cache_root = repo_root.join(".crab/cache");
+        crate::workflow::cache::store_local_xorbs(&cache_root, &entry.outs, Some(&repo_root))
+            .unwrap();
+        crate::workflow::cache::write_local(&cache_root, &entry).unwrap();
+        fs::remove_dir_all(repo_root.join(&relative)).unwrap();
+        let mut lockfile = Lockfile::default();
+        lockfile
+            .upsert(&entry, Vec::new(), BTreeMap::new(), BTreeMap::new())
+            .unwrap();
+        lockfile.save(&repo_root.join("crab.lock")).unwrap();
+        let yaml_path = repo_root.join("crab.yaml");
+        fs::write(
+            &yaml_path,
+            "stages:\n  build:\n    cmd: 'false'\n    deps: [missing-input]\n",
+        )
+        .unwrap();
+        let mut args = yaml_base_args();
+        args.cache_only = true;
+        run_with_yaml(
+            &args,
+            &repo_root,
+            std::slice::from_ref(&yaml_path),
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !cwd.join(&relative).exists(),
+            "replay wrote into process cwd"
+        );
+        for suffix in ["file", "stdout", "directory/child"] {
+            assert_eq!(
+                fs::read(repo_root.join(&relative).join(suffix)).unwrap(),
+                bytes
+            );
+        }
+
+        // A cache entry may reuse verified output bytes when content-cache
+        // objects have been evicted. A mode change forces that read path.
+        fs::remove_dir_all(cache_root.join("xorbs")).unwrap();
+        entry.outs[0].mode = 0o600;
+        crate::workflow::cache::write_local(&cache_root, &entry).unwrap();
+        run_with_yaml(
+            &args,
+            &repo_root,
+            std::slice::from_ref(&yaml_path),
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read(repo_root.join(&relative).join("file")).unwrap(),
+            bytes
+        );
+
+        fs::write(repo_root.join(&relative).join("file"), b"local edit").unwrap();
+        args.no_overwrite = true;
+        let replay = run_with_yaml(
+            &args,
+            &repo_root,
+            &[yaml_path],
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await;
+        assert!(
+            matches!(replay, Err(CrabError::StageOverwriteConflict { .. })),
+            "{replay:?}"
+        );
+        assert_eq!(
+            fs::read(repo_root.join(&relative).join("file")).unwrap(),
+            b"local edit"
+        );
+        assert!(!cwd.join(&relative).exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
