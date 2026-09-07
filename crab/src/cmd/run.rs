@@ -663,7 +663,7 @@ async fn run_inline_single_stage(
     // Cache replay also publishes output sidecars. Both replay and execution
     // must exclude another scheduler before materialization or orphan cleanup.
     let lock_timeout = compute_lock_timeout(args, config);
-    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout).await?;
 
     if args.cache_only {
         let cache_only_ctx = CacheOnlyContext {
@@ -1055,7 +1055,7 @@ async fn replay_yaml_cache(
 ) -> Result<()> {
     let workflow_root = repo_root.join(".crab/workflow");
     let cache_root = repo_root.join(".crab/cache");
-    let _lock = SchedulerLock::acquire(&workflow_root, compute_lock_timeout(args, config))?;
+    let _lock = SchedulerLock::acquire(&workflow_root, compute_lock_timeout(args, config)).await?;
     let lockfile = lock_ctx.load(repo_root)?;
     let selected = filter_stages(args, workflow, graph)?;
     let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
@@ -1355,7 +1355,7 @@ async fn run_yaml_single_stage(
 
     // Lock and journal setup mirrors inline single-stage.
     let lock_timeout = compute_lock_timeout(args, config);
-    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout).await?;
 
     let run_id = Uuid::now_v7();
     sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &stage.outs)?;
@@ -1486,7 +1486,7 @@ async fn run_dag(
     // Acquire scheduler lock once for the whole DAG — design's
     // concurrency model is "one `crab run` per repo".
     let lock_timeout = compute_lock_timeout(args, config);
-    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout).await?;
 
     let run_id = Uuid::now_v7();
     // Sweep orphan sidecars across every declared out path so a
@@ -6271,6 +6271,7 @@ mod tests {
             &tmp.path().join(".crab/workflow"),
             std::time::Duration::ZERO,
         )
+        .await
         .unwrap();
         let replay = run_with_yaml(
             &args,

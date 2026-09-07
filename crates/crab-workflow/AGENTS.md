@@ -37,7 +37,9 @@ execution. Parsing and graph construction are sequential caller-owned steps.
 
 - Scheduler contention is fs4's `Ok(false)` outcome, not an I/O failure.
   The guard owns the advisory lock; PID files are only diagnostics.
-  `SchedulerLock::acquire` blocks its calling thread while waiting. Inline and YAML
+  Await `SchedulerLock::acquire`; contention backoff yields through Tokio timers.
+  Dropping the acquisition future cancels its wait; filesystem attempts remain
+  synchronous. Inline and YAML
   cache-only replay must hold the same guard as normal output publication.
   YAML replay reads lockfile hashes under that guard; never resolve live inputs
   or run stage commands/hooks on this path.

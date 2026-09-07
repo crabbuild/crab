@@ -1,7 +1,7 @@
 //! Serializes workflow schedulers with an exclusive advisory file lock.
 //!
 //! The caller supplies a workflow root; the guard locks its `.lock` file and
-//! creates missing parent directories. `acquire` waits synchronously, while
+//! creates missing parent directories. `acquire` yields during contention;
 //! `try_acquire` reports contention immediately. Timeout policy belongs to the
 //! caller, including the CLI's `--lock-timeout` and `--no-wait` options.
 //!
@@ -75,9 +75,10 @@ impl SchedulerLock {
     /// returning a `WorkflowLockTimeout` on contention — `--no-wait`
     /// routes through here with a zero timeout.
     ///
-    /// This blocks the calling thread while waiting. On success the returned
-    /// guard holds the lock; writing the PID diagnostic is best-effort and
-    /// does not determine acquisition success.
+    /// Contention waits use Tokio timers; dropping this future cancels waiting
+    /// without leaving a background waiter. Filesystem attempts and best-effort
+    /// PID writes remain synchronous. Call within a Tokio runtime with time
+    /// enabled. On success, retain the returned guard for the protected work.
     ///
     /// # Errors
     ///
@@ -90,7 +91,7 @@ impl SchedulerLock {
     ///
     /// Returns [`WorkflowError::Io`] for other filesystem failures
     /// (permission denied, ENOSPC, etc.).
-    pub fn acquire(workflow_root: &Path, timeout: Duration) -> Result<Self> {
+    pub async fn acquire(workflow_root: &Path, timeout: Duration) -> Result<Self> {
         std::fs::create_dir_all(workflow_root).map_err(WorkflowError::Io)?;
         let path = workflow_root.join(LOCKFILE_NAME);
         let start = Instant::now();
@@ -129,7 +130,7 @@ impl SchedulerLock {
                     drop(file);
                     let remaining = timeout.saturating_sub(elapsed);
                     let nap = delay.min(remaining);
-                    std::thread::sleep(nap);
+                    tokio::time::sleep(nap).await;
                     delay = (delay * POLL_MULTIPLIER).min(POLL_MAX);
                 }
                 Err(e) => return Err(WorkflowError::Io(e)),
@@ -285,11 +286,45 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::{Notify, oneshot};
 
-    #[test]
-    fn acquire_succeeds_on_free_lock() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn waiting_allows_the_holder_future_to_release() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("workflow");
+        let holder = SchedulerLock::try_acquire(&root).unwrap().unwrap();
+        let (acquired, ()) = tokio::join!(
+            biased;
+            async { SchedulerLock::acquire(&root, Duration::from_millis(100)).await },
+            async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                drop(holder);
+            }
+        );
+        assert!(acquired.is_ok(), "lock waiting starved the holder future");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn cancelled_wait_does_not_retain_lock_ownership() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("workflow");
+        let holder = SchedulerLock::try_acquire(&root).unwrap().unwrap();
+        let cancelled = tokio::time::timeout(
+            Duration::from_millis(10),
+            SchedulerLock::acquire(&root, Duration::from_secs(5)),
+        )
+        .await;
+        assert!(cancelled.is_err());
+        drop(holder);
+        let next = SchedulerLock::try_acquire(&root).unwrap();
+        assert!(next.is_some(), "cancelled waiter retained lock ownership");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acquire_succeeds_on_free_lock() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("workflow");
-        let guard = SchedulerLock::acquire(&root, Duration::from_millis(100)).unwrap();
+        let guard = SchedulerLock::acquire(&root, Duration::from_millis(100))
+            .await
+            .unwrap();
         assert!(guard.path().exists());
         assert_eq!(guard.path().file_name().unwrap(), LOCKFILE_NAME);
         let pid = read_holder_pid(guard.path()).expect("pid recorded");
@@ -304,12 +339,12 @@ mod tests {
         assert!(guard.is_some());
     }
 
-    #[test]
-    fn drop_releases_lock_and_retains_diagnostic_file() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_releases_lock_and_retains_diagnostic_file() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("workflow");
         let path = {
-            let guard = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+            let guard = SchedulerLock::acquire(&root, Duration::ZERO).await.unwrap();
             assert!(guard.path().exists());
             guard.path().to_path_buf()
         };
@@ -321,20 +356,20 @@ mod tests {
         );
 
         // Re-acquire: should succeed.
-        let _next = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+        let _next = SchedulerLock::acquire(&root, Duration::ZERO).await.unwrap();
     }
 
     #[cfg(unix)]
-    #[test]
-    fn drop_releases_lock_with_a_duplicated_descriptor() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_releases_lock_with_a_duplicated_descriptor() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("workflow");
-        let guard = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+        let guard = SchedulerLock::acquire(&root, Duration::ZERO).await.unwrap();
         // A concurrent fork can retain this open-file description until exec,
         // even though the descriptor is close-on-exec. Model it without timing.
         let duplicate = guard.file.as_ref().unwrap().try_clone().unwrap();
         drop(guard);
-        let next = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+        let next = SchedulerLock::acquire(&root, Duration::ZERO).await.unwrap();
         drop(duplicate);
         assert!(SchedulerLock::try_acquire(&root).unwrap().is_none());
         drop(next);
@@ -360,7 +395,9 @@ mod tests {
         let release_a = release.clone();
         let root_a = root.clone();
         let task_a = tokio::spawn(async move {
-            let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO).unwrap();
+            let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO)
+                .await
+                .unwrap();
             acquired_a.notify_one();
             release_a.notified().await;
             let _ = done_tx.send(());
@@ -396,7 +433,9 @@ mod tests {
         let release_a = release.clone();
         let root_a = root.clone();
         let task_a = tokio::spawn(async move {
-            let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO).unwrap();
+            let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO)
+                .await
+                .unwrap();
             acquired_a.notify_one();
             release_a.notified().await;
         });
@@ -406,9 +445,8 @@ mod tests {
         let root_b = root.clone();
         let timeout = Duration::from_millis(500);
         let started = Instant::now();
-        let err = tokio::task::spawn_blocking(move || SchedulerLock::acquire(&root_b, timeout))
+        let err = SchedulerLock::acquire(&root_b, timeout)
             .await
-            .unwrap()
             .expect_err("acquire must time out while A holds the lock");
         let elapsed = started.elapsed();
 
@@ -456,7 +494,9 @@ mod tests {
         let root_a = root.clone();
         let task_a = tokio::spawn(async move {
             {
-                let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO).unwrap();
+                let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO)
+                    .await
+                    .unwrap();
                 acquired_a.notify_one();
                 // Hold briefly then drop by leaving scope.
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -469,9 +509,10 @@ mod tests {
         // Start the waiter with a generous timeout — it should
         // succeed after task A's 100ms hold + drop.
         let root_b = root.clone();
-        let task_b = tokio::task::spawn_blocking(move || {
-            SchedulerLock::acquire(&root_b, Duration::from_secs(5))
-        });
+        let task_b =
+            tokio::spawn(
+                async move { SchedulerLock::acquire(&root_b, Duration::from_secs(5)).await },
+            );
 
         // Wait for task A to finish, then check that task B's
         // acquisition completed successfully.
@@ -499,7 +540,9 @@ mod tests {
         let release_a = release.clone();
         let root_a = root.clone();
         let task_a = tokio::spawn(async move {
-            let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO).unwrap();
+            let _guard = SchedulerLock::acquire(&root_a, Duration::ZERO)
+                .await
+                .unwrap();
             acquired_a.notify_one();
             release_a.notified().await;
         });
@@ -508,11 +551,9 @@ mod tests {
 
         let root_b = root.clone();
         let started = Instant::now();
-        let err =
-            tokio::task::spawn_blocking(move || SchedulerLock::acquire(&root_b, Duration::ZERO))
-                .await
-                .unwrap()
-                .expect_err("no-wait must fail fast");
+        let err = SchedulerLock::acquire(&root_b, Duration::ZERO)
+            .await
+            .expect_err("no-wait must fail fast");
         let elapsed = started.elapsed();
 
         assert!(
@@ -528,13 +569,13 @@ mod tests {
         task_a.await.unwrap();
     }
 
-    #[test]
-    fn acquire_creates_missing_parent_directory() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acquire_creates_missing_parent_directory() {
         let tmp = TempDir::new().unwrap();
         // Workflow root two levels deep — neither exists yet.
         let root = tmp.path().join("a").join("b").join("workflow");
         assert!(!root.exists());
-        let _guard = SchedulerLock::acquire(&root, Duration::ZERO).unwrap();
+        let _guard = SchedulerLock::acquire(&root, Duration::ZERO).await.unwrap();
         assert!(root.is_dir());
     }
 

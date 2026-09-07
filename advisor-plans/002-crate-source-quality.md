@@ -54,13 +54,13 @@ not claims that the named code is defective.
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Provider ranges, aggregate resource limits, and broader consumer qualification remain | Lifecycle documentation, README navigation, and coalescing admission boundaries verified |
-| crab-vfs | Native backend/dependency child tasks and FUSE refresh ownership remain | Background ownership tests, feature checks, lint/docs, CLI build and preparation tests pass |
+| crab-vfs | Native backend/dependency child tasks and abandoned-future cleanup remain | Hydration and refresh ownership regressions, feature checks, lint/docs, and CLI build pass |
 | crab-auth | Key-source policy, power-loss durability, non-Unix locking remain | Diagnostic, load-outcome, and key-publication slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex guards and startup rejection verified; preflight, strict lint/docs pass |
 | crab-http-server | Archive worker draining, production-route cancellation, embedded assets, service errors remain | HTTP/1 LFS and archive framing verified; request/admission ownership documented |
-| crab-workflow | Async lock waiting, remaining cancellation ownership, and broader native qualification remain | Retry parsing, metadata identity, serialized replay, root-relative materialization, and cleanup slices verified |
+| crab-workflow | Remaining cancellation ownership and broader native qualification remain | Async lock waiting, retry parsing, metadata identity, serialized replay, root-relative materialization, and cleanup slices verified |
 
 ## Pointer diagnostic change
 
@@ -2792,3 +2792,37 @@ Final all-target VFS Clippy passes with the new NFS fixture. The refresh batch
 now has91 focused passing tests, backend checks, strict docs/lint, and CLI build
 proof. Native qualification remains tied to published head d58bcf91151 until
 this follow-up is published and separately qualified.
+
+## Scheduler contention yields to async callers (in progress)
+
+All four production acquire callers in crab/src/cmd/run.rs are async: inline
+execution/replay, YAML cache replay, YAML single-stage, and DAG execution.
+SchedulerLock::acquire previously used thread::sleep during contention. A
+biased tokio::join fixture polls the waiter before a holder-release future;
+the old implementation times out because the latter cannot run. Session36156
+exits101 at the intended starvation assertion. The same fixture passes after
+making acquire async and using Tokio sleep for backoff.
+
+There is one acquisition wait API, with all workspace callers migrated; no
+blocking compatibility alias was added. The crate has publish=false. Existing
+try_acquire keeps its immediate-contention semantics. fs4 0.13.1 documents
+Ok(false) for contention, and Tokio 1.52.1 documents sleep cancellation by
+future drop without extra cleanup. Filesystem attempts and PID writes remain
+synchronous; this change specifically fixes contention backoff, not all I/O.
+Timeout errors, no-wait policy, guard ownership, retained inode, and PID cleanup
+remain unchanged. Tests formerly wrapping acquisition in spawn_blocking now
+exercise it directly or as an async task.
+
+The first13 scheduler-lock tests pass. A14th cancellation/reacquisition test
+was added before final verification. Session13815 runs those tests, strict
+all-target workflow Clippy, strict rustdoc, cache-only CLI consumers, and CLI
+build. The inline sidecar contention consumer also needs its focused run.
+This batch is uncommitted; refresh commit0cd4fea1b07 remains unpublished.
+
+Scheduler final checks pass:14 lock tests, strict all-target Clippy, and strict
+rustdoc. CLI cache_only filtering passes8 tests, of which two are the directly
+relevant YAML replay consumers; the other six are incidental push/migration
+matches. The separately selected inline contention test also passes for normal
+and cache-only execution, preserving holder sidecars. The CLI build passes with
+the same macOS debug-unwind linker warning. Runtime behavior is unchanged after
+those checks; the final edit only improves module-doc wording.
