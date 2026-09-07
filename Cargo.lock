@@ -2360,7 +2360,6 @@ name = "crab-remote-git"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum 0.8.9",
  "blake3",
  "bytes",
  "crab-git",
@@ -2376,8 +2375,6 @@ dependencies = [
  "gix-pack",
  "object_store",
  "proptest",
- "rand 0.9.4",
- "serde",
  "serde_json",
  "sha1 0.10.6",
  "tempfile",
