@@ -29,6 +29,10 @@ pub enum ReadError {
     #[error("xet data-plane error")]
     Xet(#[from] crab_xet::error::XetError),
 
+    /// An admitted term-resolution worker failed before returning its result.
+    #[error("term resolution task failed: {0}")]
+    ResolutionTask(#[source] tokio::task::JoinError),
+
     #[error("xet runtime error: {0}")]
     Runtime(#[from] xet_runtime::RuntimeError),
 

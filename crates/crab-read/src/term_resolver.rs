@@ -1,4 +1,4 @@
-//! Term resolution: file_hash → Vec<FileDataSequenceEntry>.
+//! Term resolution: `file_hash` → `Vec<FileDataSequenceEntry>`.
 //!
 //! Resolves file hashes to their reconstruction terms by following the
 //! resolution chain: shard_hint → file-index GET → shard download →
@@ -320,7 +320,7 @@ async fn drain_resolution_tasks(
         let error = match handle.await {
             Ok(Ok(())) => continue,
             Ok(Err(error)) => error,
-            Err(error) => ReadError::internal(format!("term resolution task failed: {error}")),
+            Err(error) => ReadError::ResolutionTask(error),
         };
         if matches!(error, ReadError::Cancelled) || (strict && first_error.is_none()) {
             first_error = Some(error);
@@ -779,6 +779,25 @@ mod tests {
                 "all workers released ownership"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn strict_resolution_preserves_worker_panic_source() {
+        use std::error::Error;
+
+        let worker: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async {
+            panic!("resolution worker fixture");
+        });
+        let error = drain_resolution_tasks(vec![worker], true)
+            .await
+            .unwrap_err();
+        let source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<tokio::task::JoinError>());
+        assert!(
+            source.is_some_and(tokio::task::JoinError::is_panic),
+            "worker panic lost its typed source"
+        );
     }
 
     #[tokio::test]

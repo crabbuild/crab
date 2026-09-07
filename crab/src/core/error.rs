@@ -1122,6 +1122,7 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::Cancelled => Self::Cancelled,
             error @ (crab_read::ReadError::Availability { .. }
             | crab_read::ReadError::Runtime(_)
+            | crab_read::ReadError::ResolutionTask(_)
             | crab_read::ReadError::Reconstruction { .. }) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
@@ -3902,6 +3903,25 @@ mod tests {
                 .unwrap();
             assert!(std::sync::Arc::ptr_eq(cause, &source));
         }
+    }
+
+    #[tokio::test]
+    async fn term_resolution_task_source_survives_cli_conversion() {
+        use std::error::Error;
+
+        let worker = tokio::spawn(async { panic!("resolution worker fixture") });
+        let error = CrabError::from(crab_read::ReadError::ResolutionTask(
+            worker.await.unwrap_err(),
+        ));
+        let source = std::iter::successors(error.source(), |source| (*source).source())
+            .find_map(|source| source.downcast_ref::<tokio::task::JoinError>())
+            .expect("CLI conversion must preserve the task failure");
+        assert!(source.is_panic());
+        let previous = CrabError::Internal("resolution worker fixture".into());
+        assert_eq!(error.code(), previous.code());
+        assert_eq!(error.exit_code(), previous.exit_code());
+        assert_eq!(error.category(), previous.category());
+        assert_eq!(error.is_retryable(), previous.is_retryable());
     }
 
     #[test]

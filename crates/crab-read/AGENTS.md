@@ -36,6 +36,10 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
   Source: `crates/crab-read/src/hydrator.rs`.
 - Drain every spawned term-resolution worker before closing the shared file-index lookup session, including cancellation and strict errors. Await batch futures through cancellation; dropping a future does not perform asynchronous cleanup.
   Source: `crates/crab-read/src/term_resolver.rs`.
+- Preserve typed worker join failures through `ReadError::ResolutionTask` and
+  consumer conversions. Strict resolution must not stringify away JoinError;
+  best-effort batches still log and omit failed files.
+  Sources: `crates/crab-read/src/error.rs`, `crab/src/core/error.rs`.
 
 ## Features and platform
 

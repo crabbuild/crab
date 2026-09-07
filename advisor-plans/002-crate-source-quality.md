@@ -3616,3 +3616,33 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   cleanup. Strict all-target Clippy, rustdoc, binary build, formatting and diff
   checks pass. New non-test code represents the missing ownership lifetime;
   neither a detached cleanup task nor a timeout would provide equivalent proof.
+
+
+### Term-resolution worker diagnostics
+
+- Strict term-resolution drains previously converted JoinError into an internal
+  string. `ReadError::ResolutionTask` now retains it as a typed source while
+  preserving the display context. The CLI routes it through the existing
+  ReadFailure wrapper instead of flattening it; best-effort resolution and
+  cancellation precedence are unchanged.
+- Evidence map: CLI diff/diff-driver facade calls shared TermResolver batch
+  methods; the shared drain helper handles all admitted JoinHandles before
+  closing the file-index session. Current main's strict sequence join path
+  likewise stringifies worker failures. Tokio JoinError exposes panic and
+  cancellation predicates and implements Error. Auth-server conversion already
+  wraps otherwise unmatched ReadErrors with a source, requiring no new branch.
+- Regression: a strict batch worker panic lost its typed source before the fix;
+  the same fixture and four existing term-resolution tests now pass. CLI proof
+  additionally checks source traversal and unchanged diagnostic classification.
+- Further review findings remain open: semaphore concurrency bounds downloads,
+  not the batch's spawned task count. Zero concurrency can wait indefinitely
+  without cancellation, and configuration overlay accepts usize values directly.
+  Constructor/admission policy and all configuration consumers need a coherent
+  follow-up rather than a local clamp or preserving zero as a disabled mode.
+  Dropped batch futures still cannot perform asynchronous session closure.
+- Validation complete: five term-resolution tests and the CLI conversion
+  regression pass; strict all-target Clippy, strict rustdoc, auth-server
+  consumer check, and CLI binary build pass. Strict rustdoc exposed an existing
+  unescaped generic type in the touched module header; formatted it as code.
+  The initial CLI test invocation used an incorrect target path and failed
+  before compilation; rerunning with the approved per-worktree target passed.
