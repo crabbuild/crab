@@ -3278,11 +3278,12 @@ mod storage {
     }
 
     #[cfg(feature = "remote-index")]
-    async fn apply_catalog_journal_edits(
+    async fn read_catalog_pending(
         store: &Store,
         router: &StoreLayout<Store>,
         manifest: &Manifest,
-    ) -> Result<Option<GitCatalogVisibilityIndex>> {
+    ) -> Result<Option<GitVisibilityPending>> {
+        validate_hash(&manifest.git_validation_digest, "Git validation digest")?;
         let pending_path = router.git_visibility_pending_path(&manifest.git_validation_digest);
         let body = match read_bounded(store, &pending_path).await {
             Ok(body) => body,
@@ -3312,6 +3313,33 @@ mod storage {
             "base Git validation digest",
         )?;
         validate_hash(&pending.base_catalog_digest, "base catalog digest")?;
+        Ok(Some(pending))
+    }
+
+    /// Check for a bounded pending visibility handoff bound to this manifest.
+    ///
+    /// This is admission evidence, not a materialized proof. Fetch must still
+    /// validate the base catalog and edits while completing the handoff.
+    #[cfg(feature = "remote-index")]
+    pub async fn pending_bound_available(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        manifest: &Manifest,
+    ) -> Result<bool> {
+        Ok(read_catalog_pending(store, router, manifest)
+            .await?
+            .is_some())
+    }
+
+    #[cfg(feature = "remote-index")]
+    async fn apply_catalog_journal_edits(
+        store: &Store,
+        router: &StoreLayout<Store>,
+        manifest: &Manifest,
+    ) -> Result<Option<GitCatalogVisibilityIndex>> {
+        let Some(pending) = read_catalog_pending(store, router, manifest).await? else {
+            return Ok(None);
+        };
         let base_path = router.git_visibility_catalog_path(&pending.base_git_validation_digest);
         let base_body = match read_bounded(store, &base_path).await {
             Ok(body) => body,
@@ -3776,7 +3804,10 @@ pub use storage::{
 };
 
 #[cfg(all(feature = "remote-index", feature = "storage"))]
-pub use storage::{GitCatalogVisibilityRead, catalog_bound_available, read_catalog_with_format};
+pub use storage::{
+    GitCatalogVisibilityRead, catalog_bound_available, pending_bound_available,
+    read_catalog_with_format,
+};
 
 #[cfg(test)]
 mod tests {
@@ -5095,6 +5126,28 @@ mod tests {
             .await
             .expect("prepare catalog visibility handoff")
         );
+        assert!(
+            pending_bound_available(&store, &router, &target)
+                .await
+                .expect("pending handoff is admission evidence")
+        );
+        for mismatch in [
+            Manifest {
+                generation: target.generation + 1,
+                ..target.clone()
+            },
+            Manifest {
+                pack_index_hash: "f".repeat(64),
+                ..target.clone()
+            },
+        ] {
+            assert!(
+                pending_bound_available(&store, &router, &mismatch)
+                    .await
+                    .is_err(),
+                "pending admission must reject a mismatched target binding"
+            );
+        }
         assert!(
             ensure_catalog_bound(&store, &router, &target)
                 .await

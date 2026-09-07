@@ -311,25 +311,9 @@ async fn capability_snapshot_is_stable(
     };
     let repair_store = crate::storage::Store::from_storage(store.clone());
     let repair_layout = crate::storage::StoreLayout::new(repair_store.clone(), prefix.to_owned());
-    let active_marker_present = store
-        .list_prefix_bounded(&layout.ref_journal_active_prefix(), 1)
-        .await?
-        .is_none_or(|objects| !objects.is_empty());
-    let owner_active =
-        match super::push::git_generation_owner_is_active(&repair_store, &repair_layout).await {
-            Ok(active) => active,
-            Err(error) => {
-                tracing::warn!(%error, "generation owner probe failed during capability discovery");
-                return Ok(false);
-            }
-        };
-    if owner_active {
-        tracing::debug!(
-            active_marker_present,
-            "protocol-v2 capability withheld while generation-owner admission is active"
-        );
-        return Ok(false);
-    }
+    // Owner contention is transient, not missing protocol support. Fetch
+    // admission waits for repair and validates the discovered refs/inventory;
+    // gating here would randomly downgrade concurrent clones to legacy fetch.
     if manifest.refs.is_empty() {
         return Ok(true);
     }
@@ -340,7 +324,15 @@ async fn capability_snapshot_is_stable(
     )
     .await
     {
-        Ok(available) => Ok(available),
+        Ok(true) => Ok(true),
+        // Compaction publishes its immutable handoff before the manifest CAS.
+        // Requiring its materialized result here races the first reader that
+        // completes it; fetch admission remains the only repair/validation path.
+        Ok(false) => {
+            crab_metadata::git_visibility::pending_bound_available(store, &layout, &manifest)
+                .await
+                .map_err(RemoteGitError::from)
+        }
         Err(error) => {
             tracing::warn!(%error, "visibility proof probe failed during capability discovery");
             Ok(false)

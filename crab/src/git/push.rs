@@ -23678,13 +23678,13 @@ mod tests {
             Some(&RefPushOutcome::Ok)
         );
         assert!(
-            !crate::git::upload_pack_wire::snapshot_available(
+            crate::git::upload_pack_wire::snapshot_available(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
             )
             .await,
-            "protocol v2 must remain withheld while the generation owner protects the active journal"
+            "protocol v2 must remain available while fetch admission waits for the active owner"
         );
         let (manifest, _) = read_manifest(&store, &router)
             .await
@@ -24084,6 +24084,72 @@ mod tests {
         assert!(admitted.manifest.generation > initial.generation);
         assert!(admitted.manifest.refs.contains_key("refs/heads/main"));
         assert_eq!(repository.generation(), admitted.manifest.generation);
+        let storage_router =
+            crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned());
+        assert!(
+            crab_metadata::git_visibility::ensure_catalog_bound(
+                store.as_storage(),
+                &storage_router,
+                &admitted.manifest,
+            )
+            .await
+            .expect("bind the base catalog proof")
+        );
+        let pushed = Box::pin(
+            PushPipeline::new(
+                PushConfig::default(),
+                vec![make_spec("refs/heads/dev")],
+                Some(store.clone()),
+                None,
+                None,
+                repo_prefix.to_owned(),
+                router.clone(),
+                None,
+                CancellationToken::new(),
+                None,
+            )
+            .execute(),
+        )
+        .await;
+        assert_eq!(
+            pushed.outcomes.get("refs/heads/dev"),
+            Some(&RefPushOutcome::Ok)
+        );
+        // Pause at the same boundary as a concurrent reader: the compacted
+        // manifest is visible, but its ordinal handoff is not materialized.
+        let compacted = crab_metadata::manifest_store::compact_ref_journal(
+            store.as_storage(),
+            &storage_router,
+            admitted.manifest.created_at.clone(),
+            None,
+            "pending-admission".to_owned(),
+        )
+        .await
+        .expect("compact the journal")
+        .expect("journal compaction exists");
+        assert!(!compacted.git_visibility_published);
+        assert!(
+            crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "durable pending visibility evidence must preserve protocol v2"
+        );
+        assert!(
+            !git_visibility_proof_available_for_manifest(&store, &router, &compacted.manifest)
+                .await
+                .expect("capability discovery must leave materialization to admission")
+        );
+        let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
+            store.as_storage(),
+            repo_prefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("admission completes the pending handoff");
+        assert_eq!(repository.generation(), compacted.manifest.generation);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -24279,6 +24345,15 @@ mod tests {
             git_generation_owner_is_active(&store, &router)
                 .await
                 .expect("inspect active generation owner")
+        );
+        assert!(
+            crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "an active owner must not disable protocol v2 when visibility evidence exists"
         );
         let cancellation = CancellationToken::new();
         cancellation.cancel();

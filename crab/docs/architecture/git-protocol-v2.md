@@ -179,6 +179,14 @@ The RustFS concurrency qualification follows each independent-ref and hot-ref
 write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
 ref visibility alone cannot satisfy the gate.
 
+Generation-owner contention does not suppress protocol-v2 capability discovery
+when the compacted manifest has visibility evidence, a bounded pending handoff
+bound to that manifest, or is empty. Discovery does not repair or compact
+metadata. Fetch admission waits for owner work when needed, completes and
+validates pending handoffs, then verifies the advertised refs and immutable pack
+inventory against the admitted snapshot. A pending handoff is not itself object
+authorization; absent evidence still withholds v2.
+
 Upload-pack admission is repository-scoped and distributed: each helper
 process must hold one of the fixed object-store read leases for the duration
 of its session. A rotated, jittered retry probes one slot at a time, leases
