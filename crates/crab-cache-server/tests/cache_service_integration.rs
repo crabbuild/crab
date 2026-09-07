@@ -1775,6 +1775,44 @@ async fn test_pack_put_get_and_admin_evict_removes_canonical_file() {
 }
 
 #[tokio::test]
+async fn test_admin_evict_failure_preserves_accounting() {
+    let server = start_test_server().await;
+    let client = test_client(server.addr);
+    let pack_path = "org/repo/packs/pack-blocked.pack";
+    let data = Bytes::from_static(b"retained pack bytes");
+    client.put(pack_path, data.clone()).await.unwrap();
+    let storage_hex = pack_storage_hex("pack-blocked");
+    let path = server
+        .cache_root
+        .join("packs")
+        .join(&storage_hex[..2])
+        .join(storage_hex);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let marker = path.join("retained");
+    std::fs::write(&marker, "do not delete").unwrap();
+
+    for request in [
+        serde_json::json!({ "object_type": "pack" }),
+        serde_json::json!({ "path": pack_path }),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/v1/admin/evict", server.addr))
+            .header("x-cache-psk", TEST_PSK)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 500);
+        let stats = admin_stats(server.addr).await;
+        assert_eq!(stats["pack_count"].as_u64().unwrap(), 1);
+        assert_eq!(stats["total_bytes"].as_u64().unwrap(), data.len() as u64);
+        assert!(marker.exists());
+    }
+    let _ = server.shutdown.send(());
+}
+
+#[tokio::test]
 async fn test_admin_evict_exact_pack_path_removes_only_target() {
     let server = start_test_server().await;
     let client = test_client(server.addr);

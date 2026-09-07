@@ -3288,3 +3288,55 @@ build pass. The CLI retains its macOS debug-unwind linker warning. Native
 run34154546592 on6ae0432975e has passed both Linux jobs and the macOS native
 smoke; Windows remains running. These native results apply to that earlier
 commit, not the later control/startup changes.
+
+
+### macOS native evidence verified
+
+Downloaded nfs-smoke-macos-34154546592-1 into the workspace evidence directory.
+The retained report identifies 6ae0432975e872c8e8261fdc80e49dfa344ae3b7; the
+current report verifier passes with required artifacts and that exact commit.
+The uncached benchmark records 31 lease hits, one miss, 32 READ RPCs, and 8 MiB
+returned to its caller. NFS returned 32 MiB, so the recorded amplification is 4.0.
+This proves native lease reuse for the corrected workload; it does not claim
+an efficient client read pattern or comparability with historical cached runs.
+Both Linux jobs also pass; Windows remains live in run 34154546592. Later control
+and coordinator-startup commits are not included in that native head.
+
+### Cache eviction removal failures
+
+Inspection moved to cache-server eviction and found a concrete accounting gap.
+On origin/main a371fb7d002, CacheStore::remove_object logs non-NotFound unlink
+errors but still deletes SQLite metadata, subtracts tracked bytes and records
+an eviction. A regression replacing a cached file with a nonempty directory
+fails: the exact-key path reports one eviction and 18 freed bytes despite the
+filesystem refusing removal.
+
+The canonical indexed-file removal helper now returns a typed error with its
+path and I/O cause before metadata or counters change. It is shared by normal
+eviction and invalid-object cleanup, replacing their separate unlink matches.
+Confirmed absence remains idempotent. The new error type is private; there is
+no public signature, dependency, persistent format, threshold or wire-shape
+change. Existing unindexed startup cleanup already returns deletion errors;
+it has a separate directory-removal policy and is not changed here.
+
+Caller map: exact-key and filtered admin eviction return the error as HTTP 500;
+budget eviction is used by startup and the periodic evictor; emergency eviction
+is used by handlers' cache-budget admission paths. All four store entry points call
+remove_object. Failed cleanup cannot claim available cache capacity. Corruption
+repair also uses the shared unlink helper and keeps its metadata on failure.
+The mutation lock continues to serialize deletion and accounting with writes.
+
+All 42 cache-store tests, six evictor tests, and three admin-eviction loopback
+integration tests pass. The regression checks exact, budget, emergency and
+filtered eviction; it retains metadata, accounted bytes, counters and the
+blocking directory, and verifies the underlying I/O source. The HTTP regression
+uses both filtered and exact admin routes and observes 500 plus unchanged stats.
+Successful canonical pack eviction remains covered. Strict all-target Clippy,
+rustdoc and the cache-server binary build pass.
+
+Remaining eviction qualification includes synchronous disk/SQLite work on async
+workers and its shutdown ownership, zero-byte/missing-candidate reporting, and
+aggregate candidate memory. Moving eviction to spawn_blocking must also change
+shutdown: aborting its outer task would otherwise detach admitted blocking work.
+These findings are follow-up work, not claims of completed eviction concurrency
+or full cache-service qualification.

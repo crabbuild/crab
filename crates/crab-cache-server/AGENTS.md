@@ -54,6 +54,9 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
   Source: `crates/crab-cache-server/src/handlers.rs`.
 - Payload integrity and persistent accounting must agree after put/eviction; inspect cache-store and evictor paths together.
   Source: `crates/crab-cache-server/src/cache_store.rs`.
+- Failed payload removal must retain metadata, byte accounting, and eviction
+  counters. Indexed eviction and invalid-object cleanup share `remove_cache_file`;
+  preserve its typed I/O cause. Source: `crates/crab-cache-server/src/cache_store.rs`.
 
 ## Features and platform
 

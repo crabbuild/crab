@@ -736,17 +736,7 @@ impl CacheStore {
     }
 
     fn evict_invalid_cache_file(&self, key: &ServerObjectKey, path: &Path) -> Result<()> {
-        let removed_invalid_file = match std::fs::remove_file(path) {
-            Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => Err(CacheServiceError::InternalError(
-                format!(
-                    "failed to remove invalid cache file {}: {e}",
-                    path.display()
-                )
-                .into(),
-            ))?,
-        };
+        let removed_invalid_file = remove_cache_file(path)?;
 
         self.remove_metadata_after_invalid_eviction(key, path)?;
         if removed_invalid_file {
@@ -1053,6 +1043,7 @@ impl CacheStore {
     ///
     /// The `meta_key` is the 33-byte metadata key (object_type + hash).
     /// Silently returns 0 if the object is already gone.
+    /// File-removal errors retain metadata and byte accounting for a later retry.
     pub fn remove_object(&self, meta_key: &[u8; META_KEY_LEN]) -> Result<u64> {
         let _mutation_guard = self.mutation_guard()?;
 
@@ -1074,13 +1065,9 @@ impl CacheStore {
             .join(prefix)
             .join(&hash_hex);
 
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to remove cached file");
-            }
-        }
+        // Keep accounting until the payload is removed or confirmed absent;
+        // an unlink failure must not make occupied disk space look available.
+        remove_cache_file(&path)?;
 
         // Remove the metadata entry.
         let conn = self.connection()?;
@@ -1698,6 +1685,27 @@ fn reconcile_unindexed_files(
     }
 
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("failed to remove cache file {}: {source}", path.display())]
+struct CacheFileRemovalError {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+fn remove_cache_file(path: &Path) -> Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(CacheServiceError::InternalError(Box::new(
+            CacheFileRemovalError {
+                path: path.to_path_buf(),
+                source,
+            },
+        ))),
+    }
 }
 
 fn remove_unindexed_path(path: &Path) -> Result<()> {
@@ -2321,6 +2329,43 @@ mod tests {
         assert!(!path.exists());
         assert!(store.get(&key).unwrap().is_none());
         assert_eq!(store.current_bytes(), 0);
+    }
+
+    #[test]
+    fn eviction_preserves_accounting_when_file_removal_fails() {
+        let evictions: [fn(&CacheStore, &ServerObjectKey) -> Result<EvictStats>; 4] = [
+            CacheStore::evict_key,
+            |store, _| store.evict_to_budget(0.4, 0.2),
+            |store, _| store.emergency_evict(),
+            |store, _| store.evict_by_filter(&EvictFilter { object_type: None }),
+        ];
+        for evict in evictions {
+            let directory = tempfile::tempdir().unwrap();
+            let db = CacheDb::open_or_create(&directory.path().join(CACHE_DB_FILE)).unwrap();
+            let store = CacheStore::open(directory.path().to_path_buf(), 32, db.connect().unwrap())
+                .unwrap();
+            let data = Bytes::from_static(b"stored cache bytes");
+            let hash = blake3::hash(&data);
+            let key = test_key(hash.to_hex().as_ref());
+            store.put(&key, data.clone(), hash.as_bytes()).unwrap();
+            let path = store.object_path(&key);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            let marker = path.join("retained");
+            std::fs::write(&marker, "do not delete").unwrap();
+
+            let error = evict(&store, &key).unwrap_err();
+            assert_eq!(store.current_bytes(), data.len() as u64);
+            let meta_key = make_meta_key(key.object_type, hash.as_bytes());
+            assert!(store.read_meta(&meta_key).unwrap().is_some());
+            assert_eq!(store.eviction_stats().total, 0);
+            assert!(marker.exists());
+            let mut cause: &(dyn std::error::Error + 'static) = &error;
+            while let Some(source) = cause.source() {
+                cause = source;
+            }
+            assert!(cause.downcast_ref::<std::io::Error>().is_some());
+        }
     }
 
     #[test]

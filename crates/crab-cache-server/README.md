@@ -99,6 +99,14 @@ checks pass. If onboarding render cannot print its result, already-written
 bundle files remain available. Evidence files use the same JSON writer as
 stdout; this is not an atomic publication or power-loss durability guarantee.
 
+## Eviction failures
+
+Eviction updates metadata and byte counters only after removing the payload or
+confirming that it is already absent. A filesystem removal error leaves the
+entry accounted for and returns an error; admin eviction responds with HTTP 500.
+The error retains the cache path and underlying I/O cause. Invalid-object
+cleanup uses the same removal policy.
+
 ## Shutdown ownership
 
 Signal registration happens before runtime dependencies are prepared. A
