@@ -2322,3 +2322,24 @@ methods with Self and documented the verified 120-second value without linking
 the private item. Warnings-denied rustdoc now passes with no suppression.
 Formatting and diff checks pass. A fresh CLI build is still required before
 publishing this runtime batch; no latest-head consumer-build claim is made.
+
+### Multipart clock consumer qualification
+
+A retained CLI regression now calls StoreChecker through MultipartJournal's
+spawn_blocking adapter with an on-disk SQLite registry and a pre-epoch scan.
+It verifies CrabError::Io retains InvalidInput and the SystemTimeError cause.
+The staging regression covers active-lease misclassification; this consumer
+test covers error preservation across the asynchronous composition boundary.
+
+All five selected CLI multipart tests pass: the new checker regression,
+endpoint-change repair protection, row-replacement repair protection, exact-byte
+multipart export, and push-packer spill behavior. The separate existing
+checker_and_repairer_abort_exact_journal_destination test also passes using its
+in-memory provider and real SQLite journal. These are local integration checks,
+not live-provider qualification.
+
+The debug CLI build passes for the staging runtime fix, with the existing
+macOS linker warning. This closes the consumer-build gap recorded above.
+Formatting and diff checks pass; the only new source is the 20-line test.
+Published c808a1553d2 CI remains running; local commits are still awaiting the
+next grouped update rather than cancelling that qualification.
