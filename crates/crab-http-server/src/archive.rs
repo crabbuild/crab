@@ -491,25 +491,88 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn cancelled_archive_does_not_complete_the_response_body() {
-        use http_body_util::BodyExt;
+    async fn archive_http_body_requires_completed_traversal() {
+        use futures_util::StreamExt;
+        use std::time::Duration;
 
-        let (messages, entries) = mpsc::channel(1);
-        let (output, receiver) = mpsc::channel(1);
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
-        let cancellation = CancellationToken::new();
-        spawn_zip_writer("repo-1111111".into(), entries, output);
-        messages.send(ArchiveMessage::Abort).await.unwrap();
-        drop(messages);
-        let result = response_body(receiver, permit, cancellation.drop_guard())
-            .collect()
-            .await;
-        assert!(
-            result.is_err(),
-            "an aborted traversal must not become a successful partial ZIP response"
-        );
-        assert_eq!(semaphore.available_permits(), 1);
+        for abort in [false, true] {
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            let admission = Arc::clone(&semaphore);
+            let gate = Arc::new(tokio::sync::Notify::new());
+            let body_gate = Arc::clone(&gate);
+            let app = axum::Router::new().route(
+                "/archive.zip",
+                axum::routing::get(move || {
+                    let admission = Arc::clone(&admission);
+                    let gate = Arc::clone(&body_gate);
+                    async move {
+                        let permit = admission.acquire_owned().await.unwrap();
+                        let (messages, entries) = mpsc::channel(1);
+                        let (output, receiver) = mpsc::channel(1);
+                        spawn_zip_writer("repo-1111111".into(), entries, output);
+                        messages
+                            .send(if abort {
+                                ArchiveMessage::Abort
+                            } else {
+                                ArchiveMessage::Finish
+                            })
+                            .await
+                            .unwrap();
+                        drop(messages);
+                        let body =
+                            response_body(receiver, permit, CancellationToken::new().drop_guard());
+                        // Delay body polling until the client sees headers, so an
+                        // abort exercises HTTP framing after a successful status.
+                        let delayed = futures_util::stream::once(async move {
+                            gate.notified().await;
+                            body
+                        })
+                        .flat_map(Body::into_data_stream);
+                        Body::from_stream(delayed)
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let stop = CancellationToken::new();
+            let stopped = stop.clone();
+            let http = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(stopped.cancelled_owned())
+                    .await
+                    .unwrap();
+            });
+            let client = reqwest::Client::builder()
+                .http1_only()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap();
+            let response = client
+                .get(format!("http://{address}/archive.zip"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+            assert_eq!(semaphore.available_permits(), 0);
+            gate.notify_one();
+            let result = response.bytes().await;
+            stop.cancel();
+            tokio::time::timeout(Duration::from_secs(5), http)
+                .await
+                .unwrap()
+                .unwrap();
+            if abort {
+                assert!(
+                    matches!(result, Err(ref error) if !error.is_timeout()),
+                    "aborted traversal must fail the HTTP body without a client timeout"
+                );
+            } else {
+                let mut archive = zip::ZipArchive::new(io::Cursor::new(result.unwrap())).unwrap();
+                assert_eq!(archive.by_index(0).unwrap().name(), "repo-1111111/");
+            }
+            assert_eq!(semaphore.available_permits(), 1);
+        }
     }
 
     #[tokio::test]

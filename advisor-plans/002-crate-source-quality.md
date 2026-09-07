@@ -1662,3 +1662,20 @@ Clippy passes. The frontend was built before these checks. This is worker/body
 integration proof, not a live HTTP archive download or cloud qualification.
 Detached archive-worker draining and the timing of permit release relative to
 worker completion remain separate open lifecycle work.
+
+The archive regression now replaces the body-only check with a loopback HTTP/1
+check through Axum/Hyper and reqwest. It uses the production ZIP worker and body
+adapter on a fixture route, delays body polling until HTTP 200 headers arrive,
+and verifies Content-Length is absent. Finish yields a readable ZIP root entry;
+Abort yields a client body error without relying on the client timeout. Both
+cases hold the transfer permit after headers and release it after server drain.
+Restoring the old abort-as-success behavior makes the new client assertion fail.
+This qualifies transport framing, not production archive routing, remote Git
+traversal, or detached-worker shutdown. The existing body-only test was replaced
+rather than retained as duplicate coverage. All five archive tests and strict
+all-target HTTP-server Clippy pass after restoring the fixed source.
+
+The RustFS race, crash, and scale workflow completed successfully on published
+head 636f2a6b9f5 (run 34124097701). Its evidence does not cover later local HTTP
+commits. The PR description now links this successful gate while keeping the
+browser contrast failure and outstanding qualification visible.
