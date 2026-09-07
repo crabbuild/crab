@@ -2716,8 +2716,8 @@ mod tests {
         std::fs::create_dir_all(&paths.repo_dir).unwrap();
         let ov = OverlayStore::open(&paths.overlay_db_path, &paths.overlay_dir).unwrap();
         use crate::engine::OverlayWriter;
-        ov.create_file("dirty.txt", 0o100644).unwrap();
-        ov.create_file("._dirty.txt", 0o100644).unwrap();
+        ov.create_file("dirty.txt", 0o100_644).unwrap();
+        ov.create_file("._dirty.txt", 0o100_644).unwrap();
         drop(ov);
 
         let status = read_persisted_status(&config, dir.path());

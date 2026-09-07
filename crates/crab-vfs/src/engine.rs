@@ -2628,7 +2628,7 @@ mod tests {
         test_engine_with_nodes(vec![BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -2755,7 +2755,7 @@ mod tests {
             BaseNode {
                 path: "dir".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -2763,7 +2763,7 @@ mod tests {
             BaseNode {
                 path: "dir/file.txt".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -2815,7 +2815,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("pointer-blob-oid".to_owned()),
             pointer: Some(pointer.clone()),
             size: pointer.size,
@@ -2846,7 +2846,7 @@ mod tests {
         let mut fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some(oid),
             pointer: None,
             size: 0,
@@ -2898,7 +2898,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "small.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("0123456789abcdef".to_owned()),
             pointer: None,
             size: 0,
@@ -3072,7 +3072,7 @@ mod tests {
             BaseNode {
                 path: "changed.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3080,7 +3080,7 @@ mod tests {
             BaseNode {
                 path: "unchanged.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3109,7 +3109,7 @@ mod tests {
             BaseNode {
                 path: "models".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3117,7 +3117,7 @@ mod tests {
             BaseNode {
                 path: "models/model.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3125,7 +3125,7 @@ mod tests {
             BaseNode {
                 path: "sibling.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3178,7 +3178,7 @@ mod tests {
             BaseNode {
                 path: "dir".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3186,7 +3186,7 @@ mod tests {
             BaseNode {
                 path: "dir/a.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3194,7 +3194,7 @@ mod tests {
             BaseNode {
                 path: "other.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3432,7 +3432,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("pointer-blob-oid".to_owned()),
             pointer: Some(crab_types::pointer::Pointer {
                 file_hash: [42; 32],
@@ -3467,7 +3467,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: None,
             pointer: Some(crab_types::pointer::Pointer {
                 file_hash: [7; 32],
@@ -3494,7 +3494,7 @@ mod tests {
             BaseNode {
                 path: "models".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3502,7 +3502,7 @@ mod tests {
             BaseNode {
                 path: "models/model.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 1024,

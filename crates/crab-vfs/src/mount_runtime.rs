@@ -439,7 +439,7 @@ mod tests {
             ("first.txt", b"first".as_slice(), "first mounted commit"),
             ("second.txt", b"second".as_slice(), "second mounted commit"),
         ] {
-            overlay.create_file(path, 0o100644).unwrap();
+            overlay.create_file(path, 0o100_644).unwrap();
             overlay.write_file(path, 0, content).unwrap();
             let engine = std::sync::Arc::clone(&output.engine);
             let _reset = engine.begin_overlay_reset().await;

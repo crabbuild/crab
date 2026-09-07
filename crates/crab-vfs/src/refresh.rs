@@ -1307,7 +1307,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("abcd1234".to_owned()),
             pointer: None,
             size,
@@ -1481,7 +1481,7 @@ mod tests {
 
         // Create an overlay entry for "a.txt".
         use crate::engine::OverlayWriter;
-        overlay.create_file("a.txt", 0o100644).unwrap();
+        overlay.create_file("a.txt", 0o100_644).unwrap();
 
         let mut changed = HashSet::new();
         changed.insert("a.txt".to_owned());
@@ -1500,7 +1500,7 @@ mod tests {
         let overlay = Arc::new(OverlayStore::open(&db_path, &upper_dir).unwrap());
 
         use crate::engine::OverlayWriter;
-        overlay.create_file("a.txt", 0o100644).unwrap();
+        overlay.create_file("a.txt", 0o100_644).unwrap();
         overlay.remove("a.txt").unwrap();
 
         let mut changed = HashSet::new();

@@ -689,3 +689,16 @@ committed baseline each have 417 error diagnostics, with zero added or removed
 fingerprints. Baseline daemon.rs is identical to origin/main. The corrected
 regression passes again. No lint suppression was added. Strict VFS Clippy is
 still not clean; the backlog remains part of the all-crate quality work.
+
+## VFS literal readability
+
+Applied 140 Clippy-suggested numeric separators across nine VFS files. Before
+writing each edit, checked that removing underscores yields the exact original
+literal. After formatting, every changed Rust file remains byte-equivalent to
+HEAD after underscore removal; no numeric value, assertion, or control flow
+changed. No new tests are needed for separator-only changes.
+
+Strict all-target nfs Clippy now reports 277 diagnostics, down from 417; all
+140 unreadable_literal diagnostics disappeared and all other lint counts remain
+unchanged. The command still fails, so this is measured backlog reduction rather
+than a clean VFS gate. Formatting and diff checks pass.

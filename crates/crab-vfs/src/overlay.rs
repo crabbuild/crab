@@ -1687,7 +1687,7 @@ mod tests {
     #[test]
     fn create_and_get() {
         let (_dir, store) = temp_store();
-        let entry = store.create_file("hello.txt", 0o100644).unwrap();
+        let entry = store.create_file("hello.txt", 0o100_644).unwrap();
         assert_eq!(entry.kind, OverlayKind::Create);
         assert_eq!(entry.size, 0);
 
@@ -1699,7 +1699,7 @@ mod tests {
     #[test]
     fn write_and_read_back() {
         let (_dir, store) = temp_store();
-        store.create_file("data.txt", 0o100644).unwrap();
+        store.create_file("data.txt", 0o100_644).unwrap();
 
         let n = store.write_file("data.txt", 0, b"hello world").unwrap();
         assert_eq!(n, 11);
@@ -1780,7 +1780,7 @@ mod tests {
     #[test]
     fn write_at_offset() {
         let (_dir, store) = temp_store();
-        store.create_file("data.txt", 0o100644).unwrap();
+        store.create_file("data.txt", 0o100_644).unwrap();
         store.write_file("data.txt", 0, b"hello world").unwrap();
         store.write_file("data.txt", 6, b"rust!").unwrap();
 
@@ -1792,7 +1792,7 @@ mod tests {
     #[test]
     fn remove_discards_overlay_only_file() {
         let (_dir, store) = temp_store();
-        store.create_file("doomed.txt", 0o100644).unwrap();
+        store.create_file("doomed.txt", 0o100_644).unwrap();
         store.remove("doomed.txt").unwrap();
 
         assert!(OverlayLookup::get(&store, "doomed.txt").is_none());
@@ -1802,7 +1802,7 @@ mod tests {
     #[test]
     fn rename_overlay_only_file_preserves_create_kind() {
         let (_dir, store) = temp_store();
-        store.create_file("old.txt", 0o100644).unwrap();
+        store.create_file("old.txt", 0o100_644).unwrap();
         store.write_file("old.txt", 0, b"content").unwrap();
 
         store.rename("old.txt", "new.txt").unwrap();
@@ -1821,7 +1821,7 @@ mod tests {
     #[test]
     fn remove_discards_renamed_overlay_only_file() {
         let (_dir, store) = temp_store();
-        store.create_file("old.txt", 0o100644).unwrap();
+        store.create_file("old.txt", 0o100_644).unwrap();
         store.write_file("old.txt", 0, b"content").unwrap();
         store.rename("old.txt", "new.txt").unwrap();
 
@@ -1833,8 +1833,8 @@ mod tests {
     #[test]
     fn rename_directory_moves_descendant_entries() {
         let (_dir, store) = temp_store();
-        store.mkdir("old", 0o040755).unwrap();
-        store.create_file("old/child.txt", 0o100644).unwrap();
+        store.mkdir("old", 0o040_755).unwrap();
+        store.create_file("old/child.txt", 0o100_644).unwrap();
         store
             .write_file("old/child.txt", 0, b"child content")
             .unwrap();
@@ -1858,7 +1858,7 @@ mod tests {
     #[test]
     fn mkdir_and_rmdir() {
         let (_dir, store) = temp_store();
-        store.mkdir("subdir", 0o040755).unwrap();
+        store.mkdir("subdir", 0o040_755).unwrap();
 
         let entry = OverlayLookup::get(&store, "subdir").unwrap();
         assert_eq!(entry.kind, OverlayKind::Mkdir);
@@ -1901,7 +1901,7 @@ mod tests {
     fn promote_writes_content() {
         let (_dir, store) = temp_store();
         let entry = store
-            .promote("base.txt", 0o100644, b"base content", Some("abc123"))
+            .promote("base.txt", 0o100_644, b"base content", Some("abc123"))
             .unwrap();
         assert_eq!(entry.kind, OverlayKind::Modify);
         assert_eq!(entry.size, 12);
@@ -1914,9 +1914,9 @@ mod tests {
     #[test]
     fn list_by_prefix_returns_children() {
         let (_dir, store) = temp_store();
-        store.create_file("src/main.rs", 0o100644).unwrap();
-        store.create_file("src/lib.rs", 0o100644).unwrap();
-        store.create_file("README.md", 0o100644).unwrap();
+        store.create_file("src/main.rs", 0o100_644).unwrap();
+        store.create_file("src/lib.rs", 0o100_644).unwrap();
+        store.create_file("README.md", 0o100_644).unwrap();
 
         let children = store.list_by_prefix("src");
         let paths: Vec<&str> = children.iter().map(|e| e.path.as_str()).collect();
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn set_mtime_updates_entry() {
         let (_dir, store) = temp_store();
-        store.create_file("ts.txt", 0o100644).unwrap();
+        store.create_file("ts.txt", 0o100_644).unwrap();
         store
             .set_mtime("ts.txt", 1_800_000_000_000_000_000)
             .unwrap();
@@ -1940,7 +1940,7 @@ mod tests {
     #[test]
     fn set_mode_updates_entry_and_backing_permissions() {
         let (_dir, store) = temp_store();
-        store.create_file("script.sh", 0o100644).unwrap();
+        store.create_file("script.sh", 0o100_644).unwrap();
 
         store.set_mode("script.sh", 0o755).unwrap();
 
@@ -1963,7 +1963,7 @@ mod tests {
         let (_dir, store) = temp_store();
         assert_eq!(store.dirty_count().unwrap(), 0);
 
-        store.create_file("a.txt", 0o100644).unwrap();
+        store.create_file("a.txt", 0o100_644).unwrap();
         assert_eq!(store.dirty_count().unwrap(), 1);
 
         store.remove("a.txt").unwrap();
@@ -1978,9 +1978,9 @@ mod tests {
         let (_dir, store) = temp_store();
 
         // Local creates remain dirty even if the base later has the path.
-        store.create_file("local_conflict.txt", 0o100644).unwrap();
+        store.create_file("local_conflict.txt", 0o100_644).unwrap();
         // Create a file that won't be in the base.
-        store.create_file("local.txt", 0o100644).unwrap();
+        store.create_file("local.txt", 0o100_644).unwrap();
         // Delete marker for a path that no longer exists in base (stale).
         store.remove("gone.txt").unwrap();
 
@@ -2009,8 +2009,8 @@ mod tests {
 
         {
             let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
-            store.mkdir("newdir", 0o040755).unwrap();
-            store.create_file("created.txt", 0o100644).unwrap();
+            store.mkdir("newdir", 0o040_755).unwrap();
+            store.create_file("created.txt", 0o100_644).unwrap();
             store.write_file("created.txt", 0, b"created").unwrap();
             store.rename("created.txt", "newdir/renamed.txt").unwrap();
         }
@@ -2031,7 +2031,7 @@ mod tests {
         let (_dir, store) = temp_store();
 
         store
-            .promote("edited.txt", 0o100644, b"user edits", None)
+            .promote("edited.txt", 0o100_644, b"user edits", None)
             .unwrap();
 
         store
@@ -2059,7 +2059,7 @@ mod tests {
     #[test]
     fn path_normalization() {
         let (_dir, store) = temp_store();
-        store.create_file("/leading/slash.txt", 0o100644).unwrap();
+        store.create_file("/leading/slash.txt", 0o100_644).unwrap();
 
         // Should be accessible without leading slash.
         let entry = OverlayLookup::get(&store, "leading/slash.txt");
@@ -2107,7 +2107,7 @@ mod tests {
         let backing = upper_dir.join("migrated.txt");
         std::fs::write(&backing, b"").unwrap();
         let entry = store
-            .promote("migrated.txt", 0o100644, b"data", Some("deadbeef"))
+            .promote("migrated.txt", 0o100_644, b"data", Some("deadbeef"))
             .unwrap();
         assert_eq!(entry.kind, OverlayKind::Modify);
     }
@@ -2120,7 +2120,7 @@ mod tests {
         let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
 
         store
-            .promote("tracked.txt", 0o100644, b"content", Some("abc123def456"))
+            .promote("tracked.txt", 0o100_644, b"content", Some("abc123def456"))
             .unwrap();
 
         // Query the raw source_oid from SQLite to verify it was stored.
@@ -2143,7 +2143,7 @@ mod tests {
         let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
 
         store
-            .promote("empty_oid.txt", 0o100644, b"data", None)
+            .promote("empty_oid.txt", 0o100_644, b"data", None)
             .unwrap();
 
         let db = store.db.lock().unwrap();
@@ -2164,7 +2164,7 @@ mod tests {
         let upper_dir = dir.path().join("upper");
         let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
 
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
 
         let db = store.db.lock().unwrap();
         let oid: String = db
@@ -2183,17 +2183,17 @@ mod tests {
 
         // Promote a file with source_oid "aaa111" (simulates COW from base).
         store
-            .promote("edited.txt", 0o100644, b"user edits", Some("aaa111"))
+            .promote("edited.txt", 0o100_644, b"user edits", Some("aaa111"))
             .unwrap();
 
         // Promote a file with source_oid "bbb222" (base will diverge).
         store
-            .promote("stale.txt", 0o100644, b"old edits", Some("bbb222"))
+            .promote("stale.txt", 0o100_644, b"old edits", Some("bbb222"))
             .unwrap();
 
         // Promote a file whose base will disappear.
         store
-            .promote("gone.txt", 0o100644, b"orphan", Some("ccc333"))
+            .promote("gone.txt", 0o100_644, b"orphan", Some("ccc333"))
             .unwrap();
 
         store
@@ -2227,7 +2227,7 @@ mod tests {
 
         // Promote with source_oid "aaa111".
         store
-            .promote("racing.txt", 0o100644, b"original", Some("aaa111"))
+            .promote("racing.txt", 0o100_644, b"original", Some("aaa111"))
             .unwrap();
 
         // Simulate a concurrent write that changes mtime (and source_oid
@@ -2286,7 +2286,7 @@ mod tests {
 
         {
             let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
-            store.create_file("kept.txt", 0o100644).unwrap();
+            store.create_file("kept.txt", 0o100_644).unwrap();
             store.write_file("kept.txt", 0, b"keep me").unwrap();
         }
 
@@ -2307,7 +2307,7 @@ mod tests {
 
         {
             let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
-            store.create_file("kept.txt", 0o100644).unwrap();
+            store.create_file("kept.txt", 0o100_644).unwrap();
             store.write_file("kept.txt", 0, b"keep me").unwrap();
         }
 
@@ -2337,7 +2337,7 @@ mod tests {
         // Create a store with some data.
         {
             let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
-            store.create_file("file.txt", 0o100644).unwrap();
+            store.create_file("file.txt", 0o100_644).unwrap();
             store.write_file("file.txt", 0, b"data").unwrap();
         }
 
@@ -2364,17 +2364,17 @@ mod tests {
         // Create entries in the first session.
         {
             let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
-            store.create_file("user_file.txt", 0o100644).unwrap();
+            store.create_file("user_file.txt", 0o100_644).unwrap();
             store.write_file("user_file.txt", 0, b"user data").unwrap();
             store
                 .promote(
                     "modified.txt",
-                    0o100644,
+                    0o100_644,
                     b"modified content",
                     Some("oid123"),
                 )
                 .unwrap();
-            store.mkdir("user_dir", 0o040755).unwrap();
+            store.mkdir("user_dir", 0o040_755).unwrap();
             assert_eq!(store.dirty_count().unwrap(), 3);
         }
 
@@ -2410,10 +2410,10 @@ mod tests {
         {
             let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
             store
-                .promote("edited.txt", 0o100644, b"user edits", Some("base_oid_1"))
+                .promote("edited.txt", 0o100_644, b"user edits", Some("base_oid_1"))
                 .unwrap();
             store
-                .promote("stale.txt", 0o100644, b"old edits", Some("base_oid_2"))
+                .promote("stale.txt", 0o100_644, b"old edits", Some("base_oid_2"))
                 .unwrap();
         }
 
@@ -2445,11 +2445,11 @@ mod tests {
     fn dirty_paths_returns_sorted_changed_paths() {
         let (_dir, store) = temp_store();
 
-        store.create_file("c.txt", 0o100644).unwrap();
-        store.create_file("a.txt", 0o100644).unwrap();
-        store.create_file("b.txt", 0o100644).unwrap();
+        store.create_file("c.txt", 0o100_644).unwrap();
+        store.create_file("a.txt", 0o100_644).unwrap();
+        store.create_file("b.txt", 0o100_644).unwrap();
         store.remove("deleted.txt").unwrap();
-        store.mkdir("dir", 0o040755).unwrap();
+        store.mkdir("dir", 0o040_755).unwrap();
 
         let paths = store.dirty_paths().unwrap();
         assert_eq!(paths, vec!["a.txt", "b.txt", "c.txt", "deleted.txt", "dir"]);
@@ -2459,8 +2459,8 @@ mod tests {
     fn dirty_paths_includes_base_delete_markers() {
         let (_dir, store) = temp_store();
 
-        store.create_file("alive.txt", 0o100644).unwrap();
-        store.create_file("doomed.txt", 0o100644).unwrap();
+        store.create_file("alive.txt", 0o100_644).unwrap();
+        store.create_file("doomed.txt", 0o100_644).unwrap();
         store.remove("doomed.txt").unwrap();
         store.remove("base_deleted.txt").unwrap();
 
@@ -2487,9 +2487,9 @@ mod tests {
 
         {
             let store = OverlayStore::open(&db_path, &upper_dir).unwrap();
-            store.create_file("zeta.txt", 0o100644).unwrap();
+            store.create_file("zeta.txt", 0o100_644).unwrap();
             store.write_file("zeta.txt", 0, b"z").unwrap();
-            store.create_file("alpha.txt", 0o100644).unwrap();
+            store.create_file("alpha.txt", 0o100_644).unwrap();
             store.write_file("alpha.txt", 0, b"a").unwrap();
             store.remove("deleted.txt").unwrap();
         }
@@ -2514,9 +2514,9 @@ mod tests {
         let (_dir, store) = temp_store();
 
         // Create source and destination files.
-        store.create_file("src.txt", 0o100644).unwrap();
+        store.create_file("src.txt", 0o100_644).unwrap();
         store.write_file("src.txt", 0, b"source content").unwrap();
-        store.create_file("dst.txt", 0o100644).unwrap();
+        store.create_file("dst.txt", 0o100_644).unwrap();
         store.write_file("dst.txt", 0, b"old destination").unwrap();
 
         // Rename src → dst should overwrite dst.
@@ -2555,7 +2555,7 @@ mod tests {
         let (_dir, store) = temp_store();
 
         // Create a file, then delete it, then create a new one.
-        store.create_file("reborn.txt", 0o100644).unwrap();
+        store.create_file("reborn.txt", 0o100_644).unwrap();
         store.write_file("reborn.txt", 0, b"first life").unwrap();
 
         // Unlink it. A file created and deleted only in the overlay is clean.
@@ -2563,7 +2563,7 @@ mod tests {
         assert!(OverlayLookup::get(&store, "reborn.txt").is_none());
 
         // Create a new file at the same path.
-        store.create_file("reborn.txt", 0o100644).unwrap();
+        store.create_file("reborn.txt", 0o100_644).unwrap();
 
         // Write to the new file.
         let n = store.write_file("reborn.txt", 0, b"second life").unwrap();
@@ -2584,7 +2584,7 @@ mod tests {
     fn metadata_consistency_after_create() {
         let (_dir, store) = temp_store();
 
-        let entry = store.create_file("meta.txt", 0o100644).unwrap();
+        let entry = store.create_file("meta.txt", 0o100_644).unwrap();
         assert_eq!(entry.size, 0);
         assert!(entry.mtime_ns > 0);
     }
@@ -2593,7 +2593,7 @@ mod tests {
     fn metadata_consistency_after_write() {
         let (_dir, store) = temp_store();
 
-        store.create_file("meta.txt", 0o100644).unwrap();
+        store.create_file("meta.txt", 0o100_644).unwrap();
         let before = OverlayLookup::get(&store, "meta.txt").unwrap();
 
         // Small sleep to ensure mtime changes.
@@ -2610,7 +2610,7 @@ mod tests {
     fn metadata_consistency_after_remove() {
         let (_dir, store) = temp_store();
 
-        store.create_file("meta.txt", 0o100644).unwrap();
+        store.create_file("meta.txt", 0o100_644).unwrap();
         store.remove("meta.txt").unwrap();
 
         assert!(OverlayLookup::get(&store, "meta.txt").is_none());
@@ -2620,7 +2620,7 @@ mod tests {
     fn metadata_consistency_after_rename() {
         let (_dir, store) = temp_store();
 
-        store.create_file("old.txt", 0o100644).unwrap();
+        store.create_file("old.txt", 0o100_644).unwrap();
         store.write_file("old.txt", 0, b"content").unwrap();
         store.rename("old.txt", "new.txt").unwrap();
 
@@ -2635,7 +2635,7 @@ mod tests {
     fn metadata_consistency_after_mkdir() {
         let (_dir, store) = temp_store();
 
-        store.mkdir("dir", 0o040755).unwrap();
+        store.mkdir("dir", 0o040_755).unwrap();
         let entry = OverlayLookup::get(&store, "dir").unwrap();
         assert_eq!(entry.size, 0);
         assert!(entry.mtime_ns > 0);
@@ -2646,7 +2646,7 @@ mod tests {
         let (_dir, store) = temp_store();
 
         let entry = store
-            .promote("promoted.txt", 0o100644, b"promoted content", Some("oid"))
+            .promote("promoted.txt", 0o100_644, b"promoted content", Some("oid"))
             .unwrap();
         assert_eq!(entry.size, 16);
         assert!(entry.mtime_ns > 0);
@@ -2660,7 +2660,7 @@ mod tests {
     fn metadata_consistency_after_update_size_and_mtime() {
         let (_dir, store) = temp_store();
 
-        store.create_file("meta.txt", 0o100644).unwrap();
+        store.create_file("meta.txt", 0o100_644).unwrap();
         store
             .update_size_and_mtime("meta.txt", 42, 999_000_000)
             .unwrap();

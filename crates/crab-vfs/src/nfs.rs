@@ -2644,7 +2644,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -2655,7 +2655,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::Dir,
-            mode: 0o040755,
+            mode: 0o040_755,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -3156,7 +3156,7 @@ mod tests {
             BaseNode {
                 path: "models/model.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: Some("pointer-blob-oid".to_owned()),
                 pointer: Some(pointer.clone()),
                 size: pointer.size,
@@ -3254,7 +3254,7 @@ mod tests {
         let fixture = nfs_read_fixture(vec![BaseNode {
             path: "unknown.txt".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("0123456789012345678901234567890123456789".to_owned()),
             pointer: None,
             size: 0,

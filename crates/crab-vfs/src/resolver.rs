@@ -536,7 +536,7 @@ mod tests {
         let overlay = vec![OverlayEntry {
             path: "private.txt".to_owned(),
             kind: OverlayKind::Modify,
-            mode: 0o100600,
+            mode: 0o100_600,
             size: 1,
             mtime_ns: 1_800_000_000_000_000_000,
             node_type: NodeType::File,
@@ -589,7 +589,7 @@ mod tests {
         let node = ResolvedNode::Base(BaseNode {
             path: "src/main.rs".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("abc123".to_owned()),
             pointer: None,
             size: 4096,
@@ -605,7 +605,7 @@ mod tests {
         let node = ResolvedNode::Overlay(OverlayEntry {
             path: "new_file.txt".to_owned(),
             kind: OverlayKind::Create,
-            mode: 0o100644,
+            mode: 0o100_644,
             size: 100,
             mtime_ns: 1_700_000_000_000_000_000,
             node_type: NodeType::File,
@@ -622,7 +622,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("abcd1234".to_owned()),
             pointer: None,
             size,
@@ -633,7 +633,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::Dir,
-            mode: 0o040000,
+            mode: 0o040_000,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -694,7 +694,7 @@ mod tests {
         let (_dir, resolver) = temp_resolver(&[BaseNode {
             path: "a.txt".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("abcd1234".to_owned()),
             pointer: None,
             size: 0,
@@ -737,7 +737,7 @@ mod tests {
         let overlay = vec![OverlayEntry {
             path: "._overlay.txt".to_owned(),
             kind: OverlayKind::Create,
-            mode: 0o100644,
+            mode: 0o100_644,
             size: 4,
             mtime_ns: 1_700_000_000_000_000_000,
             node_type: NodeType::File,
@@ -760,7 +760,7 @@ mod tests {
             .map(|index| OverlayEntry {
                 path: format!("file-{index:03}.bin"),
                 kind: OverlayKind::Delete,
-                mode: 0o100644,
+                mode: 0o100_644,
                 size: 0,
                 mtime_ns: 0,
                 node_type: NodeType::File,
@@ -769,7 +769,7 @@ mod tests {
         overlay.push(OverlayEntry {
             path: "new.bin".to_owned(),
             kind: OverlayKind::Create,
-            mode: 0o100644,
+            mode: 0o100_644,
             size: 1,
             mtime_ns: 0,
             node_type: NodeType::File,
@@ -852,7 +852,7 @@ mod tests {
         let overlay = vec![OverlayEntry {
             path: "a.txt".to_owned(),
             kind: OverlayKind::Modify,
-            mode: 0o100644,
+            mode: 0o100_644,
             size: 999,
             mtime_ns: 1_700_000_000_000_000_000,
             node_type: NodeType::File,
@@ -885,7 +885,7 @@ mod tests {
         let overlay = vec![OverlayEntry {
             path: "new.txt".to_owned(),
             kind: OverlayKind::Create,
-            mode: 0o100644,
+            mode: 0o100_644,
             size: 50,
             mtime_ns: 1_700_000_000_000_000_000,
             node_type: NodeType::File,
@@ -921,7 +921,7 @@ mod tests {
         let overlay = vec![OverlayEntry {
             path: "a.txt".to_owned(),
             kind: OverlayKind::Modify,
-            mode: 0o100755,
+            mode: 0o100_755,
             size: 999,
             mtime_ns: 1_800_000_000_000_000_000,
             node_type: NodeType::File,
