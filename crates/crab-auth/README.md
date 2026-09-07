@@ -70,15 +70,17 @@ assert!(resolution.storage_scope.is_none());
 # }
 ```
 
-Enable only the provider clients required by the deployment:
+In a consuming Crab workspace member, enable only the provider clients needed
+by the deployment. This crate is not published to the registry:
 
 ```toml
 [dependencies]
-crab-auth = { version = "1", features = ["oidc-client", "aws-oidc-client"] }
+crab-auth = { workspace = true, features = ["oidc-client", "aws-oidc-client"] }
 ```
 
-Credential values and tokens are sensitive. Callers should pass resolutions
-directly to the storage adapter and avoid logging their debug representation.
+Credential and token types omit secrets from `Debug` output. Their string fields
+and serialized payloads still contain credentials: pass resolutions directly to
+the storage adapter and keep those fields out of logs.
 
 ## Boundaries
 

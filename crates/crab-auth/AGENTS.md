@@ -39,8 +39,8 @@ Store consumers compose those results in `crates/crab-auth-store/src/lib.rs`.
 
 ## Features and platform
 
-Empty default. Optional features are `oidc-client`, `aws-oidc-client`, `azure-entra-client`, `crab-auth-client`, and `gcp-workload-identity-client`; provider clients enable oidc-client. Token locking has platform-specific code. `CachedTokens` contains token strings;
-do not log the struct or assume Debug redacts it. TokenCache construction may
+Empty default. Optional features are `oidc-client`, `aws-oidc-client`, `azure-entra-client`, `crab-auth-client`, and `gcp-workload-identity-client`; provider clients enable oidc-client. Token locking has platform-specific code. Credential and token Debug output omits secrets;
+raw fields and serialized payloads remain sensitive. TokenCache construction may
 use the OS keychain or a fallback key file; inspect fixture setup before running
 token persistence tests. Mock OIDC tests do not qualify real identity providers; inspect their contract before changing exchanges.
 

@@ -182,7 +182,6 @@ fn small_jitter(base: Duration) -> Duration {
 }
 
 #[cfg(test)]
-#[expect(clippy::panic, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
 

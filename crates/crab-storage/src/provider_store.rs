@@ -23,7 +23,8 @@ mod target;
 pub const STATIC_ENV_PROVIDER_ENV: &str = "CRAB_STORAGE_PROVIDER";
 
 /// Provider credentials consumed by object-store builders.
-#[derive(Debug, Clone)]
+/// Debug output identifies the provider without exposing credential fields.
+#[derive(Clone)]
 pub enum ObjectStoreCredentials {
     /// Use the provider SDK's default environment chain.
     StaticEnv { provider: StorageProviderKind },
@@ -43,6 +44,14 @@ pub enum ObjectStoreCredentials {
     },
 }
 
+impl std::fmt::Debug for ObjectStoreCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObjectStoreCredentials")
+            .field("provider", &self.provider_kind())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ObjectStoreCredentials {
     /// Returns the physical storage provider used by these credentials.
     #[must_use]
@@ -57,12 +66,22 @@ impl ObjectStoreCredentials {
 }
 
 /// Azure authorization accepted by the object-store builder.
-#[derive(Debug, Clone)]
+/// Debug output redacts the token value.
+#[derive(Clone)]
 pub enum AzureAuthorization {
     /// OAuth2 bearer token.
     Bearer(String),
     /// SAS query string.
     Sas(String),
+}
+
+impl std::fmt::Debug for AzureAuthorization {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+            Self::Sas(_) => f.write_str("Sas(<redacted>)"),
+        }
+    }
 }
 
 /// Built provider object store plus optional signing adapter.
@@ -684,7 +703,7 @@ fn normalize_env_option_key(key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-#[expect(clippy::panic, clippy::expect_used, reason = "test assertions")]
+#[expect(clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
 

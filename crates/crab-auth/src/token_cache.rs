@@ -38,7 +38,8 @@ pub struct TokenCache {
 }
 
 /// Cached token set for a single provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Debug output includes lifetime metadata only; serialization includes tokens.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CachedTokens {
     /// The OIDC ID token (JWT).
     pub id_token: String,
@@ -54,6 +55,15 @@ pub struct CachedTokens {
     /// Unix timestamp at which the access token expires, when known.
     #[serde(default)]
     pub expires_at: Option<u64>,
+}
+
+impl std::fmt::Debug for CachedTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedTokens")
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Identity claims extracted from a JWT ID token.

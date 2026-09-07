@@ -71,6 +71,10 @@ are already resolved by [`crab-auth`](../crab-auth/README.md). Use `cas_update` 
 mutable manifest/ref state and `range_get` or `get_stream` for large immutable
 objects.
 
+`ObjectStoreCredentials` and `AzureAuthorization` omit secrets from `Debug`
+output. Their string fields still contain credential material; pass those
+fields only to the provider construction boundary.
+
 ## Design boundaries
 
 - Provider credentials are inputs; credential resolution belongs to
