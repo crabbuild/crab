@@ -599,3 +599,19 @@ Minimal-feature strict all-target Clippy passes. With storage enabled, 26
 registry tests and five shallow-closure tests pass, including CAS updates,
 conservative roots, isolated partitions, stale descriptors, and corrupt entries.
 Strict all-target Clippy also passes with storage and remote-index separately.
+
+## VFS task ownership inspection
+
+Read pipeline worker creation, HydrationService spawn/worker/drain/prefetch paths,
+coordinator shutdown, daemon teardown, and NFS shutdown. Queue cancellation
+clears pending work after the current synchronous step. Read-window prefetch
+spawns independent tasks and discards their handles. The coordinator timeout
+owns a future containing worker handles; timeout drops those handles rather
+than proving worker completion. Daemon requests abort without joining workers.
+NFS manages server/control/refresh separately. These are qualification gaps,
+not evidence that teardown is complete or that corruption has occurred.
+
+Corrected rustdoc and README to distinguish queue-worker completion from total
+hydration completion, and fixed the constructor's worker-method link. Runtime
+behavior is unchanged. Follow-up must consolidate task ownership across all
+mount owners and qualify real teardown before claiming resource release.

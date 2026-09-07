@@ -258,7 +258,7 @@ impl std::fmt::Debug for HydrationService {
 impl HydrationService {
     /// Create a new hydration service.
     ///
-    /// Call [`spawn_workers`] to start the background worker pool.
+    /// Call [`Self::spawn_workers`] to start the background worker pool.
     #[expect(clippy::too_many_arguments, reason = "wires VFS dependency graph")]
     pub fn new(
         cache: Arc<ChunkCache>,
@@ -296,8 +296,13 @@ impl HydrationService {
 
     /// Spawn background worker tasks that process the priority queue.
     ///
-    /// Returns `JoinHandle`s for the workers. The caller should hold these
-    /// and await them on shutdown.
+    /// The first call starts the pool; later calls return an empty vector.
+    /// Cancel the token supplied to [`Self::new`] and await these handles to
+    /// join the queue workers. Cancellation discards queued tasks after the
+    /// current synchronous hydration step returns.
+    ///
+    /// These handles do not include independently spawned read-window prefetch
+    /// tasks. Joining them alone does not prove all hydration activity stopped.
     pub fn spawn_workers(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
         // Prevent duplicate worker pools: if spawn_workers is called
         // multiple times, only the first invocation creates workers.

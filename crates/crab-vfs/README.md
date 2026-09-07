@@ -60,6 +60,20 @@ its failure isolation, per-read verification, private filesystem access, and
 budget/lifetime ownership remain Plan 017 work. Startup and in-memory-origin
 tests are not native mounted-filesystem or whole-process resource proof.
 
+## Task ownership
+
+| Task | Handle owner | Completion boundary |
+| --- | --- | --- |
+| Hydration queue workers | `PipelineOutput::hydrator_handles` or daemon runtime | Cancel the service token, then await the handles; queued tasks are discarded |
+| Read-window prefetch | Spawned independently by `HydrationService` | Not included in queue-worker handles |
+| NFS server, refresh, control | NFS mount runtime | Backend teardown controls these separately from hydration |
+
+Cancellation is cooperative. A queue worker observes it between synchronous
+hydration steps; requesting abort does not prove that a running step has ended.
+The coordinator currently bounds its wait with a grace period, while daemon
+teardown requests worker aborts. Neither path establishes completion of detached
+read-window prefetch. Full teardown qualification remains outstanding.
+
 ## Usage
 
 Source detection requires `fuse` or `nfs`. This crate is not published to the

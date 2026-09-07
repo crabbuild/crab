@@ -95,7 +95,8 @@ pub struct PipelineOutput {
     pub head_ref: String,
     /// Snapshot generation published during this pipeline run.
     pub generation: i64,
-    /// Hydration worker join handles (abort to stop workers).
+    /// Queue-worker handles; cancel the configured token and await completion.
+    /// Read-window prefetch tasks are not included in this collection.
     pub hydrator_handles: Vec<JoinHandle<()>>,
 }
 
