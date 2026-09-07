@@ -8,8 +8,11 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::Semaphore;
+use tokio_util::task::TaskTracker;
 
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -338,6 +341,8 @@ pub struct CacheStore {
     max_bytes: u64,
     conn: Mutex<Connection>,
     mutation_lock: Mutex<()>,
+    mutation_tasks: tokio::sync::Mutex<TaskTracker>,
+    mutation_permits: Arc<Semaphore>,
     current_bytes: AtomicU64,
     startup_integrity: CacheIntegrityStats,
     runtime_integrity: CacheRuntimeIntegrityCounters,
@@ -387,11 +392,53 @@ impl CacheStore {
             max_bytes,
             conn: Mutex::new(conn),
             mutation_lock: Mutex::new(()),
+            mutation_tasks: tokio::sync::Mutex::new(TaskTracker::new()),
+            mutation_permits: Arc::new(Semaphore::new(1)),
             current_bytes: AtomicU64::new(initial_bytes),
             startup_integrity,
             runtime_integrity: CacheRuntimeIntegrityCounters::default(),
             eviction: CacheEvictionCounters::default(),
         })
+    }
+
+    // Admit one request mutation at a time before entering the blocking pool.
+    // The permit lives in the worker, so cancelling its caller cannot admit
+    // an unbounded queue of jobs waiting on the synchronous mutation lock.
+    pub(crate) async fn run_mutation<T: Send + 'static>(
+        self: &Arc<Self>,
+        mutation: impl FnOnce(&Self) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let permit = Arc::clone(&self.mutation_permits)
+            .acquire_owned()
+            .await
+            .map_err(|error| CacheServiceError::InternalError(error.into()))?;
+        let tasks = self.mutation_tasks.lock().await;
+        if tasks.is_closed() {
+            return Err(CacheServiceError::InternalError(
+                std::io::Error::other("cache mutation admission is closed").into(),
+            ));
+        }
+        let store = Arc::clone(self);
+        let worker = tasks.spawn_blocking(move || {
+            let _permit = permit;
+            mutation(&store)
+        });
+        drop(tasks);
+        worker
+            .await
+            .map_err(|error| CacheServiceError::InternalError(error.into()))?
+    }
+
+    pub(crate) async fn shutdown_mutations(&self) {
+        let tasks = {
+            let tasks = self.mutation_tasks.lock().await;
+            // TaskTracker closure alone does not reject new jobs. Serialize
+            // closure with admission so an empty tracker is a final drain.
+            self.mutation_permits.close();
+            tasks.close();
+            tasks.clone()
+        };
+        tasks.wait().await;
     }
 
     /// Current cache size in bytes.
@@ -970,6 +1017,8 @@ impl CacheStore {
             max_bytes: 1_073_741_824, // 1 GiB default for stubs
             conn: Mutex::new(conn),
             mutation_lock: Mutex::new(()),
+            mutation_tasks: tokio::sync::Mutex::new(TaskTracker::new()),
+            mutation_permits: Arc::new(Semaphore::new(1)),
             current_bytes: AtomicU64::new(0),
             startup_integrity: CacheIntegrityStats::default(),
             runtime_integrity: CacheRuntimeIntegrityCounters::default(),
@@ -2434,6 +2483,96 @@ mod tests {
         );
         assert!(waited, "shutdown detached the admitted eviction");
         assert_eq!(store.current_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_admit_a_mutation() {
+        let store = Arc::new(test_store());
+        let running_store = Arc::clone(&store);
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let running = tokio::spawn(async move {
+            running_store
+                .run_mutation(move |_| {
+                    entered.send(()).unwrap();
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entering.await.unwrap();
+        let (executed, execution) = tokio::sync::oneshot::channel();
+        let mut queued = Box::pin(store.run_mutation(move |_| {
+            let _ = executed.send(());
+            Ok(())
+        }));
+        assert!(futures_util::poll!(&mut queued).is_pending());
+        drop(queued);
+        release.send(()).unwrap();
+        running.await.unwrap().unwrap();
+        store.shutdown_mutations().await;
+        assert!(
+            execution.await.is_err(),
+            "cancelled waiter executed a mutation"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_mutation_is_drained_before_shutdown() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let store = Arc::new(test_store());
+        let key = pack_key("cancelled-admin-eviction");
+        store
+            .put_unverified(&key, Bytes::from_static(b"payload"))
+            .unwrap();
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let locked_store = Arc::clone(&store);
+        let blocker = std::thread::spawn(move || {
+            let _guard = locked_store.mutation_guard().unwrap();
+            locked.send(()).unwrap();
+            let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            if responsive {
+                let _ = release_rx.recv_timeout(Duration::from_secs(3));
+            }
+            responsive
+        });
+        ready.await.unwrap();
+        let request_store = Arc::clone(&store);
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let request = tokio::spawn(async move {
+            request_store
+                .run_mutation(move |store| {
+                    let _ = entered.send(());
+                    store.evict_key(&key)
+                })
+                .await
+        });
+        entering.await.unwrap();
+        let _ = heartbeat.send(());
+        request.abort();
+        let _ = request.await;
+        let mut shutdown = Box::pin(store.shutdown_mutations());
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err();
+        let _ = release.send(());
+        let responsive = blocker.join().unwrap();
+        if waited {
+            shutdown.await;
+        }
+        assert!(responsive, "mutation blocked the async executor");
+        assert!(waited, "shutdown detached a cancelled request's mutation");
+        assert_eq!(store.current_bytes(), 0);
+        assert!(
+            store.run_mutation(|_| Ok(())).await.is_err(),
+            "shutdown must close admission"
+        );
     }
 
     #[test]

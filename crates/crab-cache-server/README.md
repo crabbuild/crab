@@ -113,6 +113,12 @@ Batch eviction sums actual removal results instead of counting stale candidates.
 
 ## Shutdown ownership
 
+Administrative eviction uses a service-owned blocking worker. Admission allows
+one such mutation at a time; cancelling a queued request removes it, while an
+already admitted mutation finishes before server shutdown returns. Cancellation
+does not roll back an eviction. Upload/origin publication and startup recovery
+still use synchronous paths and are not covered by this worker's drain.
+
 Periodic eviction runs disk/SQLite work on a blocking worker, one batch at a
 time. Evictor shutdown stops polling and waits for any admitted batch before
 releasing its cache reference. A shutdown signal takes priority over a queued

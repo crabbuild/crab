@@ -1154,7 +1154,11 @@ pub async fn admin_evict(
             object_type,
             hash,
         };
-        return match state.cache_store.evict_key(&key) {
+        return match state
+            .cache_store
+            .run_mutation(move |store| store.evict_key(&key))
+            .await
+        {
             Ok(stats) => axum::Json(stats).into_response(),
             Err(e) => e.into_response(),
         };
@@ -1175,7 +1179,11 @@ pub async fn admin_evict(
 
     let filter = EvictFilter { object_type };
 
-    match state.cache_store.evict_by_filter(&filter) {
+    match state
+        .cache_store
+        .run_mutation(move |store| store.evict_by_filter(&filter))
+        .await
+    {
         Ok(stats) => axum::Json(stats).into_response(),
         Err(e) => e.into_response(),
     }

@@ -3464,3 +3464,46 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
 - This is the simpler fix for the redundant ownership state, not completion
   of request cancellation work. Service-owned blocking admission/drain and
   upload/origin sibling qualification remain open as described above.
+
+
+### Administrative mutation admission and drain
+
+- Both `handlers.rs::admin_evict` branches now use a crate-private
+  `CacheStore::run_mutation` boundary. Disk/SQLite eviction runs in a tracked
+  blocking worker; an owned semaphore permit bounds admission to one worker,
+  including when the request future is cancelled. Waiting requests can cancel
+  without queuing work in the blocking pool.
+- `PreparedServer::shutdown` stops background eviction, closes request mutation
+  admission, and waits for tracked workers. Tracker closure and spawn share an
+  async mutex, preventing an empty-tracker race with new admission. Dropping
+  the whole serving/shutdown future is not qualified by this change.
+- Evidence map: `build_router` routes authenticated admin requests through
+  Tower timeout/concurrency middleware; both exact and filter handlers call
+  the new boundary; its callees are existing eviction and persistence methods.
+  Inspected main calls those methods synchronously. `run_server` calls prepared
+  shutdown after either plain/TLS serving returns. HTTP response mapping and
+  eviction accounting remain unchanged.
+- Dependency contracts: Tokio 1.52 owned semaphore permits can cross task
+  boundaries, cancellation loses the queued acquisition, and closure rejects
+  waiting/new acquisitions. Tokio-util TaskTracker records a blocking task
+  before spawn and releases its token after the closure finishes; `close`
+  alone does not prevent admission. Enable existing tokio-util's `rt` feature
+  explicitly; no new dependency or lockfile change.
+- Regression: the real mutation-lock fixture failed with synchronous execution
+  at the new boundary (`mutation blocked the async executor`, 3.02 seconds),
+  then passed with tracked offloading. It cancels the admitted request and
+  verifies shutdown waits, the eviction completes, and closed admission rejects
+  more work. A separate fixture cancels a queued waiter and proves it never
+  executes. These are local owner tests, not a full transport-disconnect E2E.
+- Best-fix scope: one canonical owner for both admin branches, bounded admission
+  and explicit drain rather than detached spawn calls. Added non-test code buys
+  executor isolation plus cancellation ownership; the existing synchronous APIs
+  remain the implementation used inside the worker and by synchronous callers.
+- Sibling follow-up remains required: streamed PUT and origin-fill publication
+  need the temp file and authoritative budget/commit operation moved together;
+  startup recovery is pre-listener synchronous work. Periodic eviction retains
+  its separately joined owner. No claim that all request disk work is offloaded.
+- Validation: 46 store tests, 4 server tests, 4 administrative HTTP integration
+  tests, strict all-target Clippy, strict rustdoc, and the cache-server binary
+  build pass. Documentation describes the scoped
+  admission/drain contract and the remaining synchronous siblings.

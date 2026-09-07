@@ -47,11 +47,12 @@ pub struct PreparedServer {
 }
 
 impl PreparedServer {
-    /// Stops any background tasks owned by the prepared server.
+    /// Stops background eviction and drains admitted request mutations.
     pub async fn shutdown(self) {
         if let Some(evictor_handle) = self.evictor_handle {
             evictor_handle.shutdown().await;
         }
+        self.state.cache_store.shutdown_mutations().await;
     }
 }
 
