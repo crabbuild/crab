@@ -11519,7 +11519,7 @@ mod tests {
                 origin_proof_id: test_hash(0xD2),
             })
             .collect::<Vec<_>>();
-        let recipe_hash: [u8; 32] = recipe.hash().into();
+        let recipe_hash: [u8; 32] = recipe.hash();
         let write = FilePushPlanWrite {
             file_hash: &file_hash,
             recipe_hash: &recipe_hash,
