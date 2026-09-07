@@ -41,7 +41,7 @@ not claims that the named code is defective.
 | Crate | Next source inspection | State |
 | --- | --- | --- |
 | crab-types | Pointer causes and checked timestamps; broader contract qualification remains | Pointer and timestamp slices verified |
-| crab-git | Shared delta decoder; discovery and process contracts remain | Delta slice verified |
+| crab-git | Discovery, process ownership, non-UTF-8 paths, and quoted line-mode fields remain | Delta and NUL worktree framing slices verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Coverage count simplification; parser and reconstruction qualification remain | Coverage slice verified |
 | crab-storage | Broader retry/error classification and cancellation cleanup remain | Diagnostics, multipart cleanup, and stream framing verified |
@@ -1697,3 +1697,30 @@ and feature names match workspace manifests, and the CLAUDE guide symlink is
 intact. No Rust behavior or dependency manifest changed; no compilation was
 needed for this presentation-only pass. Documentation grows overall because
 existing contract detail is preserved while adding a short entry point.
+
+### Worktree porcelain field identity
+
+Current main applies trailing-CR removal to every porcelain field, including
+NUL-delimited output. Git documents -z as NUL framing for paths with special
+characters. A native Git 2.50.1 fixture confirms it emits a literal trailing CR
+in a bare repository path; the old shared parser removes it. Both that native
+regression and a pure field-preservation regression fail before the fix.
+
+Owner: crab-git/worktree.rs::parse_worktree_list_porcelain and its field decoder.
+The CLI adapter forwards unchanged bytes and the delimiter flag. Production
+worktree JSON listing, state-location discovery, and hydration sibling discovery
+all request --porcelain -z and pass true; they use parsed paths for identity or
+filesystem lookup. Correcting this shared boundary covers those consumers.
+Line-mode parsing retains CRLF handling, proved with a two-record control.
+Unknown attributes and lock reasons receive the same field-preservation rule.
+
+The parser now streams fields directly instead of allocating a temporary vector
+and using two one-call helpers. Only newline framing strips CR. Public signature,
+record shape, error mapping, and lossy UTF-8 behavior are unchanged. All eight
+worktree tests pass with and without the facade feature; strict default
+all-target crab-git Clippy passes. The native
+fixture uses a temporary repository and does not modify a user checkout. This
+is Git-output/parser integration proof, not full CLI command qualification.
+Non-UTF-8 identity and non-NUL quoted-field decoding remain separate open work.
+
+Dependency contract: https://git-scm.com/docs/git-worktree#_porcelain_format.

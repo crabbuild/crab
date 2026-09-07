@@ -26,6 +26,12 @@ product layers independent of a particular Git command flow.
        validated Git-domain values
 ```
 
+Worktree consumers should request `git worktree list --porcelain -z` and pass
+`true` to `worktree::parse_worktree_list_porcelain`. NUL-delimited fields retain
+whitespace, including carriage returns in paths. Line mode accepts CRLF; returned
+string fields still use lossy UTF-8 conversion. See Git's
+[porcelain format](https://git-scm.com/docs/git-worktree#_porcelain_format).
+
 The main surfaces are:
 
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository

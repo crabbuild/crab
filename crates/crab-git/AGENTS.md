@@ -36,6 +36,10 @@ Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate`
 - Keep common-directory discovery distinct from the current working tree; discovery has an explicit .git result outside repositories.
   Source: `crates/crab-git/src/discover.rs`.
 
+- Worktree porcelain framing must not trim NUL-delimited field contents. Line
+  mode and NUL mode have different delimiter contracts; native Git path coverage
+  lives in `worktree::tests`.
+
 ## Features and platform
 
 Only `facade` is declared; there is no declared default feature. It enables the optional high-level gix dependency. Git-spawning tests need Git on PATH; inspect locked gix source before altering its validation or discovery contract.
