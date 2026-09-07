@@ -3564,3 +3564,22 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
 - Non-test handler code shrinks by consolidating two decision paths. The new
   helper carries both worker and commit outcomes because only the latter owns
   a recoverable file; merging them would lose that distinction.
+
+
+### HTTP responsiveness under real SQLite contention
+
+- Added a loopback HTTP regression holding an independent SQLite write
+  transaction while exact administrative eviction removes its payload and
+  waits for metadata DELETE. A separate thread observes payload removal to
+  establish entry into the contended path; the async test then requests the
+  public liveness route before releasing the transaction.
+- Restoring the former synchronous exact handler makes this test fail with
+  `metadata contention blocked the HTTP executor` after 3.47 seconds. Restored
+  tracked execution passes; eviction still returns count 1 and bytes 7. This
+  adds transport/SQLite proof to the earlier owner-level cancellation tests.
+- Cache-service CI run `34159002206` succeeded on `374410f6dc1`, including
+  build, service tests, RustFS smoke, report verification, CLI evidence checks,
+  and harness audit. It does not qualify later local request-worker commits.
+- NFS run `34154546592` is terminal/cancelled. Retained-evidence job
+  `101858226689` failed: missing required suite `mount-nfs-windows`. Linux and
+  macOS jobs passed on the earlier head; Windows remains unqualified.

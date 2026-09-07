@@ -1774,6 +1774,69 @@ async fn test_pack_put_get_and_admin_evict_removes_canonical_file() {
     let _ = server.shutdown.send(());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn test_health_remains_responsive_during_admin_sqlite_contention() {
+    let server = start_test_server().await;
+    let path = "org/repo/packs/contended.pack";
+    test_client(server.addr)
+        .put(path, Bytes::from_static(b"payload"))
+        .await
+        .unwrap();
+    let hash = pack_storage_hex("contended");
+    let payload_path = server.cache_root.join("packs").join(&hash[..2]).join(&hash);
+    let db_path = server.cache_root.join(CACHE_DB_FILE);
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (removed, removal) = tokio::sync::oneshot::channel();
+    let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Payload removal precedes the blocked metadata DELETE. Observe it
+        // without borrowing an async worker or relying on a scheduling sleep.
+        let started = std::time::Instant::now();
+        while payload_path.exists() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let did_remove = !payload_path.exists();
+        let _ = removed.send(did_remove);
+        let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+        conn.execute_batch("ROLLBACK").unwrap();
+        responsive
+    });
+    ready.await.unwrap();
+    let addr = server.addr;
+    let eviction = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://{addr}/v1/admin/evict"))
+            .header("x-cache-psk", TEST_PSK)
+            .json(&serde_json::json!({ "path": path }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let did_remove = removal.await.unwrap();
+    let health = reqwest::Client::new()
+        .get(format!("http://{}/health/live", server.addr))
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await;
+    let _ = heartbeat.send(());
+    let responsive = blocker.join().unwrap();
+    let response = eviction.await.unwrap();
+    let _ = server.shutdown.send(());
+    assert!(
+        did_remove,
+        "eviction never reached the contended metadata write"
+    );
+    assert!(responsive, "metadata contention blocked the HTTP executor");
+    assert_eq!(health.unwrap().status().as_u16(), 200);
+    assert_eq!(response.status().as_u16(), 200);
+    let stats = response.json::<Value>().await.unwrap();
+    assert_eq!(stats["evicted_count"], 1);
+    assert_eq!(stats["evicted_bytes"], 7);
+}
+
 #[tokio::test]
 async fn test_admin_evict_failure_preserves_accounting() {
     let server = start_test_server().await;
