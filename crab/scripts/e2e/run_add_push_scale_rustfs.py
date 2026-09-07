@@ -85,19 +85,19 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
                     stream.write(f"pub const VERSION_{version}: u64 = {version};\n")
         if version == 1:
             selected = str(paths[0].relative_to(repo))
-            runner.run_crab(repo, ["add", "--skip-git-add", selected], name="deferred preparation")
+            runner.run_crab(repo, ["add", "--jsonl", "--skip-git-add", selected], name="deferred preparation")
             runner.run_git(repo, ["add", selected], name="deferred Git publication")
         if version == 2 and len(paths) > 1:
             with ThreadPoolExecutor(max_workers=2) as pool:
                 pending = [pool.submit(runner.run_crab, repo,
-                           ["add", str(path.relative_to(repo))], name=f"concurrent add {path.name}")
+                           ["add", "--jsonl", str(path.relative_to(repo))], name=f"concurrent add {path.name}")
                            for path in paths[:2]]
                 for result in pending:
                     result.result()
-        runner.run_crab(repo, ["add", "models/"], name=f"v{version} add")
+        runner.run_crab(repo, ["add", "--jsonl", "models/"], name=f"v{version} add")
         runner.run_git(repo, ["add", "src"])
         runner.run_git(repo, ["commit", "-m", f"version {version}"])
-        runner.run_crab(repo, ["push", "origin", "HEAD:refs/heads/main"],
+        runner.run_crab(repo, ["push", "--jsonl", "origin", "HEAD:refs/heads/main"],
                         name=f"v{version} push", timeout=args.push_timeout)
 
     expected = {str(path.relative_to(repo)): sha256_file(path)
