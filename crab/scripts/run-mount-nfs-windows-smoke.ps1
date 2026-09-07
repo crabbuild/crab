@@ -43,9 +43,9 @@ function Invoke-Native {
             Set-Location -LiteralPath $WorkingDirectory
         }
 
-        $output = & $FilePath @ArgumentList 2>&1
+        # Retain progress even when a native command never returns before the job timeout.
+        & $FilePath @ArgumentList 2>&1 | Tee-Object -FilePath $LogPath
         $exitCode = $LASTEXITCODE
-        $output | Tee-Object -FilePath $LogPath
 
         if ($exitCode -ne 0) {
             throw "$FilePath failed with exit code $exitCode; see $LogPath"
