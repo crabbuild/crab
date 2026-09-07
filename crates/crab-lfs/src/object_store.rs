@@ -365,9 +365,7 @@ impl LfsObjectStore {
 
         match hash_result {
             Ok(()) => {
-                upload.complete().await.map_err(|e| {
-                    LfsError::from(crab_storage::map_object_store_error(e, path.as_ref()))
-                })?;
+                crab_storage::multipart::complete_upload(&mut *upload, &path).await?;
                 self.record_verification_receipt(oid).await;
                 Ok(())
             }

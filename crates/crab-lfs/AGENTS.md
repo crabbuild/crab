@@ -35,6 +35,9 @@ either product surface.
 
 ## Invariants
 
+- Non-resumable multipart completion uses `crab_storage::multipart::complete_upload`: abort on failure, preserve the completion error, and await cleanup before retry. Durable journal sessions retain their separate recovery protocol.
+  Source: `crates/crab-storage/src/multipart.rs`.
+
 - Keep declared SHA-256 identity and size verification together; presence or a matching path alone does not prove object bytes.
   Source: `crates/crab-lfs/src/object_store.rs`.
 - Fresh origin verification differs from receipt-aware reads and replica fallback; callers needing publication proof must retain the origin-only boundary.

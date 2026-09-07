@@ -1,4 +1,4 @@
-//! Durable multipart-upload recovery contracts.
+//! Multipart upload completion and durable recovery contracts.
 //!
 //! The storage crate owns provider transport while the staging crate owns the
 //! local SQLite journal. [`MultipartJournal`] is the narrow composition seam
@@ -6,6 +6,27 @@
 //! the current lease token, and the journal never performs provider I/O.
 
 use std::time::Duration;
+
+/// Completes a non-resumable upload, aborting it if completion fails.
+///
+/// All part futures must have finished successfully before this call. An abort
+/// failure is logged; the original completion error is returned. Await this
+/// operation to completion: dropping its future cannot guarantee remote cleanup.
+/// Journal-owned resumable sessions must use their recovery protocol instead.
+pub async fn complete_upload(
+    upload: &mut dyn object_store::MultipartUpload,
+    path: &object_store::path::Path,
+) -> crate::Result<()> {
+    if let Err(error) = upload.complete().await {
+        // S3/GCS cannot reclaim parts on drop. Keep the completion failure as
+        // the retry decision even when the best-effort cleanup also fails.
+        if let Err(abort_error) = upload.abort().await {
+            tracing::warn!(path = %path, error = %abort_error, "multipart abort after completion failure also failed");
+        }
+        return Err(crate::map_object_store_error(error, path.as_ref()));
+    }
+    Ok(())
+}
 
 /// Error returned by a multipart journal implementation.
 pub type JournalError = Box<dyn std::error::Error + Send + Sync>;

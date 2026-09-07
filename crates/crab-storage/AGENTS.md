@@ -30,6 +30,9 @@ dependency source before asserting provider behavior.
 
 ## Invariants
 
+- Non-resumable multipart completion uses `crab_storage::multipart::complete_upload`: abort on failure, preserve the completion error, and await cleanup before retry. Durable journal sessions retain their separate recovery protocol.
+  Source: `crates/crab-storage/src/multipart.rs`.
+
 - Keep CAS conditional create/update and conflict handling distinct from transport retry. The mutation callback may be evaluated more than once.
   Source: `crates/crab-storage/src/cas.rs`.
 - Check both loaded and newly serialized CAS object sizes; a successful write must remain within the same read ceiling.

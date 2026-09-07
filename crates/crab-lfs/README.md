@@ -36,6 +36,11 @@ checks to avoid re-reading the object body. A configured primary fallback can
 serve reads when a selected replica is stale or unavailable; receipts are
 written to the source that passed verification.
 
+Streamed uploads verify size and SHA-256 before completion. Read, part, hash,
+and completion failures attempt multipart abort; a cleanup failure preserves
+the original upload error. Await the operation to finish cleanup: dropping its
+future or terminating the process cannot guarantee remote part reclamation.
+
 `verify_origin(oid, expected_size)` performs a fresh SHA-256 and exact-size check
 without reading/writing verification receipts or using the configured fallback.
 Supply an origin-only store and bound the expected size and request deadline at

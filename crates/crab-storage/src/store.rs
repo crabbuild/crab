@@ -1479,8 +1479,8 @@ impl Store {
     ///
     /// `on_part_done` is invoked with the byte count of each part that
     /// uploads successfully, so callers can drive a byte-granular progress
-    /// bar while a single large object is in flight. Pass `None` to use the
-    /// simpler sequential `WriteMultipart` path.
+    /// bar while a single large object is in flight. Both callback modes use
+    /// the same bounded part queue and abort-before-retry boundary.
     ///
     /// # Errors
     ///
@@ -2191,10 +2191,8 @@ impl Store {
         .await
     }
 
-    /// One full multipart-upload attempt: create, write parts with bounded
-    /// in-flight concurrency (progress-aware) or via `WriteMultipart`
-    /// (sequential), then complete. Any error aborts the upload so S3 does
-    /// not retain orphaned parts.
+    // One queue owns part ordering and cleanup in both callback modes; choosing
+    // progress reporting must not change the remote upload's failure lifecycle.
     async fn put_multipart_once(
         inner: &Arc<dyn ObjectStore>,
         path: &Path,
@@ -2207,16 +2205,6 @@ impl Store {
 
         const IN_FLIGHT_PARTS: usize = 4;
 
-        // No progress callback? Use the high-level helper that manages part
-        // parallelism internally — identical behaviour to the prior fallback
-        // path, including cancellation handling.
-        let Some(cb) = on_part_done else {
-            return Self::put_multipart_writer(inner, path, data, part_size, cancel).await;
-        };
-
-        // Progress-aware path: drive MultipartUpload directly so we can
-        // report bytes as each part completes. Bounded concurrency keeps
-        // the pipeline full without unbounded memory or socket pressure.
         let mut upload = inner
             .put_multipart(path)
             .await
@@ -2243,7 +2231,11 @@ impl Store {
             }
             if pending.len() >= IN_FLIGHT_PARTS {
                 match pending.next().await {
-                    Some((Ok(()), bytes)) => cb(bytes),
+                    Some((Ok(()), bytes)) => {
+                        if let Some(cb) = on_part_done {
+                            cb(bytes);
+                        }
+                    }
                     Some((Err(e), _)) => {
                         abort_on(upload).await;
                         return Err(map_object_store_error(e, path.as_ref()));
@@ -2263,7 +2255,11 @@ impl Store {
 
         while let Some((res, bytes)) = pending.next().await {
             match res {
-                Ok(()) => cb(bytes),
+                Ok(()) => {
+                    if let Some(cb) = on_part_done {
+                        cb(bytes);
+                    }
+                }
                 Err(e) => {
                     abort_on(upload).await;
                     return Err(map_object_store_error(e, path.as_ref()));
@@ -2276,12 +2272,7 @@ impl Store {
             return Err(StorageError::Cancelled);
         }
 
-        upload
-            .complete()
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        Ok(())
+        crate::multipart::complete_upload(&mut *upload, path).await
     }
 
     async fn put_multipart_file_once(
@@ -2424,66 +2415,7 @@ impl Store {
             return Err(StorageError::Cancelled);
         }
 
-        upload
-            .complete()
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        Ok(())
-    }
-
-    /// Sequential multipart path using `WriteMultipart` (no per-part
-    /// progress callback). Preserves abort-on-cancel semantics so dropped
-    /// uploads don't leak parts.
-    async fn put_multipart_writer(
-        inner: &Arc<dyn ObjectStore>,
-        path: &Path,
-        data: &[u8],
-        part_size: usize,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<()> {
-        use object_store::WriteMultipart;
-
-        let upload = inner
-            .put_multipart(path)
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        let mut writer = WriteMultipart::new(upload);
-        let mut cancelled_during_write = false;
-        for chunk in data.chunks(part_size) {
-            // Observe cancellation between parts. Racing the write itself
-            // via tokio::select! is not practical — WriteMultipart::write
-            // is synchronous — but chunk boundaries are frequent enough
-            // (8–16 MiB apart) to give timely response.
-            if cancel.is_cancelled() {
-                cancelled_during_write = true;
-                break;
-            }
-            writer.write(chunk);
-        }
-
-        // If cancelled at any point, abort the upload to release any parts
-        // already uploaded; without this, `WriteMultipart::drop` would leave
-        // orphaned parts consuming storage until a lifecycle rule or
-        // `fsck --repair` cleans them up.
-        if cancelled_during_write || cancel.is_cancelled() {
-            if let Err(e) = writer.abort().await {
-                tracing::warn!(
-                    path = %path,
-                    error = %e,
-                    "failed to abort multipart upload after cancellation",
-                );
-            }
-            return Err(StorageError::Cancelled);
-        }
-
-        writer
-            .finish()
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        Ok(())
+        crate::multipart::complete_upload(&mut *upload, path).await
     }
 
     /// Generate a presigned HTTPS URL for a GET of `path`, valid for

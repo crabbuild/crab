@@ -44,11 +44,11 @@ not claims that the named code is defective.
 | crab-git | Shared delta decoder; discovery and process contracts remain | Delta slice verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Coverage count simplification; parser and reconstruction qualification remain | Coverage slice verified |
-| crab-storage | Credential diagnostics; retry/error classification remains | Diagnostic slice verified |
+| crab-storage | Non-resumable multipart cleanup; broader retry/error classification remains | Diagnostics and multipart cleanup slices verified |
 | crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
-| crab-lfs | Upload I/O causes; integrity and lock ownership remain | Upload diagnostic slice verified |
+| crab-lfs | Receipt/stream identity races and lock ownership remain | Upload diagnostics and completion cleanup verified |
 | crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
 | crab-cache-store | Startup outcomes; origin authority and range qualification remain | Startup slice verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
@@ -1083,3 +1083,74 @@ Cargo home. The fixture uses the CLI's enabled dependency features; this checks
 API/type compatibility, not isolated minimal feature sets. Removed the temporary
 fixture after checking. No cloud requests or filesystem examples were executed.
 This pass covers the revised snippets, not every code block in all 21 READMEs.
+
+## Non-resumable multipart cleanup
+
+The storage byte/progress and file paths, plus LFS streaming uploads, returned
+completion failures without aborting the multipart session. The callback-free
+storage path used object_store 0.14.1 WriteMultipart: `finish` skipped abort when
+part draining failed and replaced a completion error when abort also failed.
+A fault-injecting integration fixture reproduced nine incorrect outcomes across
+four public entry paths before the production edit.
+
+One bounded byte queue now serves both callback modes. Storage owns
+`multipart::complete_upload`, shared by the byte/file and LFS upload paths;
+completion failure attempts abort and retains the original mapped error. The
+helper must be awaited through cleanup. Part errors still use their existing
+abort boundary. The removed writer path also eliminates its unbounded task
+submission and makes the caller's part size apply consistently in both modes.
+
+Evidence map:
+
+- Entry: CLI LFS transfer/publication/batch/migration call
+  LfsObjectStore::put_stream_with_size; CLI Store delegates ordinary byte/file
+  multipart upload to crab-storage, including pack and xorb publishers.
+- Owner: crab-storage Store owns whole-upload retry and part scheduling;
+  crab-lfs owns streaming SHA-256/size verification before completion.
+- Callee: locked object_store 0.14.1 MultipartUpload. S3 and GCS complete and
+  abort are separate requests; neither reclaims upload parts on handle drop.
+  Azure abort is a no-op. Cleanup cannot roll back an already committed object
+  when completion's response was uncertain.
+- Siblings: journal-owned resumable sessions deliberately retain recoverable
+  state, verify uncertain completion, and release the lease for later recovery.
+  They must not use this non-resumable completion helper. The raw export upload
+  controller already aborts completion errors while preserving the primary
+  error. Raw-handle lifetime remains the caller's responsibility.
+- Main: origin/main contains the same direct completion returns and upstream
+  WriteMultipart delegation reproduced by the regression.
+
+Best-fix assessment: fixing only LFS leaves the same resource leak in storage.
+Sharing completion policy and deleting the second byte uploader removes that
+inconsistency without new config, provider overrides, or serialized changes.
+Production Rust shrinks; the integration fixture covers the four public paths
+rather than testing only the new helper. Remote abort failure and caller/process
+cancellation still prevent a guarantee of full remote reclamation. Live provider
+qualification remains required for that deployment boundary.
+
+Separate integrity follow-up found during this review: receipt-aware LFS stream
+verification and opening the served stream are separate reads. The second read
+checks size/range but does not compare its ETag/version to the verified metadata.
+Receipt recording after upload also performs a fresh HEAD. These identity races
+need a dedicated validator/receipt investigation and regression; this cleanup
+change does not qualify LFS streaming integrity in full.
+
+Validation: both cross-crate integration regressions pass, including 24
+success/part/completion/abort-outcome combinations and multi-part callback parity.
+Error checks traverse the typed source chain; successful uploads are read back
+byte-for-byte. All 11 selected storage multipart tests and 31 LFS object-store
+tests pass. Strict all-target Clippy passes for crab-storage and crab-lfs.
+The existing macOS CLI linker unwind-table warning remains; no Rust build or
+regression failure is attributed to it.
+
+The six existing CLI multipart-retry integration tests also pass with the
+`testing` feature (transient retry, exhaustion, cancellation, progress, byte
+round-trip, Xet hash validation). Clippy checks the new cross-crate integration
+target without diagnostics; the CLI library still reports its previously
+recorded 489 warnings. No new lint suppressions were added to production code.
+
+CI observation on head 26d28d68338: repository-browser job 101723107249 fails
+its release-page tooltip contrast assertion (3.87 versus required 4.5). The
+entire packages/repository tree and the browser workflow match origin/main;
+this Node-only job does not build or execute Rust. The latest main run skipped
+that job, so no main runtime reproduction is claimed. Rust CI remained running
+at observation. This is an outstanding PR check, not a green qualification.

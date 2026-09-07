@@ -49,6 +49,11 @@ This digest is separate from the established `BucketIdentity` used for logical
 cross-scheme comparison and cache keys. Raw `Store::new` wrappers have no target
 identity; integrity callers must not infer one from their display text.
 
+Non-resumable multipart uploads use one bounded part queue with or without a
+progress callback. Part and completion failures attempt abort before returning;
+an abort failure does not replace the original error used for retry decisions.
+Durable resumable uploads keep their journal lease and recovery protocol.
+
 ## Usage
 
 ```rust
