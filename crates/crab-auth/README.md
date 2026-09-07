@@ -89,6 +89,10 @@ the storage adapter and keep those fields out of logs.
 | macOS Keychain | 64 ASCII hex characters | Returns a key-store error; initialization follows its existing key-file path |
 | Key file | Exactly 32 raw bytes | Returns a key-store error for an incorrect length |
 
+The Keychain loader creates without replacing an existing item. If insertion
+fails, it rereads the stored key so concurrent initializers converge on the
+winner. It never returns a candidate that was not successfully stored.
+
 Decoder errors never include the supplied key. Token-cache tests use synthetic
 keys and temporary directories; they do not qualify live Keychain integration.
 

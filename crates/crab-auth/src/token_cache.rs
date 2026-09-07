@@ -380,19 +380,24 @@ fn load_or_create_key() -> Result<[u8; 32]> {
 fn keychain_load_key() -> Result<[u8; 32]> {
     use std::process::{Command, Stdio};
 
-    // Pre-check: verify a login keychain is available. `list-keychains` never
-    // triggers a GUI dialog. If no keychain is listed, skip entirely.
-    let list_output = Command::new("security")
-        .args(["list-keychains", "-d", "user"])
-        .stderr(Stdio::null())
-        .output()?;
+    keychain_load_key_with(|args| {
+        Command::new("security")
+            .args(args)
+            .stderr(Stdio::null())
+            .output()
+    })
+}
 
+#[cfg(target_os = "macos")]
+fn keychain_load_key_with(
+    mut run: impl FnMut(&[&str]) -> std::io::Result<std::process::Output>,
+) -> Result<[u8; 32]> {
+    let list_output = run(&["list-keychains", "-d", "user"])?;
     if !list_output.status.success() {
         return Err(AuthError::KeyStore(
             "security list-keychains failed — no usable keychain".into(),
         ));
     }
-
     let keychains = String::from_utf8_lossy(&list_output.stdout);
     if keychains.trim().is_empty() || !keychains.contains("login.keychain") {
         return Err(AuthError::KeyStore(
@@ -402,46 +407,39 @@ fn keychain_load_key() -> Result<[u8; 32]> {
 
     let service = "crab-token-cache";
     let account = "encryption-key";
-
-    // Try to read existing key.
-    let output = Command::new("security")
-        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped())
-        .output()?;
-
+    let lookup = ["find-generic-password", "-s", service, "-a", account, "-w"];
+    let output = run(&lookup)?;
     if output.status.success() {
-        let hex_str = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        return hex_to_key(&hex_str);
+        return hex_to_key(String::from_utf8_lossy(&output.stdout).trim());
     }
 
-    // Key doesn't exist — generate and store.
     let mut key = [0u8; 32];
     rand::rng().fill(&mut key);
-    let hex_str = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
-
-    let status = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-            &hex_str,
-            "-U", // update if exists
-        ])
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .status()?;
-
-    if !status.success() {
-        return Err(AuthError::KeyStore(
-            "failed to store encryption key in macOS Keychain".into(),
-        ));
+    let hex = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    // A failed lookup does not prove absence. Create without updating: replacing
+    // an existing key would make every token encrypted with it unreadable.
+    let output = run(&[
+        "add-generic-password",
+        "-s",
+        service,
+        "-a",
+        account,
+        "-w",
+        &hex,
+    ])?;
+    if output.status.success() {
+        return Ok(key);
     }
 
-    Ok(key)
+    // Another creator may have won. Only the stored key is authoritative;
+    // never return the unused candidate when creation fails.
+    let winner = run(&lookup)?;
+    if winner.status.success() {
+        return hex_to_key(String::from_utf8_lossy(&winner.stdout).trim());
+    }
+    Err(AuthError::KeyStore(
+        "failed to create or read encryption key in macOS Keychain".into(),
+    ))
 }
 
 /// Decode a 64-char hex string into a 32-byte key.
@@ -618,6 +616,70 @@ mod tests {
         ] {
             assert!(matches!(hex_to_key(&value), Err(AuthError::KeyStore(_))));
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_creation_preserves_a_concurrent_winners_key() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        let winner = [42; 32];
+        let mut stored: Option<[u8; 32]> = None;
+        let key = keychain_load_key_with(|args| {
+            let (success, stdout) = match args[0] {
+                "list-keychains" => (true, b"login.keychain-db".to_vec()),
+                "find-generic-password" => match stored {
+                    Some(key) => (
+                        true,
+                        key.iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>()
+                            .into_bytes(),
+                    ),
+                    None => (false, Vec::new()),
+                },
+                "add-generic-password" => {
+                    // The competing process publishes after our initial miss.
+                    stored = Some(winner);
+                    if args.contains(&"-U") {
+                        stored = Some(hex_to_key(args[6]).unwrap());
+                        (true, Vec::new())
+                    } else {
+                        (false, Vec::new())
+                    }
+                }
+                _ => panic!("unexpected Keychain operation"),
+            };
+            Ok(Output {
+                status: ExitStatus::from_raw(if success { 0 } else { 256 }),
+                stdout,
+                stderr: Vec::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!((key, stored), (winner, Some(winner)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_creation_never_returns_an_unstored_candidate() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        let result = keychain_load_key_with(|args| {
+            let listing = args[0] == "list-keychains";
+            Ok(Output {
+                status: ExitStatus::from_raw(if listing { 0 } else { 256 }),
+                stdout: if listing {
+                    b"login.keychain-db".to_vec()
+                } else {
+                    Vec::new()
+                },
+                stderr: Vec::new(),
+            })
+        });
+        assert!(matches!(result, Err(AuthError::KeyStore(_))));
     }
 
     /// Build a minimal JWT with the given claims JSON as the payload.

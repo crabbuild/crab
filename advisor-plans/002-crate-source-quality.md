@@ -55,7 +55,7 @@ not claims that the named code is defective.
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
-| crab-auth | Token-cache key creation and non-Unix locking remain | Diagnostic and load-outcome slices verified |
+| crab-auth | Key-file publication, key-source policy, non-Unix locking remain | Diagnostic, load-outcome, and Keychain race slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
@@ -1512,3 +1512,37 @@ all-target auth Clippy passes. Tests use temporary directories and fixture keys;
 they never invoke TokenCache::new, Keychain, or the host key file. The logout
 interleaving is established by the lock/read source ordering, not a forced
 scheduler test; native Windows and live identity-provider proof remain open.
+
+
+### Keychain initialization preserves the stored winner
+
+`keychain_load_key` previously followed any failed lookup with
+`add-generic-password -U`, allowing a second initializer to overwrite the first
+initializer's encryption key. A lookup failure also does not establish that an
+existing key is absent. The installed macOS `man security` documents `-U` as
+updating an existing item, and says insertion without it requires absence.
+
+Remove `-U`. A successful insertion returns its candidate; a failed insertion
+rereads the stored key and returns only a valid decoded value. If both insertion
+and lookup fail, the Keychain path returns an error. The outer, pre-existing
+key-file selection policy remains unchanged and needs separate qualification.
+This is winner resolution after create-only publication, not a new key-source
+fallback. No existing key is migrated, rotated, or overwritten by this change.
+
+Evidence map: TokenCache::new owns initialization; load_or_create_key selects
+the existing Keychain/file paths; the Keychain command wrapper and hex decoder
+are callees. Login/status/refresh/logout construct TokenCache. The file-based
+sibling already uses create_new and reads an existing winner, but publishes
+bytes directly to the final path and has no non-Unix lock; partial publication
+and key-source selection are explicit follow-ups. Main uses the same unsafe
+update option in the Keychain path.
+
+A private command runner separates the algorithm from process execution and
+removes repeated Command/Stdio construction. Two macOS unit regressions model a
+competitor publishing between lookup and creation, and total insertion/lookup
+failure. Re-enabling `-U` makes the winner-preservation regression fail. All 21
+token-cache tests and strict default all-target auth Clippy pass. No test invokes
+security, changes the host Keychain, or accesses a real key file. Native Keychain
+service integration remains unqualified; these are deterministic algorithm
+regressions backed by the installed command contract. Production code shrinks;
+the net increase is regression coverage and documentation.

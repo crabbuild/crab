@@ -30,6 +30,11 @@ Store consumers compose those results in `crates/crab-auth-store/src/lib.rs`.
 
 ## Invariants
 
+- Keychain initialization must not update an existing encryption key after a
+  failed lookup. Use create-only insertion and read the stored winner after a
+  failed insertion. Never return an unstored candidate.
+  Source: `crates/crab-auth/src/token_cache.rs`.
+
 - Classify missing tokens from the read result under the cache lock. Never use
   an existence probe to turn filesystem errors into an unauthenticated state.
   The current lock is Unix-only; non-Unix serialization remains unimplemented.
