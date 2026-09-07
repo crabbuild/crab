@@ -54,11 +54,11 @@ not claims that the named code is defective.
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Provider ranges, aggregate resource limits, and broader consumer qualification remain | Lifecycle documentation, README navigation, and coalescing admission boundaries verified |
-| crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
+| crab-vfs | Native backend/dependency child tasks and FUSE refresh ownership remain | Background ownership tests, feature checks, lint/docs, CLI build and preparation tests pass |
 | crab-auth | Key-source policy, power-loss durability, non-Unix locking remain | Diagnostic, load-outcome, and key-publication slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
-| crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
+| crab-cache-server | Eviction concurrency, shutdown, request validation | Hex guards and startup rejection verified; preflight, strict lint/docs pass |
 | crab-http-server | Archive worker draining, production-route cancellation, embedded assets, service errors remain | HTTP/1 LFS and archive framing verified; request/admission ownership documented |
 | crab-workflow | Async lock waiting, remaining cancellation ownership, and broader native qualification remain | Retry parsing, metadata identity, serialized replay, root-relative materialization, and cleanup slices verified |
 
@@ -2556,3 +2556,196 @@ The auth-server receive publication test also passes, exercising committed file
 and chunk-index publication through the existing public diagnostic consumer.
 Formatting and diff checks pass. This batch is locally qualified; its broader
 CI evidence must follow publication with the next grouped PR update.
+
+
+## One owner for VFS background hydration (in progress)
+
+The previous queue-worker handle collections did not include read-window
+prefetch. A retained regression additionally proves that a cancelled service
+still accepted a new prefetch request. The before-fix test fails on that public
+admission result; it is not a claim that the cancelled request published corrupt
+bytes or that every backend task has leaked.
+
+HydrationService now retains both task types in the existing tokio-util 0.7.18
+TaskTracker. A short mutex serializes Ready/Running/Stopped admission with task
+registration and tracker closure. No lock crosses an await. Queue startup is
+idempotent; enqueue and prefetch reject stopped/cancelled services. A private
+child token stops queue workers without cancelling foreground reads.
+
+request_shutdown closes admission and requests worker exit. shutdown awaits the
+same tracker, including admitted prefetch reconstruction and blocking cache
+writes. Multiple waiters and resumed waits share completion ownership. Prefetch
+is not aborted: write_cached_window awaits spawn_blocking, and dropping that
+outer future would not prove its file work had stopped. Locked TaskTracker docs
+state that close alone permits new spawns and that wait covers task-future
+destruction. The admission mutex supplies the missing no-new-tasks boundary.
+
+The worker-handle vectors are removed from PipelineOutput and RepoRuntime.
+Pipeline, daemon, coordinator, IPC setup/unmount, NFS, and both foreground CLI
+mount paths now retain the service or engine until its background shutdown
+finishes. Daemon and CLI fallible setup blocks drain on errors too. Coordinator
+unmount precedes background drain; its ten-second warning does not cancel the
+work or release ownership. Synchronous coordinator cleanup can only request
+shutdown, as before; callers requiring completion must use the async path.
+
+Evidence map: worker and prefetch production spawning both live in hydration.rs.
+Pipeline and daemon start queue workers after preparation; engine reads and
+prefetch_dir dispatch prefetch. Coordinator/IPC and CLI own FUSE session endings;
+NFS run_until_cancelled owns its listener result and still attempts journal sync
+and native unmount before stopping background hydration. Engine's small shutdown
+method exposes that ownership operation to the NFS and legacy foreground owners
+without exposing its service field. No dependency, feature, or storage-format
+change is introduced. All workspace callers of the changed worker-start and
+unmount APIs were searched and migrated.
+
+Is this the best fix? It gives queue and speculative work one completion owner,
+removes the obsolete handle vectors and queue-only grace helper, and preserves
+foreground/backend ownership as a separate explicit boundary. It avoids aborting
+an async wrapper around still-running blocking I/O. This intentionally provides
+completion rather than a hard shutdown latency bound.
+
+Initial proof: 34 hydration tests pass with NFS and FUSE, including admitted
+prefetch held behind its real window lock, concurrent shutdown calls, completed
+cache reads with origin access disabled, startup/shutdown races, and rejection
+of late queue/prefetch work. The 14 pipeline and 38 daemon tests also pass;
+daemon teardown now observes actual hydration-service release as well as its
+refresh/watcher task destruction. Other owner checks, Clippy, feature builds,
+and the CLI consumer build remain in progress before publication.
+
+Native NFS connection handlers and the dependency cleaner remain outside this
+tracker. Joining the listener still does not prove their completion, and this
+change must not be described as whole-backend shutdown proof. Failed native
+unmount and foreground request draining require separate qualification. Native
+NFS smoke jobs are skipped on pull_request events; a workflow_dispatch on the
+published review ref is needed for those existing dedicated jobs.
+
+The 13 coordinator and 16 NFS parent-lifecycle tests pass as well (115 focused
+tests across the five selected modules before the final test additions). A final
+regression strengthens timed-out-wait resumption and positive single-pool startup;
+pipeline success now also verifies cache-reference release after shutdown.
+Those test additions require their final rerun. Lint/feature/doc and CLI build
+proof is still pending; this VFS migration is uncommitted and unpublished.
+Abandoning a whole mount/setup/shutdown future is not covered by the normal
+awaited owner paths, and dependency child requests remain separate gaps.
+
+
+### Published-head CI completion
+
+Head 0f268b2c21c now has 31 successful checks, 11 skipped checks, and no failures.
+RustFS race/crash/scale run 34141980690, binary/integration contracts in run
+34141980569, and repository browser interactions in run 34141980655 pass. All
+checks are terminal. This supersedes the pending-CI note for that published head;
+it does not qualify local metadata commit e27c565392a or the uncommitted VFS
+ownership migration. The PR description now separates current results from
+remaining native/cloud/lifecycle qualification.
+
+The two legacy foreground preparation tests also now await the engine's new
+background shutdown boundary. They will run with the CLI consumer checks; no
+native mount is needed for those real-Git preparation fixtures.
+
+The legacy foreground builder creates a fresh hydration cancellation token and
+returns only resolver/engine. Its session token is separate. The explicit engine
+shutdown therefore supplies completion ownership that session cancellation alone
+cannot provide; the new call-site comment records that caller difference.
+
+
+### Final VFS regression and lint results
+
+The final 35 hydration tests and 14 pipeline tests pass, including timed-out wait
+resumption, positive single-worker-pool startup, worker-owned service release,
+and the pipeline cache-reference check. Together with the unchanged 38 daemon,
+13 coordinator, and 16 NFS checks, this is 116 focused passing tests. Strict
+all-target Clippy passes with NFS and FUSE. The existing lint process completed
+normally; it was not restarted after its observation delays.
+
+Separate NFS/FUSE checks, rustdoc, the CLI build, and the three foreground
+preparation tests are running in the final verification driver. This is still
+an uncommitted VFS batch pending those results and native workflow qualification.
+
+## Cache-server startup ownership inspection (next candidate)
+
+Read server prepare/run/shutdown, evictor startup/loop/shutdown, origin client
+construction, config URL loading, and preflight's startup options. prepare_server
+starts an evictor holding Arc<CacheStore> before the fallible OriginClient::from_url
+call. The config loader requires an origin string but does not construct its
+object store; build_url_object_store can reject malformed URLs before reading
+provider environment options. Preflight disables both eviction switches, while
+run_server enables them.
+
+The evictor loop retains a strong cache-store Arc, and its handle has no Drop
+implementation. Its rustdoc's suggestion that dropping an external cache-store
+Arc stops the task does not match this ownership. A bounded next change should
+reproduce failed preparation with a malformed origin, prove no maintenance task
+or cache mutation survives rejection, and move fallible origin construction
+before cache work/background spawning. Verify the enabled and preflight-disabled
+paths. No cache-server source has been changed, and runtime reproduction remains
+required before treating this inspection as completed defect qualification.
+
+The cache-server regression is now written, with separate current-thread Tokio
+runtimes for service-enabled and preflight-disabled eviction. It checks that an
+invalid origin returns an error without a live task or newly created cache root.
+Tokio 1.52.1 runtime metrics document spawn/exit task counts and only qualify
+multi-threaded counts as weakly consistent; the fixture uses the current-thread
+runtime deliberately. The before-fix run is queued after the active VFS driver
+(session 34608), in session 80278, logging to
+/tmp/crab-089c-cache-startup-before.log. Production code remains unchanged until
+the regression result is inspected. This is not yet a reproduced defect.
+
+The remaining FUSE refresh ownership gap is specifically the sole production
+caller of pipeline::spawn_refresh_loop in IPC handle_mount: its returned
+JoinHandle is discarded. RefreshService::run serializes two timers in one task,
+and poll_remote awaits a spawn_blocking Git fetch. A follow-up owner must retain
+and await the refresh task after cancellation; merely aborting that outer task
+would not establish completion of the blocking fetch. Daemon and NFS refresh
+owners use different loops and must be reviewed separately. This is distinct
+from the hydration tracker, whose comments now consistently name hydration.
+
+Separate NFS-only and FUSE-only cargo checks passed (14m32s and45.90s).
+The final verification driver exited101 at strict rustdoc: existing bare links
+for DaemonService::start and MountPipelineBuilder::execute did not resolve.
+Both links now use Self qualification. Rustdoc must rerun; CLI build/tests did
+not execute in that driver. The queued cache startup before-test has begun.
+
+### Cache-server invalid-origin preparation regression
+
+The before-fix test failed at the intended assertion: preparing an invalid
+origin with eviction enabled left (alive tasks, cache-root existence)=(1,true),
+against the expected(0,false). Log: /tmp/crab-089c-cache-startup-before.log;
+session80278 exited101. This confirms a detached task and disk initialization,
+not merely an inferred ownership risk.
+
+prepare_server now constructs the origin immediately after policy validation,
+before cache recovery/index rebuild/startup eviction or task spawning. No new
+cleanup abstraction or error mapping is needed; successful construction still
+hands the evictor directly to PreparedServer. run_server and preflight retain
+their existing awaited shutdown paths. The evictor rustdoc now correctly states
+that the task holds its own strong cache-store reference. README/AGENTS explain
+the preparation boundary and distinguish client construction from connectivity.
+
+The after-test, existing preflight tests, strict all-target lint, and strict
+docs are running in session34303. No dependency, format, or configuration
+surface changed. VFS strict rustdoc passed after fixing the two method links;
+its remaining CLI build/tests continue in session53042.
+
+The cache-server after-run passes all three server tests, including invalid
+origin rejection with eviction enabled and disabled. The CLI binary build also
+passes (4m39s), with the previously observed macOS large-debug-unwind linker
+warning. CLI foreground preparation tests and remaining cache preflight/lint/docs
+are still active. Guide validation resolves all31 referenced paths across the
+two touched guides, and both CLAUDE symlinks still target their AGENTS files.
+
+### Publication-ready local results
+
+VFS consumer verification completed: the CLI build and all three foreground
+preparation tests pass. Separate NFS/FUSE checks, strict VFS rustdoc, and strict
+all-target VFS Clippy pass alongside116 focused lifecycle tests. Runtime source
+has not changed since those tests/lint; subsequent VFS edits correct rustdoc
+links and ownership comments. Cache startup passes three server tests and16
+preflight tests, strict all-target Clippy, and strict rustdoc. The exact-type
+configuration-error assertion was included in the passing after-run.
+
+Latest fetched main remains a371fb7d002; HEAD contains it. The unpublished
+metadata commit and these two source batches are ready for grouped publication.
+Native NFS workflow dispatch and refreshed PR CI remain required after push.
+These results do not establish whole-backend/refresh completion or finish the
+all21-crate objective.
