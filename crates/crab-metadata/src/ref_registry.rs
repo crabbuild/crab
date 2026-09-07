@@ -38,8 +38,10 @@ pub struct ActiveActiveCoordinatorRegistration {
 ///
 pub const REF_REGISTRY_SCHEMA_VERSION: u32 = 1;
 pub const REF_REGISTRY_RECORD_SCHEMA_VERSION: u32 = 1;
+#[cfg(feature = "storage")]
 const REF_REGISTRY_ROOT_SCHEMA_VERSION: u32 = 1;
 
+#[cfg(feature = "storage")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoRefRecord {
@@ -52,6 +54,7 @@ struct RepoRefRecord {
     active_active_coordinator: Option<ActiveActiveCoordinatorRegistration>,
 }
 
+#[cfg(feature = "storage")]
 impl Default for RepoRefRecord {
     fn default() -> Self {
         Self {
@@ -66,6 +69,7 @@ impl Default for RepoRefRecord {
     }
 }
 
+#[cfg(feature = "storage")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShardRootPartition {
@@ -76,6 +80,7 @@ struct ShardRootPartition {
     shard_hashes: Vec<String>,
 }
 
+#[cfg(feature = "storage")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RegistryCoverage {

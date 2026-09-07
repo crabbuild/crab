@@ -581,3 +581,21 @@ Frontend build prerequisite passed after installing missing local dependencies.
 No dependency or lockfile change retained. Current PR browser checks passed on
 head 0bf1d72e99c; broader Rust/platform CI was still running when inspected.
 Strict all-target HTTP-server Clippy passes.
+
+## Metadata feature boundaries
+
+Private ref-registry persistence records, their Default implementation, and
+root schema constant now use the same storage gate as every consumer. The
+shallow-closure descriptor test helper follows its storage-only test. This
+removes five minimal-build dead-code warnings without lint suppression or
+changing public contracts, serialized fields, or runtime code.
+
+Storage-only qualification found GitCatalogVisibilityRead was compiled despite
+its only constructor and re-export requiring remote-index. Its declaration and
+import now match that gate. Public availability is unchanged. Verified all
+references in ref_registry, shallow_closure, and git_visibility before gating.
+
+Minimal-feature strict all-target Clippy passes. With storage enabled, 26
+registry tests and five shallow-closure tests pass, including CAS updates,
+conservative roots, isolated partitions, stale descriptors, and corrupt entries.
+Strict all-target Clippy also passes with storage and remote-index separately.

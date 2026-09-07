@@ -801,6 +801,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "storage")]
     fn descriptor(write: &ShallowClosureWrite) -> ShallowClosureDescriptor {
         decode_shallow_closure_descriptor(&write.descriptor_bytes, "descriptor")
             .expect("decode descriptor")
