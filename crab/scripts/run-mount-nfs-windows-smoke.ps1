@@ -485,9 +485,14 @@ try {
         -ArgumentList @("mount", "--repo", $Source, "--mountpoint", $Drive, "--backend", "nfs", "--no-refresh") `
         -LogPath (Join-Path $LogDir "mount.log")
 
+    # A successful mount message precedes process exit and filesystem visibility.
+    # Keep these boundaries visible when a native filesystem call blocks.
+    Write-Host "Mount command exited; waiting for the mounted fixture"
     Wait-ForPath (Join-Path $DriveRoot "hello.txt")
+    Write-Host "Mounted fixture is visible; collecting native mount state"
     $mountExeLog = Join-Path $LogDir "mount-exe-after-mount.txt"
     & $MountExe *> $mountExeLog
+    Write-Host "Native mount state collected; checking mounted file contents"
 
     Assert-FileText -Path (Join-Path $DriveRoot "hello.txt") -Expected "hello"
     Assert-FileText -Path (Join-Path $DriveRoot "dir\nested.txt") -Expected "nested"

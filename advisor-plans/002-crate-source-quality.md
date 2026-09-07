@@ -3507,3 +3507,26 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   tests, strict all-target Clippy, strict rustdoc, and the cache-server binary
   build pass. Documentation describes the scoped
   admission/drain contract and the remaining synchronous siblings.
+
+
+### Windows native mount readiness evidence
+
+- Run `34154546592`, Windows job `101846737021`, was cancelled after its
+  one-hour job window. Linux/macOS jobs passed; retained-evidence verification
+  was queued at inspection. Do not describe Windows as still running.
+- Downloaded artifact `nfs-smoke-windows-34154546592-1` (ID `10032110657`)
+  under the worktree's external evidence directory. Streaming `mount.log` is
+  now present: Crab printed mount readiness at 19:42:05 UTC; job cancellation
+  occurred at 20:28:06 UTC. There is no `mount-exe-after-mount.txt` or completed
+  smoke report in the artifact.
+- Source boundary: `spawn_nfs_background` prints readiness after mounted-state
+  and control readiness checks and returns `Ok(())`. The PowerShell harness
+  then awaits `Invoke-Native` completion, calls `Wait-ForPath` (whose synchronous
+  `Test-Path` can block inside its nominal retry loop), and only then captures
+  native mount state. The artifact does not distinguish command-exit/pipeline
+  completion from that first filesystem probe. It does not prove a startup
+  connect timeout or native mount command failure.
+- Added three phase messages at these boundaries. No timeout, assertion,
+  native filesystem behavior, or success criterion changed. Fresh Windows
+  execution is still required to locate the remaining stall; no hang fix is
+  claimed. Private helper logs remain excluded from uploaded artifacts.
