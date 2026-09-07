@@ -2276,3 +2276,49 @@ Production changes are comments only; test growth protects distinct admission
 boundaries and entry preservation. No binary rebuild is required for these
 comment/test changes. Keep this local commit for the next grouped PR update
 rather than cancelling the current published-head qualification.
+
+
+### Reject invalid multipart cleanup clocks
+
+MultipartRegistry::find_abandoned converted pre-epoch and unrepresentable
+SystemTime values to i64::MAX. That sentinel made active uploads satisfy both
+lease-expiration and grace predicates. A retained regression creates an active
+lease and scans at one second before the epoch: the old source returns the
+active row. The fixed code returns InvalidInput before issuing the query and
+preserves SystemTimeError inside StagingError::Io. Integer conversion overflow
+also returns InvalidInput with its typed cause instead of saturating.
+
+Evidence map: fsck scan -> StoreChecker::check_multipart_uploads ->
+MultipartJournal::find_abandoned (spawn_blocking adapter) -> registry scan ->
+checked SystemTime and SQLite integer conversion. CrabError preserves the Io
+value. fsck logs a failed scan and creates no multipart issues from it. The
+repair path separately uses a row-revision and expired-lease claim before
+provider abort; this regression proves false candidate selection, not an
+observed provider abort. The repair unix_now helper falls back to zero and
+remains separate clock-policy work; it does not use the maximum-time sentinel.
+
+Sibling inspection: staging batch/publication/temp identifiers use timestamps
+as nonce inputs with process/sequence components, not expiration cutoffs.
+Lease duration saturation is distinct from converting an absolute scan time.
+The shared RFC3339 helper has a different range contract and is not a staging
+dependency; no new dependency or format change is needed here. Installed Rust
+SystemTime documentation confirms duration_since returns SystemTimeError when
+the comparison time is later. Current origin/main has the reproduced sentinel.
+
+Is this the best fix? A fallible conversion uses the scan's existing Result
+boundary and prevents fabricated cleanup candidates while retaining error
+causes. Clamping invalid time to zero or returning an empty success would hide
+the failed scan. No public error variant, schema, or lease policy changes.
+
+Proof: regression fails before the fix; all 12 multipart journal tests pass
+afterwards, including ownership contention, renewal, takeover, and fsck/resume
+races. Production provider cleanup and cross-platform clock limits are not
+claimed by these SQLite-local tests.
+
+Strict all-target staging Clippy passes. Strict rustdoc initially exposed six
+existing public documentation link failures in lib.rs: two links to a private
+blocking-budget constant and four unqualified method links. Qualified the
+methods with Self and documented the verified 120-second value without linking
+the private item. Warnings-denied rustdoc now passes with no suppression.
+Formatting and diff checks pass. A fresh CLI build is still required before
+publishing this runtime batch; no latest-head consumer-build claim is made.

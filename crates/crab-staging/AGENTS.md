@@ -43,6 +43,9 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
   `crab/src/cmd/add.rs` (`close_staging_before_indexing`), and
   `crab/src/import/coordinator.rs` (flush before exposing import pointers).
 
+- Multipart abandonment scans reject unrepresentable clock values; never convert a failed time conversion into an expired-lease cutoff. Provider cleanup still requires claiming the observed row revision.
+  Source: `crates/crab-staging/src/multipart_resume.rs`.
+
 ## Features and platform
 
 No declared Cargo features. Requires writable local filesystem/SQLite and platform lock semantics. Scale tests under `crates/crab-staging/tests` need dedicated disk/time budgets; do not run them as an incidental unit check.

@@ -66,6 +66,16 @@ Recovery treats missing files differently from failed filesystem operations:
 that flush explicitly; dropping staging only releases handles. Recovery is not
 a substitute for flushing a successful operation.
 
+## Multipart cleanup
+
+The multipart journal records provider sessions separately from chunk staging.
+`find_abandoned` selects only expired leases whose last update predates the
+grace cutoff. Invalid scan times return an error rather than a candidate list.
+
+Cleanup must acquire the observed row revision with `claim_abandoned` before
+contacting the provider. A scan result alone does not grant ownership; a
+concurrent resume can make that result stale.
+
 ## Usage
 
 The smallest complete staging cycle is:
