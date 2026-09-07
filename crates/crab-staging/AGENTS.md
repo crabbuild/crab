@@ -33,7 +33,7 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
   Source: `crates/crab-staging/src/lib.rs`.
 - File-version reads must include all ordered chunk occurrences, even when chunk bytes deduplicate; inspect recipe consumers before changing index membership.
   Source: `crates/crab-staging/src/index.rs`.
-- Recovery rejects missing/undersized sealed segments; current-segment truncation and index cleanup must agree on the surviving durable data.
+- Recovery distinguishes confirmed absence from filesystem lookup errors; only absence permits dropping pending locators. It rejects missing/undersized sealed segments; current-segment truncation and index cleanup must agree on the surviving durable data.
   Source: `crates/crab-staging/src/recovery.rs`.
 
 - Flush staged data before publication. `StagingArea::close` flushes explicitly;

@@ -46,7 +46,7 @@ not claims that the named code is defective.
 | crab-xet | Range arithmetic, malformed payloads, reconstruction checks | Pending |
 | crab-storage | Credential diagnostics; retry/error classification remains | Diagnostic slice verified |
 | crab-metadata | Reader/writer closure and feature boundaries | Pending |
-| crab-staging | Flush-before-publication and recovery ownership | Pending |
+| crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | Upload I/O causes; integrity and lock ownership remain | Upload diagnostic slice verified |
 | crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
@@ -325,3 +325,36 @@ real SlateDB cancellation qualification remain separate work.
 
 Validation: all four term-resolution tests and strict all-target Clippy pass.
 Production code shrank; added lines are regression tests and lifecycle docs.
+
+## Staging recovery filesystem errors
+
+`crab-staging/src/recovery.rs` used `Path::exists` before current-segment
+recovery. Rust's installed standard-library documentation confirms that this
+method coerces lookup failures to false. An inaccessible current segment could
+therefore be treated as absent, deleting pending rows and resetting its durable
+boundary before the subsequent writer open failed.
+
+Recovery now inspects metadata once, permits absence recovery only for
+`ErrorKind::NotFound`, and returns other typed I/O causes before changing that
+segment's rows. Sealed-segment lookup likewise distinguishes missing data from
+an I/O failure. Orphan temp cleanup directly removes the entry and tolerates
+only NotFound, covering dangling symlinks and removing the check/delete race.
+No serialized format, public error variant, or durability ordering changed.
+
+Entry point: writable `StagingArea::open_with_acquired_lock` calls recovery
+under the exclusive process lock, then `SegmentWriter::open_recovered`.
+Callees: Index's promoted/pending offsets, deletion of incomplete pending rows,
+and durable-boundary update. CLI and protected-server conversions preserve
+`StagingError::Io` as their typed I/O variant. Confirmed missing/short sealed
+segments remain corruption errors; existing torn-tail and promoted-row tests
+protect the destructive recovery rules.
+
+Three Unix regressions fail on main behavior: a looping current symlink loses
+its pending row, a looping sealed symlink loses the I/O cause, and a dangling
+temporary symlink survives cleanup. The fixtures work without assuming process
+permission restrictions. These are local filesystem/SQLite checks, not
+power-loss or platform-wide qualification.
+
+Validation: all 14 recovery tests and strict all-target staging Clippy pass.
+Production recovery grows nine lines to distinguish three filesystem outcomes;
+regression fixtures account for the remaining source growth.

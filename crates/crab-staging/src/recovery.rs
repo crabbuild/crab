@@ -73,9 +73,13 @@ fn verify_sealed_segment(
 ) -> Result<()> {
     let path = segments_dir.join(format!("{segment_id:016x}.seg"));
     let meta = fs::metadata(&path).map_err(|e| {
-        StagingError::StagingCorrupt(format!(
-            "sealed segment {segment_id:016x}.seg missing or inaccessible: {e}"
-        ))
+        if e.kind() == std::io::ErrorKind::NotFound {
+            StagingError::StagingCorrupt(format!(
+                "sealed segment {segment_id:016x}.seg missing: {e}"
+            ))
+        } else {
+            StagingError::Io(e)
+        }
     })?;
 
     if meta.len() < expected_min_size {
@@ -104,21 +108,23 @@ fn truncate_current_segment(segments_dir: &Path, segment_id: u64, index: &Index)
     let recorded_offset = index.max_committed_offset(segment_id)?;
     let promoted_offset = index.max_promoted_chunk_offset(segment_id)?;
 
-    // If the file doesn't exist and there are no committed chunks,
-    // discard any pending rows and recover an empty current segment.
-    if !path.exists() {
-        if promoted_offset > 0 {
-            return Err(StagingError::StagingCorrupt(format!(
-                "current segment {segment_id:016x}.seg missing but promoted chunks require {promoted_offset} bytes"
-            )));
+    // Only confirmed absence permits discarding pending locators. Lookup errors
+    // do not prove bytes are missing and must leave the durable boundary intact.
+    let file_size = match fs::metadata(&path) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if promoted_offset > 0 {
+                return Err(StagingError::StagingCorrupt(format!(
+                    "current segment {segment_id:016x}.seg missing but promoted chunks require {promoted_offset} bytes"
+                )));
+            }
+            index.delete_pending_beyond_offset(segment_id, 0)?;
+            index.flush_pending(segment_id, 0)?;
+            debug!(segment_id, "no current.seg to recover");
+            return Ok(0);
         }
-        index.delete_pending_beyond_offset(segment_id, 0)?;
-        index.flush_pending(segment_id, 0)?;
-        debug!(segment_id, "no current.seg to recover");
-        return Ok(0);
-    }
-
-    let file_size = fs::metadata(&path)?.len();
+        Err(error) => return Err(error.into()),
+    };
     if file_size < promoted_offset {
         return Err(StagingError::StagingCorrupt(format!(
             "current segment {segment_id:016x}.seg is {file_size} bytes, but promoted chunks require {promoted_offset}"
@@ -154,11 +160,14 @@ fn truncate_current_segment(segments_dir: &Path, segment_id: u64, index: &Index)
 /// Remove orphan `current.seg.tmp` files from the segments directory.
 fn cleanup_orphan_temps(segments_dir: &Path) -> Result<()> {
     let tmp_path = segments_dir.join("current.seg.tmp");
-    if tmp_path.exists() {
-        fs::remove_file(&tmp_path)?;
-        debug!("removed orphan current.seg.tmp");
+    match fs::remove_file(&tmp_path) {
+        Ok(()) => {
+            debug!("removed orphan current.seg.tmp");
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -173,6 +182,75 @@ mod tests {
         let index = Index::open(&db_path).expect("open index");
         fs::create_dir_all(root.join("segments")).expect("mkdir segments");
         (root, index)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_lookup_error_preserves_pending_rows_and_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, index) = setup_staging(&tmp);
+        let segment_id = index.allocate_segment_id().unwrap();
+        index.register_current_segment(segment_id).unwrap();
+        let file_hash = [1u8; 32];
+        index
+            .connection()
+            .execute(
+                "INSERT INTO files (file_hash, total_bytes) VALUES (?1, 100)",
+                rusqlite::params![file_hash.as_slice()],
+            )
+            .unwrap();
+        index
+            .insert_pending(&[PendingRow {
+                chunk_hash: [2; 32],
+                file_hash,
+                chunk_index: 0,
+                size: 100,
+                segment_id,
+                segment_offset: 0,
+            }])
+            .unwrap();
+        index.flush_pending(segment_id, 108).unwrap();
+        let path = root.join("segments/current.seg");
+        // A loop produces a lookup error even when tests run with elevated access.
+        std::os::unix::fs::symlink("current.seg", &path).unwrap();
+        let expected = fs::metadata(&path).unwrap_err();
+
+        let result = recover(&root, &index);
+
+        assert_eq!(index.segment_pending_chunk_count(segment_id).unwrap(), 1);
+        assert_eq!(index.max_committed_offset(segment_id).unwrap(), 108);
+        let StagingError::Io(source) = result.unwrap_err() else {
+            panic!("lookup errors must retain their I/O cause");
+        };
+        assert_eq!(source.raw_os_error(), expected.raw_os_error());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sealed_lookup_error_retains_io_cause() {
+        let tmp = tempfile::tempdir().unwrap();
+        let name = "0000000000000001.seg";
+        let path = tmp.path().join(name);
+        std::os::unix::fs::symlink(name, &path).unwrap();
+        let expected = fs::metadata(&path).unwrap_err();
+        let error = verify_sealed_segment(tmp.path(), 1, 100).unwrap_err();
+        let StagingError::Io(source) = error else {
+            panic!("lookup errors are not evidence that a sealed segment is missing");
+        };
+        assert_eq!(source.raw_os_error(), expected.raw_os_error());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_removes_dangling_orphan_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("current.seg.tmp");
+        std::os::unix::fs::symlink("missing-target", &path).unwrap();
+        cleanup_orphan_temps(tmp.path()).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(path).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[test]

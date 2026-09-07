@@ -48,6 +48,24 @@ failure rolls back the batch; an unlink failure leaves an orphan for recovery,
 not a missing live payload. This shares one cleanup path across publication,
 rollback and push, avoiding repeated per-file commits and inventory scans.
 
+## Recovery contract
+
+Opening writable staging runs recovery before creating or reusing its writer.
+Recovery treats missing files differently from failed filesystem operations:
+
+| Observed state | Recovery action |
+| --- | --- |
+| Sealed segment missing or shorter than its indexed size | Reject as staging corruption. |
+| Current segment missing, with promoted chunks | Reject as staging corruption. |
+| Current segment missing, with only pending rows | Discard those rows and reset its durable boundary. |
+| Current segment has a torn tail | Keep complete recoverable records, truncate the tail, and update SQLite's boundary. |
+| Current segment metadata lookup fails for another reason | Return the I/O cause before changing that segment's rows or boundary. |
+| Orphan `current.seg.tmp` entry | Remove the entry; an already absent entry is harmless. |
+
+`flush_pending` is the durability barrier before publication. `close` performs
+that flush explicitly; dropping staging only releases handles. Recovery is not
+a substitute for flushing a successful operation.
+
 ## Usage
 
 The smallest complete staging cycle is:
