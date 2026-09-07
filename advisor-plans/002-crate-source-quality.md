@@ -1724,3 +1724,30 @@ is Git-output/parser integration proof, not full CLI command qualification.
 Non-UTF-8 identity and non-NUL quoted-field decoding remain separate open work.
 
 Dependency contract: https://git-scm.com/docs/git-worktree#_porcelain_format.
+
+### One reconstruction-term report assembly path
+
+compare_terms had separate added, deleted, empty, and modified report assembly.
+Added/deleted constructors repeated the shared report fields and segment-detail
+mapping. The entry point now selects file status once, skips matching when one
+side is empty, then uses the same counters, detail builder, and final report.
+Whole-file Added/Deleted reports still omit changed ranges, as documented by
+ChunkDiffReport; their absent-side size remains zero. Empty/empty remains
+Modified. Matching keys, exact/greedy thresholds, and dedup arithmetic are unchanged.
+
+Evidence map: exported compare_terms -> classification -> byte counters,
+compute_changed_byte_ranges, build_segment_details -> ChunkDiffReport. The
+workspace has no production compare_terms caller; the CLI uses compare_sequences,
+whose separate report path is unchanged. Existing term and sequence tests cover
+shared ordered matching. Current main's report contracts and field documentation
+were read before consolidation.
+
+A temporary public-API probe compared complete Debug representations for all 49
+pairs of seven sequences: empty, distinct single terms, both orders, duplicates,
+and 4,097 repeated terms. Outputs match before/after, including the large-input
+path. The probe was removed after comparison; all 27 retained library tests and
+strict all-target Clippy pass. Production code shrinks by 104 lines. Added and
+deleted inputs now allocate a linear status vector before the shared builder;
+this is an explicit memory tradeoff for one report assembly path, not a claimed
+performance improvement. Input validation and very-large-count arithmetic remain
+separate qualification work.

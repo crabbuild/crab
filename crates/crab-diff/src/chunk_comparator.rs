@@ -82,39 +82,18 @@ pub fn compare_terms(
     old_size: u64,
     new_size: u64,
 ) -> ChunkDiffReport {
-    // Handle added files (old empty).
-    if old_terms.is_empty() && !new_terms.is_empty() {
-        return build_added_report(path, new_terms, new_size);
-    }
+    let (status, old_size, new_size) = match (old_terms.is_empty(), new_terms.is_empty()) {
+        (true, false) => (FileStatus::Added, 0, new_size),
+        (false, true) => (FileStatus::Deleted, old_size, 0),
+        _ => (FileStatus::Modified, old_size, new_size),
+    };
 
-    // Handle deleted files (new empty).
-    if !old_terms.is_empty() && new_terms.is_empty() {
-        return build_deleted_report(path, old_terms, old_size);
-    }
-
-    // Handle both empty (edge case: empty file unchanged).
-    if old_terms.is_empty() && new_terms.is_empty() {
-        return ChunkDiffReport {
-            path: path.to_owned(),
-            status: FileStatus::Modified,
-            old_size,
-            new_size,
-            unchanged_segments: 0,
-            unchanged_bytes: 0,
-            removed_segments: 0,
-            removed_bytes: 0,
-            added_segments: 0,
-            added_bytes: 0,
-            delta_bytes: 0,
-            dedup_ratio: compute_dedup_ratio(0, old_size, new_size),
-            changed_byte_ranges: Vec::new(),
-            segment_details: Vec::new(),
-            annotations: Vec::new(),
-            chunk_metrics: None,
-        };
-    }
-
-    let (old_status, new_status) = if old_terms.len() + new_terms.len() > LCS_SEGMENT_CEILING {
+    let (old_status, new_status) = if old_terms.is_empty() || new_terms.is_empty() {
+        (
+            vec![SegmentStatus::Removed; old_terms.len()],
+            vec![SegmentStatus::Added; new_terms.len()],
+        )
+    } else if old_terms.len() + new_terms.len() > LCS_SEGMENT_CEILING {
         tracing::debug!(
             path,
             old = old_terms.len(),
@@ -134,7 +113,6 @@ pub fn compare_terms(
         classify_segments(old_terms, new_terms, &dp)
     };
 
-    // Accumulate byte counts.
     let mut unchanged_bytes: u64 = 0;
     let mut removed_bytes: u64 = 0;
     let mut added_bytes: u64 = 0;
@@ -174,15 +152,19 @@ pub fn compare_terms(
     let delta_bytes = added_bytes;
     let dedup_ratio = compute_dedup_ratio(unchanged_bytes, old_size, new_size);
 
-    // Compute changed byte ranges from the new-side segment positions.
-    let changed_byte_ranges = compute_changed_byte_ranges(new_terms, &new_status);
+    // Added/deleted reports describe the whole file through status and byte
+    // totals; changed ranges are the existing modified-file report contract.
+    let changed_byte_ranges = if status == FileStatus::Modified {
+        compute_changed_byte_ranges(new_terms, &new_status)
+    } else {
+        Vec::new()
+    };
 
-    // Build segment details for verbose output.
     let segment_details = build_segment_details(old_terms, &old_status, new_terms, &new_status);
 
     ChunkDiffReport {
         path: path.to_owned(),
-        status: FileStatus::Modified,
+        status,
         old_size,
         new_size,
         unchanged_segments,
@@ -194,92 +176,6 @@ pub fn compare_terms(
         delta_bytes,
         dedup_ratio,
         changed_byte_ranges,
-        segment_details,
-        annotations: Vec::new(),
-        chunk_metrics: None,
-    }
-}
-
-fn build_added_report(
-    path: &str,
-    new_terms: &[FileDataSequenceEntry],
-    new_size: u64,
-) -> ChunkDiffReport {
-    let added_bytes: u64 = new_terms
-        .iter()
-        .map(|e| u64::from(e.unpacked_segment_bytes))
-        .sum();
-    let segment_details: Vec<SegmentDiff> = new_terms
-        .iter()
-        .enumerate()
-        .map(|(i, e)| SegmentDiff {
-            index: i as u32,
-            status: SegmentStatus::Added,
-            old_xorb_hash: None,
-            new_xorb_hash: Some(e.xorb_hash.to_string()),
-            old_chunk_range: None,
-            new_chunk_range: Some((e.chunk_index_start, e.chunk_index_end)),
-            bytes: u64::from(e.unpacked_segment_bytes),
-        })
-        .collect();
-
-    ChunkDiffReport {
-        path: path.to_owned(),
-        status: FileStatus::Added,
-        old_size: 0,
-        new_size,
-        unchanged_segments: 0,
-        unchanged_bytes: 0,
-        removed_segments: 0,
-        removed_bytes: 0,
-        added_segments: new_terms.len() as u32,
-        added_bytes,
-        delta_bytes: added_bytes,
-        dedup_ratio: 0.0,
-        changed_byte_ranges: Vec::new(),
-        segment_details,
-        annotations: Vec::new(),
-        chunk_metrics: None,
-    }
-}
-
-fn build_deleted_report(
-    path: &str,
-    old_terms: &[FileDataSequenceEntry],
-    old_size: u64,
-) -> ChunkDiffReport {
-    let removed_bytes: u64 = old_terms
-        .iter()
-        .map(|e| u64::from(e.unpacked_segment_bytes))
-        .sum();
-    let segment_details: Vec<SegmentDiff> = old_terms
-        .iter()
-        .enumerate()
-        .map(|(i, e)| SegmentDiff {
-            index: i as u32,
-            status: SegmentStatus::Removed,
-            old_xorb_hash: Some(e.xorb_hash.to_string()),
-            new_xorb_hash: None,
-            old_chunk_range: Some((e.chunk_index_start, e.chunk_index_end)),
-            new_chunk_range: None,
-            bytes: u64::from(e.unpacked_segment_bytes),
-        })
-        .collect();
-
-    ChunkDiffReport {
-        path: path.to_owned(),
-        status: FileStatus::Deleted,
-        old_size,
-        new_size: 0,
-        unchanged_segments: 0,
-        unchanged_bytes: 0,
-        removed_segments: old_terms.len() as u32,
-        removed_bytes,
-        added_segments: 0,
-        added_bytes: 0,
-        delta_bytes: 0,
-        dedup_ratio: 0.0,
-        changed_byte_ranges: Vec::new(),
         segment_details,
         annotations: Vec::new(),
         chunk_metrics: None,
