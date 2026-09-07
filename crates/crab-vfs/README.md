@@ -75,9 +75,11 @@ no such workers. Native backend tasks have their own cleanup boundaries.
 
 Cancellation is cooperative. A queue worker observes it between synchronous
 hydration steps; requesting abort does not prove that a running step has ended.
-The coordinator currently bounds its wait with a grace period, while daemon
-teardown aborts and joins its refresh, watcher, and queue-worker tasks. Neither path establishes completion of detached
-read-window prefetch. Full teardown qualification remains outstanding.
+The coordinator gives queue workers a grace period, then aborts and joins any
+remaining workers. Its shutdown can exceed that period while a blocking step
+finishes. Daemon teardown aborts and joins its refresh, watcher, and queue-worker
+tasks. Neither path establishes completion of detached read-window prefetch.
+Full teardown qualification remains outstanding.
 
 The locked `nfs3_server` listener also spawns connection handlers and a transaction
 cleaner without exposing join handles. Listener drop notifies the cleaner, but

@@ -1031,3 +1031,39 @@ All 14 pipeline tests and 38 daemon tests pass with NFS and FUSE enabled.
 Strict all-target VFS Clippy passes with NFS and FUSE. CLI/coordinator failures after successful pipeline
 return still require handle ownership review; this change does not qualify those
 post-preparation paths.
+
+## Coordinator grace-period ownership
+
+`Coordinator::shutdown_graceful` moved hydration handles into a timeout future.
+On expiry, dropping that future dropped the handles and detached the workers;
+mount/cache state could then be released before task destruction. The locked
+Tokio JoinHandle contract explicitly distinguishes dropping from joining and
+supports cancellation-safe waiting through a mutable handle reference.
+
+The grace helper now borrows retained handles, removes each completed handle
+before awaiting another, and aborts/joins every unfinished task after timeout.
+Removing completed handles avoids a second poll of an already consumed result.
+The grace period is a cooperative deadline, not a bound on blocking task exit.
+Shutdown must still be awaited to completion.
+
+Evidence map:
+
+- Entry: `crab/src/cmd/coordinator.rs` directly awaits shutdown_graceful after the
+  IPC server returns; it does not wrap shutdown in a second timeout/select.
+- Owner: `crates/crab-vfs/src/coordinator.rs`, MountHandle/PipelineOutput retain
+  cache-backed state until the worker join helper completes.
+- Callee: Tokio timeout cancels its inner future; JoinHandle drop detaches, while
+  awaiting a join guarantees the task destructor has finished.
+- Sibling: daemon teardown already aborts and joins its retained handles without
+  a timeout. Synchronous shutdown/Drop, individual unmount, foreground reads,
+  refresh task ownership and detached prefetch remain separate open boundaries.
+
+The timeout regression failed before the fix: a pending task retained its Arc
+state after the grace helper returned. It now also includes a previously finished
+handle to detect accidental double-await. A second test covers ordinary finished
+and aborted tasks inside the grace period. These are real Tokio tasks and the
+same helper used by production shutdown; no native FUSE mount is involved.
+All 15 coordinator tests and strict all-target VFS Clippy pass with NFS and
+FUSE enabled. The ten-second cooperative grace value is unchanged; final joining
+can take longer if a blocking hydration step is still running. No native mount
+or entire-process shutdown qualification is claimed.

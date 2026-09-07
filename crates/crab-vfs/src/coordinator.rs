@@ -684,14 +684,14 @@ impl Coordinator {
         self.cleanup_files();
     }
 
-    /// Graceful async shutdown: cancel all mount child tokens, wait up to 10s
-    /// for hydrator tasks to complete, log warnings for stuck mounts, then
-    /// clean up daemon files.
+    /// Cancel mount child tokens, give hydration workers ten seconds to finish,
+    /// then abort and join any remaining workers before releasing mount state.
+    /// Blocking hydration steps can delay completion beyond the grace period.
+    /// Await this method to completion; dropping its future does not finish cleanup.
     ///
     /// This is the preferred shutdown path when running inside a tokio runtime.
     pub async fn shutdown_graceful(&mut self) {
         use std::time::Duration;
-        use tokio::time::timeout;
 
         const GRACE_PERIOD: Duration = Duration::from_secs(10);
 
@@ -728,32 +728,23 @@ impl Coordinator {
         for (mountpoint, handle) in &mut mount_handles {
             let hydrator_count = handle.pipeline_output.hydrator_handles.len();
             if hydrator_count == 0 {
-                info!(mountpoint = %mountpoint.display(), "mount has no active tasks, unmounting");
+                info!(mountpoint = %mountpoint.display(), "mount has no hydration queue workers, unmounting");
                 continue;
             }
 
-            let handles: Vec<_> = handle.pipeline_output.hydrator_handles.drain(..).collect();
-            let mp_display = mountpoint.display().to_string();
-
-            let wait_result = timeout(GRACE_PERIOD, async {
-                for h in handles {
-                    // Ignore join errors (task may have been aborted or panicked).
-                    let _ = h.await;
-                }
-            })
+            let completed = join_hydrators_with_grace(
+                &mut handle.pipeline_output.hydrator_handles,
+                GRACE_PERIOD,
+            )
             .await;
-
-            match wait_result {
-                Ok(()) => {
-                    info!(mountpoint = %mp_display, "mount tasks completed within grace period");
-                }
-                Err(_) => {
-                    warn!(
-                        mountpoint = %mp_display,
-                        grace_period_secs = GRACE_PERIOD.as_secs(),
-                        "mount did not unmount within grace period"
-                    );
-                }
+            if completed {
+                info!(mountpoint = %mountpoint.display(), "hydration queue workers completed within grace period");
+            } else {
+                warn!(
+                    mountpoint = %mountpoint.display(),
+                    grace_period_secs = GRACE_PERIOD.as_secs(),
+                    "hydration workers exceeded grace period; aborted and joined"
+                );
             }
         }
 
@@ -925,6 +916,35 @@ impl Drop for Coordinator {
         // Always clean up daemon files (PID, lock, socket).
         self.cleanup_files();
     }
+}
+
+async fn join_hydrators_with_grace(
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    grace: Duration,
+) -> bool {
+    // Borrow handles across the timeout so unfinished workers remain joinable.
+    // Remove each completed handle before the next await to avoid polling it twice.
+    if tokio::time::timeout(grace, async {
+        while let Some(task) = handles.last_mut() {
+            let _ = task.await;
+            handles.pop();
+        }
+    })
+    .await
+    .is_ok()
+    {
+        return true;
+    }
+
+    // Abort only requests cancellation. Joining must precede release of the
+    // mount's cache ownership, including any in-progress blocking hydration.
+    for task in handles.iter() {
+        task.abort();
+    }
+    for task in handles.drain(..) {
+        let _ = task.await;
+    }
+    false
 }
 
 fn unmount_session(session: Option<fuser::BackgroundSession>, mountpoint: &Path) -> Result<()> {
@@ -1119,6 +1139,37 @@ async fn wait_for_shutdown_signal() {
 )]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grace_period_joins_finished_and_aborted_workers() {
+        let completed = tokio::spawn(async {});
+        let aborted = tokio::spawn(std::future::pending::<()>());
+        aborted.abort();
+        let mut handles = vec![completed, aborted];
+        assert!(join_hydrators_with_grace(&mut handles, Duration::from_secs(1)).await);
+        assert!(handles.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grace_timeout_releases_worker_owned_state() {
+        let retained = Arc::new(());
+        let task_state = Arc::clone(&retained);
+        let pending = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(task_state);
+        });
+        let completed = tokio::spawn(async {});
+        while !completed.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let mut handles = vec![pending, completed];
+        assert!(!join_hydrators_with_grace(&mut handles, Duration::from_millis(10)).await);
+        assert_eq!(
+            Arc::strong_count(&retained),
+            1,
+            "timed-out worker was detached"
+        );
+    }
 
     #[test]
     fn lock_acquisition_succeeds() {
