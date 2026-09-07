@@ -1813,6 +1813,30 @@ async fn test_admin_evict_failure_preserves_accounting() {
 }
 
 #[tokio::test]
+async fn test_admin_evict_counts_empty_object_once() {
+    let server = start_test_server().await;
+    let client = test_client(server.addr);
+    let path = "org/repo/packs/pack-empty.pack";
+    client.put(path, Bytes::new()).await.unwrap();
+    let http = reqwest::Client::new();
+
+    for expected_count in [1, 0] {
+        let response = http
+            .post(format!("http://{}/v1/admin/evict", server.addr))
+            .header("x-cache-psk", TEST_PSK)
+            .json(&serde_json::json!({ "path": path }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let stats = response.json::<Value>().await.unwrap();
+        assert_eq!(stats["evicted_count"].as_u64().unwrap(), expected_count);
+        assert_eq!(stats["evicted_bytes"].as_u64().unwrap(), 0);
+    }
+    let _ = server.shutdown.send(());
+}
+
+#[tokio::test]
 async fn test_admin_evict_exact_pack_path_removes_only_target() {
     let server = start_test_server().await;
     let client = test_client(server.addr);

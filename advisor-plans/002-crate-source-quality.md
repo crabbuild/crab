@@ -3340,3 +3340,35 @@ aggregate candidate memory. Moving eviction to spawn_blocking must also change
 shutdown: aborting its outer task would otherwise detach admitted blocking work.
 These findings are follow-up work, not claims of completed eviction concurrency
 or full cache-service qualification.
+
+
+### Eviction count and byte contracts
+
+The next accounting check reproduced an empty-object defect in evict_key:
+deleting a zero-byte entry returned evicted_count=0 because the method treated
+zero freed bytes as absence. This is also present on inspected origin/main
+(a371fb7d002). The new regression fails with count 0 instead of 1 before the fix.
+
+CacheStore::remove_object now returns the existing EvictStats rather than u64.
+It determines both count and bytes under the mutation lock: an existing empty
+entry returns (1,0), an absent entry (0,0). Exact eviction returns that result;
+budget, emergency and filtered paths sum actual counts instead of incrementing
+for every candidate. A candidate already removed by another caller therefore
+contributes no count. This is a Rust return-type change, not a compatibility
+wrapper. Workspace search found raw-removal consumers only in this crate's
+methods and tests; crab-remote-git's similarly named method has a different
+owner. The HTTP JSON fields remain unchanged.
+
+The empty-object store test verifies deletion once, repeated absence, and
+agreement with lifetime eviction counters. A loopback test PUTs an empty pack
+and invokes exact admin eviction twice, observing counts 1 then 0 and zero bytes
+in both HTTP 200 responses. Existing missing-object and nonempty-removal tests
+now inspect both result fields. Emergency eviction docs now describe its actual
+pre-admission caller and snapshot selection; concurrent removals can reduce
+the achieved count. This does not promise a fixed count under concurrency.
+
+All 43 cache-store tests, six evictor tests and four HTTP admin tests pass, as do
+strict all-target Clippy, rustdoc and the cache-server binary build. The
+crab-cache-store test-target compilation also passes with its cache-server
+fixture dependency. Scheduling/shutdown and aggregate candidate-memory work
+remain open; the all-crate objective is not complete.

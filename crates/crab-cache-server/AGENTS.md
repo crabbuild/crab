@@ -57,6 +57,9 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
 - Failed payload removal must retain metadata, byte accounting, and eviction
   counters. Indexed eviction and invalid-object cleanup share `remove_cache_file`;
   preserve its typed I/O cause. Source: `crates/crab-cache-server/src/cache_store.rs`.
+- Use removal's `EvictStats` for both count and bytes. Zero bytes can mean an
+  empty object; a stale candidate contributes no eviction. Source:
+  `crates/crab-cache-server/src/cache_store.rs`.
 
 ## Features and platform
 

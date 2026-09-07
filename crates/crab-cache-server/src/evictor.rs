@@ -221,8 +221,9 @@ mod tests {
         meta_key[0] = ObjectType::Xorb.as_u8();
         meta_key[1..].copy_from_slice(hash.as_bytes());
 
-        let freed = store.remove_object(&meta_key).unwrap();
-        assert_eq!(freed, 42);
+        let removed = store.remove_object(&meta_key).unwrap();
+        assert_eq!(removed.evicted_count, 1);
+        assert_eq!(removed.evicted_bytes, 42);
         assert_eq!(store.current_bytes(), 0);
 
         // Object should be gone.
@@ -230,11 +231,12 @@ mod tests {
     }
 
     #[test]
-    fn remove_object_missing_returns_zero() {
+    fn remove_object_missing_returns_no_evictions() {
         let store = test_store(1000);
         let meta_key = [0u8; 33];
-        let freed = store.remove_object(&meta_key).unwrap();
-        assert_eq!(freed, 0);
+        let removed = store.remove_object(&meta_key).unwrap();
+        assert_eq!(removed.evicted_count, 0);
+        assert_eq!(removed.evicted_bytes, 0);
     }
 
     #[test]

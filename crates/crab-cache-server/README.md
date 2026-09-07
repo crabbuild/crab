@@ -107,6 +107,10 @@ entry accounted for and returns an error; admin eviction responds with HTTP 500.
 The error retains the cache path and underlying I/O cause. Invalid-object
 cleanup uses the same removal policy.
 
+Removal reports object count separately from bytes. Deleting an empty object
+counts as one eviction with zero bytes; deleting it again reports zero objects.
+Batch eviction sums actual removal results instead of counting stale candidates.
+
 ## Shutdown ownership
 
 Signal registration happens before runtime dependencies are prepared. A

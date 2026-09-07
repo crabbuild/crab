@@ -298,7 +298,9 @@ pub struct ObjectMeta {
 /// Statistics from an eviction run.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EvictStats {
+    /// Number of indexed entries removed, including empty objects.
     pub evicted_count: u64,
+    /// Accounted payload bytes removed from the index.
     pub evicted_bytes: u64,
 }
 
@@ -1039,17 +1041,18 @@ impl CacheStore {
     // Eviction
     // -----------------------------------------------------------------------
 
-    /// Remove a single object from disk and metadata, returning freed bytes.
+    /// Remove a single object from disk and metadata, returning eviction statistics.
     ///
     /// The `meta_key` is the 33-byte metadata key (object_type + hash).
-    /// Silently returns 0 if the object is already gone.
+    /// Reports no eviction if the object is already gone, or one eviction even
+    /// when the removed object is empty.
     /// File-removal errors retain metadata and byte accounting for a later retry.
-    pub fn remove_object(&self, meta_key: &[u8; META_KEY_LEN]) -> Result<u64> {
+    pub fn remove_object(&self, meta_key: &[u8; META_KEY_LEN]) -> Result<EvictStats> {
         let _mutation_guard = self.mutation_guard()?;
 
         // Read the metadata to get size and build the disk path.
         let Some(meta) = self.read_meta(meta_key)? else {
-            return Ok(0);
+            return Ok(EvictStats::default());
         };
         let size = meta.size;
         let object_type = meta.object_type;
@@ -1089,7 +1092,10 @@ impl CacheStore {
             "evicted object"
         );
 
-        Ok(size)
+        Ok(EvictStats {
+            evicted_count: 1,
+            evicted_bytes: size,
+        })
     }
 
     /// Evict exactly one object by canonical cache key.
@@ -1100,15 +1106,7 @@ impl CacheStore {
             return Ok(EvictStats::default());
         };
         let meta_key = make_meta_key(key.object_type, &storage_id);
-        let freed = self.remove_object(&meta_key)?;
-        if freed == 0 {
-            return Ok(EvictStats::default());
-        }
-
-        Ok(EvictStats {
-            evicted_count: 1,
-            evicted_bytes: freed,
-        })
+        self.remove_object(&meta_key)
     }
 
     /// Evict objects until `current_bytes <= max_bytes * low_water_ratio`.
@@ -1139,9 +1137,9 @@ impl CacheStore {
             if self.current_bytes() <= low_water {
                 break;
             }
-            let freed = self.remove_object(mk)?;
-            stats.evicted_count += 1;
-            stats.evicted_bytes += freed;
+            let removed = self.remove_object(mk)?;
+            stats.evicted_count += removed.evicted_count;
+            stats.evicted_bytes += removed.evicted_bytes;
         }
 
         debug!(
@@ -1156,8 +1154,9 @@ impl CacheStore {
 
     /// Emergency eviction: evict the oldest 10% of objects by count.
     ///
-    /// Called when a `put` fails with `DiskFull`. Sorts all entries by
-    /// `last_access` ascending and removes the first 10%.
+    /// Used before cache admission when capacity is insufficient. Selects the
+    /// oldest 10% of a metadata snapshot, at least one entry; concurrent removals
+    /// may make the actual eviction count smaller.
     pub fn emergency_evict(&self) -> Result<EvictStats> {
         let mut candidates = self.collect_eviction_candidates()?;
 
@@ -1173,9 +1172,9 @@ impl CacheStore {
 
         let mut stats = EvictStats::default();
         for (mk, _, _) in candidates.iter().take(evict_count) {
-            let freed = self.remove_object(mk)?;
-            stats.evicted_count += 1;
-            stats.evicted_bytes += freed;
+            let removed = self.remove_object(mk)?;
+            stats.evicted_count += removed.evicted_count;
+            stats.evicted_bytes += removed.evicted_bytes;
         }
 
         debug!(
@@ -1223,9 +1222,9 @@ impl CacheStore {
 
         let mut stats = EvictStats::default();
         for mk in &candidates {
-            let freed = self.remove_object(mk)?;
-            stats.evicted_count += 1;
-            stats.evicted_bytes += freed;
+            let removed = self.remove_object(mk)?;
+            stats.evicted_count += removed.evicted_count;
+            stats.evicted_bytes += removed.evicted_bytes;
         }
 
         debug!(
@@ -2324,8 +2323,9 @@ mod tests {
         assert_eq!(store.get(&key).unwrap().unwrap(), data);
 
         let meta_key = make_meta_key(ObjectType::Pack, &storage_id);
-        let freed = store.remove_object(&meta_key).unwrap();
-        assert_eq!(freed, data.len() as u64);
+        let removed = store.remove_object(&meta_key).unwrap();
+        assert_eq!(removed.evicted_count, 1);
+        assert_eq!(removed.evicted_bytes, data.len() as u64);
         assert!(!path.exists());
         assert!(store.get(&key).unwrap().is_none());
         assert_eq!(store.current_bytes(), 0);
@@ -2366,6 +2366,28 @@ mod tests {
             }
             assert!(cause.downcast_ref::<std::io::Error>().is_some());
         }
+    }
+
+    #[test]
+    fn exact_eviction_counts_empty_objects_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_or_create(&directory.path().join(CACHE_DB_FILE)).unwrap();
+        let store =
+            CacheStore::open(directory.path().to_path_buf(), 32, db.connect().unwrap()).unwrap();
+        let key = pack_key("empty");
+        let data = Bytes::new();
+        store
+            .put(&key, data.clone(), blake3::hash(&data).as_bytes())
+            .unwrap();
+
+        let first = store.evict_key(&key).unwrap();
+        assert_eq!(first.evicted_count, 1);
+        assert_eq!(first.evicted_bytes, 0);
+        assert_eq!(store.eviction_stats().total, 1);
+        let repeated = store.evict_key(&key).unwrap();
+        assert_eq!(repeated.evicted_count, 0);
+        assert_eq!(repeated.evicted_bytes, 0);
+        assert_eq!(store.eviction_stats().total, 1);
     }
 
     #[test]
