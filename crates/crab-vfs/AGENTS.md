@@ -61,6 +61,10 @@ mount/control owners consume the pipeline output separately.
 - FUSE IPC exchanges temporarily own their connection. Restore it only after a
   valid response; cancellation or errors must close it so a late response cannot
   satisfy a later request. Source: `crates/crab-vfs/src/ipc_client.rs`.
+- IPC clients must not unlink coordinator socket paths. The daemon lock holder
+  owns stale cleanup; only missing/refused connections permit spawn or retry.
+  Sources: `crates/crab-vfs/src/ipc_client.rs` and
+  `crates/crab-vfs/src/coordinator.rs`.
 
 ## Features and platform
 

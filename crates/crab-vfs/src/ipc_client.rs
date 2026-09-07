@@ -5,13 +5,12 @@
 //! Used by the CLI to delegate mount/unmount/status operations to the
 //! coordinator process.
 
-use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::core::error::{CrabError, Result};
 use crate::ipc_server::{IpcRequest, IpcResponse};
@@ -20,7 +19,7 @@ use crate::ipc_server::{IpcRequest, IpcResponse};
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum total time to wait for the coordinator to become available.
+/// Budget for connection retry backoff after spawning the coordinator.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Initial backoff delay between connection retries.
@@ -73,6 +72,13 @@ pub enum IpcClientError {
     OperationFailed(String),
 }
 
+impl IpcClientError {
+    fn can_retry_connect(&self) -> bool {
+        matches!(self, Self::ConnectionFailed { source, .. }
+            if matches!(source.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused))
+    }
+}
+
 impl From<IpcClientError> for CrabError {
     fn from(e: IpcClientError) -> Self {
         CrabError::Internal(e.to_string())
@@ -123,36 +129,22 @@ impl IpcClient {
 
     /// Connect to the coordinator, spawning it if not already running.
     ///
-    /// Attempts to connect to the socket. If the connection is refused,
-    /// removes any stale socket file, spawns the coordinator process, and
-    /// retries with exponential backoff (100ms, 200ms, 400ms, 800ms, 1600ms)
-    /// up to 5 seconds total.
+    /// A missing or refused socket connection starts the coordinator and retries
+    /// with exponential backoff. Other connection errors return immediately.
+    /// The coordinator owns stale socket cleanup under its daemon lock.
+    /// The five-second retry budget does not bound individual connection attempts.
     pub async fn connect_or_spawn(socket_path: &Path) -> std::result::Result<Self, IpcClientError> {
         // First attempt: try to connect directly.
         match Self::connect(socket_path).await {
             Ok(client) => return Ok(client),
-            Err(IpcClientError::ConnectionFailed { .. }) => {
+            Err(error) if error.can_retry_connect() => {
                 debug!("coordinator not running, spawning");
             }
             Err(e) => return Err(e),
         }
 
-        // Remove stale socket file if it exists — the connection was refused,
-        // so no coordinator is listening on it. Only remove actual sockets
-        // or empty files (stale socket artifacts), not regular files/dirs.
-        if socket_path.exists()
-            && let Ok(meta) = std::fs::metadata(socket_path)
-        {
-            let ft = meta.file_type();
-            if ft.is_socket() || (ft.is_file() && meta.len() == 0) {
-                debug!(path = %socket_path.display(), "removing stale socket before spawning coordinator");
-                let _ = std::fs::remove_file(socket_path);
-            } else {
-                warn!(path = %socket_path.display(), "socket path exists but is not a socket; refusing to remove");
-            }
-        }
-
-        // Spawn the coordinator process.
+        // Only the coordinator holding the daemon lock may remove a stale
+        // socket. Unlinking here can disconnect a coordinator that just bound.
         spawn_coordinator()?;
 
         // Retry with exponential backoff.
@@ -174,7 +166,7 @@ impl IpcClient {
                     );
                     return Ok(client);
                 }
-                Err(IpcClientError::ConnectionFailed { .. }) => {
+                Err(error) if error.can_retry_connect() => {
                     debug!(
                         attempt,
                         delay_ms = delay.as_millis(),
@@ -755,6 +747,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_or_spawn_preserves_connection_path_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("file");
+        std::fs::write(&file, "occupied").unwrap();
+        for path in [PathBuf::from("invalid\0socket"), file.join("daemon.sock")] {
+            let expected = match IpcClient::connect(&path).await.unwrap_err() {
+                IpcClientError::ConnectionFailed { source, .. } => source.kind(),
+                error => panic!("unexpected connect error: {error}"),
+            };
+            let result = IpcClient::connect_or_spawn(&path).await;
+            assert!(
+                matches!(result, Err(IpcClientError::ConnectionFailed { source, .. })
+                if source.kind() == expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_or_spawn_leaves_socket_cleanup_to_coordinator() {
+        for socket in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("daemon.sock");
+            if socket {
+                drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+            } else {
+                std::fs::write(&path, "").unwrap();
+            }
+            let result = IpcClient::connect_or_spawn(&path).await;
+            assert!(result.is_err());
+            assert!(
+                path.exists(),
+                "a client without the daemon lock must not unlink the path"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn client_send_and_receive() {
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -886,30 +915,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!received.is_empty());
-    }
-
-    #[tokio::test]
-    async fn connect_or_spawn_removes_stale_socket_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let socket_path = tmp.path().join("daemon.sock");
-
-        // Create an empty stale socket artifact (socket files may appear as
-        // zero-byte regular files on some platforms after crashes).
-        std::fs::write(&socket_path, "").unwrap();
-        assert!(socket_path.exists());
-
-        // connect_or_spawn will fail to connect (not a real socket), then
-        // remove the stale empty file before attempting to spawn. The spawn
-        // will fail in test (no coordinator binary), but the file should be
-        // gone.
-        let result = IpcClient::connect_or_spawn(&socket_path).await;
-        assert!(result.is_err());
-
-        // The stale socket file should have been removed.
-        assert!(
-            !socket_path.exists(),
-            "stale empty socket artifact should be removed"
-        );
     }
 
     #[tokio::test]

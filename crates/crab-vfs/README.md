@@ -113,6 +113,11 @@ timeout, or a transport/parse failure closes it. Further sends return
 `NotConnected`. Reconnect explicitly and determine a mutation's outcome before
 deciding whether to retry it. Connection setup/spawning has a separate policy.
 
+Only a missing or refused connection triggers coordinator startup. Permission,
+invalid-path, and other connection errors return their original cause. Clients
+never unlink the socket path; stale cleanup belongs to the coordinator holding
+the daemon lock. The startup retry budget does not bound an individual connect.
+
 ### NFS control deadlines
 
 Each control call owns a fresh socket. Its timeout covers connection setup,

@@ -3244,3 +3244,47 @@ connect/spawn deadline and stale-socket classification, IPC server child-task
 ownership, mutation completion after disconnect, and error-source retention in
 the CLI conversion. Native run34154546592 passed its feature gate; all four
 platform/service jobs are running on the earlier6ae0432975e commit.
+
+
+### Coordinator startup error and socket ownership
+
+Owner: IPC connect-or-spawn policy in `crab-vfs/src/ipc_client.rs`. Both initial
+connection and retry matches accepted every ConnectionFailed variant on
+origin/main a371fb7d002, including invalid paths and permissions. The initial
+branch also unlinked stale-looking sockets/empty files without holding the
+daemon lock. Coordinator::start already acquires that lock before stale socket
+cleanup; IpcServer runs while retaining the coordinator through Arc.
+
+Before-fix regressions fail for an embedded-NUL path (its connection error is lost)
+and preservation of a socket artifact (unlinked by the client). The path fixture
+also covers a regular-file ancestor; the artifact fixture covers both an empty
+file and an actual closed Unix listener. Tokio 1.52.1 UnixStream::connect passes
+through pathname conversion, mio connect and socket errors; the fix classifies
+the typed I/O kind, never strings. A shared private predicate permits only
+NotFound and ConnectionRefused for both spawn and retry. Other failures return
+the original ConnectionFailed with its I/O source.
+
+Client-side file deletion is removed entirely. The coordinator holding the
+lock remains the cleanup owner, preventing a client from unlinking a socket
+that bound after its failed connection. A new owner regression holds the lock,
+checks a second coordinator cannot remove a stale Unix socket, releases the
+lock, and verifies successful startup performs cleanup. It passes. Two old
+crate/CLI tests that required unlocked client deletion were retired, replaced
+by client-preservation and lock-owner coverage. No inventory/baseline/assertion
+was weakened to hide a failure; the removed expectation was the behavior fixed.
+
+Callers remain try_ipc_mount and the direct coordinator-lifecycle consumer.
+Production coordinator startup already composes Coordinator::start before
+IpcServer::run_with_bound_hook; wire requests and CLI options are unchanged.
+NFS control has its own endpoint probes and never uses this spawn helper.
+The retry budget still does not bound an individual connect; that limit is now
+stated accurately rather than claiming a five-second total startup deadline.
+Further connect timing, duplicate server startup, cleanup error handling, and
+child-process/task ownership remain open.
+
+All 26 focused IPC client tests and the new coordinator lock-owner test pass.
+Strict fuse+nfs lint/docs, the running-coordinator CLI consumer, and default CLI
+build pass. The CLI retains its macOS debug-unwind linker warning. Native
+run34154546592 on6ae0432975e has passed both Linux jobs and the macOS native
+smoke; Windows remains running. These native results apply to that earlier
+commit, not the later control/startup changes.

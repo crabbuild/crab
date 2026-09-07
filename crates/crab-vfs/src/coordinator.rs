@@ -1147,6 +1147,26 @@ mod tests {
         assert_eq!(pid, Some(std::process::id()));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn coordinator_cleans_stale_socket_only_after_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = CoordinatorConfig::with_base_dir(directory.path().to_path_buf());
+        let path = config.socket_path();
+        let lock = acquire_daemon_lock(&config.lock_path()).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+
+        assert!(Coordinator::start(config.clone()).is_err());
+        assert!(
+            path.exists(),
+            "a losing coordinator must leave the socket alone"
+        );
+        drop(lock);
+
+        let _coordinator = Coordinator::start(config).unwrap();
+        assert!(!path.exists(), "the lock holder owns stale socket cleanup");
+    }
+
     #[test]
     fn coordinator_config_paths() {
         let config = CoordinatorConfig::with_base_dir(PathBuf::from("/tmp/test-mounts"));
