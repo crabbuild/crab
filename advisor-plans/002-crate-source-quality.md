@@ -60,7 +60,7 @@ not claims that the named code is defective.
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
 | crab-http-server | Request validation, embedded assets, service errors | Pending |
-| crab-workflow | Async lock waiting, experiment metadata identity, cache/resume remain | Retry parsing, lock readability, and default API docs verified |
+| crab-workflow | Async lock waiting, cache/resume, native qualification remain | Retry parsing, lock readability, metadata identity, and default API docs verified |
 
 ## Pointer diagnostic change
 
@@ -1438,3 +1438,46 @@ parent semantics and valid checkpoint-only roots.
 This survey changes the required implementation scope. No decoding/runtime
 change is claimed yet. Latest observed CI for e4a90d01ab0 reports two successes,
 two in progress, four skipped, with no reported failures at that observation.
+
+
+### Canonical metadata decoding and complete live sets
+
+`ExperimentMetadata::from_json` now probes the supported schema, decodes typed
+metadata, and checks the requested ID. All five surveyed readers use it. Remote
+readers additionally verify the canonical hash. The CLI keeps repository prefixes
+on ID/hash diagnostics, listings retain warning/skip presentation policy, and
+missing local files keep ExperimentNotFound behavior.
+
+`ExperimentMetadataMalformed` retains serde_json::Error as its source. The CLI
+wraps it without discarding the cause and classifies it as CRAB-E0020 in both
+error-code surfaces, integrity exit/category handling, details, and storage
+retry policy (one retry before failure, matching existing corruption errors).
+
+The live-set collector propagates directory-entry and metadata read/stat failures
+and rejects malformed, unsupported, or incorrectly identified metadata. Matching
+metadata paths must be regular files. Missing parents and unrelated filenames
+retain their existing meaning; checkpoint-only roots are still collected. The
+old malformed-blob skip test was removed with that behavior and replaced by a
+fail-closed regression. No production GC caller exists today, so this improves
+the exported contract without claiming a live deletion-path repair.
+
+Why this shape: decoding and identity belong to the metadata owner, while list
+presentation and destructive-operation admission differ by caller. A second
+schema parser or a metrics-error alias would perpetuate inconsistent contracts.
+The collector shrinks substantially as silent failure branches disappear.
+Schema-version errors retain the existing variant/code; its historical "newer"
+wording also applies to unsupported older versions and remains diagnostic cleanup.
+
+Validation: 33 experiment tests, seven live-set tests, three CLI decoder/error
+and retry tests, and the remote prefix regression pass (44 total). The new
+malformed-metadata live-set regression fails against the original collector;
+restored code passes. Strict all-target workflow Clippy and strict rustdoc pass.
+CLI library Clippy completes with 489 warnings versus 494 on the recorded main
+baseline: 484 map exactly to main source; the remaining five are the previously
+recorded large-future size differences, with unchanged messages and locations
+modulo source movement. No new warning category/location is introduced.
+
+Scope limits: the live-set helper is not wired into production GC; no native or
+cloud E2E deletion proof is claimed. JSON serialization error handling remains
+separate from the decoding changes. Metadata publication concurrency and async
+scheduler lock waiting remain open work.

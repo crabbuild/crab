@@ -145,5 +145,13 @@ checks both before returning a value. Readers that already decoded metadata can
 call `ExperimentMetadata::verify_identity` with the requested ID and ref hash.
 
 An ID or hash mismatch returns `WorkflowError::CorruptObject`. Whitespace and
-JSON object ordering do not change the canonical hash. This check validates
-identity; it does not replace schema validation or make two storage reads atomic.
+JSON object ordering do not change the canonical hash.
+
+Use `ExperimentMetadata::from_json` to check the supported schema and requested
+ID while preserving JSON decoding errors. Remote reads additionally call
+`verify_identity` to check the ref hash. These checks do not make two storage
+reads atomic.
+
+`collect_local_workflow_live_set` fails if metadata enumeration, reading, or
+validation fails. A caller must handle that error before making deletion
+choices; an incomplete set is never returned as a successful result.

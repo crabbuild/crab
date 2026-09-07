@@ -31,7 +31,8 @@ execution. Parsing and graph construction are sequential caller-owned steps.
 
 - Experiment metadata readers share `ExperimentMetadata::verify_identity` for
   requested ID and canonical hash checks. Storage prefixes remain caller-owned;
-  schema decoding and missing-object policy are separate concerns.
+  `from_json` owns schema decoding and requested-ID checks. Listings own their
+  warning/skip policy; live-set collection must fail on unknown metadata roots.
   Source: `crates/crab-workflow/src/experiment.rs` and `crab/src/cmd/exp.rs`.
 
 - Scheduler contention is fs4's `Ok(false)` outcome, not an I/O failure.

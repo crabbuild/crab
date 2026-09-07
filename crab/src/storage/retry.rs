@@ -69,6 +69,7 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
         CrabError::CasConflict { .. } => RetryClass::StateDependent,
         CrabError::CorruptObject { .. }
         | CrabError::GitPackCorrupt(_)
+        | CrabError::WorkflowMetadataCorrupt(_)
         | CrabError::PackIntegrity { .. } => RetryClass::FatalAfterOneRetry,
         CrabError::Io(_) => RetryClass::InspectErrno,
         CrabError::Storage(e) => classify_storage(e),
@@ -506,6 +507,15 @@ mod tests {
             expected_etag: None,
         };
         assert_eq!(retry_class(&err), RetryClass::StateDependent);
+    }
+
+    #[test]
+    fn metadata_decoding_corruption_uses_bounded_integrity_retry() {
+        let id = crab_workflow::ExperimentId::new_v7();
+        let error = CrabError::from(
+            crab_workflow::ExperimentMetadata::from_json(b"invalid", &id).unwrap_err(),
+        );
+        assert_eq!(retry_class(&error), RetryClass::FatalAfterOneRetry);
     }
 
     #[test]

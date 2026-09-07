@@ -71,6 +71,9 @@ pub enum CrabError {
     // validation, with a typed payload so dependency causes stay inspectable.
     #[error("corrupt Git pack evidence [CRAB-E0020]: {0}")]
     GitPackCorrupt(#[source] crab_git::pack_locator::PackLocatorError),
+    /// Workflow metadata corruption retains the original JSON decoding cause.
+    #[error("corrupt workflow metadata [CRAB-E0020]: {0}")]
+    WorkflowMetadataCorrupt(#[source] crab_workflow::WorkflowError),
     #[error("origin object at {path} failed integrity verification [CRAB-E0020]: {source}")]
     OriginIntegrity {
         path: String,
@@ -1213,6 +1216,9 @@ impl From<crab_workflow::WorkflowError> for CrabError {
         match error {
             crab_workflow::WorkflowError::Timestamp(source) => Self::from(source),
             crab_workflow::WorkflowError::Cancelled => Self::Cancelled,
+            error @ crab_workflow::WorkflowError::ExperimentMetadataMalformed { .. } => {
+                Self::WorkflowMetadataCorrupt(error)
+            }
             crab_workflow::WorkflowError::CorruptObject { path, reason } => {
                 Self::CorruptObject { path, reason }
             }
@@ -2231,6 +2237,7 @@ impl CrabError {
 
             Self::CorruptObject { .. }
             | Self::GitPackCorrupt(_)
+            | Self::WorkflowMetadataCorrupt(_)
             | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
@@ -2425,9 +2432,10 @@ impl CrabError {
             Self::RefAlreadyExists { .. } => "CRAB-E0011",
             Self::PushLockHeld { .. } => "CRAB-E0012",
             Self::NonFastForward { .. } => "CRAB-E0017",
-            Self::CorruptObject { .. } | Self::GitPackCorrupt(_) | Self::OriginIntegrity { .. } => {
-                "CRAB-E0020"
-            }
+            Self::CorruptObject { .. }
+            | Self::GitPackCorrupt(_)
+            | Self::WorkflowMetadataCorrupt(_)
+            | Self::OriginIntegrity { .. } => "CRAB-E0020",
             Self::ChunkNotFound { .. } => "CRAB-E0021",
             Self::NotFound { .. } => "CRAB-E0030",
             Self::Forbidden { .. } => "CRAB-E0031",
@@ -2632,6 +2640,7 @@ impl CrabError {
 
             Self::CorruptObject { .. }
             | Self::GitPackCorrupt(_)
+            | Self::WorkflowMetadataCorrupt(_)
             | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
@@ -2846,7 +2855,7 @@ impl CrabError {
             | Self::PushIntegrationFailed { .. }
             | Self::FileChangedDuringStaging { .. }
             | Self::CorruptObject { .. }
-            | Self::GitPackCorrupt(_)
+            | Self::GitPackCorrupt(_) | Self::WorkflowMetadataCorrupt(_)
             | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::NotFound { .. }
@@ -3041,6 +3050,9 @@ impl CrabError {
                     "path": path,
                     "reason": reason,
                 })
+            }
+            Self::WorkflowMetadataCorrupt(source) => {
+                serde_json::json!({ "source": source.to_string() })
             }
             Self::GitPackCorrupt(source) => serde_json::json!({ "source": source.to_string() }),
             Self::OriginIntegrity { path, source } => serde_json::json!({

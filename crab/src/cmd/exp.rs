@@ -3658,22 +3658,17 @@ async fn read_remote_metadata(
 
     let meta_path = remote_exp_meta_object_path(prefix, id);
     let (meta_bytes, _) = store.get_with_etag(&meta_path).await?;
-    let metadata: ExperimentMetadata =
-        serde_json::from_slice(&meta_bytes).map_err(|e| CrabError::CorruptObject {
-            path: meta_path.as_ref().to_owned(),
-            reason: format!("experiment metadata is not valid JSON: {e}"),
-        })?;
+    let contextualize = |error| match error {
+        crab_workflow::WorkflowError::CorruptObject { path, reason } => CrabError::CorruptObject {
+            path: remote_key(prefix, &path),
+            reason,
+        },
+        other => other.into(),
+    };
+    let metadata = ExperimentMetadata::from_json(&meta_bytes, id).map_err(contextualize)?;
     metadata
         .verify_identity(id, expected_hash)
-        .map_err(|error| match error {
-            crab_workflow::WorkflowError::CorruptObject { path, reason } => {
-                CrabError::CorruptObject {
-                    path: remote_key(prefix, &path),
-                    reason,
-                }
-            }
-            other => other.into(),
-        })?;
+        .map_err(contextualize)?;
     Ok(metadata)
 }
 
@@ -5164,9 +5159,7 @@ fn read_local_metadata(repo_root: &Path, id: &ExperimentId) -> Result<Experiment
         }
         Err(e) => return Err(CrabError::Io(e)),
     };
-    serde_json::from_slice(&bytes).map_err(|e| {
-        CrabError::Internal(format!("experiment metadata malformed JSON for {id}: {e}"))
-    })
+    ExperimentMetadata::from_json(&bytes, id).map_err(CrabError::from)
 }
 
 fn parse_experiment_id(raw: &str) -> Result<ExperimentId> {
@@ -5267,7 +5260,17 @@ fn collect_summaries(repo_root: &Path) -> Result<Vec<ExpSummary>> {
                 continue;
             }
         };
-        let meta: ExperimentMetadata = match serde_json::from_slice(&bytes) {
+        let Some(raw_id) = name.strip_suffix(".meta.json") else {
+            continue;
+        };
+        let id = match parse_experiment_id(raw_id) {
+            Ok(id) => id,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "exp ls: invalid metadata filename");
+                continue;
+            }
+        };
+        let meta = match ExperimentMetadata::from_json(&bytes, &id) {
             Ok(m) => m,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "exp ls: metadata parse failed");
@@ -7361,6 +7364,48 @@ mod tests {
             started_at: "2024-01-01T00:00:00.000Z".into(),
             ended_at: None,
         }
+    }
+
+    #[test]
+    fn metadata_decoding_rejects_local_identity_and_schema_mismatches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = ExperimentId::new_v7();
+        for wrong_id in [false, true] {
+            let mut metadata = test_exp_metadata(id, &"a".repeat(40));
+            if wrong_id {
+                metadata.exp_id = ExperimentId::new_v7();
+            } else {
+                metadata.schema_version = 2;
+            }
+            let path = meta_file_path(tmp.path(), &id);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, metadata.canonical_json().unwrap()).unwrap();
+            let result = read_local_metadata(tmp.path(), &id);
+            assert!(
+                matches!(
+                    result,
+                    Err(CrabError::CorruptObject { .. }
+                        | CrabError::WorkflowExperimentMetadataSchemaNewer { .. })
+                ),
+                "wrong_id={wrong_id}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_decoding_preserves_json_cause_and_integrity_code() {
+        let id = ExperimentId::new_v7();
+        let error = CrabError::from(ExperimentMetadata::from_json(b"invalid", &id).unwrap_err());
+        assert_eq!(error.code(), "CRAB-E0020");
+        assert_eq!(crate::core::error_catalog::error_code(&error), error.code());
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(
+            source
+                .source()
+                .unwrap()
+                .downcast_ref::<serde_json::Error>()
+                .is_some()
+        );
     }
 
     #[tokio::test]

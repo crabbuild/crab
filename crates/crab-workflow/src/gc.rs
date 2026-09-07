@@ -1,34 +1,13 @@
-//! Workflow-scoped garbage-collection helpers.
+//! Workflow live roots collected from local metadata and checkpoint caches.
 //!
-//! The bucket-scope GC walker (`cmd::gc::bucket`) lists content-
-//! addressed objects under `.crab/{shards,xorbs,file-index}/` and
-//! deletes anything unreachable from the ref-registry. Workflow stage
-//! entries and experiment metadata live under `.crab/workflow/…`
-//! — a namespace the current walker intentionally does not touch —
-//! but once the workflow push path ships (task 4.8) the remote GC
-//! walker will need a way to decide whether a workflow object is
-//! reachable from a host's local view.
-//!
-//! This module is that decision: given a local repo root, walk the
-//! on-disk experiment metadata and checkpoint caches and return the union
-//! of stage hashes, experiment IDs, and checkpoint payload identities a
-//! remote GC walker would consider reachable. The function is I/O-light
-//! (`fs::read_dir` + `fs::read`) and never spawns subprocesses — it's safe
-//! to call from any context, including the signal handlers that run during
-//! a GC sweep.
-//!
-//! The helper is conservative about what it parses: malformed or
-//! half-written `.meta.json` blobs are logged and skipped, not
-//! surfaced as errors. Checkpoint state is different: a malformed
-//! lineage can hide a live payload, so checkpoint parse or reference
-//! failures abort the walk. A caller must fail closed rather than
-//! treating an unknown checkpoint as dead.
+//! A complete walk returns the union of experiment IDs, stage hashes, and
+//! checkpoint payload identities. Unreadable or malformed metadata aborts the
+//! walk: a destructive caller must never interpret unknown roots as dead.
+//! This filesystem API is synchronous and is not signal-handler safe.
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-
-use tracing::warn;
 
 use crate::checkpoint::{CheckpointLineage, CheckpointRecord};
 use crate::experiment::{ExperimentId, ExperimentMetadata};
@@ -51,11 +30,8 @@ const CHECKPOINT_PARENT_REL: &str = ".crab/workflow/checkpoints";
 /// Union of workflow artifacts reachable from the local experiment
 /// metadata cache.
 ///
-/// Used by the future bucket GC walker (task 4.8) to gate removal of
-/// remote workflow state (stage entry JSONs, experiment metadata
-/// blobs) against what this host still cares about. Kept as plain
-/// `HashSet`s — cheap to union across hosts when the remote GC
-/// walker aggregates multiple registries.
+/// These sets describe local roots. Callers own remote reachability, grace
+/// periods, and deletion policy; collecting roots does not authorize deletion.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalWorkflowLiveSet {
     /// Lowercase hex stage hashes declared by every live
@@ -85,96 +61,40 @@ impl LocalWorkflowLiveSet {
     }
 }
 
-/// Walk the local experiment metadata cache and return the
-/// [`LocalWorkflowLiveSet`] implied by every `.meta.json` blob the
-/// cache contains.
+/// Collect roots from experiment metadata and checkpoint state.
 ///
-/// Behavior:
-/// - A missing metadata parent contributes no metadata entries rather than an
-///   error. Checkpoint state is still scanned, because a crash can leave a
-///   durable lineage after its summary blob was not written.
-/// - Entries that aren't regular files or whose name doesn't end in
-///   `.meta.json` are ignored silently — the cache shares its parent
-///   with experiment-scratch tmpdirs handled by
-///   [`crate::exp_worktree::sweep_orphan_experiment_tmpdirs`].
-/// - Parse errors on individual metadata blobs log a `warn!` and skip the
-///   blob.
-/// - Checkpoint state is validated after metadata. A missing, malformed, or
-///   unreferenced checkpoint payload returns an error so a destructive caller
-///   cannot mistake unknown state for unreachable state.
-///   The live set is the union of successfully-parsed blobs, never a
-///   "partially determined" set that could misgate a delete.
-///
-/// Filesystem and checkpoint-contract errors are returned so a destructive
-/// caller can fail closed; malformed legacy metadata blobs remain logged and
-/// skipped for compatibility.
+/// Missing parents contribute no entries. Unrelated filenames are ignored;
+/// metadata files must be regular files named `<experiment-id>.meta.json`.
+/// Enumeration, read, schema, identity, or checkpoint errors abort the walk so
+/// callers cannot mistake a partial live set for a complete one.
 pub fn collect_local_workflow_live_set(repo_root: &Path) -> Result<LocalWorkflowLiveSet> {
     let parent = repo_root.join(EXP_META_PARENT_REL);
     let mut live = LocalWorkflowLiveSet::default();
     match fs::read_dir(&parent) {
         Ok(entries) => {
             for entry in entries {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!(error = %e, "workflow gc: dir entry unreadable; skipping");
-                        continue;
-                    }
-                };
+                let entry = entry.map_err(CrabError::Io)?;
                 let path = entry.path();
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        warn!(path = %path.display(), error = %error, "workflow gc: metadata entry stat failed; skipping");
-                        continue;
-                    }
+                let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
                 };
+                let Some(raw_id) = name.strip_suffix(EXP_META_SUFFIX) else {
+                    continue;
+                };
+                let metadata = fs::symlink_metadata(&path).map_err(CrabError::Io)?;
                 if metadata.file_type().is_symlink() || !metadata.is_file() {
-                    // Tmpdir worktrees and other siblings live in this
-                    // directory; only plain `.meta.json` files describe
-                    // experiments. Silently skip everything else.
-                    continue;
+                    return Err(CrabError::CorruptObject {
+                        path: path.display().to_string(),
+                        reason: "experiment metadata must be a regular file".into(),
+                    });
                 }
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                if !name.ends_with(EXP_META_SUFFIX) {
-                    continue;
-                }
-
-                let bytes = match fs::read(&path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "workflow gc: metadata read failed; skipping",
-                        );
-                        continue;
-                    }
-                };
-
-                let meta: ExperimentMetadata = match serde_json::from_slice(&bytes) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        // Malformed blob — partial write, disk corruption,
-                        // or forward-compat drift. Don't fail the live-set
-                        // walk: the remote GC walker's grace period is the
-                        // backstop for genuinely stale objects whose
-                        // metadata became unreadable.
-                        warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "workflow gc: metadata parse failed; skipping",
-                        );
-                        continue;
-                    }
-                };
-
+                let id = raw_id.parse::<ExperimentId>()?;
+                let bytes = fs::read(&path).map_err(CrabError::Io)?;
+                // Unknown roots cannot safely be treated as unreachable. Abort
+                // rather than returning a partial set to a destructive caller.
+                let meta = ExperimentMetadata::from_json(&bytes, &id)?;
                 live.experiment_ids.insert(meta.exp_id);
-                for hex in meta.stages.values() {
-                    live.stage_hashes.insert(hex.clone());
-                }
+                live.stage_hashes.extend(meta.stages.into_values());
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -475,23 +395,21 @@ mod tests {
     }
 
     #[test]
-    fn collect_local_workflow_live_set_skips_malformed_blobs() {
+    fn collect_local_workflow_live_set_rejects_malformed_metadata() {
         let tmp = TempDir::new().unwrap();
         let valid_id = ExperimentId::new_v7();
         write_meta(tmp.path(), &make_meta(valid_id, &["aa"]));
-
-        // Drop a garbage file alongside the valid one. It must not
-        // propagate as an error — the walker keeps going and returns
-        // only the artifacts it could parse.
-        let dir = tmp.path().join(EXP_META_PARENT_REL);
-        let garbage = dir.join("not-a-uuid.meta.json");
-        fs::write(&garbage, b"{ this is not valid json").unwrap();
-
-        let live = collect_local_workflow_live_set(tmp.path()).expect("walk ok");
-        assert_eq!(live.experiment_ids.len(), 1);
-        assert!(live.experiment_ids.contains(&valid_id));
-        assert_eq!(live.stage_hashes.len(), 1);
-        assert!(live.stage_hashes.contains("aa"));
+        let corrupt_id = ExperimentId::new_v7();
+        let path = tmp
+            .path()
+            .join(EXP_META_PARENT_REL)
+            .join(format!("{corrupt_id}.meta.json"));
+        fs::write(path, b"{ invalid json").unwrap();
+        let result = collect_local_workflow_live_set(tmp.path());
+        assert!(matches!(
+            result,
+            Err(CrabError::ExperimentMetadataMalformed { .. })
+        ));
     }
 
     #[test]

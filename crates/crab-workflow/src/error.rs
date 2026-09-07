@@ -24,6 +24,16 @@ pub enum WorkflowError {
         expected_etag: Option<String>,
     },
 
+    /// Experiment metadata is not valid JSON for the supported schema.
+    #[error("malformed experiment metadata for {id}: {source}")]
+    ExperimentMetadataMalformed {
+        /// Requested experiment ID.
+        id: String,
+        /// Original JSON decoding failure.
+        #[source]
+        source: serde_json::Error,
+    },
+
     /// A persisted workflow object does not match its declared identity.
     #[error("corrupt object at {path}: {reason}")]
     CorruptObject {
