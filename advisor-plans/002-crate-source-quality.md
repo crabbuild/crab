@@ -2419,3 +2419,54 @@ is still invalidated by the commit changes exercised in the fixtures. No source
 or dependency changes followed the successful sequential build. Formatting and
 diff checks pass. This batch is ready for grouped publication; current PR CI
 continues to qualify c808a1553d2, not these local follow-ups.
+
+
+### Checked push-lock deadlines
+
+Push-lock acquisition and both renewal write paths added TTL seconds to the
+Unix clock without checking overflow. Renewal also added a duration directly
+to Instant. A retained regression invokes the public acquisition paths with
+Duration::MAX and panics on the old source before reaching its assertion.
+Current origin/main contains the same four Unix additions and Instant addition.
+
+A shared expiry helper now returns Configuration when the Unix sum cannot be
+represented. Renewal validates before a holder lookup/CAS and recomputes the
+expiry for each write attempt, since retries can cross clock seconds. Its
+monotonic retry deadline uses Instant::checked_add. No arbitrary maximum TTL,
+new option, dependency, public variant, or wire-format change is introduced.
+The native Instant documentation specifies that checked_add returns None when
+the platform cannot represent the result.
+
+Evidence map: product metadb/push callers construct Duration from resolved
+push_lock_ttl_secs; product config validates a minimum (>20) but not an upper
+limit. The public crate context also accepts Duration directly. Context ref,
+internal, and nonblocking acquisition converge on the two checked creation
+paths. PushLock::renew and renew_if_holder converge on renew_one; token fast
+CAS and read-after-conflict renewal use the same expiry helper. Background
+heartbeat and while_renewing preserve the existing error/drain/release policy.
+The Duration::MAX reproducer is a crate API test, not a claim that TOML can
+encode every u64 value.
+
+Siblings: push admission and GC fences use saturating timestamp arithmetic and
+minimum-TTL validation, rather than these unchecked additions. Their large-TTL
+and clock policies remain separate qualification work. Short-TTL renewal cadence
+also remains outside this overflow fix; the product minimum is unchanged.
+
+Is this the best fix? Checked arithmetic rejects invalid input through the
+existing Result boundary instead of panicking or changing the requested lease
+by saturation. The shared helper removes repeated expiry policy at all four
+writes. The renewal preflight prevents an invalid duration from causing storage
+work, while recalculation in each attempt preserves the existing clock behavior.
+
+Proof: all 30 push-lock tests pass, including the new public-path regression,
+zero storage requests for oversized TTLs, renewal/release retries, expiration,
+reclamation, and tombstone protection. The old regression fails with arithmetic
+overflow. This does not qualify deployed backend behavior or every platform's
+Instant bound. Consumer build is required before grouped publication.
+
+The existing while_renewing regression passes both work-result outcomes after
+lost-lease cancellation and draining. Strict all-target Clippy and warnings-denied
+rustdoc pass with object-store-lock. Heartbeat source confirms any renewal error
+cancels the push and stops the heartbeat. Formatting and diff checks pass.
+Production growth provides the common checked expiry and platform-checked retry
+deadline; regression coverage accounts for the remaining source growth.

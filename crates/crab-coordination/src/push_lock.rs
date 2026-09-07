@@ -263,7 +263,7 @@ impl PushLockAcquireContext {
         ttl: Duration,
     ) -> Result<PushLock> {
         let holder = generate_holder_id();
-        let expires_at = unix_now() + ttl.as_secs();
+        let expires_at = lease_expiry(ttl)?;
         let known_existing = !self.known_paths.insert(path.clone());
         let etag = acquire_one(
             &self.store,
@@ -293,7 +293,7 @@ impl PushLockAcquireContext {
         ttl: Duration,
     ) -> Result<PushLock> {
         let holder = generate_holder_id();
-        let expires_at = unix_now() + ttl.as_secs();
+        let expires_at = lease_expiry(ttl)?;
         let body = serialize_payload(
             &path,
             &PushLockPayload::new(&holder, expires_at, ttl.as_secs()),
@@ -689,7 +689,15 @@ async fn renew_one(
 ) -> Result<UpdateVersion> {
     // Renewal retries must finish before the next lease window expires. A
     // late retry could let a slow owner outlive a legitimate reclamation.
-    let deadline = Instant::now() + (ttl / 3).max(Duration::from_secs(1));
+    // Reject an invalid diagnostic expiry before a holder lookup or CAS.
+    // Each retry recomputes it because the wall clock may have advanced.
+    lease_expiry(ttl)?;
+    let deadline = Instant::now()
+        .checked_add((ttl / 3).max(Duration::from_secs(1)))
+        .ok_or_else(|| CoordinationError::Configuration {
+            key: "lease duration exceeds the monotonic deadline range".into(),
+            origin: "push lock renewal".into(),
+        })?;
     retry_coordination_operation_until(path, holder, deadline, || {
         renew_one_once(store, path, holder, ttl, etag.clone())
     })
@@ -707,7 +715,7 @@ async fn renew_one_once(
         let object_path = Path::from(path);
         let body = serialize_payload(
             path,
-            &PushLockPayload::new(holder, unix_now() + ttl.as_secs(), ttl.as_secs()),
+            &PushLockPayload::new(holder, lease_expiry(ttl)?, ttl.as_secs()),
         )?;
         return match update(store, &object_path, body, etag).await {
             Ok(etag) => Ok(etag),
@@ -751,7 +759,7 @@ async fn renew_one_after_cas_conflict(
     }
     let body = serialize_payload(
         path,
-        &PushLockPayload::new(holder, unix_now() + ttl.as_secs(), ttl.as_secs()),
+        &PushLockPayload::new(holder, lease_expiry(ttl)?, ttl.as_secs()),
     )?;
     update(store, &object_path, body, etag)
         .await
@@ -1235,6 +1243,15 @@ pub(crate) fn generate_holder_id() -> String {
     format!("pid-{}-{nanos}-{sequence}", std::process::id())
 }
 
+fn lease_expiry(ttl: Duration) -> Result<u64> {
+    unix_now()
+        .checked_add(ttl.as_secs())
+        .ok_or_else(|| CoordinationError::Configuration {
+            key: "lease duration exceeds the Unix expiry range".into(),
+            origin: "push lock".into(),
+        })
+}
+
 /// Returns the current Unix timestamp in seconds.
 #[must_use]
 pub fn unix_now() -> u64 {
@@ -1409,6 +1426,48 @@ mod tests {
         .release()
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_lease_deadlines_fail_before_storage_requests() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let store: Arc<dyn ObjectStore> = Arc::new(RequestCountingStore {
+            inner: Arc::new(InMemory::new()),
+            requests: Arc::clone(&requests),
+            fail_next_create: AtomicBool::new(false),
+            fail_next_get: AtomicBool::new(false),
+            fail_next_update: AtomicBool::new(false),
+        });
+        let mut context = PushLockAcquireContext::new(Arc::clone(&store));
+        for operation in 0..3 {
+            let result = match operation {
+                0 => {
+                    context
+                        .acquire_ref("repo", "refs/heads/main", Duration::MAX)
+                        .await
+                }
+                1 => {
+                    context
+                        .acquire_internal("repo", GIT_MANIFEST_RESOURCE, Duration::MAX)
+                        .await
+                }
+                _ => {
+                    context
+                        .try_acquire_internal("repo", GIT_MANIFEST_RESOURCE, Duration::MAX)
+                        .await
+                }
+            };
+            assert!(matches!(
+                result,
+                Err(CoordinationError::Configuration { .. })
+            ));
+        }
+        let result = PushLock::renew_if_holder(&store, "repo/lock", "owner", Duration::MAX).await;
+        assert!(matches!(
+            result,
+            Err(CoordinationError::Configuration { .. })
+        ));
+        assert_eq!(requests.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

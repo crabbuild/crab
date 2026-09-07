@@ -32,6 +32,8 @@ Single repository mutation                 Active-active mutation
 `PushLock` protects a Git ref or internal resource under a repository prefix.
 It has a default five-minute TTL, holder-checked release, renewal, and
 expired-lease reclamation. Enable it with `object-store-lock`.
+Unrepresentable expiry or renewal deadlines return a configuration error;
+deadline arithmetic must not panic or wrap into an expired lease.
 
 ### Lease lifecycle
 

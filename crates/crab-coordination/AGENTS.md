@@ -36,6 +36,9 @@ Trace one path: `crates/crab-write/src/generation.rs` → `while_renewing` in
 - Do not conflate ref leases, GC fences, and active-active transaction state; inspect the corresponding owner contract before moving authority boundaries.
   Source: `crates/crab-coordination/src/write_coordinator.rs`.
 
+- Check both Unix expiry and monotonic renewal-deadline arithmetic. Reject unrepresentable durations before storage access; retain fresh expiry calculation on each renewal attempt.
+  Source: `crates/crab-coordination/src/push_lock.rs`.
+
 ## Features and platform
 
 Empty default. `object-store-lock` exposes lease/fence/admission code. `coordinator-dynamodb`, `coordinator-spanner`, and `coordinator-cosmosdb` enable their provider adapters. Provider SDK semantics require locked source review and dedicated backend proof; do not assume default tests exercise those services.
