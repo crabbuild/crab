@@ -311,6 +311,11 @@ impl CachingStore {
 
     /// Expose this cache-aware store as an [`ObjectStore`] for read-only
     /// dependencies such as SlateDB.
+    ///
+    /// Unconditional immutable reads may return synthetic metadata without an
+    /// origin ETag or version. This includes HEAD requests, unlike [`Self::head`].
+    /// Conditional and versioned requests bypass caches to preserve origin
+    /// preconditions and metadata; mutable paths always bypass caches.
     pub fn object_store(&self) -> Arc<dyn ObjectStore> {
         Arc::new(CacheAwareObjectStore {
             store: self.clone(),
@@ -348,27 +353,16 @@ impl CachingStore {
         self.cache_client.is_some() && self.mode.dedup_enabled()
     }
 
-    /// Read an object, returning its body and CAS token.
+    /// Read object bytes and their origin token when available.
     ///
-    /// For immutable paths the lookup order is:
-    /// 1. Local disk cache (hash-verified)
-    /// 2. Remote cache service (when configured)
-    /// 3. Origin S3
+    /// Mutable paths go directly to origin. Immutable reads try local disk,
+    /// then the optional cache service, then origin. Eligible origin reads
+    /// warm the local cache for subsequent requests.
     ///
-    /// On a cache miss the fetched data is written back to the local
-    /// cache for future reads. Mutable paths always go direct to origin.
-    ///
-    /// # ETag semantics for cache hits
-    ///
-    /// When the response is served from a cache (local disk or remote
-    /// service), the returned `ETag` has `e_tag: None` and
-    /// `version: None`. This synthetic ETag must **not** be used for
-    /// subsequent CAS updates - CAS on a cached immutable path would
-    /// reject any update with a meaningless pre-condition. In practice,
-    /// cached paths (shards and xorbs) are content-addressed and
-    /// never updated, so no caller uses the returned ETag for CAS.
-    /// Mutable paths (refs, manifests) skip the cache entirely and
-    /// always get a real ETag from origin. See finding CR11-F3.
+    /// Cache hits return an [`ETag`] with no `e_tag` or `version`; that
+    /// synthetic token cannot authorize CAS updates. Use [`Self::head`] when
+    /// origin metadata is required, and retain conditional origin checks when
+    /// publishing a write.
     pub async fn get_with_etag(&self, path: &Path) -> Result<(Bytes, ETag)> {
         if let Some(max_bytes) = immutable_read_limit(path) {
             return self.get_with_etag_bounded(path, max_bytes).await;
@@ -1271,6 +1265,8 @@ impl ObjectStore for CacheAwareObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        // Cache metadata cannot evaluate origin preconditions or select a
+        // version. Forward the complete request before consulting any cache.
         if !cacheable_get_options(&options)
             || classify_path(location.as_ref()) == PathClass::Mutable
         {
@@ -1551,7 +1547,11 @@ fn immutable_read_limit(path: &Path) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
+#[expect(clippy::unwrap_used, reason = "test assertions")]
+#[cfg_attr(
+    feature = "remote-client",
+    expect(clippy::expect_used, reason = "remote service test assertions")
+)]
 mod tests {
     use super::*;
 
@@ -4269,6 +4269,102 @@ mod tests {
         assert!(result.unknown.contains(&120_002));
         if let Some(shutdown) = server.shutdown.take() {
             let _ = shutdown.send(());
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_and_versioned_reads_bypass_a_warm_immutable_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = origin_store();
+        let (body, hash) = test_xorb(b"origin preconditions remain authoritative");
+        let path = content_path("xorbs", &hash);
+        origin.put(&path, body.clone()).await.unwrap();
+        let expected = origin.head(&path).await.unwrap();
+        let cached = CachingStore::new_with_local_cache(
+            origin.clone(),
+            no_cache_config(),
+            Arc::new(LocalCache::new(tmp.path().join("cache"))),
+        )
+        .unwrap();
+        cached.get_with_etag(&path).await.unwrap();
+        let adapter = cached.object_store();
+        let result = adapter
+            .get_opts(
+                &path,
+                GetOptions {
+                    if_match: expected.e_tag.clone(),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            expected.e_tag.is_some(),
+            "fixture must provide an origin ETag"
+        );
+        assert_eq!(result.meta, expected);
+        assert_eq!(result.bytes().await.unwrap(), body);
+
+        origin.delete(&path).await.unwrap();
+        assert_eq!(
+            adapter.get(&path).await.unwrap().bytes().await.unwrap(),
+            body,
+            "positive control must still read the warm immutable cache"
+        );
+        let timestamp = SystemTime::UNIX_EPOCH.into();
+        let cases = [
+            (
+                "if-match",
+                GetOptions {
+                    if_match: Some("*".into()),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "if-none-match",
+                GetOptions {
+                    if_none_match: Some("*".into()),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "if-modified-since",
+                GetOptions {
+                    if_modified_since: Some(timestamp),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "if-unmodified-since",
+                GetOptions {
+                    if_unmodified_since: Some(timestamp),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "version",
+                GetOptions {
+                    version: Some("recorded-version".into()),
+                    ..GetOptions::default()
+                },
+            ),
+        ];
+        for (name, options) in cases {
+            for head in [false, true] {
+                let result = adapter
+                    .get_opts(
+                        &path,
+                        GetOptions {
+                            head,
+                            ..options.clone()
+                        },
+                    )
+                    .await;
+                assert!(
+                    matches!(result, Err(object_store::Error::NotFound { .. })),
+                    "{name}, head={head}: {result:?}"
+                );
+            }
         }
     }
 

@@ -50,7 +50,7 @@ not claims that the named code is defective.
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
 | crab-cache | Cache keys and invalidation remain | Diagnostic slice and README navigation verified |
-| crab-cache-store | Startup outcomes; origin authority and range qualification remain | Startup slice verified |
+| crab-cache-store | Range and broader integrity qualification remain | Startup, conditional/versioned bypass, and metadata authority documented and verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
@@ -1977,3 +1977,56 @@ The existing macOS debug unwind-size warning remains. CLI library Clippy has
 no new diagnostic is observed. The previously recorded main count is 494.
 Formatting and diff checks pass. Keep this batch local while the current
 published head's CI completes, then include it in the next grouped PR update.
+
+### Cache adapter metadata and origin preconditions
+
+Inspection found a documentation ambiguity rather than a new routing defect:
+`CachingStore::head` always delegates to origin, while the ObjectStore adapter
+intentionally uses cache-service HEAD for unconditional immutable requests and
+synthesizes metadata. Its ETag/version are absent and its modification time is
+response-construction time. The prior scoped guide said all HEAD operations
+retain origin authority; the existing remote HEAD test contradicts that claim.
+
+The README now compares the direct store, mutable adapter reads, conditional
+and versioned adapter reads, unconditional immutable reads, and adapter HEAD.
+The public adapter docs state the same boundary. `get_with_etag` rustdoc is
+shorter, provider-neutral, and explains synthetic tokens without a stale task
+identifier or an unsupported blanket claim about every consumer's CAS usage.
+The early-bypass comment explains why cached metadata cannot evaluate origin
+preconditions or select an object version. Runtime routing is unchanged.
+
+Dependency proof: pinned object_store 0.14.1 `ObjectStoreExt::head` delegates to
+`get_opts` with `head = true`; GetOptions defines ETag/time preconditions and
+version selection. The adapter's `cacheable_get_options` checks all five
+selectors before any cache lookup. `head_immutable_object` and
+`bytes_get_result` own synthetic immutable HEAD metadata. The direct `head`
+method and explicit cache-service HEAD method are distinct sibling contracts.
+
+Consumer map: `crab-read::StoreClient` file-index lookup and batch lookup ->
+`cache_aware_storage` -> `object_store` adapter -> SlateDB-backed metadata
+sessions. Hydrate and remote-helper metadata setup also use this facade.
+Read-through range helpers remain a separate inspection target.
+
+A retained contract test warms a real local immutable cache and first checks
+that a successful conditional GET returns the full origin ObjectMeta and body.
+After deleting origin, unconditional GET still succeeds from cache. Each of
+if-match, if-none-match, modified-since, unmodified-since, and explicit version
+then returns origin NotFound for GET and HEAD rather than cached success.
+The test passes both without default features and with remote-client enabled;
+the latter enables the feature but does not configure a remote service in this
+new fixture.
+
+Five existing remote-enabled tests also pass: direct HEAD, warm cache-service
+HEAD, adapter HEAD without origin GET, mutable-path bypass, and explicit
+cache-service mutable-path rejection. These use loopback service fixtures,
+not live deployed providers. Strict remote-client all-target Clippy passes.
+This establishes the documented API distinction and strengthens regression
+coverage; it does not establish all range, freshness, or cache-corruption paths.
+
+Minimal-feature strict Clippy exposed an unfulfilled expect_used expectation:
+all four test expect() calls are behind remote-client, but the module-level
+expectation was unconditional. Gate that expectation with the same feature;
+unwrap_used remains expected for both test builds. Strict all-target Clippy
+now passes with and without remote-client, without disabling the unfulfilled
+expectations lint. Rustdoc builds with warnings denied and no dependencies
+rendered. Formatting and diff checks pass. No routing or dependency changes.

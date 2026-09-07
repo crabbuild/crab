@@ -55,6 +55,21 @@ do not publish any local placement metadata. Hydration's
 `get_xorb_chunks_without_install` reads a bounded complete body and installs
 no duplicate full xorb; decoded-range caching belongs to `crab-read`'s runtime.
 
+### Choose the metadata contract
+
+| API/request | Metadata authority |
+| --- | --- |
+| `CachingStore::head` | Always origin; retains its ETag, version, and modification time. |
+| `object_store()` with mutable paths | Always origin, including HEAD. |
+| `object_store()` with conditions or a version | Entire request goes to origin, including HEAD and ranges. |
+| Unconditional immutable adapter reads | May use caches; synthesized results have no ETag/version and use the response construction time. |
+| Unconditional immutable adapter HEAD | May use cache-service HEAD without fetching the body; otherwise asks origin for size and synthesizes the result. |
+
+Use origin metadata for CAS and freshness decisions. Do not interpret a
+synthesized modification time as the object's creation or update time.
+Explicit cache-service HEAD/range methods query that service without origin
+fallback; they are separate from the read-through adapter.
+
 ### Process-local result retention
 
 The process-local xorb result cache retains at most 4,096 entries and charges
