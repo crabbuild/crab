@@ -236,3 +236,82 @@ async fn native_git_lfs_push_and_clone_transfer_exact_large_file() {
     server.finish_maintenance().await.unwrap();
     server.runtime.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_lfs_response_fails_http_body_and_releases_capacity() {
+    for cancel in [false, true] {
+        use futures_util::StreamExt;
+
+        let mut server = maintenance_tests::fixture().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        Arc::get_mut(&mut server).unwrap().port = port;
+        let repo = &server.repositories[&("team".into(), "repo".into())];
+        let oid: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(b"hello").into();
+        crab_lfs::LfsObjectStore::new(repo.store.clone(), &repo.config.prefix)
+            .put(&oid, bytes::Bytes::from_static(b"hello"))
+            .await
+            .unwrap();
+
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let body_gate = Arc::clone(&gate);
+        let app = router(Arc::clone(&server)).layer(axum::middleware::from_fn(
+            move |request: Request, next: axum::middleware::Next| {
+                let gate = Arc::clone(&body_gate);
+                async move {
+                    let (parts, body) = next.run(request).await.into_parts();
+                    // Keep the real handler's body unpolled until headers reach the
+                    // client, making cancellation timing independent of socket speed.
+                    let delayed = futures_util::stream::once(async move {
+                        gate.notified().await;
+                        body
+                    })
+                    .flat_map(Body::into_data_stream);
+                    axum::response::Response::from_parts(parts, Body::from_stream(delayed))
+                }
+            },
+        ));
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        let http = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(stopped.cancelled_owned())
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .http1_only()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/git/team/repo.git/info/lfs/objects/{HELLO}?size=5"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(server.git_admission.available_permits(), 3);
+        if cancel {
+            server.cancellation.cancel();
+        }
+        gate.notify_one();
+        let result = response.bytes().await;
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(5), http)
+            .await
+            .unwrap()
+            .unwrap();
+        server.runtime.shutdown().await;
+        if cancel {
+            assert!(
+                matches!(result, Err(ref error) if !error.is_timeout()),
+                "cancelled body must fail without relying on the client timeout"
+            );
+        } else {
+            assert_eq!(&result.unwrap()[..], b"hello");
+        }
+        assert_eq!(server.git_admission.available_permits(), 4);
+    }
+}

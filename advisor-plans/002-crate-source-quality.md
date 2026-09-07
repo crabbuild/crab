@@ -1611,3 +1611,29 @@ The published head remains 636f2a6b9f5 while CI runs. Two local HTTP documentati
 commits describe request validation/reservation ownership and distinguish handler
 admission from response-body ownership. Latest observed checks: eight successes,
 twelve running, one queued, nine skipped; no reported failures at that observation.
+
+### Live HTTP/1 LFS cancellation qualification
+
+A new loopback test exercises the production LFS route and response body through
+Axum/Hyper and an HTTP/1-only reqwest client. Test middleware delays polling the
+real body until the client receives headers. The cancellation case then cancels
+the server token and releases that gate: client body reading fails without its
+own timeout, and all four transfer permits return after the connection drains.
+A normal-download control runs through the same gate and receives exact `hello`
+bytes. Both cases verify a permit remains held after headers arrive.
+
+The two-case test passes, as does strict all-target HTTP-server Clippy. The
+required frontend build passes with its existing chunk-size warning. This closes
+the inspected LFS HTTP/1 response-framing and permit-release slice with a real
+client; it does not qualify release-download cancellation, archive worker
+shutdown, native Git-LFS clients, or cloud storage. No production transport
+behavior changed.
+
+CI on published 636f2a6b9f5 reports a repository-browser failure in job
+101751477879 (run 34124097720): the release tooltip has contrast 3.87 versus 4.5.
+packages/repository and .github/workflows/rust.yml are identical to origin/main;
+the job runs Node browser tests and releases.e2e.ts mocks API routes. No Rust
+server is executed by that failing test. This is source-level isolation evidence,
+not a fresh runtime reproduction on main. The check remains red; no UI test,
+threshold, snapshot, or baseline was changed. Other qualification jobs continue,
+so local commits remain unpublished to preserve their running head.
