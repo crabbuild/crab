@@ -79,7 +79,7 @@ pub async fn run_staging_stats(mode: OutputMode) -> Result<()> {
             lifecycle,
             files,
         };
-        emit_json("staging.stats", "1.0", payload);
+        emit_json("staging.stats", "1.0", payload)?;
         return Ok(());
     }
 

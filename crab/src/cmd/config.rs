@@ -152,7 +152,7 @@ fn run_project_config_get(key: &str, mode: OutputMode) -> Result<()> {
             }
             .to_owned(),
         };
-        emit_json("config.get", "1.0", payload);
+        emit_json("config.get", "1.0", payload)?;
         return Ok(());
     }
 
@@ -371,7 +371,7 @@ fn run_internal_config_get(key: &str, path: &Path, mode: OutputMode) -> Result<(
             value: resolved.value,
             source: resolved.source.to_owned(),
         };
-        emit_json("config.get", "1.0", payload);
+        emit_json("config.get", "1.0", payload)?;
         return Ok(());
     }
 

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
 use tokio::sync::RwLock;
@@ -2052,8 +2052,7 @@ fn serialize_system_time_opt<S: serde::Serializer>(
 ) -> std::result::Result<S::Ok, S::Error> {
     match time {
         Some(t) => {
-            let ms = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-            let s = crab_types::time::from_epoch_millis(ms);
+            let s = crab_types::time::from_system_time(*t).map_err(serde::ser::Error::custom)?;
             serializer.serialize_some(&s)
         }
         None => serializer.serialize_none(),
@@ -2096,6 +2095,20 @@ fn lock_poisoned() -> CrabError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
+    #[test]
+    fn timestamp_serialization_rejects_unrepresentable_dates() {
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        for time in [
+            epoch - std::time::Duration::from_millis(1),
+            epoch + std::time::Duration::from_hours(70_389_528),
+        ] {
+            assert!(
+                super::serialize_system_time_opt(&Some(time), serde_json::value::Serializer,)
+                    .is_err()
+            );
+        }
+    }
+
     use super::*;
 
     fn temp_registry() -> (tempfile::TempDir, Registry) {

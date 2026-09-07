@@ -336,7 +336,7 @@ fn write_fetch_json(
         })
         .collect();
     let payload = FetchJsonPayload { transfers };
-    emit_json("lfs.fetch", "1.1", &payload);
+    emit_json("lfs.fetch", "1.1", &payload)?;
     Ok(())
 }
 

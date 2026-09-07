@@ -245,7 +245,7 @@ pub fn run_dehydrate_in(
 
     let payload = DehydrateSummaryPayload::from_summary(&summary, elapsed);
 
-    match args.mode {
+    let output = match args.mode {
         OutputMode::Text => {
             println!(
                 "Dehydrated {} file(s), freed {} in {}",
@@ -271,22 +271,28 @@ pub fn run_dehydrate_in(
             if summary.failed > 0 {
                 println!("{} failed", summary.failed);
             }
+            Ok(())
         }
-        OutputMode::Json => {
-            emit_json("dehydrate", "1.0", &payload);
-        }
+        OutputMode::Json => emit_json("dehydrate", "1.0", &payload),
         OutputMode::Jsonl => {
             if let Some(stream) = &jsonl_stream
                 && let Ok(mut s) = stream.lock()
             {
-                s.emit_result(&payload);
+                s.emit_result(&payload)
+            } else {
+                Ok(())
             }
         }
-    }
+    };
 
     if let Some(error) = first_failure {
+        if let Err(output_error) = output {
+            eprintln!("could not emit dehydrate summary: {output_error}");
+        }
         return Err(error);
     }
+
+    output?;
 
     Ok(())
 }
@@ -942,12 +948,13 @@ fn dehydrate_batch_with_events(
             if let Some(stream) = jsonl_stream
                 && let Ok(mut s) = stream.lock()
             {
-                s.emit_file_done(FileDonePayload {
+                let output = s.emit_file_done(FileDonePayload {
                     path: rel_string,
                     bytes: 0,
                     duration_ms: 0,
                     status: "skipped".to_owned(),
                 });
+                crate::core::output::report_progress_output(output);
             }
             continue;
         }
@@ -960,12 +967,13 @@ fn dehydrate_batch_with_events(
                 if let Some(stream) = jsonl_stream
                     && let Ok(mut s) = stream.lock()
                 {
-                    s.emit_file_done(FileDonePayload {
+                    let output = s.emit_file_done(FileDonePayload {
                         path: rel_string,
                         bytes: original_size,
                         duration_ms: file_start.elapsed().as_millis() as u64,
                         status: "ok".to_owned(),
                     });
+                    crate::core::output::report_progress_output(output);
                 }
             }
             Err(e) => {
@@ -977,12 +985,13 @@ fn dehydrate_batch_with_events(
                 if let Some(stream) = jsonl_stream
                     && let Ok(mut s) = stream.lock()
                 {
-                    s.emit_file_done(FileDonePayload {
+                    let output = s.emit_file_done(FileDonePayload {
                         path: rel_string,
                         bytes: 0,
                         duration_ms: file_start.elapsed().as_millis() as u64,
                         status: "failed".to_owned(),
                     });
+                    crate::core::output::report_progress_output(output);
                 }
             }
         }

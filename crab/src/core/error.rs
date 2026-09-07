@@ -1202,9 +1202,16 @@ impl From<crab_vfs::VfsError> for CrabError {
     }
 }
 
+impl From<crab_types::time::TimestampError> for CrabError {
+    fn from(error: crab_types::time::TimestampError) -> Self {
+        Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+}
+
 impl From<crab_workflow::WorkflowError> for CrabError {
     fn from(error: crab_workflow::WorkflowError) -> Self {
         match error {
+            crab_workflow::WorkflowError::Timestamp(source) => Self::from(source),
             crab_workflow::WorkflowError::Cancelled => Self::Cancelled,
             crab_workflow::WorkflowError::NetworkTransient(source) => {
                 Self::NetworkTransient(source)
@@ -1928,6 +1935,7 @@ impl From<crab_write::WriteError> for CrabError {
                 path,
                 expected_etag: None,
             },
+            crab_write::WriteError::Timestamp(source) => Self::from(source),
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
             crab_write::WriteError::Metadata(source) => Self::from(source),

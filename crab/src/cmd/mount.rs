@@ -1770,7 +1770,7 @@ fn register_nfs_background_mount(
         source,
         git_ref,
         pid,
-        start_time: mounts_registry::now_iso8601(),
+        start_time: mounts_registry::now_iso8601()?,
         read_only: opts.read_only,
         name,
         backend: Some("nfs".to_owned()),
@@ -3466,7 +3466,7 @@ pub async fn run_mount_diff(path: &Path, json: bool) -> Result<()> {
                 cache_dir: context.overlay_paths.cache_dir.display().to_string(),
                 diff,
             },
-        );
+        )?;
         return Ok(());
     }
     print_overlay_diff(&diff);
@@ -3491,7 +3491,7 @@ pub async fn run_mount_export(path: &Path, destination: &Path, json: bool) -> Re
                 destination: destination.display().to_string(),
                 diff,
             },
-        );
+        )?;
         return Ok(());
     }
     println!(
@@ -3527,7 +3527,7 @@ pub async fn run_mount_reset(path: &Path, overlay: bool, yes: bool, json: bool) 
                 cache_dir: context.overlay_paths.cache_dir.display().to_string(),
                 diff,
             },
-        );
+        )?;
         return Ok(());
     }
     println!("Discarded {} overlay change(s).", diff.changes.len());
@@ -3645,7 +3645,7 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
                 cache_dir: context.overlay_paths.cache_dir.display().to_string(),
                 result,
             },
-        );
+        )?;
         return Ok(());
     }
 
@@ -4501,14 +4501,13 @@ fn read_last_refresh(cache_dir: &Path) -> (Option<String>, Option<String>) {
 
     let relative = format_relative_time(elapsed_secs);
 
-    // Compute absolute timestamp from mtime.
-    let mtime_secs = modified
+    let absolute = modified
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let absolute = crate::vfs::mounts_registry::format_unix_timestamp(mtime_secs);
-
-    (Some(absolute), Some(relative))
+        .ok()
+        .and_then(|duration| {
+            crate::vfs::mounts_registry::format_unix_timestamp(duration.as_secs()).ok()
+        });
+    (absolute, Some(relative))
 }
 
 /// Format seconds elapsed as a relative time string (e.g. "2 minutes ago").
@@ -5018,7 +5017,7 @@ fn run_daemon_list(daemon_root: &Path, mode: OutputMode) -> Result<()> {
             .map(|config| crate::vfs::daemon::read_persisted_status(config, daemon_root))
             .collect();
         let payload = DaemonListPayload { repos: statuses };
-        emit_json("daemon.list", "1.0", payload);
+        emit_json("daemon.list", "1.0", payload)?;
         return Ok(());
     }
 
@@ -5070,7 +5069,7 @@ async fn run_daemon_status(daemon_root: &Path, name: &str, mode: OutputMode) -> 
     let status = crate::vfs::daemon::read_status(&config, daemon_root).await;
     if mode == OutputMode::Json {
         let payload = DaemonStatusPayload(status);
-        emit_json("daemon.status", "1.0", payload);
+        emit_json("daemon.status", "1.0", payload)?;
         return Ok(());
     }
 
@@ -5280,7 +5279,7 @@ async fn run_daemon_commit(
                 mountpoint: paths.mount_path.display().to_string(),
                 result,
             },
-        );
+        )?;
         return Ok(());
     }
 

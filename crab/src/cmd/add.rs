@@ -1344,7 +1344,7 @@ async fn execute_add(
                 } else {
                     0.0
                 };
-                s.emit_progress(ProgressPayload {
+                let output = s.emit_progress(ProgressPayload {
                     operation: "push-plan".to_owned(),
                     current: plan_summary.files,
                     total: total_files,
@@ -1353,6 +1353,7 @@ async fn execute_add(
                     rate_bytes_per_sec: rate,
                     xorbs_produced: Some(plan_summary.prepared_xorbs),
                 });
+                crate::core::output::report_progress_output(output);
             }
         };
         let plan_result = if can_use_stream_prepared_plans(&staged_entries) {
@@ -1607,13 +1608,13 @@ async fn execute_add(
                 }
             }
             OutputMode::Json => {
-                emit_json("add", "1.0", &summary);
+                emit_json("add", "1.0", &summary)?;
             }
             OutputMode::Jsonl => {
                 if let Some(ref stream) = jsonl_stream
                     && let Ok(mut s) = stream.lock()
                 {
-                    s.emit_result(&summary);
+                    s.emit_result(&summary)?;
                 }
             }
         }
@@ -1678,12 +1679,13 @@ fn record_successful_file_result(
     if let Some(stream) = accounting.jsonl_stream
         && let Ok(mut s) = stream.lock()
     {
-        s.emit_file_done(FileDonePayload {
+        let output = s.emit_file_done(FileDonePayload {
             path: rel_path.to_string_lossy().into_owned(),
             bytes: result.size,
             duration_ms: result.duration_ms,
             status: "ok".to_owned(),
         });
+        crate::core::output::report_progress_output(output);
 
         let elapsed = accounting.start.elapsed();
         let rate = if elapsed.as_secs_f64() > 0.0 {
@@ -1691,7 +1693,7 @@ fn record_successful_file_result(
         } else {
             0.0
         };
-        s.emit_progress(ProgressPayload {
+        let output = s.emit_progress(ProgressPayload {
             operation: "staging".to_owned(),
             current: summary.files_staged + summary.files_skipped + summary.files_failed,
             total: accounting.total_candidate_files,
@@ -1700,6 +1702,7 @@ fn record_successful_file_result(
             rate_bytes_per_sec: rate,
             xorbs_produced: None,
         });
+        crate::core::output::report_progress_output(output);
     }
 
     staged_entries.push(StagedEntry {

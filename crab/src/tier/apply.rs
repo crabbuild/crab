@@ -123,7 +123,7 @@ pub async fn apply(
                 new_guard: guard
                     .as_ref()
                     .map_or(GuardSummary::None, GuardSummary::from),
-                applied_at: now_rfc3339_millis(),
+                applied_at: now_rfc3339_millis()?,
                 backup_path: None,
             });
         }
@@ -249,7 +249,7 @@ fn write_backup(
     guard: Option<&Guard>,
     provider: &str,
 ) -> Result<String> {
-    let ts = now_rfc3339_millis();
+    let ts = now_rfc3339_millis()?;
     // Replace colons in the timestamp for filesystem compatibility.
     let safe_ts = ts.replace(':', "-");
 
@@ -600,7 +600,7 @@ mod tests {
 
             Ok(PutOutcome {
                 new_guard: Guard::Etag("new-etag".to_string()),
-                applied_at: now_rfc3339_millis(),
+                applied_at: now_rfc3339_millis().unwrap(),
             })
         }
 
@@ -609,7 +609,7 @@ mod tests {
             *self.existing.lock().unwrap() = None;
             Ok(PutOutcome {
                 new_guard: Guard::None,
-                applied_at: now_rfc3339_millis(),
+                applied_at: now_rfc3339_millis().unwrap(),
             })
         }
 

@@ -40,7 +40,7 @@ not claims that the named code is defective.
 
 | Crate | Next source inspection | State |
 | --- | --- | --- |
-| crab-types | Pointer error sources; timestamp range contracts remain | Pointer slice verified |
+| crab-types | Pointer causes and checked timestamps; broader contract qualification remains | Pointer and timestamp slices verified |
 | crab-git | Shared delta decoder; discovery and process contracts remain | Delta slice verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Coverage count simplification; parser and reconstruction qualification remain | Coverage slice verified |
@@ -875,46 +875,86 @@ loopback validation, and the focused test route against server.rs. Formatting
 and git diff --check pass. This documentation-only change needs no Rust rebuild;
 historical verification claims were retained, not re-certified.
 
-## Timestamp range defect and migration boundary
+## Checked timestamp contract
 
-A compiled probe of the current crab-types time module produced:
+Status: focused validation complete; ready for draft PR review. Broader crate
+qualification remains in the coverage ledger.
 
-| Epoch milliseconds | Current output |
-| --- | --- |
-| 253402300799999 | `9999-12-31T23:59:59.999Z` |
-| 253402300800000 | `10000-01-01T00:00:00.000Z` |
-| 18446744073709551615 | `8354187-08-01T14:25:51.615Z` |
+The original helper, compiled directly from source, produced invalid RFC 3339:
+
+| Epoch milliseconds | Original output | Checked behavior |
+| --- | --- | --- |
+| 253402300799999 | `9999-12-31T23:59:59.999Z` | Same string |
+| 253402300800000 | `10000-01-01T00:00:00.000Z` | `TimestampError::OutOfRange` |
+| 18446744073709551615 | `8354187-08-01T14:25:51.615Z` | `TimestampError::OutOfRange` |
 
 [RFC 3339 section 5.6](https://www.rfc-editor.org/rfc/rfc3339#section-5.6)
-requires a four-digit year. from_epoch_millis accepts all u64 values without
-validation; epoch_secs_to_utc additionally narrows its day count to u32.
-now_rfc3339_millis silently maps pre-epoch clocks to the epoch and narrows u128
-milliseconds. This is an open correctness defect, not a formatting-only issue.
-The probe compiled the actual module with rustc into this checkout's external
-target directory; it did not copy the arithmetic into a separate implementation.
+requires four-digit years. The old calendar arithmetic also narrowed the day
+count, while the wall-clock wrapper silently replaced pre-epoch time with 1970.
+Release tag `v1.1.0` contains the helper and required string timestamp field.
+Valid wire output stays unchanged; invalid input produces a typed error.
 
-Caller map and required follow-through:
+### Ownership and consumer evidence
 
-- Shared writes: crab-write journal compaction, crab-auth-server receive/view,
-  and crab-workflow executor construct persisted timestamps. Resolve clock errors
-  before starting the affected publication/transition and preserve typed causes.
-- VFS daemon's serde hook can return a serializer error; it currently also
-  clamps pre-epoch SystemTime and narrows milliseconds. mounts_registry has a
-  separate whole-second civil-date implementation and a CLI mount display caller.
-- CLI import assemble converts signed window ends with saturating multiplication
-  and substitutes u64::MAX for negative values. Its commit_window already returns
-  Result. Window grouping uses signed seconds and can saturate window ends;
-  validate at the conversion boundary instead of manufacturing another date.
-- CLI tier/experiment/queue paths and JSON/JSONL envelopes consume the wall-clock
-  helper. Envelope error construction itself needs a timestamp, so blindly
-  propagating a clock error into the same error formatter would recurse.
+| Surface | Owner and caller | Failure policy |
+| --- | --- | --- |
+| Shared formatting | `crab-types/src/time.rs`: `from_epoch_millis`, `from_system_time`, wall-clock wrapper | Validate before narrowing; preserve pre-epoch source; truncate sub-millisecond precision |
+| Journal compaction | `crab-write/src/journal.rs`: `compact_ref_journal_until_idle` → metadata compaction | Resolve time before starting the next manifest transaction |
+| Protected manifests | `crab-auth-server/src/receive.rs` and `view.rs` | Typed error; view resolves time before segmented-bulk upload |
+| Stage execution | `crab-workflow/src/executor.rs`: `run_local` | Resolve start time before Running transition and child execution |
+| VFS serialization | `crab-vfs/src/daemon.rs` optional SystemTime serde hook | Return serializer error for unrepresentable dates |
+| Mount display | `crab-vfs/src/mounts_registry.rs` → CLI mount registration/display | Shared checked calendar; optional unavailable display remains absent |
+| Import commit dates | `crab/src/import/assemble.rs`: `commit_window` → `epoch_to_rfc3339` | Check signed conversion and multiplication; keep whole-second strings |
+| JSON/JSONL | `crab/src/core/output/`: envelopes, stream and command presenters | Construct checked timestamp before writing; preserve existing writer-error policy |
 
-The time helper and required string timestamp field are present in release tag
-v1.1.0. Preserve valid serialized output; do not silently change timestamp fields
-to nullable or emit expanded-year strings. The next implementation should make
-range failure explicit, migrate callers together, and give terminal output a
-non-recursive clock-error path. Do not add a second unchecked formatter or retain
-clamping as a compatibility shim. Validate year-9999 boundary/overflow, signed
-import inputs, serializer failure, and publication-before-error ordering. Full
-caller migration and tests remain outstanding; no production source changed in
-this investigation.
+All direct callers of the changed shared APIs were searched. Other independent
+calendar helpers in CLI auth status, Git push, repack, history recovery and xorb
+reconciliation remain separate inspection targets; this migration does not
+claim those formatters are qualified.
+
+### Output and cleanup rules
+
+- Terminal success presenters return output errors to the command boundary.
+- Informational progress callbacks report output failure and let workers drain.
+  Remote-helper stderr summaries follow the same policy: Git has already received
+  authoritative per-ref outcomes on stdout, so diagnostics cannot fail the helper.
+- Primary push, DAG, dehydration and experiment failures survive secondary
+  timestamp/output failure. Error reporting uses direct stderr, never another
+  timestamped envelope.
+- DAG summary follows stage completion and lockfile persistence. Add stops its
+  progress ticker before terminal output; hydration rejects failed machine-mode
+  batches before success output.
+- Experiment end-time construction follows checkpoint-supervisor joining;
+  worktree Drop owns cleanup on early errors. Checkpoint restoration resolves its
+  temporary filename timestamp before preparing files.
+- The CLI retains typed timestamp causes through its existing I/O error category.
+  No nullable timestamp, clamping shim or unchecked formatter was introduced.
+
+### Validation evidence
+
+| Check | Result |
+| --- | --- |
+| Shared time tests | 8 passed; strict types Clippy passed |
+| VFS mount registry | 19 tests passed with NFS |
+| VFS timestamp serializer | Pre-epoch and year-10000 regression passed |
+| Shared write/workflow/auth-server compile | Passed |
+| Default CLI check | Passed without warnings |
+| CLI output suite | 26 passed again after lifecycle adjustments |
+| Import timestamp boundaries | 2 passed after lifecycle adjustments |
+| Formatting / whitespace | Passed |
+| Strict default CLI library lint | Baseline debt, detailed below |
+| Strict affected shared-crate lint | All targets passed for types, write, workflow, auth-server, and VFS with NFS + FUSE |
+| Final VFS timestamp fixture rerun | Passed with NFS + FUSE |
+| Final CLI consumer check | Passed without warnings |
+| Publication | Prepared for draft PR #159 |
+
+Strict Clippy against current main `4b8b36b1870` reports 494 diagnostics; this
+branch reports 489. Of those, 484 match unchanged source lines, codes and
+messages exactly. Five are existing experiment/queue large-future findings,
+each eight bytes larger, with no new lint location or threshold crossing.
+No suppressions were added. This is baseline proof, not a clean CLI lint claim.
+
+The baseline checkout and Cargo target are separate on the mounted workspace.
+Local diagnostics are `/tmp/crab-089c-{main,current}-cli-clippy.jsonl`; comparison
+is `/tmp/crab-089c-clippy-comparison.json`. CLI test linking reports an unwind-table
+size warning for the large test binary; no Rust test failure was reported.

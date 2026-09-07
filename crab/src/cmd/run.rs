@@ -506,8 +506,7 @@ pub(crate) async fn run_in_with_options(
 
     if !discovered.is_empty() {
         if args.validate {
-            run_validate(repo_root, &discovered);
-            return Ok(());
+            return run_validate(repo_root, &discovered);
         }
         return run_with_yaml(args, repo_root, &discovered, mode, &config, options).await;
     }
@@ -627,11 +626,11 @@ async fn run_inline_single_stage(
     let cache_hit = cached.is_some() && !args.force;
 
     if args.explain_miss && !cache_hit {
-        emit_miss_explanation(&resolved, &stage_hash, mode, repo_root);
+        emit_miss_explanation(&resolved, &stage_hash, mode, repo_root)?;
     }
 
     if args.dry_run {
-        emit_plan(&resolved, &stage_hash, cache_hit, mode);
+        emit_plan(&resolved, &stage_hash, cache_hit, mode)?;
         return Ok(());
     }
 
@@ -937,7 +936,7 @@ async fn run_inline_single_stage(
         }
     };
 
-    emit_result(jsonl.as_mut(), &result, mode);
+    emit_result(jsonl.as_mut(), &result, mode)?;
     Ok(())
 }
 
@@ -1063,7 +1062,7 @@ async fn run_with_yaml(
 /// `crab run --validate` path. Parses `crab.yaml`, runs all
 /// semantic checks, and reports all errors as a structured JSON
 /// array. Exits 0 on valid, 2 on any error.
-fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
+fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) -> Result<()> {
     let mut errors: Vec<serde_json::Value> = Vec::new();
 
     // Layer 1+2: YAML syntax + schema validation (deny_unknown_fields).
@@ -1077,7 +1076,9 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
                     "path": path.display().to_string(),
                     "message": e.to_string(),
                 }));
-                emit_validate_json(&errors);
+                if let Err(error) = emit_validate_json(&errors) {
+                    eprintln!("could not emit workflow validation errors: {error}");
+                }
                 std::process::exit(2);
             }
         };
@@ -1088,7 +1089,9 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
                 errors.push(yaml_error_to_json(&error));
                 // Even on parse failure, try to report what we can.
                 // But we can't do semantic checks without a parsed workflow.
-                emit_validate_json(&errors);
+                if let Err(error) = emit_validate_json(&errors) {
+                    eprintln!("could not emit workflow validation errors: {error}");
+                }
                 std::process::exit(2);
             }
         }
@@ -1097,7 +1100,9 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
             Ok(w) => w,
             Err(e) => {
                 errors.push(yaml_error_to_json(&CrabError::from(e)));
-                emit_validate_json(&errors);
+                if let Err(error) = emit_validate_json(&errors) {
+                    eprintln!("could not emit workflow validation errors: {error}");
+                }
                 std::process::exit(2);
             }
         }
@@ -1163,15 +1168,18 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
             result["expanded_count"] = serde_json::json!(expanded_count);
         }
 
-        emit_validate_json(&result);
+        emit_validate_json(&result)?;
     } else {
-        emit_validate_json(&errors);
+        if let Err(error) = emit_validate_json(&errors) {
+            eprintln!("could not emit workflow validation errors: {error}");
+        }
         std::process::exit(2);
     }
+    Ok(())
 }
 
-fn emit_validate_json<T: Serialize>(data: T) {
-    emit_json("workflow.validate", "1.0", data);
+fn emit_validate_json<T: Serialize>(data: T) -> Result<()> {
+    emit_json("workflow.validate", "1.0", data)
 }
 
 /// Convert a [`CrabError`] into a structured JSON value for
@@ -1388,7 +1396,7 @@ async fn run_yaml_single_stage(
             upsert_lockfile(&mut lockfile, stage, &entry, repo_root, params)?;
             let yaml_stages: BTreeSet<StageName> = workflow.stages.keys().cloned().collect();
             prune_and_save_lockfile_via_ctx(&mut lockfile, &yaml_stages, lock_ctx, repo_root)?;
-            emit_result(jsonl.as_mut(), &result, mode);
+            emit_result(jsonl.as_mut(), &result, mode)?;
             Ok(())
         }
         Err(err) => {
@@ -2017,7 +2025,7 @@ async fn run_dag(
         jsonl_recovered = Some(inner.into_inner());
     }
 
-    emit_dag_summary(
+    let output = emit_dag_summary(
         jsonl_recovered.as_mut(),
         &stage_results,
         &succeeded,
@@ -2028,6 +2036,9 @@ async fn run_dag(
     );
 
     if !failed.is_empty() {
+        if let Err(output_error) = output {
+            eprintln!("could not emit workflow summary: {output_error}");
+        }
         let first = failed
             .iter()
             .next()
@@ -2041,6 +2052,7 @@ async fn run_dag(
         }));
     }
 
+    output?;
     Ok(())
 }
 
@@ -2260,7 +2272,8 @@ async fn emit_started_shared(
         attempt: 1,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_cache_checked_shared(
@@ -2280,7 +2293,8 @@ async fn emit_cache_checked_shared(
         hit_source: hit_source.to_owned(),
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_retry_shared(
@@ -2303,7 +2317,8 @@ async fn emit_retry_shared(
         exhausted: false,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    let output = stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_produced_shared(
@@ -2320,7 +2335,8 @@ async fn emit_produced_shared(
         exit_code: 0,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_hashed_shared(
@@ -2346,7 +2362,8 @@ async fn emit_hashed_shared(
             .collect(),
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_committed_shared(
@@ -2364,7 +2381,8 @@ async fn emit_committed_shared(
         cache_hit: result.cache_hit,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_failed_shared(
@@ -2387,8 +2405,11 @@ async fn emit_failed_shared(
         stderr_tail: None,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
-    stream.emit_error_info(crate::core::output::ErrorInfo::from(err));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
+    crate::core::output::report_progress_output(output);
+    if let Err(output_error) = stream.emit_error_info(crate::core::output::ErrorInfo::from(err)) {
+        eprintln!("error: {err}; could not emit structured error: {output_error}");
+    }
 }
 
 async fn emit_not_started_shared(
@@ -2405,18 +2426,21 @@ async fn emit_not_started_shared(
                 stage: stage.as_str().to_owned(),
                 reason: reason.to_owned(),
             };
-            stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            let output =
+                stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Json => {
             let payload = WorkflowStageNotStarted {
                 stage: stage.as_str().to_owned(),
                 reason: reason.to_owned(),
             };
-            emit_json(
+            let output = emit_json(
                 WORKFLOW_STAGE_NOT_STARTED_SCHEMA,
                 WORKFLOW_SCHEMA_VERSION,
                 payload,
             );
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Text => {
             warn!(stage = %stage, reason = %reason, "dag: stage not started");
@@ -2964,18 +2988,21 @@ fn emit_not_started(
             // `workflow.stage.not_started` isn't part of the
             // `WorkflowStageEvent` enum (it has no stage_hash) so
             // we route through the general schema-override path.
-            stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            let output =
+                stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Json => {
             let payload = WorkflowStageNotStarted {
                 stage: stage.as_str().to_owned(),
                 reason: reason.to_owned(),
             };
-            emit_json(
+            let output = emit_json(
                 WORKFLOW_STAGE_NOT_STARTED_SCHEMA,
                 WORKFLOW_SCHEMA_VERSION,
                 payload,
             );
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Text => {
             warn!(stage = %stage, reason = %reason, "dag: stage not started");
@@ -2995,11 +3022,11 @@ fn emit_dag_summary(
     not_started: &BTreeSet<StageName>,
     duration_ms: u64,
     mode: OutputMode,
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Json => {
             let summary = build_run_summary(results, succeeded, failed, not_started, duration_ms);
-            emit_json(WORKFLOW_RUN_SCHEMA, WORKFLOW_SCHEMA_VERSION, summary);
+            emit_json(WORKFLOW_RUN_SCHEMA, WORKFLOW_SCHEMA_VERSION, summary)?;
         }
         OutputMode::Jsonl => {
             // On the JSONL stream the terminal `result` line
@@ -3007,9 +3034,9 @@ fn emit_dag_summary(
             // uses. The stream's umbrella schema stays at
             // `workflow.stage.event`; the run-summary schema
             // rides in on the line's `schema` field.
-            let Some(stream) = jsonl else { return };
+            let Some(stream) = jsonl else { return Ok(()) };
             let summary = build_run_summary(results, succeeded, failed, not_started, duration_ms);
-            stream.emit_schema_event(WORKFLOW_RUN_SCHEMA, "result", &summary);
+            stream.emit_schema_event(WORKFLOW_RUN_SCHEMA, "result", &summary)?;
         }
         OutputMode::Text => {
             info!(
@@ -3021,6 +3048,7 @@ fn emit_dag_summary(
             );
         }
     }
+    Ok(())
 }
 
 /// Build the terminal [`WorkflowRunSummary`] payload from the
@@ -3174,7 +3202,7 @@ fn cache_only_emit_hit(
     if from_remote {
         result.source = Some("Remote".to_owned());
     }
-    emit_result(None, &result, mode);
+    emit_result(None, &result, mode)?;
     Ok(())
 }
 
@@ -4046,7 +4074,12 @@ fn mark_side_effects_skipped(stage: Option<&Stage>, result: &mut WorkflowStageRe
     }
 }
 
-fn emit_plan(resolved: &ResolvedStage, stage_hash: &StageHash, cache_hit: bool, mode: OutputMode) {
+fn emit_plan(
+    resolved: &ResolvedStage,
+    stage_hash: &StageHash,
+    cache_hit: bool,
+    mode: OutputMode,
+) -> Result<()> {
     let plan = WorkflowPlan {
         stage_name: resolved.stage.name.as_str().to_owned(),
         stage_hash: stage_hash.as_hex(),
@@ -4078,11 +4111,11 @@ fn emit_plan(resolved: &ResolvedStage, stage_hash: &StageHash, cache_hit: bool, 
     };
 
     match mode {
-        OutputMode::Json => emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan),
+        OutputMode::Json => emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan)?,
         OutputMode::Jsonl => {
             // Under --jsonl --dry-run we still emit a single envelope:
             // the plan is terminal, no streaming events make sense.
-            emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan);
+            emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan)?;
         }
         OutputMode::Text => {
             info!(
@@ -4095,6 +4128,7 @@ fn emit_plan(resolved: &ResolvedStage, stage_hash: &StageHash, cache_hit: bool, 
             );
         }
     }
+    Ok(())
 }
 
 fn emit_dag_plan(
@@ -4134,7 +4168,7 @@ fn emit_dag_plan(
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_DAG_PLAN_SCHEMA, "1.0", plan);
+            emit_json(WORKFLOW_DAG_PLAN_SCHEMA, "1.0", plan)?;
         }
         OutputMode::Text => {
             for stage in &plan.stages {
@@ -4175,13 +4209,13 @@ fn emit_result(
     jsonl: Option<&mut JsonlStream<std::io::Stdout>>,
     result: &WorkflowStageResult,
     mode: OutputMode,
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Json => emit_json(
             WORKFLOW_STAGE_RESULT_SCHEMA,
             WORKFLOW_SCHEMA_VERSION,
             result,
-        ),
+        )?,
         OutputMode::Jsonl => {
             if let Some(stream) = jsonl {
                 // Terminal `result` event carries the canonical
@@ -4189,7 +4223,7 @@ fn emit_result(
                 // stream's umbrella schema is
                 // `workflow.stage.event`, the final payload shape
                 // matches `--json` output byte-for-byte.
-                stream.emit_result(result);
+                stream.emit_result(result)?;
             }
         }
         OutputMode::Text => {
@@ -4203,6 +4237,7 @@ fn emit_result(
             );
         }
     }
+    Ok(())
 }
 
 fn emit_jsonl_started(
@@ -4217,7 +4252,8 @@ fn emit_jsonl_started(
         attempt: 1,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_cache_checked(
@@ -4235,7 +4271,8 @@ fn emit_jsonl_cache_checked(
         hit_source: hit_source.to_owned(),
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_produced(
@@ -4250,7 +4287,8 @@ fn emit_jsonl_produced(
         exit_code: 0,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_hashed(
@@ -4274,7 +4312,8 @@ fn emit_jsonl_hashed(
             .collect(),
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_committed(
@@ -4290,7 +4329,8 @@ fn emit_jsonl_committed(
         cache_hit: result.cache_hit,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_failed(
@@ -4314,10 +4354,13 @@ fn emit_jsonl_failed(
         stderr_tail: None,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
+    crate::core::output::report_progress_output(output);
     // Also flush a structured error-info terminal event so consumers
     // who only consume the final line see the full error envelope.
-    stream.emit_error_info(crate::core::output::ErrorInfo::from(err));
+    if let Err(output_error) = stream.emit_error_info(crate::core::output::ErrorInfo::from(err)) {
+        eprintln!("error: {err}; could not emit structured error: {output_error}");
+    }
 }
 
 fn emit_jsonl_retry(
@@ -4338,7 +4381,8 @@ fn emit_jsonl_retry(
         exhausted: false,
         elapsed_ms: None,
     };
-    stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    let output = stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    crate::core::output::report_progress_output(output);
 }
 
 /// Map a `CrabError` onto the `workflow.stage.failed` payload's
@@ -4533,7 +4577,7 @@ fn emit_miss_explanation(
     hash: &StageHash,
     mode: OutputMode,
     repo_root: &Path,
-) {
+) -> Result<()> {
     let lockfile_path = repo_root.join("crab.lock");
     let lockfile = Lockfile::load(&lockfile_path).unwrap_or_default();
     let stage_name = &resolved.stage.name;
@@ -4584,7 +4628,7 @@ fn emit_miss_explanation(
                             "diffs": diff_entries,
                         }
                     });
-                    emit_json("workflow.explain_miss", "1.0", payload);
+                    emit_json("workflow.explain_miss", "1.0", payload)?;
                 }
                 OutputMode::Text => {
                     info!(
@@ -4620,7 +4664,7 @@ fn emit_miss_explanation(
                             "diffs": [],
                         }
                     });
-                    emit_json("workflow.explain_miss", "1.0", payload);
+                    emit_json("workflow.explain_miss", "1.0", payload)?;
                 }
                 OutputMode::Text => {
                     info!(
@@ -4632,6 +4676,7 @@ fn emit_miss_explanation(
             }
         }
     }
+    Ok(())
 }
 
 fn hex_lower(bytes: &[u8; 32]) -> String {
@@ -4671,7 +4716,7 @@ pub fn abandon_in(repo_root: &Path, run_id: Uuid, mode: OutputMode) -> Result<()
                 "run_id": run_id.to_string(),
                 "outcome": "aborted",
             });
-            emit_json("workflow.abandon", "1.0", payload);
+            emit_json("workflow.abandon", "1.0", payload)?;
         }
         OutputMode::Text => {
             info!(run_id = %run_id, "workflow journal marked aborted");
@@ -4885,11 +4930,12 @@ async fn run_watch(
                         changed_paths: changed_paths.clone(),
                         coalesced_events: changed.len(),
                     };
-                    stream.emit_schema_event(
+                    let output = stream.emit_schema_event(
                         WORKFLOW_WATCH_TRIGGERED_SCHEMA,
                         "event",
                         &payload,
                     );
+                    crate::core::output::report_progress_output(output);
                 }
 
                 // Re-execute affected stages.

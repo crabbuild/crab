@@ -323,49 +323,29 @@ pub fn derive_name_from_source(source: &str) -> String {
     }
 }
 
-/// Get the current time as an ISO 8601 string (UTC).
-pub fn now_iso8601() -> String {
-    use std::time::SystemTime;
-
-    let Ok(duration) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
-        tracing::warn!("system clock is before UNIX epoch; using 0 as fallback");
-        return crab_types::time::from_epoch_millis(0);
-    };
-    let secs = duration.as_secs();
-
-    format_unix_timestamp(secs)
+/// Returns the current UTC time with whole-second precision.
+///
+/// Returns an error for a clock before the Unix epoch or beyond year 9999.
+pub fn now_iso8601() -> std::result::Result<String, crab_types::time::TimestampError> {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map_err(crab_types::time::TimestampError::BeforeEpoch)?;
+    format_unix_timestamp(duration.as_secs())
 }
 
-/// Format a Unix timestamp as ISO 8601 UTC string.
-pub fn format_unix_timestamp(secs: u64) -> String {
-    // Days since epoch.
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant).
-    let (year, month, day) = civil_from_days(days as i64);
-
-    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
-}
-
-/// Convert days since 1970-01-01 to (year, month, day).
-/// Algorithm by Howard Hinnant.
-fn civil_from_days(days: i64) -> (i32, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = i64::from(yoe) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    (year as i32, m, d)
+/// Formats Unix seconds as RFC 3339 UTC, rejecting dates beyond year 9999.
+pub fn format_unix_timestamp(
+    secs: u64,
+) -> std::result::Result<String, crab_types::time::TimestampError> {
+    let millis = secs
+        .checked_mul(1000)
+        .ok_or(crab_types::time::TimestampError::OutOfRange)?;
+    let mut timestamp = crab_types::time::from_epoch_millis(millis)?;
+    // The checked formatter guarantees a four-digit year and millisecond suffix.
+    // Mount display uses whole seconds without a second calendar implementation.
+    timestamp.truncate(19);
+    timestamp.push('Z');
+    Ok(timestamp)
 }
 
 // ---------------------------------------------------------------------------
@@ -594,7 +574,7 @@ mod tests {
 
     #[test]
     fn now_iso8601_format() {
-        let ts = now_iso8601();
+        let ts = now_iso8601().unwrap();
         // Should match YYYY-MM-DDTHH:MM:SSZ pattern.
         assert_eq!(ts.len(), 20);
         assert!(ts.ends_with('Z'));
@@ -608,13 +588,23 @@ mod tests {
     #[test]
     fn format_known_timestamp() {
         // 2024-01-15T10:30:00Z = 1705314600 seconds since epoch.
-        let ts = format_unix_timestamp(1_705_314_600);
+        let ts = format_unix_timestamp(1_705_314_600).unwrap();
         assert_eq!(ts, "2024-01-15T10:30:00Z");
     }
 
     #[test]
+    fn format_timestamp_rejects_out_of_range_seconds() {
+        for seconds in [253_402_300_800, u64::MAX] {
+            assert!(matches!(
+                format_unix_timestamp(seconds),
+                Err(crab_types::time::TimestampError::OutOfRange)
+            ));
+        }
+    }
+
+    #[test]
     fn format_epoch() {
-        let ts = format_unix_timestamp(0);
+        let ts = format_unix_timestamp(0).unwrap();
         assert_eq!(ts, "1970-01-01T00:00:00Z");
     }
 

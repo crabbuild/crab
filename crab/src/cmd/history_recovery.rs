@@ -238,7 +238,7 @@ pub async fn run(
             {
                 warn!(%error, "failed to append historical prune audit event");
             }
-            emit_prune(&payload, command.output_mode());
+            emit_prune(&payload, command.output_mode())?;
             Ok(())
         }
         HistoryCmd::Verify(args) => {
@@ -250,7 +250,7 @@ pub async fn run(
                 cancel,
             )
             .await?;
-            emit_verification(&verified.verification, command.output_mode());
+            emit_verification(&verified.verification, command.output_mode())?;
             Ok(())
         }
         HistoryCmd::Restore(args) => {
@@ -260,7 +260,7 @@ pub async fn run(
             {
                 warn!(%error, "failed to append historical restore audit event");
             }
-            emit_restore(&payload, command.output_mode());
+            emit_restore(&payload, command.output_mode())?;
             Ok(())
         }
     }
@@ -322,7 +322,7 @@ async fn run_list(store: &Store, router: &StoreLayout, mode: OutputMode) -> Resu
     };
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(HISTORY_LIST_SCHEMA, HISTORY_SCHEMA_VERSION, &payload);
+            emit_json(HISTORY_LIST_SCHEMA, HISTORY_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -1264,10 +1264,10 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     (year, month, day)
 }
 
-fn emit_verification(payload: &HistoryVerificationPayload, mode: OutputMode) {
+fn emit_verification(payload: &HistoryVerificationPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(HISTORY_VERIFY_SCHEMA, HISTORY_SCHEMA_VERSION, payload);
+            emit_json(HISTORY_VERIFY_SCHEMA, HISTORY_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => println!(
             "verified generation {} {}: refs={} packs={} git_objects={} shards={} xorbs={} dependency_objects={} dependency_bytes={}",
@@ -1282,12 +1282,13 @@ fn emit_verification(payload: &HistoryVerificationPayload, mode: OutputMode) {
             payload.dependency_bytes
         ),
     }
+    Ok(())
 }
 
-fn emit_prune(payload: &HistoryPrunePayload, mode: OutputMode) {
+fn emit_prune(payload: &HistoryPrunePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(HISTORY_PRUNE_SCHEMA, HISTORY_SCHEMA_VERSION, payload);
+            emit_json(HISTORY_PRUNE_SCHEMA, HISTORY_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             let action = if payload.applied { "pruned" } else { "preview" };
@@ -1304,12 +1305,13 @@ fn emit_prune(payload: &HistoryPrunePayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_restore(payload: &HistoryRestorePayload, mode: OutputMode) {
+fn emit_restore(payload: &HistoryRestorePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(HISTORY_RESTORE_SCHEMA, HISTORY_SCHEMA_VERSION, payload);
+            emit_json(HISTORY_RESTORE_SCHEMA, HISTORY_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             let action = if payload.applied {
@@ -1329,6 +1331,7 @@ fn emit_restore(payload: &HistoryRestorePayload, mode: OutputMode) {
             );
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

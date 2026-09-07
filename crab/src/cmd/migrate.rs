@@ -1138,7 +1138,7 @@ pub fn run_migrate_from_dvc_with_options(
                 report,
                 journal_path: (!options.plan).then(|| journal_path.display().to_string()),
             },
-        );
+        )?;
         return Ok(());
     }
 
@@ -2698,15 +2698,16 @@ fn encode_hex(bytes: &[u8; 32]) -> String {
     blake3::Hash::from(*bytes).to_hex().to_string()
 }
 
-fn emit_dvc_migration_result(mode: OutputMode, result: DvcMigrationResult) {
+fn emit_dvc_migration_result(mode: OutputMode, result: DvcMigrationResult) -> Result<()> {
     match mode {
         OutputMode::Text => print_dvc_inventory_report(&result),
-        OutputMode::Json => emit_json(DVC_MIGRATION_SCHEMA, "1.0", result),
+        OutputMode::Json => emit_json(DVC_MIGRATION_SCHEMA, "1.0", result)?,
         OutputMode::Jsonl => {
             let mut stream = JsonlStream::new("migrate.from-dvc.event", "1.0", std::io::stdout());
-            stream.emit_result(result);
+            stream.emit_result(result)?;
         }
     }
+    Ok(())
 }
 
 fn apply_remote_mappings(inventory: &mut DvcInventory, mappings: &[String]) -> Result<()> {

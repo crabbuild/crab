@@ -302,7 +302,7 @@ fn run_list(mode: OutputMode) -> Result<()> {
             "skills.list",
             SKILLS_SCHEMA_VERSION,
             SkillListPayload { skills },
-        );
+        )?;
     } else {
         for skill in skills {
             println!("{skill}");
@@ -327,7 +327,7 @@ fn run_install(args: &InstallArgs) -> Result<()> {
     };
 
     if args.json {
-        emit_json("skills.install", SKILLS_SCHEMA_VERSION, payload);
+        emit_json("skills.install", SKILLS_SCHEMA_VERSION, payload)?;
     } else {
         println!(
             "installed {} as {} for {} at {}",

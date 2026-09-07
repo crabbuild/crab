@@ -112,7 +112,7 @@ pub fn run_version(mode: OutputMode) -> Result<()> {
             build_timestamp: env!("CRAB_BUILD_TIMESTAMP").to_owned(),
             schemas: schema_registry(),
         };
-        emit_json("version", "1.0", payload);
+        emit_json("version", "1.0", payload)?;
         return Ok(());
     }
 

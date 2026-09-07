@@ -307,7 +307,8 @@ impl ProgressSink for JsonlEnumerateSink<'_> {
             // tagged as a non-progress event. The schema field
             // carries `enumerate.event` via the stream header,
             // and the envelope `type` is set by the writer.
-            guard.emit_file_done(payload);
+            let output = guard.emit_file_done(payload);
+            crate::core::output::report_progress_output(output);
         }
     }
 }
@@ -334,7 +335,8 @@ impl IngestProgressSink for JsonlStageSink<'_> {
             duration_ms: event.duration_ms,
         };
         if let Ok(mut guard) = self.stream.lock() {
-            guard.emit_file_done(payload);
+            let output = guard.emit_file_done(payload);
+            crate::core::output::report_progress_output(output);
         }
     }
 }
@@ -363,7 +365,8 @@ impl AssembleProgressSink for JsonlAssembleSink<'_> {
             files_deleted: event.files_deleted,
         };
         if let Ok(mut guard) = self.stream.lock() {
-            guard.emit_file_done(payload);
+            let output = guard.emit_file_done(payload);
+            crate::core::output::report_progress_output(output);
         }
     }
 }

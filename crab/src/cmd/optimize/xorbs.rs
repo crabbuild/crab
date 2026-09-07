@@ -212,7 +212,7 @@ pub async fn run(args: &OptimizeXorbsArgs, cfg: &Config, cancel: &CancellationTo
                         event: OptimizeXorbsControlEventKind::JournalDropped,
                         run_id: None,
                     },
-                );
+                )?;
             }
         } else {
             info!("no xorb optimization journal found");
@@ -232,7 +232,7 @@ pub async fn run(args: &OptimizeXorbsArgs, cfg: &Config, cancel: &CancellationTo
             &sources,
             args.include_cold,
             output_mode,
-        );
+        )?;
         return Ok(());
     }
 
@@ -367,19 +367,19 @@ fn run_dry_run(
     sources: &[SourceXorbMeta],
     include_cold: bool,
     output_mode: OutputMode,
-) {
+) -> Result<()> {
     let cal = CalibrationConfig::default();
     let estimate = planner::estimate(profile_name, profile, sources, &cal, include_cold);
 
     match output_mode {
         OutputMode::Json => {
-            emit_json(OPTIMIZE_XORBS_PLAN_SCHEMA, "1.0", &estimate);
+            emit_json(OPTIMIZE_XORBS_PLAN_SCHEMA, "1.0", &estimate)?;
         }
         OutputMode::Jsonl => {
             // JSONL mode: emit the estimate as a single event.
             let stdout = std::io::stdout();
             let mut stream = JsonlStream::new(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", stdout.lock());
-            stream.emit_result(&estimate);
+            stream.emit_result(&estimate)?;
         }
         OutputMode::Text => {
             println!("Xorb optimization dry-run estimate:");
@@ -401,6 +401,7 @@ fn run_dry_run(
             }
         }
     }
+    Ok(())
 }
 
 /// Abort the current xorb optimization run.
@@ -423,7 +424,7 @@ fn run_abort(journal_path: &Path, output_mode: OutputMode) -> Result<()> {
                     event: OptimizeXorbsControlEventKind::Aborted,
                     run_id: Some(run.run_id),
                 },
-            );
+            )?;
         } else if output_mode == OutputMode::Text {
             println!("Xorb optimization run {} aborted.", run.run_id);
             println!("Run `crab gc` to reclaim staged orphan xorbs.");
@@ -622,12 +623,12 @@ async fn run_apply(
 
     match output_mode {
         OutputMode::Json => {
-            emit_json(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", &summary);
+            emit_json(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", &summary)?;
         }
         OutputMode::Jsonl => {
             let stdout = std::io::stdout();
             let mut stream = JsonlStream::new(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", stdout.lock());
-            stream.emit_result(&summary);
+            stream.emit_result(&summary)?;
         }
         OutputMode::Text => {
             println!("Xorb optimization complete:");

@@ -1026,7 +1026,7 @@ fn parse_commit_graph_oid(value: &str) -> Result<[u8; 20]> {
 fn render_generation_owner_sample(sample: &GenerationOwnerSample, jsonl: bool) -> Result<()> {
     if jsonl {
         let mut stream = JsonlStream::new("metadb.owner", "1.0", std::io::stdout());
-        stream.emit_snapshot(sample);
+        stream.emit_snapshot(sample)?;
     } else {
         info!(
             generation = sample.generation,
@@ -1106,7 +1106,7 @@ async fn run_diagnose(
 
     guard.close().await?;
     check_cancelled(cancel)?;
-    render_diagnose(&payload, mode);
+    render_diagnose(&payload, mode)?;
     Ok(())
 }
 
@@ -1509,10 +1509,10 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
-fn render_diagnose(payload: &DiagnosePayload, mode: OutputMode) {
+fn render_diagnose(payload: &DiagnosePayload, mode: OutputMode) -> Result<()> {
     if matches!(mode, OutputMode::Json) {
-        emit_json("metadb.diagnose", "1.0", payload);
-        return;
+        emit_json("metadb.diagnose", "1.0", payload)?;
+        return Ok(());
     }
 
     println!("crab metadb diagnose\n");
@@ -1522,6 +1522,7 @@ fn render_diagnose(payload: &DiagnosePayload, mode: OutputMode) {
     {
         render_db_diagnosis(db);
     }
+    Ok(())
 }
 
 fn render_db_diagnosis(d: &DbDiagnosis) {
@@ -1909,7 +1910,7 @@ async fn run_rebuild_in(
     let result = rebuild_with_guard(&store, &repo_prefix, db, emit_progress, &guard, cancel).await;
     let result = close_rebuild_guard(guard, result).await;
     let payload = result?;
-    render_rebuild_payload(&payload, mode);
+    render_rebuild_payload(&payload, mode)?;
     Ok(())
 }
 
@@ -2883,9 +2884,9 @@ fn verify_sampled_pack_ranges(
     Ok(())
 }
 
-fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) {
+fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) -> Result<()> {
     if matches!(mode, OutputMode::Json) {
-        emit_json("metadb.rebuild", "1.0", &payload);
+        emit_json("metadb.rebuild", "1.0", payload)?;
     } else {
         println!("\ncrab metadb rebuild\n");
         println!("  repo_prefix:                 {}", payload.repo_prefix);
@@ -2934,6 +2935,7 @@ fn render_rebuild_payload(payload: &RebuildPayload, mode: OutputMode) {
         elapsed_ms = payload.elapsed_ms,
         "metadb rebuild complete"
     );
+    Ok(())
 }
 
 /// Flush the pending per-database entry buffers through one
@@ -3133,7 +3135,7 @@ fn run_cache_stats(mode: OutputMode) -> Result<()> {
     let payload = cache_stats_for(&path)?;
 
     if matches!(mode, OutputMode::Json) {
-        emit_json("metadb.cache.stats", "1.0", &payload);
+        emit_json("metadb.cache.stats", "1.0", &payload)?;
     } else {
         println!("crab metadb cache stats\n");
         println!("  path:              {}", payload.cache_path);
@@ -3253,7 +3255,7 @@ pub async fn run_doctor_metadb_in(root: &Path, mode: OutputMode) -> Result<()> {
                         "remote is not configured; generation/index proof unavailable",
                     ),
                 };
-                render_doctor_metadb(&empty, mode);
+                render_doctor_metadb(&empty, mode)?;
                 return Ok(());
             }
         };
@@ -3307,7 +3309,7 @@ pub async fn run_doctor_metadb_in(root: &Path, mode: OutputMode) -> Result<()> {
         acceleration,
     };
 
-    render_doctor_metadb(&payload, mode);
+    render_doctor_metadb(&payload, mode)?;
     guard.close().await?;
     Ok(())
 }
@@ -3639,10 +3641,10 @@ async fn count_shards(store: &Arc<dyn ObjectStore>, prefix: &ObjectPath) -> Resu
     Ok(total)
 }
 
-fn render_doctor_metadb(payload: &DoctorMetadbPayload, mode: OutputMode) {
+fn render_doctor_metadb(payload: &DoctorMetadbPayload, mode: OutputMode) -> Result<()> {
     if matches!(mode, OutputMode::Json) {
-        emit_json("doctor.metadb", "1.0", payload);
-        return;
+        emit_json("doctor.metadb", "1.0", payload)?;
+        return Ok(());
     }
 
     println!("crab doctor --metadb\n");
@@ -3772,6 +3774,7 @@ fn render_doctor_metadb(payload: &DoctorMetadbPayload, mode: OutputMode) {
     for note in &payload.acceleration.notes {
         println!("  note: {note}");
     }
+    Ok(())
 }
 
 #[cfg(test)]

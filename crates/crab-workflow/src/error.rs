@@ -8,6 +8,9 @@ pub type Result<T> = std::result::Result<T, WorkflowError>;
 /// Errors returned by workflow contract and planning modules.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkflowError {
+    /// The clock cannot produce a valid persisted timestamp.
+    #[error("invalid timestamp: {0}")]
+    Timestamp(#[from] crab_types::time::TimestampError),
     /// A transient object-store failure exhausted its retry budget.
     #[error("network transient error: {0}")]
     NetworkTransient(#[source] object_store::Error),

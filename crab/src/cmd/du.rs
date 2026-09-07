@@ -113,7 +113,7 @@ pub async fn run_du_in(root: &Path, args: &DuArgs) -> Result<()> {
     };
 
     match args.mode {
-        OutputMode::Json => emit_json("du", "1.1", DuPayload::from(&stats)),
+        OutputMode::Json => emit_json("du", "1.1", DuPayload::from(&stats))?,
         OutputMode::Text | OutputMode::Jsonl => print_table(&stats),
     }
 

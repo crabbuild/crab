@@ -101,7 +101,7 @@ async fn exec_push_cache_in_with_cancel(
         };
         let mode = args.output_mode();
         if mode == OutputMode::Json {
-            emit_json(WORKFLOW_PUSH_CACHE_SCHEMA, "1", &result);
+            emit_json(WORKFLOW_PUSH_CACHE_SCHEMA, "1", &result)?;
         }
         return Ok(());
     }
@@ -138,7 +138,7 @@ async fn exec_push_cache_in_with_cancel(
             skipped: push_result.skipped,
             errors: push_result.errors,
         };
-        emit_json(WORKFLOW_PUSH_CACHE_SCHEMA, "1", &result);
+        emit_json(WORKFLOW_PUSH_CACHE_SCHEMA, "1", &result)?;
     } else {
         println!(
             "Pushed {} entries, skipped {} (already remote), {} errors",

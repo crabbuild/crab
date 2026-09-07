@@ -398,7 +398,7 @@ pub fn run_exp_queue(args: &QueueArgs, repo_root: &Path) -> Result<()> {
         false,
         "exp queue",
     )?;
-    emit_queue(&payload, mode);
+    emit_queue(&payload, mode)?;
     Ok(())
 }
 
@@ -423,7 +423,7 @@ pub(crate) fn queue_from_exp_run(
         true,
         "exp run --queue",
     )?;
-    emit_queue(&payload, mode);
+    emit_queue(&payload, mode)?;
     Ok(())
 }
 
@@ -480,7 +480,7 @@ fn queue_experiments(
     // Queue one experiment per combination.
     let queue_dir = queue_dir(repo_root);
     let queue = ExpQueue::new(queue_dir);
-    let queued_at = crab_types::time::now_rfc3339_millis();
+    let queued_at = crab_types::time::now_rfc3339_millis()?;
 
     let mut experiment_ids = Vec::with_capacity(combinations.len());
     for combo in &combinations {
@@ -563,7 +563,7 @@ pub async fn run_exp_start(args: &StartArgs, repo_root: &Path) -> Result<()> {
             succeeded_ids: Vec::new(),
             failed_ids: Vec::new(),
         };
-        emit_start(&payload, mode);
+        emit_start(&payload, mode)?;
         return Ok(());
     }
 
@@ -636,7 +636,7 @@ pub async fn run_exp_start(args: &StartArgs, repo_root: &Path) -> Result<()> {
         succeeded_ids,
         failed_ids,
     };
-    emit_start(&payload, mode);
+    emit_start(&payload, mode)?;
     Ok(())
 }
 
@@ -735,7 +735,7 @@ pub fn run_exp_status(args: &StatusArgs, repo_root: &Path) -> Result<()> {
         failed,
         total: all.len(),
     };
-    emit_status(&payload, mode);
+    emit_status(&payload, mode)?;
     Ok(())
 }
 
@@ -796,7 +796,7 @@ pub fn run_exp_queue_remove(
         removed,
         skipped_running: skipped_running.into_iter().collect(),
     };
-    emit_queue_remove(&payload, mode);
+    emit_queue_remove(&payload, mode)?;
     Ok(payload)
 }
 
@@ -825,7 +825,7 @@ pub fn run_exp_queue_logs(args: &QueueLogsArgs, repo_root: &Path) -> Result<ExpQ
         contents,
         followed: args.follow,
     };
-    emit_queue_logs(&payload, mode);
+    emit_queue_logs(&payload, mode)?;
     Ok(payload)
 }
 
@@ -841,7 +841,7 @@ pub fn run_exp_queue_kill(args: &QueueKillArgs, repo_root: &Path) -> Result<ExpQ
 
     let mode = args.output_mode();
     let payload = kill_queue_tasks(repo_root, &args.ids, args.force)?;
-    emit_queue_kill(&payload, mode);
+    emit_queue_kill(&payload, mode)?;
     Ok(payload)
 }
 
@@ -871,7 +871,7 @@ pub fn run_exp_stop(args: &StopArgs, repo_root: &Path) -> Result<()> {
         signaled: true,
         killed,
     };
-    emit_stop(&payload, mode);
+    emit_stop(&payload, mode)?;
     Ok(())
 }
 
@@ -987,7 +987,7 @@ pub(crate) fn mark_queue_child_started(repo_root: &Path, id: &str, pid: u32) -> 
         )));
     }
     marker.child_pid = Some(pid);
-    marker.child_started_at = Some(crab_types::time::now_rfc3339_millis());
+    marker.child_started_at = Some(crab_types::time::now_rfc3339_millis()?);
     let json = serde_json::to_vec_pretty(&marker).map_err(|e| {
         CrabError::Internal(format!("failed to serialize active queue run {id}: {e}"))
     })?;
@@ -1416,10 +1416,10 @@ fn resolve_queue_entry<'a>(
 
 // ─── Output rendering ─────────────────────────────────────────────────
 
-fn emit_queue(payload: &ExpQueuePayload, mode: OutputMode) {
+fn emit_queue(payload: &ExpQueuePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_QUEUE_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_QUEUE_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -1432,12 +1432,13 @@ fn emit_queue(payload: &ExpQueuePayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_start(payload: &ExpStartPayload, mode: OutputMode) {
+fn emit_start(payload: &ExpStartPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_START_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_START_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -1458,12 +1459,13 @@ fn emit_start(payload: &ExpStartPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_status(payload: &ExpStatusPayload, mode: OutputMode) {
+fn emit_status(payload: &ExpStatusPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_STATUS_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_STATUS_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!("Experiment queue ({} total):", payload.total);
@@ -1473,12 +1475,13 @@ fn emit_status(payload: &ExpStatusPayload, mode: OutputMode) {
             println!("  Failed:   {}", payload.failed);
         }
     }
+    Ok(())
 }
 
-fn emit_queue_remove(payload: &ExpQueueRemovePayload, mode: OutputMode) {
+fn emit_queue_remove(payload: &ExpQueueRemovePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_QUEUE_REMOVE_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_QUEUE_REMOVE_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!("Removed {} queue task(s).", payload.removed.len());
@@ -1493,24 +1496,26 @@ fn emit_queue_remove(payload: &ExpQueueRemovePayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_queue_logs(payload: &ExpQueueLogsPayload, mode: OutputMode) {
+fn emit_queue_logs(payload: &ExpQueueLogsPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_QUEUE_LOGS_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_QUEUE_LOGS_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             print!("{}", payload.contents);
             let _ = std::io::stdout().flush();
         }
     }
+    Ok(())
 }
 
-fn emit_queue_kill(payload: &ExpQueueKillPayload, mode: OutputMode) {
+fn emit_queue_kill(payload: &ExpQueueKillPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_QUEUE_KILL_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_QUEUE_KILL_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             let verb = if payload.force { "Killed" } else { "Signaled" };
@@ -1520,12 +1525,13 @@ fn emit_queue_kill(payload: &ExpQueueKillPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_stop(payload: &ExpStopPayload, mode: OutputMode) {
+fn emit_stop(payload: &ExpStopPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_STOP_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_STOP_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             if payload.signaled {
@@ -1545,6 +1551,7 @@ fn emit_stop(payload: &ExpStopPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

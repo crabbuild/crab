@@ -9,6 +9,9 @@ pub use namespace::with_ref_namespace;
 /// Failure while preparing or publishing canonical Git metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    /// The clock cannot produce a valid persisted timestamp.
+    #[error("invalid timestamp: {0}")]
+    Timestamp(#[from] crab_types::time::TimestampError),
     #[error(transparent)]
     Namespace(#[from] crab_git::refname::RefNamespaceError),
     #[error("generation {generation} has no verified Git visibility proof")]

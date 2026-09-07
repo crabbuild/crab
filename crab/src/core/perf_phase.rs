@@ -42,12 +42,14 @@ impl PerfPhaseSink {
         match self {
             Self::Stdout(stream) => {
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+                    let output = s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             Self::Stderr(stream) => {
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+                    let output = s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
         }

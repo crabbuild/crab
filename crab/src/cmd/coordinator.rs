@@ -403,7 +403,7 @@ async fn run_status(json: bool) -> Result<ExitCode> {
                 "coordinator.status",
                 "1.0",
                 serde_json::json!({ "running": false }),
-            );
+            )?;
         } else {
             eprintln!("Coordinator is not running.");
         }
@@ -433,7 +433,7 @@ async fn run_status(json: bool) -> Result<ExitCode> {
             "hydration_queue_depth": response.hydration_queue_depth,
             "hydration_workers": response.hydration_workers,
         });
-        emit_json("coordinator.status", "1.0", output);
+        emit_json("coordinator.status", "1.0", output)?;
     } else {
         // Human-readable output.
         println!("Coordinator: running");

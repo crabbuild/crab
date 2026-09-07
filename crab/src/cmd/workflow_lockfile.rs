@@ -115,7 +115,7 @@ pub fn resolve_in(args: &ResolveArgs, repo_root: &Path) -> Result<()> {
 
     let outcome = lockfile::resolve(&lockfile_path, strategy, repo_root)?;
     write_resolved(&lockfile_path, &outcome.lockfile)?;
-    emit(args.output_mode(), &lockfile_path, &outcome);
+    emit(args.output_mode(), &lockfile_path, &outcome)?;
     Ok(())
 }
 
@@ -126,7 +126,7 @@ pub fn write_resolved(path: &Path, resolved: &Lockfile) -> Result<()> {
     Ok(())
 }
 
-fn emit(mode: OutputMode, path: &Path, outcome: &ResolveOutcome) {
+fn emit(mode: OutputMode, path: &Path, outcome: &ResolveOutcome) -> Result<()> {
     let payload = LockfileResolvePayload {
         strategy: outcome.strategy.as_str().to_owned(),
         path: path.to_path_buf(),
@@ -144,7 +144,7 @@ fn emit(mode: OutputMode, path: &Path, outcome: &ResolveOutcome) {
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_LOCKFILE_RESOLVE_SCHEMA, "1.0", payload);
+            emit_json(WORKFLOW_LOCKFILE_RESOLVE_SCHEMA, "1.0", payload)?;
         }
         OutputMode::Text => {
             info!(
@@ -156,6 +156,7 @@ fn emit(mode: OutputMode, path: &Path, outcome: &ResolveOutcome) {
             );
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -421,7 +422,7 @@ pub fn split_in(args: &SplitArgs, repo_root: &Path) -> Result<()> {
                 stage_count: lock.stages.len(),
             })
             .collect();
-        emit_split(args.output_mode(), true, false, &files);
+        emit_split(args.output_mode(), true, false, &files)?;
         return Ok(());
     }
 
@@ -445,7 +446,7 @@ pub fn split_in(args: &SplitArgs, repo_root: &Path) -> Result<()> {
         update_config_to_split(repo_root)?;
     }
 
-    emit_split(args.output_mode(), false, removed_monolithic, &files);
+    emit_split(args.output_mode(), false, removed_monolithic, &files)?;
     Ok(())
 }
 
@@ -553,7 +554,7 @@ fn emit_split(
     dry_run: bool,
     removed_monolithic: bool,
     files: &[LockfileSplitFile],
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
             let payload = LockfileSplitPayload {
@@ -561,12 +562,12 @@ fn emit_split(
                 removed_monolithic,
                 files: files.to_vec(),
             };
-            emit_json(WORKFLOW_LOCKFILE_SPLIT_SCHEMA, "1.0", payload);
+            emit_json(WORKFLOW_LOCKFILE_SPLIT_SCHEMA, "1.0", payload)?;
         }
         OutputMode::Text => {
             if files.is_empty() {
                 info!(dry_run, "workflow: crab.lock has no stages to split");
-                return;
+                return Ok(());
             }
             for f in files {
                 info!(
@@ -581,6 +582,7 @@ fn emit_split(
             }
         }
     }
+    Ok(())
 }
 
 // Manual Clone impls: auto-derive would need every field to be Clone,

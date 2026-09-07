@@ -402,7 +402,7 @@ async fn run_init_inner(
             gc_list_profile: gc_list_profile.map(|profile| profile.as_str().to_owned()),
             credential_status,
         };
-        emit_json(INIT_SCHEMA, INIT_VERSION, payload);
+        emit_json(INIT_SCHEMA, INIT_VERSION, payload)?;
     }
 
     // Remote publication runs after local setup has written the provider and

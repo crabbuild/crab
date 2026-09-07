@@ -143,11 +143,11 @@ pub fn run(args: &WorkflowCheckpointArgs) -> Result<()> {
     };
     match args.output_mode() {
         OutputMode::Text => {}
-        OutputMode::Json => emit_json(WORKFLOW_CHECKPOINT_SCHEMA, "1.0", result),
+        OutputMode::Json => emit_json(WORKFLOW_CHECKPOINT_SCHEMA, "1.0", result)?,
         OutputMode::Jsonl => {
             let mut stream =
                 JsonlStream::new("workflow.checkpoint.event", "1.0", std::io::stdout());
-            stream.emit_result(result);
+            stream.emit_result(result)?;
         }
     }
     Ok(())

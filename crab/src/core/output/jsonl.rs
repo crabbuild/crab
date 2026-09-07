@@ -33,6 +33,7 @@ const PROGRESS_RATE_LIMIT: Duration = Duration::from_millis(250);
 /// `emit_progress` is rate-limited to one emission per 250 ms
 /// wall-clock. All other event types are emitted unconditionally.
 ///
+/// Clock errors return before writing the affected event.
 /// `emit_result` and `emit_error` flush the writer. The `Drop` impl
 /// also flushes to avoid losing the final line in buffered output.
 pub struct JsonlStream<W: Write> {
@@ -67,68 +68,75 @@ impl<W: Write> JsonlStream<W> {
 
     /// Emit a `"progress"` event, rate-limited to at most once per 250 ms.
     ///
-    /// Returns `true` if the event was actually written, `false` if it
-    /// was suppressed by the rate limiter.
-    pub fn emit_progress<T: Serialize>(&mut self, data: T) -> bool {
+    /// Returns `Ok(true)` after emission is attempted, or `Ok(false)` when
+    /// rate-limited. An unrepresentable clock returns an error before writing.
+    /// Writer errors retain the stream's best-effort output policy.
+    pub fn emit_progress<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<bool> {
         let now = Instant::now();
         if self
             .last_progress_emit
             .is_some_and(|last| now.duration_since(last) < PROGRESS_RATE_LIMIT)
         {
-            return false;
+            return Ok(false);
         }
+        self.write_event("progress", data)?;
         self.last_progress_emit = Some(now);
-        self.write_event("progress", data);
-        true
+        Ok(true)
     }
 
     /// Emit a `"file_done"` event. Never rate-limited.
-    pub fn emit_file_done<T: Serialize>(&mut self, data: T) {
-        self.write_event("file_done", data);
+    pub fn emit_file_done<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<()> {
+        self.write_event("file_done", data)
     }
 
     /// Emit a `"xorb_done"` event. Never rate-limited.
-    pub fn emit_xorb_done<T: Serialize>(&mut self, data: T) {
-        self.write_event("xorb_done", data);
+    pub fn emit_xorb_done<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<()> {
+        self.write_event("xorb_done", data)
     }
 
     /// Emit a `"warning"` event. Never rate-limited.
-    pub fn emit_warning<T: Serialize>(&mut self, data: T) {
-        self.write_event("warning", data);
+    pub fn emit_warning<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<()> {
+        self.write_event("warning", data)
     }
 
     /// Emit a `"restore_submit"` event for tier restore tracking.
     /// Never rate-limited. Uses the stream's schema (expected to be
     /// `"tier.event"` v `"1.0"` for hydrate restore streams).
-    pub fn emit_restore_submit<T: Serialize>(&mut self, data: T) {
-        self.write_event("restore_submit", data);
+    pub fn emit_restore_submit<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<()> {
+        self.write_event("restore_submit", data)
     }
 
     /// Emit a `"restore_complete"` event for tier restore tracking.
     /// Never rate-limited.
-    pub fn emit_restore_complete<T: Serialize>(&mut self, data: T) {
-        self.write_event("restore_complete", data);
+    pub fn emit_restore_complete<T: Serialize>(
+        &mut self,
+        data: T,
+    ) -> crate::core::error::Result<()> {
+        self.write_event("restore_complete", data)
     }
 
     /// Emit a terminal `"result"` event and flush the writer.
-    pub fn emit_result<T: Serialize>(&mut self, data: T) {
-        self.write_event("result", data);
+    pub fn emit_result<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<()> {
+        self.write_event("result", data)?;
         let _ = self.writer.flush();
+        Ok(())
     }
 
     /// Emit a `"snapshot"` event and flush the writer.
-    pub fn emit_snapshot<T: Serialize>(&mut self, data: T) {
-        self.write_event("snapshot", data);
+    pub fn emit_snapshot<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<()> {
+        self.write_event("snapshot", data)?;
         let _ = self.writer.flush();
+        Ok(())
     }
 
     /// Emit a terminal `"result"` event with an error payload and flush.
     ///
     /// Used when a streaming command fails — the final event carries
     /// the structured error instead of a success payload.
-    pub fn emit_error<T: Serialize>(&mut self, data: T) {
-        self.write_event("result", data);
+    pub fn emit_error<T: Serialize>(&mut self, data: T) -> crate::core::error::Result<()> {
+        self.write_event("result", data)?;
         let _ = self.writer.flush();
+        Ok(())
     }
 
     /// Emit a terminal `"result"` event with a structured [`ErrorInfo`]
@@ -136,17 +144,18 @@ impl<W: Write> JsonlStream<W> {
     ///
     /// Per SO4.8, a fatal error in JSONL mode is emitted as a terminal
     /// `result` event with `"error"` populated and no `"data"` field.
-    pub fn emit_error_info(&mut self, error: ErrorInfo) {
+    pub fn emit_error_info(&mut self, error: ErrorInfo) -> crate::core::error::Result<()> {
         let envelope = ErrorEventEnvelope {
             schema: self.schema,
             version: self.version,
-            timestamp: now_rfc3339_millis(),
+            timestamp: now_rfc3339_millis()?,
             event_type: "result".to_owned(),
             error,
         };
         let _ = serde_json::to_writer(&mut self.writer, &envelope);
         let _ = self.writer.write_all(b"\n");
         let _ = self.writer.flush();
+        Ok(())
     }
 
     /// Serialize an [`EventEnvelope`] as a single JSON line.
@@ -154,16 +163,12 @@ impl<W: Write> JsonlStream<W> {
     /// Write errors are silently ignored — these helpers are called
     /// during normal operation and there is nothing useful to do if
     /// the output pipe is broken.
-    fn write_event<T: Serialize>(&mut self, event_type: &str, data: T) {
-        let envelope = EventEnvelope {
-            schema: self.schema,
-            version: self.version,
-            timestamp: now_rfc3339_millis(),
-            event_type: event_type.to_owned(),
-            data,
-        };
-        let _ = serde_json::to_writer(&mut self.writer, &envelope);
-        let _ = self.writer.write_all(b"\n");
+    fn write_event<T: Serialize>(
+        &mut self,
+        event_type: &str,
+        data: T,
+    ) -> crate::core::error::Result<()> {
+        self.write_schema_event(self.schema, event_type, data)
     }
 
     /// Emit a workflow-layer `workflow.stage.*` event.
@@ -173,7 +178,10 @@ impl<W: Write> JsonlStream<W> {
     /// which reuses the stream's umbrella schema. The envelope's
     /// `type` field is always `"event"` — the `schema` identifies
     /// the specific stage transition. Never rate-limited.
-    pub fn emit_workflow_stage_event(&mut self, event: &WorkflowStageEvent<'_>) {
+    pub fn emit_workflow_stage_event(
+        &mut self,
+        event: &WorkflowStageEvent<'_>,
+    ) -> crate::core::error::Result<()> {
         let schema = event.schema();
         match event {
             WorkflowStageEvent::Started(p) => self.write_schema_event(schema, "event", p),
@@ -198,16 +206,17 @@ impl<W: Write> JsonlStream<W> {
         schema: &'static str,
         event_type: &str,
         data: T,
-    ) {
+    ) -> crate::core::error::Result<()> {
         let envelope = EventEnvelope {
             schema,
             version: self.version,
-            timestamp: now_rfc3339_millis(),
+            timestamp: now_rfc3339_millis()?,
             event_type: event_type.to_owned(),
             data,
         };
         let _ = serde_json::to_writer(&mut self.writer, &envelope);
         let _ = self.writer.write_all(b"\n");
+        Ok(())
     }
 
     /// Emit an event whose `schema` field overrides the stream's
@@ -226,11 +235,12 @@ impl<W: Write> JsonlStream<W> {
         schema: &'static str,
         event_type: &str,
         data: T,
-    ) {
-        self.write_schema_event(schema, event_type, data);
+    ) -> crate::core::error::Result<()> {
+        self.write_schema_event(schema, event_type, data)?;
         if event_type == "result" {
             let _ = self.writer.flush();
         }
+        Ok(())
     }
 }
 
@@ -328,7 +338,7 @@ mod tests {
     fn emit_result_writes_valid_jsonl_line() {
         let buf = SharedBuf::new();
         let mut stream = JsonlStream::new("test.event", "1.0", buf.clone());
-        stream.emit_result(TestPayload { value: 42 });
+        stream.emit_result(TestPayload { value: 42 }).unwrap();
         drop(stream);
 
         let output = buf.to_string();
@@ -347,7 +357,7 @@ mod tests {
     fn emit_snapshot_writes_snapshot_event() {
         let buf = SharedBuf::new();
         let mut stream = JsonlStream::new("test.event", "1.0", buf.clone());
-        stream.emit_snapshot(TestPayload { value: 42 });
+        stream.emit_snapshot(TestPayload { value: 42 }).unwrap();
         drop(stream);
 
         let output = buf.to_string();
@@ -365,10 +375,10 @@ mod tests {
     fn each_line_ends_with_newline() {
         let buf = SharedBuf::new();
         let mut stream = JsonlStream::new("t", "1.0", buf.clone());
-        stream.emit_file_done(TestPayload { value: 1 });
-        stream.emit_xorb_done(TestPayload { value: 2 });
-        stream.emit_warning(TestPayload { value: 3 });
-        stream.emit_result(TestPayload { value: 4 });
+        stream.emit_file_done(TestPayload { value: 1 }).unwrap();
+        stream.emit_xorb_done(TestPayload { value: 2 }).unwrap();
+        stream.emit_warning(TestPayload { value: 3 }).unwrap();
+        stream.emit_result(TestPayload { value: 4 }).unwrap();
         drop(stream);
 
         let output = buf.to_string();
@@ -385,10 +395,10 @@ mod tests {
         let mut stream = JsonlStream::new("t", "1.0", buf.clone());
 
         // First progress should always emit.
-        assert!(stream.emit_progress(TestPayload { value: 1 }));
+        assert!(stream.emit_progress(TestPayload { value: 1 }).unwrap());
 
         // Immediate second call should be suppressed.
-        assert!(!stream.emit_progress(TestPayload { value: 2 }));
+        assert!(!stream.emit_progress(TestPayload { value: 2 }).unwrap());
         drop(stream);
 
         let output = buf.to_string();
@@ -401,7 +411,7 @@ mod tests {
         let mut stream = JsonlStream::new("t", "1.0", buf.clone());
 
         for i in 0..10 {
-            stream.emit_file_done(TestPayload { value: i });
+            stream.emit_file_done(TestPayload { value: i }).unwrap();
         }
         drop(stream);
 
@@ -415,15 +425,15 @@ mod tests {
         let mut stream = JsonlStream::new("t", "1.0", buf.clone());
 
         // Emit first progress.
-        assert!(stream.emit_progress(TestPayload { value: 1 }));
+        assert!(stream.emit_progress(TestPayload { value: 1 }).unwrap());
 
         // file_done events should NOT reset the progress timer.
         for i in 0..5 {
-            stream.emit_file_done(TestPayload { value: i });
+            stream.emit_file_done(TestPayload { value: i }).unwrap();
         }
 
         // Immediate second progress should still be suppressed.
-        assert!(!stream.emit_progress(TestPayload { value: 2 }));
+        assert!(!stream.emit_progress(TestPayload { value: 2 }).unwrap());
         drop(stream);
 
         let output = buf.to_string();
@@ -435,11 +445,11 @@ mod tests {
     fn event_types_are_correct() {
         let buf = SharedBuf::new();
         let mut stream = JsonlStream::new("t", "1.0", buf.clone());
-        stream.emit_progress(TestPayload { value: 0 });
-        stream.emit_file_done(TestPayload { value: 0 });
-        stream.emit_xorb_done(TestPayload { value: 0 });
-        stream.emit_warning(TestPayload { value: 0 });
-        stream.emit_result(TestPayload { value: 0 });
+        stream.emit_progress(TestPayload { value: 0 }).unwrap();
+        stream.emit_file_done(TestPayload { value: 0 }).unwrap();
+        stream.emit_xorb_done(TestPayload { value: 0 }).unwrap();
+        stream.emit_warning(TestPayload { value: 0 }).unwrap();
+        stream.emit_result(TestPayload { value: 0 }).unwrap();
         drop(stream);
 
         let output = buf.to_string();
@@ -461,7 +471,7 @@ mod tests {
     fn emit_error_writes_result_type() {
         let buf = SharedBuf::new();
         let mut stream = JsonlStream::new("t", "1.0", buf.clone());
-        stream.emit_error(TestPayload { value: 99 });
+        stream.emit_error(TestPayload { value: 99 }).unwrap();
         drop(stream);
 
         let output = buf.to_string();
@@ -484,7 +494,7 @@ mod tests {
             details: serde_json::Value::Null,
             source_chain: vec![],
         };
-        stream.emit_error_info(error_info);
+        stream.emit_error_info(error_info).unwrap();
         drop(stream);
 
         let output = buf.to_string();
@@ -575,13 +585,27 @@ mod tests {
             elapsed_ms: None,
         };
 
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&started));
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&cache));
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::Running(&running));
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&produced));
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&hashed));
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&committed));
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&failed));
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::Started(&started))
+            .unwrap();
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&cache))
+            .unwrap();
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::Running(&running))
+            .unwrap();
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::Produced(&produced))
+            .unwrap();
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&hashed))
+            .unwrap();
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::Committed(&committed))
+            .unwrap();
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::Failed(&failed))
+            .unwrap();
         drop(stream);
 
         let output = buf.to_string();
@@ -639,7 +663,9 @@ mod tests {
             stderr_tail: None,
             elapsed_ms: None,
         };
-        stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
+        stream
+            .emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload))
+            .unwrap();
         drop(stream);
 
         let output = buf.to_string();

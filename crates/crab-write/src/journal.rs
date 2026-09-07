@@ -365,7 +365,7 @@ async fn compact_ref_journal_until_idle(
         let compacted = crab_metadata::manifest_store::compact_ref_journal(
             store,
             router,
-            crab_types::time::now_rfc3339_millis(),
+            crab_types::time::now_rfc3339_millis()?,
             pusher.clone(),
             uuid::Uuid::now_v7().to_string(),
         )

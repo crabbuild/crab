@@ -29,7 +29,7 @@ pub async fn run(root: &Path, mode: OutputMode) -> Result<()> {
 
     if mode == OutputMode::Json {
         let payload = StatPayload { stats };
-        emit_json("stat", "1.0", payload);
+        emit_json("stat", "1.0", payload)?;
         return Ok(());
     }
 
@@ -58,7 +58,7 @@ pub async fn run_push_plan(root: &Path, verify: bool, mode: OutputMode) -> Resul
     let stats = push_plan_stats_for_root(root, options).await?;
 
     if mode == OutputMode::Json {
-        emit_json("stat.push-plan", "1.0", StatPushPlanPayload { stats });
+        emit_json("stat.push-plan", "1.0", StatPushPlanPayload { stats })?;
         return Ok(());
     }
 
@@ -167,7 +167,7 @@ pub fn run_perf(perf_path: &str, mode: OutputMode) -> Result<()> {
     let summary = load_perf_summary(path)?;
 
     if mode == OutputMode::Json {
-        emit_json("stat.perf", "1.0", &summary);
+        emit_json("stat.perf", "1.0", &summary)?;
         return Ok(());
     }
 
@@ -227,7 +227,7 @@ pub async fn run_classes(mode: OutputMode) -> Result<()> {
     };
 
     if mode == OutputMode::Json {
-        emit_json("stat.classes", "1.0", &payload);
+        emit_json("stat.classes", "1.0", &payload)?;
         return Ok(());
     }
 

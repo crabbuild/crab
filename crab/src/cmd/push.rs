@@ -597,10 +597,10 @@ async fn run_push_once(
         };
         if emit_terminal && mode != OutputMode::Text {
             match mode {
-                OutputMode::Json => emit_json("push", "1.0", &summary),
+                OutputMode::Json => emit_json("push", "1.0", &summary)?,
                 OutputMode::Jsonl => {
                     let mut stream = JsonlStream::new("push.event", "1.0", std::io::stdout());
-                    stream.emit_result(&summary);
+                    stream.emit_result(&summary)?;
                 }
                 OutputMode::Text => unreachable!(),
             }
@@ -891,7 +891,7 @@ async fn run_push_once(
             }
             OutputMode::Json => {
                 if emit_terminal {
-                    emit_json("push", "1.0", &summary);
+                    emit_json("push", "1.0", &summary)?;
                 }
             }
             OutputMode::Jsonl => {
@@ -899,7 +899,7 @@ async fn run_push_once(
                     && let Some(ref stream) = jsonl_stream
                     && let Ok(mut s) = stream.lock()
                 {
-                    s.emit_result(&summary);
+                    s.emit_result(&summary)?;
                 }
             }
         }
@@ -946,7 +946,9 @@ fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
                 failure.elapsed,
                 failure.integration.as_ref(),
             );
-            emit_json("push", "1.0", &summary);
+            if let Err(error) = emit_json("push", "1.0", &summary) {
+                eprintln!("could not emit failed push summary: {error}");
+            }
         }
         OutputMode::Jsonl => {
             let summary = build_push_summary(
@@ -957,7 +959,9 @@ fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
                 failure.integration.as_ref(),
             );
             let mut stream = JsonlStream::new("push.event", "1.0", std::io::stdout());
-            stream.emit_result(&summary);
+            if let Err(error) = stream.emit_result(&summary) {
+                eprintln!("could not emit failed push summary: {error}");
+            }
         }
     }
 }

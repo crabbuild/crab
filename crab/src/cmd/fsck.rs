@@ -665,11 +665,12 @@ pub async fn run_fsck(
         // Emit a warning event per issue in JSONL mode.
         if let Some(stream) = jsonl_stream {
             if let Ok(mut s) = stream.lock() {
-                s.emit_warning(WarningPayload {
+                let output = s.emit_warning(WarningPayload {
                     code: issue_code(&issue.kind),
                     message: issue.to_string(),
                     path: issue_path(&issue.kind),
                 });
+                crate::core::output::report_progress_output(output);
             }
         }
     }

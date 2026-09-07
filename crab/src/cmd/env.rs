@@ -33,7 +33,7 @@ pub fn run_env(mode: OutputMode) -> Result<()> {
 pub fn run_env_in(root: &Path, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
         let payload = collect_env_payload(root);
-        emit_json("env", "1.0", payload);
+        emit_json("env", "1.0", payload)?;
         return Ok(());
     }
 

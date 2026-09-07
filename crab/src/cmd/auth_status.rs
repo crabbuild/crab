@@ -74,7 +74,7 @@ pub fn run_auth_status(json: bool, config: &Config) -> Result<()> {
             refresh: has_refresh,
             provider_settings,
         };
-        crate::core::output::emit_json("auth.status", "1.0", &status);
+        crate::core::output::emit_json("auth.status", "1.0", &status)?;
     } else {
         print_text_status(
             provider_name,

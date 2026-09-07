@@ -111,7 +111,7 @@ pub fn run_errors(
                 .iter()
                 .filter_map(|c| doc_entry_for_code(c))
                 .collect();
-            emit_json("errors", "1.0", ErrorCatalogPayload { codes });
+            emit_json("errors", "1.0", ErrorCatalogPayload { codes })?;
             Ok(true)
         }
         (OutputMode::Json, Some(raw)) => {
@@ -129,7 +129,7 @@ pub fn run_errors(
                         message_template: entry.message_template,
                         remediation: entry.remediation,
                     },
-                );
+                )?;
                 Ok(true)
             } else {
                 eprintln!("unknown error code: {raw}");

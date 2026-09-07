@@ -366,13 +366,13 @@ fn run_plan(args: &RecoverPlanArgs, mode: OutputMode) -> Result<()> {
     if let Some(output) = &args.output {
         write_plan(output, &plan)?;
     }
-    emit_plan(&plan, mode);
+    emit_plan(&plan, mode)?;
     Ok(())
 }
 
 fn run_show(args: &RecoverShowArgs, mode: OutputMode) -> Result<()> {
     let plan = read_plan(&args.plan)?;
-    emit_plan(&plan, mode);
+    emit_plan(&plan, mode)?;
     Ok(())
 }
 
@@ -422,7 +422,7 @@ async fn run_apply(
     }
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(RECOVER_APPLY_SCHEMA, RECOVER_SCHEMA_VERSION, &payload);
+            emit_json(RECOVER_APPLY_SCHEMA, RECOVER_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -443,10 +443,10 @@ async fn run_apply(
     Ok(())
 }
 
-fn emit_plan(plan: &RecoverPlanPayload, mode: OutputMode) {
+fn emit_plan(plan: &RecoverPlanPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(RECOVER_PLAN_SCHEMA, RECOVER_SCHEMA_VERSION, plan);
+            emit_json(RECOVER_PLAN_SCHEMA, RECOVER_SCHEMA_VERSION, plan)?;
         }
         OutputMode::Text => {
             println!(
@@ -455,6 +455,7 @@ fn emit_plan(plan: &RecoverPlanPayload, mode: OutputMode) {
             );
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

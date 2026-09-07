@@ -70,3 +70,25 @@ share it.
 There are no optional features. The dependency surface is intentionally limited
 to serialization and schema generation so this crate can sit at the bottom of
 the workspace dependency graph.
+
+## Timestamp errors
+
+Timestamp formatting returns `Result<String, TimestampError>`. Unix milliseconds
+must be at most `253402300799999` (the last millisecond of year 9999); system
+times before the Unix epoch are rejected instead of being replaced by 1970.
+`from_system_time` truncates sub-millisecond precision and preserves the cause of
+a pre-epoch clock error.
+
+```rust
+use crab_types::time::{TimestampError, from_epoch_millis};
+
+fn main() -> Result<(), TimestampError> {
+    let timestamp = from_epoch_millis(1_777_055_537_123)?;
+    assert_eq!(timestamp, "2026-04-24T18:32:17.123Z");
+    Ok(())
+}
+```
+
+Resolve timestamps before starting the write that records them. Terminal error
+reporting must handle clock failure without recursively constructing another
+timestamped error.

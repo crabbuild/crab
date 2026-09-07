@@ -245,7 +245,7 @@ pub async fn run_setup_at(root: &Path, args: &SetupArgs, cancel: &CancellationTo
                     tracked_patterns,
                     dry_run: args.dry_run,
                 },
-            );
+            )?;
         }
         OutputMode::Text => {
             eprintln!();

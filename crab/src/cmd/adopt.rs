@@ -153,7 +153,7 @@ pub async fn run_adopt(args: &AdoptArgs, cancel: &CancellationToken) -> Result<(
 
     // Interactive mode: when Json + interactive, behave as dry-run.
     if args.interactive && args.mode == OutputMode::Json {
-        run_dry_run(&candidates, args.mode);
+        run_dry_run(&candidates, args.mode)?;
         return Ok(());
     }
 
@@ -167,7 +167,7 @@ pub async fn run_adopt(args: &AdoptArgs, cancel: &CancellationToken) -> Result<(
     }
 
     if args.dry_run {
-        run_dry_run(&candidates, args.mode);
+        run_dry_run(&candidates, args.mode)?;
         return Ok(());
     }
 
@@ -482,7 +482,7 @@ fn prompt_confirmation() -> Result<bool> {
 // Dry-run mode (tasks 15.1–15.5)
 // ---------------------------------------------------------------------------
 
-fn run_dry_run(candidates: &[(PathBuf, u64)], mode: OutputMode) {
+fn run_dry_run(candidates: &[(PathBuf, u64)], mode: OutputMode) -> Result<()> {
     // Sort by size descending for display.
     let mut sorted: Vec<&(PathBuf, u64)> = candidates.iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1));
@@ -516,8 +516,8 @@ fn run_dry_run(candidates: &[(PathBuf, u64)], mode: OutputMode) {
             total_human: format_size_human(total_bytes),
             files,
         };
-        emit_json("adopt.dry-run", "1.0", &output);
-        return;
+        emit_json("adopt.dry-run", "1.0", &output)?;
+        return Ok(());
     }
 
     // Print table header.
@@ -547,6 +547,7 @@ fn run_dry_run(candidates: &[(PathBuf, u64)], mode: OutputMode) {
         n,
         format_size_human(total_bytes),
     );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -217,7 +217,7 @@ pub async fn run_cache_service_support_bundle(
     }
 
     match (mode, output.as_deref()) {
-        (OutputMode::Json, _) => emit_json(CACHE_SERVICE_SUPPORT_SCHEMA, "1.0", &bundle),
+        (OutputMode::Json, _) => emit_json(CACHE_SERVICE_SUPPORT_SCHEMA, "1.0", &bundle)?,
         (OutputMode::Text, Some(path)) => {
             println!("Wrote cache-service support bundle to {}", path.display());
             println!("Redacted: {}", bundle.redacted);
@@ -285,7 +285,7 @@ pub async fn run_cost_report(
     }
 
     if mode == OutputMode::Json {
-        emit_json("cost", "1.0", &report);
+        emit_json("cost", "1.0", &report)?;
     } else {
         let output = crate::cost::report::render_human(&report);
         print!("{output}");
@@ -340,7 +340,7 @@ pub async fn run_doctor_in(
             checks: results,
             summary: DoctorSummary { ok, warn, fail },
         };
-        emit_json("doctor", "1.0", payload);
+        emit_json("doctor", "1.0", payload)?;
         return Ok(());
     }
 

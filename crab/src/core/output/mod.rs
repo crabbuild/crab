@@ -79,30 +79,51 @@ impl OutputMode {
 
 /// Write a success envelope to stdout and flush.
 ///
+/// Timestamp errors return before acquiring stdout or writing bytes.
 /// Locks stdout for the duration of the write so no interleaved
 /// `println!` can corrupt the JSON. Errors writing to stdout are
 /// silently ignored — these helpers are called right before process
 /// exit, and there is nothing useful to do if stdout is broken.
-pub fn emit_json<T: Serialize>(schema: &'static str, version: &'static str, data: T) {
-    let envelope = Envelope::ok(schema, version, data);
+pub fn emit_json<T: Serialize>(
+    schema: &'static str,
+    version: &'static str,
+    data: T,
+) -> crate::core::error::Result<()> {
+    let envelope = Envelope::ok(schema, version, data)?;
     let stdout = std::io::stdout();
     let lock = stdout.lock();
     let mut writer = std::io::BufWriter::new(lock);
     let _ = serde_json::to_writer(&mut writer, &envelope);
     let _ = writer.write_all(b"\n");
     let _ = writer.flush();
+    Ok(())
 }
 
 /// Write an error envelope to stdout and flush.
 ///
-/// Same stdout-locking and error-swallowing semantics as [`emit_json`].
-pub fn emit_error_json(schema: &'static str, version: &'static str, err: &CrabError) {
+/// Timestamp errors return before writing bytes. Callers reporting an existing
+/// error must report this failure directly, without retrying an error envelope.
+/// Stdout write failures retain the same handling as [`emit_json`].
+pub fn emit_error_json(
+    schema: &'static str,
+    version: &'static str,
+    err: &CrabError,
+) -> crate::core::error::Result<()> {
     let error_info = ErrorInfo::from(err);
-    let envelope = Envelope::err(schema, version, error_info);
+    let envelope = Envelope::err(schema, version, error_info)?;
     let stdout = std::io::stdout();
     let lock = stdout.lock();
     let mut writer = std::io::BufWriter::new(lock);
     let _ = serde_json::to_writer(&mut writer, &envelope);
     let _ = writer.write_all(b"\n");
     let _ = writer.flush();
+    Ok(())
+}
+
+// Progress callbacks must not skip their owner's cleanup because a diagnostic
+// timestamp is invalid. Terminal output remains fallible at the command boundary.
+pub(crate) fn report_progress_output<T>(result: crate::core::error::Result<T>) {
+    if let Err(error) = result {
+        tracing::warn!(%error, "could not emit progress output");
+    }
 }

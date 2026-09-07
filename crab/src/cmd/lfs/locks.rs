@@ -67,7 +67,7 @@ pub async fn run_lfs_lock(options: LfsLockOptions) -> Result<()> {
     let record = mgr.lock_with_expiry(&path, &owner, expires_dur).await?;
     LockCache::open(&ctx.local_lfs_dir, options.remote.as_deref())?.add_local(&record)?;
     if options.json {
-        emit_json("lfs.lock", "1.1", &record);
+        emit_json("lfs.lock", "1.1", &record)?;
     } else if let Some(exp) = record.expires_at {
         println!(
             "Locked {} (id: {}, expires at Unix {})",
@@ -112,7 +112,7 @@ pub async fn run_lfs_unlock(options: LfsUnlockOptions) -> Result<()> {
             "lfs.unlock",
             "1.1",
             &serde_json::json!({ "path": path, "id": id, "unlocked": true }),
-        );
+        )?;
     } else if let Some(id) = id {
         println!("Unlocked Lock {id}");
     } else {
@@ -274,7 +274,7 @@ pub async fn run_lfs_locks(options: LfsLocksOptions) -> Result<()> {
         } else {
             cache.read_remote()?
         };
-        emit_locks(&locks, options.mode);
+        emit_locks(&locks, options.mode)?;
         return Ok(());
     }
 
@@ -305,7 +305,7 @@ pub async fn run_lfs_locks(options: LfsLocksOptions) -> Result<()> {
         );
         cache.write_remote(&remote_locks)?;
         cache.replace_local_owned(&remote_locks, &owner)?;
-        emit_verified_locks(&verified, options.mode);
+        emit_verified_locks(&verified, options.mode)?;
         return Ok(());
     }
 
@@ -315,7 +315,7 @@ pub async fn run_lfs_locks(options: LfsLocksOptions) -> Result<()> {
     }
     let locks = filter_locks(locks, &options);
 
-    emit_locks(&locks, options.mode);
+    emit_locks(&locks, options.mode)?;
 
     Ok(())
 }
@@ -446,15 +446,15 @@ fn filter_verified_locks(
     records
 }
 
-fn emit_verified_locks(records: &[VerifiedLockRecord], mode: OutputMode) {
+fn emit_verified_locks(records: &[VerifiedLockRecord], mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("lfs.locks.verify", "1.1", records);
-        return;
+        emit_json("lfs.locks.verify", "1.1", records)?;
+        return Ok(());
     }
 
     if records.is_empty() {
         eprintln!("no locks found");
-        return;
+        return Ok(());
     }
 
     for lock in records {
@@ -476,17 +476,18 @@ fn emit_verified_locks(records: &[VerifiedLockRecord], mode: OutputMode) {
             lock.path, lock.owner, lock.id
         );
     }
+    Ok(())
 }
 
-fn emit_locks(locks: &[LockRecord], mode: OutputMode) {
+fn emit_locks(locks: &[LockRecord], mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("lfs.locks", "1.1", locks);
-        return;
+        emit_json("lfs.locks", "1.1", locks)?;
+        return Ok(());
     }
 
     if locks.is_empty() {
         eprintln!("no locks found");
-        return;
+        return Ok(());
     }
 
     for lock in locks {
@@ -497,6 +498,7 @@ fn emit_locks(locks: &[LockRecord], mode: OutputMode) {
             .unwrap_or_default();
         println!("{}\t{}\tID:{}\t{ts}{exp}", lock.path, lock.owner, lock.id);
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

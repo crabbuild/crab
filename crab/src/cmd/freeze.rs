@@ -128,7 +128,7 @@ fn run_toggle(args: &FreezeArgs, repo_root: &Path, frozen: bool) -> Result<Freez
         frozen,
         stages: updates,
     };
-    emit_toggle(&payload, args.output_mode());
+    emit_toggle(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -395,14 +395,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn emit_toggle(payload: &FreezePayload, mode: OutputMode) {
+fn emit_toggle(payload: &FreezePayload, mode: OutputMode) -> Result<()> {
     let schema = if payload.frozen {
         FREEZE_SCHEMA
     } else {
         UNFREEZE_SCHEMA
     };
     match mode {
-        OutputMode::Json | OutputMode::Jsonl => emit_json(schema, SCHEMA_VERSION, payload),
+        OutputMode::Json | OutputMode::Jsonl => emit_json(schema, SCHEMA_VERSION, payload)?,
         OutputMode::Text => {
             let verb = if payload.frozen { "Froze" } else { "Unfroze" };
             println!("{verb} {} stage(s).", payload.stages.len());
@@ -421,6 +421,7 @@ fn emit_toggle(payload: &FreezePayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
