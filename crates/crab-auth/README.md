@@ -101,3 +101,13 @@ keys and temporary directories; they do not qualify live Keychain integration.
 - Use [`crab-coordination`](../crab-coordination/README.md) for write
   serialization and commit authority; authentication does not decide ref
   ownership.
+
+## Token-cache reads
+
+`TokenCache::load` returns `None` for a missing token file and preserves lock,
+read, decryption, and decoding failures as errors. It reads under the cache lock;
+there is no separate existence probe that can race logout or hide I/O errors.
+
+The current lock implementation serializes Unix processes. Non-Unix locking is
+a no-op and still needs platform qualification; atomic file replacement alone
+does not provide a cross-process transaction around login or logout.

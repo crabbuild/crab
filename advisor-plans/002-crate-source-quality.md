@@ -55,7 +55,7 @@ not claims that the named code is defective.
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
-| crab-auth | Credential Debug output; token-cache lifecycle remains | Diagnostic slice verified |
+| crab-auth | Token-cache key creation and non-Unix locking remain | Diagnostic and load-outcome slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
@@ -1481,3 +1481,34 @@ Scope limits: the live-set helper is not wired into production GC; no native or
 cloud E2E deletion proof is claimed. JSON serialization error handling remains
 separate from the decoding changes. Metadata publication concurrency and async
 scheduler lock waiting remain open work.
+
+
+### Token-cache read outcomes under the cache lock
+
+Remove `TokenCache::load`'s pre-lock `Path::exists` probe. Acquire the existing
+lock, read once, return None only for read NotFound, and propagate other errors.
+This prevents an intervening logout from turning a cache miss into a spurious
+read failure and avoids interpreting failed metadata probes as missing tokens.
+A lock-acquisition failure remains an error, including a removed cache directory
+on Unix; TokenCache construction normally creates that directory.
+
+Evidence map: load/load_any feed auth status, doctor, refresh, and logout
+revocation. Store publishes under the same Unix lock; delete already classifies
+remove_file's NotFound under that lock. delete_all holds the lock throughout its
+walk. These sibling paths need no new existence check. File-key initialization
+also locks first; macOS Keychain creation and non-Unix no-op locking require
+separate lifecycle qualification. No encryption format, key storage, provider
+naming, or fallback contract changes in this batch.
+
+Dependency contract: [Rust Path::exists](https://doc.rust-lang.org/stable/std/path/struct.Path.html#method.exists)
+can return false for metadata-access errors. Replacing it with try_exists would
+retain a redundant check/read window; classifying the operation's result is the
+better fix here. The current main loader has the same pre-lock probe.
+
+Validation: 19 token-cache tests pass, including encrypted round trips, deletion,
+provider selection, concurrent store/load, and a new Unix invalid-directory
+regression. The new regression fails against the original loader. Strict default
+all-target auth Clippy passes. Tests use temporary directories and fixture keys;
+they never invoke TokenCache::new, Keychain, or the host key file. The logout
+interleaving is established by the lock/read source ordering, not a forced
+scheduler test; native Windows and live identity-provider proof remain open.

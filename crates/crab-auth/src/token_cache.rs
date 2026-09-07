@@ -166,15 +166,17 @@ impl TokenCache {
     /// Load tokens for the given provider. Returns `None` if not cached.
     ///
     /// Decrypts and deserializes the token file. Returns `None` if the file
-    /// does not exist. Returns an error on decryption or parse failure.
+    /// does not exist. Lock, read, decryption, and parse failures remain errors.
     pub fn load(&self, provider: &str) -> Result<Option<CachedTokens>> {
         let path = self.token_path(provider);
-        if !path.exists() {
-            return Ok(None);
-        }
-
         let _lock = flock_dir(&self.cache_dir)?;
-        let ciphertext = fs::read(&path)?;
+        // Classify absence while holding the same lock as logout. An earlier
+        // existence probe can race deletion and also conceal filesystem errors.
+        let ciphertext = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
         let plaintext = self.decrypt(&ciphertext)?;
 
         let cached: CachedTokens = serde_json::from_slice(&plaintext)
@@ -732,6 +734,19 @@ mod tests {
 
         assert_eq!(loaded.access_token.as_deref(), Some("access"));
         assert_eq!(loaded.expires_at, Some(loaded.issued_at + 600));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_invalid_cache_directory_instead_of_reporting_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("tokens");
+        fs::write(&cache_dir, b"not a directory").unwrap();
+        let cache = TokenCache {
+            cache_dir,
+            key: [0; 32],
+        };
+        assert!(matches!(cache.load("provider"), Err(AuthError::Io(_))));
     }
 
     #[test]
