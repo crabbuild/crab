@@ -647,6 +647,7 @@ fn visibility_base(
 
 fn validate_path(path_hex: &str) -> Result<crab_remote_git::GitPath, Error> {
     if path_hex.is_empty()
+        || !path_hex.is_ascii()
         || !path_hex.len().is_multiple_of(2)
         || path_hex.len() > MAX_PATH_BYTES * 2
     {
@@ -1000,4 +1001,39 @@ fn build_upload_tree<'a>(
         }
         Ok(UploadTreeOutcome::Built(encode_tree(entries, objects)?))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multibyte_content_paths_return_bad_request() {
+        for path_hex in ["€0", "0é0", "🦀"] {
+            let input = ChangeInput::Create(CreateInput {
+                branch: "refs/heads/main".to_owned(),
+                expected_head: "a".repeat(40),
+                new_branch: None,
+                path_hex: path_hex.to_owned(),
+                content: "content".to_owned(),
+                message: "Create file".to_owned(),
+            });
+            let Err(error) = validate_input(&input) else {
+                panic!("non-ASCII hex path was accepted");
+            };
+            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn multibyte_upload_paths_return_bad_request() {
+        let files = [UploadFileInput {
+            path_hex: "€0".to_owned(),
+            content_base64: "YQ==".to_owned(),
+        }];
+        let Err(error) = validate_upload(&files) else {
+            panic!("non-ASCII upload path was accepted");
+        };
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+    }
 }

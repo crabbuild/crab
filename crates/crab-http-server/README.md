@@ -229,6 +229,10 @@ pack through the same quarantine, graph validation, ref lock, visibility, and
 journal publication path used by native smart-HTTP pushes. Empty trees created by
 deletion are pruned. No server checkout or local Git object database is created.
 
+Content and upload `path_hex` fields require ASCII hexadecimal text. Invalid
+encoding returns HTTP 400 before repository reads or publication. Raw Git path
+bytes remain supported when correctly hex-encoded.
+
 Browser uploads use `POST /api/repos/{owner}/{name}/uploads` with the same branch,
 exact-head, commit-message, authorization, CSRF and protected-branch contracts.
 It accepts the same optional `new_branch` proposal target. The request carries

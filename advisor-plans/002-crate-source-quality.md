@@ -565,3 +565,19 @@ All 18 token-cache tests pass on macOS, including encrypted persistence and
 concurrent store/load. Tests construct synthetic keys and temporary directories;
 no live Keychain command was run. HTTP contents decoding remains pending.
 Strict all-target auth Clippy with default features passes.
+
+## HTTP content-path decoding
+
+Single-file create/update/delete share validate_input; upload uses
+validate_upload. Both call validate_path before opening the repository or
+publishing objects, after repository authorization. Their error mapper returns
+HTTP 400 for Input. Two regression tests reproduced UTF-8 slicing panics through
+these validation boundaries, then passed with the ASCII guard. Tests verify
+response mapping directly, not a live HTTP request. The sibling api::decode_hex
+already validates ASCII hex digits, so read decoding is unaffected. Valid raw
+Git bytes remain representable as hex; no path normalization policy changed.
+
+Frontend build prerequisite passed after installing missing local dependencies.
+No dependency or lockfile change retained. Current PR browser checks passed on
+head 0bf1d72e99c; broader Rust/platform CI was still running when inspected.
+Strict all-target HTTP-server Clippy passes.
