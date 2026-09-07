@@ -13,7 +13,13 @@ GC/product roadmap in `plans/`.
 Execute plan 001 in its six batches. Complete source-backed navigation and
 validation for every crate before marking it DONE. No dependency on GC plans.
 
-## Scope decisions
+## Source quality follow-up
+
+[002 — Rust crate source quality](002-crate-source-quality.md) is in progress
+across all 21 crates. It tracks source fixes, documentation corrections,
+regression evidence, and the remaining qualification work.
+
+## Agent-guide scope decisions
 
 - Selected by the user: agent guides across all 21 crates.
 - Deferred: README/rustdoc rewrites, executable examples and code decomposition.

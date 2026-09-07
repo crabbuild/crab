@@ -81,12 +81,13 @@ let store = crab_auth_store::build_protected_push_store(
 )?;
 ```
 
-`refreshing-store` and `managed-service` are deliberately opt-in because they
-add HTTP clients and managed-service contracts:
+`refreshing-store` and `managed-service` are opt-in because they add HTTP clients
+and managed-service contracts. This crate is not published to the registry;
+enable features in a consuming Crab workspace member:
 
 ```toml
 [dependencies]
-crab-auth-store = { version = "1", features = ["refreshing-store"] }
+crab-auth-store = { workspace = true, features = ["refreshing-store"] }
 ```
 
 ## Boundaries

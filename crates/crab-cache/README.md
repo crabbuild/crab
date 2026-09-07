@@ -270,11 +270,12 @@ explicit unlock does not make a detached writer safe.
 
 ## Usage
 
-Enable the local implementation and cache a verified chunk:
+Enable local caching in a consuming Crab workspace member. This crate is not
+published to the registry; the example below caches a verified chunk:
 
 ```toml
 [dependencies]
-crab-cache = { version = "1", features = ["local-cache"] }
+crab-cache = { workspace = true, features = ["local-cache"] }
 ```
 
 ```rust

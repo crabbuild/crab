@@ -113,12 +113,13 @@ validate_manifest_payload(&manifest)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-For remote indexes, construct a repo-aware layout and use the feature-gated
-lookup or write helpers:
+For remote indexes, enable the feature in a consuming Crab workspace member
+(this crate is not published to the registry), then construct a repo-aware
+layout for the lookup or write helpers:
 
 ```toml
 [dependencies]
-crab-metadata = { version = "1", features = ["remote-index"] }
+crab-metadata = { workspace = true, features = ["remote-index"] }
 ```
 
 ```rust

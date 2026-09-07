@@ -91,11 +91,12 @@ acquire a lock from an `Arc<dyn object_store::ObjectStore>` using
 `PushLock::acquire_ref_default`. Always release the returned lock, including
 on error paths; its release operation is holder-checked.
 
-Provider features are independent:
+Provider features are independent. Enable the required provider in a consuming
+Crab workspace member; this crate is not published to the registry:
 
 ```toml
 [dependencies]
-crab-coordination = { version = "1", features = ["coordinator-dynamodb"] }
+crab-coordination = { workspace = true, features = ["coordinator-dynamodb"] }
 ```
 
 ## Boundaries

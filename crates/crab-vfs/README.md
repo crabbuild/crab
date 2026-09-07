@@ -62,11 +62,12 @@ tests are not native mounted-filesystem or whole-process resource proof.
 
 ## Usage
 
-Source detection is available with either `fuse` or `nfs`:
+Source detection requires `fuse` or `nfs`. This crate is not published to the
+registry; enable the backend in a consuming Crab workspace member:
 
 ```toml
 [dependencies]
-crab-vfs = { version = "1", features = ["fuse"] }
+crab-vfs = { workspace = true, features = ["fuse"] }
 ```
 
 ```rust
