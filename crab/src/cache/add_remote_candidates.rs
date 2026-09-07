@@ -337,6 +337,48 @@ impl AddRemoteCandidateCache {
         self.persist_results_inner(entries, true)
     }
 
+    /// Forget negative results for chunks whose publication has completed locally.
+    pub(crate) fn forget_negatives(&self, hashes: &[MerkleHash]) -> Result<()> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| CrabError::Internal("add remote candidate database poisoned".into()))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| database_error("begin negative invalidation", error))?;
+        for batch in hashes.chunks(LOOKUP_BATCH_SIZE) {
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let values = batch
+                .iter()
+                .map(|hash| <[u8; 32]>::from(*hash))
+                .collect::<Vec<_>>();
+            transaction
+                .execute(
+                    &format!("DELETE FROM {NEGATIVE_TABLE} WHERE chunk_hash IN ({placeholders})"),
+                    params_from_iter(values.iter().map(|hash| hash.as_slice())),
+                )
+                .map_err(|error| database_error("forget committed negatives", error))?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| database_error("commit negative invalidation", error))?;
+        let mut memory = self
+            .memory
+            .lock()
+            .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
+        for hash in hashes {
+            if memory
+                .peek(hash)
+                .is_some_and(|entry| entry.candidate.is_none())
+            {
+                memory.pop(hash);
+            }
+        }
+        Ok(())
+    }
+
     /// Persist entries whose chunk hashes are unique within the batch.
     ///
     /// The add classifier already deduplicates lookup inputs, so this path can

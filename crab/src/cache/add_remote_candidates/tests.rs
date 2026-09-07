@@ -2,6 +2,49 @@ use super::*;
 use tempfile::tempdir;
 
 #[test]
+fn committed_chunks_forget_only_matching_negatives_in_both_tiers() {
+    let dir = tempdir().expect("tempdir");
+    let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
+    let committed = MerkleHash::from([21; 32]);
+    let pending = MerkleHash::from([22; 32]);
+    let positive = MerkleHash::from([23; 32]);
+    let entries = [
+        (committed, None),
+        (pending, None),
+        (positive, Some(candidate(23))),
+    ];
+    cache.persist_unique_results(&entries).expect("persist");
+    cache
+        .load_persistent(&[committed, pending, positive])
+        .expect("promote");
+    cache
+        .forget_negatives(&[committed, positive])
+        .expect("commit invalidation");
+    let expected = HashMap::from([(pending, None), (positive, Some(candidate(23)))]);
+    assert_eq!(
+        cache
+            .memory_get_batch(&[committed, pending, positive])
+            .expect("memory"),
+        expected
+    );
+    assert_eq!(
+        cache
+            .load_persistent(&[committed, pending, positive])
+            .expect("disk"),
+        expected
+    );
+    let counts: (i64, i64) = cache
+        .connection
+        .lock()
+        .expect("lock")
+        .query_row("SELECT positives, negatives FROM cache_counts", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("counts");
+    assert_eq!(counts, (1, 1));
+}
+
+#[test]
 fn persistent_promotion_preserves_negative_expiry() {
     let dir = tempdir().expect("tempdir");
     let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");

@@ -15728,6 +15728,37 @@ impl PushPipeline {
         };
 
         if !shard_entries.is_empty() {
+            // Only successful visibility publication invalidates cached misses.
+            // Reuse the prepared shard membership; do not rescan recipes or
+            // promote pre-CAS candidates into add-time remote authority.
+            let cache_path = crate::cache::add_remote_candidate_cache_path(
+                &crate::cache::default_cache_root(),
+                &self.router.store().bucket_identity(),
+                self.router.global_prefix(),
+            );
+            if self.store.is_some() && cache_path.is_file() {
+                let published = Arc::clone(&shard_entries);
+                let invalidation = tokio::task::spawn_blocking(move || -> Result<()> {
+                    let cache = crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(
+                        &cache_path,
+                    )?;
+                    for (_, entries) in published.iter() {
+                        for batch in entries.chunks(CANDIDATE_METADATA_BATCH_SIZE) {
+                            let hashes = batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+                            cache.forget_negatives(&hashes)?;
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+                match invalidation {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        warn!(error = %error, "failed to invalidate committed add cache misses")
+                    }
+                    Err(error) => warn!(error = %error, "add cache invalidation task failed"),
+                }
+            }
             let mut chunk_index = self.chunk_index.lock().await;
             for (shard_hash, entries) in shard_entries.iter() {
                 let already_installed = chunk_index.has_shard(shard_hash);

@@ -207,6 +207,9 @@ chunk, so it expires after five minutes in both SQLite and memory; promotion
 preserves the original observation time. Transactional row accounting and
 eviction enforce the combined two-million-entry limit across process restarts
 and concurrent writers, without full-table counts on the add hot path.
+After a successful local push, published shard membership invalidates matching
+negative entries, so the next add can reuse newly committed remote chunks
+without waiting for the TTL. Invalidation never publishes pre-CAS authority.
 An expired or stale miss otherwise only causes local
 repacking; push still revalidates every positive placement and origin proof.
 Cache failures, stale entries, and evictions are advisory misses; they cannot
