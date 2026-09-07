@@ -219,6 +219,7 @@ pub async fn mount(
     let native_mount_start = Instant::now();
     if let Err(error) = mount_native_nfs(config, ip, port) {
         server_handle.abort();
+        let _ = server_handle.await;
         return Err(error);
     }
     let native_mount_ms = duration_millis(native_mount_start.elapsed());
@@ -265,18 +266,18 @@ pub async fn run_until_cancelled(
         .auto_refresh_interval
         .map(|interval| nfs_control::spawn_auto_refresh(control_state, interval, cancel.clone()));
     let mut server_error = None;
-    loop {
+    let server_joined = loop {
         tokio::select! {
             () = cancel.cancelled() => {
                 info!("cancellation received, unmounting NFS filesystem");
-                break;
+                break false;
             }
             msg = session.mount_rx.recv() => {
                 match msg {
                     Some(true) => continue,
                     _ => {
                         info!("NFS unmount detected, shutting down server");
-                        break;
+                        break false;
                     }
                 }
             }
@@ -284,36 +285,38 @@ pub async fn run_until_cancelled(
                 match result {
                     Ok(Ok(())) => {
                         info!("NFS server exited");
-                        break;
+                        break true;
                     }
                     Ok(Err(error)) => {
                         warn!(error = %error, "NFS server exited with error");
                         server_error = Some(error);
-                        break;
+                        break true;
                     }
-                    Err(error) if error.is_cancelled() => break,
+                    Err(error) if error.is_cancelled() => break true,
                     Err(error) => {
                         server_error = Some(CrabError::Internal(format!("NFS server task failed: {error}")));
-                        break;
+                        break true;
                     }
                 }
             }
             () = tokio::time::sleep(Duration::from_secs(2)) => {
                 if !is_mounted(&session.mountpoint) {
                     info!(mountpoint = %session.mountpoint.display(), "NFS mount disappeared");
-                    break;
+                    break false;
                 }
             }
         }
-    }
+    };
 
     let shutdown_start = Instant::now();
     cancel.cancel();
     if let Some(handle) = refresh_handle {
         handle.abort();
+        let _ = handle.await;
     }
     if let Some(handle) = control_handle {
         handle.abort();
+        let _ = handle.await;
     }
     // Flush overlay state and unmount while the local NFS server can still
     // answer the kernel client. Forced macOS unmounts require root even when
@@ -330,7 +333,12 @@ pub async fn run_until_cancelled(
         Ok(())
     };
     let native_unmount_ms = duration_millis(native_unmount_start.elapsed());
-    session.server_handle.abort();
+    // The select branch may already have consumed the join result. Only join
+    // here when shutdown was triggered by cancellation or native unmount.
+    if !server_joined {
+        session.server_handle.abort();
+        let _ = (&mut session.server_handle).await;
+    }
     let stats = session.runtime_snapshot();
     debug!(
         read_lease_entries = stats.read_leases.entries,
@@ -1069,6 +1077,92 @@ fn sudo_noninteractive_available() -> bool {
 )]
 mod tests {
     use super::*;
+
+    fn synthetic_session(
+        root: &Path,
+        server_handle: tokio::task::JoinHandle<Result<()>>,
+        mount_rx: mpsc::Receiver<bool>,
+    ) -> NfsMountedSession {
+        let snapshot = Arc::new(
+            crate::snapshot::SnapshotStore::open_or_create(&root.join("snapshot.db")).unwrap(),
+        );
+        let resolver = Arc::new(crate::resolver::FuseResolver::new(
+            Arc::clone(&snapshot),
+            None,
+            0,
+            0,
+        ));
+        let cache = Arc::new(crate::ChunkCache::open(root.join("chunks"), None).unwrap());
+        let hydration = crate::pipeline::create_hydration(
+            cache,
+            Arc::new(crate::verified_set::VerifiedSet::default()),
+            CancellationToken::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let engine = Arc::new(VfsEngine::new(
+            Arc::clone(&resolver),
+            None,
+            hydration,
+            None,
+            Some(snapshot),
+        ));
+        let adapter = CrabNfsFs::new(
+            resolver,
+            Arc::clone(&engine),
+            root.to_str().unwrap(),
+            true,
+            None,
+        );
+        NfsMountedSession {
+            server_handle,
+            mount_rx,
+            mountpoint: root.join("not-mounted"),
+            engine,
+            read_leases: adapter.read_lease_pool(),
+            directory_pages: adapter.directory_page_cache(),
+            write_journal: adapter.write_journal(),
+            protocol_stats: adapter.protocol_stats(),
+            control_endpoint: None,
+            read_only: true,
+            auto_refresh_interval: None,
+            runtime: None,
+            lifecycle: NfsMountLifecycleStatus::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_joins_listener_task() {
+        let root = tempfile::tempdir().unwrap();
+        let ownership = Arc::new(());
+        let guard = Arc::clone(&ownership);
+        let server = tokio::spawn(async move {
+            std::future::pending::<()>().await;
+            drop(guard);
+            Ok(())
+        });
+        let (_sender, receiver) = mpsc::channel(1);
+        let session = synthetic_session(root.path(), server, receiver);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        run_until_cancelled(session, cancel).await.unwrap();
+        assert_eq!(Arc::strong_count(&ownership), 1);
+    }
+
+    #[tokio::test]
+    async fn completed_listener_is_not_joined_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let server = tokio::spawn(async { Ok(()) });
+        let (_sender, receiver) = mpsc::channel(1);
+        let session = synthetic_session(root.path(), server, receiver);
+        assert!(
+            run_until_cancelled(session, CancellationToken::new())
+                .await
+                .is_ok()
+        );
+    }
 
     #[test]
     fn windows_drive_target_parser_requires_explicit_drive() {

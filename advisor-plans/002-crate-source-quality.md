@@ -760,3 +760,46 @@ public signatures or duplicating backend entry points. read_status mutability
 is now scoped to nfs. Test-panic expectations are limited to FUSE test modules;
 four test pointer conversions use pointer::cast without changing addresses.
 No mounting was performed; this is compile/lint proof, not native teardown proof.
+
+## NFS task joining in progress
+
+Updated native mount failure to join its aborted listener before returning the
+original mount error. run_until_cancelled now joins refresh/control tasks before
+journal sync, keeps the listener serving through native unmount, then joins it
+unless select already consumed its result. The loop returns that ownership state
+explicitly to avoid polling a completed JoinHandle twice. Existing drain,
+unmount, then server-error precedence is unchanged. Strict nfs Clippy passes.
+
+This runtime change is not yet committed or published: it still needs lifecycle
+regressions for cancellation and already-completed server results, plus failed
+native mount cleanup proof. No claim of native mounted behavior is made. NFS
+listener child connection ownership also requires upstream-source inspection
+before claiming all request futures have completed when the listener joins.
+
+## NFS dependency ownership evidence
+
+Inspected locked nfs3_server 0.11.0 tcp.rs and transaction_tracker.rs.
+NFSTcpListener::handle_forever spawns Cleaner::run and one process_socket task
+per accepted connection, discarding both handles. process_socket additionally
+spawns its message handler without retaining a handle. Contexts retain Arc VFS
+references. NFSTcpListener::drop notifies Cleaner through Notify; connection
+handlers do not consume that stop notification. NFSTcp exposes no drain method.
+The socket processor is crate-private except under a test-only re-export feature.
+
+Therefore local listener joining is not whole-backend completion proof. Do not
+publish a claim that cache/snapshot ownership is released merely because the
+listener joined. The in-progress local joins can still establish parent-task
+completion, but full shutdown needs an explicit dependency task-ownership
+solution and connection-level regressions. Do not enable test-only exports in
+production or patch/vendor the dependency without required authorization.
+README now records this limitation. No dependency or lockfile changed.
+
+Local NFS regression evidence: cancellation_joins_listener_task fails against the
+previous production function (listener-owned Arc remains alive) and passes with
+the join. completed_listener_is_not_joined_twice also passes, covering the select
+branch that consumes the join result. Both use the real run_until_cancelled with
+synthetic listener tasks, empty engine state, and a nonexistent mount path;
+they do not invoke native mounting or qualify dependency child connections.
+Strict all-target nfs Clippy passes with these tests. Failed native mount and
+journal/unmount error injection remain unqualified; no complete NFS shutdown
+claim is made. The joins improve directly owned task release only.
