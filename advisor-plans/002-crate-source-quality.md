@@ -2934,3 +2934,34 @@ Formatting and git diff --check pass. Production code grows17 net lines to
 carry entry identity through pin admission and release; the regression and
 short ownership documentation explain the payoff. PR checks on d58bcf91151 are
 now terminal with no failures; its separate Windows native job remains live.
+
+
+### macOS native read workload correction
+
+The retained benchmark verifier requires both lease misses and lease hits in
+its own before/after window, not just the later mount-status snapshot. A
+separate probe after that window would therefore leave the benchmark unproved.
+The macOS script now sets fcntl.F_NOCACHE before the first read in each pass and
+records client_cache=disabled. The fixture is previously unread at this point.
+No positive-hit assertion, threshold, baseline, or verifier expectation changed.
+
+Dependency evidence: Apple's [fcntl manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html)
+defines F_NOCACHE. Its [NFS client source at93733ffc](https://github.com/apple-oss-distributions/NFS/blob/93733ffccece4daee73bf6306b291d1ae69130c0/kext/nfs_bio.c)
+limits uncached read-ahead to the request and marks freshly read buffers
+NB_NOCACHE; release dumps those pages. Existing cached pages may still be read,
+which is why setting this before the fixture's first read matters. Historical
+kernel-cached throughput is not an equivalent workload baseline. This source
+is published upstream evidence, not proof of the exact runner kernel build.
+
+Linux and Windows retain their existing native workloads. The d58 Linux run
+passed its positive-hit assertion; Windows is still executing its native step.
+Platform-general cache-control/benchmark comparison policy remains follow-up;
+this correction uses a macOS-specific API and does not claim those other kernels
+have identical caching behavior.
+
+Local shell syntax, all seven embedded Python ASTs, all three platform script
+contracts, script-contract self-test, and retained-report verifier self-test
+pass. A temporary local file accepts F_NOCACHE and preserves bytes over repeated
+reads; that checks the host API only. Native macOS CI remains required. The
+initial verifier invocation used --self-test and was rejected by argparse; the
+actual documented self-test subcommand was then run and passed.

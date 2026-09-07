@@ -232,6 +232,7 @@ assert_file_text "$MNT/dir/nested.txt" "nested"
 assert_file_text "$MNT/link-to-hello" "hello"
 assert_gitdir_file
 python3 - "$MNT/native-read.bin" "$RUN_ROOT/native-read-benchmark.json" "$CRAB_EXE" "$MNT" <<'PY'
+import fcntl
 import hashlib
 import json
 import subprocess
@@ -356,6 +357,9 @@ before = runtime_snapshot()
 start = time.perf_counter_ns()
 for pass_index in range(passes):
     with path.open("rb", buffering=0) as handle:
+        # Kernel read-ahead can fill this fixture in concurrent first misses.
+        # Uncached reads keep later requests on NFS so lease reuse is exercised.
+        fcntl.fcntl(handle.fileno(), fcntl.F_NOCACHE, 1)
         while True:
             chunk = handle.read(read_size)
             if not chunk:
@@ -376,6 +380,7 @@ report = {
     "schema_version": 1,
     "suite": "nfs-native-read-benchmark",
     "scenario": "native_sequential_read",
+    "client_cache": "disabled",
     "path": str(path),
     "mountpoint": mountpoint,
     "file_size": path.stat().st_size,

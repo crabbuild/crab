@@ -70,6 +70,11 @@ invalidate entries; existing reads keep their owned lease until completion.
 Pins identify an entry lifetime as well as a file ID, so a late release cannot
 unpin a replacement inserted after invalidation.
 
+The macOS native smoke requests uncached sequential reads with `F_NOCACHE`
+and records `client_cache: disabled` in its benchmark artifact. This exercises
+server lease reuse even when kernel read-ahead could fetch the fixture at once.
+Its throughput is not directly comparable with older kernel-cached runs.
+
 ## Task ownership
 
 | Task | Handle owner | Completion boundary |
