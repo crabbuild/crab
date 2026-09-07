@@ -5,10 +5,30 @@ ref-journal commit and compaction extracted from CLI push, reader repair and gen
 paths. Those CLI callers use these implementations; HTTP receive can compose it without depending
 on the CLI or another server.
 
+## Publication flow
+
+```text
+commit_edits                 durable journal refs; catalog may still lag
+     ↓
+make_readable                elected generation owner, with caller GC fences
+     ├── compact_for_owner   fold journal into the manifest
+     ├── maintain_catalog    publish the generation-bound object catalog
+     └── visibility check    recheck the manifest and active journal
+     ↓
+Some(manifest): ready        None: capture fresh state and try another pass
+```
+
+A commit error may be uncertain; resolve that outcome before proceeding or
+reporting rejection. Read readiness is a separate result from ref durability.
+
+## Initialization
+
 `initialize::initialize_repository` owns canonical empty-repository creation for
 the CLI and HTTP server. It creates the layout only for an empty repository prefix,
 conditionally publishes the generation-zero manifest, and adopts concurrent or
 previous initialization after validating the persisted canonical roots.
+
+## Catalog publication
 
 `catalog::publish_inventory` accepts a caller-owned locator writer, a committed
 inventory/coverage anchor and optional validated local index evidence. Missing
@@ -26,6 +46,8 @@ manifest still matches the supplied generation and pack-index hash.
 they enter publication. Their files must remain unchanged until the call ends.
 The remote path validates the same checksums/counts and uses the same writer.
 Storage, metadata, Git, worker and file errors retain their sources.
+
+## Generation maintenance
 
 `generation::maintain_catalog` owns the catalog lease, renewal, planning reader,
 writer, checkpoint and close lifecycle. Supply a captured manifest and its complete
@@ -49,6 +71,8 @@ borrowed iterator entries do not make publication unspawnable. This retains the
 existing concurrency bound and request ordering; the extra key storage is linear
 in the caller's bounded batch, with 21 bytes per key.
 
+## Journal compaction
+
 `journal::compact_for_owner` folds already committed ref transactions into the
 manifest under its renewable lease. It waits up to two lease lifetimes for
 handoff, then drains at most five waves before releasing ownership.
@@ -65,6 +89,8 @@ Lease renewal failure signals cancellation and drains that operation. Both entry
 points await lease release on success and error; an operation error remains the
 primary error when release also fails. A cancellation result does not roll back
 transactions that were already committed.
+
+## Journal commit
 
 `journal::commit_edits` is the CLI's shared journal commit path. It validates a
 complete batch and checks each expected old OID against a caller-supplied snapshot
@@ -123,71 +149,26 @@ push can acknowledge a fully readable generation.
 
 ## Verification
 
-CLI tests exercise generation advancement without new packs, stale-slot repair,
-concurrent local/remote evidence and kind metadata through the extracted code.
-The direct integration test rejects cancellation, mismatched local evidence and
-truncated indexes without publishing coverage, closes/reopens the writer, then
-verifies exact commit/tree/blob bytes
-through `crab-remote-git` after discarding the local Git repository.
+| Contract | Executable evidence |
+| --- | --- |
+| Invalid local evidence and remote-only byte reconstruction | [Catalog tests](tests/catalog.rs) |
+| Catalog close/release, cancellation, superseded generations, read readiness | [Generation tests](tests/generation.rs) |
+| Atomic batches, namespace conflicts, holder-safe cleanup, failed compaction and retry | [Journal tests](tests/journal.rs) |
+| Canonical initialization and adoption | [Initialization tests](src/initialize.rs) |
+| Original error retained when cleanup also fails | [Error precedence test](src/lib.rs) |
 
-A separate local RustFS qualification also removed its local repository before
-catalog publication and read all three objects byte-identically. Publication took
-21 ms for that small fixture. This is catalog qualification, not an accepted
-HTTP push or a production latency guarantee.
+Run these focused tests from the repository root. Replace `crab-write-dev` with
+a unique checkout name and verify the workspace volume is mounted and writable,
+following root `AGENTS.md`:
 
-Journal tests cover owner and reader handoff, preservation of a replacement ref
-lease, cancellation while waiting, manifest failure and retry, and repeat calls
-with no active transactions. Shared renewal tests prove that lease loss drains
-the operation and preserves its primary error; existing CLI tests also cover a
-completed operation racing a stalled backend renewal.
+```sh
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-write-dev \
+  cargo test -p crab-write --locked --lib --test catalog --test generation --test journal
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-write-dev \
+  cargo clippy -p crab-write --locked --all-targets -- -D warnings
+```
 
-Commit tests cover a second atomic batch over un-compacted journal state, including
-causal parents, exact creation/update/deletion, peeled tag removal and HEAD changes.
-Stale and malformed batches leave storage unchanged, including no orphan journal
-artifacts. Existing compaction tests also enter through the shared commit function.
-
-Namespace tests cover conflicting concurrent creates, atomic parent replacement,
-existing-ref progress behind a busy namespace lease, cancellable admission and
-preservation of a committed result after lease loss. A CLI test interleaves a
-journal create with an initial import whose manifest ETag is still unchanged.
-Metadata tests cancel immediately before and after the marker boundary.
-A RustFS race accepts exactly one conflicting create, releases the namespace
-lease, and publishes the winning generation. Its commit/tree/blob bytes match
-through `crab-remote-git` after removal of the local fixture. The two contending
-operations complete in 229 ms and read readiness takes 163 ms for this small
-fixture; these shared-cache samples do not measure HTTP push latency.
-
-Metadata fault tests cover lost marker replies, unavailable readback, wrong or
-oversized marker bodies and compaction before readback. CLI/protected-service
-error boundaries preserve the uncertain transaction's identity and typed sources.
-A RustFS proxy qualification drops all 55 marker-write responses across transport
-and storage retries. RustFS accepts the marker once; exact readback confirms it,
-then compaction/catalog publication and byte-identical remote reads succeed.
-The injected failure adds 22.6 seconds to commit; it is not a normal latency sample.
-
-A RustFS fixture removes its local repository before shared journal commit, rejects
-a stale retry without another active transaction, then compacts and publishes the
-catalog. Exact commit/tree/blob bytes match through `crab-remote-git`. The shared
-commit took 7 ms, compaction 22 ms and catalog lifecycle 22 ms for this small fixture;
-these are component timings with shared caches, not HTTP push benchmarks.
-
-A separate RustFS round trip commits a native Git fixture through the ref journal,
-removes its local repository, verifies that a busy reader skips compaction, then
-compacts the journal and publishes the catalog. The compactor publishes exact
-visibility from the transaction's evidence; all three Git objects subsequently
-match the native oracle through `crab-remote-git`. Journal compaction took 28 ms
-and catalog publication 12 ms for that small fixture. This does not qualify
-HTTP receive or production latency.
-
-Catalog lifecycle tests cover cancellation behind a writer, failed-publication
-cleanup/retry, stale samples before planning and a manifest change after the
-captured read. The latter runs the lifecycle in a spawned Tokio task. Metadata
-point and scan lookup tests preserve request order and missing rows. Eleven
-focused CLI owner/planning/commit-graph tests pass through the shared code.
-
-A separate RustFS fixture removes its local repository before the shared
-lifecycle publishes the catalog. It binds visibility to the published checkpoint,
-verifies exact commit/tree/blob bytes through `crab-remote-git`, and repeats the
-lifecycle without a second advance. Full catalog lifecycle took 23 ms and journal
-compaction 29 ms for that small fixture. These shared-cache observations do not
-qualify native HTTP receive or production latency.
+The tests use local fixtures and in-memory storage; native pack fixtures require
+Git. They establish component contracts, not a complete HTTP receive path or
+provider qualification. Use the repository's dedicated CI and RustFS qualification
+for live storage, race/crash behavior, and cross-platform proof.

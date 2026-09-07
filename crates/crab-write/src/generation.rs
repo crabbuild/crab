@@ -27,9 +27,8 @@ use crab_remote_git::{
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
-use crate::{Result, WriteError, catalog::publish_inventory};
+use crate::{Result, WriteError, catalog::publish_inventory, finish_after_cleanup};
 
 const COMMIT_GRAPH_BATCH_SIZE: usize = 512;
 
@@ -496,16 +495,13 @@ pub async fn maintain_catalog(
         let session =
             GitObjectLocatorSession::open(Arc::clone(store.inner()), layout.repo_prefix()).await?;
         let coverage = session.coverage();
-        let bindings = session.pack_bindings().await;
+        let bindings = session.pack_bindings().await.map_err(WriteError::from);
         let close = session.close().await;
-        let bindings = match (bindings, close) {
-            (Ok(bindings), Ok(())) => bindings,
-            (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error.into()),
-            (Err(error), Err(close_error)) => {
-                warn!(error = %close_error, "catalog planning session close also failed");
-                return Err(error.into());
-            }
-        };
+        let bindings = finish_after_cleanup(
+            bindings,
+            close,
+            "catalog planning session close also failed",
+        )?;
         check_cancelled(cancel)?;
         let planned_rows = uncovered_locator_object_rows(coverage, &bindings, packs);
         let unchanged = anchor.is_some_and(|anchor| {
@@ -563,15 +559,11 @@ pub async fn maintain_catalog(
         }
         .await;
         let close = writer.close().await;
-        let (maintenance, covered) = match (result, close) {
-            (Ok(result), Ok(_)) => result,
-            (Err(error), Ok(_)) => return Err(error),
-            (Ok(_), Err(error)) => return Err(error.into()),
-            (Err(error), Err(close_error)) => {
-                warn!(error = %close_error, "catalog writer close also failed after publication");
-                return Err(error);
-            }
-        };
+        let (maintenance, covered) = finish_after_cleanup(
+            result,
+            close,
+            "catalog writer close also failed after publication",
+        )?;
         check_cancelled(cancel)?;
         let (current, _) = manifest_store::read_manifest(store, layout).await?;
         if !same_generation(&current, manifest) {
@@ -586,13 +578,9 @@ pub async fn maintain_catalog(
     })
     .await;
     let release = lock.release().await;
-    match (operation, release) {
-        (Ok(result), Ok(())) => Ok(result),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error.into()),
-        (Err(error), Err(release_error)) => {
-            warn!(error = %release_error, "catalog lease release also failed after publication");
-            Err(error)
-        }
-    }
+    finish_after_cleanup(
+        operation,
+        release,
+        "catalog lease release also failed after publication",
+    )
 }

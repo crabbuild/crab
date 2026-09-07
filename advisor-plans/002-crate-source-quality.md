@@ -52,7 +52,7 @@ not claims that the named code is defective.
 | crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
 | crab-cache-store | Origin authority, corrupt-cache repair, range validation | Pending |
 | crab-read | Hydration integrity and error propagation to consumers | Pending |
-| crab-write | Commit uncertainty and generation cleanup | Pending |
+| crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Operation finish/shutdown and range error propagation | Pending |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
 | crab-auth | Credential Debug output; token-cache lifecycle remains | Diagnostic slice verified |
@@ -246,3 +246,26 @@ now pass all three regressions; four existing request-header tests also pass,
 confirming PSK/bearer values still reach requests and no-auth/mTLS add no headers.
 The base credential regression also passes without default features. Strict
 all-target Clippy passes for crab-cache (remote-client) and crab-workflow.
+
+## Publication cleanup ownership
+
+`crab-write` repeated the same outcome selection five times: catalog planning
+reader close, catalog writer close, catalog lease release, and owner/reader
+journal compaction release. A private `finish_after_cleanup` now owns that rule:
+surface cleanup failure after success; preserve the primary operation error and
+log the cleanup cause when both fail. Callers still await close/release first.
+No public API or lifecycle ordering changed.
+
+Caller map: CLI push owner/reader wrappers and metadb generation maintenance;
+HTTP maintenance enters through `generation::make_readable`. Callees remain
+metadata reader/writer close and coordination's holder-checked lease release.
+The namespace sibling intentionally preserves a known committed outcome even
+after lease failure and does not use this maintenance helper.
+
+All 18 existing generation/journal integration tests pass before and after the
+refactor. Four library tests (including typed I/O error precedence) and the
+native-Git catalog reconstruction test also pass, for 23 focused tests. Strict
+all-target Clippy passes. Production line count across the three source modules
+is unchanged while five outcome decisions become one. The README now has a
+publication-flow diagram, subsystem headings, and a compact test evidence table
+instead of uncited historical timing paragraphs.
