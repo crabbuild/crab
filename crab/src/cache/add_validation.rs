@@ -5,12 +5,13 @@
 //! and every filesystem stat field captured during verification. An exact
 //! token can resolve Git's racy-stat ambiguity; a miss must hash the file.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bstr::ByteSlice;
 use crab_types::pointer::Pointer;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params_from_iter};
 
 use crate::core::error::{CrabError, Result};
 
@@ -67,14 +68,47 @@ impl AddValidationCache {
         Ok(Self { connection })
     }
 
-    pub(crate) fn contains(&self, path: &[u8], token: &[u8; 32]) -> Result<bool> {
-        self.connection
-            .prepare_cached("SELECT 1 FROM add_validations WHERE path = ?1 AND token = ?2")
-            .map_err(|error| database_error("prepare add validation cache query", error))?
-            .query_row(params![path, token.as_slice()], |_| Ok(()))
-            .optional()
-            .map(|row| row.is_some())
-            .map_err(|error| database_error("query add validation cache", error))
+    pub(crate) fn contains_batch(
+        &self,
+        entries: &[(&[u8], &[u8; 32])],
+    ) -> Result<HashSet<Vec<u8>>> {
+        if entries.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut hits = HashSet::new();
+        const LOOKUP_BATCH_SIZE: usize = 512;
+        for batch in entries.chunks(LOOKUP_BATCH_SIZE) {
+            let expected = batch.iter().copied().collect::<HashMap<_, _>>();
+            let placeholders = std::iter::repeat_n("?", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query =
+                format!("SELECT path, token FROM add_validations WHERE path IN ({placeholders})");
+            let mut statement = self.connection.prepare_cached(&query).map_err(|error| {
+                database_error("prepare add validation cache lookup batch", error)
+            })?;
+            let paths = batch.iter().map(|(path, _)| *path).collect::<Vec<_>>();
+            let rows = statement
+                .query_map(params_from_iter(paths.iter().copied()), |row| {
+                    let path = row.get::<_, Vec<u8>>(0)?;
+                    let token = row.get::<_, Vec<u8>>(1)?;
+                    Ok((path, token))
+                })
+                .map_err(|error| {
+                    database_error("query add validation cache lookup batch", error)
+                })?;
+            for row in rows {
+                let (path, token) = row
+                    .map_err(|error| database_error("decode add validation cache lookup", error))?;
+                if expected
+                    .get(path.as_slice())
+                    .is_some_and(|expected_token| token.as_slice() == &expected_token[..])
+                {
+                    hits.insert(path);
+                }
+            }
+        }
+        Ok(hits)
     }
 
     pub(crate) fn upsert(&mut self, rows: &[(Vec<u8>, [u8; 32])]) -> Result<()> {
@@ -85,18 +119,37 @@ impl AddValidationCache {
             .connection
             .transaction()
             .map_err(|error| database_error("begin add validation cache update", error))?;
-        {
+        // Two bind variables per row keep batches below SQLite's default
+        // 999-variable limit while avoiding one statement per file.
+        const UPSERT_BATCH_SIZE: usize = 256;
+        for batch in rows.chunks(UPSERT_BATCH_SIZE) {
+            let values_sql = std::iter::repeat_n("(?,?)", batch.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "INSERT INTO add_validations(path, token) VALUES {values_sql}
+                 ON CONFLICT(path) DO UPDATE SET token = excluded.token"
+            );
             let mut statement = transaction
-                .prepare_cached(
-                    "INSERT INTO add_validations(path, token) VALUES (?1, ?2)
-                     ON CONFLICT(path) DO UPDATE SET token = excluded.token",
-                )
+                .prepare_cached(&query)
                 .map_err(|error| database_error("prepare add validation cache update", error))?;
-            for (path, token) in rows {
-                statement
-                    .execute(params![path, token.as_slice()])
-                    .map_err(|error| database_error("write add validation cache row", error))?;
+            let mut values: Vec<&dyn rusqlite::ToSql> =
+                Vec::with_capacity(batch.len().saturating_mul(2));
+            let paths = batch
+                .iter()
+                .map(|(path, _)| path.as_slice())
+                .collect::<Vec<_>>();
+            let tokens = batch
+                .iter()
+                .map(|(_, token)| token.as_slice())
+                .collect::<Vec<_>>();
+            for index in 0..batch.len() {
+                values.push(&paths[index] as &dyn rusqlite::ToSql);
+                values.push(&tokens[index] as &dyn rusqlite::ToSql);
             }
+            statement
+                .execute(params_from_iter(values))
+                .map_err(|error| database_error("write add validation cache batch", error))?;
         }
         transaction
             .commit()
@@ -252,8 +305,50 @@ mod tests {
 
         cache.upsert(&[(literal_path.clone(), token)]).unwrap();
 
-        assert!(cache.contains(&literal_path, &token).unwrap());
-        assert!(!cache.contains(b"model.bin", &token).unwrap());
+        assert_eq!(
+            cache
+                .contains_batch(&[(&literal_path, &token), (b"model.bin", &token)])
+                .unwrap(),
+            HashSet::from([literal_path])
+        );
+    }
+
+    #[test]
+    fn cache_upsert_batches_large_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(ADD_VALIDATIONS_FILENAME);
+        let mut cache = AddValidationCache::open(&path).unwrap();
+        let rows = (0..600_u16)
+            .map(|index| {
+                let mut path = b"file-".to_vec();
+                path.extend_from_slice(&index.to_le_bytes());
+                (path, [index as u8; 32])
+            })
+            .collect::<Vec<_>>();
+
+        cache.upsert(&rows).unwrap();
+
+        let entries = rows
+            .iter()
+            .map(|(path, token)| (path.as_slice(), token))
+            .collect::<Vec<_>>();
+        let hits = cache.contains_batch(&entries).unwrap();
+        assert_eq!(hits.len(), rows.len());
+        assert!(rows.iter().all(|(path, _)| hits.contains(path)));
+    }
+
+    #[test]
+    fn cache_batch_lookup_requires_exact_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(ADD_VALIDATIONS_FILENAME);
+        let mut cache = AddValidationCache::open(&path).unwrap();
+        let literal_path = b"model.bin".to_vec();
+        let token = [7; 32];
+        let wrong_token = [8; 32];
+        cache.upsert(&[(literal_path.clone(), token)]).unwrap();
+
+        let entries = [(literal_path.as_slice(), &wrong_token)];
+        assert!(cache.contains_batch(&entries).unwrap().is_empty());
     }
 
     #[test]

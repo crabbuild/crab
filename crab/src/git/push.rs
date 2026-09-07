@@ -95,6 +95,9 @@ use crab_xet::xorb::format::{
 };
 use crab_xet::xorb::parser::{XorbParser, xorb_metadata_region};
 
+const RECIPE_PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const RECIPE_PAGE_CACHE_ENTRY_OVERHEAD: usize = 128;
+
 fn bulk_data_bytes(bulk: &BulkData) -> u64 {
     let shard_segment_bytes: u64 = bulk
         .shard_index
@@ -284,6 +287,7 @@ async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -
 
 const GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE: usize = 4_096;
 const GLOBAL_CHUNK_LOOKUP_BUDGET: Duration = Duration::from_secs(120);
+const ADD_REMOTE_CLASSIFIER_INITIAL_CAPACITY: usize = 65_536;
 const BASE_SHARD_LOOKUP_LIMIT: usize = 4_096;
 const CANDIDATE_METADATA_BATCH_SIZE: usize = 2_048;
 const STAGING_VERIFY_CONCURRENCY: usize = 4;
@@ -4130,8 +4134,9 @@ pub struct PushPipeline {
     /// through coordinator commit. Protected pushes use the receive service's
     /// equivalent fence and therefore do not populate this slot.
     gc_writer: tokio::sync::Mutex<Option<crate::maintenance::GcWriterLeases>>,
-    /// Shard bytes + hash pairs produced by step 8, consumed by step 9.
-    shard_results: tokio::sync::Mutex<Vec<(Vec<u8>, MerkleHash)>>,
+    /// Shard payloads + hashes produced by step 8, consumed by step 9.
+    /// `Bytes` keeps upload/cache readers zero-copy after shard construction.
+    shard_results: tokio::sync::Mutex<Vec<(Bytes, MerkleHash)>>,
     /// Maps file_hash → index into `shard_results`, so step 9 knows which
     /// shard contains each file's reconstruction info.
     file_shard_index: tokio::sync::Mutex<HashMap<MerkleHash, usize>>,
@@ -4143,6 +4148,10 @@ pub struct PushPipeline {
     /// reconstruction terms from an empty staging list would mis-fire
     /// the tertiary `IncompleteShardReconstruction` sentinel.
     remote_only_pointers: tokio::sync::Mutex<std::collections::HashSet<MerkleHash>>,
+    /// Per-shard chunk placements prepared while publishing candidate
+    /// metadata. Post-success cleanup consumes this snapshot instead of
+    /// paging every recipe a second time.
+    precomputed_chunk_index_entries: tokio::sync::Mutex<Option<Arc<ChunkIndexShardEntries>>>,
     /// Verified recipe hashes backing snapshot-pinned remote-only dependencies.
     remote_file_recipe_hashes: tokio::sync::Mutex<HashMap<MerkleHash, [u8; 32]>>,
     /// ChunkIndex populated by this push's verified MetaDb hits.
@@ -4181,6 +4190,10 @@ pub struct PushPipeline {
     /// Per-file immutable recipe-root cache populated by step 2.
     /// Ordered terms remain indexed in staging and are consumed in fixed pages.
     chunk_cache: tokio::sync::Mutex<HashMap<MerkleHash, CachedFileRecipe>>,
+    /// Bounded cross-phase cache for immutable recipe pages. It is cleared
+    /// whenever step 2 rebuilds the recipe snapshot, so retries cannot reuse
+    /// pages from a prior staging view.
+    recipe_page_cache: std::sync::Mutex<RecipePageCache>,
     /// Add-time push plans that matched an exact published recipe during step 2.
     ///
     /// These are advisory until step 4 re-proves every remote placement
@@ -4255,6 +4268,9 @@ pub struct PushPipeline {
 /// Shared add-time classifier backed by the push pipeline's full proof path.
 pub(crate) struct AddRemoteChunkClassifier {
     pipeline: PushPipeline,
+    candidate_cache: Option<Arc<crate::cache::add_remote_candidates::AddRemoteCandidateCache>>,
+    candidate_cache_hits: std::sync::atomic::AtomicU64,
+    candidate_cache_misses: std::sync::atomic::AtomicU64,
 }
 
 impl AddRemoteChunkClassifier {
@@ -4291,10 +4307,44 @@ impl AddRemoteChunkClassifier {
             true,
         );
         pipeline.install_metadb(guard);
-        Self { pipeline }
+        let cache_path = crate::cache::add_remote_candidate_cache_path(
+            &crate::cache::default_cache_root(),
+            &store.bucket_identity(),
+            router.global_prefix(),
+        );
+        let candidate_cache =
+            match crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(&cache_path) {
+                Ok(cache) => Some(Arc::new(cache)),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        path = %cache_path.display(),
+                        "add remote candidate cache unavailable; using remote proof lookup"
+                    );
+                    None
+                }
+            };
+        Self {
+            pipeline,
+            candidate_cache,
+            candidate_cache_hits: std::sync::atomic::AtomicU64::new(0),
+            candidate_cache_misses: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     pub(crate) async fn close(&self) {
+        let cache_hits = self
+            .candidate_cache_hits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let cache_misses = self
+            .candidate_cache_misses
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cache_hits > 0 || cache_misses > 0 {
+            debug!(
+                cache_hits,
+                cache_misses, "add remote candidate cache summary"
+            );
+        }
         self.pipeline.close_metadb().await;
     }
 
@@ -4313,17 +4363,138 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
         &self,
         chunks: &[(MerkleHash, u64)],
     ) -> crab_staging::Result<Vec<Option<crab_staging::push_plan::ExistingChunkCandidate>>> {
-        let hashes = chunks.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-        let candidates = self
-            .pipeline
-            .lookup_proven_remote_chunks_for_add(&hashes)
-            .await
-            .map_err(|error| match error {
-                CrabError::Cancelled => crab_staging::StagingError::Cancelled,
-                error => crab_staging::StagingError::Internal(format!(
-                    "remote add classifier failed: {error}"
-                )),
-            })?;
+        if chunks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let initial_capacity = chunks.len().min(ADD_REMOTE_CLASSIFIER_INITIAL_CAPACITY);
+        let mut unique_chunks = Vec::with_capacity(initial_capacity);
+        let mut seen = HashSet::with_capacity(initial_capacity);
+        for (chunk_hash, _) in chunks {
+            if seen.insert(*chunk_hash) {
+                unique_chunks.push(*chunk_hash);
+            }
+        }
+        drop(seen);
+
+        // Most first pushes are all misses; grow only when a positive candidate
+        // exists instead of reserving buckets for the whole repository.
+        let mut candidates = HashMap::new();
+        let mut misses = Vec::with_capacity(unique_chunks.len());
+        if let Some(cache) = &self.candidate_cache {
+            match cache.memory_get_batch(&unique_chunks) {
+                Ok(cached) => {
+                    for chunk_hash in &unique_chunks {
+                        match cached.get(chunk_hash).copied() {
+                            Some(Some(candidate)) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                candidates.insert(*chunk_hash, candidate);
+                            }
+                            Some(None) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            None => misses.push(*chunk_hash),
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(error = %error, "add remote candidate memory cache lookup failed");
+                    misses = unique_chunks;
+                }
+            }
+        } else {
+            misses = unique_chunks;
+        }
+
+        if !misses.is_empty()
+            && let Some(cache) = &self.candidate_cache
+        {
+            let mut remote_misses = Vec::new();
+            let lookup_hashes = Arc::new(std::mem::take(&mut misses));
+            let persistent_lookup = {
+                let cache = Arc::clone(cache);
+                let hashes = Arc::clone(&lookup_hashes);
+                tokio::task::spawn_blocking(move || cache.load_persistent(hashes.as_slice())).await
+            };
+            match persistent_lookup {
+                Ok(Ok(persisted)) => {
+                    if persisted.is_empty() {
+                        // Preserve the cold-cache all-miss fast path without
+                        // reserving this repository-sized buffer for warm hits.
+                        remote_misses.reserve(lookup_hashes.len());
+                    }
+                    for &chunk_hash in lookup_hashes.iter() {
+                        match persisted.get(&chunk_hash).copied() {
+                            Some(Some(candidate)) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                candidates.insert(chunk_hash, candidate);
+                            }
+                            Some(None) => {
+                                self.candidate_cache_hits
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                // A persisted negative is advisory: it only avoids
+                                // a duplicate lookup, and push still revalidates
+                                // every candidate it does receive.
+                            }
+                            None => remote_misses.push(chunk_hash),
+                        }
+                    }
+                }
+                Ok(Err(error)) => {
+                    warn!(error = %error, "add remote candidate persistent cache lookup failed");
+                    remote_misses.extend(lookup_hashes.iter().copied());
+                }
+                Err(error) => {
+                    warn!(error = %error, "add remote candidate persistent cache task failed");
+                    remote_misses.extend(lookup_hashes.iter().copied());
+                }
+            }
+            misses = remote_misses;
+        }
+
+        self.candidate_cache_misses
+            .fetch_add(misses.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        if !misses.is_empty() {
+            let fetched = self
+                .pipeline
+                .lookup_proven_remote_chunks_for_add(&misses)
+                .await
+                .map_err(|error| match error {
+                    CrabError::Cancelled => crab_staging::StagingError::Cancelled,
+                    error => crab_staging::StagingError::Internal(format!(
+                        "remote add classifier failed: {error}"
+                    )),
+                })?;
+            let mut updates = Vec::with_capacity(misses.len());
+            for chunk_hash in misses {
+                let candidate = fetched.get(&chunk_hash).copied();
+                if self.candidate_cache.is_some() {
+                    updates.push((chunk_hash, candidate));
+                }
+                if let Some(candidate) = candidate {
+                    candidates.insert(chunk_hash, candidate);
+                }
+            }
+            if let Some(cache) = &self.candidate_cache {
+                if let Err(error) = cache.memory_insert_batch(&updates) {
+                    warn!(error = %error, "add remote candidate memory cache update failed");
+                }
+                let cache = Arc::clone(cache);
+                match tokio::task::spawn_blocking(move || cache.persist_unique_results(&updates))
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        warn!(error = %error, "add remote candidate persistent cache update failed");
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "add remote candidate persistent cache task failed");
+                    }
+                }
+            }
+        }
         Ok(chunks
             .iter()
             .map(|(chunk_hash, size)| {
@@ -4441,6 +4612,12 @@ struct CommittedChunkCandidates {
     placements: HashMap<MerkleHash, crab_metadata::receipts::CommittedChunkPlacement>,
     origin_proofs: HashMap<[u8; 32], crab_metadata::receipts::OriginReceipt>,
     source_anchors: HashMap<[u8; 32], crab_metadata::receipts::SourceAnchor>,
+}
+
+#[derive(Default)]
+struct ValidatedCommittedChunkReceipts {
+    origins: HashMap<XorbHash, crab_metadata::receipts::OriginReceipt>,
+    placements: HashMap<MerkleHash, [u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -4589,6 +4766,45 @@ impl CachedFileRecipe {
         Self { recipe }
     }
 }
+
+#[derive(Default)]
+struct RecipePageCache {
+    pages: HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
+    bytes: usize,
+}
+
+impl RecipePageCache {
+    fn clear(&mut self) {
+        self.pages.clear();
+        self.bytes = 0;
+    }
+
+    fn insert(&mut self, key: ([u8; 32], u64), page: Arc<crab_staging::recipe::RecipePage>) {
+        if self.pages.contains_key(&key) {
+            return;
+        }
+        let page_bytes = page
+            .chunks
+            .capacity()
+            .saturating_mul(std::mem::size_of::<crab_staging::recipe::RecipeChunk>());
+        let entry_bytes = page_bytes.saturating_add(RECIPE_PAGE_CACHE_ENTRY_OVERHEAD);
+        if entry_bytes > RECIPE_PAGE_CACHE_BYTES.saturating_sub(self.bytes) {
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(entry_bytes);
+        self.pages.insert(key, page);
+    }
+}
+
+struct ClassifiedChunkStats {
+    size: u64,
+    new_occurrences: u64,
+}
+
+type ChunkIndexShardEntries = Vec<(
+    MerkleHash,
+    Vec<(MerkleHash, crab_xet::xorb::format::XorbRef)>,
+)>;
 
 async fn pack_decoded_chunk_group(
     ordered: Vec<(Chunk, RunId)>,
@@ -4846,8 +5062,6 @@ impl UploadedXorb {
     }
 }
 
-const PREPARED_XORB_HASH_BUFFER_BYTES: usize = 1024 * 1024;
-
 async fn verify_prepared_xorb_plan(
     path: &Path,
     file_hash: &MerkleHash,
@@ -4855,18 +5069,6 @@ async fn verify_prepared_xorb_plan(
     planned: &PlannedXorb,
     len: usize,
 ) -> Result<(Vec<ChunkPlacement>, [u8; 32])> {
-    let payload_hash = hash_prepared_xorb_file(path).await?;
-    let payload_hash_hex = blake3::Hash::from(payload_hash).to_hex().to_string();
-    if payload_hash_hex != planned.payload_hash {
-        return Err(CrabError::StagingCorrupt(format!(
-            "prepared xorb {} for file {} has payload hash {}, plan says {}",
-            xorb_hash.hex(),
-            file_hash.hex(),
-            payload_hash_hex,
-            planned.payload_hash
-        )));
-    }
-
     if len < FOOTER_SIZE {
         return Err(CrabError::StagingCorrupt(format!(
             "prepared xorb {} for file {} is too small for a footer",
@@ -4874,6 +5076,14 @@ async fn verify_prepared_xorb_plan(
             file_hash.hex()
         )));
     }
+    let expected_payload_hash = blake3::Hash::from_hex(&planned.payload_hash).map_err(|error| {
+        CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} has invalid planned payload hash {}: {error}",
+            xorb_hash.hex(),
+            file_hash.hex(),
+            planned.payload_hash
+        ))
+    })?;
 
     let mut file = tokio::fs::File::open(path).await?;
     let footer_offset = u64::try_from(len - FOOTER_SIZE).map_err(|_| {
@@ -4883,31 +5093,50 @@ async fn verify_prepared_xorb_plan(
     let mut footer = vec![0u8; FOOTER_SIZE];
     file.read_exact(&mut footer).await?;
     let region = xorb_metadata_region(len, &footer)?;
-    file.seek(SeekFrom::Start(u64::try_from(region.offset).map_err(
-        |_| CrabError::Internal("prepared xorb metadata offset does not fit u64".to_owned()),
-    )?))
-    .await?;
     let mut metadata = vec![0u8; region.len];
+    let metadata_start = u64::try_from(region.offset).map_err(|_| {
+        CrabError::Internal("prepared xorb metadata offset does not fit u64".to_owned())
+    })?;
+    let metadata_end = metadata_start
+        .checked_add(u64::try_from(region.len).map_err(|_| {
+            CrabError::Internal("prepared xorb metadata length does not fit u64".to_owned())
+        })?)
+        .ok_or_else(|| CrabError::Internal("prepared xorb metadata range overflow".to_owned()))?;
+    let expected_len = u64::try_from(len)
+        .map_err(|_| CrabError::Internal("prepared xorb length does not fit u64".to_owned()))?;
+    if metadata_end > expected_len {
+        return Err(CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} has metadata outside its payload",
+            xorb_hash.hex(),
+            file_hash.hex()
+        )));
+    }
+
+    file.seek(SeekFrom::Start(metadata_start)).await?;
     file.read_exact(&mut metadata).await?;
     let placements = push_plan::validate_prepared_xorb_metadata(
         len, &footer, &metadata, file_hash, xorb_hash, planned,
     )?;
 
-    Ok((placements, payload_hash))
-}
-
-async fn hash_prepared_xorb_file(path: &Path) -> Result<[u8; 32]> {
-    let mut file = tokio::fs::File::open(path).await?;
+    let mut payload_reader = tokio::fs::File::open(path).await?;
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0u8; PREPARED_XORB_HASH_BUFFER_BYTES];
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
-        let read = file.read(&mut buffer).await?;
+        let read = payload_reader.read(&mut buffer).await?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(*hasher.finalize().as_bytes())
+    if hasher.finalize() != expected_payload_hash {
+        return Err(CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} payload digest does not match its plan",
+            xorb_hash.hex(),
+            file_hash.hex()
+        )));
+    }
+
+    Ok((placements, *expected_payload_hash.as_bytes()))
 }
 
 #[derive(Debug)]
@@ -6504,6 +6733,7 @@ impl PushPipeline {
             file_shard_index: tokio::sync::Mutex::new(HashMap::new()),
             pending_file_index_plan: tokio::sync::Mutex::new(Vec::new()),
             remote_only_pointers: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            precomputed_chunk_index_entries: tokio::sync::Mutex::new(None),
             remote_file_recipe_hashes: tokio::sync::Mutex::new(HashMap::new()),
             chunk_index: tokio::sync::Mutex::new(ChunkIndex::with_ceiling(chunk_index_ceiling)),
             uploaded_packs: tokio::sync::Mutex::new(Vec::new()),
@@ -6516,6 +6746,7 @@ impl PushPipeline {
             planned_git_bytes: std::sync::atomic::AtomicU64::new(0),
             uploaded_xorbs: tokio::sync::Mutex::new(Vec::new()),
             chunk_cache: tokio::sync::Mutex::new(HashMap::new()),
+            recipe_page_cache: std::sync::Mutex::new(RecipePageCache::default()),
             add_push_plans: tokio::sync::Mutex::new(HashMap::new()),
             staging_push_id: uuid::Uuid::now_v7().to_string(),
             staging_push_marked: tokio::sync::Mutex::new(false),
@@ -6583,12 +6814,21 @@ impl PushPipeline {
         Ok(self.common_git_dir()?.join("objects"))
     }
 
-    async fn cached_recipe_for_file(&self, file_hash: &MerkleHash) -> Result<Option<FileRecipe>> {
-        self.chunk_cache
-            .lock()
-            .await
+    async fn cached_recipe_snapshot(&self) -> HashMap<MerkleHash, Option<FileRecipe>> {
+        let cache = self.chunk_cache.lock().await;
+        cache
+            .iter()
+            .map(|(file_hash, cached)| (*file_hash, cached.recipe.clone()))
+            .collect()
+    }
+
+    fn recipe_from_snapshot<'a>(
+        snapshot: &'a HashMap<MerkleHash, Option<FileRecipe>>,
+        file_hash: &MerkleHash,
+    ) -> Result<Option<&'a FileRecipe>> {
+        snapshot
             .get(file_hash)
-            .map(|cached| cached.recipe.clone())
+            .map(Option::as_ref)
             .ok_or_else(|| {
                 CrabError::Internal(format!(
                     "push pipeline invariant violated: verified recipe root missing for file {}; lookup_staging must run first",
@@ -6601,14 +6841,33 @@ impl PushPipeline {
         &self,
         recipe: &FileRecipe,
         start_occurrence: u64,
-    ) -> Result<crab_staging::recipe::RecipePage> {
-        self.staging
+    ) -> Result<Arc<crab_staging::recipe::RecipePage>> {
+        let key = (recipe.hash(), start_occurrence);
+        if let Some(page) = self
+            .recipe_page_cache
+            .lock()
+            .map_err(|_| CrabError::Internal("recipe page cache poisoned".to_owned()))?
+            .pages
+            .get(&key)
+            .cloned()
+        {
+            return Ok(page);
+        }
+        let page = self
+            .staging
             .as_ref()
             .ok_or_else(|| {
                 CrabError::Internal("staging disappeared during recipe read".to_owned())
             })?
             .recipe_page(recipe, start_occurrence)
-            .map_err(CrabError::from)
+            .map_err(CrabError::from)?;
+        let page = Arc::new(page);
+        let mut cache = self
+            .recipe_page_cache
+            .lock()
+            .map_err(|_| CrabError::Internal("recipe page cache poisoned".to_owned()))?;
+        cache.insert(key, Arc::clone(&page));
+        Ok(page)
     }
 
     fn visit_recipe_chunks(
@@ -6627,14 +6886,86 @@ impl PushPipeline {
         Ok(())
     }
 
-    fn build_file_terms_for_recipe(
+    fn visit_recipe_chunks_cached(
         &self,
         recipe: &FileRecipe,
-        placement: &ChunkPlacementMap,
+        pages: &mut HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
+        cached_bytes: &mut usize,
+        mut visit: impl FnMut(MerkleHash, u64) -> Result<()>,
+    ) -> Result<()> {
+        let recipe_hash = recipe.hash();
+        let mut next = 0u64;
+        while next < recipe.chunk_count() {
+            let key = (recipe_hash, next);
+            let page = if let Some(page) = pages.get(&key) {
+                Arc::clone(page)
+            } else {
+                let page = self.recipe_page(recipe, next)?;
+                let estimated_bytes = page
+                    .chunks
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<crab_staging::recipe::RecipeChunk>())
+                    .saturating_add(RECIPE_PAGE_CACHE_ENTRY_OVERHEAD);
+                if (*cached_bytes).saturating_add(estimated_bytes) <= RECIPE_PAGE_CACHE_BYTES {
+                    *cached_bytes = (*cached_bytes).saturating_add(estimated_bytes);
+                    pages.insert(key, Arc::clone(&page));
+                }
+                page
+            };
+            for chunk in &page.chunks {
+                visit(chunk.chunk_hash, chunk.len)?;
+            }
+            next = page.next_occurrence();
+        }
+        Ok(())
+    }
+
+    fn build_file_terms_for_recipe(
+        &self,
+        file_hash: &MerkleHash,
+        recipe: &FileRecipe,
+        pages: &mut HashMap<([u8; 32], u64), Arc<crab_staging::recipe::RecipePage>>,
+        cached_bytes: &mut usize,
+        placement: &mut ChunkPlacementMap,
+        verified_existing: &ChunkPlacementMap,
+        fail_fast_on_missing: bool,
     ) -> Result<Vec<FileTerm>> {
         let mut builder = crab_xet::reconstruction::FileTermBuilder::new();
-        self.visit_recipe_chunks(recipe, |chunk_hash, _| {
-            builder.push(chunk_hash, placement).map_err(CrabError::from)
+        let mut chunk_index = 0usize;
+        self.visit_recipe_chunks_cached(recipe, pages, cached_bytes, |chunk_hash, _| {
+            if fail_fast_on_missing {
+                let resolved = if let Some(existing) = placement.get(&chunk_hash) {
+                    Some(existing)
+                } else {
+                    match verified_existing.get(&chunk_hash) {
+                        Some(existing) => {
+                            placement.insert(chunk_hash, existing.clone());
+                            placement.get(&chunk_hash)
+                        }
+                        None => {
+                            return Err(CrabError::IncompleteShardReconstruction {
+                                file_hash: file_hash.hex(),
+                                path: None,
+                                uncovered_chunks: 1,
+                                example_chunk_hash: chunk_hash.hex(),
+                                example_chunk_index: usize_to_shard_u32(
+                                    "file chunk index",
+                                    chunk_index,
+                                )?,
+                            });
+                        }
+                    }
+                };
+                builder
+                    .push_with_placement(chunk_hash, resolved)
+                    .map_err(CrabError::from)?;
+            } else {
+                builder
+                    .push(chunk_hash, placement)
+                    .map_err(CrabError::from)?;
+            }
+            chunk_index = chunk_index.saturating_add(1);
+            Ok(())
         })?;
         builder
             .finish(&recipe.file_hash(), recipe.chunk_count())
@@ -7575,6 +7906,7 @@ impl PushPipeline {
         let mut recipe_hasher = blake3::Hasher::new();
         recipe_hasher.update(b"crab push file recipes v1\0");
         let remote_records = self.remote_file_recipe_hashes.lock().await.clone();
+        let recipe_snapshot = self.cached_recipe_snapshot().await;
         let mut planned_file_dependencies = Vec::with_capacity(recipe_specs.len());
         for (file_hash, size) in recipe_specs {
             recipe_hasher.update(&<[u8; 32]>::from(file_hash));
@@ -7588,7 +7920,14 @@ impl PushPipeline {
                 })?;
                 (*record, true)
             } else {
-                (self.staged_recipe_hash(&file_hash).await?, false)
+                let recipe =
+                    Self::recipe_from_snapshot(&recipe_snapshot, &file_hash)?.ok_or_else(|| {
+                        CrabError::Internal(format!(
+                            "staged recipe root missing for {}",
+                            file_hash.hex()
+                        ))
+                    })?;
+                (recipe.hash(), false)
             };
             recipe_hasher.update(&recipe_hash);
             planned_file_dependencies.push(PlannedFileDependency {
@@ -7631,15 +7970,8 @@ impl PushPipeline {
                     .as_bytes(),
             );
         }
-        let staged_recipes = self
-            .chunk_cache
-            .lock()
-            .await
-            .values()
-            .filter_map(|cached| cached.recipe.clone())
-            .collect::<Vec<_>>();
         let mut staged_hashes = HashSet::new();
-        for recipe in &staged_recipes {
+        for recipe in recipe_snapshot.values().filter_map(Option::as_ref) {
             self.visit_recipe_chunks(recipe, |chunk_hash, _| {
                 staged_hashes.insert(chunk_hash);
                 Ok(())
@@ -9188,6 +9520,10 @@ impl PushPipeline {
         // recipe-derived set from the surviving refs so a rejected sibling
         // cannot contribute payload, proof, or receipt state to the retry.
         self.chunk_cache.lock().await.clear();
+        self.recipe_page_cache
+            .lock()
+            .map_err(|_| CrabError::Internal("recipe page cache poisoned".to_owned()))?
+            .clear();
         self.add_push_plans.lock().await.clear();
         self.remote_only_pointers.lock().await.clear();
         self.remote_file_recipe_hashes.lock().await.clear();
@@ -9256,12 +9592,41 @@ impl PushPipeline {
             }
         }
 
-        let staging = Arc::clone(staging);
+        let file_hashes = unique_specs
+            .iter()
+            .map(|(file_hash, _)| *file_hash)
+            .collect::<Vec<_>>();
+        let published_recipes = Arc::new(staging.published_recipes_for_files(&file_hashes)?);
+        let recipe_hashes = published_recipes
+            .values()
+            .filter_map(|recipe| {
+                recipe
+                    .as_ref()
+                    .map(|recipe| MerkleHash::from(recipe.hash()))
+            })
+            .collect::<Vec<_>>();
+        let prepared_xorbs = match staging.prepared_xorbs_for_recipes(&recipe_hashes) {
+            Ok(prepared_xorbs) => Some(Arc::new(prepared_xorbs)),
+            Err(error) => {
+                warn!(error = %error, "failed to batch read prepared xorb authority; continuing without add-time plans");
+                None
+            }
+        };
         let verify_results = futures_util::stream::iter(unique_specs.into_iter().map(
             |(file_hash, pointer_size)| {
-                let staging = Arc::clone(&staging);
+                let published_recipes = Arc::clone(&published_recipes);
+                let prepared_xorbs = prepared_xorbs.clone();
                 async move {
-                    let Some(recipe) = staging.published_recipe_for_file(&file_hash)? else {
+                    let recipe = published_recipes
+                        .get(&file_hash)
+                        .cloned()
+                        .ok_or_else(|| {
+                            CrabError::Internal(format!(
+                                "staging recipe batch lookup omitted file {}",
+                                file_hash.hex()
+                            ))
+                        })?;
+                    let Some(recipe) = recipe else {
                         debug!(
                             file_hash = %file_hash.hex(),
                             "step 2: no published staging recipe for pointer"
@@ -9307,35 +9672,27 @@ impl PushPipeline {
                         )));
                     }
 
-                    let add_push_plan = match staging.load_file_push_plan(&file_hash).await
-                    {
-                        Ok(Some(plan))
-                            if add_push_plan_matches_staging(
-                                &plan,
-                                &file_hash,
-                                pointer_size,
-                                &recipe,
-                            ) =>
-                        {
+                    let add_push_plan = prepared_xorbs.as_ref().and_then(|prepared_xorbs| {
+                        let mut plan = FilePushPlan::new_verified_recipe(&recipe);
+                        plan.prepared_xorbs = prepared_xorbs
+                            .get(&MerkleHash::from(recipe.hash()))
+                            .cloned()
+                            .unwrap_or_default();
+                        if add_push_plan_matches_staging(
+                            &plan,
+                            &file_hash,
+                            pointer_size,
+                            &recipe,
+                        ) {
                             Some(plan)
-                        }
-                        Ok(Some(_)) => {
+                        } else {
                             debug!(
                                 file_hash = %file_hash.hex(),
-                                "step 2: add-time push plan did not match the verified recipe; ignoring plan"
+                                "batch add-time push plan did not match the verified recipe; ignoring plan"
                             );
                             None
                         }
-                        Ok(None) => None,
-                        Err(e) => {
-                            warn!(
-                                file_hash = %file_hash.hex(),
-                                error = %e,
-                                "step 2: failed to read add-time push plan; continuing from verified recipe"
-                            );
-                            None
-                        }
-                    };
+                    });
 
                     Ok((
                         file_hash,
@@ -9476,7 +9833,16 @@ impl PushPipeline {
         let mut verified = HashMap::new();
         let mut cached_xorb_hashes = HashSet::new();
         let mut refs_by_xorb: HashMap<XorbHash, Vec<(MerkleHash, XorbRef)>> = HashMap::new();
-        let full_xorb_cache = self.remote_full_xorb_ref_cache.lock().await.clone();
+        // The cache is global and may contain many repositories' xorbs. Only
+        // retain entries referenced by this push; later proof work never needs
+        // to inspect the rest of the cache.
+        let full_xorb_cache = {
+            let cache = self.remote_full_xorb_ref_cache.lock().await;
+            refs.values()
+                .map(|xorb_ref| xorb_ref.xorb_hash)
+                .filter(|xorb_hash| cache.contains(xorb_hash))
+                .collect::<HashSet<_>>()
+        };
         {
             let chunk_ref_cache = self.remote_chunk_ref_cache.lock().await;
             for (chunk_hash, xorb_ref) in refs {
@@ -9922,8 +10288,8 @@ impl PushPipeline {
     }
 
     async fn prove_all_origin_xorbs_for_publish(&self) -> Result<()> {
-        let placements = self.merged_placement.lock().await.clone();
-        if placements.is_empty() {
+        let by_xorb = self.snapshot_placements_by_xorb().await;
+        if by_xorb.is_empty() {
             self.origin_receipts.lock().await.clear();
             return Ok(());
         }
@@ -9934,13 +10300,6 @@ impl PushPipeline {
                 key: "push store".to_owned(),
                 origin: "canonical-origin proof requires a remote store".to_owned(),
             })?;
-        let mut by_xorb: HashMap<MerkleHash, Vec<ChunkPlacement>> = HashMap::new();
-        for placement in placements.values() {
-            by_xorb
-                .entry(placement.xorb_hash)
-                .or_default()
-                .push(placement.clone());
-        }
         let mut candidates = by_xorb
             .into_iter()
             .map(|(hash, placements)| RemoteXorbCandidate { hash, placements })
@@ -9972,8 +10331,8 @@ impl PushPipeline {
     }
 
     async fn prove_all_xorbs_for_protected_push(&self) -> Result<()> {
-        let placements = self.merged_placement.lock().await.clone();
-        if placements.is_empty() {
+        let by_xorb = self.snapshot_placements_by_xorb().await;
+        if by_xorb.is_empty() {
             self.origin_receipts.lock().await.clear();
             return Ok(());
         }
@@ -9989,13 +10348,7 @@ impl PushPipeline {
             .into_iter()
             .map(|write| (write.canonical_key.clone(), write))
             .collect::<HashMap<_, _>>();
-        let mut by_xorb: HashMap<MerkleHash, Vec<ChunkPlacement>> = HashMap::new();
-        for placement in placements.values() {
-            by_xorb
-                .entry(placement.xorb_hash)
-                .or_default()
-                .push(placement.clone());
-        }
+        let required_xorb_count = by_xorb.len();
         let mut canonical_candidates = Vec::new();
         let mut receipts = HashMap::new();
         for (hash, placements) in by_xorb {
@@ -10055,11 +10408,7 @@ impl PushPipeline {
         )
         .await?;
         receipts.extend(canonical);
-        let required = placements
-            .values()
-            .map(|placement| placement.xorb_hash)
-            .collect::<HashSet<_>>();
-        if receipts.len() != required.len() {
+        if receipts.len() != required_xorb_count {
             return Err(CrabError::CorruptObject {
                 path: self.router.repo_prefix().to_owned(),
                 reason: "protected push lacks staged or canonical proof for a candidate xorb"
@@ -10068,6 +10417,18 @@ impl PushPipeline {
         }
         *self.origin_receipts.lock().await = receipts;
         Ok(())
+    }
+
+    async fn snapshot_placements_by_xorb(&self) -> HashMap<MerkleHash, Vec<ChunkPlacement>> {
+        let placements = self.merged_placement.lock().await;
+        let mut by_xorb = HashMap::new();
+        for placement in placements.values() {
+            by_xorb
+                .entry(placement.xorb_hash)
+                .or_insert_with(Vec::new)
+                .push(placement.clone());
+        }
+        by_xorb
     }
 
     async fn verify_cache_service_xorb_refs(
@@ -10261,14 +10622,15 @@ impl PushPipeline {
         let mut residual_chunks = HashSet::new();
         let mut total_occurrence_bytes = 0u64;
         let mut total_occurrence_chunks = 0u64;
+        let recipe_cache = self.cached_recipe_snapshot().await;
         for (file_hash, pointer_size) in pointer_specs {
-            let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? else {
+            let Some(recipe) = Self::recipe_from_snapshot(&recipe_cache, &file_hash)? else {
                 continue;
             };
             if recipe.chunk_count() == 0 {
                 continue;
             }
-            let mut file_sizes = HashMap::new();
+            let mut file_chunks = HashSet::new();
             self.visit_recipe_chunks(&recipe, |chunk_hash, size| {
                 total_occurrence_bytes = total_occurrence_bytes.saturating_add(size);
                 total_occurrence_chunks = total_occurrence_chunks.saturating_add(1);
@@ -10281,13 +10643,8 @@ impl PushPipeline {
                     }
                     _ => {}
                 }
-                match file_sizes.insert(chunk_hash, size) {
-                    Some(existing) if existing != size => Err(CrabError::StagingCorrupt(format!(
-                        "chunk {} has conflicting sizes within one recipe",
-                        chunk_hash.hex()
-                    ))),
-                    _ => Ok(()),
-                }
+                file_chunks.insert(chunk_hash);
+                Ok(())
             })?;
 
             let Some(plan) = plans.remove(&file_hash) else {
@@ -10296,7 +10653,7 @@ impl PushPipeline {
                     file_hash = %file_hash.hex(),
                     "step 4: no add-time push plan for staged pointer; classifying only this file normally"
                 );
-                residual_chunks.extend(file_sizes.keys().copied());
+                residual_chunks.extend(file_chunks.iter().copied());
                 continue;
             };
             if !add_push_plan_matches_staging(&plan, &file_hash, pointer_size, &recipe) {
@@ -10311,7 +10668,7 @@ impl PushPipeline {
                     file_hash = %file_hash.hex(),
                     "step 4: add-time push plan no longer matches staging; classifying only this file normally"
                 );
-                residual_chunks.extend(file_sizes.keys().copied());
+                residual_chunks.extend(file_chunks.iter().copied());
                 continue;
             }
 
@@ -10355,23 +10712,46 @@ impl PushPipeline {
                     &recipe,
                     "contains malformed prepared-xorb metadata",
                 )?;
-                residual_chunks.extend(file_sizes.keys().copied());
+                residual_chunks.extend(file_chunks.iter().copied());
                 continue;
             }
 
+            let mut remote_authority_hashes = Vec::new();
             let mut next_occurrence = 0u64;
+            const REMOTE_AUTHORITY_BATCH_PAGES: u64 = 16;
+            let page_entries = crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64;
+            let batch_entries = page_entries
+                .checked_mul(REMOTE_AUTHORITY_BATCH_PAGES)
+                .ok_or_else(|| {
+                    CrabError::StagingCorrupt("remote authority batch range overflow".to_owned())
+                })?;
             while next_occurrence < recipe.chunk_count() {
+                let end_occurrence = next_occurrence
+                    .checked_add(batch_entries)
+                    .ok_or_else(|| {
+                        CrabError::StagingCorrupt(
+                            "remote authority batch range overflow".to_owned(),
+                        )
+                    })?
+                    .min(recipe.chunk_count());
                 for (chunk_hash, candidate) in
-                    staging.recipe_remote_chunk_page(&recipe, next_occurrence)?
+                    staging.recipe_remote_chunk_range(&recipe, next_occurrence, end_occurrence)?
                 {
-                    let size = file_sizes.get(&chunk_hash).ok_or_else(|| {
+                    let size = expected_sizes.get(&chunk_hash).copied().ok_or_else(|| {
                         CrabError::StagingCorrupt(format!(
                             "remote authority for chunk {} escaped file {} recipe coverage",
                             chunk_hash.hex(),
                             file_hash.hex()
                         ))
                     })?;
-                    if u64::from(candidate.xorb_ref.uncompressed_size) != *size {
+                    if !file_chunks.contains(&chunk_hash) {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "remote authority for chunk {} escaped file {} recipe coverage",
+                            chunk_hash.hex(),
+                            file_hash.hex()
+                        )));
+                    }
+                    if u64::from(candidate.xorb_ref.uncompressed_size) != size {
                         return Err(CrabError::StagingCorrupt(format!(
                             "remote authority for chunk {} in file {} has size {}, expected {size}",
                             chunk_hash.hex(),
@@ -10379,25 +10759,28 @@ impl PushPipeline {
                             candidate.xorb_ref.uncompressed_size
                         )));
                     }
-                    if let Some(existing) = candidate_refs.insert(chunk_hash, candidate)
-                        && existing != candidate
-                    {
-                        return Err(CrabError::StagingCorrupt(format!(
-                            "add-time push plans disagree on remote placement proof for chunk {}",
-                            chunk_hash.hex()
-                        )));
+                    match candidate_refs.insert(chunk_hash, candidate) {
+                        None => remote_authority_hashes.push(chunk_hash),
+                        Some(existing) if existing == candidate => {}
+                        Some(_) => {
+                            return Err(CrabError::StagingCorrupt(format!(
+                                "add-time push plans disagree on remote placement proof for chunk {}",
+                                chunk_hash.hex()
+                            )));
+                        }
                     }
                 }
-                next_occurrence = next_occurrence
-                    .checked_add(crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64)
-                    .ok_or_else(|| {
-                        CrabError::StagingCorrupt(
-                            "remote authority recipe page overflow".to_owned(),
-                        )
-                    })?;
+                next_occurrence = end_occurrence;
             }
             self.record_add_plan_adopted();
-            needed_plans.push((file_hash, recipe, plan, file_sizes, prepared));
+            needed_plans.push((
+                file_hash,
+                recipe,
+                plan,
+                file_chunks,
+                prepared,
+                remote_authority_hashes,
+            ));
         }
         if needed_plans.is_empty() {
             return Ok(false);
@@ -10420,13 +10803,13 @@ impl PushPipeline {
             );
         }
 
-        let cache_lookup_candidates: Vec<MerkleHash> = expected_sizes
+        let mut lookup_candidates: Vec<MerkleHash> = expected_sizes
             .keys()
             .filter(|chunk_hash| !verified_refs.contains_key(chunk_hash))
             .copied()
             .collect();
         let verified_cache_service_hits = self
-            .lookup_cache_service_chunk_refs(&cache_lookup_candidates)
+            .lookup_cache_service_chunk_refs(&lookup_candidates)
             .await?;
         let verified_cache_service_hit_count = verified_cache_service_hits.len();
         if !verified_cache_service_hits.is_empty() {
@@ -10436,17 +10819,12 @@ impl PushPipeline {
                     chunk_index.insert(*chunk_hash, *xorb_ref);
                 }
             }
-            {}
             verified_refs.extend(verified_cache_service_hits);
         }
 
-        let global_lookup_candidates: Vec<MerkleHash> = expected_sizes
-            .keys()
-            .filter(|chunk_hash| !verified_refs.contains_key(chunk_hash))
-            .copied()
-            .collect();
+        lookup_candidates.retain(|chunk_hash| !verified_refs.contains_key(chunk_hash));
         let global_lookup = self
-            .lookup_verified_global_chunk_refs(&global_lookup_candidates)
+            .lookup_verified_global_chunk_refs(&lookup_candidates)
             .await?;
         if global_lookup.stale_hits > 0 {
             warn!(
@@ -10474,7 +10852,7 @@ impl PushPipeline {
         let mut placement_map = HashMap::new();
         let mut unusable_prepared_xorbs = 0usize;
         let mut skipped_existing_prepared_xorbs = 0usize;
-        for (file_hash, recipe, plan, chunks, prepared) in &needed_plans {
+        for (file_hash, recipe, plan, chunks, prepared, _) in &needed_plans {
             for (planned_xorb, (prepared_hash, planned_placements)) in plan
                 .prepared_xorbs
                 .iter()
@@ -10529,7 +10907,7 @@ impl PushPipeline {
                         );
                         unusable_prepared_xorbs += 1;
                         for placement in planned_placements {
-                            if !chunks.contains_key(&placement.chunk_hash) {
+                            if !chunks.contains(&placement.chunk_hash) {
                                 continue;
                             }
                             residual_chunks.insert(placement.chunk_hash);
@@ -10563,39 +10941,63 @@ impl PushPipeline {
                 )
             })
             .collect();
-        for (file_hash, recipe, _, chunks, _) in &needed_plans {
-            let mut next_occurrence = 0u64;
-            while next_occurrence < recipe.chunk_count() {
-                for (chunk_hash, _) in staging.recipe_remote_chunk_page(recipe, next_occurrence)? {
-                    if verified_placement.contains_key(&chunk_hash)
-                        || placement_map.contains_key(&chunk_hash)
-                    {
-                        continue;
-                    }
-                    let size = chunks.get(&chunk_hash).copied().ok_or_else(|| {
-                        CrabError::StagingCorrupt(format!(
-                            "remote authority for chunk {} escaped file {} recipe coverage",
-                            chunk_hash.hex(),
-                            file_hash.hex()
-                        ))
-                    })?;
-                    if !staging.has_segment_payload(&chunk_hash, size)? {
-                        return Err(CrabError::StagingCorrupt(format!(
-                            "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
-                            chunk_hash.hex(),
-                            file_hash.hex()
-                        )));
-                    }
-                }
-                next_occurrence = next_occurrence
-                    .checked_add(crab_staging::recipe::RECIPE_PAGE_ENTRIES as u64)
-                    .ok_or_else(|| {
-                        CrabError::StagingCorrupt(
-                            "remote authority recipe page overflow".to_owned(),
-                        )
-                    })?;
+        const SEGMENT_PAYLOAD_CHECK_BATCH: usize = 16_384;
+        let mut segment_candidates = Vec::with_capacity(SEGMENT_PAYLOAD_CHECK_BATCH);
+        let check_segment_candidates = |segment_candidates: &mut Vec<(
+            MerkleHash,
+            MerkleHash,
+            u64,
+        )>|
+         -> Result<()> {
+            if segment_candidates.is_empty() {
+                return Ok(());
             }
-            for chunk_hash in chunks.keys() {
+            let requested = segment_candidates
+                .iter()
+                .map(|(_, chunk_hash, size)| (*chunk_hash, *size))
+                .collect::<Vec<_>>();
+            let present = staging.segment_payloads_exist(&requested)?;
+            for (file_hash, chunk_hash, _) in segment_candidates.drain(..) {
+                if !present.contains(&chunk_hash) {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "add-time remote proof for chunk {} in file {} is stale and no local payload copy exists; run crab add again",
+                        chunk_hash.hex(),
+                        file_hash.hex()
+                    )));
+                }
+            }
+            Ok(())
+        };
+        for (file_hash, _, _, chunks, _, remote_authority_hashes) in &needed_plans {
+            for chunk_hash in remote_authority_hashes {
+                if verified_placement.contains_key(chunk_hash)
+                    || placement_map.contains_key(chunk_hash)
+                {
+                    continue;
+                }
+                if !chunks.contains(chunk_hash) {
+                    return Err(CrabError::StagingCorrupt(format!(
+                        "remote authority for chunk {} escaped file {} recipe coverage",
+                        chunk_hash.hex(),
+                        file_hash.hex()
+                    )));
+                }
+                let size = expected_sizes.get(chunk_hash).copied().ok_or_else(|| {
+                    CrabError::StagingCorrupt(format!(
+                        "remote authority for chunk {} escaped file {} recipe coverage",
+                        chunk_hash.hex(),
+                        file_hash.hex()
+                    ))
+                })?;
+                segment_candidates.push((*file_hash, *chunk_hash, size));
+                if segment_candidates.len() == SEGMENT_PAYLOAD_CHECK_BATCH {
+                    check_segment_candidates(&mut segment_candidates)?;
+                }
+            }
+        }
+        check_segment_candidates(&mut segment_candidates)?;
+        for (_, _, _, chunks, _, _) in &needed_plans {
+            for chunk_hash in chunks {
                 if placement_map.contains_key(chunk_hash)
                     || verified_placement.contains_key(chunk_hash)
                 {
@@ -10703,21 +11105,21 @@ impl PushPipeline {
             .iter()
             .map(|pointer| MerkleHash::from(pointer.file_hash))
             .collect::<Vec<_>>();
+        let recipe_cache = self.cached_recipe_snapshot().await;
         let mut file_recipes = Vec::with_capacity(file_hashes.len());
         for file_hash in file_hashes {
-            if let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? {
+            if let Some(recipe) = Self::recipe_from_snapshot(&recipe_cache, &file_hash)? {
                 file_recipes.push(recipe);
             }
         }
         let mut occurrence_bytes = 0u64;
-        let mut chunk_sizes = HashMap::new();
+        let mut chunk_stats = HashMap::new();
 
         let mut total_chunks = 0u64;
         let mut existing = 0u64;
         let mut staged = 0u64;
         let mut new_chunks = 0u64;
         let mut new_set = std::collections::HashSet::new();
-        let mut new_counts = HashMap::new();
         let mut existing_candidates: HashMap<MerkleHash, (XorbRef, u64)> = HashMap::new();
 
         {
@@ -10740,14 +11142,18 @@ impl PushPipeline {
                                     .to_owned(),
                             )
                         })?;
-                    match chunk_sizes.insert(chunk_hash, chunk_size) {
-                        Some(existing) if existing != chunk_size => {
-                            return Err(CrabError::StagingCorrupt(format!(
-                                "chunk {} has conflicting staged sizes {existing} and {chunk_size}",
-                                chunk_hash.hex()
-                            )));
-                        }
-                        _ => {}
+                    let stats = chunk_stats
+                        .entry(chunk_hash)
+                        .or_insert(ClassifiedChunkStats {
+                            size: chunk_size,
+                            new_occurrences: 0,
+                        });
+                    if stats.size != chunk_size {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "chunk {} has conflicting staged sizes {} and {chunk_size}",
+                            chunk_hash.hex(),
+                            stats.size,
+                        )));
                     }
                     total_chunks += 1;
                     let class = classifier.classify_with_context(&chunk_hash, &dedup_ctx);
@@ -10762,7 +11168,7 @@ impl PushPipeline {
                         ChunkClass::New => {
                             new_chunks += 1;
                             new_set.insert(chunk_hash);
-                            *new_counts.entry(chunk_hash).or_insert(0) += 1;
+                            stats.new_occurrences += 1;
                         }
                     }
                     classifier.mark_seen(chunk_hash);
@@ -10784,7 +11190,9 @@ impl PushPipeline {
                 stale_existing += count;
                 if new_set.insert(chunk_hash) {
                     new_chunks += 1;
-                    new_counts.insert(chunk_hash, 1);
+                    if let Some(stats) = chunk_stats.get_mut(&chunk_hash) {
+                        stats.new_occurrences = 1;
+                    }
                 }
                 staged += count.saturating_sub(1);
             }
@@ -10796,16 +11204,19 @@ impl PushPipeline {
             );
         }
 
-        let verified_cache_service_hits = {
-            let candidates: Vec<MerkleHash> = new_set.iter().copied().collect();
-            self.lookup_cache_service_chunk_refs(&candidates).await?
-        };
+        let mut lookup_candidates: Vec<MerkleHash> = new_set.iter().copied().collect();
+        let verified_cache_service_hits = self
+            .lookup_cache_service_chunk_refs(&lookup_candidates)
+            .await?;
         let verified_cache_service_hit_count = verified_cache_service_hits.len();
         if !verified_cache_service_hits.is_empty() {
             let mut newly_existing = 0u64;
             for chunk_hash in verified_cache_service_hits.keys() {
                 if new_set.remove(chunk_hash) {
-                    let count = new_counts.remove(chunk_hash).unwrap_or(1);
+                    let count = chunk_stats
+                        .get_mut(chunk_hash)
+                        .map(|stats| std::mem::take(&mut stats.new_occurrences))
+                        .unwrap_or(1);
                     newly_existing += count;
                 }
             }
@@ -10838,7 +11249,10 @@ impl PushPipeline {
             let mut newly_existing = 0u64;
             for chunk_hash in verified_base_shard_hits.keys() {
                 if new_set.remove(chunk_hash) {
-                    let count = new_counts.remove(chunk_hash).unwrap_or(1);
+                    let count = chunk_stats
+                        .get_mut(chunk_hash)
+                        .map(|stats| std::mem::take(&mut stats.new_occurrences))
+                        .unwrap_or(1);
                     newly_existing += count;
                 }
             }
@@ -10847,10 +11261,10 @@ impl PushPipeline {
             verified_refs.extend(verified_base_shard_hits);
         }
 
-        let global_lookup = {
-            let candidates: Vec<MerkleHash> = new_set.iter().copied().collect();
-            self.lookup_verified_global_chunk_refs(&candidates).await?
-        };
+        lookup_candidates.retain(|chunk_hash| new_set.contains(chunk_hash));
+        let global_lookup = self
+            .lookup_verified_global_chunk_refs(&lookup_candidates)
+            .await?;
         let stale_global_hits = global_lookup.stale_hits;
         if stale_global_hits > 0 {
             warn!(
@@ -10868,13 +11282,16 @@ impl PushPipeline {
         let verified_global_hit_count = verified_global_hits.len();
         let global_dedup_bytes = verified_global_hits
             .keys()
-            .map(|hash| chunk_sizes.get(hash).copied().unwrap_or(0))
+            .map(|hash| chunk_stats.get(hash).map_or(0, |stats| stats.size))
             .sum::<u64>();
         if !verified_global_hits.is_empty() {
             let mut newly_existing = 0u64;
             for chunk_hash in verified_global_hits.keys() {
                 if new_set.remove(chunk_hash) {
-                    let count = new_counts.remove(chunk_hash).unwrap_or(1);
+                    let count = chunk_stats
+                        .get_mut(chunk_hash)
+                        .map(|stats| std::mem::take(&mut stats.new_occurrences))
+                        .unwrap_or(1);
                     newly_existing += count;
                 }
             }
@@ -10916,7 +11333,7 @@ impl PushPipeline {
         );
         let new_bytes = new_set
             .iter()
-            .map(|hash| chunk_sizes.get(hash).copied().unwrap_or(0))
+            .map(|hash| chunk_stats.get(hash).map_or(0, |stats| stats.size))
             .sum::<u64>();
         self.planned_xorb_bytes
             .store(new_bytes, std::sync::atomic::Ordering::Relaxed);
@@ -10975,6 +11392,11 @@ impl PushPipeline {
             return Ok(XorbPackSummary::default());
         }
 
+        // Recipe roots are immutable after lookup_staging. Snapshot the
+        // small per-file map once so the pack read schedule does not await
+        // the cache mutex for every pointer in a large repository.
+        let recipe_cache = self.cached_recipe_snapshot().await;
+
         let residual_add_plan_chunks = self
             .new_chunk_hashes
             .lock()
@@ -11031,7 +11453,13 @@ impl PushPipeline {
             for (file_idx, ptr) in pointers.iter().enumerate() {
                 check_cancelled(&self.cancel)?;
                 let file_hash = MerkleHash::from(ptr.file_hash);
-                let Some(recipe) = self.cached_recipe_for_file(&file_hash).await? else {
+                let cached = recipe_cache.get(&file_hash).ok_or_else(|| {
+                    CrabError::Internal(format!(
+                        "push pipeline invariant violated: verified recipe root missing for file {}; lookup_staging must run first",
+                        file_hash.hex()
+                    ))
+                })?;
+                let Some(recipe) = cached else {
                     debug!(file_hash = %file_hash.hex(), "no staged chunks for pointer, skipping");
                     if let Some(ref p) = self.progress {
                         p.inc_pack_file();
@@ -11240,8 +11668,9 @@ impl PushPipeline {
         let already_exist = head_batch(&planned_hashes, &head_store, &config).await?;
         let existing_candidates: Vec<RemoteXorbCandidate> = xorbs
             .iter()
-            .filter(|xorb| already_exist.existing.contains(&xorb.hash.hex()))
-            .map(|xorb| RemoteXorbCandidate {
+            .zip(planned_hashes.iter())
+            .filter(|(_, planned_hash)| already_exist.existing.contains(*planned_hash))
+            .map(|(xorb, _)| RemoteXorbCandidate {
                 hash: xorb.hash,
                 placements: xorb.placements.clone(),
             })
@@ -11890,31 +12319,33 @@ impl PushPipeline {
                 .collect()
         };
         pointer_specs.sort_unstable();
-        let mut placement_map = self.chunk_placement.lock().await.clone();
-        let mut verified_existing = self.verified_existing_placement.lock().await.clone();
         let verified_existing_xorb_info = self.verified_existing_xorb_info.lock().await.clone();
         let mut packed_xorb_info = self.packed_xorb_info.lock().await.clone();
-        let mut uncaptured_placements = ChunkPlacementMap::new();
-        for (chunk_hash, placement) in &placement_map {
-            if let Some(info) = packed_xorb_info.get(&placement.xorb_hash) {
-                let entry = usize::try_from(placement.chunk_index)
-                    .ok()
-                    .and_then(|index| info.chunks.get(index));
-                if !entry.is_some_and(|entry| {
-                    entry.chunk_hash == *chunk_hash
-                        && entry.unpacked_segment_bytes == placement.uncompressed_size
-                }) {
-                    return Err(CrabError::StagingCorrupt(format!(
-                        "packed xorb metadata {} does not cover current chunk {} at index {}",
-                        placement.xorb_hash.hex(),
-                        chunk_hash.hex(),
-                        placement.chunk_index
-                    )));
+        let uncaptured_placements = {
+            let placement_map = self.chunk_placement.lock().await;
+            let mut uncaptured = ChunkPlacementMap::new();
+            for (chunk_hash, placement) in placement_map.iter() {
+                if let Some(info) = packed_xorb_info.get(&placement.xorb_hash) {
+                    let entry = usize::try_from(placement.chunk_index)
+                        .ok()
+                        .and_then(|index| info.chunks.get(index));
+                    if !entry.is_some_and(|entry| {
+                        entry.chunk_hash == *chunk_hash
+                            && entry.unpacked_segment_bytes == placement.uncompressed_size
+                    }) {
+                        return Err(CrabError::StagingCorrupt(format!(
+                            "packed xorb metadata {} does not cover current chunk {} at index {}",
+                            placement.xorb_hash.hex(),
+                            chunk_hash.hex(),
+                            placement.chunk_index
+                        )));
+                    }
+                } else {
+                    uncaptured.insert(*chunk_hash, placement.clone());
                 }
-            } else {
-                uncaptured_placements.insert(*chunk_hash, placement.clone());
             }
-        }
+            uncaptured
+        };
         packed_xorb_info.extend(
             build_complete_xorb_info_map(&uncaptured_placements)?
                 .into_iter()
@@ -11926,75 +12357,68 @@ impl PushPipeline {
             debug!("step 8: no pointers, skipping shard build");
             return Ok(());
         }
+        let recipe_snapshot = self.cached_recipe_snapshot().await;
 
         // `chunk_placement` can contain immutable xorbs uploaded for a ref
         // that lost a non-atomic manifest-CAS race. Only chunks reachable
         // from the current proceeding ref set may enter the rebuilt shard.
         // Content-addressed uploads for removed refs can be reclaimed as
         // ordinary orphans, but must not become generation dependencies.
+        // The push reader snapshot pins these roots, so a page validated in
+        // the reachability pass remains immutable for term construction.
+        // Keep the cache local and budgeted to bound its lifetime and memory.
+        let mut recipe_pages = HashMap::new();
+        let mut recipe_page_cache_bytes = 0usize;
         let mut required_chunks = HashSet::new();
+        let mut seen_recipe_files = HashSet::new();
         for (file_hash, _) in &pointer_specs {
-            if remote_only.contains(file_hash) {
+            if remote_only.contains(file_hash) || !seen_recipe_files.insert(*file_hash) {
                 continue;
             }
-            if let Some(recipe) = self.cached_recipe_for_file(file_hash).await? {
-                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                    required_chunks.insert(chunk_hash);
-                    Ok(())
-                })?;
+            if let Some(recipe) = Self::recipe_from_snapshot(&recipe_snapshot, file_hash)? {
+                self.visit_recipe_chunks_cached(
+                    &recipe,
+                    &mut recipe_pages,
+                    &mut recipe_page_cache_bytes,
+                    |chunk_hash, _| {
+                        required_chunks.insert(chunk_hash);
+                        Ok(())
+                    },
+                )?;
             }
         }
-        placement_map.retain(|chunk_hash, _| required_chunks.contains(chunk_hash));
-        verified_existing.retain(|chunk_hash, _| required_chunks.contains(chunk_hash));
-
         // Build a merged placement map that includes both new chunks and
         // existing chunks whose referenced xorbs were confirmed present in
         // step 4. Advisory local indexes are not read here; a stale entry
         // must repack, not publish metadata pointing at a missing xorb.
-        let mut merged_placement: ChunkPlacementMap = placement_map.clone();
+        let mut merged_placement = {
+            let placement_map = self.chunk_placement.lock().await;
+            placement_map
+                .iter()
+                .filter(|(chunk_hash, _)| required_chunks.contains(chunk_hash))
+                .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+                .collect::<ChunkPlacementMap>()
+        };
+        let placement_new = merged_placement.len();
+        let verified_existing = {
+            let verified_existing = self.verified_existing_placement.lock().await;
+            verified_existing
+                .iter()
+                .filter(|(chunk_hash, _)| required_chunks.contains(chunk_hash))
+                .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+                .collect::<ChunkPlacementMap>()
+        };
         let mut merged_from_index = 0u64;
-        if !verified_existing.is_empty() {
-            for (file_hash, _) in &pointer_specs {
-                if remote_only.contains(file_hash) {
-                    continue;
-                }
-                let Some(recipe) = self.cached_recipe_for_file(file_hash).await? else {
-                    continue;
-                };
-                let mut idx = 0usize;
-                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                    if !merged_placement.contains_key(&chunk_hash) {
-                        match verified_existing.get(&chunk_hash) {
-                            Some(placement) => {
-                                merged_placement.insert(chunk_hash, placement.clone());
-                                merged_from_index += 1;
-                            }
-                            None => {
-                                // Invariant 6: shard reconstruction terms must
-                                // cover ALL chunks. If a chunk for this file is
-                                // absent from both the new placement map and
-                                // the verified existing-placement set, we cannot
-                                // build a complete shard.
-                                return Err(CrabError::IncompleteShardReconstruction {
-                                    file_hash: file_hash.hex(),
-                                    path: None,
-                                    uncovered_chunks: 1,
-                                    example_chunk_hash: chunk_hash.hex(),
-                                    example_chunk_index: usize_to_shard_u32(
-                                        "file chunk index",
-                                        idx,
-                                    )?,
-                                });
-                            }
-                        }
-                    }
-                    idx = idx.saturating_add(1);
-                    Ok(())
-                })?;
+        for (chunk_hash, placement) in &verified_existing {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                merged_placement.entry(*chunk_hash)
+            {
+                entry.insert(placement.clone());
+                merged_from_index += 1;
             }
         }
         info!(
-            placement_new = placement_map.len(),
+            placement_new,
             merged_from_index,
             merged_total = merged_placement.len(),
             verified_existing = verified_existing.len(),
@@ -12065,44 +12489,47 @@ impl PushPipeline {
                 );
                 continue;
             }
-            let recipe = self.cached_recipe_for_file(file_hash).await?;
+            let recipe = Self::recipe_from_snapshot(&recipe_snapshot, file_hash)?;
 
-            let entries: Vec<FileDataSequenceEntry> = if recipe
-                .as_ref()
-                .is_none_or(|recipe| recipe.chunk_count() == 0)
-            {
-                if *size != 0 {
-                    return Err(CrabError::PointerMissingStaging {
-                        total: pointer_specs.len(),
-                        missing: 1,
-                        example_file_hash: file_hash.hex(),
-                        example_size: *size,
-                    });
+            let entries: Vec<FileDataSequenceEntry> = match recipe {
+                Some(recipe) if recipe.chunk_count() > 0 => {
+                    let terms = self.build_file_terms_for_recipe(
+                        file_hash,
+                        recipe,
+                        &mut recipe_pages,
+                        &mut recipe_page_cache_bytes,
+                        &mut merged_placement,
+                        &verified_existing,
+                        !verified_existing.is_empty(),
+                    )?;
+
+                    terms
+                        .into_iter()
+                        .map(|t| {
+                            FileDataSequenceEntry::new(
+                                t.xorb_hash,
+                                t.unpacked_bytes,
+                                t.chunk_start,
+                                t.chunk_end,
+                            )
+                        })
+                        .collect()
                 }
-                debug!(
-                    file_hash = %file_hash.hex(),
-                    "step 8: adding zero-byte file reconstruction entry"
-                );
-                Vec::new()
-            } else {
-                let recipe = recipe.as_ref().ok_or_else(|| {
-                    CrabError::Internal(
-                        "non-empty recipe disappeared during shard build".to_owned(),
-                    )
-                })?;
-                let terms = self.build_file_terms_for_recipe(recipe, &merged_placement)?;
-
-                terms
-                    .iter()
-                    .map(|t| {
-                        FileDataSequenceEntry::new(
-                            t.xorb_hash,
-                            t.unpacked_bytes,
-                            t.chunk_start,
-                            t.chunk_end,
-                        )
-                    })
-                    .collect()
+                _ => {
+                    if *size != 0 {
+                        return Err(CrabError::PointerMissingStaging {
+                            total: pointer_specs.len(),
+                            missing: 1,
+                            example_file_hash: file_hash.hex(),
+                            example_size: *size,
+                        });
+                    }
+                    debug!(
+                        file_hash = %file_hash.hex(),
+                        "step 8: adding zero-byte file reconstruction entry"
+                    );
+                    Vec::new()
+                }
             };
             let mut dependency_hashes = entries
                 .iter()
@@ -12141,7 +12568,13 @@ impl PushPipeline {
             current_shard_file_count += 1;
         }
 
-        let results = shard_session.finalize()?;
+        // Convert the finalized buffers without copying; step 9 and cache
+        // warming retain immutable `Bytes` handles to the same payload.
+        let results: Vec<(Bytes, MerkleHash)> = shard_session
+            .finalize()?
+            .into_iter()
+            .map(|(bytes, hash)| (Bytes::from(bytes), hash))
+            .collect();
         let shard_count = results.len();
         let total_shard_bytes: usize = results.iter().map(|(b, _)| b.len()).sum();
 
@@ -12176,7 +12609,7 @@ impl PushPipeline {
     async fn persist_shard_hints(
         &self,
         file_shard_idx: &HashMap<MerkleHash, usize>,
-        shard_results: &[(Vec<u8>, MerkleHash)],
+        shard_results: &[(Bytes, MerkleHash)],
     ) {
         if file_shard_idx.is_empty() || shard_results.is_empty() {
             return;
@@ -12273,7 +12706,7 @@ impl PushPipeline {
                     (
                         *shard_hash,
                         self.router.shard_path(shard_hash),
-                        Bytes::from(shard_bytes.clone()),
+                        shard_bytes.clone(),
                     )
                 })
                 .collect()
@@ -13592,21 +14025,40 @@ impl PushPipeline {
         &self,
         placements: &HashMap<MerkleHash, XorbRef>,
     ) -> HashMap<XorbHash, crab_metadata::receipts::OriginReceipt> {
-        self.verified_committed_chunk_receipts.lock().await.clear();
-        if placements.is_empty() {
-            return HashMap::new();
+        let candidates = std::mem::take(&mut *self.committed_chunk_receipt_candidates.lock().await);
+        let validated = self
+            .validate_committed_chunk_candidates(placements, candidates)
+            .await;
+        *self.verified_committed_chunk_receipts.lock().await = validated.placements;
+        validated.origins
+    }
+
+    async fn validate_committed_chunk_candidates(
+        &self,
+        placements: &HashMap<MerkleHash, XorbRef>,
+        candidates: CommittedChunkCandidates,
+    ) -> ValidatedCommittedChunkReceipts {
+        // Add calls this concurrently. Own the entire proof snapshot and result
+        // across awaits so another file cannot replace or clear this lookup.
+        if placements.is_empty() || candidates.placements.is_empty() {
+            return ValidatedCommittedChunkReceipts::default();
         }
         let Some(store) = &self.store else {
-            return HashMap::new();
+            return ValidatedCommittedChunkReceipts::default();
         };
         let source_roots = {
-            let candidates = self.committed_chunk_receipt_candidates.lock().await;
-            if candidates.placements.is_empty() {
-                return HashMap::new();
-            }
-            candidates
-                .source_anchors
-                .values()
+            let referenced_anchor_ids = placements
+                .keys()
+                .filter_map(|chunk_hash| {
+                    candidates
+                        .placements
+                        .get(chunk_hash)
+                        .map(|placement| placement.source_anchor_id)
+                })
+                .collect::<HashSet<_>>();
+            referenced_anchor_ids
+                .into_iter()
+                .filter_map(|anchor_id| candidates.source_anchors.get(&anchor_id))
                 .map(|anchor| {
                     (
                         anchor.source_repo_prefix.clone(),
@@ -13698,7 +14150,6 @@ impl PushPipeline {
             }
         }
 
-        let candidates = self.committed_chunk_receipt_candidates.lock().await;
         let candidate_count = candidates.placements.len();
         let mut verified = HashMap::new();
         let mut verified_origins = HashMap::new();
@@ -13761,12 +14212,12 @@ impl PushPipeline {
             verified_chunks = verified.len(),
             "generation-pinned committed chunk receipt validation complete"
         );
-        drop(candidates);
-        *self.committed_chunk_receipt_candidates.lock().await = CommittedChunkCandidates::default();
-        *self.verified_committed_chunk_receipts.lock().await = verified;
         self.tombstone_stale_committed_chunk_receipts(&stale_receipts)
             .await;
-        verified_origins
+        ValidatedCommittedChunkReceipts {
+            origins: verified_origins,
+            placements: verified,
+        }
     }
 
     // A staging miss is acceptable only with a recipe in the captured journal
@@ -13947,6 +14398,7 @@ impl PushPipeline {
         self.shard_results.lock().await.clear();
         self.file_shard_index.lock().await.clear();
         self.pending_file_index_plan.lock().await.clear();
+        *self.precomputed_chunk_index_entries.lock().await = None;
         self.uploaded_shard_hashes.lock().await.clear();
         self.merged_placement.lock().await.clear();
         self.origin_receipts.lock().await.clear();
@@ -14266,14 +14718,17 @@ impl PushPipeline {
             return Ok(None);
         };
 
-        let result = tokio::time::timeout(
-            GLOBAL_CHUNK_LOOKUP_BUDGET,
-            chunk_store.get_batch_with_candidates_bounded(chunk_hashes, chunk_hashes.len()),
-        )
-        .await;
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = chunk_store.get_batch_with_candidates_until(
+                chunk_hashes,
+                tokio::time::Instant::now() + GLOBAL_CHUNK_LOOKUP_BUDGET,
+            ) => result,
+        };
         let (refs, remote_candidates, skipped_remote) = match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => {
+            Ok(result) => result,
+            Err(e) => {
                 warn!(
                     error = %e,
                     candidates = chunk_hashes.len(),
@@ -14281,18 +14736,7 @@ impl PushPipeline {
                 );
                 return Ok(Some((HashMap::new(), chunk_hashes.len())));
             }
-            Err(_) => {
-                debug!(
-                    candidates = chunk_hashes.len(),
-                    budget_ms = GLOBAL_CHUNK_LOOKUP_BUDGET.as_millis() as u64,
-                    "step 4: global chunk lookup reached its proof budget"
-                );
-                return Ok(Some((HashMap::new(), chunk_hashes.len())));
-            }
         };
-        if skipped_remote > 0 {
-            return Ok(Some((HashMap::new(), chunk_hashes.len())));
-        }
 
         {
             let mut candidates = self.committed_chunk_receipt_candidates.lock().await;
@@ -14313,7 +14757,7 @@ impl PushPipeline {
             .zip(refs)
             .filter_map(|(chunk_hash, xorb_ref)| xorb_ref.map(|value| (chunk_hash, value)))
             .collect();
-        Ok(Some((hits, 0)))
+        Ok(Some((hits, skipped_remote)))
     }
 
     async fn lookup_proven_remote_chunks_for_add(
@@ -14368,21 +14812,22 @@ impl PushPipeline {
                 (placement.placement_id(), placement.origin_proof_id),
             );
         }
-        *self.committed_chunk_receipt_candidates.lock().await = CommittedChunkCandidates {
+        let candidates = CommittedChunkCandidates {
             placements: remote_candidates.placements,
             origin_proofs: remote_candidates.origin_proofs,
             source_anchors: remote_candidates.source_anchors,
         };
-        let committed_receipts = self.validate_committed_chunk_receipts(&refs).await;
-        let validated = self.verified_committed_chunk_receipts.lock().await.clone();
+        let validated = self
+            .validate_committed_chunk_candidates(&refs, candidates)
+            .await;
         let verified = self
-            .verify_xorb_refs_with_committed_receipts(&refs, &committed_receipts)
+            .verify_xorb_refs_with_committed_receipts(&refs, &validated.origins)
             .await?;
         Ok(verified
             .into_iter()
             .filter_map(|(chunk_hash, xorb_ref)| {
                 let (placement_id, origin_proof_id) = proof_ids.get(&chunk_hash).copied()?;
-                (validated.get(&chunk_hash) == Some(&placement_id)).then_some((
+                (validated.placements.get(&chunk_hash) == Some(&placement_id)).then_some((
                     chunk_hash,
                     crab_staging::push_plan::ExistingChunkCandidate {
                         xorb_ref,
@@ -14408,7 +14853,7 @@ impl PushPipeline {
 
         let raw: Vec<[u8; 32]> = chunk_hashes.iter().map(|h| (*h).into()).collect();
         let result = caching_store
-            .dedup_query(self.router.repo_prefix(), &raw)
+            .dedup_query_unique(self.router.repo_prefix(), &raw)
             .await?;
 
         let mut hits = HashMap::new();
@@ -14684,6 +15129,40 @@ impl PushPipeline {
         let file_store = guard.file_index().await?;
         let chunk_store = guard.chunk_index().await?;
 
+        for (file_hash, shard_index) in file_index_plan {
+            if shard_hashes.get(*shard_index).is_none() {
+                return Err(CrabError::IncompleteShardReconstruction {
+                    file_hash: file_hash.hex(),
+                    path: None,
+                    uncovered_chunks: 0,
+                    example_chunk_hash: String::new(),
+                    example_chunk_index: u32::MAX,
+                });
+            }
+        }
+
+        // Snapshot every recipe used by this file-index plan once. The same
+        // immutable roots feed file-index records, committed chunk receipts,
+        // and local cache warming; reacquiring the cache mutex per file would
+        // add scheduler overhead and repeat the recipe-page reads below.
+        let cached_recipes = {
+            let cache = self.chunk_cache.lock().await;
+            let mut recipes = HashMap::with_capacity(file_index_plan.len());
+            for (file_hash, _) in file_index_plan {
+                let recipe = cache
+                    .get(file_hash)
+                    .and_then(|cached| cached.recipe.clone())
+                    .ok_or_else(|| {
+                        CrabError::Internal(format!(
+                            "staged recipe root missing for {}",
+                            file_hash.hex()
+                        ))
+                    })?;
+                recipes.insert(*file_hash, recipe);
+            }
+            recipes
+        };
+
         let mut file_entries: Vec<(MerkleHash, crab_metadata::value_codec::CommittedFileRecord)> =
             Vec::with_capacity(file_index_plan.len());
         for (file_hash, idx) in file_index_plan {
@@ -14696,18 +15175,22 @@ impl PushPipeline {
                     example_chunk_index: u32::MAX,
                 });
             };
+            let recipe = cached_recipes.get(file_hash).ok_or_else(|| {
+                CrabError::Internal(format!(
+                    "staged recipe root missing for {}",
+                    file_hash.hex()
+                ))
+            })?;
             file_entries.push((
                 *file_hash,
                 crab_metadata::value_codec::CommittedFileRecord {
-                    recipe_hash: self.staged_recipe_hash(file_hash).await?,
+                    recipe_hash: recipe.hash(),
                     shard_hash: *shard_hash,
                     committed_generation: anchor.generation,
                     shard_index_hash: anchor.shard_index_hash,
                 },
             ));
         }
-
-        let placement_snapshot = self.verified_placement_snapshot().await;
 
         let gc_registry_generation = self
             .push_commit_receipt
@@ -14726,6 +15209,7 @@ impl PushPipeline {
             std::mem::take(&mut *verified)
         };
         let mut chunk_sources = HashMap::new();
+        let mut warm_hashes_by_shard: Vec<Vec<MerkleHash>> = vec![Vec::new(); shard_hashes.len()];
         for (file_hash, shard_index) in file_index_plan {
             let shard_hash = shard_hashes.get(*shard_index).ok_or_else(|| {
                 CrabError::IncompleteShardReconstruction {
@@ -14736,10 +15220,25 @@ impl PushPipeline {
                     example_chunk_index: u32::MAX,
                 }
             })?;
-            let Some(recipe) = self.cached_recipe_for_file(file_hash).await? else {
-                continue;
-            };
-            self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+            let recipe = cached_recipes.get(file_hash).ok_or_else(|| {
+                CrabError::Internal(format!(
+                    "staged recipe root missing for {}",
+                    file_hash.hex()
+                ))
+            })?;
+            let warm_bucket = warm_hashes_by_shard.get_mut(*shard_index).ok_or_else(|| {
+                CrabError::IncompleteShardReconstruction {
+                    file_hash: file_hash.hex(),
+                    path: None,
+                    uncovered_chunks: 0,
+                    example_chunk_hash: String::new(),
+                    example_chunk_index: u32::MAX,
+                }
+            })?;
+            self.visit_recipe_chunks(recipe, |chunk_hash, _| {
+                // Local shard markers must retain every shard membership even
+                // when one chunk hash occurs in multiple files or shards.
+                warm_bucket.push(chunk_hash);
                 // The global index is rebuildable acceleration. Re-publishing an
                 // already generation-pinned receipt only grows immutable history;
                 // if that source root later disappears, validation repacks or repair
@@ -14751,6 +15250,14 @@ impl PushPipeline {
                 Ok(())
             })?;
         }
+        let warm_required_chunks = warm_hashes_by_shard
+            .iter()
+            .flat_map(|hashes| hashes.iter())
+            .copied()
+            .collect::<HashSet<_>>();
+        let placement_snapshot = self
+            .verified_placement_snapshot_for(&warm_required_chunks)
+            .await;
         for chunk_hash in chunk_sources.keys() {
             let placement = placement_snapshot.get(chunk_hash).ok_or_else(|| {
                 CrabError::IncompleteShardReconstruction {
@@ -14863,7 +15370,6 @@ impl PushPipeline {
             .await?;
         }
         guard.flush_memtables().await?;
-        drop(placement_snapshot);
         drop(origin_receipts);
         self.pending_committed_receipt_tombstones
             .lock()
@@ -14884,94 +15390,63 @@ impl PushPipeline {
         // step 8. Failures are logged and swallowed — the remote
         // state is authoritative and the cache will refill on next
         // read.
-        self.warm_local_chunk_index(chunk_store, file_index_plan, shard_hashes)
-            .await;
+        self.warm_local_chunk_index(
+            chunk_store,
+            warm_hashes_by_shard,
+            &placement_snapshot,
+            shard_hashes,
+        )
+        .await;
 
         Ok(())
-    }
-
-    async fn staged_recipe_hash(&self, file_hash: &MerkleHash) -> Result<[u8; 32]> {
-        self.cached_recipe_for_file(file_hash)
-            .await?
-            .map(|recipe| recipe.hash())
-            .ok_or_else(|| {
-                CrabError::Internal(format!(
-                    "staged recipe root missing for {}",
-                    file_hash.hex()
-                ))
-            })
     }
 
     /// Warm the local chunk-index cache tiers for every shard this
     /// push uploaded.
     ///
     /// Called from [`Self::commit_metadb_and_warm_cache_with_guard`] after the
-    /// remote commit succeeds. Groups verified chunk placements by shard
-    /// index and calls [`ChunkIndexStore::warm_local_shard`] per
-    /// shard so the local cache's `shards_v1` presence marker and
-    /// chunk rows stay consistent with the shard metadata uploaded in
-    /// step 8.
+    /// remote commit succeeds. Converts the precomputed per-shard chunk
+    /// membership into verified placements and calls
+    /// [`ChunkIndexStore::warm_local_shard`] per shard so the local cache's
+    /// `shards_v1` presence marker and chunk rows stay consistent with the
+    /// shard metadata uploaded in step 8.
     ///
     /// Extracted into its own method so the outer `execute` state
     /// machine stays compact.
     async fn warm_local_chunk_index(
         &self,
         chunk_store: crate::metadata::ChunkIndexStore,
-        file_index_plan: &[(MerkleHash, usize)],
+        per_shard_hashes: Vec<Vec<MerkleHash>>,
+        placement_snapshot: &ChunkPlacementMap,
         shard_hashes: &[MerkleHash],
     ) {
-        let mut per_shard_chunks: Vec<Vec<(MerkleHash, XorbRef)>> =
-            vec![Vec::new(); shard_hashes.len()];
         if self.staging.is_none() {
             return;
         }
-        let placement_snapshot = self.verified_placement_snapshot().await;
-
-        for (file_hash, shard_idx) in file_index_plan {
-            let recipe = match self.cached_recipe_for_file(file_hash).await {
-                Ok(Some(recipe)) => recipe,
-                Ok(None) => continue,
-                Err(e) => {
-                    warn!(
-                        file_hash = %file_hash.hex(),
-                        error = %e,
-                        "candidate metadata failed to resolve chunk list for warm grouping; skipping file"
-                    );
-                    continue;
-                }
-            };
-            let Some(bucket) = per_shard_chunks.get_mut(*shard_idx) else {
-                warn!(
-                    file_hash = %file_hash.hex(),
-                    shard_idx,
-                    shards = per_shard_chunks.len(),
-                    "candidate metadata file-index plan points past uploaded shard hashes, skipping local warm"
-                );
-                continue;
-            };
-            if let Err(error) = self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                if let Some(p) = placement_snapshot.get(&chunk_hash) {
-                    bucket.push((chunk_hash, Self::xorb_ref_from_placement(p)));
-                }
-                Ok(())
-            }) {
-                warn!(
-                    file_hash = %file_hash.hex(),
-                    error = %error,
-                    "candidate metadata failed to page recipe for warm grouping; skipping file"
-                );
-            }
-        }
-        // De-dup within each shard bucket so `install_shard` doesn't
-        // re-register the same chunk→xorb_ref pair multiple times.
-        for bucket in &mut per_shard_chunks {
-            let mut seen: std::collections::HashSet<MerkleHash> =
-                std::collections::HashSet::with_capacity(bucket.len());
-            bucket.retain(|(h, _)| seen.insert(*h));
-        }
-
-        for (idx, shard_hash) in shard_hashes.iter().enumerate() {
-            let entries = &per_shard_chunks[idx];
+        let per_shard_chunks: Vec<Vec<(MerkleHash, XorbRef)>> = per_shard_hashes
+            .into_iter()
+            .map(|hashes| {
+                let mut seen = HashSet::with_capacity(hashes.len());
+                hashes
+                    .into_iter()
+                    .filter(|chunk_hash| seen.insert(*chunk_hash))
+                    .filter_map(|chunk_hash| {
+                        placement_snapshot
+                            .get(&chunk_hash)
+                            .map(|placement| (chunk_hash, Self::xorb_ref_from_placement(placement)))
+                    })
+                    .collect()
+            })
+            .collect();
+        let shard_entries = Arc::new(
+            shard_hashes
+                .iter()
+                .copied()
+                .zip(per_shard_chunks)
+                .collect::<Vec<_>>(),
+        );
+        *self.precomputed_chunk_index_entries.lock().await = Some(Arc::clone(&shard_entries));
+        for (shard_hash, entries) in shard_entries.iter() {
             if entries.is_empty() {
                 continue;
             }
@@ -14986,14 +15461,32 @@ impl PushPipeline {
         }
     }
 
-    async fn verified_placement_snapshot(&self) -> ChunkPlacementMap {
+    // Post-commit consumers only need reachable chunks; filter while holding the
+    // source lock so orphan placements never get copied into a large snapshot.
+    async fn verified_placement_snapshot_for(
+        &self,
+        required: &HashSet<MerkleHash>,
+    ) -> ChunkPlacementMap {
+        if required.is_empty() {
+            return ChunkPlacementMap::new();
+        }
         let merged = self.merged_placement.lock().await;
         if !merged.is_empty() {
-            return merged.clone();
+            return merged
+                .iter()
+                .filter(|(chunk_hash, _)| required.contains(chunk_hash))
+                .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+                .collect();
         }
         drop(merged);
 
-        self.chunk_placement.lock().await.clone()
+        self.chunk_placement
+            .lock()
+            .await
+            .iter()
+            .filter(|(chunk_hash, _)| required.contains(chunk_hash))
+            .map(|(chunk_hash, placement)| (*chunk_hash, placement.clone()))
+            .collect()
     }
 
     /// Step 10b: Verify every object reachable from each ref tip exists
@@ -15150,109 +15643,140 @@ impl PushPipeline {
         self.stop_heartbeat_and_release_lock().await;
 
         // Build the per-shard chunk→xorb entries outside the ChunkIndex
-        // lock to minimize lock contention. We snapshot the placement map
-        // and shard results, then release those locks before acquiring
-        // the ChunkIndex lock.
+        // lock to minimize lock contention. The metadata path hands us a
+        // prepared snapshot; only offline/no-MetaDb pushes use the defensive
+        // reconstruction below.
         //
         // Each file's chunks are packed into one shard (see `add_file` in
         // the shard session). We use `file_shard_index` to map each file
         // back to its shard, then group the file's chunk placements under
         // that shard for the session-local ChunkIndex.
-        let shard_entries: Vec<(
-            MerkleHash,
-            Vec<(MerkleHash, crab_xet::xorb::format::XorbRef)>,
-        )> = {
-            let shard_results = self.shard_results.lock().await;
-            let placement_map = self.merged_placement.lock().await;
-            let file_shard_index = self.file_shard_index.lock().await;
-            let pointers = self.pointers.lock().await;
+        let shard_entries = match self.precomputed_chunk_index_entries.lock().await.take() {
+            Some(entries) => entries,
+            None => {
+                let recipe_snapshot = self.cached_recipe_snapshot().await;
+                Arc::new({
+                    let shard_results = self.shard_results.lock().await;
+                    let placement_map = self.merged_placement.lock().await;
+                    let file_shard_index = self.file_shard_index.lock().await;
+                    let pointers = self.pointers.lock().await;
 
-            if shard_results.is_empty() || placement_map.is_empty() {
-                Vec::new()
-            } else {
-                // Per-shard entry buckets. A `Vec<Vec<...>>` indexed by
-                // shard index is cheaper than a HashMap for the small
-                // shard counts in practice (usually 1, up to a handful).
-                let mut per_shard: Vec<Vec<(MerkleHash, crab_xet::xorb::format::XorbRef)>> =
-                    vec![Vec::new(); shard_results.len()];
+                    if shard_results.is_empty() || placement_map.is_empty() {
+                        Vec::new()
+                    } else {
+                        // Per-shard entry buckets. A `Vec<Vec<...>>` indexed by
+                        // shard index is cheaper than a HashMap for the small
+                        // shard counts in practice (usually 1, up to a handful).
+                        let mut per_shard: Vec<Vec<(MerkleHash, crab_xet::xorb::format::XorbRef)>> =
+                            vec![Vec::new(); shard_results.len()];
 
-                // Dedup pointers by file_hash to match `build_shard`'s
-                // added_files guard. Without this, a file appearing at
-                // multiple paths in the tree would produce duplicate
-                // chunk entries across the per-shard buckets.
-                let mut seen_files: HashSet<MerkleHash> = HashSet::new();
+                        // Dedup pointers by file_hash to match `build_shard`'s
+                        // added_files guard. Without this, a file appearing at
+                        // multiple paths in the tree would produce duplicate
+                        // chunk entries across the per-shard buckets.
+                        let mut seen_files: HashSet<MerkleHash> = HashSet::new();
 
-                for ptr in pointers.iter() {
-                    let file_hash = MerkleHash::from(ptr.file_hash);
-                    if !seen_files.insert(file_hash) {
-                        continue;
+                        for ptr in pointers.iter() {
+                            let file_hash = MerkleHash::from(ptr.file_hash);
+                            if !seen_files.insert(file_hash) {
+                                continue;
+                            }
+                            let Some(&shard_idx) = file_shard_index.get(&file_hash) else {
+                                // Remote-only pointers (verified durable by step 2)
+                                // have no shard entry — skip them here; their
+                                // chunks are already durable elsewhere.
+                                continue;
+                            };
+                            if shard_idx >= per_shard.len() {
+                                // Defense in depth: log and skip rather than panic.
+                                warn!(
+                                    file_hash = %file_hash.hex(),
+                                    shard_idx,
+                                    shards = shard_results.len(),
+                                    "step 13: file_shard_index points past shard_results, skipping"
+                                );
+                                continue;
+                            }
+
+                            let recipe = recipe_snapshot.get(&file_hash).and_then(Option::as_ref);
+                            let Some(recipe) = recipe else {
+                                continue;
+                            };
+
+                            if let Err(error) =
+                                self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
+                                    let Some(p) = placement_map.get(&chunk_hash) else {
+                                        // Invariant: build_shard guarantees every
+                                        // chunk has a placement. Log and skip — the
+                                        // push already succeeded at this point so we
+                                        // are defensive about cleanup warnings.
+                                        return Ok(());
+                                    };
+                                    per_shard[shard_idx].push((
+                                        chunk_hash,
+                                        crab_xet::xorb::format::XorbRef {
+                                            xorb_hash: p.xorb_hash,
+                                            chunk_index: p.chunk_index,
+                                            uncompressed_size: p.uncompressed_size,
+                                        },
+                                    ));
+                                    Ok(())
+                                })
+                            {
+                                warn!(
+                                    file_hash = %file_hash.hex(),
+                                    error = %error,
+                                    "step 13: failed to page recipe for local cache update"
+                                );
+                            }
+                        }
+
+                        shard_results
+                            .iter()
+                            .zip(per_shard.into_iter())
+                            .map(|((_, shard_hash), entries)| (*shard_hash, entries))
+                            .collect()
                     }
-                    let Some(&shard_idx) = file_shard_index.get(&file_hash) else {
-                        // Remote-only pointers (verified durable by step 2)
-                        // have no shard entry — skip them here; their
-                        // chunks are already durable elsewhere.
-                        continue;
-                    };
-                    if shard_idx >= per_shard.len() {
-                        // Defense in depth: log and skip rather than panic.
-                        warn!(
-                            file_hash = %file_hash.hex(),
-                            shard_idx,
-                            shards = shard_results.len(),
-                            "step 13: file_shard_index points past shard_results, skipping"
-                        );
-                        continue;
-                    }
-
-                    let recipe = {
-                        let cache = self.chunk_cache.lock().await;
-                        cache
-                            .get(&file_hash)
-                            .and_then(|cached| cached.recipe.clone())
-                    };
-                    let Some(recipe) = recipe else {
-                        continue;
-                    };
-
-                    if let Err(error) = self.visit_recipe_chunks(&recipe, |chunk_hash, _| {
-                        let Some(p) = placement_map.get(&chunk_hash) else {
-                            // Invariant: build_shard guarantees every
-                            // chunk has a placement. Log and skip — the
-                            // push already succeeded at this point so we
-                            // are defensive about cleanup warnings.
-                            return Ok(());
-                        };
-                        per_shard[shard_idx].push((
-                            chunk_hash,
-                            crab_xet::xorb::format::XorbRef {
-                                xorb_hash: p.xorb_hash,
-                                chunk_index: p.chunk_index,
-                                uncompressed_size: p.uncompressed_size,
-                            },
-                        ));
-                        Ok(())
-                    }) {
-                        warn!(
-                            file_hash = %file_hash.hex(),
-                            error = %error,
-                            "step 13: failed to page recipe for local cache update"
-                        );
-                    }
-                }
-
-                shard_results
-                    .iter()
-                    .zip(per_shard.into_iter())
-                    .map(|((_, shard_hash), entries)| (*shard_hash, entries))
-                    .collect()
+                    // shard_results / placement_map / file_shard_index / pointers
+                    // locks dropped here.
+                })
             }
-            // shard_results / placement_map / file_shard_index / pointers
-            // locks dropped here.
         };
 
         if !shard_entries.is_empty() {
+            // Only successful visibility publication invalidates cached misses.
+            // Reuse the prepared shard membership; do not rescan recipes or
+            // promote pre-CAS candidates into add-time remote authority.
+            let cache_path = crate::cache::add_remote_candidate_cache_path(
+                &crate::cache::default_cache_root(),
+                &self.router.store().bucket_identity(),
+                self.router.global_prefix(),
+            );
+            if self.store.is_some() && cache_path.is_file() {
+                let published = Arc::clone(&shard_entries);
+                let invalidation = tokio::task::spawn_blocking(move || -> Result<()> {
+                    let cache = crate::cache::add_remote_candidates::AddRemoteCandidateCache::open(
+                        &cache_path,
+                    )?;
+                    for (_, entries) in published.iter() {
+                        for batch in entries.chunks(CANDIDATE_METADATA_BATCH_SIZE) {
+                            let hashes = batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+                            cache.forget_negatives(&hashes)?;
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
+                match invalidation {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        warn!(error = %error, "failed to invalidate committed add cache misses")
+                    }
+                    Err(error) => warn!(error = %error, "add cache invalidation task failed"),
+                }
+            }
             let mut chunk_index = self.chunk_index.lock().await;
-            for (shard_hash, entries) in &shard_entries {
+            for (shard_hash, entries) in shard_entries.iter() {
                 let already_installed = chunk_index.has_shard(shard_hash);
                 chunk_index.install_shard(*shard_hash, entries);
                 if !already_installed && let Some(metrics) = self.metrics.as_deref() {
@@ -28689,6 +29213,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn verified_global_lookup_keeps_local_hits_across_remote_pages() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "repo-bounded-local".to_owned());
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![],
+            Some(store.clone()),
+            None,
+            None,
+            "repo-bounded-local".to_owned(),
+            router.clone(),
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        let (local_hash, xorb_bytes, xorb_hash, xorb_ref) =
+            test_single_chunk_xorb(b"bounded local global lookup");
+        store
+            .put(&router.xorb_path(&xorb_hash), xorb_bytes)
+            .await
+            .expect("seed durable xorb");
+        let guard = build_push_metadb_guard(
+            &store,
+            &router,
+            None,
+            &crate::core::config::MetaDbTomlConfig::default(),
+            false,
+        );
+        let chunk_store = guard.chunk_index().await.expect("chunk index store");
+        chunk_store
+            .warm_local_shard(
+                MerkleHash::from([0xB0, 0xD6, 0xE7, 0x01]),
+                &[(local_hash, xorb_ref)],
+            )
+            .await
+            .expect("warm local chunk index");
+        pipeline.install_metadb(guard);
+
+        let mut chunk_hashes = (0..=(GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE + 1))
+            .map(|index| MerkleHash::from([index as u64, 0xB0D6E7, 0xCA11, 0xD0]))
+            .collect::<Vec<_>>();
+        chunk_hashes[0] = local_hash;
+        let lookup = pipeline
+            .lookup_verified_global_chunk_refs(&chunk_hashes)
+            .await
+            .expect("bounded lookup");
+
+        assert_eq!(lookup.refs.get(&local_hash), Some(&xorb_ref));
+        assert!(!lookup.lookup_unavailable);
+        assert_eq!(lookup.skipped_after_unavailable, 0);
+        pipeline.close_metadb().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn verified_global_lookup_ignores_missing_xorb_hits() {
         use crate::test::git_repo::CacheDirGuard;
 
@@ -29458,14 +30038,12 @@ mod tests {
             .lookup_verified_global_chunk_refs(&chunk_hashes)
             .await
             .expect("lookup global refs");
+        assert!(!lookup.lookup_unavailable);
+        assert_eq!(lookup.skipped_after_unavailable, 0);
         assert_eq!(lookup.stale_hits, missing_chunk_hashes.len());
-        assert_eq!(lookup.refs.len(), 2);
-        for chunk_hash in &chunk_hashes[missing_chunk_hashes.len()..] {
-            let xorb_ref = lookup
-                .refs
-                .get(chunk_hash)
-                .expect("present xorb hit should survive stale earlier batch");
-            assert_eq!(xorb_ref.xorb_hash, present_xorb);
+        assert_eq!(lookup.refs.len(), present_chunks.len());
+        for (hash, _) in &present_chunks {
+            assert_eq!(lookup.refs.get(hash).unwrap().xorb_hash, present_xorb);
         }
 
         pipeline.close_metadb().await;
@@ -30608,7 +31186,7 @@ mod tests {
         let shard_results = pipeline.shard_results.lock().await;
         assert_eq!(shard_results.len(), 1);
         let (shard_bytes, shard_hash) = &shard_results[0];
-        let reader = ShardReader::from_bytes(Bytes::from(shard_bytes.clone()), *shard_hash);
+        let reader = ShardReader::from_bytes(shard_bytes.clone(), *shard_hash);
 
         let xorb_info = reader
             .get_xorb_info(&xorb_hash)
@@ -30699,7 +31277,7 @@ mod tests {
         drop(merged);
         let shards = pipeline.shard_results.lock().await;
         let (bytes, hash) = shards.first().expect("one rebuilt shard");
-        let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *hash);
+        let reader = ShardReader::from_bytes(bytes.clone(), *hash);
         assert!(
             reader
                 .get_file_info(&kept_file)
@@ -30796,7 +31374,7 @@ mod tests {
 
         let shards = pipeline.shard_results.lock().await;
         let (bytes, hash) = shards.first().expect("one rebuilt shard");
-        let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *hash);
+        let reader = ShardReader::from_bytes(bytes.clone(), *hash);
         let xorb_info = reader
             .get_xorb_info(&shared_xorb)
             .expect("read shared xorb")
@@ -32084,7 +32662,8 @@ mod tests {
             false,
         );
         pipeline.install_metadb(guard);
-        *pipeline.shard_results.lock().await = vec![(shard_bytes.to_vec(), shard_hash)];
+        *pipeline.shard_results.lock().await =
+            vec![(Bytes::from(shard_bytes.to_vec()), shard_hash)];
 
         pipeline
             .upload_shard_and_file_index()
@@ -32995,9 +33574,19 @@ mod tests {
             },
         ));
         let chunk_store = guard.chunk_index().await.expect("chunk index store");
+        let required_chunk_list = vec![new_chunk, existing_chunk];
+        let required_chunks = required_chunk_list.iter().copied().collect::<HashSet<_>>();
+        let placement_snapshot = pipeline
+            .verified_placement_snapshot_for(&required_chunks)
+            .await;
 
         pipeline
-            .warm_local_chunk_index(chunk_store, &[(file_hash, 0)], &[shard_hash])
+            .warm_local_chunk_index(
+                chunk_store,
+                vec![required_chunk_list],
+                &placement_snapshot,
+                &[shard_hash],
+            )
             .await;
 
         let persistent = PersistentChunkIndex::open_or_create(&cache_path).expect("open sqlite");
@@ -34874,7 +35463,7 @@ mod tests {
         assert_eq!(first_results.len(), 2);
         let mut extracted_files = Vec::new();
         for (bytes, _) in &first_results {
-            let recipes = crab_xet::shard_parse::extract_file_recipes(&Bytes::from(bytes.clone()))
+            let recipes = crab_xet::shard_parse::extract_file_recipes(bytes)
                 .expect("each forced shard must be independently dependency closed");
             assert_eq!(recipes.len(), 1);
             extracted_files.push(recipes[0].file_hash);
@@ -34968,7 +35557,7 @@ mod tests {
         let shard_results = pipeline.shard_results.lock().await;
         assert_eq!(shard_results.len(), 1);
         let (bytes, shard_hash) = &shard_results[0];
-        let reader = ShardReader::from_bytes(Bytes::from(bytes.clone()), *shard_hash);
+        let reader = ShardReader::from_bytes(bytes.clone(), *shard_hash);
         let file_info = reader
             .get_file_info(&file_hash)
             .expect("read shard file info")

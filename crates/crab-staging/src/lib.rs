@@ -1040,8 +1040,22 @@ fn indexed_recipe_remote_chunk_page(
     recipe: &crate::recipe::FileRecipe,
     start_occurrence: u64,
 ) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
+    let end_occurrence = start_occurrence
+        .checked_add(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
+        .ok_or_else(|| {
+            StagingError::StagingCorrupt("remote authority page range overflow".to_owned())
+        })?;
+    indexed_recipe_remote_chunk_range(index, recipe, start_occurrence, end_occurrence)
+}
+
+fn indexed_recipe_remote_chunk_range(
+    index: &Mutex<Index>,
+    recipe: &crate::recipe::FileRecipe,
+    start_occurrence: u64,
+    end_occurrence: u64,
+) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
     lock_index(index)?
-        .recipe_remote_chunk_page(&recipe.hash(), start_occurrence)?
+        .recipe_remote_chunk_range(&recipe.hash(), start_occurrence, end_occurrence)?
         .into_iter()
         .map(|existing| {
             Ok((
@@ -1193,12 +1207,15 @@ fn existing_chunk_index_records(plan: &push_plan::FilePushPlan) -> Result<Vec<Ex
 fn indexed_prepared_xorb_cache_for_chunks(
     root: &Path,
     index: &Mutex<Index>,
-    wanted_chunks: &HashSet<MerkleHash>,
+    wanted_chunks: &[(MerkleHash, u64)],
 ) -> Result<push_plan::PreparedXorbCache> {
     if wanted_chunks.is_empty() {
         return Ok(push_plan::PreparedXorbCache::default());
     }
-    let wanted: Vec<[u8; 32]> = wanted_chunks.iter().map(|chunk| (*chunk).into()).collect();
+    let wanted: Vec<[u8; 32]> = wanted_chunks
+        .iter()
+        .map(|(chunk, _)| (*chunk).into())
+        .collect();
     let stored = lock_index(index)?.prepared_xorbs_for_chunks(&wanted)?;
     let mut cache = push_plan::PreparedXorbCache::default();
 
@@ -2534,23 +2551,21 @@ impl StagingArea {
         )
     }
 
-    pub(crate) fn append_recording_remote_chunks(
+    pub(crate) fn append_recording_batch(
         &self,
         batch_id: &StagingBatchId,
-        chunks: &[(MerkleHash, push_plan::ExistingChunkCandidate)],
+        start_occurrence: u64,
+        start_offset: u64,
+        recipe_chunks: &[(MerkleHash, u64)],
+        remote_chunks: &[ExistingChunkWrite],
     ) -> Result<()> {
-        let writes = chunks
-            .iter()
-            .map(|(chunk_hash, candidate)| ExistingChunkWrite {
-                chunk_hash: (*chunk_hash).into(),
-                xorb_hash: candidate.xorb_ref.xorb_hash.into(),
-                chunk_index: candidate.xorb_ref.chunk_index,
-                uncompressed_size: candidate.xorb_ref.uncompressed_size,
-                placement_id: candidate.placement_id,
-                origin_proof_id: candidate.origin_proof_id,
-            })
-            .collect::<Vec<_>>();
-        lock_index(&self.index)?.append_recording_remote_chunks(batch_id.as_str(), &writes)
+        lock_index(&self.index)?.append_recording_batch(
+            batch_id.as_str(),
+            start_occurrence,
+            start_offset,
+            recipe_chunks,
+            remote_chunks,
+        )
     }
 
     /// Persist an unverified immutable recipe and lease it to one native-byte path.
@@ -2867,6 +2882,22 @@ impl StagingArea {
         lock_index(&self.index)?.chunk_payload_exists(&chunk_hash, size)
     }
 
+    /// Return requested chunk hashes whose exact raw segment payload remains locally readable.
+    pub fn segment_payloads_exist(
+        &self,
+        chunks: &[(MerkleHash, u64)],
+    ) -> Result<HashSet<MerkleHash>> {
+        let raw_chunks = chunks
+            .iter()
+            .map(|(hash, size)| ((*hash).into(), *size))
+            .collect::<Vec<_>>();
+        Ok(lock_index(&self.index)?
+            .chunk_payloads_exist(&raw_chunks)?
+            .into_iter()
+            .map(MerkleHash::from)
+            .collect())
+    }
+
     /// Return the immutable recipe owned by a published staging batch.
     pub fn published_recipe_for_file(
         &self,
@@ -2931,27 +2962,44 @@ impl StagingArea {
         plan: &push_plan::FilePushPlan,
         recipe: &crate::recipe::FileRecipe,
     ) -> Result<()> {
-        self.write_file_push_plan_bound_to_recipe(plan, recipe, None)
+        let pair = (plan, recipe);
+        self.write_file_push_plans_for_recipes(std::slice::from_ref(&pair))
             .await
     }
 
-    async fn write_file_push_plan_bound_to_recipe(
+    /// Persist several verified push plans in one SQLite transaction.
+    #[expect(
+        clippy::unused_async,
+        reason = "async signature matches the writable staging API"
+    )]
+    pub async fn write_file_push_plans_for_recipes(
         &self,
-        plan: &push_plan::FilePushPlan,
-        recipe: &crate::recipe::FileRecipe,
-        recording_batch_id: Option<&StagingBatchId>,
+        plans: &[(&push_plan::FilePushPlan, &crate::recipe::FileRecipe)],
     ) -> Result<()> {
-        let file_hash = validate_file_push_plan_matches_recipe(plan, recipe)?;
-        let existing_chunks = existing_chunk_index_records(plan)?;
-        let prepared_xorbs = prepared_xorb_index_records(plan)?;
-        let fh: [u8; 32] = file_hash.into();
-        let removed = lock_index(&self.index)?.insert_file_push_plan(index::FilePushPlanWrite {
-            file_hash: &fh,
-            recipe_hash: &recipe.hash(),
-            recording_batch_id: recording_batch_id.map(StagingBatchId::as_str),
-            existing_chunks: &existing_chunks,
-            prepared_xorbs: &prepared_xorbs,
-        })?;
+        if plans.is_empty() {
+            return Ok(());
+        }
+        let mut file_hashes = Vec::with_capacity(plans.len());
+        let mut recipe_hashes = Vec::with_capacity(plans.len());
+        let mut existing_chunks = Vec::with_capacity(plans.len());
+        let mut prepared_xorbs = Vec::with_capacity(plans.len());
+        for (plan, recipe) in plans {
+            let file_hash = validate_file_push_plan_matches_recipe(plan, recipe)?;
+            file_hashes.push(<[u8; 32]>::from(file_hash));
+            recipe_hashes.push(recipe.hash());
+            existing_chunks.push(existing_chunk_index_records(plan)?);
+            prepared_xorbs.push(prepared_xorb_index_records(plan)?);
+        }
+        let writes = (0..plans.len())
+            .map(|index| index::FilePushPlanWrite {
+                file_hash: &file_hashes[index],
+                recipe_hash: &recipe_hashes[index],
+                recording_batch_id: None,
+                existing_chunks: &existing_chunks[index],
+                prepared_xorbs: &prepared_xorbs[index],
+            })
+            .collect::<Vec<_>>();
+        let removed = lock_index(&self.index)?.insert_file_push_plans(&writes)?;
         remove_prepared_payload_files(&self.root, &removed)?;
         Ok(())
     }
@@ -2970,7 +3018,7 @@ impl StagingArea {
 
     pub(crate) fn load_prepared_xorb_cache_for_chunks(
         &self,
-        wanted_chunks: &HashSet<MerkleHash>,
+        wanted_chunks: &[(MerkleHash, u64)],
     ) -> Result<push_plan::PreparedXorbCache> {
         indexed_prepared_xorb_cache_for_chunks(&self.root, &self.index, wanted_chunks)
     }
@@ -2984,13 +3032,14 @@ impl StagingArea {
             .prepared_payload_exclusive_to_recipe(&<[u8; 32]>::from(*xorb_hash), recipe_hash)
     }
 
-    pub(crate) fn chunks_for_file_with_locators(
+    pub(crate) fn file_chunks_match(
         &self,
         file_hash: &MerkleHash,
-    ) -> Result<Vec<StagedChunkLocator>> {
+        expected: &[(MerkleHash, u64)],
+        expected_size: u64,
+    ) -> Result<bool> {
         let fh: [u8; 32] = (*file_hash).into();
-        let chunks = lock_index(&self.index)?.chunks_for_file_with_locators(&fh)?;
-        Ok(chunks.into_iter().map(StagedChunkLocator::from).collect())
+        lock_index(&self.index)?.file_chunks_match(&fh, expected, expected_size)
     }
 
     /// Register a file and its chunks in the index.
@@ -3877,6 +3926,22 @@ impl StagingAreaReadOnly {
         lock_index(&self.index)?.chunk_payload_exists(&chunk_hash, size)
     }
 
+    /// Return requested chunk hashes whose exact raw segment payload remains locally readable.
+    pub fn segment_payloads_exist(
+        &self,
+        chunks: &[(MerkleHash, u64)],
+    ) -> Result<HashSet<MerkleHash>> {
+        let raw_chunks = chunks
+            .iter()
+            .map(|(hash, size)| ((*hash).into(), *size))
+            .collect::<Vec<_>>();
+        Ok(lock_index(&self.index)?
+            .chunk_payloads_exist(&raw_chunks)?
+            .into_iter()
+            .map(MerkleHash::from)
+            .collect())
+    }
+
     /// Return the immutable recipe owned by a published staging batch.
     pub fn published_recipe_for_file(
         &self,
@@ -3884,6 +3949,22 @@ impl StagingAreaReadOnly {
     ) -> Result<Option<crate::recipe::FileRecipe>> {
         let file_hash: [u8; 32] = (*file_hash).into();
         lock_index(&self.index)?.published_recipe_for_file(&file_hash)
+    }
+
+    /// Return published immutable recipes for several file hashes in one index read.
+    pub fn published_recipes_for_files(
+        &self,
+        file_hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Option<crate::recipe::FileRecipe>>> {
+        let raw_hashes = file_hashes
+            .iter()
+            .map(|file_hash| (*file_hash).into())
+            .collect::<Vec<[u8; 32]>>();
+        Ok(lock_index(&self.index)?
+            .published_recipes_for_files(&raw_hashes)?
+            .into_iter()
+            .map(|(file_hash, recipe)| (MerkleHash::from(file_hash), recipe))
+            .collect())
     }
 
     /// Read one bounded page from an indexed immutable recipe.
@@ -3904,6 +3985,16 @@ impl StagingAreaReadOnly {
         indexed_recipe_remote_chunk_page(&self.index, recipe, start_occurrence)
     }
 
+    /// Load a bounded range of proof-bearing remote authority for an immutable recipe.
+    pub fn recipe_remote_chunk_range(
+        &self,
+        recipe: &crate::recipe::FileRecipe,
+        start_occurrence: u64,
+        end_occurrence: u64,
+    ) -> Result<Vec<(MerkleHash, push_plan::ExistingChunkCandidate)>> {
+        indexed_recipe_remote_chunk_range(&self.index, recipe, start_occurrence, end_occurrence)
+    }
+
     /// Load the indexed add-time push plan for a file.
     #[expect(
         clippy::unused_async,
@@ -3914,6 +4005,43 @@ impl StagingAreaReadOnly {
         file_hash: &MerkleHash,
     ) -> Result<Option<push_plan::FilePushPlan>> {
         authoritative_file_push_plan(&self.root, &self.index, file_hash)
+    }
+
+    /// Load prepared xorb authority for several published recipes in one index read.
+    pub fn prepared_xorbs_for_recipes(
+        &self,
+        recipe_hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Vec<push_plan::PlannedXorb>>> {
+        let raw_hashes = recipe_hashes
+            .iter()
+            .map(|recipe_hash| (*recipe_hash).into())
+            .collect::<Vec<[u8; 32]>>();
+        let stored = lock_index(&self.index)?.prepared_xorbs_for_recipes(&raw_hashes)?;
+        stored
+            .into_iter()
+            .map(|(recipe_hash, xorbs)| {
+                let xorbs = xorbs
+                    .into_iter()
+                    .map(|stored| push_plan::PlannedXorb {
+                        hash: MerkleHash::from(stored.xorb_hash).hex(),
+                        payload_hash: blake3::Hash::from(stored.payload_hash).to_hex().to_string(),
+                        bytes: stored.bytes,
+                        upload: true,
+                        placements: stored
+                            .placements
+                            .into_iter()
+                            .map(|placement| push_plan::PlannedPlacement {
+                                chunk_hash: MerkleHash::from(placement.chunk_hash).hex(),
+                                xorb_hash: MerkleHash::from(stored.xorb_hash).hex(),
+                                chunk_index: placement.chunk_index,
+                                uncompressed_size: placement.uncompressed_size,
+                            })
+                            .collect(),
+                    })
+                    .collect();
+                Ok((MerkleHash::from(recipe_hash), xorbs))
+            })
+            .collect()
     }
 
     /// Retire the staged chunks for a successfully-pushed file.
@@ -5484,11 +5612,6 @@ mod tests {
             .iter()
             .map(|(hash, data)| (*hash, data.len() as u64))
             .collect();
-        let wanted_chunks = chunk_pairs
-            .iter()
-            .map(|(hash, _)| *hash)
-            .collect::<HashSet<_>>();
-
         let file_hash;
         {
             let staging = StagingArea::open(tmp.path().to_path_buf())
@@ -5513,7 +5636,7 @@ mod tests {
                 .expect("write file push plan");
             assert!(
                 !staging
-                    .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
+                    .load_prepared_xorb_cache_for_chunks(&chunk_pairs)
                     .expect("load prepared cache")
                     .is_empty()
             );
@@ -5527,7 +5650,7 @@ mod tests {
             .expect("reopen staging");
         assert!(
             !staging
-                .load_prepared_xorb_cache_for_chunks(&wanted_chunks)
+                .load_prepared_xorb_cache_for_chunks(&chunk_pairs)
                 .expect("load recipe-bound prepared cache")
                 .is_empty(),
             "prepared xorb authority is independent of mutable segment rows"

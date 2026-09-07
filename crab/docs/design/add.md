@@ -38,6 +38,7 @@ The important ownership boundaries are:
 | --- | --- |
 | `crab/src/cmd/add.rs` | CLI orchestration, candidate discovery, progress, rollback, pointer publication |
 | `crab/src/cache/add_validation.rs` | Per-worktree v1 proof cache for already-verified indexed content |
+| `crab/src/cache/add_remote_candidates.rs` | Bucket/global-prefix scoped advisory cache for proof-backed remote chunk candidates |
 | `crates/crab-staging/src/stream.rs` | Bounded file streaming, Blake3 hashing, CDC chunking, preparation-wide claims, provisional staging adoption |
 | `crates/crab-staging/src/lib.rs` | Segment writes, SQLite rows, flush/promotion, staged-file adoption and retirement |
 | `crates/crab-staging/src/add_push_plan.rs` | Add-time push-plan construction from staged chunk rows |
@@ -73,7 +74,18 @@ sequenceDiagram
 
 `run_add` resolves the current worktree through
 `crab/src/git/worktree.rs`, opens a `TrackedClassifier`, builds the user's
-path filter, then walks the worktree.
+path filter, then discovers candidates. Path-qualified literal files (for
+example `models/weights.bin`) use a direct metadata/classifier/ignore check;
+this avoids an O(repository-files) walk for the common single-file edit. A
+literal basename remains on the full walk because Git pathspec semantics allow
+it to match that name at any depth. Path-qualified literal directories walk
+only the selected subtree (with the same nested ignore handling), while globs,
+magic pathspecs, and missing paths use the full walker so matching and
+diagnostics stay unchanged.
+
+Literal selection checks every path component for symlinks, matching the full
+walker's no-follow boundary. A symlinked ancestor must not cause an external
+file to enter staging merely because its final component is a regular file.
 
 The classifier has two modes:
 
@@ -191,6 +203,33 @@ SlateDB contains only committed, origin-bound receipts and is updated after a
 successful push CAS; it never stores add claims, local paths, or pending
 uploads.
 
+Concurrent add lookups own their receipt snapshot and validation result across
+remote awaits. They share keyed advisory caches, not the push pipeline's
+mutable per-push proof accumulator; otherwise one file can erase another's
+valid proof and cause unnecessary local payload preparation.
+
+Successful proof-backed candidates and confirmed remote misses are retained in
+a bounded SQLite cache under the user's Crab cache. Persisting misses avoids
+repeating remote-index reads for newly-seen chunks across `crab add`
+invocations. A negative can become stale after another client pushes the
+chunk, so it expires after five minutes in both SQLite and memory; promotion
+preserves the original observation time. Transactional row accounting and
+eviction enforce the combined two-million-entry limit across process restarts
+and concurrent writers, without full-table counts on the add hot path.
+After a successful local push, published shard membership invalidates matching
+negative entries, so the next add can reuse newly committed remote chunks
+without waiting for the TTL. Invalidation never publishes pre-CAS authority.
+An expired or stale miss otherwise only causes local
+repacking; push still revalidates every positive placement and origin proof.
+Cache failures, stale entries, and evictions are advisory misses; they cannot
+change the bytes selected for a push.
+
+Push reads remote candidates in bounded pages under a shared deadline. It
+retains completed pages and local cache hits if the deadline expires or a later
+remote page fails; every retained placement still crosses normal proof
+validation. A large miss set never disables cross-repository lookup solely
+because it exceeds one page.
+
 Prepared bodies use one local content-addressed path:
 
 ```text
@@ -221,6 +260,12 @@ reclaims only globally unleased payloads.
 There is no persisted per-file JSON plan or per-file payload copy. Runtime
 `FilePushPlan` values are derived from normalized recipe, remote, prepared, and
 segment rows for the push attempt.
+
+Multi-file push-plan preparation validates every file first, then persists all
+normalized authority rows in one SQLite transaction. This keeps the per-file
+coverage and identity checks while eliminating one transaction commit and
+global prepared-payload retirement sweep per file; a failed file still rolls
+back the entire batch.
 
 ## Progress and JSONL
 

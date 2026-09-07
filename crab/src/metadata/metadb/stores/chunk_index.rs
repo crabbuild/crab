@@ -145,20 +145,20 @@ impl ChunkIndexStore {
     }
 
     /// Resolve local candidates first, then consult remote receipt heads only
-    /// when the remaining miss set fits the caller's proof budget.
-    pub(crate) async fn get_batch_with_candidates_bounded(
+    /// in bounded pages until the caller's deadline, retaining completed hits.
+    pub(crate) async fn get_batch_with_candidates_until(
         &self,
         chunk_hashes: &[MerkleHash],
-        remote_candidate_limit: usize,
+        deadline: tokio::time::Instant,
     ) -> Result<(Vec<Option<XorbRef>>, CommittedChunkCandidateBatch, usize)> {
-        self.get_batch_with_candidates_inner(chunk_hashes, Some(remote_candidate_limit))
+        self.get_batch_with_candidates_inner(chunk_hashes, Some(deadline))
             .await
     }
 
     async fn get_batch_with_candidates_inner(
         &self,
         chunk_hashes: &[MerkleHash],
-        remote_candidate_limit: Option<usize>,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<(Vec<Option<XorbRef>>, CommittedChunkCandidateBatch, usize)> {
         if chunk_hashes.is_empty() {
             return Ok((Vec::new(), CommittedChunkCandidateBatch::default(), 0));
@@ -242,18 +242,40 @@ impl ChunkIndexStore {
             m.add_metadb_chunk_index_cache_hits(cache_hits);
             m.add_metadb_chunk_index_cache_misses(remote_miss_count);
         }
-        if remote_candidate_limit.is_some_and(|limit| remote_todo.len() > limit) {
-            return Ok((
-                results,
-                CommittedChunkCandidateBatch::default(),
-                remote_todo.len(),
-            ));
+        let mut candidates = CommittedChunkCandidateBatch::default();
+        let mut skipped_remote = remote_todo.len();
+        for batch in remote_todo.chunks(GET_BATCH_TIER_CHUNK_LIMIT) {
+            let remote_hashes = batch
+                .iter()
+                .map(|&idx| chunk_hashes[idx])
+                .collect::<Vec<_>>();
+            let page = if let Some(deadline) = deadline {
+                // Check before polling: an immediately ready read can otherwise
+                // succeed after the deadline and keep an arbitrarily large loop alive.
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.get_committed_candidates_page(&remote_hashes),
+                )
+                .await
+                {
+                    Ok(Ok(page)) => page,
+                    Ok(Err(error)) => {
+                        tracing::debug!(error = %error, skipped_remote, "remote candidate page unavailable");
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            } else {
+                self.get_committed_candidates_page(&remote_hashes).await?
+            };
+            candidates.placements.extend(page.placements);
+            candidates.origin_proofs.extend(page.origin_proofs);
+            candidates.source_anchors.extend(page.source_anchors);
+            skipped_remote -= batch.len();
         }
-        let remote_hashes = remote_todo
-            .iter()
-            .map(|&idx| chunk_hashes[idx])
-            .collect::<Vec<_>>();
-        let candidates = self.get_committed_candidates_batch(&remote_hashes).await?;
         let mut lazy_fills = 0u64;
         let mut warm_entries: Vec<(MerkleHash, XorbRef)> =
             Vec::with_capacity(GET_BATCH_TIER_CHUNK_LIMIT);
@@ -290,7 +312,7 @@ impl ChunkIndexStore {
             m.add_metadb_chunk_index_cache_lazy_fills(lazy_fills);
         }
 
-        Ok((results, candidates, 0))
+        Ok((results, candidates, skipped_remote))
     }
 
     /// Read immutable committed receipts for each queried chunk hash.
@@ -299,6 +321,20 @@ impl ChunkIndexStore {
     /// source-manifest membership, the GC registry, and canonical-origin
     /// object state before treating one as current proof.
     pub(crate) async fn get_committed_candidates_batch(
+        &self,
+        chunk_hashes: &[MerkleHash],
+    ) -> Result<CommittedChunkCandidateBatch> {
+        let mut out = CommittedChunkCandidateBatch::default();
+        for batch in chunk_hashes.chunks(GET_BATCH_TIER_CHUNK_LIMIT) {
+            let page = self.get_committed_candidates_page(batch).await?;
+            out.placements.extend(page.placements);
+            out.origin_proofs.extend(page.origin_proofs);
+            out.source_anchors.extend(page.source_anchors);
+        }
+        Ok(out)
+    }
+
+    async fn get_committed_candidates_page(
         &self,
         chunk_hashes: &[MerkleHash],
     ) -> Result<CommittedChunkCandidateBatch> {
@@ -385,6 +421,20 @@ impl ChunkIndexStore {
     /// exact proof selected during add even when another repository later
     /// publishes a newer candidate for the same chunk.
     pub(crate) async fn get_committed_candidates_by_id_batch(
+        &self,
+        candidates: &[(MerkleHash, [u8; 32])],
+    ) -> Result<CommittedChunkCandidateBatch> {
+        let mut out = CommittedChunkCandidateBatch::default();
+        for batch in candidates.chunks(GET_BATCH_TIER_CHUNK_LIMIT) {
+            let page = self.get_committed_candidates_by_id_page(batch).await?;
+            out.placements.extend(page.placements);
+            out.origin_proofs.extend(page.origin_proofs);
+            out.source_anchors.extend(page.source_anchors);
+        }
+        Ok(out)
+    }
+
+    async fn get_committed_candidates_by_id_page(
         &self,
         candidates: &[(MerkleHash, [u8; 32])],
     ) -> Result<CommittedChunkCandidateBatch> {
@@ -1085,7 +1135,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_lookup_resolves_persistent_hits_before_skipping_remote_misses() {
+    async fn expired_lookup_preserves_persistent_hits() {
         let ctx = new_ctx().await;
         let local_hash = hash_from_seed(70_000);
         let local_ref = xorb_ref_for(80_000, 7, 8192);
@@ -1099,13 +1149,51 @@ mod tests {
 
         let (placements, candidates, skipped_remote) = ctx
             .store
-            .get_batch_with_candidates_bounded(&query, 256)
+            .get_batch_with_candidates_until(&query, tokio::time::Instant::now())
             .await
             .expect("bounded lookup");
 
         assert_eq!(placements.last(), Some(&Some(local_ref)));
         assert!(candidates.placements.is_empty());
         assert_eq!(skipped_remote, 257);
+        ctx.db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn remote_page_failure_preserves_completed_proofs_and_local_hits() {
+        let ctx = new_ctx().await;
+        let mut query = (0..=GET_BATCH_TIER_CHUNK_LIMIT as u64)
+            .map(|index| hash_from_seed(200_000 + index))
+            .collect::<Vec<_>>();
+        let remote_ref = xorb_ref_for(210_000, 0, 4096);
+        seed_remote(&ctx.db, &query[0], &remote_ref).await;
+        let mut corrupt = slatedb::WriteBatch::new();
+        corrupt.put(
+            encode_committed_chunk_head_key(query.last().unwrap()).as_slice(),
+            b"invalid".as_slice(),
+        );
+        ctx.db
+            .write(corrupt)
+            .await
+            .expect("seed corrupt second page");
+        let local_hash = hash_from_seed(220_000);
+        let local_ref = xorb_ref_for(230_000, 0, 4096);
+        ctx.persistent
+            .insert(&local_hash, &local_ref)
+            .expect("local hit");
+        query.push(local_hash);
+        let (placements, candidates, skipped) = ctx
+            .store
+            .get_batch_with_candidates_until(
+                &query,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect("partial lookup");
+        assert_eq!(placements[0], Some(remote_ref));
+        assert_eq!(placements.last(), Some(&Some(local_ref)));
+        assert_eq!(candidates.placements.len(), 1);
+        assert_eq!(skipped, 1);
         ctx.db.close().await.expect("close");
     }
 
@@ -1137,7 +1225,10 @@ mod tests {
 
         let (_, candidates, skipped) = ctx
             .store
-            .get_batch_with_candidates_bounded(&query, query.len())
+            .get_batch_with_candidates_until(
+                &query,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            )
             .await
             .expect("candidate batch");
 
@@ -1145,6 +1236,57 @@ mod tests {
         assert_eq!(candidates.placements.len(), query.len());
         assert_eq!(candidates.origin_proofs.len(), 1);
         assert_eq!(candidates.source_anchors.len(), 1);
+        ctx.db.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn committed_candidate_batches_page_large_queries() {
+        let ctx = new_ctx_without_persistent().await;
+        let xorb_hash = hash_from_seed(130_000);
+        let entries = (0..=GET_BATCH_TIER_CHUNK_LIMIT as u64)
+            .map(|index| {
+                let chunk_hash = hash_from_seed(131_000 + index);
+                let xorb_ref = XorbRef {
+                    xorb_hash,
+                    chunk_index: index as u32,
+                    uncompressed_size: 4096,
+                };
+                (chunk_hash, committed_receipt(chunk_hash, xorb_ref))
+            })
+            .collect::<Vec<_>>();
+        let mut txn = Transaction::new();
+        ctx.store
+            .save_committed_receipts(&mut txn, &entries)
+            .expect("save receipts");
+        let (_, batch) = crate::metadata::metadb::transaction::into_per_db_batches(txn);
+        ctx.db.write(batch).await.expect("write receipts");
+
+        let query = entries
+            .iter()
+            .map(|(chunk_hash, _)| *chunk_hash)
+            .collect::<Vec<_>>();
+        let got = ctx
+            .store
+            .get_committed_candidates_batch(&query)
+            .await
+            .expect("candidate batch");
+        assert_eq!(got.placements.len(), query.len());
+        assert_eq!(got.origin_proofs.len(), 1);
+        assert_eq!(got.source_anchors.len(), 1);
+
+        let exact = entries
+            .iter()
+            .map(|(chunk_hash, receipt)| (*chunk_hash, receipt.compact_placement().placement_id()))
+            .collect::<Vec<_>>();
+        let got_exact = ctx
+            .store
+            .get_committed_candidates_by_id_batch(&exact)
+            .await
+            .expect("exact candidate batch");
+        assert_eq!(got_exact.placements.len(), query.len());
+        assert_eq!(got_exact.origin_proofs.len(), 1);
+        assert_eq!(got_exact.source_anchors.len(), 1);
+
         ctx.db.close().await.expect("close");
     }
 
@@ -1181,8 +1323,8 @@ mod tests {
         }
         assert_eq!(
             metrics.snapshot().metadb_batch_get_count,
-            2,
-            "one head lookup and one proof-record lookup should cover all remote misses"
+            4,
+            "two pages require one head lookup and one proof-record lookup each"
         );
 
         ctx.db.close().await.expect("close");

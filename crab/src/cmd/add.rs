@@ -982,7 +982,7 @@ async fn execute_add(
     let filter = build_filter(&args.patterns, &[])?;
 
     // Walk the working tree and collect files to process.
-    let candidates = collect_candidates(&repo_root, &classifier, &filter, cancel)?;
+    let candidates = collect_candidates(&repo_root, &classifier, &filter, &args.patterns, cancel)?;
 
     if candidates.is_empty() {
         if args.dry_run {
@@ -2622,8 +2622,15 @@ fn collect_candidates(
     repo_root: &Path,
     classifier: &TrackedClassifier,
     filter: &PatternFilter,
+    patterns: &[String],
     cancel: &CancellationToken,
 ) -> Result<Vec<(PathBuf, u64)>> {
+    if let Some(candidates) =
+        collect_literal_candidates(repo_root, classifier, filter, patterns, cancel)?
+    {
+        return Ok(candidates);
+    }
+
     let mut candidates = Vec::new();
 
     #[cfg(feature = "gix-pathmatch")]
@@ -2651,6 +2658,226 @@ fn collect_candidates(
     )?;
 
     Ok(candidates)
+}
+
+/// Return direct candidates when every selector names a repo-relative file or
+/// directory. A literal basename can match files at any depth, so it
+/// deliberately falls back to the walker; path-qualified selectors are
+/// unambiguous.
+fn collect_literal_candidates(
+    repo_root: &Path,
+    classifier: &TrackedClassifier,
+    filter: &PatternFilter,
+    patterns: &[String],
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<(PathBuf, u64)>>> {
+    if patterns.is_empty() || patterns.iter().any(|pattern| !is_literal_path(pattern)) {
+        return Ok(None);
+    }
+
+    let mut candidates = Vec::with_capacity(patterns.len());
+    let mut seen_files = HashSet::with_capacity(patterns.len());
+    let mut direct_files = Vec::with_capacity(patterns.len());
+    let mut direct_dirs = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        error::check_cancelled(cancel)?;
+        let Some(rel_path) = literal_relative_path(pattern) else {
+            return Ok(None);
+        };
+        // The full walker never descends through symlinks. A leaf-only stat
+        // would follow linked ancestors and prepare bytes outside the worktree.
+        let mut selected_path = repo_root.to_path_buf();
+        let mut linked = false;
+        for component in rel_path.components() {
+            selected_path.push(component);
+            match std::fs::symlink_metadata(&selected_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    linked = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if linked {
+            continue;
+        }
+        let abs_path = repo_root.join(&rel_path);
+        let metadata = match std::fs::symlink_metadata(&abs_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_file() {
+            if literal_path_has_hidden_parent(&rel_path) || !seen_files.insert(rel_path.clone()) {
+                continue;
+            }
+            direct_files.push((rel_path, abs_path, metadata.len()));
+        } else if metadata.file_type().is_dir() {
+            if rel_path
+                .components()
+                .any(|component| matches!(component, std::path::Component::Normal(name) if name.to_string_lossy().starts_with('.')))
+            {
+                continue;
+            }
+            direct_dirs.push((rel_path, abs_path));
+        } else {
+            return Ok(None);
+        }
+    }
+
+    for (rel_path, abs_path, file_size) in direct_files {
+        error::check_cancelled(cancel)?;
+
+        #[cfg(feature = "gix-pathmatch")]
+        if literal_candidate_is_ignored(repo_root, &rel_path)? {
+            continue;
+        }
+        if !classifier.is_tracked(&rel_path) {
+            continue;
+        }
+        let rel_str = rel_path.to_string_lossy();
+        if !filter.matches(&rel_str)
+            || crate::engine::pointer::is_working_tree_pointer(&abs_path).unwrap_or(false)
+        {
+            continue;
+        }
+        candidates.push((abs_path, file_size));
+    }
+
+    direct_dirs.sort_by(|(left, _), (right, _)| left.cmp(right));
+    direct_dirs.dedup_by(|(left, _), (right, _)| left == right);
+    let mut selected_dirs = Vec::with_capacity(direct_dirs.len());
+    for (rel_path, abs_path) in direct_dirs {
+        if selected_dirs
+            .iter()
+            .any(|(parent, _)| rel_path.starts_with(parent))
+        {
+            continue;
+        }
+        selected_dirs.push((rel_path, abs_path));
+    }
+
+    let mut seen_paths = candidates
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<HashSet<_>>();
+    for (rel_path, abs_path) in selected_dirs {
+        error::check_cancelled(cancel)?;
+        let mut directory_candidates = Vec::new();
+        #[cfg(feature = "gix-pathmatch")]
+        {
+            let ignore = crate::core::attrs::IgnoreReader::open(repo_root)?;
+            if literal_directory_is_ignored(repo_root, &rel_path, &ignore)? {
+                continue;
+            }
+            walk_candidates(
+                repo_root,
+                &abs_path,
+                classifier,
+                filter,
+                Some(&ignore),
+                cancel,
+                &mut directory_candidates,
+            )?;
+        }
+        #[cfg(not(feature = "gix-pathmatch"))]
+        walk_candidates(
+            repo_root,
+            &abs_path,
+            classifier,
+            filter,
+            cancel,
+            &mut directory_candidates,
+        )?;
+        for (path, size) in directory_candidates {
+            if seen_paths.insert(path.clone()) {
+                candidates.push((path, size));
+            }
+        }
+    }
+
+    Ok(Some(candidates))
+}
+
+fn is_literal_path(pattern: &str) -> bool {
+    pattern.contains('/')
+        && !pattern.starts_with(':')
+        && !pattern.contains('*')
+        && !pattern.contains('?')
+        && !pattern.contains('[')
+}
+
+fn literal_relative_path(pattern: &str) -> Option<PathBuf> {
+    let path = Path::new(pattern);
+    if path.is_absolute() {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => relative.push(part),
+            std::path::Component::ParentDir
+            | std::path::Component::RootDir
+            | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    (!relative.as_os_str().is_empty()).then_some(relative)
+}
+
+fn literal_path_has_hidden_parent(path: &Path) -> bool {
+    let components = path.components().collect::<Vec<_>>();
+    components
+        .iter()
+        .take(components.len().saturating_sub(1))
+        .any(|component| {
+            matches!(component, std::path::Component::Normal(name)
+                if name.to_string_lossy().starts_with('.'))
+        })
+}
+
+#[cfg(feature = "gix-pathmatch")]
+fn literal_directory_is_ignored(
+    repo_root: &Path,
+    rel_path: &Path,
+    ignore: &crate::core::attrs::IgnoreReader,
+) -> Result<bool> {
+    let mut current = repo_root.to_path_buf();
+    let mut relative = PathBuf::new();
+    for component in rel_path.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        relative.push(name);
+        if ignore.is_ignored(&relative.to_string_lossy(), true) {
+            return Ok(true);
+        }
+        current.push(name);
+        ignore.append_patterns_from_file(&current.join(".gitignore"), Some(repo_root));
+    }
+    Ok(false)
+}
+
+#[cfg(feature = "gix-pathmatch")]
+fn literal_candidate_is_ignored(repo_root: &Path, rel_path: &Path) -> Result<bool> {
+    let ignore = crate::core::attrs::IgnoreReader::open(repo_root)?;
+    let mut current = repo_root.to_path_buf();
+    let mut relative = PathBuf::new();
+    let components = rel_path.components().collect::<Vec<_>>();
+    for component in components.iter().take(components.len().saturating_sub(1)) {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        relative.push(name);
+        if ignore.is_ignored(&relative.to_string_lossy(), true) {
+            return Ok(true);
+        }
+        current.push(name);
+        ignore.append_patterns_from_file(&current.join(".gitignore"), Some(repo_root));
+    }
+    Ok(ignore.is_ignored(&rel_path.to_string_lossy(), false))
 }
 
 async fn filter_clean_indexed_candidates(
@@ -2696,7 +2923,26 @@ async fn filter_clean_indexed_candidates(
     };
     let honor_filemode = git_honors_filemode(repo_root);
     let cache_path = crate::cache::add_validation::cache_path_for_context(&ctx);
-    let mut validation_cache =
+    let mut prepared = Vec::with_capacity(candidates.len());
+    for (abs_path, size) in candidates {
+        let indexed =
+            clean_index_pointer(repo_root, &repo, &index, &abs_path, size, honor_filemode);
+        prepared.push((abs_path, size, indexed));
+    }
+    let lookup_entries = prepared
+        .iter()
+        .filter_map(|(_, _, indexed)| {
+            indexed.as_ref().and_then(|indexed| {
+                indexed
+                    .validation_token
+                    .as_ref()
+                    .map(|token| (indexed.path_bytes.as_slice(), token))
+            })
+        })
+        .collect::<Vec<_>>();
+    let validation_cache = if lookup_entries.is_empty() {
+        None
+    } else {
         match crate::cache::add_validation::AddValidationCache::open(&cache_path) {
             Ok(cache) => Some(cache),
             Err(error) => {
@@ -2707,63 +2953,53 @@ async fn filter_clean_indexed_candidates(
                 );
                 None
             }
-        };
-    let mut prepared = Vec::with_capacity(candidates.len());
-    for (abs_path, size) in candidates {
-        let indexed =
-            clean_index_pointer(repo_root, &repo, &index, &abs_path, size, honor_filemode);
-        let cache_hit = match (
-            validation_cache.as_ref(),
-            indexed.as_ref(),
-            indexed
-                .as_ref()
-                .and_then(|indexed| indexed.validation_token.as_ref()),
-        ) {
-            (Some(cache), Some(indexed), Some(token)) => {
-                match cache.contains(&indexed.path_bytes, token) {
-                    Ok(hit) => hit,
-                    Err(error) => {
-                        debug!(
-                            path = %cache_path.display(),
-                            error = %error,
-                            "clean-index add validation cache query failed; hashing candidates"
-                        );
-                        validation_cache = None;
-                        false
-                    }
-                }
+        }
+    };
+    let mut cache_hits = HashSet::new();
+    if let Some(cache) = validation_cache.as_ref() {
+        match cache.contains_batch(&lookup_entries) {
+            Ok(hits) => cache_hits = hits,
+            Err(error) => {
+                debug!(
+                    path = %cache_path.display(),
+                    error = %error,
+                    "clean-index add validation cache batch query failed; hashing candidates"
+                );
             }
-            _ => false,
-        };
-        prepared.push((abs_path, size, indexed, cache_hit));
+        }
     }
     let mut checks = futures_util::stream::iter(prepared)
-        .map(|(abs_path, size, indexed, cache_hit)| async move {
-            let (matches, verified) = if cache_hit {
-                (
-                    crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&abs_path)
-                        == indexed.as_ref().map(|indexed| indexed.verified_stat),
-                    None,
-                )
-            } else {
-                match indexed {
-                    Some(indexed) => {
-                        let verified = worktree_content_matches_pointer(
-                            &abs_path,
-                            size,
-                            indexed.expected_hash,
-                            cancel,
-                        )
-                        .await?;
-                        (
-                            verified.is_some(),
-                            verified.map(|stat| (indexed.expected_hash, stat)),
-                        )
+        .map(|(abs_path, size, indexed)| {
+            let cache_hit = indexed
+                .as_ref()
+                .is_some_and(|indexed| cache_hits.contains(&indexed.path_bytes));
+            async move {
+                let (matches, verified) = if cache_hit {
+                    (
+                        crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&abs_path)
+                            == indexed.as_ref().map(|indexed| indexed.verified_stat),
+                        None,
+                    )
+                } else {
+                    match indexed {
+                        Some(indexed) => {
+                            let verified = worktree_content_matches_pointer(
+                                &abs_path,
+                                size,
+                                indexed.expected_hash,
+                                cancel,
+                            )
+                            .await?;
+                            (
+                                verified.is_some(),
+                                verified.map(|stat| (indexed.expected_hash, stat)),
+                            )
+                        }
+                        None => (false, None),
                     }
-                    None => (false, None),
-                }
-            };
-            Ok::<_, CrabError>((abs_path, size, matches, cache_hit, verified))
+                };
+                Ok::<_, CrabError>((abs_path, size, matches, cache_hit, verified))
+            }
         })
         .buffered(jobs.max(1));
 
@@ -2974,8 +3210,7 @@ fn walk_candidates(
         }
 
         // Get file size for reporting.
-        let metadata = std::fs::metadata(&path)?;
-        let file_size = metadata.len();
+        let file_size = entry.metadata()?.len();
 
         // Skip files that are already pointers (e.g. lazy-checkout left
         // the pointer on disk, or `crab dehydrate` was run). These don't
@@ -3048,8 +3283,7 @@ fn walk_candidates(
         }
 
         // Get file size for reporting.
-        let metadata = std::fs::metadata(&path)?;
-        let file_size = metadata.len();
+        let file_size = entry.metadata()?.len();
 
         // Skip files that are already pointers (e.g. lazy-checkout left
         // the pointer on disk, or `crab dehydrate` was run). These don't
@@ -3293,6 +3527,10 @@ enum GitIndexWriteError {
 ///   3. Locks and rereads the current index, applies only the selected
 ///      pointer/stat deltas, and commits one atomic replacement.
 ///
+/// The Git repository handle is opened once for the whole batch so hundreds
+/// of small files do not pay repository discovery and object-store setup per
+/// pointer blob.
+///
 /// Why not just `git add`?  `git add` invokes the crab clean filter,
 /// which re-reads and re-hashes the full file just to emit the same
 /// pointer we can assemble from the data we already have. For a 1.6 GiB
@@ -3335,14 +3573,38 @@ fn write_pointers_and_tracking_to_git_index(
 ) -> std::result::Result<(), GitIndexWriteError> {
     let honor_filemode = git_honors_filemode(repo_root);
     let mut index_entries = Vec::with_capacity(entries.len());
+    let pointer_repo = if entries.is_empty() {
+        None
+    } else {
+        Some(gix::open(repo_root).map_err(|error| {
+            GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(format!(
+                "failed to open git repository for pointer publication: {error}"
+            )))
+        })?)
+    };
+    // Identical files produce identical pointer payloads. Git's object store
+    // is content-addressed, so one blob write per unique payload is enough;
+    // reusing the OID avoids repeated filesystem work for duplicate paths.
+    let mut pointer_oids = HashMap::<Vec<u8>, String>::new();
 
     for entry in entries {
         // The cache may not contain this file on the first push; the
         // smudge path tolerates a missing hint.
         let pointer = shard_hints.pointer_for(entry.file_hash, entry.size);
         let payload = pointer.serialize();
-        let sha = write_pointer_blob(repo_root, &payload)
-            .map_err(GitIndexWriteError::BeforeIndexMutation)?;
+        let pointer_repo = pointer_repo.as_ref().ok_or_else(|| {
+            GitIndexWriteError::BeforeIndexMutation(CrabError::Internal(
+                "pointer repository was not opened for non-empty publication".to_owned(),
+            ))
+        })?;
+        let sha = if let Some(sha) = pointer_oids.get(&payload) {
+            sha.clone()
+        } else {
+            let sha = write_pointer_blob_to_repo(pointer_repo, &payload)
+                .map_err(GitIndexWriteError::BeforeIndexMutation)?;
+            pointer_oids.insert(payload, sha.clone());
+            sha
+        };
 
         // The index-info record bypasses git's normal worktree mode detection,
         // so compute the regular-file mode here to match `git add`.
@@ -3383,10 +3645,15 @@ struct GitIndexEntry {
     index_stat: crate::cmd::stream_stage::VerifiedIndexStat,
 }
 
+#[cfg(test)]
 fn write_pointer_blob(repo_root: &Path, payload: &[u8]) -> Result<String> {
     let repo = gix::open(repo_root).map_err(|e| {
         CrabError::Internal(format!("failed to open git repository for blob write: {e}"))
     })?;
+    write_pointer_blob_to_repo(&repo, payload)
+}
+
+fn write_pointer_blob_to_repo(repo: &gix::Repository, payload: &[u8]) -> Result<String> {
     let oid = repo
         .write_blob(payload)
         .map_err(|e| CrabError::Internal(format!("failed to write pointer blob: {e}")))?;
@@ -4035,6 +4302,67 @@ mod tests {
 
         assert!(cls.is_tracked(Path::new("qualification/model.bin")));
         assert!(!cls.is_tracked(Path::new("other/model.bin")));
+    }
+
+    #[test]
+    fn literal_path_candidates_avoid_repository_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::create_dir_all(dir.path().join("other")).unwrap();
+        std::fs::write(dir.path().join(".gitattributes"), "*.bin filter=crab\n").unwrap();
+        std::fs::write(dir.path().join("models/a.bin"), b"model").unwrap();
+        std::fs::write(dir.path().join("other/a.bin"), b"other").unwrap();
+
+        let classifier = TrackedClassifier::open(dir.path()).unwrap();
+        let filter = build_filter(&["models/a.bin".to_owned()], &[]).unwrap();
+        let candidates = collect_candidates(
+            dir.path(),
+            &classifier,
+            &filter,
+            &["models/a.bin".to_owned()],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert_eq!(candidates, vec![(dir.path().join("models/a.bin"), 5)]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn literal_candidates_skip_symlink_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("models")).unwrap();
+        std::fs::write(outside.path().join("models/a.bin"), b"outside").unwrap();
+        std::fs::write(dir.path().join(".gitattributes"), "*.bin filter=crab\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        let classifier = TrackedClassifier::open(dir.path()).unwrap();
+        for selector in ["linked/models/a.bin", "linked/models"] {
+            let patterns = vec![selector.to_owned()];
+            let filter = build_filter(&patterns, &[]).unwrap();
+            assert!(
+                collect_candidates(
+                    dir.path(),
+                    &classifier,
+                    &filter,
+                    &patterns,
+                    &CancellationToken::new()
+                )
+                .unwrap()
+                .is_empty(),
+                "{selector} followed a symlink ancestor"
+            );
+        }
+    }
+
+    #[test]
+    fn literal_path_detection_rejects_ambiguous_selectors() {
+        assert!(is_literal_path("models/a.bin"));
+        assert!(!is_literal_path("a.bin"));
+        assert!(!is_literal_path("models/*.bin"));
+        assert!(literal_relative_path("./models/a.bin").is_some());
+        assert!(literal_relative_path("../outside.bin").is_none());
+        assert!(literal_relative_path("/outside.bin").is_none());
     }
 
     #[test]
@@ -4968,6 +5296,35 @@ mod tests {
         assert!(to_process.is_empty());
         assert_eq!(skipped.files, 1);
         assert_eq!(skipped.bytes, payload.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn clean_index_filter_defers_cache_setup_without_indexed_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        if !init_git_repo(dir.path()) {
+            eprintln!("SKIP: git init failed");
+            return;
+        }
+
+        let path = dir.path().join("new-model.bin");
+        let payload = b"new model payload";
+        std::fs::write(&path, payload).unwrap();
+        let context = crate::git::worktree::WorktreeContext::resolve_from_path(dir.path()).unwrap();
+        let cache_path = crate::cache::add_validation::cache_path_for_context(&context);
+        assert!(!cache_path.exists());
+
+        let (to_process, skipped) = filter_clean_indexed_candidates(
+            dir.path(),
+            vec![(path, payload.len() as u64)],
+            1,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(to_process.len(), 1);
+        assert_eq!(skipped.files, 0);
+        assert!(!cache_path.exists());
     }
 
     #[tokio::test]

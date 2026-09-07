@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::StagingArea;
-use crate::index::{PreparedChunkClaim, RecordingAuthorityState};
+use crate::index::{ExistingChunkWrite, PreparedChunkClaim, RecordingAuthorityState};
 use crate::push_plan::{ExistingChunkCandidate, ExistingChunkLookup, move_prepared_xorb};
 use crate::{Result, StagingError as CrabError};
 use crab_xet::chunker::GearChunker;
@@ -1019,6 +1019,7 @@ async fn stream_chunk_and_stage_producer(
     let mut remote_existing_chunks = 0u64;
     let mut total = 0u64;
     let mut timings = StreamStageTimingAccumulator::default();
+    let mut flush_scratch = FlushBatchScratch::default();
 
     loop {
         check_cancelled(cancel)?;
@@ -1058,6 +1059,7 @@ async fn stream_chunk_and_stage_producer(
             &mut xorb_writer,
             existing_lookup,
             &mut remote_existing_chunks,
+            &mut flush_scratch,
             &mut timings,
             cancel,
             hooks,
@@ -1090,6 +1092,7 @@ async fn stream_chunk_and_stage_producer(
         &mut xorb_writer,
         existing_lookup,
         &mut remote_existing_chunks,
+        &mut flush_scratch,
         &mut timings,
         cancel,
         hooks,
@@ -1155,6 +1158,15 @@ struct ChunkStageStats {
     timings: StreamStageTimingAccumulator,
 }
 
+#[derive(Default)]
+struct FlushBatchScratch {
+    terms: Vec<(MerkleHash, u64)>,
+    remote_authority: Vec<ExistingChunkWrite>,
+    existing: Vec<Option<ExistingChunkCandidate>>,
+    misses: Vec<(MerkleHash, u64)>,
+    to_pack: Vec<(Chunk, RunId)>,
+}
+
 fn append_emitted_chunks(
     chunks: Vec<crab_xet::chunker::Chunk>,
     batch: &mut Vec<(MerkleHash, Bytes)>,
@@ -1198,6 +1210,7 @@ async fn flush_full_batches(
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
     existing_lookup: Option<&dyn ExistingChunkLookup>,
     remote_existing_chunks: &mut u64,
+    scratch: &mut FlushBatchScratch,
     timings: &mut StreamStageTimingAccumulator,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
@@ -1221,6 +1234,7 @@ async fn flush_full_batches(
             xorb_writer,
             existing_lookup,
             remote_existing_chunks,
+            scratch,
             timings,
             cancel,
             hooks,
@@ -1283,6 +1297,7 @@ async fn flush_batch(
     xorb_writer: &mut Option<&mut StreamPreparedXorbWriter>,
     existing_lookup: Option<&dyn ExistingChunkLookup>,
     remote_existing_chunks: &mut u64,
+    scratch: &mut FlushBatchScratch,
     timings: &mut StreamStageTimingAccumulator,
     cancel: &CancellationToken,
     hooks: &StreamStageHooks,
@@ -1293,7 +1308,15 @@ async fn flush_batch(
 
     let batch_start = *chunk_index_offset;
     let lookup_start = Instant::now();
-    let mut existing = classify_existing_batch(batch, existing_lookup, cancel).await?;
+    classify_existing_batch(
+        batch,
+        existing_lookup,
+        cancel,
+        &mut scratch.terms,
+        &mut scratch.existing,
+    )
+    .await?;
+    let existing = &mut scratch.existing;
     timings.remote_lookup = timings.remote_lookup.saturating_add(lookup_start.elapsed());
     for (candidate, (_, data)) in existing.iter_mut().zip(batch.iter()) {
         if candidate.as_ref().is_some_and(|candidate| {
@@ -1304,20 +1327,24 @@ async fn flush_batch(
             *candidate = None;
         }
     }
-    let remote_authority = batch
-        .iter()
-        .zip(existing.iter())
-        .filter_map(|((chunk_hash, _), candidate)| {
-            candidate.map(|candidate| (*chunk_hash, candidate))
-        })
-        .collect::<Vec<_>>();
-    staging.append_recording_remote_chunks(batch_id, &remote_authority)?;
-    *remote_existing_chunks = remote_existing_chunks
-        .checked_add(remote_authority.len() as u64)
-        .ok_or_else(|| {
-            CrabError::StagingCorrupt("remote existing chunk count overflow".to_owned())
-        })?;
-
+    scratch.remote_authority.clear();
+    scratch
+        .remote_authority
+        .extend(
+            batch
+                .iter()
+                .zip(existing.iter())
+                .filter_map(|((chunk_hash, _), candidate)| {
+                    candidate.map(|candidate| ExistingChunkWrite {
+                        chunk_hash: (*chunk_hash).into(),
+                        xorb_hash: candidate.xorb_ref.xorb_hash.into(),
+                        chunk_index: candidate.xorb_ref.chunk_index,
+                        uncompressed_size: candidate.xorb_ref.uncompressed_size,
+                        placement_id: candidate.placement_id,
+                        origin_proof_id: candidate.origin_proof_id,
+                    })
+                }),
+        );
     if xorb_builder.is_none() {
         let mut start = 0usize;
         while start < batch.len() {
@@ -1345,18 +1372,25 @@ async fn flush_batch(
             start = end;
         }
     }
-    let recipe_terms = batch
-        .iter()
-        .map(|(hash, data)| (*hash, data.len() as u64))
-        .collect::<Vec<_>>();
-    staging.append_recipe_recording_terms(
+    scratch.terms.clear();
+    scratch
+        .terms
+        .extend(batch.iter().map(|(hash, data)| (*hash, data.len() as u64)));
+    staging.append_recording_batch(
         batch_id,
         *chunk_index_offset,
         *recipe_byte_offset,
-        &recipe_terms,
+        &scratch.terms,
+        &scratch.remote_authority,
     )?;
+    *remote_existing_chunks = remote_existing_chunks
+        .checked_add(scratch.remote_authority.len() as u64)
+        .ok_or_else(|| {
+            CrabError::StagingCorrupt("remote existing chunk count overflow".to_owned())
+        })?;
     *recipe_byte_offset =
-        recipe_terms
+        scratch
+            .terms
             .iter()
             .try_fold(*recipe_byte_offset, |offset, (_, size)| {
                 offset.checked_add(*size).ok_or_else(|| {
@@ -1376,22 +1410,27 @@ async fn flush_batch(
         ))
     })?;
     if xorb_builder.is_some() {
-        let mut pack = vec![false; batch.len()];
         let coordination = xorb_writer
             .as_ref()
             .and_then(|writer| writer.factory.coordination.as_ref());
-        if let Some(coordination) = coordination {
-            let misses = batch
-                .iter()
-                .zip(existing.iter())
-                .filter_map(|((hash, data), candidate)| {
-                    candidate.is_none().then_some((*hash, data.len() as u64))
-                })
-                .collect::<Vec<_>>();
-            let claims =
-                staging.claim_prepared_chunks(&coordination.preparation_id, batch_id, &misses)?;
+        let mut to_pack = std::mem::take(&mut scratch.to_pack);
+        to_pack.clear();
+        let to_pack = if let Some(coordination) = coordination {
+            scratch.misses.clear();
+            scratch
+                .misses
+                .extend(batch.iter().zip(existing.iter()).filter_map(
+                    |((hash, data), candidate)| {
+                        candidate.is_none().then_some((*hash, data.len() as u64))
+                    },
+                ));
+            let claims = staging.claim_prepared_chunks(
+                &coordination.preparation_id,
+                batch_id,
+                &scratch.misses,
+            )?;
             let mut claims = claims.into_iter();
-            for (index, candidate) in existing.iter().enumerate() {
+            for ((hash, data), candidate) in batch.iter().zip(existing.iter()) {
                 if candidate.is_some() {
                     continue;
                 }
@@ -1400,32 +1439,40 @@ async fn flush_batch(
                         "prepared ownership claim cardinality was truncated".to_owned(),
                     )
                 })?;
-                pack[index] = matches!(claim, PreparedChunkClaim::Claimed);
+                if matches!(claim, PreparedChunkClaim::Claimed) {
+                    to_pack.push((
+                        Chunk {
+                            hash: *hash,
+                            data: data.clone(),
+                        },
+                        RunId(0),
+                    ));
+                }
             }
             if claims.next().is_some() {
                 return Err(CrabError::Internal(
                     "prepared ownership claim cardinality exceeded input".to_owned(),
                 ));
             }
+            to_pack
         } else {
-            for (index, candidate) in existing.iter().enumerate() {
-                pack[index] = candidate.is_none();
-            }
-        }
-        let to_pack: Vec<_> = batch
-            .iter()
-            .zip(pack)
-            .filter(|(_, should_pack)| *should_pack)
-            .map(|((hash, data), _)| {
-                (
-                    Chunk {
-                        hash: *hash,
-                        data: data.clone(),
-                    },
-                    RunId(0),
-                )
-            })
-            .collect();
+            to_pack.extend(
+                batch
+                    .iter()
+                    .zip(existing.iter())
+                    .filter(|(_, candidate)| candidate.is_none())
+                    .map(|((hash, data), _)| {
+                        (
+                            Chunk {
+                                hash: *hash,
+                                data: data.clone(),
+                            },
+                            RunId(0),
+                        )
+                    }),
+            );
+            to_pack
+        };
         let mut builder = xorb_builder.take().ok_or_else(|| {
             CrabError::Internal("direct xorb builder disappeared before pack".to_owned())
         })?;
@@ -1440,29 +1487,34 @@ async fn flush_batch(
         let runtime = tokio::runtime::Handle::current();
         let pack_cancel = cancel.clone();
         let compression_start = Instant::now();
-        let (returned_builder, returned_sequence) = tokio::task::spawn_blocking(move || {
-            builder.push_batch_with_rollover_admission(
-                &to_pack,
-                || runtime.block_on(writer_factory.acquire_materialization(&pack_cancel)),
-                |result, permit| {
-                    StreamPreparedXorbWriter::submit_reserved_blocking(
-                        &sender,
-                        &mut next_sequence,
-                        result,
-                        permit,
-                    )
-                },
-            )?;
-            Ok::<_, CrabError>((builder, next_sequence))
-        })
-        .await
-        .map_err(|error| CrabError::Internal(format!("direct xorb pack task failed: {error}")))??;
+        let (returned_builder, returned_sequence, returned_to_pack) =
+            tokio::task::spawn_blocking(move || {
+                builder.push_batch_with_rollover_admission(
+                    &to_pack,
+                    || runtime.block_on(writer_factory.acquire_materialization(&pack_cancel)),
+                    |result, permit| {
+                        StreamPreparedXorbWriter::submit_reserved_blocking(
+                            &sender,
+                            &mut next_sequence,
+                            result,
+                            permit,
+                        )
+                    },
+                )?;
+                Ok::<_, CrabError>((builder, next_sequence, to_pack))
+            })
+            .await
+            .map_err(|error| {
+                CrabError::Internal(format!("direct xorb pack task failed: {error}"))
+            })??;
         timings.compression = timings
             .compression
             .saturating_add(compression_start.elapsed());
         *xorb_builder = Some(returned_builder);
         writer.next_sequence = returned_sequence;
         *xorb_writer = Some(writer);
+        scratch.to_pack = returned_to_pack;
+        scratch.to_pack.clear();
     }
     batch.clear();
     *batch_payload_bytes = 0;
@@ -1476,39 +1528,44 @@ async fn classify_existing_batch(
     batch: &[(MerkleHash, Bytes)],
     lookup: Option<&dyn ExistingChunkLookup>,
     cancel: &CancellationToken,
-) -> Result<Vec<Option<ExistingChunkCandidate>>> {
+    terms: &mut Vec<(MerkleHash, u64)>,
+    existing: &mut Vec<Option<ExistingChunkCandidate>>,
+) -> Result<()> {
+    existing.clear();
     let Some(lookup) = lookup else {
-        return Ok(vec![None; batch.len()]);
+        existing.resize(batch.len(), None);
+        return Ok(());
     };
-    let terms = batch
-        .iter()
-        .map(|(hash, data)| (*hash, data.len() as u64))
-        .collect::<Vec<_>>();
+    terms.clear();
+    terms.extend(batch.iter().map(|(hash, data)| (*hash, data.len() as u64)));
     let result = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        result = lookup.lookup_existing_candidates(&terms) => result,
+        result = lookup.lookup_existing_candidates(terms) => result,
     };
     match result {
-        Ok(candidates) if candidates.len() == batch.len() => Ok(candidates),
+        Ok(candidates) if candidates.len() == batch.len() => {
+            existing.extend(candidates);
+        }
         Ok(candidates) => {
             warn!(
                 returned = candidates.len(),
                 requested = batch.len(),
                 "remote chunk classifier returned malformed cardinality; packing batch locally"
             );
-            Ok(vec![None; batch.len()])
+            existing.resize(batch.len(), None);
         }
-        Err(CrabError::Cancelled) => Err(CrabError::Cancelled),
+        Err(CrabError::Cancelled) => return Err(CrabError::Cancelled),
         Err(error) => {
             warn!(
                 error = %error,
                 chunks = batch.len(),
                 "remote chunk classifier unavailable; packing batch locally"
             );
-            Ok(vec![None; batch.len()])
+            existing.resize(batch.len(), None);
         }
     }
+    Ok(())
 }
 
 async fn persist_stream_prepared_authority(
@@ -1535,8 +1592,20 @@ async fn persist_stream_prepared_authority(
         if let Some(before_promote) = &hooks.before_prepared_xorb_promote {
             before_promote(&prepared.payload_path)?;
         }
-        let written =
-            move_prepared_xorb(staging.root(), &prepared.hash, &prepared.payload_path).await?;
+        let expected_payload_hash =
+            blake3::Hash::from_hex(&prepared.payload_hash).map_err(|error| {
+                CrabError::StagingCorrupt(format!(
+                    "stream-prepared xorb {} has an invalid payload digest: {error}",
+                    prepared.hash.hex()
+                ))
+            })?;
+        let written = move_prepared_xorb(
+            staging.root(),
+            &prepared.hash,
+            &prepared.payload_path,
+            expected_payload_hash.as_bytes(),
+        )
+        .await?;
         if written != prepared.bytes {
             return Err(CrabError::StagingCorrupt(format!(
                 "stream-prepared xorb {} changed size while becoming authoritative: expected {} bytes, found {written}",

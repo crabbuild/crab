@@ -25,6 +25,7 @@ use crab_types::storage::StorageProviderKind;
 pub mod chunks {
     pub use crab_vfs::chunk_cache::*;
 }
+pub(crate) mod add_remote_candidates;
 pub(crate) mod add_validation;
 pub mod hydrated_pointer;
 pub mod shard_hints {
@@ -67,6 +68,23 @@ pub(crate) fn chunk_index_cache_path(cache_root: &Path, identity: &BucketIdentit
         .join("chunk-index.sqlite")
 }
 
+/// Return the scoped persistent add-time remote-candidate cache path.
+pub(crate) fn add_remote_candidate_cache_path(
+    cache_root: &Path,
+    identity: &BucketIdentity,
+    global_prefix: &str,
+) -> PathBuf {
+    let chunk_index_path = chunk_index_cache_path(cache_root, identity);
+    let Some(parent) = chunk_index_path.parent() else {
+        return cache_root.join("remote-candidates.sqlite");
+    };
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"crab-add-remote-candidates-v1\0");
+    hasher.update(global_prefix.as_bytes());
+    let hex = hasher.finalize().to_hex();
+    parent.join(format!("remote-candidates-{}.sqlite", &hex[..16]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +105,20 @@ mod tests {
             chunk_index_cache_path(root, &other)
         );
         assert!(chunk_index_cache_path(root, &first).ends_with("chunk-index.sqlite"));
+    }
+
+    #[test]
+    fn add_remote_candidate_cache_isolated_by_global_prefix() {
+        let root = Path::new("cache");
+        let bucket = BucketIdentity::new(StorageProviderKind::S3, "bucket-a", "bucket-a");
+        let first = add_remote_candidate_cache_path(root, &bucket, "repo-a/.crab");
+        let same = add_remote_candidate_cache_path(root, &bucket, "repo-a/.crab");
+        let other = add_remote_candidate_cache_path(root, &bucket, "repo-b/.crab");
+        assert_eq!(first, same);
+        assert_ne!(first, other);
+        assert_eq!(
+            first.extension().and_then(|extension| extension.to_str()),
+            Some("sqlite")
+        );
     }
 }
