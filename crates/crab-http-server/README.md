@@ -72,6 +72,39 @@ and a canonical HTTPS origin. For container deployment, use the
 | Work on issues, pull requests, reviews, or merges | [Collaboration](REFERENCE.md#issues-pull-requests-and-reviews) |
 | Report CI results or enforce merge checks | [Statuses and checks](REFERENCE.md#commit-statuses-and-required-checks) |
 
+## Trace issue creation
+
+Use `POST /api/repos/{owner}/{name}/issues` to follow a collaboration request.
+Read these sources in order:
+
+| Source | Responsibility |
+| --- | --- |
+| [server.rs](src/server.rs) | Route composition, host/session checks, and mutation protection |
+| [issues.rs](src/issues.rs) | Route body limit, request extraction, and issue handler |
+| [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
+| [issues/storage.rs](src/issues/storage.rs) | Submission reservation and visible issue creation |
+| [app_storage.rs](src/app_storage.rs) | Storage reads, conditional creation, and number allocation |
+
+Example JSON body, subject to the server's authentication and mutation checks:
+
+```json
+{
+  "request_id": "01931b9e-4b3c-7b2a-b9f0-0123456789ab",
+  "title": "Document the repository setup",
+  "body": "Include prerequisites and a minimal configuration."
+}
+```
+
+Generate a fresh submission ID for a new issue. If the response is lost, retry
+with the same ID and original title/body: the reservation preserves the issue
+number. Reusing that ID with different content or another author is a conflict.
+
+The handler also loads presentation data after issue creation. A failed response
+therefore does not prove that the write failed; keep retry behavior aligned with
+the storage reservation contract. JSON extractor rejections retain their HTTP
+status through `app::Error`, while internal storage failures use a separate
+response classification.
+
 ## Work on this crate
 
 Start with [AGENTS.md](AGENTS.md) for entry points, ownership, and invariants.
