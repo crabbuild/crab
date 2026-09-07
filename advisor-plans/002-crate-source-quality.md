@@ -811,3 +811,21 @@ branch. All 16 nfs_mount tests pass, including the earlier completion/cancellati
 regressions; strict all-target nfs Clippy passes. Tests use no native mount and
 do not prove concurrent error precedence when cancellation wins select, failed
 native unmount, or dependency connection draining. Those gaps remain explicit.
+
+## Auth-server helper output classification
+
+The output boundary now chooses the stderr prefix and exit code together,
+removing duplicate conflict classification without changing either helper's
+public result mapping. Both binary entry points call emit_json_result; receive
+helper Python consumers check the return code before parsing JSON and map
+conflict/invalid prefixes, while view consumers preserve a generic error path.
+Read the complete output module, both binary entry points, error variants and
+receive_helper.py/view_helper.py consumer branches. Existing main behavior is
+preserved; no dependency behavior changes. README now documents the mapping,
+Clap's separate argument handling, cleanup warnings, and absence of automatic
+error-text redaction. Production Rust shrinks by eight lines.
+
+Validation: all four output tests pass; strict all-target crab-auth-server Clippy
+passes; cargo fmt --all and git diff --check pass. This proves the scoped output
+refactor, not cloud-backed receive/view runtime qualification or full crate
+quality completion.

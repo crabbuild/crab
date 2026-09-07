@@ -48,10 +48,11 @@ pub fn emit_json_result<T: Serialize>(policy: HelperOutputPolicy, result: Result
 }
 
 fn render_error(policy: HelperOutputPolicy, error: AuthServerError) -> RenderedHelperOutput {
+    let (prefix, exit_code) = error_status(policy, &error);
     RenderedHelperOutput {
         stdout: None,
-        stderr: Some(format!("{}: {error}", error_prefix(policy, &error))),
-        exit_code: error_exit_code(policy, &error),
+        stderr: Some(format!("{prefix}: {error}")),
+        exit_code,
     }
 }
 
@@ -63,28 +64,19 @@ fn serialize_error(policy: HelperOutputPolicy, error: serde_json::Error) -> Auth
     AuthServerError::Internal(message)
 }
 
-fn error_prefix(policy: HelperOutputPolicy, error: &AuthServerError) -> &'static str {
-    match policy {
-        HelperOutputPolicy::Receive => match error {
-            AuthServerError::CasConflict { .. } | AuthServerError::NonFastForward { .. } => {
-                "conflict"
-            }
-            AuthServerError::CorruptObject { .. }
-            | AuthServerError::NotFound { .. }
-            | AuthServerError::Configuration { .. } => "invalid",
-            _ => "error",
-        },
-        HelperOutputPolicy::View => "error",
-    }
-}
-
-fn error_exit_code(policy: HelperOutputPolicy, error: &AuthServerError) -> i32 {
+fn error_status(policy: HelperOutputPolicy, error: &AuthServerError) -> (&'static str, i32) {
     match (policy, error) {
         (
             HelperOutputPolicy::Receive,
             AuthServerError::CasConflict { .. } | AuthServerError::NonFastForward { .. },
-        ) => 2,
-        _ => 1,
+        ) => ("conflict", 2),
+        (
+            HelperOutputPolicy::Receive,
+            AuthServerError::CorruptObject { .. }
+            | AuthServerError::NotFound { .. }
+            | AuthServerError::Configuration { .. },
+        ) => ("invalid", 1),
+        _ => ("error", 1),
     }
 }
 

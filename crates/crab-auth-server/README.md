@@ -46,10 +46,29 @@ to reconstruction and the chunking worker. This avoids retaining a whole
 decoded source file; export parsing, accumulated xorb results, and temporary
 disk still require separate resource qualification.
 
-Both binaries emit structured JSON with safe error handling. `Doctor` reports
-the Git version and helper readiness. Cleanup is attempted after receive
+Both binaries emit JSON on stdout only for successful results. Errors are plain
+text on stderr; output formatting does not redact arbitrary error content.
+`Doctor` reports the Git version and helper readiness. Cleanup is attempted after receive
 verification and commit, but cleanup warnings do not turn a successful
 finalization into a false failure.
+
+## Process output contract
+
+The result renderer uses the following mapping after argument parsing. CLI help,
+version output, and argument errors are handled separately by Clap; receive
+cleanup warnings can appear on stderr even when the result succeeds.
+
+| Result | Helper | stderr prefix | Exit code |
+| --- | --- | --- | --- |
+| Success | Both | No result error; JSON goes to stdout | 0 |
+| CAS conflict or non-fast-forward | Receive | `conflict:` | 2 |
+| Corrupt object, missing object, invalid configuration | Receive | `invalid:` | 1 |
+| Other errors | Receive | `error:` | 1 |
+| Any error | View | `error:` | 1 |
+
+Consumers must check the exit code before parsing stdout. Error constructors
+must keep credentials out of messages; the output boundary prints their display
+text. JSON serialization failures also follow the helper's error path.
 
 ## Usage
 
