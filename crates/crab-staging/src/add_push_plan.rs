@@ -140,15 +140,12 @@ pub async fn prepare_file_push_plans_with_progress(
         return prepare_cached_file_plans_with_progress(
             staging,
             files,
-            CachedFilePlanContext {
-                existing_refs: &existing_refs,
-                build_xorb_builder,
-                prepared_cache: &mut prepared_cache,
-                summary,
-                verified_sequences: &mut verified_sequences,
-                cancel,
-                on_progress,
-            },
+            &existing_refs,
+            build_xorb_builder,
+            &mut prepared_cache,
+            summary,
+            cancel,
+            on_progress,
         )
         .await;
     }
@@ -194,30 +191,17 @@ struct PreparedFilePlan {
     summary: FilePlanSummary,
 }
 
-struct CachedFilePlanContext<'existing, 'builder, 'cache, 'verified, 'cancel, 'progress> {
-    existing_refs: &'existing Option<HashMap<MerkleHash, Option<ExistingChunkCandidate>>>,
-    build_xorb_builder: &'builder (dyn Fn() -> XorbBuilder + Send + Sync),
-    prepared_cache: &'cache mut PreparedXorbCache,
-    summary: AddPushPlanSummary,
-    verified_sequences: &'verified mut HashSet<(MerkleHash, [u8; 32], u64)>,
-    cancel: &'cancel CancellationToken,
-    on_progress: Option<&'progress mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
-}
-
 async fn prepare_cached_file_plans_with_progress(
     staging: &StagingArea,
     files: &[AddPlanFile<'_>],
-    context: CachedFilePlanContext<'_, '_, '_, '_, '_, '_>,
+    existing_refs: &Option<HashMap<MerkleHash, Option<ExistingChunkCandidate>>>,
+    build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
+    prepared_cache: &mut PreparedXorbCache,
+    mut summary: AddPushPlanSummary,
+    cancel: &CancellationToken,
+    mut on_progress: Option<&mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
 ) -> Result<AddPushPlanSummary> {
-    let CachedFilePlanContext {
-        existing_refs,
-        build_xorb_builder,
-        prepared_cache,
-        mut summary,
-        verified_sequences,
-        cancel,
-        mut on_progress,
-    } = context;
+    let mut verified_sequences = HashSet::new();
     let mut prepared_plans = Vec::with_capacity(files.len());
     let mut ownership_cache = HashMap::new();
     for file in files {
@@ -249,7 +233,7 @@ async fn prepare_cached_file_plans_with_progress(
             file_existing_refs,
             build_xorb_builder,
             prepared_cache,
-            verified_sequences,
+            &mut verified_sequences,
             &mut ownership_cache,
             cancel,
         )

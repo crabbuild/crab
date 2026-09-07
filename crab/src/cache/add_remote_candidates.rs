@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
-use rusqlite::{Connection, params, params_from_iter};
+use rusqlite::{Connection, TransactionBehavior, params, params_from_iter};
 
 use crate::core::error::{CrabError, Result};
 use crab_staging::push_plan::ExistingChunkCandidate;
@@ -20,19 +20,31 @@ use crab_xet::xorb::format::XorbRef;
 
 const SCHEMA_VERSION: i64 = 1;
 const MEMORY_CAPACITY: usize = 65_536;
-const MAX_PERSISTENT_ENTRIES: i64 = 2_000_000;
+const MAX_PERSISTENT_ENTRIES: i64 = if cfg!(test) { 1_024 } else { 2_000_000 };
 const LOOKUP_BATCH_SIZE: usize = 512;
 const PERSISTENT_UNION_LOOKUP_BATCH: usize = LOOKUP_BATCH_SIZE / 2;
 const PERSIST_DEDUP_BATCH_SIZE: usize = MEMORY_CAPACITY;
-const PRUNE_EVERY_WRITES: u64 = 64;
 const NEGATIVE_TABLE: &str = "remote_candidate_misses_v1";
 const NEGATIVE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// A bounded bucket-scoped cache of proof-backed candidates.
 pub(crate) struct AddRemoteCandidateCache {
     connection: Mutex<Connection>,
-    memory: Mutex<LruCache<MerkleHash, Option<ExistingChunkCandidate>>>,
-    writes_since_prune: std::sync::atomic::AtomicU64,
+    memory: Mutex<LruCache<MerkleHash, CachedCandidate>>,
+}
+
+#[derive(Clone, Copy)]
+struct CachedCandidate {
+    candidate: Option<ExistingChunkCandidate>,
+    observed_at: i64,
+}
+
+impl CachedCandidate {
+    fn is_current(self, now: i64) -> bool {
+        self.candidate.is_some()
+            || (self.observed_at <= now
+                && now.saturating_sub(self.observed_at) < NEGATIVE_TTL.as_secs() as i64)
+    }
 }
 
 impl AddRemoteCandidateCache {
@@ -47,21 +59,25 @@ impl AddRemoteCandidateCache {
                 ))
             })?;
         }
-        let connection = Connection::open(path).map_err(|error| database_error("open", error))?;
+        let mut connection =
+            Connection::open(path).map_err(|error| database_error("open", error))?;
         connection
             .busy_timeout(Duration::from_millis(250))
             .map_err(|error| database_error("configure timeout", error))?;
         connection
             .execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
             .map_err(|error| database_error("configure", error))?;
-        let version = connection
+        // Serialize schema creation with other add processes.
+        let schema = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| database_error("begin schema", error))?;
+        let version = schema
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .map_err(|error| database_error("read schema version", error))?;
         if version == 0 {
-            connection
+            schema
                 .execute_batch(
-                    "BEGIN IMMEDIATE;
-                     CREATE TABLE remote_candidates_v1 (
+                    "CREATE TABLE remote_candidates_v1 (
                          chunk_hash BLOB PRIMARY KEY NOT NULL CHECK(length(chunk_hash) = 32),
                          xorb_hash BLOB NOT NULL CHECK(length(xorb_hash) = 32),
                          chunk_index INTEGER NOT NULL CHECK(chunk_index >= 0),
@@ -73,8 +89,21 @@ impl AddRemoteCandidateCache {
                          chunk_hash BLOB PRIMARY KEY NOT NULL CHECK(length(chunk_hash) = 32),
                          observed_at INTEGER NOT NULL CHECK(observed_at >= 0)
                      ) WITHOUT ROWID;
-                     PRAGMA user_version = 1;
-                     COMMIT;",
+                     CREATE TABLE cache_counts (
+                         singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                         positives INTEGER NOT NULL CHECK(positives >= 0),
+                         negatives INTEGER NOT NULL CHECK(negatives >= 0)
+                     );
+                     INSERT INTO cache_counts VALUES (1, 0, 0);
+                     CREATE TRIGGER candidate_insert AFTER INSERT ON remote_candidates_v1
+                     BEGIN UPDATE cache_counts SET positives = positives + 1; END;
+                     CREATE TRIGGER candidate_delete AFTER DELETE ON remote_candidates_v1
+                     BEGIN UPDATE cache_counts SET positives = positives - 1; END;
+                     CREATE TRIGGER miss_insert AFTER INSERT ON remote_candidate_misses_v1
+                     BEGIN UPDATE cache_counts SET negatives = negatives + 1; END;
+                     CREATE TRIGGER miss_delete AFTER DELETE ON remote_candidate_misses_v1
+                     BEGIN UPDATE cache_counts SET negatives = negatives - 1; END;
+                     PRAGMA user_version = 1;",
                 )
                 .map_err(|error| database_error("initialize", error))?;
         } else if version != SCHEMA_VERSION {
@@ -82,26 +111,27 @@ impl AddRemoteCandidateCache {
                 "unsupported add remote candidate cache schema {version}; expected v{SCHEMA_VERSION}"
             )));
         }
-        connection
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS remote_candidate_misses_v1 (
-                     chunk_hash BLOB PRIMARY KEY NOT NULL CHECK(length(chunk_hash) = 32),
-                     observed_at INTEGER NOT NULL CHECK(observed_at >= 0)
-                 ) WITHOUT ROWID;",
-            )
-            .map_err(|error| database_error("initialize negative entries", error))?;
-        ensure_negative_timestamp_column(&connection)?;
+        schema
+            .commit()
+            .map_err(|error| database_error("commit schema", error))?;
         let capacity = NonZeroUsize::new(MEMORY_CAPACITY).unwrap_or(NonZeroUsize::MIN);
         Ok(Self {
             connection: Mutex::new(connection),
             memory: Mutex::new(LruCache::new(capacity)),
-            writes_since_prune: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
     pub(crate) fn memory_get_batch(
         &self,
         hashes: &[MerkleHash],
+    ) -> Result<HashMap<MerkleHash, Option<ExistingChunkCandidate>>> {
+        self.memory_get_batch_at(hashes, current_unix_timestamp()?)
+    }
+
+    fn memory_get_batch_at(
+        &self,
+        hashes: &[MerkleHash],
+        now: i64,
     ) -> Result<HashMap<MerkleHash, Option<ExistingChunkCandidate>>> {
         if hashes.is_empty() {
             return Ok(HashMap::new());
@@ -115,7 +145,11 @@ impl AddRemoteCandidateCache {
         let mut out = HashMap::new();
         for hash in hashes {
             if let Some(candidate) = memory.get(hash).copied() {
-                out.insert(*hash, candidate);
+                if candidate.is_current(now) {
+                    out.insert(*hash, candidate.candidate);
+                } else {
+                    memory.pop(hash);
+                }
             }
         }
         Ok(out)
@@ -132,8 +166,15 @@ impl AddRemoteCandidateCache {
             .memory
             .lock()
             .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
+        let observed_at = current_unix_timestamp()?;
         for (hash, candidate) in entries {
-            memory.put(*hash, *candidate);
+            memory.put(
+                *hash,
+                CachedCandidate {
+                    candidate: *candidate,
+                    observed_at,
+                },
+            );
         }
         Ok(())
     }
@@ -156,6 +197,7 @@ impl AddRemoteCandidateCache {
         // A cold persistent lookup commonly returns no rows. Keep the
         // all-miss path allocation-free; the map grows with actual hits.
         let mut out = HashMap::new();
+        let mut memory_updates = Vec::new();
         // The UNION repeats every hash list, so keep total bind variables below
         // SQLite's default 999-variable limit.
         for batch in hashes.chunks(PERSISTENT_UNION_LOOKUP_BATCH) {
@@ -231,9 +273,23 @@ impl AddRemoteCandidateCache {
                     row.map_err(|error| database_error("decode lookup", error))?;
                 if let Some(candidate) = candidate {
                     out.insert(chunk_hash.into(), Some(candidate));
+                    memory_updates.push((
+                        chunk_hash.into(),
+                        CachedCandidate {
+                            candidate: Some(candidate),
+                            observed_at: now,
+                        },
+                    ));
                 } else if let Some(observed_at) = observed_at {
-                    if observed_at >= cutoff && observed_at <= now {
+                    if observed_at > cutoff && observed_at <= now {
                         out.entry(chunk_hash.into()).or_insert(None);
+                        memory_updates.push((
+                            chunk_hash.into(),
+                            CachedCandidate {
+                                candidate: None,
+                                observed_at,
+                            },
+                        ));
                     } else {
                         expired.push(chunk_hash);
                     }
@@ -249,7 +305,8 @@ impl AddRemoteCandidateCache {
                         .collect::<Vec<_>>()
                         .join(",");
                     let query = format!(
-                        "DELETE FROM {NEGATIVE_TABLE} WHERE chunk_hash IN ({placeholders})"
+                        "DELETE FROM {NEGATIVE_TABLE} WHERE chunk_hash IN ({placeholders})
+                         AND (observed_at <= {cutoff} OR observed_at > {now})"
                     );
                     connection
                         .execute(
@@ -258,6 +315,15 @@ impl AddRemoteCandidateCache {
                         )
                         .map_err(|error| database_error("delete expired negative", error))?;
                 }
+            }
+            // Bound promotion scratch to one page and preserve observation time:
+            // reading a miss never renews its lease. Lock order is database → memory.
+            let mut memory = self
+                .memory
+                .lock()
+                .map_err(|_| CrabError::Internal("add remote candidate cache poisoned".into()))?;
+            for (hash, candidate) in memory_updates.drain(..) {
+                memory.put(hash, candidate);
             }
         }
         Ok(out)
@@ -305,7 +371,7 @@ impl AddRemoteCandidateCache {
             .lock()
             .map_err(|_| CrabError::Internal("add remote candidate database poisoned".into()))?;
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| database_error("begin update", error))?;
         let mut positive_entries = Vec::new();
         let mut negative_hashes = Vec::new();
@@ -456,35 +522,22 @@ impl AddRemoteCandidateCache {
                 .execute(params_from_iter(values))
                 .map_err(|error| database_error("write negative update batch", error))?;
         }
-        transaction
-            .commit()
-            .map_err(|error| database_error("commit update", error))?;
-        let writes = self
-            .writes_since_prune
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        if !writes.is_multiple_of(PRUNE_EVERY_WRITES) {
-            return Ok(());
-        }
-        let positive_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM remote_candidates_v1", [], |row| {
-                row.get(0)
-            })
-            .map_err(|error| database_error("count entries", error))?;
-        let negative_count: i64 = connection
+        // Counts and eviction share the write transaction. The limit survives
+        // process restarts without scanning the full cache on every write.
+        let (positive_count, negative_count): (i64, i64) = transaction
             .query_row(
-                &format!("SELECT COUNT(*) FROM {NEGATIVE_TABLE}"),
+                "SELECT positives, negatives FROM cache_counts WHERE singleton = 1",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map_err(|error| database_error("count negative entries", error))?;
+            .map_err(|error| database_error("read entry counts", error))?;
         let mut overflow = positive_count
             .saturating_add(negative_count)
             .saturating_sub(MAX_PERSISTENT_ENTRIES);
         if overflow > 0 {
             let negative_eviction = overflow.min(negative_count);
             if negative_eviction > 0 {
-                connection
+                transaction
                     .execute(
                         &format!(
                             "DELETE FROM {NEGATIVE_TABLE}
@@ -499,7 +552,7 @@ impl AddRemoteCandidateCache {
                 overflow -= negative_eviction;
             }
             if overflow > 0 {
-                connection
+                transaction
                     .execute(
                         "DELETE FROM remote_candidates_v1
                          WHERE chunk_hash IN (
@@ -511,6 +564,9 @@ impl AddRemoteCandidateCache {
                     .map_err(|error| database_error("evict entries", error))?;
             }
         }
+        transaction
+            .commit()
+            .map_err(|error| database_error("commit update", error))?;
         Ok(())
     }
 }
@@ -532,31 +588,6 @@ fn database_error(operation: &str, error: rusqlite::Error) -> CrabError {
     CrabError::Internal(format!("{operation} add remote candidate cache: {error}"))
 }
 
-fn ensure_negative_timestamp_column(connection: &Connection) -> Result<()> {
-    let mut statement = connection
-        .prepare("PRAGMA table_info(remote_candidate_misses_v1)")
-        .map_err(|error| database_error("inspect negative schema", error))?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|error| database_error("inspect negative columns", error))?;
-    let column_names = columns
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|error| database_error("decode negative schema", error))?;
-    drop(statement);
-    let has_timestamp = column_names.iter().any(|name| name == "observed_at");
-    if has_timestamp {
-        return Ok(());
-    }
-    connection
-        .execute(
-            "ALTER TABLE remote_candidate_misses_v1
-             ADD COLUMN observed_at INTEGER NOT NULL DEFAULT 0",
-            [],
-        )
-        .map_err(|error| database_error("upgrade negative schema", error))?;
-    Ok(())
-}
-
 fn current_unix_timestamp() -> Result<i64> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -567,202 +598,4 @@ fn current_unix_timestamp() -> Result<i64> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    fn candidate(seed: u8) -> ExistingChunkCandidate {
-        ExistingChunkCandidate {
-            xorb_ref: XorbRef {
-                xorb_hash: MerkleHash::from([seed; 32]),
-                chunk_index: u32::from(seed),
-                uncompressed_size: 4096,
-            },
-            placement_id: [seed.wrapping_add(1); 32],
-            origin_proof_id: [seed.wrapping_add(2); 32],
-        }
-    }
-
-    fn cache_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
-        let root = dir.path().join("cache");
-        crab_cache::ensure_private_cache_directory(&root).expect("private cache root");
-        root.join("cache.sqlite")
-    }
-
-    #[test]
-    fn persistent_candidates_round_trip() {
-        let dir = tempdir().expect("tempdir");
-        let path = cache_path(&dir);
-        let cache = AddRemoteCandidateCache::open(&path).expect("open");
-        let hash = MerkleHash::from([7; 32]);
-        cache
-            .persist_results(&[(hash, Some(candidate(7)))])
-            .expect("persist");
-        cache
-            .persist_results(&[(hash, Some(candidate(8)))])
-            .expect("refresh");
-        let loaded = cache.load_persistent(&[hash]).expect("load");
-        assert_eq!(loaded.get(&hash), Some(&Some(candidate(8))));
-    }
-
-    #[test]
-    fn persistent_negative_entries_round_trip_and_refresh() {
-        let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
-        let hash = MerkleHash::from([4; 32]);
-        cache
-            .persist_results(&[(hash, None)])
-            .expect("persist negative");
-        assert_eq!(
-            cache.load_persistent(&[hash]).expect("load").get(&hash),
-            Some(&None)
-        );
-
-        cache
-            .persist_results(&[(hash, Some(candidate(4)))])
-            .expect("refresh positive");
-        assert_eq!(
-            cache.load_persistent(&[hash]).expect("load").get(&hash),
-            Some(&Some(candidate(4)))
-        );
-    }
-
-    #[test]
-    fn persistent_duplicate_results_keep_input_order() {
-        let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
-        let hash = MerkleHash::from([6; 32]);
-
-        cache
-            .persist_results(&[(hash, Some(candidate(6))), (hash, None)])
-            .expect("persist negative last");
-        assert_eq!(
-            cache.load_persistent(&[hash]).expect("load").get(&hash),
-            Some(&None)
-        );
-
-        cache
-            .persist_results(&[(hash, None), (hash, Some(candidate(6)))])
-            .expect("persist positive last");
-        assert_eq!(
-            cache.load_persistent(&[hash]).expect("load").get(&hash),
-            Some(&Some(candidate(6)))
-        );
-    }
-
-    #[test]
-    fn expired_negative_entries_are_not_reused() {
-        let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
-        let hash = MerkleHash::from([5; 32]);
-        cache
-            .persist_results(&[(hash, None)])
-            .expect("persist negative");
-        cache
-            .connection
-            .lock()
-            .expect("database lock")
-            .execute(
-                "UPDATE remote_candidate_misses_v1 SET observed_at = 0 WHERE chunk_hash = ?1",
-                params![<[u8; 32]>::from(hash).as_slice()],
-            )
-            .expect("age negative");
-
-        assert!(
-            !cache
-                .load_persistent(&[hash])
-                .expect("load")
-                .contains_key(&hash)
-        );
-        let remaining: i64 = cache
-            .connection
-            .lock()
-            .expect("database lock")
-            .query_row(
-                "SELECT COUNT(*) FROM remote_candidate_misses_v1 WHERE chunk_hash = ?1",
-                params![<[u8; 32]>::from(hash).as_slice()],
-                |row| row.get(0),
-            )
-            .expect("count expired");
-        assert_eq!(remaining, 0);
-    }
-
-    #[test]
-    fn memory_cache_distinguishes_negative_entries() {
-        let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
-        let hash = MerkleHash::from([3; 32]);
-        assert!(
-            !cache
-                .memory_get_batch(&[hash])
-                .expect("lookup")
-                .contains_key(&hash)
-        );
-        cache.memory_insert_batch(&[(hash, None)]).expect("insert");
-        assert_eq!(
-            cache.memory_get_batch(&[hash]).expect("lookup").get(&hash),
-            Some(&None)
-        );
-    }
-
-    #[test]
-    fn memory_batch_cache_preserves_positive_negative_and_misses() {
-        let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
-        let positive_hash = MerkleHash::from([8; 32]);
-        let negative_hash = MerkleHash::from([9; 32]);
-        let missing_hash = MerkleHash::from([10; 32]);
-        cache
-            .memory_insert_batch(&[(positive_hash, Some(candidate(8))), (negative_hash, None)])
-            .expect("insert batch");
-
-        let loaded = cache
-            .memory_get_batch(&[positive_hash, negative_hash, missing_hash])
-            .expect("lookup batch");
-        assert_eq!(loaded.get(&positive_hash), Some(&Some(candidate(8))));
-        assert_eq!(loaded.get(&negative_hash), Some(&None));
-        assert!(!loaded.contains_key(&missing_hash));
-    }
-
-    #[test]
-    fn persistent_lookup_batches_large_requests() {
-        let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
-        let entries = (0..600u16)
-            .map(|seed| {
-                let mut bytes = [0; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                (MerkleHash::from(bytes), candidate((seed % 256) as u8))
-            })
-            .collect::<Vec<_>>();
-        let entries = entries
-            .into_iter()
-            .map(|(hash, candidate)| (hash, Some(candidate)))
-            .collect::<Vec<_>>();
-        cache
-            .persist_unique_results(&entries)
-            .expect("persist unique");
-        let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-        assert_eq!(cache.load_persistent(&hashes).expect("load").len(), 600);
-    }
-
-    #[test]
-    fn persistent_negative_writes_batch_large_requests() {
-        let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
-        let entries = (0..600u16)
-            .map(|seed| {
-                let mut bytes = [0; 32];
-                bytes[..2].copy_from_slice(&seed.to_le_bytes());
-                (MerkleHash::from(bytes), None)
-            })
-            .collect::<Vec<_>>();
-        cache
-            .persist_unique_results(&entries)
-            .expect("persist unique negatives");
-        let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-        let loaded = cache.load_persistent(&hashes).expect("load negatives");
-        assert_eq!(loaded.len(), 600);
-        assert!(loaded.values().all(Option::is_none));
-    }
-}
+mod tests;

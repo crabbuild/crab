@@ -203,10 +203,20 @@ Successful proof-backed candidates and confirmed remote misses are retained in
 a bounded SQLite cache under the user's Crab cache. Persisting misses avoids
 repeating remote-index reads for newly-seen chunks across `crab add`
 invocations. A negative can become stale after another client pushes the
-chunk, so it expires after five minutes and otherwise only causes local
+chunk, so it expires after five minutes in both SQLite and memory; promotion
+preserves the original observation time. Transactional row accounting and
+eviction enforce the combined two-million-entry limit across process restarts
+and concurrent writers, without full-table counts on the add hot path.
+An expired or stale miss otherwise only causes local
 repacking; push still revalidates every positive placement and origin proof.
 Cache failures, stale entries, and evictions are advisory misses; they cannot
 change the bytes selected for a push.
+
+Push reads remote candidates in bounded pages under a shared deadline. It
+retains completed pages and local cache hits if the deadline expires or a later
+remote page fails; every retained placement still crosses normal proof
+validation. A large miss set never disables cross-repository lookup solely
+because it exceeds one page.
 
 Prepared bodies use one local content-addressed path:
 

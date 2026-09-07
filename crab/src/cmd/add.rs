@@ -2684,6 +2684,25 @@ fn collect_literal_candidates(
         let Some(rel_path) = literal_relative_path(pattern) else {
             return Ok(None);
         };
+        // The full walker never descends through symlinks. A leaf-only stat
+        // would follow linked ancestors and prepare bytes outside the worktree.
+        let mut selected_path = repo_root.to_path_buf();
+        let mut linked = false;
+        for component in rel_path.components() {
+            selected_path.push(component);
+            match std::fs::symlink_metadata(&selected_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    linked = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if linked {
+            continue;
+        }
         let abs_path = repo_root.join(&rel_path);
         let metadata = match std::fs::symlink_metadata(&abs_path) {
             Ok(metadata) => metadata,
@@ -3626,6 +3645,7 @@ struct GitIndexEntry {
     index_stat: crate::cmd::stream_stage::VerifiedIndexStat,
 }
 
+#[cfg(test)]
 fn write_pointer_blob(repo_root: &Path, payload: &[u8]) -> Result<String> {
     let repo = gix::open(repo_root).map_err(|e| {
         CrabError::Internal(format!("failed to open git repository for blob write: {e}"))
@@ -4305,6 +4325,34 @@ mod tests {
         .unwrap();
 
         assert_eq!(candidates, vec![(dir.path().join("models/a.bin"), 5)]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn literal_candidates_skip_symlink_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("models")).unwrap();
+        std::fs::write(outside.path().join("models/a.bin"), b"outside").unwrap();
+        std::fs::write(dir.path().join(".gitattributes"), "*.bin filter=crab\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        let classifier = TrackedClassifier::open(dir.path()).unwrap();
+        for selector in ["linked/models/a.bin", "linked/models"] {
+            let patterns = vec![selector.to_owned()];
+            let filter = build_filter(&patterns, &[]).unwrap();
+            assert!(
+                collect_candidates(
+                    dir.path(),
+                    &classifier,
+                    &filter,
+                    &patterns,
+                    &CancellationToken::new()
+                )
+                .unwrap()
+                .is_empty(),
+                "{selector} followed a symlink ancestor"
+            );
+        }
     }
 
     #[test]

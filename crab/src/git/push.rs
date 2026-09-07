@@ -4424,30 +4424,22 @@ impl crab_staging::push_plan::ExistingChunkLookup for AddRemoteChunkClassifier {
                         // reserving this repository-sized buffer for warm hits.
                         remote_misses.reserve(lookup_hashes.len());
                     }
-                    // Persisted misses are not inserted into memory; only grow
-                    // this buffer for rows that actually came back from SQLite.
-                    let mut memory_updates = Vec::new();
                     for &chunk_hash in lookup_hashes.iter() {
                         match persisted.get(&chunk_hash).copied() {
                             Some(Some(candidate)) => {
                                 self.candidate_cache_hits
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                memory_updates.push((chunk_hash, Some(candidate)));
                                 candidates.insert(chunk_hash, candidate);
                             }
                             Some(None) => {
                                 self.candidate_cache_hits
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                memory_updates.push((chunk_hash, None));
                                 // A persisted negative is advisory: it only avoids
                                 // a duplicate lookup, and push still revalidates
                                 // every candidate it does receive.
                             }
                             None => remote_misses.push(chunk_hash),
                         }
-                    }
-                    if let Err(error) = cache.memory_insert_batch(&memory_updates) {
-                        warn!(error = %error, "add remote candidate memory cache update failed");
                     }
                 }
                 Ok(Err(error)) => {
@@ -14711,17 +14703,17 @@ impl PushPipeline {
             return Ok(None);
         };
 
-        let result = tokio::time::timeout(
-            GLOBAL_CHUNK_LOOKUP_BUDGET,
-            chunk_store.get_batch_with_candidates_bounded(
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Err(CrabError::Cancelled),
+            result = chunk_store.get_batch_with_candidates_until(
                 chunk_hashes,
-                GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE,
-            ),
-        )
-        .await;
+                tokio::time::Instant::now() + GLOBAL_CHUNK_LOOKUP_BUDGET,
+            ) => result,
+        };
         let (refs, remote_candidates, skipped_remote) = match result {
-            Ok(Ok(result)) => result,
-            Ok(Err(e)) => {
+            Ok(result) => result,
+            Err(e) => {
                 warn!(
                     error = %e,
                     candidates = chunk_hashes.len(),
@@ -14729,27 +14721,7 @@ impl PushPipeline {
                 );
                 return Ok(Some((HashMap::new(), chunk_hashes.len())));
             }
-            Err(_) => {
-                debug!(
-                    candidates = chunk_hashes.len(),
-                    budget_ms = GLOBAL_CHUNK_LOOKUP_BUDGET.as_millis() as u64,
-                    "step 4: global chunk lookup reached its proof budget"
-                );
-                return Ok(Some((HashMap::new(), chunk_hashes.len())));
-            }
         };
-        if skipped_remote > 0 {
-            // Local and persistent tiers are already exact placements. Keep
-            // those hits even when the remote candidate phase is over budget;
-            // each retained ref still crosses the normal origin-proof check.
-            let hits = chunk_hashes
-                .iter()
-                .copied()
-                .zip(refs)
-                .filter_map(|(chunk_hash, xorb_ref)| xorb_ref.map(|value| (chunk_hash, value)))
-                .collect();
-            return Ok(Some((hits, skipped_remote)));
-        }
 
         {
             let mut candidates = self.committed_chunk_receipt_candidates.lock().await;
@@ -14770,7 +14742,7 @@ impl PushPipeline {
             .zip(refs)
             .filter_map(|(chunk_hash, xorb_ref)| xorb_ref.map(|value| (chunk_hash, value)))
             .collect();
-        Ok(Some((hits, 0)))
+        Ok(Some((hits, skipped_remote)))
     }
 
     async fn lookup_proven_remote_chunks_for_add(
@@ -29194,7 +29166,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn verified_global_lookup_keeps_local_hits_when_remote_budget_is_exceeded() {
+    async fn verified_global_lookup_keeps_local_hits_across_remote_pages() {
         let inner: Arc<dyn object_store::ObjectStore> =
             Arc::new(object_store::memory::InMemory::new());
         let store = Store::new(inner);
@@ -29244,11 +29216,8 @@ mod tests {
             .expect("bounded lookup");
 
         assert_eq!(lookup.refs.get(&local_hash), Some(&xorb_ref));
-        assert!(lookup.lookup_unavailable);
-        assert_eq!(
-            lookup.skipped_after_unavailable,
-            chunk_hashes.len().saturating_sub(1)
-        );
+        assert!(!lookup.lookup_unavailable);
+        assert_eq!(lookup.skipped_after_unavailable, 0);
         pipeline.close_metadb().await;
     }
 
@@ -30022,14 +29991,13 @@ mod tests {
             .lookup_verified_global_chunk_refs(&chunk_hashes)
             .await
             .expect("lookup global refs");
-        assert!(lookup.refs.is_empty());
-        assert!(lookup.lookup_unavailable);
-        assert_eq!(
-            lookup.skipped_after_unavailable,
-            chunk_hashes.len(),
-            "a remote proof set larger than the budget must be skipped atomically"
-        );
-        assert_eq!(lookup.stale_hits, 0);
+        assert!(!lookup.lookup_unavailable);
+        assert_eq!(lookup.skipped_after_unavailable, 0);
+        assert_eq!(lookup.stale_hits, missing_chunk_hashes.len());
+        assert_eq!(lookup.refs.len(), present_chunks.len());
+        for (hash, _) in &present_chunks {
+            assert_eq!(lookup.refs.get(hash).unwrap().xorb_hash, present_xorb);
+        }
 
         pipeline.close_metadb().await;
     }
