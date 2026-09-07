@@ -81,6 +81,11 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-cache-dev \
 
 Use a unique target directory for the checkout on the mounted workspace volume.
 
+Startup constructs the authorization policy and origin client before opening or
+evicting cache data. Invalid origin configuration therefore leaves the cache
+untouched and starts no maintenance task. Successful client construction does
+not prove origin connectivity; the readiness check also probes the origin.
+
 The CLI also provides `evidence` verification/gating and `onboarding`
 render/check/probe commands for repeatable deployment proof.
 

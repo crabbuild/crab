@@ -30,6 +30,10 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
 
 ## Invariants
 
+- Construct policy and origin dependencies before cache recovery, eviction, or
+  background task startup. Await `PreparedServer::shutdown` after preparation
+  succeeds; dropping an evictor handle does not stop its task.
+  Sources: `crates/crab-cache-server/src/server.rs`, `crates/crab-cache-server/src/evictor.rs`.
 - Validate ASCII before byte-indexed hex decoding. Malformed PSK config and cache hashes must return errors rather than panic on UTF-8 boundaries.
   Sources: `crates/crab-cache-server/src/config.rs`, `crates/crab-cache-server/src/cache_store.rs`.
 

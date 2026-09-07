@@ -97,6 +97,9 @@ pub async fn run_server(config: CacheServerConfig) -> Result<(), CacheServiceErr
 }
 
 /// Opens cache-service runtime dependencies without binding the listener.
+///
+/// Rejects invalid policy and origin configuration before initializing the cache
+/// or starting maintenance. Await [`PreparedServer::shutdown`] after use.
 pub fn prepare_server(
     config: CacheServerConfig,
     options: ServerStartupOptions,
@@ -112,7 +115,10 @@ pub fn prepare_server(
         }
     };
 
-    // Ensure cache root exists.
+    // Reject unusable origin configuration before cache recovery/eviction can
+    // mutate disk state or a maintenance task needs completion ownership.
+    let origin = OriginClient::from_url(&config.origin_url)?;
+
     std::fs::create_dir_all(&config.cache_root).map_err(|e| {
         CacheServiceError::InternalError(
             format!(
@@ -196,9 +202,6 @@ pub fn prepare_server(
     } else {
         (None, Arc::new(tokio::sync::Notify::new()))
     };
-
-    // Step 7: Create origin client from configured URL.
-    let origin = OriginClient::from_url(&config.origin_url)?;
 
     Ok(PreparedServer {
         state: Arc::new(AppState {
@@ -476,6 +479,53 @@ async fn shutdown_signal(drain_timeout: std::time::Duration) {
 #[expect(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_origin_leaves_no_cache_state_or_background_tasks() {
+        use crate::config::{AuthConfig, DedupScope, MutablePathMode};
+
+        for start_evictor in [true, false] {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let cache_root = temp.path().join("cache");
+            let config = CacheServerConfig {
+                listen_addr: "127.0.0.1:0".parse().unwrap(),
+                tls: None,
+                auth: AuthConfig::Psk { key_hash: [0; 32] },
+                origin_url: "not a url".into(),
+                cache_root: cache_root.clone(),
+                max_cache_bytes: 1024,
+                dedup_scope: DedupScope::All,
+                drain_timeout: Duration::from_secs(1),
+                mutable_path_mode: MutablePathMode::Strict,
+                high_water_ratio: 0.95,
+                low_water_ratio: 0.90,
+                policy_path: None,
+            };
+            runtime.block_on(async {
+                let before = runtime.metrics().num_alive_tasks();
+                let result = prepare_server(
+                    config,
+                    ServerStartupOptions {
+                        metrics: CacheMetrics::stub(),
+                        start_evictor,
+                        run_startup_eviction: start_evictor,
+                    },
+                );
+                assert!(matches!(result, Err(CacheServiceError::ConfigError(_))));
+                // This dedicated runtime contains only preparation's tasks.
+                // Rejection must precede both disk mutation and task ownership.
+                assert_eq!(
+                    (runtime.metrics().num_alive_tasks(), cache_root.exists()),
+                    (before, false),
+                    "failed preparation retained state (evictor enabled: {start_evictor})"
+                );
+            });
+        }
+    }
 
     #[test]
     fn tls_client_identity_uses_leaf_sha256_fingerprint() {

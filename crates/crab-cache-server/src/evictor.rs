@@ -15,8 +15,9 @@ use crate::cache_store::CacheStore;
 
 /// Handle for the background evictor task.
 ///
-/// Dropping the handle does not cancel the task — call [`EvictorHandle::shutdown`]
-/// or drop the `Arc<CacheStore>` to stop it.
+/// The task retains its own cache-store reference. Await
+/// [`EvictorHandle::shutdown`] before releasing service ownership; dropping this
+/// handle or external cache-store references does not stop the task.
 pub struct EvictorHandle {
     /// Notify the evictor to run immediately (e.g. after a large write).
     notify: Arc<Notify>,
