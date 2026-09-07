@@ -441,7 +441,7 @@ async fn batch_get_reconstruction_empty_is_empty() {
 }
 
 #[tokio::test]
-async fn batch_get_reconstruction_returns_hits_and_omits_misses() {
+async fn file_index_resolution_agrees_between_term_and_reconstruction_batches() {
     let (client, _tmp) = test_client();
     let file_hash = hash_from_seed(42);
     let missing_hash = hash_from_seed(43);
@@ -481,6 +481,53 @@ async fn batch_get_reconstruction_returns_hits_and_omits_misses() {
         .await
         .expect("upload shard");
     seed_file_index(&client, &[(file_hash, shard_hash)]).await;
+
+    let resolver = crate::TermResolver::new(
+        client.store.clone(),
+        client.router.clone(),
+        Arc::clone(client.store.local_cache()),
+        2,
+    )
+    .unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let resolved = resolver
+        .resolve_batch(&[(file_hash, None), (missing_hash, None)], &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved,
+        [(
+            file_hash,
+            vec![FileDataSequenceEntry::new(xorb_hash, 2048, 2, 6)]
+        )]
+        .into_iter()
+        .collect()
+    );
+    for strict in [false, true] {
+        let files = [(file_hash, None, 2048)];
+        let source = crab_diff::types::ChunkSequenceSourceKind::Committed;
+        let sequences = if strict {
+            resolver
+                .resolve_sequences_batch_strict(&files, source, &cancel)
+                .await
+        } else {
+            resolver
+                .resolve_sequences_batch(&files, source, &cancel)
+                .await
+        }
+        .unwrap();
+        let chunks = sequences[&file_hash]
+            .spans
+            .iter()
+            .map(|span| (span.chunk_hash, span.offset, span.len))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            chunks,
+            (0..4)
+                .map(|index| (hash_from_seed(102 + index), index * 512, 512))
+                .collect::<Vec<_>>()
+        );
+    }
 
     let response = client
         .batch_get_reconstruction(&[file_hash, missing_hash])

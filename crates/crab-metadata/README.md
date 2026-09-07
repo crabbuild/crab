@@ -65,6 +65,18 @@ Always await close after a write error too. These operations do not provide an
 atomic transaction across the two databases, and dropping their futures does
 not provide asynchronous cleanup.
 
+### Shared lookup lifecycle
+
+`SharedFileIndexLookup::new_for_storage` opens one lazy session for concurrent
+lookups. Initialization is shared; a slow first canonical shard scan does not
+hold an exclusive session lock and block unrelated acceleration-index hits.
+Canonical scans still serialize through their session cache.
+
+Await `close()` after the operation's readers finish. Close rejects new lookups
+and waits for active lookups before closing SlateDB, even if handle clones
+remain. Await close to completion; dropping the owner or close future cannot
+perform asynchronous cleanup. Scoped stores retain write-free canonical reads.
+
 ### Snapshot-bound lookup
 
 Integrity callers use `FileIndexLookupSession::from_snapshot` with an already

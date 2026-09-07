@@ -51,7 +51,7 @@ not claims that the named code is defective.
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
 | crab-cache | Broader cache-key and invalidation qualification remain | Diagnostics, exact cached-file ranges, repair/accounting, and README navigation verified |
 | crab-cache-store | Broader source-chain integrity and deployed-service qualification remain | Warm ranges, conditional/versioned bypass, metadata authority, and corruption provenance verified |
-| crab-read | Dropped-batch session cleanup and aggregate memory/source-chain qualification remain | Bounded workers, shared admission, typed join sources, and awaited batch cleanup verified |
+| crab-read | Dropped-batch session cleanup and aggregate memory/source-chain qualification remain | Bounded workers, canonical lookup ownership, typed join sources, and awaited batch cleanup verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Provider ranges, aggregate resource limits, and broader consumer qualification remain | Lifecycle documentation, README navigation, and coalescing admission boundaries verified |
 | crab-vfs | Native backend/dependency child tasks and abandoned-future cleanup remain | Hydration and refresh ownership regressions, feature checks, lint/docs, and CLI build pass |
@@ -3710,3 +3710,50 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   CLI binary build pass. The CLI build retains the macOS unwind-size warning.
   Added production code buys bounded task retention and deterministic errors
   without waiting for every worker in a fixed wave to complete.
+
+
+### Share lazy lookup ownership without first-read serialization
+
+- Reproduced a metadata concurrency defect with a real SlateDB index and a
+  paused canonical shard read. The first lookup held the session write lock
+  after initialization; a generation-pinned index hit timed out behind that
+  unrelated miss. Current main has the same point/batch locking structure.
+- SharedFileIndexLookup now initializes a OnceCell under shared read access.
+  Both point and batch methods acquire the same initialized read guard; close
+  rejects new nonempty lookups and takes exclusive access after active readers
+  finish. Canonical scans still serialize through their session cache.
+- Dependency evidence: Tokio 1.52.1 OnceCell shares one initializer and permits
+  retry after failed/cancelled initialization. RwLockReadGuard::try_map retains
+  its read permit. Merely downgrading a write guard would leave queued writers
+  ahead of subsequent readers; shared initialization avoids that extra queue.
+  SlateDB 0.15 DbReader::close awaits its reader task shutdown and cache close.
+- TermResolver uses that metadata owner for both batch implementations, removing
+  its local Arc<OnceCell> aliases, duplicate opener, and Arc::try_unwrap close
+  branch. Origin, repository prefix, scoped-store acceleration choice, warned
+  close errors, worker draining, and cancellation precedence are retained.
+- Evidence map: CLI diff/diff-driver -> TermResolver -> shared metadata reader;
+  hydration and Git prefetch -> StoreClient -> the same reader. Direct one-shot
+  sessions retain their explicit close owner. No public signature, dependency,
+  storage format, or configuration changes. Production source shrinks overall.
+- Regression covers both first point and first batch lookup, unrelated index
+  progress, close waiting for a paused read, and clone rejection after close.
+  The existing reconstruction fixture now also checks all three term-resolution
+  APIs against actual stored index/shard data, avoiding another seed fixture.
+- Focused proof: 23 metadata lookup tests, seven term-resolution tests, and one
+  cross-path integration test pass. Minimal metadata check and strict combined
+  all-target Clippy/rustdoc and the CLI binary build pass. The build retains
+  the recorded macOS debug unwind-size linker warning.
+- Dropped batch/close futures still cannot perform asynchronous cleanup. This
+  refactor does not qualify abandonment, aggregate memory limits, or all native
+  and live-service paths; those remain in the all-crate work list.
+
+### Native run 34160586825: retained macOS evidence
+
+- Required-artifact verifier passes against exact source b6755c4b5039deee4dbcedee9c2288019c732b37.
+  The run's Linux native and Linux RustFS/Xet jobs also report success; Windows
+  remains in progress at this checkpoint. No Windows or latest-head pass claim.
+- The macOS uncached-read fixture returns 8 MiB in 32 reads and records 32 MiB
+  of NFS responses (4.0x amplification), with 31 lease hits, one miss, and no
+  eviction, stale retry, or temporary overflow. This supports lease reuse for
+  that fixture, not efficient-read or historical cached-throughput parity.
+- Run: https://github.com/crabbuild/crab/actions/runs/34160586825

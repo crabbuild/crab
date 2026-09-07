@@ -17,7 +17,7 @@ use crab_cache::{CacheKey, LocalCache};
 use crab_cache_store::CachingStore;
 use crab_diff::chunk_sequence::{ChunkOrigin, ChunkSequence, ChunkSpan};
 use crab_diff::types::ChunkSequenceSourceKind;
-use crab_metadata::file_index_lookup::FileIndexLookupSession;
+use crab_metadata::file_index_lookup::SharedFileIndexLookup;
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::ShardReader;
 use crab_xet::shard::{FileDataSequenceEntry, XorbChunkSequenceEntry};
@@ -26,8 +26,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, ReadStoreLayout as StoreLayout};
 
-type FileIndexLookupCell = tokio::sync::OnceCell<FileIndexLookupSession>;
-type SharedFileIndexLookup = Arc<FileIndexLookupCell>;
 type Result<T> = crate::Result<T>;
 
 struct SequenceResolveContext<'a> {
@@ -36,7 +34,7 @@ struct SequenceResolveContext<'a> {
     cache: &'a LocalCache,
     shard_readers: &'a Mutex<HashMap<MerkleHash, Arc<ShardReader>>>,
     xorb_chunks: &'a Mutex<HashMap<MerkleHash, Arc<Vec<XorbChunkSequenceEntry>>>>,
-    file_index_lookup: &'a FileIndexLookupCell,
+    file_index_lookup: &'a SharedFileIndexLookup,
     source: ChunkSequenceSourceKind,
     strict: bool,
 }
@@ -116,7 +114,8 @@ impl TermResolver {
             Arc::new(Mutex::new(HashMap::new()));
         let results: Arc<Mutex<HashMap<MerkleHash, Vec<FileDataSequenceEntry>>>> =
             Arc::new(Mutex::new(HashMap::with_capacity(file_hashes.len())));
-        let file_index_lookup: SharedFileIndexLookup = Arc::new(FileIndexLookupCell::new());
+        let file_index_lookup =
+            SharedFileIndexLookup::new_for_storage(self.store.origin(), self.router.repo_prefix());
 
         let mut handles = FuturesUnordered::new();
         let mut outcome = ResolutionOutcome {
@@ -141,7 +140,7 @@ impl TermResolver {
             let store = self.store.clone();
             let router = self.router.clone();
             let cache = Arc::clone(&self.cache);
-            let file_index_lookup = Arc::clone(&file_index_lookup);
+            let file_index_lookup = file_index_lookup.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = tokio::select! {
@@ -250,7 +249,8 @@ impl TermResolver {
             Arc::new(Mutex::new(HashMap::new()));
         let results: Arc<Mutex<HashMap<MerkleHash, ChunkSequence>>> =
             Arc::new(Mutex::new(HashMap::with_capacity(files.len())));
-        let file_index_lookup: SharedFileIndexLookup = Arc::new(FileIndexLookupCell::new());
+        let file_index_lookup =
+            SharedFileIndexLookup::new_for_storage(self.store.origin(), self.router.repo_prefix());
 
         let mut handles = FuturesUnordered::new();
         let mut outcome = ResolutionOutcome {
@@ -276,7 +276,7 @@ impl TermResolver {
             let store = self.store.clone();
             let router = self.router.clone();
             let cache = Arc::clone(&self.cache);
-            let file_index_lookup = Arc::clone(&file_index_lookup);
+            let file_index_lookup = file_index_lookup.clone();
 
             let handle = tokio::spawn(async move {
                 let _permit = tokio::select! {
@@ -396,7 +396,7 @@ async fn resolve_single(
     router: &StoreLayout,
     cache: &LocalCache,
     shard_readers: &Mutex<HashMap<MerkleHash, Arc<ShardReader>>>,
-    file_index_lookup: &FileIndexLookupCell,
+    file_index_lookup: &SharedFileIndexLookup,
     file_hash: MerkleHash,
     shard_hint: Option<MerkleHash>,
 ) -> Result<Vec<FileDataSequenceEntry>> {
@@ -416,7 +416,7 @@ async fn resolve_single(
     }
 
     // Resolve shard hash via file-index.
-    let shard_hash = resolve_file_index(file_index_lookup, store, router, &file_hash).await?;
+    let shard_hash = resolve_file_index(file_index_lookup, &file_hash).await?;
 
     // Download shard and extract file info.
     try_shard(cache, store, router, shard_readers, &shard_hash, &file_hash).await
@@ -445,13 +445,7 @@ async fn resolve_sequence_single(
         }
     }
 
-    let shard_hash = resolve_file_index(
-        context.file_index_lookup,
-        context.store,
-        context.router,
-        &file_hash,
-    )
-    .await?;
+    let shard_hash = resolve_file_index(context.file_index_lookup, &file_hash).await?;
     try_sequence_shard(context, &shard_hash, &file_hash, file_size).await
 }
 
@@ -467,20 +461,10 @@ fn sequence_hint_error_allows_fallback(error: &ReadError) -> bool {
 ///
 /// Lazily opens one read-only file-index session for the whole diff batch.
 async fn resolve_file_index(
-    file_index_lookup: &FileIndexLookupCell,
-    store: &CachingStore,
-    router: &StoreLayout,
+    file_index_lookup: &SharedFileIndexLookup,
     file_hash: &MerkleHash,
 ) -> Result<MerkleHash> {
-    let session = file_index_lookup
-        .get_or_try_init(|| {
-            let origin = store.origin().clone();
-            let repo_prefix = router.repo_prefix().to_owned();
-            async move { FileIndexLookupSession::open_for_storage(&origin, &repo_prefix).await }
-        })
-        .await?;
-
-    match session.lookup(file_hash).await? {
+    match file_index_lookup.lookup(file_hash).await? {
         Some(shard_hash) => Ok(shard_hash),
         None => Err(ReadError::NotFound {
             path: format!("file_index:{}", file_hash.hex()),
@@ -489,16 +473,7 @@ async fn resolve_file_index(
 }
 
 async fn close_file_index_lookup(file_index_lookup: SharedFileIndexLookup) {
-    let Ok(file_index_lookup) = Arc::try_unwrap(file_index_lookup) else {
-        warn!("diff file-index lookup session still referenced after task join");
-        return;
-    };
-
-    let Some(session) = file_index_lookup.into_inner() else {
-        return;
-    };
-
-    if let Err(e) = session.close().await {
+    if let Err(e) = file_index_lookup.close().await {
         warn!(err = %e, "diff file-index lookup session close failed");
     }
 }
