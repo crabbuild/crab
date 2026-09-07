@@ -3054,10 +3054,9 @@ impl Index {
         for batch_id in batches {
             unleased_files.extend(self.rollback_batch(&batch_id)?);
         }
-        for file_hash in unleased_files {
-            let (_, payloads) = self.remove_file(&file_hash)?;
-            removed.extend(payloads);
-        }
+        let unleased_files = unleased_files.into_iter().collect::<Vec<_>>();
+        let (_, payloads) = self.remove_files(&unleased_files)?;
+        removed.extend(payloads);
         removed.sort_unstable();
         removed.dedup();
         Ok(removed)
@@ -5925,102 +5924,56 @@ impl Index {
         })
     }
 
-    /// Remove a file and all its chunk/pending rows from the index.
+    /// Atomically remove files and their chunk rows, then reclaim unowned payload inventory.
     ///
-    /// Returns the segment IDs that had chunks removed (caller should
-    /// decrement `live_chunk_count` on those segments). Returns an empty
-    /// vec if the file was not found.
+    /// Returns per-file retirement stats and prepared bodies eligible for unlinking.
+    /// Segment live counts are decremented only for committed chunk rows.
     ///
     /// # Errors
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
-    pub fn remove_file(&self, file_hash: &[u8; 32]) -> Result<(Vec<u64>, Vec<[u8; 32]>)> {
-        let fh: &[u8] = file_hash;
+    pub fn remove_files(
+        &self,
+        file_hashes: &[[u8; 32]],
+    ) -> Result<(Vec<crate::RetireStats>, Vec<[u8; 32]>)> {
+        if file_hashes.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        // Retire one ownership set in one transaction. Per-file commits
+        // repeatedly checkpoint the same recipe indexes and expose partial
+        // retirement if a later file fails.
         let tx = self
             .conn
             .unchecked_transaction()
-            .map_err(|e| StagingError::Internal(format!("failed to begin remove_file tx: {e}")))?;
-
-        // Collect affected segment IDs from committed chunks.
-        let affected: Vec<u64> = {
-            let mut stmt = tx
-                .prepare_cached("SELECT DISTINCT segment_id FROM chunks WHERE file_hash = ?1")
-                .map_err(|e| {
-                    StagingError::Internal(format!("prepare affected segments query: {e}"))
-                })?;
-            stmt.query_map(params![fh], |row| row.get(0))
-                .map_err(|e| StagingError::Internal(format!("query affected segments: {e}")))?
-                .collect::<std::result::Result<Vec<u64>, _>>()
-                .map_err(|e| StagingError::Internal(format!("collect affected segments: {e}")))?
-        };
-
-        // Count committed chunks per segment for live_chunk_count adjustment.
-        let segment_counts: Vec<(u64, u64)>;
-        {
-            let mut stmt = tx
-                .prepare_cached(
-                    "SELECT segment_id, COUNT(*) FROM chunks WHERE file_hash = ?1 GROUP BY segment_id",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("prepare chunk count query: {e}"))
-                })?;
-            segment_counts = stmt
-                .query_map(params![fh], |row| {
-                    Ok((row.get(0)?, row.get::<_, i64>(1)? as u64))
-                })
-                .map_err(|e| StagingError::Internal(format!("query chunk counts: {e}")))?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| StagingError::Internal(format!("collect chunk counts: {e}")))?;
-        }
-
-        // Delete pending chunks for this file.
-        tx.execute(
-            "DELETE FROM pending_chunks WHERE file_hash = ?1",
-            params![fh],
-        )
-        .map_err(|e| {
-            StagingError::Internal(format!("failed to delete pending chunks for file: {e}"))
-        })?;
-
-        // Delete committed chunks for this file.
-        tx.execute("DELETE FROM chunks WHERE file_hash = ?1", params![fh])
+            .map_err(|e| StagingError::Internal(format!("failed to begin file removal: {e}")))?;
+        let mut retired = Vec::with_capacity(file_hashes.len());
+        for file_hash in file_hashes {
+            let fh: &[u8] = file_hash;
+            retired.push(Self::delete_chunks_for_file_in(&tx, file_hash)?);
+            tx.execute(
+                "DELETE FROM file_recipes
+                 WHERE file_hash = ?1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM path_leases WHERE path_leases.file_hash = ?1
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM push_snapshot_recipes
+                       WHERE push_snapshot_recipes.recipe_hash = file_recipes.recipe_hash
+                   )",
+                params![fh],
+            )
             .map_err(|e| {
-                StagingError::Internal(format!("failed to delete chunks for file: {e}"))
+                StagingError::Internal(format!("failed to delete unleased recipes: {e}"))
             })?;
+            // Delete the file row.
+            tx.execute("DELETE FROM files WHERE file_hash = ?1", params![fh])
+                .map_err(|e| StagingError::Internal(format!("failed to delete file: {e}")))?;
 
-        // Decrement live_chunk_count on affected segments.
-        {
-            let mut stmt = tx
-                .prepare_cached(
-                    "UPDATE segments SET live_chunk_count = MAX(0, live_chunk_count - ?1) WHERE segment_id = ?2",
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!("prepare live_chunk_count update: {e}"))
-                })?;
-            #[expect(clippy::cast_possible_wrap, reason = "count fits in i64")]
-            for (seg_id, count) in &segment_counts {
-                stmt.execute(params![*count as i64, seg_id]).map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to decrement live_chunk_count for segment {seg_id}: {e}"
-                    ))
-                })?;
-            }
+            // Clean up the file_paths side table.
+            tx.execute("DELETE FROM file_paths WHERE file_hash = ?1", params![fh])
+                .map_err(|e| StagingError::Internal(format!("failed to delete file_path: {e}")))?;
         }
-
-        tx.execute(
-            "DELETE FROM file_recipes
-             WHERE file_hash = ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM path_leases WHERE path_leases.file_hash = ?1
-               )
-               AND NOT EXISTS (
-                   SELECT 1
-                   FROM push_snapshot_recipes
-                   WHERE push_snapshot_recipes.recipe_hash = file_recipes.recipe_hash
-               )",
-            params![fh],
-        )
-        .map_err(|e| StagingError::Internal(format!("failed to delete unleased recipes: {e}")))?;
 
         tx.execute(
             "DELETE FROM chunk_payloads
@@ -6096,25 +6049,16 @@ impl Index {
             StagingError::Internal(format!("failed to delete unleased prepared payloads: {e}"))
         })?;
 
-        // Delete the file row.
-        tx.execute("DELETE FROM files WHERE file_hash = ?1", params![fh])
-            .map_err(|e| StagingError::Internal(format!("failed to delete file: {e}")))?;
-
-        // Clean up the file_paths side table.
-        tx.execute("DELETE FROM file_paths WHERE file_hash = ?1", params![fh])
-            .map_err(|e| StagingError::Internal(format!("failed to delete file_path: {e}")))?;
-
         tx.commit()
-            .map_err(|e| StagingError::Internal(format!("failed to commit remove_file tx: {e}")))?;
-
-        Ok((affected, reclaimable_payloads))
+            .map_err(|e| StagingError::Internal(format!("failed to commit file removal: {e}")))?;
+        Ok((retired, reclaimable_payloads))
     }
 
     /// Delete every `chunks` and `pending_chunks` row for `file_hash`.
     ///
     /// Executes as a single SQLite transaction so a partial failure
     /// cannot leave `live_chunk_count` out of sync with the surviving
-    /// `chunks` rows. Unlike [`Self::remove_file`], this helper leaves
+    /// `chunks` rows. Unlike [`Self::remove_files`], this helper leaves
     /// the `files` row untouched. Pending rows are removed so a failed
     /// or retried add cannot collide on `(file_hash, chunk_index)`, but
     /// only committed `chunks` rows decrement `live_chunk_count`.
@@ -6129,11 +6073,21 @@ impl Index {
     ///
     /// Returns [`StagingError::Internal`] on SQLite failure.
     pub fn delete_chunks_for_file(&self, file_hash: &[u8; 32]) -> Result<(u64, Vec<u64>)> {
-        let fh: &[u8] = file_hash;
         let tx = self.conn.unchecked_transaction().map_err(|e| {
-            StagingError::Internal(format!("failed to begin delete_chunks_for_file tx: {e}"))
+            StagingError::Internal(format!("failed to begin chunk retirement: {e}"))
         })?;
+        let stats = Self::delete_chunks_for_file_in(&tx, file_hash)?;
+        tx.commit().map_err(|e| {
+            StagingError::Internal(format!("failed to commit chunk retirement: {e}"))
+        })?;
+        Ok((stats.rows_deleted, stats.segments_touched))
+    }
 
+    fn delete_chunks_for_file_in(
+        tx: &rusqlite::Transaction<'_>,
+        file_hash: &[u8; 32],
+    ) -> Result<crate::RetireStats> {
+        let fh: &[u8] = file_hash;
         // Capture touched segments from both tables for tracing and
         // cleanup decisions, but decrement live counts only for rows
         // already promoted into `chunks`. Pending rows never increment
@@ -6220,11 +6174,10 @@ impl Index {
             }
         }
 
-        tx.commit().map_err(|e| {
-            StagingError::Internal(format!("failed to commit delete_chunks_for_file tx: {e}"))
-        })?;
-
-        Ok((rows_deleted, touched_segments))
+        Ok(crate::RetireStats {
+            rows_deleted,
+            segments_touched: touched_segments,
+        })
     }
 
     /// List all files in the staging index with their chunk counts and sizes.
@@ -9916,6 +9869,69 @@ mod tests {
     }
 
     #[test]
+    fn removing_multiple_files_preserves_shared_prepared_payload() {
+        let idx = open_in_memory();
+        let first = insert_test_recipe_lease(&idx, "first", b"first.bin", 0x61, 0x51);
+        let second = insert_test_recipe_lease(&idx, "second", b"second.bin", 0x62, 0x52);
+        let survivor = insert_test_recipe_lease(&idx, "survivor", b"survivor.bin", 0x63, 0x53);
+        let xorb = test_hash(0x64);
+        idx.conn.execute(
+            "INSERT INTO prepared_payloads (xorb_hash, payload_hash, bytes) VALUES (?1, ?1, 24)",
+            params![xorb.as_slice()],
+        ).unwrap();
+        for recipe in [&first, &second, &survivor] {
+            idx.conn
+                .execute(
+                    "INSERT INTO prepared_leases (recipe_hash, xorb_hash) VALUES (?1, ?2)",
+                    params![recipe.hash().as_slice(), xorb.as_slice()],
+                )
+                .unwrap();
+        }
+        idx.rollback_batch("first").unwrap();
+        idx.rollback_batch("second").unwrap();
+        let (retired, payloads) = idx
+            .remove_files(&[first.file_hash().into(), second.file_hash().into()])
+            .unwrap();
+        let surviving_rows: (i64, i64, i64) = idx
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM files),
+                    (SELECT COUNT(*) FROM prepared_payloads),
+                    (SELECT COUNT(*) FROM prepared_leases)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (
+                retired.iter().map(|stats| stats.rows_deleted).sum::<u64>(),
+                payloads,
+                surviving_rows
+            ),
+            (2, Vec::new(), (1, 1, 1)),
+        );
+    }
+
+    #[test]
+    fn remove_files_rolls_back_the_whole_batch_on_failure() {
+        let idx = open_in_memory();
+        let first = test_hash(0x71);
+        let second = test_hash(0x72);
+        insert_test_file(&idx, &first, 8);
+        insert_test_file(&idx, &second, 8);
+        idx.conn.execute_batch(
+            "CREATE TRIGGER fail_second_removal BEFORE DELETE ON files
+             WHEN OLD.file_hash = X'7272727272727272727272727272727272727272727272727272727272727272'
+             BEGIN SELECT RAISE(ABORT, 'injected retirement failure'); END;"
+        ).unwrap();
+        assert!(idx.remove_files(&[first, second]).is_err());
+        assert!(
+            idx.file_exists(&first).unwrap(),
+            "failed retirement must retain every file"
+        );
+    }
+
+    #[test]
     fn retiring_last_recipe_reclaims_payload_inventory() {
         let idx = open_in_memory();
         let segment_id = idx.allocate_segment_id().expect("allocate segment");
@@ -9970,7 +9986,7 @@ mod tests {
                 .expect("retire exact snapshot"),
             vec![file_hash]
         );
-        idx.remove_file(&file_hash).expect("remove file");
+        idx.remove_files(&[file_hash]).expect("remove file");
         idx.remove_push_snapshot("push-retire")
             .expect("remove snapshot");
 

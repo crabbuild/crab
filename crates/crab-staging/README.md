@@ -41,6 +41,13 @@ fsyncs the segment and records the durable boundary. Reads verify both the
 record checksum and the requested BLAKE3 hash. Recipes, push plans, streaming
 helpers, compaction, verification, and retirement build on these primitives.
 
+Ownership retirement removes each unowned file batch in one SQLite transaction,
+including chunk rows, segment live counts and unreferenced payload inventory.
+Prepared bodies are unlinked only after that transaction commits. A database
+failure rolls back the batch; an unlink failure leaves an orphan for recovery,
+not a missing live payload. This shares one cleanup path across publication,
+rollback and push, avoiding repeated per-file commits and inventory scans.
+
 ## Usage
 
 The smallest complete staging cycle is:

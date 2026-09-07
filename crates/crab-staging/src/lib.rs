@@ -953,14 +953,16 @@ fn remove_prepared_payload_files(root: &Path, hashes: &[[u8; 32]]) -> Result<()>
     Ok(())
 }
 
-fn remove_indexed_file(
+fn remove_indexed_files(
     root: &Path,
     index: &Mutex<Index>,
-    file_hash: &[u8; 32],
-) -> Result<Vec<u64>> {
-    let (segments, payloads) = lock_index(index)?.remove_file(file_hash)?;
+    file_hashes: &[[u8; 32]],
+) -> Result<Vec<RetireStats>> {
+    let (retired, payloads) = lock_index(index)?.remove_files(file_hashes)?;
+    // SQL ownership commits before filesystem reclamation. A failed unlink
+    // leaves only an orphan for the existing sweep, never a missing live body.
     remove_prepared_payload_files(root, &payloads)?;
-    Ok(segments)
+    Ok(retired)
 }
 
 fn sweep_abandoned_prepared_payload_files(root: &Path, index: &Index) -> Result<()> {
@@ -2615,11 +2617,7 @@ impl StagingArea {
     /// Mark a batch as published after its Git index replacement commits.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
         let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            self.retire_file(&file_hash)?;
-            self.unregister_file(&file_hash)?;
-        }
+        remove_indexed_files(&self.root, &self.index, &unleased)?;
         Ok(())
     }
 
@@ -2635,11 +2633,7 @@ impl StagingArea {
         else {
             return Ok(false);
         };
-        for file_hash in unowned {
-            let file_hash = MerkleHash::from(file_hash);
-            self.retire_file(&file_hash)?;
-            self.unregister_file(&file_hash)?;
-        }
+        remove_indexed_files(&self.root, &self.index, &unowned)?;
         Ok(true)
     }
 
@@ -2667,11 +2661,7 @@ impl StagingArea {
     /// Atomically publish every batch recorded by an add publication intent.
     pub fn publish_publication_intent(&self, intent_id: &PublicationIntentId) -> Result<()> {
         let unleased = lock_index(&self.index)?.publish_publication_intent(intent_id.as_str())?;
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            self.retire_file(&file_hash)?;
-            self.unregister_file(&file_hash)?;
-        }
+        remove_indexed_files(&self.root, &self.index, &unleased)?;
         Ok(())
     }
 
@@ -2686,13 +2676,7 @@ impl StagingArea {
         intent_id: &PublicationIntentId,
     ) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.rollback_publication_intent(intent_id.as_str())?;
-        let mut retired = Vec::with_capacity(unleased.len());
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            retired.push(self.retire_file(&file_hash)?);
-            self.unregister_file(&file_hash)?;
-        }
-        Ok(retired)
+        remove_indexed_files(&self.root, &self.index, &unleased)
     }
 
     /// Publish one complete recipe outside the multi-path `crab add` index transaction.
@@ -2769,12 +2753,7 @@ impl StagingArea {
     /// Remove one batch's leases and reclaim only recipes with no other owner.
     pub fn rollback_batch(&self, batch_id: &StagingBatchId) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.rollback_batch(batch_id.as_str())?;
-        let mut retired = Vec::with_capacity(unleased.len());
-        for file_hash in unleased {
-            retired.push(self.retire_file(&MerkleHash::from(file_hash))?);
-            self.unregister_file(&MerkleHash::from(file_hash))?;
-        }
-        Ok(retired)
+        remove_indexed_files(&self.root, &self.index, &unleased)
     }
 
     /// Reclaim a recipe only when no path head/lease or push snapshot owns it.
@@ -3112,10 +3091,13 @@ impl StagingArea {
             if !idx.file_exists(&fh)? {
                 return Ok(false);
             }
-            let (segments, payloads) = idx.remove_file(&fh)?;
+            let (retired, payloads) = idx.remove_files(&[fh])?;
             drop(idx);
             remove_prepared_payload_files(&self.root, &payloads)?;
-            segments
+            retired
+                .into_iter()
+                .flat_map(|stats| stats.segments_touched)
+                .collect::<Vec<_>>()
         };
         debug!(
             file_hash = %file_hash.hex(),
@@ -3141,12 +3123,7 @@ impl StagingArea {
 
     fn discard_open_push_snapshot(&self, push_id: &str) -> Result<()> {
         let unleased = lock_index(&self.index)?.discard_open_push_snapshot(push_id)?;
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            self.retire_file(&file_hash)?;
-            let bytes: [u8; 32] = file_hash.into();
-            remove_indexed_file(&self.root, &self.index, &bytes)?;
-        }
+        remove_indexed_files(&self.root, &self.index, &unleased)?;
         Ok(())
     }
 
@@ -3246,19 +3223,11 @@ impl StagingArea {
                 continue;
             }
             let unleased = lock_index(&self.index)?.retire_push_snapshot(&snapshot_id)?;
-            for file_hash in unleased {
-                let file_hash = MerkleHash::from(file_hash);
-                self.retire_file(&file_hash)?;
-                self.unregister_file(&file_hash)?;
-            }
+            remove_indexed_files(&self.root, &self.index, &unleased)?;
             lock_index(&self.index)?.remove_push_snapshot(&snapshot_id)?;
         }
         let unowned = lock_index(&self.index)?.reclaim_superseded_ownership()?;
-        for file_hash in unowned {
-            let file_hash = MerkleHash::from(file_hash);
-            self.retire_file(&file_hash)?;
-            self.unregister_file(&file_hash)?;
-        }
+        remove_indexed_files(&self.root, &self.index, &unowned)?;
 
         // 2. Sweep orphan segments.
         let (segments_removed, bytes_reclaimed, chunks_reclaimed) = self.sweep_orphans()?;
@@ -4082,12 +4051,7 @@ impl StagingAreaReadOnly {
     /// Mark a staged batch published after the Git index commit.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
         let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            self.retire_file_now(&file_hash)?;
-            let file_hash_bytes: [u8; 32] = file_hash.into();
-            remove_indexed_file(&self.root, &self.index, &file_hash_bytes)?;
-        }
+        remove_indexed_files(&self.root, &self.index, &unleased)?;
         Ok(())
     }
 
@@ -4120,12 +4084,7 @@ impl StagingAreaReadOnly {
     /// Atomically publish every batch recorded by an add publication intent.
     pub fn publish_publication_intent(&self, intent_id: &PublicationIntentId) -> Result<()> {
         let unleased = lock_index(&self.index)?.publish_publication_intent(intent_id.as_str())?;
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            self.retire_file_now(&file_hash)?;
-            let file_hash_bytes: [u8; 32] = file_hash.into();
-            remove_indexed_file(&self.root, &self.index, &file_hash_bytes)?;
-        }
+        remove_indexed_files(&self.root, &self.index, &unleased)?;
         Ok(())
     }
 
@@ -4135,28 +4094,13 @@ impl StagingAreaReadOnly {
         intent_id: &PublicationIntentId,
     ) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.rollback_publication_intent(intent_id.as_str())?;
-        let mut retired = Vec::with_capacity(unleased.len());
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            retired.push(self.retire_file(&file_hash).await?);
-            let file_hash_bytes: [u8; 32] = file_hash.into();
-            remove_indexed_file(&self.root, &self.index, &file_hash_bytes)?;
-        }
-        Ok(retired)
+        remove_indexed_files(&self.root, &self.index, &unleased)
     }
 
     /// Roll back one batch while preserving recipes leased by another path.
     pub async fn rollback_batch(&self, batch_id: &StagingBatchId) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.rollback_batch(batch_id.as_str())?;
-        let mut retired = Vec::with_capacity(unleased.len());
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            let stats = self.retire_file(&file_hash).await?;
-            let file_hash_bytes: [u8; 32] = file_hash.into();
-            remove_indexed_file(&self.root, &self.index, &file_hash_bytes)?;
-            retired.push(stats);
-        }
-        Ok(retired)
+        remove_indexed_files(&self.root, &self.index, &unleased)
     }
 
     /// Pin the exact published recipes read by one push.
@@ -4176,15 +4120,7 @@ impl StagingAreaReadOnly {
     /// Retire the exact recipe ownership pinned by one committed push snapshot.
     pub async fn retire_push_snapshot(&self, push_id: &str) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.retire_push_snapshot(push_id)?;
-        let mut retired = Vec::with_capacity(unleased.len());
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            let stats = self.retire_file(&file_hash).await?;
-            let file_hash_bytes: [u8; 32] = file_hash.into();
-            remove_indexed_file(&self.root, &self.index, &file_hash_bytes)?;
-            retired.push(stats);
-        }
-        Ok(retired)
+        remove_indexed_files(&self.root, &self.index, &unleased)
     }
 
     /// Remove a push recipe snapshot on success or failure.
@@ -4203,15 +4139,7 @@ impl StagingAreaReadOnly {
 
     fn discard_open_push_snapshot_now(&self, push_id: &str) -> Result<Vec<RetireStats>> {
         let unleased = lock_index(&self.index)?.discard_open_push_snapshot(push_id)?;
-        let mut retired = Vec::with_capacity(unleased.len());
-        for file_hash in unleased {
-            let file_hash = MerkleHash::from(file_hash);
-            let stats = self.retire_file_now(&file_hash)?;
-            let bytes: [u8; 32] = file_hash.into();
-            remove_indexed_file(&self.root, &self.index, &bytes)?;
-            retired.push(stats);
-        }
-        Ok(retired)
+        remove_indexed_files(&self.root, &self.index, &unleased)
     }
 
     /// Create a push-inflight marker file from a shared push handle.

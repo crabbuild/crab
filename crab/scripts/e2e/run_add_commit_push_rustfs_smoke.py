@@ -548,7 +548,7 @@ class AddCommitPushSmoke:
         self.run_root.mkdir(parents=True, exist_ok=True)
         self.logs.mkdir(parents=True, exist_ok=True)
         self.artifacts.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.write_report()
 
         for binary in ("git", "aws", self.crab_bin):
