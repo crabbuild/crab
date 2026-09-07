@@ -1361,3 +1361,44 @@ runtime qualification performed in this investigation. The previously recorded
 unchecked library-reader issue remains open. CI observed for c9bb054a23d: three
 successes, eighteen in progress, one queued, four skipped; no reported failures
 at this observation, not a completed CI qualification.
+
+### Shared experiment identity validation
+
+Move the CLI's ID/hash checks into `ExperimentMetadata::verify_identity` and
+call it from the exported library reader as well. The library now rejects a
+metadata object whose ID differs from the requested experiment or whose
+canonical hash differs from the resolved ref. Add `WorkflowError::CorruptObject`
+and map it to the existing CLI integrity error; the remote CLI reader still
+adds its repository prefix to diagnostic paths.
+
+Evidence map:
+
+- Owner: workflow metadata; `canonical_json` and `content_hash` define identity.
+- Entry points: `read_experiment_metadata` and CLI `read_remote_metadata`.
+- Callees: shared ID comparison and canonical Blake3 hash; no transport changes.
+- Writer: CLI experiment push writes canonical bytes before publishing the hash.
+- Sibling: CLI already enforced identity on main; its checks are moved, not
+  weakened. Library main ignored the ref hash and accepted mismatched IDs.
+- Scope: schema parsing, not-found behavior, publication concurrency, and
+  storage keys remain independent. Schema decoding and typed JSON causes still
+  need follow-up; this change does not claim to solve them.
+- Tests: 32 workflow experiment tests pass, including new wrong-ID/wrong-hash
+  rejection and pretty-printed JSON acceptance. CLI prefix regression and
+  focused lint results are recorded after verification below.
+
+Is this the best fix? A shared method removes duplicate identity policy while
+leaving storage-prefix ownership with the caller. Sharing complete decoding
+before reconciling the different schema/error contracts would conflate changes.
+The small production increase provides actual validation in the previously
+unchecked reader plus a classified integrity error; no second identity path
+remains in the touched readers.
+
+Validation completed: the new library mismatch regression fails when the
+verification call is disabled (unchecked reader returns `Ok(Some(..))` for a
+wrong hash). Restored code passes all 32 experiment tests. The CLI regression
+passes both mismatch cases and verifies prefixed corruption paths. Strict
+all-target workflow Clippy and workflow rustdoc with warnings denied pass.
+The initial CLI fixture reused an immutable ref across cases and hit the
+expected create-only conflict; each case now owns its own in-memory store.
+No storage behavior was changed to accommodate the fixture. Native/cloud E2E,
+full CLI lint qualification, and schema-decoder consolidation remain unclaimed.

@@ -136,3 +136,14 @@ The caller chooses the timeout and retains the guard for the protected work.
   workflow cache uses it but does not redefine storage semantics.
 - [`crab-git`](../crab-git/README.md) supplies Git object/ref mechanics; this
   crate owns stage dependency semantics and execution state.
+
+## Experiment metadata identity
+
+Remote metadata has two identities: the experiment ID selects the object, and
+its metadata ref records the canonical JSON hash. `read_experiment_metadata`
+checks both before returning a value. Readers that already decoded metadata can
+call `ExperimentMetadata::verify_identity` with the requested ID and ref hash.
+
+An ID or hash mismatch returns `WorkflowError::CorruptObject`. Whitespace and
+JSON object ordering do not change the canonical hash. This check validates
+identity; it does not replace schema validation or make two storage reads atomic.

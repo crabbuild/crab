@@ -24,6 +24,15 @@ pub enum WorkflowError {
         expected_etag: Option<String>,
     },
 
+    /// A persisted workflow object does not match its declared identity.
+    #[error("corrupt object at {path}: {reason}")]
+    CorruptObject {
+        /// Object or ref path that failed verification.
+        path: String,
+        /// Identity mismatch details.
+        reason: String,
+    },
+
     /// A requested workflow object or ref was not found.
     #[error("not found: {path}")]
     NotFound {

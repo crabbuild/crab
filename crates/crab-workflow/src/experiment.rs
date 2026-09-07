@@ -254,6 +254,32 @@ impl ExperimentMetadata {
         })
     }
 
+    /// Verify the requested experiment ID and canonical metadata hash.
+    ///
+    /// Returns [`CrabError::CorruptObject`] when either identity differs. The
+    /// hash covers canonical metadata, so JSON whitespace does not affect it.
+    pub fn verify_identity(&self, id: &ExperimentId, expected_hash: &str) -> Result<()> {
+        if self.exp_id != *id {
+            return Err(CrabError::CorruptObject {
+                path: exp_meta_object_path(id),
+                reason: format!(
+                    "metadata id {} does not match requested experiment {id}",
+                    self.exp_id
+                ),
+            });
+        }
+        let actual_hash = self.content_hash()?;
+        if expected_hash != actual_hash {
+            return Err(CrabError::CorruptObject {
+                path: exp_meta_ref(id),
+                reason: format!(
+                    "metadata ref points at {expected_hash}, but object hashes to {actual_hash}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Content-address hash of the canonical JSON bytes.
     ///
     /// The meta-ref CAS (`refs/crab/exp-meta/<uuid>`) points at
@@ -422,9 +448,8 @@ pub trait ExperimentMetaRead: Send + Sync {
 /// [`CrabError::MetricsSchemaMismatch`]-style corruption errors
 /// wrapped through `CrabError::Internal` for malformed JSON.
 ///
-/// The `_content_hash` returned by the ref is currently only used
-/// for logging; once a verification pass is added (follow-up spec),
-/// it'll gate whether the deserialized bytes are trusted.
+/// The decoded experiment ID and canonical content hash must match the lookup
+/// and ref target; mismatches return [`CrabError::CorruptObject`].
 pub async fn read_experiment_metadata<S>(
     store: &S,
     id: &ExperimentId,
@@ -434,7 +459,7 @@ where
 {
     let ref_name = exp_meta_ref(id);
 
-    let Some(_content_hash) = store.read_ref(&ref_name).await? else {
+    let Some(content_hash) = store.read_ref(&ref_name).await? else {
         return Ok(None);
     };
 
@@ -472,6 +497,7 @@ where
         CrabError::Internal(format!("experiment metadata shape mismatch for {id}: {e}"))
     })?;
 
+    metadata.verify_identity(id, &content_hash)?;
     Ok(Some(metadata))
 }
 
@@ -874,6 +900,50 @@ mod tests {
             .await
             .expect("read ok");
         assert_eq!(got, Some(meta));
+    }
+
+    #[tokio::test]
+    async fn read_experiment_metadata_rejects_identity_mismatches() {
+        let id = pinned_id();
+        for wrong_id in [false, true] {
+            let mut meta = sample_metadata(id);
+            if wrong_id {
+                meta.exp_id = ExperimentId::new_v7();
+            }
+            let hash = if wrong_id {
+                meta.content_hash().unwrap()
+            } else {
+                "00".repeat(32)
+            };
+            let mut store = MockMetaStore::default();
+            store.refs.insert(exp_meta_ref(&id), hash);
+            store
+                .objects
+                .insert(exp_meta_object_path(&id), meta.canonical_json().unwrap());
+            let result = read_experiment_metadata(&store, &id).await;
+            assert!(
+                matches!(result, Err(CrabError::CorruptObject { .. })),
+                "wrong_id={wrong_id}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_experiment_metadata_accepts_noncanonical_json() {
+        let id = pinned_id();
+        let meta = sample_metadata(id);
+        let mut store = MockMetaStore::default();
+        store
+            .refs
+            .insert(exp_meta_ref(&id), meta.content_hash().unwrap());
+        store.objects.insert(
+            exp_meta_object_path(&id),
+            serde_json::to_vec_pretty(&meta).unwrap(),
+        );
+        assert_eq!(
+            read_experiment_metadata(&store, &id).await.unwrap(),
+            Some(meta)
+        );
     }
 
     #[tokio::test]

@@ -1213,6 +1213,9 @@ impl From<crab_workflow::WorkflowError> for CrabError {
         match error {
             crab_workflow::WorkflowError::Timestamp(source) => Self::from(source),
             crab_workflow::WorkflowError::Cancelled => Self::Cancelled,
+            crab_workflow::WorkflowError::CorruptObject { path, reason } => {
+                Self::CorruptObject { path, reason }
+            }
             crab_workflow::WorkflowError::NetworkTransient(source) => {
                 Self::NetworkTransient(source)
             }

@@ -3663,24 +3663,17 @@ async fn read_remote_metadata(
             path: meta_path.as_ref().to_owned(),
             reason: format!("experiment metadata is not valid JSON: {e}"),
         })?;
-    if metadata.exp_id != *id {
-        return Err(CrabError::CorruptObject {
-            path: meta_path.as_ref().to_owned(),
-            reason: format!(
-                "metadata id {} does not match requested experiment {id}",
-                metadata.exp_id
-            ),
-        });
-    }
-    let actual_hash = metadata.content_hash()?;
-    if expected_hash != actual_hash {
-        return Err(CrabError::CorruptObject {
-            path: ref_path.as_ref().to_owned(),
-            reason: format!(
-                "metadata ref points at {expected_hash}, but object hashes to {actual_hash}"
-            ),
-        });
-    }
+    metadata
+        .verify_identity(id, expected_hash)
+        .map_err(|error| match error {
+            crab_workflow::WorkflowError::CorruptObject { path, reason } => {
+                CrabError::CorruptObject {
+                    path: remote_key(prefix, &path),
+                    reason,
+                }
+            }
+            other => other.into(),
+        })?;
     Ok(metadata)
 }
 
@@ -7367,6 +7360,45 @@ mod tests {
             host_fingerprint: "test".into(),
             started_at: "2024-01-01T00:00:00.000Z".into(),
             ended_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_metadata_identity_preserves_prefixed_diagnostics() {
+        let id = ExperimentId::new_v7();
+        let prefix = "repository";
+        for wrong_id in [false, true] {
+            let store = Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+            let metadata = test_exp_metadata(
+                if wrong_id { ExperimentId::new_v7() } else { id },
+                &"a".repeat(40),
+            );
+            let hash = if wrong_id {
+                metadata.content_hash().unwrap()
+            } else {
+                "00".repeat(32)
+            };
+            store
+                .put(&remote_exp_meta_ref_path(prefix, &id), Bytes::from(hash))
+                .await
+                .unwrap();
+            store
+                .put(
+                    &remote_exp_meta_object_path(prefix, &id),
+                    Bytes::from(metadata.canonical_json().unwrap()),
+                )
+                .await
+                .unwrap();
+            let error = read_remote_metadata(&store, prefix, &id).await.unwrap_err();
+            let expected_path = if wrong_id {
+                remote_exp_meta_object_path(prefix, &id)
+            } else {
+                remote_exp_meta_ref_path(prefix, &id)
+            };
+            assert!(
+                matches!(error, CrabError::CorruptObject { ref path, .. } if path == expected_path.as_ref()),
+                "wrong_id={wrong_id}: {error:?}"
+            );
         }
     }
 
