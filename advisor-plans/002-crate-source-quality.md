@@ -3851,3 +3851,27 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   process/runtime exit still needs Windows-specific evidence.
 - No private helper log or control token was printed or added to evidence.
   No new Windows fix, retry, or assertion relaxation is claimed.
+
+
+### Observe Windows mount process exit independently of output EOF
+
+- The smoke now starts a bounded background observer around the initial mount
+  invocation. It writes up to 30 JSONL samples at two-second intervals to
+  logs/mount-processes.jsonl, independently of Invoke-Native's output pipeline.
+- Samples contain only Crab/helper process names, process/parent IDs, creation
+  times, CPU counters, observation time, and the smoke runner PID. No command
+  lines, environment variables, private helper logs, or control tokens. Creation
+  times help distinguish process ID reuse from a continuously live process.
+- The invocation's finally block stops, receives, and removes this specific
+  observer job. The mount command, output tee, exit-code handling, readiness
+  probes, assertions, and cleanup commands retain their existing behavior.
+- This is diagnostic evidence for the reproduced Windows stall, not a hang fix.
+  It distinguishes a surviving CLI from a missing parent with a surviving helper
+  once artifacts are available. Native execution remains necessary to interpret
+  the trace; process existence alone will not identify a blocked Rust stack.
+- Existing native-smoke contract validation, formatting and diff checks pass.
+  PowerShell is unavailable locally, so parsing/execution and the observer's
+  actual Windows output still require the next native CI run.
+- Dependency references: [Start-Job](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/start-job?view=powershell-7.5),
+  [Stop-Job](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/stop-job?view=powershell-7.5),
+  [Win32_Process](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process).

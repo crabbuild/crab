@@ -135,7 +135,7 @@ result collections still scale with batch size; this is not total memory admissi
 | `resolve_sequences_batch` | Log and omit the unresolved file. |
 | `resolve_sequences_batch_strict` | Return the first worker error after draining the batch. |
 
-Term batches reuse `crab-metadata::SharedFileIndexLookup`, the same session
+Term batches reuse metadata's `SharedFileIndexLookup`, the same session
 owner used by hydration. Each batch binds the handle to its origin and
 repository prefix, retaining scoped read behavior. Close works even if unused
 clones remain.

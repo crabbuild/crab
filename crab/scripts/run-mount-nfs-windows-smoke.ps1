@@ -479,11 +479,43 @@ try {
         -ArgumentList @("mount", "doctor", "--backend", "nfs", "--mountpoint", $Drive, "--json") `
         -LogPath $MountDoctorPath
 
+    # Observe process exit independently of the output pipeline: a child can
+    # keep a pipe open after its parent exits. Never retain command lines or env.
+    $mountWatch = Start-Job -ArgumentList $PID, $LogDir -ScriptBlock {
+        param($RunnerPid, $EvidenceLogDir)
+        $tracePath = Join-Path $EvidenceLogDir "mount-processes.jsonl"
+        for ($sample = 0; $sample -lt 30; $sample++) {
+            $processes = @(Get-CimInstance -ClassName Win32_Process `
+                -Filter "Name = 'crab.exe' OR Name = 'crab-nfs-mount.exe'" `
+                -ErrorAction Stop | ForEach-Object {
+                    [pscustomobject]@{
+                        name = $_.Name
+                        pid = $_.ProcessId
+                        parent_pid = $_.ParentProcessId
+                        created_at = $_.CreationDate
+                        kernel_time = $_.KernelModeTime
+                        user_time = $_.UserModeTime
+                    }
+                })
+            [pscustomobject]@{
+                observed_at = [DateTime]::UtcNow.ToString("o")
+                runner_pid = $RunnerPid
+                processes = $processes
+            } | ConvertTo-Json -Depth 4 -Compress | Add-Content -LiteralPath $tracePath -Encoding utf8
+            Start-Sleep -Seconds 2
+        }
+    }
     $MountAttempted = $true
-    Invoke-Native `
-        -FilePath $CrabExe `
-        -ArgumentList @("mount", "--repo", $Source, "--mountpoint", $Drive, "--backend", "nfs", "--no-refresh") `
-        -LogPath (Join-Path $LogDir "mount.log")
+    try {
+        Invoke-Native `
+            -FilePath $CrabExe `
+            -ArgumentList @("mount", "--repo", $Source, "--mountpoint", $Drive, "--backend", "nfs", "--no-refresh") `
+            -LogPath (Join-Path $LogDir "mount.log")
+    } finally {
+        Stop-Job -Job $mountWatch
+        Receive-Job -Job $mountWatch -ErrorAction Continue | Out-Host
+        Remove-Job -Job $mountWatch
+    }
 
     # A successful mount message precedes process exit and filesystem visibility.
     # Keep these boundaries visible when a native filesystem call blocks.
