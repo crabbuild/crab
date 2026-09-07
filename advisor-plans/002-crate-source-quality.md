@@ -1868,3 +1868,55 @@ not every workflow invocation mode or remote-provider race.
 CLI library Clippy remains at 489 warnings versus the recorded main baseline's
 494. Of these, 484 match unchanged source and five large-future messages match
 the preceding comparison exactly. No new diagnostic was observed for this fix.
+
+### YAML cache-only replay follows recorded stage identities
+
+The YAML/DAG entry point never consumed `RunArgs::cache_only`. A native CLI
+fixture with no lockfile or cache returned success and executed its stage
+command. The new missing-lockfile regression also fails on the prior source
+with `Ok(())`. This contradicts the workflow guide's recorded-state replay and
+exit-3-on-miss contract; rejecting YAML replay would not satisfy that contract.
+
+`run_with_yaml` now routes replay to a bounded product orchestration path:
+acquire the scheduler guard, load the existing single/split lockfile context,
+apply canonical stage filters and graph order, and look up recorded stage
+hashes. It never resolves live inputs, starts the executor, invokes cache-hit
+hooks, writes a journal, or saves the lockfile. Watch and cache-only flags now
+conflict because watch explicitly schedules fresh execution.
+
+Inline and YAML replay share local/remote lookup and materialization. The
+helper returns a stage result instead of emitting output, so inline reporting
+stays single-stage while YAML emits one workflow summary in JSON or JSONL.
+Remote candidate construction is shared; selected-remote, primary fallback,
+and artifact-store routing retain their existing order and owners. No provider
+or serialized cache format changes. The production LOC increase adds the
+missing YAML orchestration; it does not duplicate an executor or materializer.
+
+Evidence map: CLI `RunArgs` -> `run_with_yaml` -> `replay_yaml_cache` ->
+`LockfileContext::load`, `filter_stages`, `Graph::toposort`, and `cache_only_path`
+-> `cache_only_materialize_hit` -> shared publication helpers. The sibling
+inline path consumes the same returned stage result. Existing normal DAG and
+watch execution remain separate callers of the executor. Current main also
+routes YAML directly to DAG execution without a cache-only branch.
+
+Two focused regressions cover missing records, recorded hashes despite absent
+live inputs and changed commands, skipped hooks, selected-stage filtering,
+real lock contention, and unchanged lockfile/journal state. A built-CLI smoke
+uses real files and an external advisory-lock holder: missing records and
+missing cache entries exit 3 without execution; contention prevents writes;
+JSON and JSONL each produce one summary while restoring exact cached bytes
+after deleting the input. The execution marker stays at one seed invocation.
+The existing inline native replay/lock smoke also passes after the shared
+helper refactor. The debug build passes with the existing macOS unwind warning.
+
+Remaining limits: live remote replay and split-lockfile replay are not newly
+runtime-qualified by this batch; their existing helpers are reused. Working
+root versus process-CWD output anchoring and asynchronous lock waiting remain
+separate issues. This is not an all-workflow or all-21-crate completion verdict.
+
+Final focused proof: both YAML replay tests, target-flag parsing (including
+watch/replay conflict), and the two-mode inline contention regression pass.
+CLI library Clippy remains 489 warnings versus 494 on the recorded main
+baseline: 484 unchanged-source matches and the same five large-future messages.
+No new diagnostic is observed. Formatting and diff checks pass. All 21 crate
+AGENTS guides and matching CLAUDE symlinks are present.

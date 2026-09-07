@@ -363,7 +363,7 @@ pub struct RunArgs {
     /// paths for modifications. On change, recompute staleness and
     /// re-execute affected stages. Exit on SIGINT/SIGTERM.
     #[cfg(feature = "watch")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, conflicts_with = "cache_only", default_value_t = false)]
     pub watch: bool,
 
     /// Execute only stages belonging to the named workflow (plus
@@ -665,37 +665,15 @@ async fn run_inline_single_stage(
     if args.cache_only {
         let cache_only_ctx = CacheOnlyContext {
             args,
-            mode,
             cache_lookup_enabled,
             artifact_stores: remote_artifact_stores.as_ref(),
-            remote: CacheOnlyRemote {
-                selected: remote_store.as_ref().zip(remote_prefix.as_deref()).map(
-                    |(store, prefix)| WorkflowRemoteCandidate {
-                        store,
-                        prefix,
-                        source: "selected",
-                    },
-                ),
-                primary_fallback: remote_primary_fallback_store
-                    .as_ref()
-                    .zip(remote_primary_fallback_prefix.as_deref())
-                    .map(|(store, prefix)| WorkflowRemoteCandidate {
-                        store,
-                        prefix,
-                        source: "primary-fallback",
-                    }),
-            },
+            remote: CacheOnlyRemote::from_remote(remote.as_ref()),
             cache_root: &cache_root,
             working_dir: Some(repo_root),
         };
-        return cache_only_path(
-            &stage_name,
-            &stage_hash,
-            &outs,
-            cached.as_ref(),
-            cache_only_ctx,
-        )
-        .await;
+        let result =
+            cache_only_path(&stage_name, &stage_hash, cached.as_ref(), cache_only_ctx).await?;
+        return emit_result(None, &result, mode);
     }
 
     let run_id = Uuid::now_v7();
@@ -1039,6 +1017,11 @@ async fn run_with_yaml(
         return Ok(());
     }
 
+    if args.cache_only {
+        return replay_yaml_cache(args, repo_root, mode, config, &workflow, &graph, &lock_ctx)
+            .await;
+    }
+
     ensure_workflow_ignored(repo_root)?;
 
     #[cfg(feature = "watch")]
@@ -1054,6 +1037,72 @@ async fn run_with_yaml(
         args, repo_root, mode, config, &workflow, &graph, &lock_ctx, options,
     )
     .await
+}
+
+// Replay the recorded workflow, without resolving live inputs or invoking hooks.
+// The lock protects both the lockfile snapshot and output publication.
+async fn replay_yaml_cache(
+    args: &RunArgs,
+    repo_root: &Path,
+    mode: OutputMode,
+    config: &Config,
+    workflow: &Workflow,
+    graph: &Graph,
+    lock_ctx: &LockfileContext,
+) -> Result<()> {
+    let workflow_root = repo_root.join(".crab/workflow");
+    let cache_root = repo_root.join(".crab/cache");
+    let _lock = SchedulerLock::acquire(&workflow_root, compute_lock_timeout(args, config))?;
+    let lockfile = lock_ctx.load(repo_root)?;
+    let selected = filter_stages(args, workflow, graph)?;
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let mut results = Vec::new();
+    let mut succeeded = BTreeSet::new();
+    let started_at = Instant::now();
+    for name in graph.toposort() {
+        if selected
+            .as_ref()
+            .is_some_and(|selected| !selected.contains(&name))
+        {
+            continue;
+        }
+        let recorded = lockfile
+            .get(&name)
+            .ok_or_else(|| CrabError::StageCacheMiss {
+                stage: name.as_str().to_owned(),
+                reason: "no recorded stage in workflow lockfile".to_owned(),
+            })?;
+        let stage = &workflow.stages[&name];
+        let cached = read_local(&cache_root, &recorded.stage_hash)?;
+        let context = CacheOnlyContext {
+            args,
+            cache_lookup_enabled: stage_cache_lookup_enabled(stage, args),
+            artifact_stores: remote
+                .as_ref()
+                .and_then(|remote| remote.artifact_stores.as_ref()),
+            remote: CacheOnlyRemote::from_remote(remote.as_ref()),
+            cache_root: &cache_root,
+            working_dir: Some(repo_root),
+        };
+        results.push(cache_only_path(&name, &recorded.stage_hash, cached.as_ref(), context).await?);
+        succeeded.insert(name);
+    }
+    let mut jsonl = (mode == OutputMode::Jsonl).then(|| {
+        JsonlStream::new(
+            WORKFLOW_STAGE_EVENT_STREAM_SCHEMA,
+            WORKFLOW_SCHEMA_VERSION,
+            std::io::stdout(),
+        )
+    });
+    emit_dag_summary(
+        jsonl.as_mut(),
+        &results,
+        &succeeded,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        started_at.elapsed().as_millis() as u64,
+        mode,
+    )
 }
 
 /// `crab run --validate` path. Parses `crab.yaml`, runs all
@@ -2551,6 +2600,23 @@ struct CacheOnlyRemote<'a> {
 }
 
 impl<'a> CacheOnlyRemote<'a> {
+    fn from_remote(remote: Option<&'a WorkflowRemote>) -> Self {
+        Self {
+            selected: remote.map(|remote| WorkflowRemoteCandidate {
+                store: &remote.store,
+                prefix: &remote.prefix,
+                source: "selected",
+            }),
+            primary_fallback: remote
+                .and_then(|remote| remote.primary_fallback.as_ref())
+                .map(|fallback| WorkflowRemoteCandidate {
+                    store: &fallback.store,
+                    prefix: &fallback.prefix,
+                    source: "primary-fallback",
+                }),
+        }
+    }
+
     fn candidates(self) -> [Option<WorkflowRemoteCandidate<'a>>; 2] {
         [self.selected, self.primary_fallback]
     }
@@ -2558,7 +2624,6 @@ impl<'a> CacheOnlyRemote<'a> {
 
 struct CacheOnlyContext<'a> {
     args: &'a RunArgs,
-    mode: OutputMode,
     cache_lookup_enabled: bool,
     artifact_stores: Option<&'a RemoteArtifactStores>,
     remote: CacheOnlyRemote<'a>,
@@ -3096,10 +3161,9 @@ fn build_run_summary(
 async fn cache_only_path(
     stage_name: &StageName,
     stage_hash: &StageHash,
-    outs: &[Out],
     cached: Option<&StageCacheEntry>,
     ctx: CacheOnlyContext<'_>,
-) -> Result<()> {
+) -> Result<WorkflowStageResult> {
     if !ctx.cache_lookup_enabled {
         return Err(CrabError::StageCacheMiss {
             stage: stage_name.as_str().to_owned(),
@@ -3131,11 +3195,9 @@ async fn cache_only_path(
                         remote_source = candidate.source,
                         "cache-only: remote hit"
                     );
-                    return cache_only_emit_hit(
+                    return cache_only_materialize_hit(
                         stage_name,
-                        outs,
                         ctx.args,
-                        ctx.mode,
                         ctx.cache_root,
                         remote_entry,
                         true,
@@ -3166,41 +3228,27 @@ async fn cache_only_path(
         });
     };
 
-    cache_only_emit_hit(
-        stage_name,
-        outs,
-        ctx.args,
-        ctx.mode,
-        ctx.cache_root,
-        entry,
-        from_remote,
-    )
+    cache_only_materialize_hit(stage_name, ctx.args, ctx.cache_root, entry, from_remote)
 }
 
-fn cache_only_emit_hit(
+fn cache_only_materialize_hit(
     stage_name: &StageName,
-    outs: &[Out],
     args: &RunArgs,
-    mode: OutputMode,
     cache_root: &Path,
     entry: StageCacheEntry,
     from_remote: bool,
-) -> Result<()> {
+) -> Result<WorkflowStageResult> {
     // Even without a journal, we still run the materialization through
     // the same sidecar path — it's what makes the hit atomic.
     let run_id = Uuid::now_v7();
     materialize_hit(stage_name, run_id, &entry, cache_root, args)?;
-    // Touch the declared outs list so unused warnings don't fire when
-    // the executor doesn't enumerate outs (they're already in `entry`).
-    let _ = outs;
 
     let duration_ms = 0;
     let mut result = build_stage_result(stage_name.as_str(), &entry, true, duration_ms);
     if from_remote {
         result.source = Some("Remote".to_owned());
     }
-    emit_result(None, &result, mode)?;
-    Ok(())
+    Ok(result)
 }
 
 /// Materialize every out from a cache entry, guarded by the overwrite
@@ -5959,6 +6007,13 @@ mod tests {
         let err = RunArgs::try_parse_from(["run", "--cache-only", "--no-run-cache"])
             .expect_err("cache-only conflicts with no-run-cache");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        #[cfg(feature = "watch")]
+        {
+            let err = RunArgs::try_parse_from(["run", "--cache-only", "--watch"])
+                .expect_err("replay cannot watch for stage execution");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     #[test]
@@ -6121,6 +6176,101 @@ mod tests {
             matches!(err, CrabError::Configuration { .. }),
             "wrong variant: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_only_missing_lockfile_never_runs_stage() {
+        let tmp = TempDir::new().unwrap();
+        let yaml_path = tmp.path().join("crab.yaml");
+        fs::write(
+            &yaml_path,
+            "stages:\n  build:\n    cmd: \"printf executed > marker\"\n    outs:\n      - marker\n",
+        )
+        .unwrap();
+        let mut args = yaml_base_args();
+        args.cache_only = true;
+        let result = run_with_yaml(
+            &args,
+            tmp.path(),
+            &[yaml_path],
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CrabError::StageCacheMiss { .. })),
+            "{result:?}"
+        );
+        assert!(!tmp.path().join("marker").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_only_replays_recorded_selection_without_live_inputs_or_hooks() {
+        let tmp = TempDir::new().unwrap();
+        let yaml_path = tmp.path().join("crab.yaml");
+        fs::write(&yaml_path, "stages:\n  build:\n    cmd: 'false'\n    deps: [missing-input]\n    side_effects: true\n    on_cache_hit: 'false'\n  other:\n    cmd: 'false'\n").unwrap();
+        let entry = StageCacheEntry {
+            schema_version: crate::workflow::cache::ENTRY_SCHEMA_VERSION,
+            stage_hash: StageHash([17; 32]),
+            stage_name: "build".into(),
+            cmd: crate::workflow::cache::CachedCmd::Shell {
+                shell: "previous-command".into(),
+            },
+            outs: Vec::new(),
+            metrics: Vec::new(),
+            plots: Vec::new(),
+            executed_at: "2026-09-07T00:00:00.000Z".into(),
+            duration_ms: 0,
+            exec_id: None,
+            attempts: 1,
+            host_fingerprint: "test".into(),
+        };
+        let mut lockfile = Lockfile::default();
+        lockfile
+            .upsert(&entry, Vec::new(), BTreeMap::new(), BTreeMap::new())
+            .unwrap();
+        let lock_path = tmp.path().join("crab.lock");
+        lockfile.save(&lock_path).unwrap();
+        let recorded_bytes = fs::read(&lock_path).unwrap();
+        let cache_root = tmp.path().join(".crab/cache");
+        crate::workflow::cache::write_local(&cache_root, &entry).unwrap();
+        let mut args = yaml_base_args();
+        args.cache_only = true;
+        args.no_wait = true;
+        args.cmd = vec!["build".into()];
+        let owner = SchedulerLock::acquire(
+            &tmp.path().join(".crab/workflow"),
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        let replay = run_with_yaml(
+            &args,
+            tmp.path(),
+            std::slice::from_ref(&yaml_path),
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await;
+        assert!(
+            matches!(replay, Err(CrabError::WorkflowLockTimeout { .. })),
+            "{replay:?}"
+        );
+        drop(owner);
+        run_with_yaml(
+            &args,
+            tmp.path(),
+            &[yaml_path],
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&lock_path).unwrap(), recorded_bytes);
+        assert!(!tmp.path().join(".crab/workflow/runs").exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]
