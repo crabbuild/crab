@@ -1515,23 +1515,23 @@ mod tests {
     #[test]
     fn backoff_doubles_on_failure() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut backoff = BackoffState::new(base, max);
 
         assert_eq!(backoff.current_interval, base);
 
         backoff.on_failure("network error");
-        assert_eq!(backoff.current_interval, Duration::from_secs(60));
+        assert_eq!(backoff.current_interval, Duration::from_mins(1));
         assert_eq!(backoff.last_fetch_result.as_deref(), Some("network error"));
 
         backoff.on_failure("timeout");
-        assert_eq!(backoff.current_interval, Duration::from_secs(120));
+        assert_eq!(backoff.current_interval, Duration::from_mins(2));
     }
 
     #[test]
     fn backoff_caps_at_max() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut backoff = BackoffState::new(base, max);
 
         // Drive past the cap.
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn backoff_resets_on_success() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut backoff = BackoffState::new(base, max);
 
         backoff.on_failure("err");
@@ -1559,17 +1559,17 @@ mod tests {
     #[test]
     fn backoff_independent_per_instance() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut a = BackoffState::new(base, max);
         let mut b = BackoffState::new(base, max);
 
         a.on_failure("err");
-        assert_eq!(a.current_interval, Duration::from_secs(60));
+        assert_eq!(a.current_interval, Duration::from_mins(1));
         assert_eq!(b.current_interval, base);
 
         b.on_success();
         assert_eq!(b.current_interval, base);
-        assert_eq!(a.current_interval, Duration::from_secs(60));
+        assert_eq!(a.current_interval, Duration::from_mins(1));
     }
 
     // --- redact_url tests ---

@@ -2499,10 +2499,10 @@ mod tests {
         assert_eq!(failure.backoff, MountFailure::INITIAL_BACKOFF);
 
         failure.record_failure();
-        assert_eq!(failure.backoff, Duration::from_secs(60));
+        assert_eq!(failure.backoff, Duration::from_mins(1));
 
         failure.record_failure();
-        assert_eq!(failure.backoff, Duration::from_secs(120));
+        assert_eq!(failure.backoff, Duration::from_mins(2));
     }
 
     #[test]
@@ -2519,7 +2519,7 @@ mod tests {
         let mut failure = MountFailure::new();
         // Set backoff to zero for testing.
         failure.backoff = Duration::from_secs(0);
-        failure.last_attempt = Instant::now() - Duration::from_secs(1);
+        failure.last_attempt = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         assert!(failure.can_retry());
     }
 

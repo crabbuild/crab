@@ -713,3 +713,12 @@ DashMap 6 source obtains a shard read guard in _get. Five verified-set tests
 pass. Strict all-target nfs Clippy decreases from 277 to 259 diagnostics: exactly
 17 redundant-closure and one public-length-helper warnings removed. Remaining
 lint counts are unchanged; the strict gate still fails. No suppressions added.
+
+## VFS timing fixtures
+
+Twelve test durations now use minute units, already used by production VFS code;
+all values are unchanged. One test uses checked Instant subtraction with an
+explicit test assertion instead of the panicking subtraction operator. Six
+backoff tests and the elapsed-retry test pass. Strict all-target nfs Clippy now
+reports 246 diagnostics (13 fewer); timing diagnostics are gone. No assertions
+or lint settings were weakened, and runtime timing policy is unchanged.

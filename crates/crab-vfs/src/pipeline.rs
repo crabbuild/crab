@@ -946,10 +946,10 @@ ref: refs/heads/main\tHEAD\n\
         };
 
         let builder = MountPipelineBuilder::new(config)
-            .with_refresh_interval(Duration::from_secs(60))
+            .with_refresh_interval(Duration::from_mins(1))
             .with_no_refresh(true);
 
-        assert_eq!(builder.refresh_interval, Duration::from_secs(60));
+        assert_eq!(builder.refresh_interval, Duration::from_mins(1));
         assert!(builder.no_refresh);
     }
 }
