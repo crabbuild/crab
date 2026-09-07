@@ -62,7 +62,8 @@ not counted as successful proof. The normal default-feature suite above passed.
 
 ## Pre-isolation runtime identity
 
-- macOS arm64; 12 logical CPUs, 32 GiB memory; APFS workspace volume.
+- macOS arm64; 12 logical CPUs, 32 GiB memory; APFS USB SSD workspace volume.
+  The same volume holds source fixtures, build artifacts and RustFS data.
 - RustFS S3 endpoint: loopback port 9000; isolated new buckets.
 - RustFS image ID: `sha256:67f06d4b3479fd9d323d8a99c86aac411e665ac0981d06b52a2b790c66db359e`.
 - Release binary source: `23788258ae0` (pre-rebase identifier).
@@ -91,8 +92,26 @@ retained 777 and prepared 284. The add workers shared mutable per-push receipt
 state across awaits. This caused unnecessary preparation, not evidence of
 incorrect reconstructed bytes.
 
-The receipt-isolation fix is committed as `6e23f81ee16c`. Its full tests and
-fresh scale run are pending. The interrupted run is not counted as a passed
-100-GiB qualification. Completed canary data/buckets were removed; reports
-and logs were retained. Final scale and cleanup results must be recorded
-before this qualification is considered complete.
+The receipt-isolation fix is committed as `6e23f81ee16c`. Its release binary
+SHA-256 is `e2ad0e0212c150168c8aa9b2a4ff4087148d4cfdc2dfe8b37c8984d7b2cd63a2`.
+The repeated live probe retained 1,057 remote chunks and prepared four boundary
+chunks with both worker counts. The fresh lifecycle rerun passed all 132 checks.
+The full default-feature library suite passed 4,145 tests with three ignored
+using `--test-threads=1`; the Crab clippy gate also passed. A preceding parallel
+run had ten Git/LFS fixture/lock failures, none in receipt validation. Serial
+success is evidence of test-process interference, not a fix to those tests.
+
+CI for implementation revision `69f12689af2` completed with 29 successful and
+eight policy-skipped checks. The unchanged repository-browser release tooltip
+contrast test failed on its first attempt and passed on retry; it also passed
+on current main. No browser code, dependency, test assertion or baseline was
+changed to obtain that result. The intermittent failure remains a separate
+test-reliability concern.
+
+Final corrected 100-GiB results, command timings, byte-check counts and cleanup
+status are recorded in [PR #156](https://github.com/crabbuild/crab/pull/156).
+The interrupted run is not counted as passed qualification. Pre-isolation
+scale/probe data and completed canary data/buckets were removed; reports and
+logs were retained. Qualification covers the exercised local RustFS lifecycle,
+not 100 GiB of unique entropy, all historical large-file versions, all CLI
+commands, or production S3/GCS/Azure behavior.
