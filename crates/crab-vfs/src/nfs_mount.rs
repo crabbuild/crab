@@ -311,7 +311,8 @@ pub async fn run_until_cancelled(
     let shutdown_start = Instant::now();
     cancel.cancel();
     if let Some(handle) = refresh_handle {
-        handle.abort();
+        // Refresh awaits blocking snapshot work; cancellation stops future
+        // polls, while joining retains ownership through the current refresh.
         let _ = handle.await;
     }
     if let Some(handle) = control_handle {
@@ -1106,12 +1107,12 @@ mod tests {
         let engine = Arc::new(VfsEngine::new(
             Arc::clone(&resolver),
             None,
-            hydration,
+            Arc::clone(&hydration),
             None,
-            Some(snapshot),
+            Some(Arc::clone(&snapshot)),
         ));
         let adapter = CrabNfsFs::new(
-            resolver,
+            Arc::clone(&resolver),
             Arc::clone(&engine),
             root.to_str().unwrap(),
             true,
@@ -1121,7 +1122,7 @@ mod tests {
             server_handle,
             mount_rx,
             mountpoint: root.join("not-mounted"),
-            engine,
+            engine: Arc::clone(&engine),
             read_leases: adapter.read_lease_pool(),
             directory_pages: adapter.directory_page_cache(),
             write_journal: adapter.write_journal(),
@@ -1129,9 +1130,75 @@ mod tests {
             control_endpoint: None,
             read_only: true,
             auto_refresh_interval: None,
-            runtime: None,
+            runtime: Some(Arc::new(Mutex::new(NfsMountRuntime {
+                output: crate::pipeline::PipelineOutput {
+                    resolver,
+                    engine: Arc::clone(&engine),
+                    hydration,
+                    snapshot,
+                    overlay: None,
+                    head_oid: String::new(),
+                    head_ref: "refs/heads/main".into(),
+                    generation: 0,
+                },
+                config: crate::pipeline::PipelineConfig {
+                    source: root.display().to_string(),
+                    git_dir: root.join("missing.git"),
+                    ref_name: None,
+                    read_only: true,
+                    cache_dir: root.to_owned(),
+                    cancel_token: CancellationToken::new(),
+                },
+            }))),
             lifecycle: NfsMountLifecycleStatus::default(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_waits_for_admitted_auto_refresh() {
+        let root = tempfile::tempdir().unwrap();
+        let server = tokio::spawn(std::future::pending::<Result<()>>());
+        let (_sender, receiver) = mpsc::channel(1);
+        let mut session = synthetic_session(root.path(), server, receiver);
+        session.auto_refresh_interval = Some(Duration::from_millis(1));
+        let runtime = Arc::clone(session.runtime.as_ref().unwrap());
+        let locked_runtime = Arc::clone(&runtime);
+        let (locked, lock_ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _guard = locked_runtime.lock().unwrap();
+            locked.send(()).unwrap();
+            let _ = released.recv();
+        });
+        lock_ready.await.unwrap();
+        let cancel = CancellationToken::new();
+        let shutdown = run_until_cancelled(session, cancel.clone());
+        tokio::pin!(shutdown);
+        // Finish synchronous startup before counting retained references; its
+        // temporary control-state clone must not masquerade as admitted work.
+        std::future::poll_fn(|context| {
+            use std::future::Future;
+            assert!(shutdown.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // Session, auto-refresh state, observer, and lock holder own four refs.
+        // The fifth is the admitted blocking refresh waiting for the mutex.
+        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&runtime) < 5 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        cancel.cancel();
+        let waiting = tokio::time::timeout(Duration::from_millis(20), &mut shutdown)
+            .await
+            .is_err();
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(admitted.is_ok(), "auto-refresh was not admitted");
+        assert!(waiting, "NFS teardown detached blocking refresh work");
+        shutdown.await.unwrap();
     }
 
     #[tokio::test]

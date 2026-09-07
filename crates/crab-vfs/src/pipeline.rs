@@ -452,7 +452,9 @@ impl MountPipelineBuilder {
 ///
 /// This is separated from the main pipeline because the FUSE mount
 /// (step 10) must succeed before the refresh loop makes sense.
-/// Callers invoke this after mounting.
+/// Callers invoke this after mounting, retain the returned handle, and await it
+/// after cancelling the configured token. Aborting the task can detach a
+/// blocking Git fetch that is still using repository state.
 pub fn spawn_refresh_loop(
     output: &PipelineOutput,
     config: &PipelineConfig,

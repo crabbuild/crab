@@ -684,13 +684,15 @@ async fn handle_mount(
     };
 
     // Spawn refresh loop if not read-only and not explicitly disabled.
-    if !read_only && !no_refresh {
+    let refresh_handle = if !read_only && !no_refresh {
         pipeline::spawn_refresh_loop(
             &output,
             &config_for_handle,
             std::time::Duration::from_secs(30),
-        );
-    }
+        )
+    } else {
+        None
+    };
 
     // Register with coordinator.
     let handle = MountHandle {
@@ -700,6 +702,7 @@ async fn handle_mount(
         pipeline_output: output,
         config: config_for_handle,
         fuse_session: Some(bg_session),
+        refresh_handle,
         invalidation_index: Some(invalidation_index),
         cancel_token,
         _cache_lock: Some(cache_lock),

@@ -34,7 +34,7 @@ resolver (snapshot + overlay) → VFS engine → FUSE or NFS
 `MountPipelineBuilder::execute` runs the preparation pipeline: source clone or
 reuse, HEAD resolution, snapshot, overlay setup, reconciliation, index
 population, hydration construction, resolver creation, and engine wiring. Only
-after those steps succeed does it start workers and return their handles. Mounting
+after those steps succeed does it start workers and return their owning service. Mounting
 and refresh are lifecycle operations performed outside the pipeline so a
 daemon, coordinator, or foreground CLI can own cancellation.
 
@@ -66,7 +66,8 @@ tests are not native mounted-filesystem or whole-process resource proof.
 | Task | Handle owner | Completion boundary |
 | --- | --- | --- |
 | Hydration queue workers and read-window prefetch | `HydrationService`, retained by the mount owner | Await `shutdown()` after backend teardown; queued work is discarded and admitted prefetch finishes |
-| NFS server, refresh, control | NFS mount runtime | Backend teardown controls these separately from hydration |
+| Ref/snapshot refresh | Coordinator, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
+| NFS server and control | NFS mount runtime | Backend teardown controls these separately from hydration |
 
 The daemon starts hydration and refresh tasks only when installing them into a
 successfully mounted runtime. Engine or backend setup failure therefore starts
@@ -77,10 +78,11 @@ admission, cancels queue workers, and awaits their shared task tracker. Repeated
 or concurrent shutdown calls observe the same completion boundary. Blocking
 hydration and cache writes can delay completion; shutdown does not abort them.
 
-The coordinator warns after ten seconds and continues waiting with mount/cache
-ownership intact. Daemon teardown separately aborts and joins refresh/watcher
-tasks. Synchronous coordinator shutdown and Drop request hydration shutdown but
-cannot await it; use the async shutdown path for background completion.
+The coordinator warns after ten seconds of hydration shutdown and continues
+waiting with mount/cache ownership intact. Refresh owners cancel polling and
+join the task; aborting it could detach a blocking Git fetch. Daemon teardown
+separately aborts and joins its watcher. Synchronous coordinator shutdown and
+Drop request cancellation but cannot await completion; use the async path.
 Foreground request ownership and native teardown still require backend proof.
 
 The locked `nfs3_server` listener also spawns connection handlers and a transaction

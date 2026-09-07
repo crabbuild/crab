@@ -2749,3 +2749,46 @@ metadata commit and these two source batches are ready for grouped publication.
 Native NFS workflow dispatch and refreshed PR CI remain required after push.
 These results do not establish whole-backend/refresh completion or finish the
 all21-crate objective.
+
+## Refresh completion ownership (in progress)
+
+Published d58bcf91151 with metadata/VFS/cache startup batches; native NFS
+workflow34148861825 is running on that exact head. Current local follow-up
+retains the coordinator refresh handle and joins refresh in all three owners:
+coordinator removal/graceful shutdown, daemon teardown, and interactive NFS.
+Daemon and interactive NFS previously aborted the outer refresh task, even
+though RefreshService::poll_remote and nfs_control::refresh_runtime await
+spawn_blocking work. Cancellation now stops later polls; joining includes the
+admitted blocking fetch/snapshot operation. Watcher/control ownership is separate.
+
+Before-fix proof adds only handle retention plumbing and a blocked refresh task
+to the existing shared-resource test; removal behavior is unchanged for that
+run. Session17267 exits101 at the intended assertion that removal detached
+in-progress refresh work. A channel releases the blocking worker before the
+assertion so failure cannot hang the runtime. The fix adds awaited completion
+before backend/cache release and cancels the daemon repo token before joining.
+Its daemon fixture now models cooperative cancellation instead of requiring an
+abort to finish. Focused coordinator/daemon/NFS/refresh tests, strict lint/docs
+are running in session81396. No native mount has been exercised locally.
+
+The refresh batch passes13 coordinator,38 daemon,23 refresh-loop, and initially
+16 NFS parent-lifecycle tests, strict Clippy/rustdoc, separate NFS/FUSE checks,
+and the CLI build. Those NFS fixtures disabled auto-refresh, so a new regression
+now admits real nfs_control auto-refresh behind a held runtime mutex, cancels,
+and verifies teardown remains pending until the blocking operation can finish.
+The fixture first polls synchronous startup to completion so temporary control
+state references cannot masquerade as an admitted refresh. Its first attempt
+missed that synchronization; the corrected fixture passes all17 NFS tests.
+
+Restoring the old NFS handle.abort line makes this new regression fail at the
+intended detached-refresh assertion (session95988, exit101). The script restored
+the fixed file afterward, and cmp verified exact restoration. Logs:
+/tmp/crab-089c-vfs-refresh-nfs-admission-before.log and
+/tmp/crab-089c-vfs-refresh-nfs-admission-after.log. This provides NFS-owner proof
+in addition to the coordinator regression. Strict all-target Clippy is rerunning
+for the new fixture; runtime source remains identical to the passing build.
+
+Final all-target VFS Clippy passes with the new NFS fixture. The refresh batch
+now has91 focused passing tests, backend checks, strict docs/lint, and CLI build
+proof. Native qualification remains tied to published head d58bcf91151 until
+this follow-up is published and separately qualified.

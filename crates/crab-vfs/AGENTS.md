@@ -45,6 +45,11 @@ mount/control owners consume the pipeline output separately.
   tracker includes queue workers and read-window prefetch. A timed-out wait does
   not complete background work. Synchronous cleanup can only request shutdown.
   Source: `crates/crab-vfs/src/hydration.rs` and `crates/crab-vfs/src/coordinator.rs`.
+- Retain refresh task handles and await them after cancellation. Refresh can
+  await blocking Git/snapshot work; aborting the outer task does not finish it.
+  Inspect coordinator, daemon, and interactive NFS owners together.
+  Sources: `crates/crab-vfs/src/coordinator.rs`, `crates/crab-vfs/src/daemon.rs`,
+  `crates/crab-vfs/src/nfs_mount.rs`.
 - Review cancellation, hydration worker shutdown, leases, and control resources in both FUSE and NFS owners before changing teardown.
   Source: `crates/crab-vfs/src/nfs_mount.rs`.
 

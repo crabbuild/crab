@@ -1197,9 +1197,10 @@ impl DaemonService {
     async fn teardown_runtime(&self, rt: &mut RepoRuntime) -> Result<()> {
         let name = &rt.config.name;
 
-        // 1. Cancel refresh loop.
+        // Cancelling polling still allows an admitted blocking Git fetch to
+        // finish. Aborting its outer task would detach that cache user.
+        rt.repo_cancel.cancel();
         if let Some(handle) = rt.refresh_handle.take() {
-            handle.abort();
             let _ = handle.await;
             debug!(name = %name, "refresh loop cancelled");
         }
@@ -1239,8 +1240,6 @@ impl DaemonService {
         }
         rt.cache_lock = None;
 
-        // Cancel repo-level token.
-        rt.repo_cancel.cancel();
         mount_result
     }
 
@@ -2145,6 +2144,13 @@ mod tests {
         .unwrap();
         hydration.spawn_workers();
         let hydration_observer = Arc::downgrade(&hydration);
+        let repo_cancel = CancellationToken::new();
+        let refresh_cancel = repo_cancel.clone();
+        let refresh_guard = Arc::clone(&ownership);
+        let refresh = tokio::spawn(async move {
+            refresh_cancel.cancelled().await;
+            drop(refresh_guard);
+        });
         let mut runtime = RepoRuntime {
             config: sample_config("teardown"),
             state: RepoRuntimeState::Initializing,
@@ -2155,8 +2161,8 @@ mod tests {
             resolver: None,
             mount_session: None,
             watcher_handle: Some(spawn()),
-            refresh_handle: Some(spawn()),
-            repo_cancel: CancellationToken::new(),
+            refresh_handle: Some(refresh),
+            repo_cancel,
             paths: None,
             cache_lock: None,
         };

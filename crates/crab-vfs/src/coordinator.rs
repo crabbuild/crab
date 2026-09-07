@@ -96,6 +96,8 @@ pub struct MountHandle {
     pub config: PipelineConfig,
     /// FUSE background session.
     pub fuse_session: Option<fuser::BackgroundSession>,
+    /// Refresh task; cancellation must be followed by completion before release.
+    pub refresh_handle: Option<tokio::task::JoinHandle<()>>,
     /// Live inode index for targeted kernel cache invalidation.
     pub invalidation_index: Option<FuseInvalidationIndex>,
     /// Per-mount cancellation token (child of coordinator's token).
@@ -723,6 +725,11 @@ impl Coordinator {
         }
 
         for (mountpoint, handle) in &mut mount_handles {
+            // Refresh may await a blocking Git fetch. Joining the outer task
+            // after cancellation keeps snapshot/cache ownership through it.
+            if let Some(refresh) = handle.refresh_handle.take() {
+                let _ = refresh.await;
+            }
             unmount_session_logged(handle.fuse_session.take(), mountpoint);
             if tokio::time::timeout(GRACE_PERIOD, handle.hydration.shutdown())
                 .await
@@ -912,7 +919,11 @@ fn unmount_session(session: Option<fuser::BackgroundSession>, mountpoint: &Path)
     crate::mount::unmount_background_session(session, mountpoint)
 }
 
-pub async fn unmount_removed_mount(handle: MountHandle, mountpoint: &Path) -> Result<()> {
+pub async fn unmount_removed_mount(mut handle: MountHandle, mountpoint: &Path) -> Result<()> {
+    handle.cancel_token.cancel();
+    if let Some(refresh) = handle.refresh_handle.take() {
+        let _ = refresh.await;
+    }
     let result = unmount_session(handle.fuse_session, mountpoint);
     handle.hydration.shutdown().await;
     result
@@ -1405,6 +1416,7 @@ mod tests {
                 pipeline_output,
                 config,
                 fuse_session: None,
+                refresh_handle: None,
                 invalidation_index: None,
                 cancel_token: cancel,
                 _cache_lock: None,
@@ -1421,7 +1433,7 @@ mod tests {
         let cancel_a = coordinator.child_cancel_token();
         let cancel_b = coordinator.child_cancel_token();
 
-        let handle_a = make_mount_handle(
+        let mut handle_a = make_mount_handle(
             &shared_cache,
             &tmp.path().join("mount_a/snapshot.sqlite"),
             "crab://bucket/repo-a",
@@ -1435,6 +1447,18 @@ mod tests {
             true,
             cancel_b.clone(),
         );
+
+        let (fetch_started, started) = tokio::sync::oneshot::channel();
+        let (finish_fetch, fetch_finished) = std::sync::mpsc::channel();
+        handle_a.refresh_handle = Some(tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                fetch_started.send(()).unwrap();
+                fetch_finished.recv().unwrap();
+            })
+            .await
+            .unwrap();
+        }));
+        started.await.unwrap();
 
         // Register both mounts.
         let mp_a = PathBuf::from("/mnt/repo-a");
@@ -1496,7 +1520,22 @@ mod tests {
         assert!(coordinator.pending_mountpoints.is_empty());
         assert!(coordinator.pending_cache_dirs.is_empty());
 
-        coordinator.remove_mount(&mp_a).await.unwrap();
+        {
+            use std::future::Future;
+            use std::task::Poll;
+
+            let removal = coordinator.remove_mount(&mp_a);
+            tokio::pin!(removal);
+            let waiting = std::future::poll_fn(|context| {
+                Poll::Ready(removal.as_mut().poll(context).is_pending())
+            })
+            .await;
+            // Release the simulated blocking Git fetch even if removal returned
+            // early, so a failing assertion cannot strand the test runtime.
+            finish_fetch.send(()).unwrap();
+            assert!(waiting, "mount removal detached in-progress refresh work");
+            removal.await.unwrap();
+        }
         assert_eq!(coordinator.mount_count(), 1);
         assert!(!coordinator.cancel_token().is_cancelled());
 

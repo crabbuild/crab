@@ -641,7 +641,7 @@ impl RefreshService {
 
     /// Run the refresh loop until cancellation.
     ///
-    /// Spawns two polling loops:
+    /// Polls two timers in one task:
     /// - Remote ref polling at `remote_poll_interval` (with backoff on failure)
     /// - Local `.git/HEAD` polling at `local_poll_interval`
     ///
