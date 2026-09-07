@@ -1751,3 +1751,37 @@ deleted inputs now allocate a linear status vector before the shared builder;
 this is an explicit memory tradeoff for one report assembly path, not a claimed
 performance improvement. Input validation and very-large-count arithmetic remain
 separate qualification work.
+
+### Diff report equality is reflexive through nested metrics
+
+ChunkDiffReport and FileDiffEntry implement Eq on main and release tag v1.1.0.
+The report already compares dedup_ratio through f64::to_bits, but its optional
+ChunkDiffMetrics uses derived floating-point PartialEq. A caller can populate
+public reuse_ratio with NaN and make a report unequal to its clone, violating
+Eq's reflexivity requirement. The old docs incorrectly claimed derived report
+PartialEq and relied on production calculations never producing NaN.
+
+Preserve the tagged Eq API and use the report's existing bitwise ratio policy
+for ChunkDiffMetrics too. Identical NaN payloads now compare equal; different
+NaN payloads and signed zeroes differ. The signed-zero distinction is an
+intentional change to nested-metric equality, aligning it with the enclosing
+report. FileDiffEntry now derives its trivial wrapper equality. Serialized
+fields and diff arithmetic are unchanged. Corrected adjacent field docs:
+comparators compute details without a verbosity request, and term reports omit
+Added/Deleted ranges while chunk reports mirror their new-side metrics.
+
+Evidence map: compare_sequences -> build_metrics/report_from_metrics -> public
+ChunkDiffReport -> nested ChunkDiffMetrics equality; FileDiffEntry delegates to
+that report. compare_terms produces no chunk metrics and keeps its existing
+ratio equality. CLI diff constructs these reports; formatter sorting uses paths
+and renders/serializes fields without depending on ratio equality. Searches of
+all workspace uses found no separate report equality owner.
+
+Two regressions fail before the fix: report/entry clone equality with nested
+NaN, and nested signed-zero comparison inconsistent with the report ratio.
+Coverage includes infinities, two NaN payloads, signed zeroes, and a finite ratio.
+All 29 diff library tests and strict all-target Clippy pass. No new dependency,
+wrapper data type, storage format, or public field was introduced; added manual
+field comparison is required by the existing tagged Eq contract.
+
+Dependency contract: https://doc.rust-lang.org/std/cmp/trait.Eq.html.

@@ -44,6 +44,10 @@ Reports include unchanged/added/removed bytes, dedup ratio, changed ranges,
 and optional segment details. `compare_sequences` uses the same ordered
 greedy matcher when its exact matching work exceeds its own budget.
 
+Report and chunk-metric equality compare ratio bit patterns. Identical NaN
+payloads compare equal; signed zeroes and distinct NaN payloads differ. This
+keeps the public `Eq` contract valid even for caller-constructed reports.
+
 ## Usage
 
 ```rust
