@@ -1164,6 +1164,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn listener_error_survives_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let server = tokio::spawn(async {
+            Err(CrabError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "synthetic listener failure",
+            )))
+        });
+        let (_sender, receiver) = mpsc::channel(1);
+        let session = synthetic_session(root.path(), server, receiver);
+        let result = run_until_cancelled(session, CancellationToken::new()).await;
+        assert!(
+            matches!(result, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::ConnectionReset)
+        );
+    }
+
+    #[tokio::test]
+    async fn aborted_listener_is_not_joined_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let server = tokio::spawn(std::future::pending::<Result<()>>());
+        server.abort();
+        let (_sender, receiver) = mpsc::channel(1);
+        let session = synthetic_session(root.path(), server, receiver);
+        assert!(
+            run_until_cancelled(session, CancellationToken::new())
+                .await
+                .is_ok()
+        );
+    }
+
     #[test]
     fn windows_drive_target_parser_requires_explicit_drive() {
         assert_eq!(parse_windows_drive_target("z:"), Some("Z:".to_owned()));

@@ -803,3 +803,11 @@ they do not invoke native mounting or qualify dependency child connections.
 Strict all-target nfs Clippy passes with these tests. Failed native mount and
 journal/unmount error injection remain unqualified; no complete NFS shutdown
 claim is made. The joins improve directly owned task release only.
+
+NFS parent-task error qualification: listener_error_survives_cleanup verifies
+that a selected listener ConnectionReset retains its typed I/O error after
+cleanup. aborted_listener_is_not_joined_twice covers the cancelled JoinError
+branch. All 16 nfs_mount tests pass, including the earlier completion/cancellation
+regressions; strict all-target nfs Clippy passes. Tests use no native mount and
+do not prove concurrent error precedence when cancellation wins select, failed
+native unmount, or dependency connection draining. Those gaps remain explicit.
