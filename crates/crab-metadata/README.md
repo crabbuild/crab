@@ -47,8 +47,25 @@ canonical key/value codecs. Storage-backed helpers are feature-gated:
 | `local-index` | SQLite-backed local chunk index |
 | `remote-index` | SlateDB remote index readers and writers |
 
+## Reader and writer ownership
+
 Keep each SlateDB session's lifecycle explicit: every opened reader or writer
 must be closed on success and error paths.
+
+`RemoteIndexWriter` opens only the indexes selected by its caller. Nonempty
+entries for an unopened index are rejected before either batch is written.
+
+| Operation | Guarantee |
+| --- | --- |
+| `RemoteIndexWriter::write_entries` | Buffer entries in opened databases; no per-batch durability guarantee. |
+| `RemoteIndexWriter::close` | Attempt to flush and close both databases; return the file-index error first if both fail. |
+| `write_index_entries` | Open the needed databases, write one batch, and close; preserve a write error over a close error. |
+
+Always await close after a write error too. These operations do not provide an
+atomic transaction across the two databases, and dropping their futures does
+not provide asynchronous cleanup.
+
+### Snapshot-bound lookup
 
 Integrity callers use `FileIndexLookupSession::from_snapshot` with an already
 captured `RepositorySnapshot` and its scoped storage layout. This constructor
@@ -58,6 +75,8 @@ select the smallest shard hash deterministically. The caller still owns
 freshness revalidation and protection against concurrent GC. This path scans
 the captured shard inventory, so it is not an acceleration-index performance
 claim.
+
+### Snapshot identity
 
 `RepositorySnapshot` also captures the validated canonical layout descriptor.
 The reader validates it around metadata materialization, and the snapshot
@@ -75,18 +94,30 @@ Receive validation uses
 `FileIndexLookupSession::for_snapshot(&layout, &snapshot, limits)` when the
 composing operation must supply stricter aggregate bounds.
 
-`FileIndexLookupLimits` bounds batch size, cached distinct files, cumulative shard
-visits, each fetched shard body and expanded recipe entries. The inventory must
-fit the visit budget before the session is created. A complete scan reserves its
-visits before dispatch; failures and cancellation consume that reservation, and
-cannot create cached absences. Cached results need no further shard visits.
-At most four shard scans overlap across all sessions in a process. Capacity is
-acquired before origin reads and moves into the blocking hash/recipe parser.
-Dropping or timing out the caller leaves that capacity held until the worker
-exits, so detached jobs cannot evade the bound. Hashing/parsing does not block
-async workers. Excluding transport retries, total shard-body
-bytes are bounded by `max_shard_visits * max_shard_bytes`; each visit also permits
-one HEAD and at most a 12-byte trailer plus a 4 KiB bloom prefilter read.
+### Lookup resource limits
+
+| Limit | Scope |
+| --- | --- |
+| `max_files` | Each batch and the session's cached distinct files. |
+| `max_shard_visits` | Cumulative shard visits, reserved before a scan is dispatched. |
+| `max_shard_bytes` | Each fetched shard body. |
+| `max_recipe_entries` | Expanded recipe entries. |
+
+The captured inventory must fit the visit budget before session creation.
+Failed or cancelled scans consume their reservation and cannot cache absences.
+Cached results need no further shard visits.
+
+At most four shard scans overlap across all sessions in a process. A scan
+acquires capacity before origin I/O, then moves its permit into the blocking
+hash/recipe parser. Dropping or timing out the caller leaves that permit held
+until the worker exits; hashing and parsing stay off async workers.
+
+Excluding transport retries, the read budget is:
+
+```text
+shard bodies ≤ max_shard_visits × max_shard_bytes
+per visit:   ≤ one HEAD + 12-byte trailer + 4 KiB bloom prefilter
+```
 
 A selected shard is only a dependency candidate. Verify the file's content at
 origin with `crab-read::pointer_proof`, and hold GC fences and recheck the exact

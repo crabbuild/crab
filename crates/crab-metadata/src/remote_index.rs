@@ -1,8 +1,8 @@
 //! Write-side SlateDB helpers for Crab's remote metadata indexes.
 //!
-//! This Module owns the narrow remote-index Interface needed by server
-//! adapters: write file/chunk index batches using the canonical key/value
-//! codecs, and close every opened SlateDB handle before returning.
+//! Server adapters use canonical file/chunk codecs through this module.
+//! One-shot helpers close their own handles; long-lived writers transfer
+//! explicit close ownership to their caller.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -74,7 +74,8 @@ fn chunk_index_path(global_prefix: &str) -> String {
 ///
 /// Empty entry sets do not open their corresponding database. Any database
 /// opened by this function is closed before the result is returned; when both
-/// a write and close fail, the write error is returned.
+/// a write and close fail, the write error is returned. Await this future to
+/// completion; dropping it cannot perform asynchronous cleanup.
 pub async fn write_index_entries(
     store: Arc<dyn ObjectStore>,
     config: &RemoteIndexConfig,
@@ -99,7 +100,11 @@ pub async fn write_index_entries(
     close_result
 }
 
-/// Long-lived bounded writer for a sequence of remote index batches.
+/// Long-lived writer for caller-bounded remote index batches.
+///
+/// Writes buffer data without waiting for durability. Always await [`Self::close`]
+/// before reporting publication success, including after a batch error. This
+/// writer does not provide an atomic transaction across file and chunk indexes.
 pub struct RemoteIndexWriter {
     file_db: Option<slatedb::Db>,
     chunk_db: Option<slatedb::Db>,
@@ -139,7 +144,12 @@ impl RemoteIndexWriter {
         Ok(Self { file_db, chunk_db })
     }
 
-    /// Commit one bounded batch without closing the underlying databases.
+    /// Buffer one caller-bounded batch in the opened databases.
+    ///
+    /// Nonempty entries require their index to have been selected in [`Self::open`].
+    /// An unopened index returns [`MetadataError::Internal`] before either index
+    /// is written. Other errors may occur after file entries were buffered;
+    /// callers must still close the writer. Success is not a durability barrier.
     pub async fn write_entries(
         &self,
         file_entries: &[(MerkleHash, CommittedFileRecord)],
@@ -155,6 +165,9 @@ impl RemoteIndexWriter {
     }
 
     /// Flush and close every database opened by this writer.
+    ///
+    /// Both closes are attempted. If both fail, return the file-index error.
+    /// Await this future through completion; dropping it cannot finish cleanup.
     pub async fn close(self) -> Result<()> {
         close_opened_writers(self.file_db, self.chunk_db).await
     }
@@ -252,6 +265,27 @@ async fn write_opened_entries(
     file_entries: &[(MerkleHash, CommittedFileRecord)],
     committed_chunk_entries: &[(MerkleHash, CommittedChunkReceipt)],
 ) -> Result<()> {
+    // Validate both selections before buffering anything: accepting half a batch
+    // would hide caller mistakes behind a successful batch result.
+    for (opened, has_entries, label) in [
+        (
+            file_db.is_some(),
+            !file_entries.is_empty(),
+            FILE_INDEX_DB_LABEL,
+        ),
+        (
+            chunk_db.is_some(),
+            !committed_chunk_entries.is_empty(),
+            CHUNK_INDEX_DB_LABEL,
+        ),
+    ] {
+        if has_entries && !opened {
+            return Err(MetadataError::Internal(format!(
+                "{label} was not opened for writing"
+            )));
+        }
+    }
+
     if let Some(db) = file_db
         && !file_entries.is_empty()
     {
@@ -514,6 +548,74 @@ mod tests {
 
     fn hash_from_seed(seed: u64) -> MerkleHash {
         MerkleHash::from([seed, seed.wrapping_mul(31), seed.wrapping_mul(97), seed])
+    }
+
+    #[tokio::test]
+    async fn unopened_index_rejects_entries_before_writing_either_index() {
+        let hash = hash_from_seed(1);
+        let files = [(
+            hash,
+            CommittedFileRecord {
+                recipe_hash: [1; 32],
+                shard_hash: hash,
+                committed_generation: 1,
+                shard_index_hash: hash,
+            },
+        )];
+        let chunks = [(
+            hash,
+            CommittedChunkReceipt {
+                schema_version: crate::receipts::RECEIPT_SCHEMA_VERSION,
+                chunk_hash: hash.into(),
+                xorb_hash: hash.into(),
+                chunk_index: 0,
+                uncompressed_size: 100,
+                origin: OriginReceipt::new(
+                    "origin".into(),
+                    "xorbs/object".into(),
+                    hash.into(),
+                    [9; 32],
+                    100,
+                    None,
+                    None,
+                ),
+                source_repo_prefix: "org/repo".into(),
+                source_shard_hash: hash.into(),
+                committed_generation: 1,
+                shard_index_hash: hash.into(),
+                gc_registry_generation: 1,
+            },
+        )];
+        for (write_files, write_chunks, missing) in [
+            (false, true, FILE_INDEX_DB_LABEL),
+            (true, false, CHUNK_INDEX_DB_LABEL),
+        ] {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let config = RemoteIndexConfig::for_repo("org/repo");
+            let writer = RemoteIndexWriter::open(store, &config, write_files, write_chunks)
+                .await
+                .unwrap();
+            let result = writer.write_entries(&files, &chunks).await;
+            let file_value = match &writer.file_db {
+                Some(db) => db.get(encode_committed_file_key(&hash, 1)).await.unwrap(),
+                None => None,
+            };
+            let chunk_value = match &writer.chunk_db {
+                Some(db) => db
+                    .get(encode_committed_chunk_head_key(&hash))
+                    .await
+                    .unwrap(),
+                None => None,
+            };
+            writer.close().await.unwrap();
+            assert!(
+                matches!(result, Err(MetadataError::Internal(message)) if message.contains(missing))
+            );
+            assert!(
+                file_value.is_none() && chunk_value.is_none(),
+                "rejected batch must not write either index"
+            );
+        }
     }
 
     #[tokio::test]

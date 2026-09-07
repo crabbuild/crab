@@ -45,7 +45,7 @@ not claims that the named code is defective.
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Range arithmetic, malformed payloads, reconstruction checks | Pending |
 | crab-storage | Credential diagnostics; retry/error classification remains | Diagnostic slice verified |
-| crab-metadata | Reader/writer closure and feature boundaries | Pending |
+| crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | Upload I/O causes; integrity and lock ownership remain | Upload diagnostic slice verified |
@@ -358,3 +358,34 @@ power-loss or platform-wide qualification.
 Validation: all 14 recovery tests and strict all-target staging Clippy pass.
 Production recovery grows nine lines to distinguish three filesystem outcomes;
 regression fixtures account for the remaining source growth.
+
+## Remote index writer selection and durability
+
+`crab-metadata::RemoteIndexWriter` can open file and chunk indexes independently,
+but `write_opened_entries` silently skipped nonempty entries when their database
+was not selected. The writer now checks both selections before buffering either
+batch and returns the existing Internal error for a caller-contract violation.
+This adds no public variants or dependencies and leaves empty batches valid.
+It does not promise cross-database atomicity for later codec or storage errors.
+
+Caller map: protected receive and path-view publication open both indexes;
+`write_index_entries` derives selection from nonempty input. Those correct paths
+remain supported. Callee: SlateDB 0.15.0 writes use `await_durable: false`; its
+close implementation flushes outstanding writes while the database is healthy.
+`close_opened_writers` awaits both handles before selecting the first error.
+Catalog writers/readers have separate publication/checkpoint policies and keep
+their existing close paths.
+
+Rustdoc previously called buffered writes a commit. It now states selection,
+partial-failure, durability, and close ownership explicitly. README includes a
+writer outcome table, separates snapshot identity from lifecycle, and replaces
+a dense lookup-budget paragraph with a field table and a byte-budget example.
+
+A new real-SlateDB/in-memory-store regression rejects mismatched selections in
+both directions and checks neither index received a row. It failed against the
+old implementation. Existing tests cover flush-on-close, receipt round trips,
+fresh indexes, and configured paths.
+
+Validation: all five remote-index tests and strict all-target Clippy with
+`remote-index` pass. Added production logic is one preflight loop; the remaining
+source growth documents durability and exercises both database selections.
