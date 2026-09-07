@@ -1402,3 +1402,39 @@ The initial CLI fixture reused an immutable ref across cases and hit the
 expected create-only conflict; each case now owns its own in-memory store.
 No storage behavior was changed to accommodate the fixture. Native/cloud E2E,
 full CLI lint qualification, and schema-decoder consolidation remain unclaimed.
+
+### Metadata decoding: complete consumer boundary survey
+
+The next decoding change must cover more than the two remote readers. Current
+source search identifies these distinct policies:
+
+| Surface | Current decoding and failure policy |
+| --- | --- |
+| Workflow `read_experiment_metadata` | Probes schema v1, deserializes, verifies identity; JSON causes are stringified into Internal. |
+| CLI `read_remote_metadata` | Direct deserialization, then shared identity verification; no explicit schema-version check, JSON cause stringified into CorruptObject. |
+| CLI `read_local_metadata` | Direct deserialization; no explicit schema or requested-ID check; missing file is ExperimentNotFound, other I/O errors propagate. |
+| CLI `collect_summaries` | Direct deserialization; read/parse errors log and skip entries; successful metadata supplies the displayed ID. |
+| Workflow `collect_local_workflow_live_set` | Direct deserialization; directory-entry, stat, read, and JSON failures log and skip; checkpoint scanning instead propagates failures. |
+
+The last surface can return an incomplete live set while its docs call that set
+conservative. A grace period cannot prove that an unreadable metadata object's
+references are dead. Exhaustive symbol search finds no production callers of
+this exported collector, only module tests and its public re-export. Therefore
+this is a dangerous library contract, not a demonstrated production deletion
+path. The existing malformed-blob test explicitly protects skip behavior and
+must be replaced when that behavior is removed, rather than retained as a
+compatibility requirement. No release-tag contract has been established for it.
+
+Implementation requirements for the next batch: one schema-aware decoding
+boundary with a retained serde_json source, an explicit integrity classification
+through the CLI error catalog, and caller-owned not-found/listing policy. A
+live-set collector must propagate incomplete-enumeration and malformed-metadata
+errors; local requested-ID checks need proof alongside remote identity checks.
+Do not reuse a metrics error or stringify a parse cause simply to avoid updating
+the error boundary. Add regressions for unsupported schemas, malformed metadata,
+local identity mismatch, and fail-closed live-set collection. Preserve missing
+parent semantics and valid checkpoint-only roots.
+
+This survey changes the required implementation scope. No decoding/runtime
+change is claimed yet. Latest observed CI for e4a90d01ab0 reports two successes,
+two in progress, four skipped, with no reported failures at that observation.
