@@ -3196,3 +3196,51 @@ is_mounted still invoke synchronous subprocess output with no subprocess
 deadline. This NFS control fix does not prove or claim to fix that native hang.
 Native run34154546592 on6ae0432975e has started its feature gate; preserve that
 run for the earlier macOS uncached-read and Windows streaming-log evidence.
+
+
+### FUSE IPC exchange ownership
+
+The NFS sibling audit led to `ipc_client::IpcClient::send_with_timeout`. On
+origin/main a371fb7d002 it writes without a deadline and borrows persistent read
+and write halves through a response-only timeout. Dropping the send future or
+returning a timeout retains that socket in the client. The server uses ordered
+newline JSON without response IDs, so preserving an incomplete exchange leaves
+a later call exposed to its late response.
+
+Two before-fix regressions fail: an 8 MiB synthetic commit cannot reach its
+response-only deadline while the listener does not read, and cancellation after
+the peer receives a ping leaves the connection open past the EOF watchdog.
+The exchange now takes ownership of one buffered Unix stream and restores it
+only after a complete, valid response. Its operation timeout covers write,
+flush and response read. Cancellation, timeout and I/O/parse errors close the
+socket; later calls return SendFailed with NotConnected, without auto-reconnect
+or mutation retry. Valid application errors preserve connection reuse.
+
+This is the same per-exchange ownership rule as NFS, adapted to the existing
+reusable FUSE client. NFS still opens a fresh transport for every call. No new
+transport wrapper or parallel request path is introduced. The small non-test growth
+expresses temporary connection ownership and the unavailable-connection error;
+most growth is regression coverage and documentation. The public error variant
+is now RequestTimeout to describe its wider scope; workspace search found no
+external match on the old ResponseTimeout variant, and this crate has
+publish=false. Method signatures and wire shapes are unchanged.
+
+Caller evidence: all eight IPC command helpers, mount_control's FUSE transport,
+CLI mount status, and coordinator stop/status use send/send_with_timeout.
+Coordinator lifecycle integration tests cover the same public client. The
+existing client/server test now also sends after a complete application error,
+preserving successful reuse. New local socket tests cover stalled writes,
+caller cancellation, timeout, rejected reuse, malformed responses and EOF.
+Tokio 1.52.1 Lines::next_line documents cancellation safety and preserves its
+buffer; cancellation safety of one read alone does not identify which request
+a late response belongs to. Owning the full buffered stream avoids losing
+buffer state on successful reuse and drops it on an uncertain exchange.
+
+Five focused client tests, strict fuse+nfs all-target Clippy/rustdoc, and the
+CLI foreground-start/ping consumer integration pass. The default-feature CLI
+build passes with the known macOS debug-unwind linker warning.
+No native mount is used by these fixtures. Remaining boundaries include
+connect/spawn deadline and stale-socket classification, IPC server child-task
+ownership, mutation completion after disconnect, and error-source retention in
+the CLI conversion. Native run34154546592 passed its feature gate; all four
+platform/service jobs are running on the earlier6ae0432975e commit.

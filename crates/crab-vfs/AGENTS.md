@@ -58,6 +58,9 @@ mount/control owners consume the pipeline output separately.
 - NFS control deadlines cover connect/write/read on a request-owned socket.
   Timeout closes that socket; it does not roll back a helper mutation. Do not
   retry an uncertain commit. Source: `crates/crab-vfs/src/nfs_control.rs`.
+- FUSE IPC exchanges temporarily own their connection. Restore it only after a
+  valid response; cancellation or errors must close it so a late response cannot
+  satisfy a later request. Source: `crates/crab-vfs/src/ipc_client.rs`.
 
 ## Features and platform
 

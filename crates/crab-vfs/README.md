@@ -104,7 +104,16 @@ cleaner without exposing join handles. Listener drop notifies the cleaner, but
 neither that notification nor joining the listener proves child-task completion.
 Native unmount and backend task cleanup need separate verification.
 
-## NFS control deadlines
+## Control exchange ownership
+
+The FUSE coordinator client reuses its connection only after a complete, valid
+response, including an application error. One timeout covers request writes and
+the response read. During I/O the exchange owns the connection; cancellation,
+timeout, or a transport/parse failure closes it. Further sends return
+`NotConnected`. Reconnect explicitly and determine a mutation's outcome before
+deciding whether to retry it. Connection setup/spawning has a separate policy.
+
+### NFS control deadlines
 
 Each control call owns a fresh socket. Its timeout covers connection setup,
 request writes, and the response read: ten seconds normally, thirty minutes for

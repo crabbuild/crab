@@ -29,11 +29,11 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 /// Backoff multiplier for each retry attempt.
 const BACKOFF_MULTIPLIER: u32 = 2;
 
-/// Timeout for reading a response from the coordinator.
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for writing a request and reading its response.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// FUSE unmount can block while the kernel drains outstanding requests.
-const UNMOUNT_RESPONSE_TIMEOUT: Duration = Duration::from_mins(2);
+const UNMOUNT_REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -60,8 +60,8 @@ pub enum IpcClientError {
     #[error("failed to read response: {0}")]
     ReadFailed(#[source] std::io::Error),
 
-    #[error("response timeout after {0:?}")]
-    ResponseTimeout(Duration),
+    #[error("request timeout after {0:?}")]
+    RequestTimeout(Duration),
 
     #[error("failed to serialize request: {0}")]
     SerializeFailed(#[source] serde_json::Error),
@@ -87,10 +87,11 @@ impl From<IpcClientError> for CrabError {
 ///
 /// Connects to the coordinator's socket, sends newline-delimited JSON
 /// requests, and reads JSON responses. Each client holds a single
-/// connection that can be reused for multiple request/response cycles.
+/// connection that can be reused after a complete, valid response. Once I/O
+/// starts, an interrupted or failed exchange closes the connection; create a new
+/// client to reconnect.
 pub struct IpcClient {
-    reader: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-    writer: tokio::net::unix::OwnedWriteHalf,
+    connection: Option<tokio::io::Lines<BufReader<UnixStream>>>,
 }
 
 impl std::fmt::Debug for IpcClient {
@@ -114,13 +115,9 @@ impl IpcClient {
             }
         })?;
 
-        let (reader, writer) = stream.into_split();
-        let lines = BufReader::new(reader).lines();
-
         debug!("connected to coordinator");
         Ok(Self {
-            reader: lines,
-            writer,
+            connection: Some(BufReader::new(stream).lines()),
         })
     }
 
@@ -203,46 +200,55 @@ impl IpcClient {
         &mut self,
         request: &IpcRequest,
     ) -> std::result::Result<IpcResponse, IpcClientError> {
-        self.send_with_timeout(request, RESPONSE_TIMEOUT).await
+        self.send_with_timeout(request, REQUEST_TIMEOUT).await
     }
 
-    /// Send a request and wait for the response using an operation-specific timeout.
+    /// Send one request with a deadline covering its write and response read.
+    ///
+    /// Timeout, I/O or parse errors, and cancellation close the connection.
+    /// Later sends return `SendFailed` with `NotConnected`; reconnect explicitly.
+    /// A disconnected client cannot determine whether a mutation completed.
     pub async fn send_with_timeout(
         &mut self,
         request: &IpcRequest,
         timeout: Duration,
     ) -> std::result::Result<IpcResponse, IpcClientError> {
-        // Serialize request.
         let mut json = serde_json::to_string(request).map_err(IpcClientError::SerializeFailed)?;
         json.push('\n');
 
-        // Write to socket.
-        self.writer
-            .write_all(json.as_bytes())
+        // The exchange owns the socket until a valid response restores it. A
+        // cancelled write or late response must never contaminate the next call.
+        let mut connection = self.connection.take().ok_or_else(|| {
+            IpcClientError::SendFailed(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "IPC connection closed after an incomplete exchange",
+            ))
+        })?;
+        let exchange = async {
+            let writer = connection.get_mut().get_mut();
+            writer
+                .write_all(json.as_bytes())
+                .await
+                .map_err(IpcClientError::SendFailed)?;
+            writer.flush().await.map_err(IpcClientError::SendFailed)?;
+            debug!(op = ?request, "sent IPC request");
+
+            let response_line = connection
+                .next_line()
+                .await
+                .map_err(IpcClientError::ReadFailed)?
+                .ok_or_else(|| {
+                    IpcClientError::ReadFailed(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "coordinator closed connection",
+                    ))
+                })?;
+            serde_json::from_str::<IpcResponse>(&response_line).map_err(IpcClientError::ParseFailed)
+        };
+        let response = tokio::time::timeout(timeout, exchange)
             .await
-            .map_err(IpcClientError::SendFailed)?;
-        self.writer
-            .flush()
-            .await
-            .map_err(IpcClientError::SendFailed)?;
-
-        debug!(op = ?request, "sent IPC request");
-
-        // Read response with timeout.
-        let response_line = tokio::time::timeout(timeout, self.reader.next_line())
-            .await
-            .map_err(|_| IpcClientError::ResponseTimeout(timeout))?
-            .map_err(IpcClientError::ReadFailed)?
-            .ok_or_else(|| {
-                IpcClientError::ReadFailed(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "coordinator closed connection",
-                ))
-            })?;
-
-        let response: IpcResponse =
-            serde_json::from_str(&response_line).map_err(IpcClientError::ParseFailed)?;
-
+            .map_err(|_| IpcClientError::RequestTimeout(timeout))??;
+        self.connection = Some(connection);
         debug!(ok = response.ok, "received IPC response");
         Ok(response)
     }
@@ -363,7 +369,7 @@ pub async fn try_ipc_unmount(mountpoint: &str) -> Result<()> {
     };
 
     let response = client
-        .send_with_timeout(&request, UNMOUNT_RESPONSE_TIMEOUT)
+        .send_with_timeout(&request, UNMOUNT_REQUEST_TIMEOUT)
         .await
         .map_err(CrabError::from)?;
 
@@ -793,8 +799,93 @@ mod tests {
         assert!(!response.ok);
         assert!(response.error.unwrap().contains("mount not found"));
 
+        // A complete application error preserves framing for the next request.
+        assert!(client.send(&IpcRequest::List).await.unwrap().ok);
+
         // Clean up.
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn client_deadline_includes_stalled_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let mut client = IpcClient::connect(&path).await.unwrap();
+        // Saturate socket buffers without letting the coordinator read.
+        let request = IpcRequest::CommitOverlay {
+            mountpoint: "/view".to_owned(),
+            message: "x".repeat(8 * 1024 * 1024),
+            push: false,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            client.send_with_timeout(&request, Duration::from_millis(100)),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(IpcClientError::RequestTimeout(_))));
+    }
+
+    #[tokio::test]
+    async fn client_interrupted_exchange_closes_connection() {
+        for timed_out in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("control.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let mut client = IpcClient::connect(&path).await.unwrap();
+            let (peer, _) = listener.accept().await.unwrap();
+            let mut lines = BufReader::new(peer).lines();
+            let mut exchange =
+                Box::pin(client.send_with_timeout(&IpcRequest::Ping, Duration::from_millis(100)));
+            tokio::select! {
+                result = &mut exchange => panic!("exchange ended before the peer read: {result:?}"),
+                request = lines.next_line() => {
+                    assert!(request.unwrap().is_some());
+                }
+            }
+            if timed_out {
+                assert!(matches!(
+                    exchange.await,
+                    Err(IpcClientError::RequestTimeout(_))
+                ));
+            } else {
+                drop(exchange);
+            }
+
+            let eof = tokio::time::timeout(Duration::from_secs(1), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                eof.is_none(),
+                "interruption must close the uncertain exchange"
+            );
+            let retry = client.send(&IpcRequest::List).await;
+            assert!(matches!(retry, Err(IpcClientError::SendFailed(error))
+                if error.kind() == std::io::ErrorKind::NotConnected));
+        }
+    }
+
+    #[tokio::test]
+    async fn client_invalid_response_closes_connection() {
+        use tokio::io::AsyncReadExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let mut client = IpcClient::connect(&path).await.unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        peer.write_all(b"{broken}\n").await.unwrap();
+
+        let result = client.send(&IpcRequest::Ping).await;
+        assert!(matches!(result, Err(IpcClientError::ParseFailed(_))));
+        let mut received = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!received.is_empty());
     }
 
     #[tokio::test]
