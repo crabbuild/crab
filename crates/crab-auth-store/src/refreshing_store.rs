@@ -20,6 +20,10 @@ use crab_auth::{CredentialProvider, CredentialResolution};
 
 use crate::Result;
 
+/// Backend handles and identities replaced together during credential refresh.
+///
+/// Every handle must address the same target. Obtain the identities from the
+/// storage builder; refresh rejects changes to either identity.
 #[derive(Clone)]
 pub struct RefreshingStoreParts {
     pub inner: Arc<dyn ObjectStore>,
@@ -31,6 +35,11 @@ pub struct RefreshingStoreParts {
 
 type StoreBuilder = dyn Fn(CredentialResolution) -> Result<RefreshingStoreParts> + Send + Sync;
 
+/// Refreshes credentials for one target, with one auth retry for unary calls.
+///
+/// Clones share the current backend and serialize refresh. Returned read/list
+/// streams and `MultipartUpload` handles keep their original backend; this
+/// wrapper does not replay them after a later authentication failure.
 pub struct RefreshingObjectStore<P>
 where
     P: CredentialProvider + ?Sized,
@@ -65,6 +74,12 @@ impl<P> RefreshingObjectStore<P>
 where
     P: CredentialProvider + ?Sized,
 {
+    /// Binds an initial backend and its rebuild function to one credential scope.
+    ///
+    /// `initial` must already be resolved for `bucket`, `prefix`, and `operation`.
+    /// `build` must preserve that scope and return consistent backend handles.
+    /// Construction performs no resolution or network I/O; refresh failures
+    /// surface on the operation that triggers them.
     pub fn new(
         provider: Arc<P>,
         bucket: String,
@@ -84,10 +99,12 @@ where
         }
     }
 
+    /// Reports signing support in the current backend without refreshing it.
     pub async fn has_signer(&self) -> bool {
         self.state.read().await.signer.is_some()
     }
 
+    /// Reports stable multipart support and identity without refreshing them.
     pub async fn has_multipart(&self) -> bool {
         let state = self.state.read().await;
         state.multipart.is_some() && state.multipart_identity.is_some()
