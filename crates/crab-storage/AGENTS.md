@@ -30,6 +30,12 @@ dependency source before asserting provider behavior.
 
 ## Invariants
 
+- Validate response ranges before exposing a stream and drain through EOF to
+  prove its declared length. File downloads share bounded validation and remove
+  partial destinations on returned errors (best-effort). Callers own cancellation
+  cleanup; transport errors retain their source.
+  Source: `crates/crab-storage/src/store.rs` (`get_stream`, `download_to_path_bounded`).
+
 - Non-resumable multipart completion uses `crab_storage::multipart::complete_upload`: abort on failure, preserve the completion error, and await cleanup before retry. Durable journal sessions retain their separate recovery protocol.
   Source: `crates/crab-storage/src/multipart.rs`.
 

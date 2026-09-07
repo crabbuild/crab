@@ -44,11 +44,11 @@ not claims that the named code is defective.
 | crab-git | Shared delta decoder; discovery and process contracts remain | Delta slice verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Coverage count simplification; parser and reconstruction qualification remain | Coverage slice verified |
-| crab-storage | Non-resumable multipart cleanup; broader retry/error classification remains | Diagnostics and multipart cleanup slices verified |
+| crab-storage | Broader retry/error classification and cancellation cleanup remain | Diagnostics, multipart cleanup, and stream framing verified |
 | crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
-| crab-lfs | Read framing, first-verification cost, and lock ownership remain | Upload cleanup and receipt/stream identity verified |
+| crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
 | crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
 | crab-cache-store | Startup outcomes; origin authority and range qualification remain | Startup slice verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
@@ -1220,3 +1220,64 @@ checks while deleting the unsafe HEAD receipt path. The earlier ledger's two LFS
 identity follow-ups are addressed by this batch; framing and first-read cost
 remain qualification work. Before publication, CI for head eb2605ff9a2 had 12
 successful, 12 running, and 12 skipped checks, with no failed check reported yet.
+
+## Storage stream framing
+
+Store::get_stream previously forwarded body chunks without validating their
+range or total length. A public-entry regression reproduced six successful
+malformed responses: short/excess full and ranged bodies, a partial response to
+a full read, and a shifted requested range. Extending the same fixture to file
+downloads reproduced fourteen accepted responses across the three public paths.
+
+get_stream now validates its response against the requested range using locked
+object_store GetRange::as_range for EOF clamping. Its stream owns a remaining-byte
+counter: oversize chunks fail before exposure, EOF with bytes missing fails, and
+provider body failures keep their original mapped source. No whole-body buffer,
+background task, or additional retry layer is introduced. A consumer must poll
+through EOF to establish complete framing.
+
+The unbounded file downloader now delegates to download_to_path_bounded with the
+maximum u64 limit. The bounded path additionally validates a full response range
+and rejects bytes beyond the advertised size before writing them. Its existing
+error cleanup removes the partial destination; this also covers the unbounded
+entry point instead of leaving two download implementations with different
+failure guarantees. Byte accounting remains at the existing boundaries.
+
+Evidence map:
+
+- Owner: crab-storage Store::get_stream and download_to_path_bounded.
+- Entry/callers: LFS get_verified_stream_at returns the storage stream to HTTP;
+  LFS origin verification and download_to_file consume it while hashing. Remote
+  Git reader.rs verified pack download and pack.rs artifact download consume it
+  under their admission/deadline and content-checksum contracts.
+- Callee: object_store 0.14.1 GetResult couples ObjectMeta, range, and payload;
+  GetRange::as_range validates bounded requests and clamps only the end at EOF.
+- Siblings: materialized get_with_etag, bounded reads, and get_version already
+  check full-body size. File downloads now share one canonical implementation.
+  Remote Git and LFS keep content hashing; framing alone cannot prove identity.
+- Main: the same unchecked chunk mapping and independent unbounded download loop
+  occur on origin/main. Re-running the new fixture against the original production
+  section reproduced the failures; the corrected production section was restored.
+
+Best-fix assessment: checking only LFS would leave remote Git and file consumers
+with the same transport hole. Validation belongs in the storage stream; deleting
+the duplicate downloader closes its sibling gap without changing content formats,
+provider dependencies, or retry configuration. Exact hash/validator checks remain
+with higher layers. This is transport framing proof, not cloud-service or full
+HTTP connection qualification.
+
+Validation: all 76 storage Store tests, 35 LFS object-store tests, five remote Git
+single-pack tests, three generated-pack corruption tests, and six LFS identity
+integration tests pass (125 total). The transport regression checks all three
+public paths; positive cases cover multiple/empty chunks, empty objects and EOF
+clamping. A late provider ConnectionReset retains its typed cause after an
+already-delivered prefix. Strict all-target Clippy passes for storage and LFS.
+The existing macOS CLI linker warning remains. No cloud E2E run is claimed.
+
+Production section grows by 21 lines for response-range and byte-count guards
+while deleting the duplicate downloader. Returned download errors attempt file
+removal; failures of removal and dropping the operation future are still caller/
+OS cleanup boundaries, not guarantees established by these tests. The earlier
+LFS framing follow-up is addressed here. Before publication, CI for head
+2caa1315d26 reported 11 successful, 13 running and 12 skipped checks, with no
+failures yet; it was not complete.

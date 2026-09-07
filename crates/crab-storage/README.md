@@ -54,6 +54,13 @@ progress callback. Part and completion failures attempt abort before returning;
 an abort failure does not replace the original error used for retry decisions.
 Durable resumable uploads keep their journal lease and recovery protocol.
 
+Stream responses must match the requested range, including EOF clamping. Drain
+the stream through EOF to validate its declared length: short or oversized bodies
+return `CorruptObject`. Provider errors retain their existing classification.
+File downloads share one bounded download path. Returned errors trigger a
+best-effort removal of partial files; callers own cleanup if they cancel by
+dropping the future. No check requires buffering the complete object.
+
 ## Usage
 
 ```rust
