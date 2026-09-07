@@ -2030,3 +2030,72 @@ unwrap_used remains expected for both test builds. Strict all-target Clippy
 now passes with and without remote-client, without disabling the unfulfilled
 expectations lint. Rustdoc builds with warnings denied and no dependencies
 rendered. Formatting and diff checks pass. No routing or dependency changes.
+
+### Warm local cache resolves complete ObjectStore range semantics
+
+A warm immutable xorb did not satisfy an EOF-clamped bounded request when
+origin was absent: the local exact-range helper returned a miss, then range
+resolution attempted origin HEAD and failed NotFound. Offset and suffix
+requests skipped the local bounded fast path entirely and also required a
+remote/origin size probe. The new regression fails on the preceding source
+with a real local cache and a deleted in-memory origin object.
+
+Pinned object_store 0.14.1 defines these policies in GetRange::as_range:
+bounded ends clamp to size, offsets read through EOF, and suffixes saturate
+at zero (including an empty suffix). ObjectStoreExt::get_range constructs the
+same bounded GetOptions request. The adapter now uses that resolver for all
+local range forms, including its direct range_get API.
+
+The size-aware local xorb method now accepts a range resolver. It opens once,
+reads that handle's size, validates the resolved bounds, verifies identity,
+and reads the requested bytes from the same handle. It does not separately
+probe a path and reopen it for payload, which could observe a replacement.
+The adapter resolves shard ranges against the verified cached body. One
+cached_object_range helper consolidates local, cache-service, and resolved
+fallback dispatch, deleting duplicate get_opts branches.
+
+API/caller audit: get_xorb_range_with_size_if_present had two workspace
+callers: the exact get_xorb_range_if_present wrapper and the adapter. Both now
+supply explicit resolver policy. The crate is publish=false. No new dependency,
+serialized shape, cache key, or provider option was introduced. The exact
+wrapper still supplies the unchanged requested interval and rejects an end
+past EOF. Its xorb-read and VFS hydration consumers keep the same signature
+and behavior; they are not switched to HTTP-style clamping.
+
+Proof: the retained adapter matrix covers admitted local xorb and shard paths,
+EOF-clamped bounds, offsets, short/oversized/empty suffixes, direct range_get,
+invalid ranges, object size, returned interval, and exact returned bytes.
+Invalid requests leave the valid cache object available. Both minimal and
+remote-client feature builds pass this test. The remote-enabled instance of
+this new test uses local cache, not a deployed remote service.
+
+Sibling proof: existing exact xorb range and invalid-range recency tests pass.
+Existing cache-service EOF-clamping, origin range fallback, and conditional
+cache-bypass tests also pass; the service test uses loopback HTTP. Strict
+all-target Clippy passes for both changed crates with local-only and remote
+features. Their rustdoc builds with warnings denied. Production dispatch is
+smaller after consolidation; added test code covers distinct public range
+contracts rather than private branches.
+
+Is this the best fix? Resolving against the open handle preserves file identity
+without importing ObjectStore policy into crab-cache. Making all low-level
+reads clamp would violate hydration's exact-range contract, while a separate
+size probe would add I/O and a replacement window. Current source keeps those
+owners explicit and uses the dependency's canonical range semantics.
+
+Remaining limits: no new deployed-provider or adversarial in-place mutation
+qualification. Cache-service/origin fallback keeps its existing transport and
+metadata behavior; this batch specifically removes unnecessary origin access
+when a valid local range can answer the request.
+
+The recorded origin/main has the same exact local-range helper and bounded-only
+adapter dispatch as the reproduced source. The debug CLI build passes through
+crab-read and crab-vfs consumers, retaining the known macOS debug unwind-size
+warning. Formatting and diff checks pass.
+
+Published-head CI note: Real Git compatibility (git-2-45), job 101779421800,
+failed before qualification while downloading the v1.0.1 rollback archive from
+GitHub Releases. Four curl attempts returned HTTP 504; the step exited 22.
+This is missing compatibility evidence, not a demonstrated Git behavior
+failure. Published head remains dc28b041ca0; local batches are not covered by
+that running CI. The browser tooltip-contrast failure remains separate.

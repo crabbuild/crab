@@ -70,6 +70,23 @@ synthesized modification time as the object's creation or update time.
 Explicit cache-service HEAD/range methods query that service without origin
 fallback; they are separate from the read-through adapter.
 
+### Local range reads
+
+A warm local xorb or shard can satisfy every `GetRange` form without an
+origin HEAD request:
+
+| Request | Returned interval for an object of size `n` |
+| --- | --- |
+| `Bounded(start..end)` | `start..min(end, n)`; start must precede EOF. |
+| `Offset(start)` | `start..n`; start must precede EOF. |
+| `Suffix(count)` | `n.saturating_sub(count)..n`, including an empty suffix. |
+
+Bounded ranges must have `end > start` and meet `object_store`'s size limit.
+The adapter uses `object_store`'s range resolver. Xorb resolution and reads
+use the same opened file; shard resolution uses the verified cached body.
+Invalid requests do not evict valid entries. The lower-level exact-range
+xorb API used by hydration still rejects ranges extending beyond the file.
+
 ### Process-local result retention
 
 The process-local xorb result cache retains at most 4,096 entries and charges

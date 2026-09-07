@@ -30,6 +30,8 @@ semantics rather than treating every cache object as interchangeable.
 
 ## Invariants
 
+- Xorb range resolution, identity verification, and reads share one open file. The size-aware resolver accepts caller policy but validates its returned bounds; `get_xorb_range_if_present` keeps exact-range semantics.
+  Source: `crates/crab-cache/src/local_cache.rs`.
 - Manifest keys carry names and optional ETags; do not treat them as content-addressed chunk/shard/xorb identities.
   Source: `crates/crab-cache/src/key.rs`.
 - Path taxonomy is shared with the service and store adapter; review both consumers before changing immutable admission.

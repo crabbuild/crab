@@ -730,32 +730,41 @@ impl LocalCache {
         hash: &MerkleHash,
         range: std::ops::Range<u64>,
     ) -> Option<Bytes> {
-        self.get_xorb_range_with_size_if_present(hash, range)
+        self.get_xorb_range_with_size_if_present(hash, |_| Some(range))
             .await
             .map(|(data, _)| data)
     }
 
-    /// Return a byte range plus total size from a cached xorb.
+    /// Resolve and read a byte range using the opened cached xorb's size.
+    ///
+    /// The resolver supplies policy (for example, suffix or EOF clamping).
+    /// Size resolution, identity verification, and payload reads use one file
+    /// handle, so concurrent replacement cannot mix their object versions.
     ///
     /// Returns `None` on miss, invalid range, or local I/O error. Callers
     /// treat this as a cache miss and fall back to the remote object store.
     pub async fn get_xorb_range_with_size_if_present(
         &self,
         hash: &MerkleHash,
-        range: std::ops::Range<u64>,
+        resolve_range: impl FnOnce(u64) -> Option<std::ops::Range<u64>> + Send,
     ) -> Option<(Bytes, u64)> {
-        if range.start > range.end {
-            return None;
-        }
-        let len = usize::try_from(range.end.checked_sub(range.start)?).ok()?;
         let path = self.hash_path(&CacheKey::Xorb(*hash));
         let (entry, file) = PayloadRead::open(&self.root, &path).await.ok()?;
         let result: Result<_> = async {
             let bytes = file.metadata().await?.len();
-            // Request bounds do not prove the cached object is corrupt.
-            if bytes > MAX_XORB_SIZE as u64 || range.end > bytes {
+            if bytes > MAX_XORB_SIZE as u64 {
                 return Ok(None);
             }
+            let Some(range) = resolve_range(bytes) else {
+                return Ok(None);
+            };
+            // Request bounds do not prove the cached object is corrupt.
+            if range.start > range.end || range.end > bytes {
+                return Ok(None);
+            }
+            let Ok(len) = usize::try_from(range.end - range.start) else {
+                return Ok(None);
+            };
             let mut file = verify_xorb_file_identity(file, &path, bytes, hash).await?;
             file.seek(std::io::SeekFrom::Start(range.start)).await?;
             let mut buf = vec![0u8; len];

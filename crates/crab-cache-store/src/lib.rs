@@ -737,7 +737,9 @@ impl CachingStore {
         let is_immutable = classify_path(path.as_ref()) == PathClass::Immutable;
 
         if is_immutable
-            && let Some((data, _)) = self.local_cached_range_with_size(path, &range).await
+            && let Some((data, _, _)) = self
+                .local_cached_range_with_size(path, &GetRange::Bounded(range.clone()))
+                .await
         {
             return Ok(data);
         }
@@ -766,14 +768,15 @@ impl CachingStore {
     async fn local_cached_range_with_size(
         &self,
         path: &Path,
-        range: &Range<u64>,
-    ) -> Option<(Bytes, u64)> {
+        requested: &GetRange,
+    ) -> Option<(Bytes, Range<u64>, u64)> {
         let key = cache_key_for_path(path.as_ref())?;
         if let CacheKey::Xorb(hash) = &key {
-            return self
+            let (data, size) = self
                 .local_cache
-                .get_xorb_range_with_size_if_present(hash, range.clone())
-                .await;
+                .get_xorb_range_with_size_if_present(hash, |size| requested.as_range(size).ok())
+                .await?;
+            return Some((data, requested.as_range(size).ok()?, size));
         }
 
         let data = self
@@ -790,17 +793,9 @@ impl CachingStore {
             .await
             .ok()?;
         let total_size = data.len() as u64;
-        let Some(slice) = slice_cached_range(&data, range) else {
-            tracing::warn!(
-                path = %path,
-                start = range.start,
-                end = range.end,
-                cached_len = data.len(),
-                "cached immutable object does not cover requested range, falling back to origin",
-            );
-            return None;
-        };
-        Some((slice, total_size))
+        let range = requested.as_range(total_size).ok()?;
+        let slice = slice_cached_range(&data, &range)?;
+        Some((slice, range, total_size))
     }
 
     /// Write an object to the origin store.
@@ -1282,38 +1277,7 @@ impl ObjectStore for CacheAwareObjectStore {
             let meta = head_immutable_object(&self.store, location).await?;
             (Bytes::new(), 0..0, meta.size)
         } else if let Some(range) = options.range {
-            match range {
-                GetRange::Bounded(requested) => {
-                    if let Some((body, range, object_size)) =
-                        bounded_cache_range(&self.store, location, requested.clone()).await?
-                    {
-                        (body, range, object_size)
-                    } else {
-                        let (range, object_size) = resolve_cache_range(
-                            &self.store,
-                            location,
-                            GetRange::Bounded(requested),
-                        )
-                        .await?;
-                        let body = self
-                            .store
-                            .range_get(location, range.clone())
-                            .await
-                            .map_err(|e| cache_error(location, e))?;
-                        (body, range, object_size)
-                    }
-                }
-                range => {
-                    let (range, object_size) =
-                        resolve_cache_range(&self.store, location, range).await?;
-                    let body = self
-                        .store
-                        .range_get(location, range.clone())
-                        .await
-                        .map_err(|e| cache_error(location, e))?;
-                    (body, range, object_size)
-                }
-            }
+            cached_object_range(&self.store, location, range).await?
         } else {
             #[cfg(feature = "remote-client")]
             if cache_key_for_path(location.as_ref()).is_none() {
@@ -1398,40 +1362,40 @@ fn cacheable_get_options(options: &GetOptions) -> bool {
         && options.version.is_none()
 }
 
-async fn bounded_cache_range(
+async fn cached_object_range(
     store: &CachingStore,
     location: &Path,
-    requested: Range<u64>,
-) -> object_store::Result<Option<(Bytes, Range<u64>, u64)>> {
-    GetRange::Bounded(requested.clone())
+    requested: GetRange,
+) -> object_store::Result<(Bytes, Range<u64>, u64)> {
+    requested
         .is_valid()
-        .map_err(|e| object_store::Error::Generic {
+        .map_err(|error| object_store::Error::Generic {
             store: "crab-cache",
-            source: Box::new(e),
+            source: Box::new(error),
         })?;
-
-    if let Some((body, object_size)) = store
+    if let Some(result) = store
         .local_cached_range_with_size(location, &requested)
         .await
     {
-        return Ok(Some((body, requested, object_size)));
+        return Ok(result);
     }
-
-    match store
-        .range_get_cache_service_object(location, requested.clone())
-        .await
-    {
-        Ok(Some(range)) => Ok(Some((range.data, range.range, range.total_size))),
-        Ok(None) => Ok(None),
-        Err(e) => {
-            tracing::warn!(
-                path = %location,
-                error = %e,
-                "cache service bounded range read failed, falling back to resolved range",
-            );
-            Ok(None)
+    if let GetRange::Bounded(range) = &requested {
+        match store
+            .range_get_cache_service_object(location, range.clone())
+            .await
+        {
+            Ok(Some(range)) => return Ok((range.data, range.range, range.total_size)),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(path = %location, error = %error,
+                "cache service bounded range read failed, falling back to resolved range"),
         }
     }
+    let (range, object_size) = resolve_cache_range(store, location, requested).await?;
+    let body = store
+        .range_get(location, range.clone())
+        .await
+        .map_err(|error| cache_error(location, error))?;
+    Ok((body, range, object_size))
 }
 
 async fn resolve_cache_range(
@@ -3497,6 +3461,84 @@ mod tests {
             0,
             "fresh metadata reader should hit cache server without origin GET"
         );
+    }
+
+    #[tokio::test]
+    async fn warm_local_cache_handles_all_get_range_forms_without_origin() {
+        let payload = Bytes::from_static(b"local range responses follow object_store semantics");
+        let (xorb, xorb_hash) = test_xorb(&payload);
+        let data_hash = crab_xet::hash::compute_data_hash(&payload).hex();
+        for (kind, body, hash) in [("xorbs", xorb, xorb_hash), ("shards", payload, data_hash)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let origin = origin_store();
+            let path = content_path(kind, &hash);
+            assert_eq!(classify_path(path.as_ref()), PathClass::Immutable);
+            origin.put(&path, body.clone()).await.unwrap();
+            let cached = CachingStore::new_with_local_cache(
+                origin.clone(),
+                no_cache_config(),
+                Arc::new(LocalCache::new(tmp.path().join("cache"))),
+            )
+            .unwrap();
+            cached.get_with_etag(&path).await.unwrap();
+            origin.delete(&path).await.unwrap();
+            let size = body.len() as u64;
+            let requests = [
+                GetRange::Bounded(7..size + 64),
+                GetRange::Offset(7),
+                GetRange::Suffix(7),
+                GetRange::Suffix(size + 64),
+                GetRange::Suffix(0),
+            ];
+            for request in requests {
+                let expected = request.as_range(size).unwrap();
+                let result = cached
+                    .object_store()
+                    .get_opts(
+                        &path,
+                        GetOptions {
+                            range: Some(request.clone()),
+                            ..GetOptions::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{request:?}: {error}"));
+                assert_eq!(result.range, expected, "{request:?}");
+                assert_eq!(result.meta.size, size);
+                assert_eq!(
+                    result.bytes().await.unwrap(),
+                    body.slice(expected.start as usize..expected.end as usize)
+                );
+            }
+            assert_eq!(
+                cached.range_get(&path, 7..size + 64).await.unwrap(),
+                body.slice(7..)
+            );
+            for invalid in [
+                GetRange::Bounded(7..7),
+                GetRange::Bounded(size..size + 1),
+                GetRange::Offset(size),
+            ] {
+                assert!(
+                    cached
+                        .object_store()
+                        .get_opts(
+                            &path,
+                            GetOptions {
+                                range: Some(invalid),
+                                ..GetOptions::default()
+                            }
+                        )
+                        .await
+                        .is_err()
+                );
+            }
+            assert_eq!(
+                cached.get_with_etag(&path).await.unwrap().0,
+                body,
+                "invalid requests must not evict a valid cached object"
+            );
+        }
     }
 
     #[tokio::test]
