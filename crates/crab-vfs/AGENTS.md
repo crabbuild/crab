@@ -30,6 +30,9 @@ mount/control owners consume the pipeline output separately.
 
 ## Invariants
 
+- Start queue workers only after fallible preparation succeeds and their handles
+  can pass directly to the owner. Daemon task startup belongs inside runtime
+  installation, after backend setup. Inspect both pipeline and daemon paths.
 - Separate pipeline preparation from backend mount/control lifetime; a built engine does not prove a mounted, usable filesystem.
   Source: `crates/crab-vfs/src/pipeline.rs`.
 - Cached read windows retain integrity checks; corruption must not be served merely because the byte length matches.

@@ -9,9 +9,10 @@
 //! 4. Open overlay (unless read-only) → SQLite + upper dir
 //! 5. Reconcile overlay → discard stale entries against current HEAD
 //! 6. Run `git read-tree HEAD` → populate index for subsequent operations
-//! 7. Start hydration → create workers, wire chunk cache
+//! 7. Prepare hydration → wire chunk cache
 //! 8. Create resolver → merge snapshot + overlay
 //! 9. Create engine → wire resolver + overlay + hydration + ODB reader
+//! 10. Start hydration workers → return their handles to the caller
 //!
 //! FUSE mount and the refresh loop are handled outside `execute()` by
 //! the caller (coordinator, daemon, or CLI foreground mode).
@@ -173,7 +174,7 @@ impl MountPipelineBuilder {
         self
     }
 
-    /// Execute the full 11-step mount pipeline.
+    /// Prepare the mount state, then start its hydration workers.
     ///
     /// Returns the resolver, engine, and hydration service on success.
     /// On failure, partial resources are cleaned up before returning
@@ -216,14 +217,18 @@ impl MountPipelineBuilder {
         info!(step = "read_tree", "running git read-tree HEAD");
         run_read_tree_head(&config.git_dir);
 
-        // Step 7: Start hydration service.
-        let (hydration, hydrator_handles) = self.step_start_hydration()?;
+        // Step 7: Prepare hydration without starting tasks.
+        let hydration = self.step_create_hydration()?;
 
         // Step 8: Create resolver (snapshot + overlay).
         let resolver = self.step_create_resolver(&snapshot, overlay.as_ref(), generation);
 
         // Step 9: Create engine (resolver + overlay + hydration + ODB reader).
         let engine = self.step_create_engine(&resolver, overlay.as_ref(), &hydration, &snapshot)?;
+
+        // All fallible preparation must finish before workers retain cache state.
+        // From here their handles pass directly to the successful pipeline owner.
+        let hydrator_handles = hydration.spawn_workers();
 
         info!(
             generation,
@@ -369,9 +374,8 @@ impl MountPipelineBuilder {
         Ok(())
     }
 
-    /// Step 7: Create and start the hydration service with workers.
-    fn step_start_hydration(&self) -> Result<(Arc<HydrationService>, Vec<JoinHandle<()>>)> {
-        info!(step = "hydration", "starting hydration service");
+    fn step_create_hydration(&self) -> Result<Arc<HydrationService>> {
+        info!(step = "hydration", "preparing hydration service");
 
         let cache = if let Some(c) = &self.chunk_cache {
             Arc::clone(c)
@@ -382,7 +386,7 @@ impl MountPipelineBuilder {
 
         let verified = Arc::new(VerifiedSet::default());
 
-        let hydration = create_hydration(
+        create_hydration(
             cache,
             verified,
             self.config.cancel_token.clone(),
@@ -391,10 +395,7 @@ impl MountPipelineBuilder {
             self.store_layout
                 .as_ref()
                 .map(|_| self.config.cache_dir.join("read_ranges")),
-        )?;
-
-        let handles = hydration.spawn_workers();
-        Ok((hydration, handles))
+        )
     }
 
     /// Step 8: Create the VFS resolver (merges snapshot + overlay).
@@ -757,6 +758,78 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn engine_setup_failure_releases_hydration_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let state = tmp.path().join("state");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::create_dir(&state).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=VFS test",
+                "-c",
+                "user.email=vfs@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "empty fixture",
+            ],
+        ] {
+            let _git_env = crate::test_support::GIT_DIR_MUTEX
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let output = std::process::Command::new("git")
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::write(state.join("blob_cache"), b"not a directory").unwrap();
+        let cache = Arc::new(ChunkCache::open(tmp.path().join("chunks"), None).unwrap());
+        let config = PipelineConfig {
+            source: repo.to_string_lossy().into_owned(),
+            git_dir: repo.join(".git"),
+            ref_name: None,
+            read_only: true,
+            cache_dir: state.clone(),
+            cancel_token: CancellationToken::new(),
+        };
+        let builder =
+            MountPipelineBuilder::new(config.clone()).with_chunk_cache(Arc::clone(&cache));
+
+        assert!(matches!(builder.execute(), Err(CrabError::Io(_))));
+        assert_eq!(
+            Arc::strong_count(&cache),
+            1,
+            "failed setup retained a worker-owned cache"
+        );
+        // Retrying the same preparation must still hand live worker handles to its owner.
+        std::fs::remove_file(state.join("blob_cache")).unwrap();
+        let mut output = MountPipelineBuilder::new(config.clone())
+            .with_chunk_cache(Arc::clone(&cache))
+            .execute()
+            .unwrap();
+        assert!(!output.hydrator_handles.is_empty());
+        config.cancel_token.cancel();
+        for worker in output.hydrator_handles.drain(..) {
+            tokio::time::timeout(Duration::from_secs(5), worker)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn hydration_startup_bypasses_chunk_storage_without_touching_live_state() {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("mount");
@@ -779,7 +852,8 @@ mod tests {
             cancel_token: cancel.clone(),
         })
         .with_read_context(stored.context.clone());
-        let (service, workers) = builder.step_start_hydration().unwrap();
+        let service = builder.step_create_hydration().unwrap();
+        let workers = service.spawn_workers();
         assert_eq!(
             service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
             content

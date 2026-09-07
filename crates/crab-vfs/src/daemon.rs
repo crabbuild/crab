@@ -954,7 +954,7 @@ impl DaemonService {
         run_read_tree_head(&paths.git_dir);
 
         // Step 7: Create hydration service with shared cache.
-        info!(step = "hydration", "starting hydration service");
+        info!(step = "hydration", "preparing hydration service");
         let read_context = self.read_resolver.resolve(&config.remote).await?;
         if crab_git::CrabUrl::parse(&config.remote).is_ok() && read_context.is_none() {
             return Err(CrabError::Configuration {
@@ -978,8 +978,6 @@ impl DaemonService {
             read_hydrator,
             read_range_cache_dir,
         )?;
-        let hydrator_handles = hydration.spawn_workers();
-
         // Step 8: Create ODB reader.
         let odb_reader = OdbReader::new(&paths.git_dir, &paths.blob_cache_dir).map_err(|e| {
             error!(step = "odb_reader", error = %e, "failed to create ODB reader");
@@ -1124,9 +1122,9 @@ impl DaemonService {
             }
         };
 
-        // Step 12: Start refresh loop (if not read-only and overlay exists).
-        let mut refresh_handle = if let Some(ref ov) = overlay {
-            info!(step = "refresh", "starting refresh loop");
+        // Prepare refresh state; start tasks only when the runtime accepts ownership.
+        let refresh_service = if let Some(ref ov) = overlay {
+            info!(step = "refresh", "preparing refresh loop");
             let refresh_config = RefreshConfig {
                 remote_poll_interval: Duration::from_secs(config.refresh_interval_secs),
                 local_poll_interval: Duration::from_millis(500),
@@ -1144,16 +1142,12 @@ impl DaemonService {
                 repo_cancel.clone(),
             ));
 
-            let handle = tokio::spawn(async move {
-                refresh_svc.run().await;
-            });
-            Some(handle)
+            Some(refresh_svc)
         } else {
             None
         };
 
         // Update runtime with all components.
-        let mut hydrator_handles = Some(hydrator_handles);
         let mut mount_session = Some(mount_session);
         let installed = {
             let mut running = self.running.write().await;
@@ -1161,10 +1155,13 @@ impl DaemonService {
                 rt.head_oid = Some(head_oid);
                 rt.snapshot = Some(snapshot);
                 rt.overlay = overlay;
-                rt.hydrator_handles = hydrator_handles.take().unwrap_or_default();
+                // No fallible setup or await may separate spawning from ownership.
+                // Failed preparation must not leave detached cache users behind.
+                rt.hydrator_handles = hydration.spawn_workers();
                 rt.resolver = Some(resolver);
                 rt.mount_session = mount_session.take();
-                rt.refresh_handle = refresh_handle.take();
+                rt.refresh_handle =
+                    refresh_service.map(|service| tokio::spawn(async move { service.run().await }));
                 true
             } else {
                 false
@@ -1172,14 +1169,6 @@ impl DaemonService {
         };
         if !installed {
             repo_cancel.cancel();
-            if let Some(handle) = refresh_handle {
-                handle.abort();
-            }
-            if let Some(handles) = hydrator_handles {
-                for handle in handles {
-                    handle.abort();
-                }
-            }
             if let Some(session) = mount_session {
                 let shutdown_result =
                     shutdown_mount_session(&config.name, session, Some(paths)).await;
@@ -2369,6 +2358,50 @@ mod tests {
 
         let status = daemon.repo_status("repo-a").await.unwrap();
         assert_eq!(status.refresh_interval_secs, 120);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn engine_setup_failure_does_not_start_daemon_hydration_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon =
+            DaemonService::new(dir.path().join("daemon"), CancellationToken::new()).unwrap();
+        let mut config = sample_config("setup-failure");
+        config.remote = dir.path().join("source").to_string_lossy().into_owned();
+        config.read_only = true;
+        let paths = config.computed_paths(&daemon.root);
+        std::fs::create_dir_all(&paths.git_dir).unwrap();
+        git(&paths.git_dir, ["init", "--bare", "-b", "main"]);
+        let tree = git_stdout(&paths.git_dir, ["mktree"]);
+        let commit = git_stdout(
+            &paths.git_dir,
+            [
+                "-c",
+                "user.name=VFS test",
+                "-c",
+                "user.email=vfs@example.invalid",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                "empty fixture",
+            ],
+        );
+        git(
+            &paths.git_dir,
+            ["update-ref", "refs/heads/main", commit.trim()],
+        );
+        std::fs::create_dir_all(paths.blob_cache_dir.parent().unwrap()).unwrap();
+        std::fs::write(&paths.blob_cache_dir, b"not a directory").unwrap();
+        let owners = Arc::strong_count(&daemon.cache);
+
+        let result = daemon
+            .execute_mount_pipeline(&config, &paths, &CancellationToken::new())
+            .await;
+        assert!(matches!(result, Err(CrabError::Io(_))));
+        assert_eq!(
+            Arc::strong_count(&daemon.cache),
+            owners,
+            "failed setup retained a worker-owned cache"
+        );
     }
 
     #[tokio::test]

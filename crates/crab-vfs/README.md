@@ -33,7 +33,8 @@ resolver (snapshot + overlay) → VFS engine → FUSE or NFS
 
 `MountPipelineBuilder::execute` runs the preparation pipeline: source clone or
 reuse, HEAD resolution, snapshot, overlay setup, reconciliation, index
-population, hydration workers, resolver creation, and engine wiring. Mounting
+population, hydration construction, resolver creation, and engine wiring. Only
+after those steps succeed does it start workers and return their handles. Mounting
 and refresh are lifecycle operations performed outside the pipeline so a
 daemon, coordinator, or foreground CLI can own cancellation.
 
@@ -67,6 +68,10 @@ tests are not native mounted-filesystem or whole-process resource proof.
 | Hydration queue workers | `PipelineOutput::hydrator_handles` or daemon runtime | Cancel the service token, then await the handles; queued tasks are discarded |
 | Read-window prefetch | Spawned independently by `HydrationService` | Not included in queue-worker handles |
 | NFS server, refresh, control | NFS mount runtime | Backend teardown controls these separately from hydration |
+
+The daemon starts hydration and refresh tasks only when installing them into a
+successfully mounted runtime. Engine or backend setup failure therefore starts
+no such workers. Native backend tasks have their own cleanup boundaries.
 
 Cancellation is cooperative. A queue worker observes it between synchronous
 hydration steps; requesting abort does not prove that a running step has ended.

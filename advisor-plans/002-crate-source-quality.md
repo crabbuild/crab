@@ -992,3 +992,42 @@ All 30 hydration tests passed with NFS and FUSE enabled, including both new
 regressions on the multi-thread Tokio runtime. Strict all-target VFS Clippy
 passed with NFS and FUSE enabled. The API and dependency graph are unchanged;
 native mount and complete hydration shutdown qualification remain open.
+
+## VFS worker startup ownership
+
+Both `MountPipelineBuilder::execute` and daemon `execute_mount_pipeline` started
+hydration workers before constructing the fallible ODB reader. An engine setup
+error dropped the join handles while tasks retained the hydration service and
+its chunk cache. The daemon outer error path requested cancellation but did not
+own those handles to prove completion before releasing runtime cache ownership.
+
+The standalone pipeline now prepares hydration, resolver and engine first, then
+starts workers immediately before returning their handles in PipelineOutput.
+The daemon prepares hydration and refresh state, completes backend setup, then
+starts and installs both task groups under the runtime write lock. There is no
+await between spawning and handle ownership, and a removed runtime starts neither
+group. This removes the abandoned local-worker abort loops for that branch.
+
+Evidence map:
+
+- Owner: pipeline execute/step_create_hydration and daemon execute_mount_pipeline.
+- Entry: `crab/src/cmd/mount.rs` and `crates/crab-vfs/src/ipc_server.rs` call
+  pipeline.execute; daemon start_repo calls its pipeline and handles errors
+  through teardown_runtime.
+- Callee: OdbReader::new validates the Git object directory and creates blob cache;
+  hydration spawn_workers returns handles whose futures retain the service Arc.
+- Siblings: both setup paths now defer workers. Engine foreground reads and
+  overlay promotion fetch directly; directory prefetch only enqueues work, so
+  native startup does not require these queue workers to be running beforehand.
+- Remaining boundaries: backend tasks, detached read-window prefetch, cancellation
+  during mount/session installation, and native failure cleanup remain separate.
+
+Two real-Git fixture regressions obstruct the blob cache with a file, then check
+that engine failure releases the supplied cache reference. Both failed before
+the fix (strong count 2 rather than 1), and both pass after it. The standalone
+fixture also removes the obstruction, retries preparation, and checks that the
+returned worker handles can be cancelled and joined. No native mount is invoked.
+All 14 pipeline tests and 38 daemon tests pass with NFS and FUSE enabled.
+Strict all-target VFS Clippy passes with NFS and FUSE. CLI/coordinator failures after successful pipeline
+return still require handle ownership review; this change does not qualify those
+post-preparation paths.
