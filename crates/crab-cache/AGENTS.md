@@ -66,7 +66,8 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 
 ## Related documentation
 
-- `crates/crab-cache/README.md` — usage and detailed contracts.
+- `crates/crab-cache/README.md` — feature selection, usage, and source map.
+- `crates/crab-cache/REFERENCE.md` — persistence/lifecycle contracts and qualification limits.
 - `crates/crab-cache/Cargo.toml` — dependency and feature authority.
 
 Update this guide when entry points, ownership, invariants, features, or test

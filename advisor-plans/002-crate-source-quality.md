@@ -49,7 +49,7 @@ not claims that the named code is defective.
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
-| crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
+| crab-cache | Cache keys and invalidation remain | Diagnostic slice and README navigation verified |
 | crab-cache-store | Startup outcomes; origin authority and range qualification remain | Startup slice verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
@@ -59,7 +59,7 @@ not claims that the named code is defective.
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
-| crab-http-server | Request validation, embedded assets, service errors | Pending |
+| crab-http-server | Archive worker draining, production-route cancellation, embedded assets, service errors remain | HTTP/1 LFS and archive framing verified; request/admission ownership documented |
 | crab-workflow | Async lock waiting, cache/resume, native qualification remain | Retry parsing, lock readability, metadata identity, and default API docs verified |
 
 ## Pointer diagnostic change
@@ -1679,3 +1679,21 @@ The RustFS race, crash, and scale workflow completed successfully on published
 head 636f2a6b9f5 (run 34124097701). Its evidence does not cover later local HTTP
 commits. The PR description now links this successful gate while keeping the
 browser contrast failure and outstanding qualification visible.
+
+### Cache documentation entry point
+
+The cache README placed nearly 250 lines of persistence and lifecycle detail
+under one architecture heading before usage. It now leads with feature choices,
+a read-through flow diagram, the verified-chunk example, and a source/test map.
+The detailed contract body is retained verbatim in REFERENCE.md, with fourteen
+section headings and navigation links. The scoped agent guide links both files.
+This moves existing evidence without claiming new native/storage qualification.
+
+Checked feature exports against Cargo.toml and lib.rs, key semantics against
+key.rs, and constructor/read-through behavior against local_cache.rs. The Rust
+example is unchanged; its dependency snippet now lists its direct bytes and
+crab-xet dependencies as well. All 38 Markdown links resolve, example dependency
+and feature names match workspace manifests, and the CLAUDE guide symlink is
+intact. No Rust behavior or dependency manifest changed; no compilation was
+needed for this presentation-only pass. Documentation grows overall because
+existing contract detail is preserved while adding a short entry point.
