@@ -151,6 +151,24 @@ pub struct SupervisorOutcome {
 /// typically forwards these straight into the journal.
 pub type EventSink = Arc<dyn Fn(SupervisorEvent) + Send + Sync>;
 
+#[cfg(unix)]
+struct ParentSignals {
+    sigint: tokio::signal::unix::Signal,
+    sigterm: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ParentSignals {
+    fn register() -> Result<Self> {
+        Ok(Self {
+            sigint: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .map_err(CrabError::Io)?,
+            sigterm: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(CrabError::Io)?,
+        })
+    }
+}
+
 /// Configuration for a single supervised run.
 pub struct ChildSupervisor {
     command: Command,
@@ -274,6 +292,12 @@ impl ChildSupervisor {
             .map_err(CrabError::Io)?;
         let log_file = Arc::new(Mutex::new(log_file));
 
+        // Install listeners immediately before spawning. A signal can arrive
+        // as soon as the child exists; registering afterward loses that event
+        // on hosts where the inherited disposition ignores SIGINT/SIGTERM.
+        #[cfg(unix)]
+        let parent_signals = ParentSignals::register()?;
+
         let mut child = self.command.spawn().map_err(CrabError::Io)?;
         let pid = child.id().ok_or_else(|| {
             // `Child::id` returns None only after the child has been
@@ -324,6 +348,9 @@ impl ChildSupervisor {
         ));
         self.emit(SupervisorEvent::Started { pid });
 
+        #[cfg(unix)]
+        let outcome = self.supervise(&mut child, pid, parent_signals).await;
+        #[cfg(not(unix))]
         let outcome = self.supervise(&mut child, pid).await;
 
         // Drain I/O tasks before returning: the child is gone, its
@@ -363,17 +390,8 @@ impl ChildSupervisor {
         &self,
         child: &mut Child,
         pid: u32,
+        mut parent_signals: ParentSignals,
     ) -> Result<(ExitStatus, Option<i32>, bool)> {
-        // Listen for parent SIGINT/SIGTERM so we can relay them.
-        // Registering fails only if the signal handler slot is
-        // already full (shouldn't happen in normal binaries; bail
-        // loud if it does — silently swallowing Ctrl-C handling is
-        // worse than surfacing the error).
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .map_err(CrabError::Io)?;
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .map_err(CrabError::Io)?;
-
         let start = Instant::now();
         let timeout_deadline = self.timeout.map(|t| start + t);
 
@@ -423,7 +441,7 @@ impl ChildSupervisor {
                 }
 
                 // Parent SIGINT → forward SIGINT to child.
-                Some(()) = sigint.recv(), if !sent_term => {
+                Some(()) = parent_signals.sigint.recv(), if !sent_term => {
                     debug!(pid, "workflow supervisor: parent SIGINT; forwarding");
                     request_child_signal(child, pid, Signal::Int).await;
                     self.emit(SupervisorEvent::SignalSent {
@@ -434,7 +452,7 @@ impl ChildSupervisor {
                 }
 
                 // Parent SIGTERM → forward SIGTERM to child.
-                Some(()) = sigterm.recv(), if !sent_term => {
+                Some(()) = parent_signals.sigterm.recv(), if !sent_term => {
                     debug!(pid, "workflow supervisor: parent SIGTERM; forwarding");
                     request_child_signal(child, pid, Signal::Term).await;
                     self.emit(SupervisorEvent::SignalSent {
