@@ -39,7 +39,8 @@ type StoreBuilder = dyn Fn(CredentialResolution) -> Result<RefreshingStoreParts>
 ///
 /// Clones share the current backend and serialize refresh. Returned read/list
 /// streams and `MultipartUpload` handles keep their original backend; this
-/// wrapper does not replay them after a later authentication failure.
+/// wrapper does not replay them after a later authentication failure. A failed
+/// retry is returned directly, even if it is another authentication error.
 pub struct RefreshingObjectStore<P>
 where
     P: CredentialProvider + ?Sized,
@@ -163,11 +164,11 @@ where
 
     async fn retryable_unary<T, F, Fut>(&self, op: F) -> object_store::Result<T>
     where
-        F: Fn(Arc<dyn ObjectStore>) -> Fut,
+        F: Fn(RefreshingStoreParts) -> Fut,
         Fut: Future<Output = object_store::Result<T>>,
     {
         let parts = self.parts_for_operation().await?;
-        match op(Arc::clone(&parts.inner)).await {
+        match op(parts).await {
             Ok(value) => Ok(value),
             Err(err) if self.should_retry_auth_error(&err) => {
                 warn!(
@@ -178,7 +179,7 @@ where
                     "object-store auth failed; refreshing credentials and retrying once"
                 );
                 let parts = self.refresh_parts(true).await?;
-                op(Arc::clone(&parts.inner)).await
+                op(parts).await
             }
             Err(err) => Err(err),
         }
@@ -230,7 +231,8 @@ where
         payload: PutPayload,
         opts: PutOptions,
     ) -> object_store::Result<PutResult> {
-        self.retryable_unary(|inner| {
+        self.retryable_unary(|parts| {
+            let inner = parts.inner;
             let location = location.clone();
             let payload = payload.clone();
             let opts = opts.clone();
@@ -253,7 +255,8 @@ where
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        self.retryable_unary(|inner| {
+        self.retryable_unary(|parts| {
+            let inner = parts.inner;
             let location = location.clone();
             let options = options.clone();
             async move { inner.get_opts(&location, options).await }
@@ -271,7 +274,8 @@ where
                 let this = this.clone();
                 async move {
                     let location = location?;
-                    this.retryable_unary(|inner| {
+                    this.retryable_unary(|parts| {
+                        let inner = parts.inner;
                         let location = location.clone();
                         async move { inner.delete(&location).await }
                     })
@@ -297,7 +301,8 @@ where
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
-        self.retryable_unary(|inner| {
+        self.retryable_unary(|parts| {
+            let inner = parts.inner;
             let prefix = prefix.cloned();
             async move { inner.list_with_delimiter(prefix.as_ref()).await }
         })
@@ -310,7 +315,8 @@ where
         to: &Path,
         options: CopyOptions,
     ) -> object_store::Result<()> {
-        self.retryable_unary(|inner| {
+        self.retryable_unary(|parts| {
+            let inner = parts.inner;
             let from = from.clone();
             let to = to.clone();
             let options = options.clone();
@@ -416,17 +422,12 @@ where
         F: Fn(Arc<dyn Signer>) -> Fut,
         Fut: Future<Output = object_store::Result<T>>,
     {
-        let parts = self.parts_for_operation().await?;
-        let signer = parts.signer.ok_or_else(signer_not_supported)?;
-        match op(Arc::clone(&signer)).await {
-            Ok(value) => Ok(value),
-            Err(err) if self.should_retry_auth_error(&err) => {
-                let parts = self.refresh_parts(true).await?;
-                let signer = parts.signer.ok_or_else(signer_not_supported)?;
-                op(Arc::clone(&signer)).await
-            }
-            Err(err) => Err(err),
-        }
+        self.retryable_unary(|parts| {
+            let signer = parts.signer.ok_or_else(signer_not_supported);
+            let op = &op;
+            async move { op(signer?).await }
+        })
+        .await
     }
 
     async fn retryable_multipart_unary<T, F, Fut>(&self, op: F) -> object_store::Result<T>
@@ -434,17 +435,12 @@ where
         F: Fn(Arc<dyn MultipartStore>) -> Fut,
         Fut: Future<Output = object_store::Result<T>>,
     {
-        let parts = self.parts_for_operation().await?;
-        let multipart = parts.multipart.ok_or_else(multipart_not_supported)?;
-        match op(Arc::clone(&multipart)).await {
-            Ok(value) => Ok(value),
-            Err(error) if self.should_retry_auth_error(&error) => {
-                let parts = self.refresh_parts(true).await?;
-                let multipart = parts.multipart.ok_or_else(multipart_not_supported)?;
-                op(Arc::clone(&multipart)).await
-            }
-            Err(error) => Err(error),
-        }
+        self.retryable_unary(|parts| {
+            let multipart = parts.multipart.ok_or_else(multipart_not_supported);
+            let op = &op;
+            async move { op(multipart?).await }
+        })
+        .await
     }
 }
 
@@ -605,6 +601,21 @@ mod tests {
     impl fmt::Display for MockStore {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "MockStore({})", self.generation)
+        }
+    }
+
+    #[async_trait]
+    impl Signer for MockStore {
+        async fn signed_url(
+            &self,
+            _method: reqwest::Method,
+            path: &Path,
+            _expires_in: Duration,
+        ) -> object_store::Result<url::Url> {
+            Err(object_store::Error::Unauthenticated {
+                path: path.to_string(),
+                source: "expired".into(),
+            })
         }
     }
 
@@ -836,6 +847,56 @@ mod tests {
             .unwrap();
         assert_eq!(got, Bytes::from_static(b"gen-1"));
         assert_eq!(provider.resolve_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn persistent_auth_failure_stops_after_one_refresh_on_each_surface() {
+        for surface in ["object", "signer", "multipart"] {
+            let provider = Arc::new(MockProvider::default());
+            let backend = Arc::new(MockStore {
+                generation: 0,
+                unauth_once: true,
+                forbidden: false,
+            });
+            let initial = RefreshingStoreParts {
+                inner: backend.clone(),
+                signer: Some(backend),
+                multipart: Some(Arc::new(MockMultipart {
+                    generation: 0,
+                    unauthenticated: true,
+                })),
+                multipart_identity: Some(crab_storage::BucketIdentity::new(
+                    crab_storage::StorageProviderKind::S3,
+                    "endpoint",
+                    "bucket",
+                )),
+                target_identity: [0; 32],
+            };
+            let rebuilt = initial.clone();
+            let store = RefreshingObjectStore::new(
+                Arc::clone(&provider),
+                "bucket".into(),
+                "repo".into(),
+                "fetch".into(),
+                initial,
+                Arc::new(move |_| Ok(rebuilt.clone())),
+            );
+            let path = Path::from("object");
+            let error = match surface {
+                "object" => store.get(&path).await.unwrap_err(),
+                "signer" => store
+                    .signed_url(reqwest::Method::GET, &path, Duration::from_secs(60))
+                    .await
+                    .unwrap_err(),
+                _ => store.create_multipart(&path).await.unwrap_err(),
+            };
+            assert!(matches!(error, object_store::Error::Unauthenticated { .. }));
+            assert_eq!(
+                provider.resolve_count.load(Ordering::SeqCst),
+                1,
+                "{surface}"
+            );
+        }
     }
 
     #[tokio::test]

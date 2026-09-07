@@ -56,8 +56,8 @@ not claims that the named code is defective.
 | crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
 | crab-auth | Credential Debug output; token-cache lifecycle remains | Diagnostic slice verified |
-| crab-auth-store | Credential refresh and storage adapter error boundaries | Pending |
-| crab-auth-server | Receive cleanup and error-to-response mapping | Pending |
+| crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
+| crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
 | crab-http-server | Request validation, embedded assets, service errors | Pending |
 | crab-workflow | Retry validation; cancellation, cache identity, resume remain | Retry parsing slice verified |
@@ -829,3 +829,29 @@ Validation: all four output tests pass; strict all-target crab-auth-server Clipp
 passes; cargo fmt --all and git diff --check pass. This proves the scoped output
 refactor, not cloud-backed receive/view runtime qualification or full crate
 quality completion.
+
+
+## One owner for auth-store unary retries
+
+Object operations, signing, and stable-ID multipart operations previously each
+implemented authentication retry. They now use one private implementation;
+backend selection remains in the small signer/multipart adapters. This removes
+five production lines and two copies of policy. All three surfaces now use the
+existing auth-retry warning; response/error mapping is unchanged. Stream bodies,
+listing streams, and returned MultipartUpload handles remain outside replay.
+
+Evidence map: read the complete refreshing_store module, CLI constructor and
+handle wiring in crab/src/auth/mod.rs, and locked object_store 0.14.1 Signer and
+MultipartStore contracts. The constructor binds all handles to one transport
+target; refresh_parts still checks target/multipart identity before publishing
+replacement parts. Existing tests exercise proactive refresh, permission denial,
+object/multipart success after refresh, and destination rejection. Added one
+table-driven public-interface test: persistent authentication failures on get,
+signed_url, and create_multipart each return Unauthenticated after exactly one
+provider refresh. This protects the documented bound across sibling surfaces;
+it is qualification of existing behavior, not a newly reproduced defect.
+
+Validation: all eight refreshing_store tests pass with refreshing-store;
+strict all-target Clippy passes with managed-service (which includes the refresh
+feature). Formatting and diff whitespace checks pass. Provider refresh races,
+live identity-service behavior, and complete gateway qualification remain open.
