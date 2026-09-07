@@ -3411,3 +3411,56 @@ This batch does not qualify abandoned server futures, whole-process shutdown,
 or aggregate candidate memory. The added production state is one shutdown
 notification and the blocking-task join boundary; no parallel eviction API or
 worker abstraction was introduced.
+
+
+### Request-triggered cache mutation: cancellation evidence
+
+Follow-up audit after `374410f6dc1`; implementation remains open.
+
+- Entry/owner: `state.rs::build_router` applies Tower's 300-second timeout
+  inside a 200-request concurrency limit. `PreparedServer::shutdown` joins
+  only the background evictor.
+- Callers: `handlers.rs::admin_evict` invokes exact/filter eviction directly;
+  `write_file_backed_object` and `commit_origin_fill_or_read_temp` invoke
+  emergency eviction and synchronous cache publication. Startup recovery and
+  eviction are a separate pre-listener path in `prepare_server`.
+- Dependency evidence: Tower 0.5 timeout `ResponseFuture::poll` polls the
+  response before its timer. A synchronous blocked poll cannot be preempted
+  by that timer. Tokio 1.52 documents that an admitted `spawn_blocking` task
+  cannot be aborted; dropping its join handle does not drain it.
+- Best-fix constraint: do not replace these calls with untracked blocking
+  jobs. Introduce service-owned admission/drain only after tracing staged
+  temp-file ownership, request cancellation, and TLS forced drain together.
+  Background eviction's joined worker is evidence for that one owner only.
+- Required proof: hold the real mutation lock while a request executes;
+  demonstrate a concurrent health request stays responsive, cancel the
+  mutation request, and prove shutdown waits for admitted work. Cover both
+  admin removal and upload/origin publication; retain current error responses
+  and temp-file cleanup behavior. No claim of completion from source review.
+- Qualification handle: cache-service run `34159002206` is active on
+  `374410f6dc17a684483fc114a2c9a32e6ce90874` (manifest validation at inspection).
+  Preserve this run rather than cancelling it with another publication.
+
+
+### Temp-file commit ownership simplification
+
+- `CacheStore::put_unverified_temp_path_recoverable` now moves its `TempPath`
+  directly into every early-return error or into `persist`. Removed the
+  optional slot, extraction closure, and unreachable missing-path error.
+  This represents pre/post-persistence ownership in Rust rather than a
+  runtime sentinel; public signatures and recoverable errors are unchanged.
+- Evidence map: streamed PUT and origin fill are the HTTP callers;
+  `put_unverified` and its non-recoverable wrapper use the same commit path.
+  `put_budget_plan`, the mutation lock, tempfile persistence, and SQLite
+  publication remain ordered as before. Inspected `origin/main` has the
+  same optional-slot implementation. Tempfile's `TempPath::persist` consumes
+  ownership and returns it as `PathPersistError.path` on failure.
+- Existing tests exercise successful file/metadata publication, rejected
+  replacement preserving the old object, recoverable budget failure returning
+  the staged bytes, cleanup on drop, and the origin response recovery caller.
+  All 44 cache-store tests and the focused handler recovery test pass;
+  strict all-target Clippy, strict rustdoc, the cache-server binary build,
+  and formatting/diff checks pass.
+- This is the simpler fix for the redundant ownership state, not completion
+  of request cancellation work. Service-owned blocking admission/drain and
+  upload/origin sibling qualification remain open as described above.

@@ -829,38 +829,26 @@ impl CacheStore {
 
     /// Store a previously validated temp file, returning the temp path when
     /// commit fails before ownership moves to the canonical cache file.
+    /// After persistence, metadata errors return `CommittedObject`; callers
+    /// must not attempt to recover or delete the former temporary path.
     pub fn put_unverified_temp_path_recoverable(
         &self,
         key: &ServerObjectKey,
         temp_path: TempPath,
         size: u64,
     ) -> std::result::Result<(), TempPathCommitError> {
-        let mut temp_path = Some(temp_path);
-        let take_temp_path = |temp_path: &mut Option<TempPath>| {
-            temp_path.take().ok_or_else(|| {
-                TempPathCommitError::after_persist(CacheServiceError::InternalError(
-                    "temp path missing before persist".into(),
-                ))
-            })
-        };
         let now = epoch_millis();
         let _mutation_guard = match self.mutation_guard() {
             Ok(guard) => guard,
             Err(e) => {
-                return Err(TempPathCommitError::with_temp_path(
-                    e,
-                    take_temp_path(&mut temp_path)?,
-                ));
+                return Err(TempPathCommitError::with_temp_path(e, temp_path));
             }
         };
 
         let plan = match self.put_budget_plan(key, size) {
             Ok(plan) => plan,
             Err(e) => {
-                return Err(TempPathCommitError::with_temp_path(
-                    e,
-                    take_temp_path(&mut temp_path)?,
-                ));
+                return Err(TempPathCommitError::with_temp_path(e, temp_path));
             }
         };
         let current_bytes = self.current_bytes();
@@ -868,7 +856,7 @@ impl CacheStore {
         if plan.exceeds_budget(current_bytes, self.max_bytes) {
             return Err(TempPathCommitError::with_temp_path(
                 Self::disk_full_error(current_bytes, plan.growth, self.max_bytes),
-                take_temp_path(&mut temp_path)?,
+                temp_path,
             ));
         }
 
@@ -880,11 +868,10 @@ impl CacheStore {
                 CacheServiceError::InternalError(
                     format!("failed to create dir {}: {e}", parent.display()).into(),
                 ),
-                take_temp_path(&mut temp_path)?,
+                temp_path,
             ));
         }
 
-        let temp_path = take_temp_path(&mut temp_path)?;
         if let Err(e) = temp_path.persist(&path) {
             return Err(TempPathCommitError::with_temp_path(
                 CacheServiceError::InternalError(
