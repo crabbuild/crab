@@ -6,8 +6,10 @@
 //! within a batch and cached on disk via the unified `LocalCache`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, warn};
 
@@ -53,6 +55,7 @@ pub struct TermResolver {
     router: StoreLayout,
     cache: Arc<LocalCache>,
     semaphore: Arc<Semaphore>,
+    concurrency: usize,
 }
 
 impl TermResolver {
@@ -79,6 +82,7 @@ impl TermResolver {
             router,
             cache,
             semaphore: Arc::new(Semaphore::new(concurrency)),
+            concurrency,
         })
     }
 
@@ -114,9 +118,18 @@ impl TermResolver {
             Arc::new(Mutex::new(HashMap::with_capacity(file_hashes.len())));
         let file_index_lookup: SharedFileIndexLookup = Arc::new(FileIndexLookupCell::new());
 
-        let mut handles = Vec::with_capacity(file_hashes.len());
+        let mut handles = FuturesUnordered::new();
+        let mut outcome = ResolutionOutcome {
+            strict: false,
+            first_error: None,
+        };
 
-        for &(file_hash, shard_hint) in file_hashes {
+        for (input_index, &(file_hash, shard_hint)) in file_hashes.iter().enumerate() {
+            if handles.len() == self.concurrency
+                && let Some((index, result)) = handles.next().await
+            {
+                outcome.record(index, result);
+            }
             if cancel.is_cancelled() {
                 break;
             }
@@ -173,10 +186,10 @@ impl TermResolver {
                 Ok::<(), ReadError>(())
             });
 
-            handles.push(handle);
+            handles.push(async move { (input_index, handle.await) });
         }
 
-        let outcome = drain_resolution_tasks(handles, false).await;
+        let outcome = drain_resolution_tasks(handles, outcome).await;
         close_file_index_lookup(file_index_lookup).await;
         check_cancelled(cancel)?;
         outcome?;
@@ -239,9 +252,18 @@ impl TermResolver {
             Arc::new(Mutex::new(HashMap::with_capacity(files.len())));
         let file_index_lookup: SharedFileIndexLookup = Arc::new(FileIndexLookupCell::new());
 
-        let mut handles = Vec::with_capacity(files.len());
+        let mut handles = FuturesUnordered::new();
+        let mut outcome = ResolutionOutcome {
+            strict,
+            first_error: None,
+        };
 
-        for &(file_hash, shard_hint, file_size) in files {
+        for (input_index, &(file_hash, shard_hint, file_size)) in files.iter().enumerate() {
+            if handles.len() == self.concurrency
+                && let Some((index, result)) = handles.next().await
+            {
+                outcome.record(index, result);
+            }
             if cancel.is_cancelled() {
                 break;
             }
@@ -300,10 +322,10 @@ impl TermResolver {
                 Ok::<(), ReadError>(())
             });
 
-            handles.push(handle);
+            handles.push(async move { (input_index, handle.await) });
         }
 
-        let outcome = drain_resolution_tasks(handles, strict).await;
+        let outcome = drain_resolution_tasks(handles, outcome).await;
         close_file_index_lookup(file_index_lookup).await;
         check_cancelled(cancel)?;
         outcome?;
@@ -316,26 +338,50 @@ impl TermResolver {
     }
 }
 
-// Join every worker before the caller closes the shared lookup session. Dropping
-// a JoinHandle detaches its task, leaving the reader in use after batch return.
-async fn drain_resolution_tasks(
-    handles: Vec<tokio::task::JoinHandle<Result<()>>>,
+type ResolutionTaskResult = std::result::Result<Result<()>, tokio::task::JoinError>;
+
+struct ResolutionOutcome {
     strict: bool,
-) -> Result<()> {
-    let mut first_error = None;
-    for handle in handles {
-        let error = match handle.await {
-            Ok(Ok(())) => continue,
+    first_error: Option<(usize, ReadError)>,
+}
+
+impl ResolutionOutcome {
+    fn record(&mut self, index: usize, result: ResolutionTaskResult) {
+        let error = match result {
+            Ok(Ok(())) => return,
             Ok(Err(error)) => error,
             Err(error) => ReadError::ResolutionTask(error),
         };
-        if matches!(error, ReadError::Cancelled) || (strict && first_error.is_none()) {
-            first_error = Some(error);
-        } else if !strict {
+        if matches!(error, ReadError::Cancelled) {
+            self.first_error = Some((index, error));
+            return;
+        }
+        if !self.strict {
             warn!(err = %error, "term resolution task failed");
+            return;
+        }
+        // Reap whichever worker finishes first without changing strict mode's
+        // input-order error selection. Cancellation retains precedence.
+        if self.first_error.as_ref().is_none_or(|(first, previous)| {
+            !matches!(previous, ReadError::Cancelled) && index < *first
+        }) {
+            self.first_error = Some((index, error));
         }
     }
-    first_error.map_or(Ok(()), Err)
+}
+
+// Join every remaining worker before closing the shared lookup session.
+async fn drain_resolution_tasks<F>(
+    mut handles: FuturesUnordered<F>,
+    mut outcome: ResolutionOutcome,
+) -> Result<()>
+where
+    F: Future<Output = (usize, ResolutionTaskResult)>,
+{
+    while let Some((index, result)) = handles.next().await {
+        outcome.record(index, result);
+    }
+    outcome.first_error.map_or(Ok(()), |(_, error)| Err(error))
 }
 
 /// Resolve a single file hash to its reconstruction terms.
@@ -756,6 +802,16 @@ mod tests {
     use crab_xet::xorb::builder::{RunId, XorbBuilder};
     use crab_xet::xorb::format::Chunk;
 
+    fn indexed_tasks(
+        handles: Vec<tokio::task::JoinHandle<Result<()>>>,
+    ) -> FuturesUnordered<impl Future<Output = (usize, ResolutionTaskResult)>> {
+        handles
+            .into_iter()
+            .enumerate()
+            .map(|(index, handle)| async move { (index, handle.await) })
+            .collect()
+    }
+
     #[tokio::test]
     async fn cancellation_drains_workers_before_returning_shared_state() {
         for strict in [false, true] {
@@ -773,7 +829,13 @@ mod tests {
                 drop(worker_shared);
                 Ok(())
             });
-            let drain = drain_resolution_tasks(vec![cancelled, pending], strict);
+            let drain = drain_resolution_tasks(
+                indexed_tasks(vec![cancelled, pending]),
+                ResolutionOutcome {
+                    strict,
+                    first_error: None,
+                },
+            );
             tokio::pin!(drain);
             assert!(
                 futures_util::poll!(&mut drain).is_pending(),
@@ -789,15 +851,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completion_order_preserves_strict_error_precedence() {
+        for later_cancelled in [false, true] {
+            let (release, released) = tokio::sync::oneshot::channel();
+            let first = tokio::spawn(async move {
+                released.await.unwrap();
+                Err(ReadError::NotFound {
+                    path: "first input".into(),
+                })
+            });
+            let later = tokio::spawn(async move {
+                if later_cancelled {
+                    Err(ReadError::Cancelled)
+                } else {
+                    Err(ReadError::NotFound {
+                        path: "later input".into(),
+                    })
+                }
+            });
+            let mut handles = indexed_tasks(vec![first, later]);
+            let mut outcome = ResolutionOutcome {
+                strict: true,
+                first_error: None,
+            };
+            let (index, result) = handles.next().await.unwrap();
+            assert_eq!(index, 1, "the later worker must finish first");
+            outcome.record(index, result);
+            release.send(()).unwrap();
+            let error = drain_resolution_tasks(handles, outcome).await.unwrap_err();
+            if later_cancelled {
+                assert!(matches!(error, ReadError::Cancelled));
+            } else {
+                assert!(matches!(error, ReadError::NotFound { path } if path == "first input"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn strict_resolution_preserves_worker_panic_source() {
         use std::error::Error;
 
         let worker: tokio::task::JoinHandle<Result<()>> = tokio::spawn(async {
             panic!("resolution worker fixture");
         });
-        let error = drain_resolution_tasks(vec![worker], true)
-            .await
-            .unwrap_err();
+        let error = drain_resolution_tasks(
+            indexed_tasks(vec![worker]),
+            ResolutionOutcome {
+                strict: true,
+                first_error: None,
+            },
+        )
+        .await
+        .unwrap_err();
         let source = error
             .source()
             .and_then(|source| source.downcast_ref::<tokio::task::JoinError>());
@@ -844,15 +949,14 @@ mod tests {
         let _occupied = resolver.semaphore.acquire().await.unwrap();
         for mode in ["terms", "sequences", "strict"] {
             let cancel = CancellationToken::new();
+            let owner_count = Arc::strong_count(&resolver.cache);
             let batch = async {
                 let hash = MerkleHash::default();
-                let files = [(hash, None, 0)];
+                let files = vec![(hash, None, 0); 1_000];
+                let terms = vec![(hash, None); 1_000];
                 let source = ChunkSequenceSourceKind::Committed;
                 match mode {
-                    "terms" => resolver
-                        .resolve_batch(&[(hash, None)], &cancel)
-                        .await
-                        .map(|_| ()),
+                    "terms" => resolver.resolve_batch(&terms, &cancel).await.map(|_| ()),
                     "sequences" => resolver
                         .resolve_sequences_batch(&files, source, &cancel)
                         .await
@@ -865,11 +969,17 @@ mod tests {
             };
             tokio::pin!(batch);
             assert!(futures_util::poll!(&mut batch).is_pending());
+            // Each worker owns the explicit cache handle and its CachingStore clone.
+            let retained = Arc::strong_count(&resolver.cache) - owner_count;
             cancel.cancel();
             let result = tokio::time::timeout(std::time::Duration::from_secs(1), batch)
                 .await
                 .expect("cancelled admission must not strand batch workers");
             assert!(matches!(result, Err(ReadError::Cancelled)), "{mode}");
+            assert!(
+                retained <= 2,
+                "{mode} retained {retained} worker owners for one permit"
+            );
         }
     }
 

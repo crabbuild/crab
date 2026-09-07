@@ -36,7 +36,8 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
   Source: `crates/crab-read/src/hydrator.rs`.
 - TermResolver construction rejects zero/oversized permit counts. Its semaphore
   is shared across batches; do not recreate independent capacity per call.
-  Queued task allocations still require separate scale qualification.
+  Bound retained worker tasks per batch too; reap completion order while
+  retaining input-order strict errors and cancellation precedence.
   Source: `crates/crab-read/src/term_resolver.rs`.
 - Drain every spawned term-resolution worker before closing the shared file-index lookup session, including cancellation and strict errors. Await batch futures through cancellation; dropping a future does not perform asynchronous cleanup.
   Source: `crates/crab-read/src/term_resolver.rs`.

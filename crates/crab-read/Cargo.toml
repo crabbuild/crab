@@ -25,6 +25,7 @@ crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }
+futures-util = { workspace = true }
 globset = { workspace = true }
 gix-packetline = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
@@ -41,6 +42,5 @@ xet-runtime = { workspace = true }
 
 [dev-dependencies]
 slatedb = { version = "=0.15.0", features = ["wal_disable", "zstd"] }
-futures-util = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

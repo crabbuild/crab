@@ -51,7 +51,7 @@ not claims that the named code is defective.
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
 | crab-cache | Broader cache-key and invalidation qualification remain | Diagnostics, exact cached-file ranges, repair/accounting, and README navigation verified |
 | crab-cache-store | Broader source-chain integrity and deployed-service qualification remain | Warm ranges, conditional/versioned bypass, metadata authority, and corruption provenance verified |
-| crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
+| crab-read | Dropped-batch session cleanup and aggregate memory/source-chain qualification remain | Bounded workers, shared admission, typed join sources, and awaited batch cleanup verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Provider ranges, aggregate resource limits, and broader consumer qualification remain | Lifecycle documentation, README navigation, and coalescing admission boundaries verified |
 | crab-vfs | Native backend/dependency child tasks and abandoned-future cleanup remain | Hydration and refresh ownership regressions, feature checks, lint/docs, and CLI build pass |
@@ -3677,3 +3677,36 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   crate Clippy/rustdoc, and the CLI binary build pass. The build retains the
   macOS unwind-size warning. Spawned task allocation and cleanup after dropped
   batch futures remain open work.
+
+
+### Bound retained term-resolution workers
+
+- Both terms and sequence batches now keep a completion-driven set of at most
+  `concurrency` JoinHandle futures. Before admitting another input, a full set
+  reaps whichever worker completes first. The resolver's shared semaphore still
+  limits metadata operations across concurrent batches. No per-input task queue
+  is allocated up front.
+- Completion order does not change strict error selection: workers retain their
+  input index, and the outcome accumulator keeps the earliest input error while
+  preserving cancellation precedence. Remaining handles are drained before
+  the shared file-index session closes. Best-effort logging is retained.
+- Regression with 1,000 inputs and one occupied permit retained 2,000 cache
+  owners before the fix (explicit cache plus CachingStore ownership per worker).
+  All three APIs now retain only the bounded worker owners and still drain on
+  cancellation. Another test makes a later input finish first and verifies
+  input-order strict errors and cancellation precedence.
+- Dependency proof: FuturesUnordered yields completions without FIFO blocking
+  and drops its contained futures on drop. Its contained JoinHandles retain the
+  prior detached-on-drop behavior; this change does not solve abandoned batch
+  cleanup. Moved the already-used futures-util dependency from dev to runtime;
+  no lockfile, version, feature, public API, or configuration change.
+- Input/result maps still scale with input size, as do aggregate caches and the
+  number of caller-created batches. The worker bound is not a whole-application
+  memory guarantee. No native or live metadata qualification is claimed here.
+- Evidence map: the two batch loops, shared semaphore, outcome drain, and lookup
+  closure are the touched ownership chain. CLI diff and diff-driver remain the
+  callers. Both sibling batch modes use the same completion and error policy.
+- Validation: all seven term-resolution tests, strict crate Clippy/rustdoc, and
+  CLI binary build pass. The CLI build retains the macOS unwind-size warning.
+  Added production code buys bounded task retention and deterministic errors
+  without waiting for every worker in a fixed wave to complete.

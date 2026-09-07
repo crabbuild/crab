@@ -125,7 +125,9 @@ clamped length and underlying xorb/chunk integrity, not the whole-file hash.
 chunk sequences rather than file output. `TermResolver::new` returns a
 configuration error for zero concurrency or values above Tokio's maximum permit
 count. One semaphore limits admitted metadata work across this resolver's
-concurrent batches; it does not bound the number of queued task allocations.
+concurrent batches. Each batch also retains at most that many worker tasks,
+reaping whichever finishes first before scheduling another input. Input and
+result collections still scale with batch size; this is not total memory admission.
 
 | API | Per-file resolution failure |
 | --- | --- |
