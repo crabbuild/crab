@@ -30,6 +30,9 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
 
 ## Invariants
 
+- Validate ASCII before byte-indexed hex decoding. Malformed PSK config and cache hashes must return errors rather than panic on UTF-8 boundaries.
+  Sources: `crates/crab-cache-server/src/config.rs`, `crates/crab-cache-server/src/cache_store.rs`.
+
 - Separate public health/metrics routes from authenticated object/admin routes; inspect router composition before moving middleware.
   Source: `crates/crab-cache-server/src/state.rs`.
 - Path parsing and immutable admission precede cache/origin operations; reject invalid paths rather than normalizing them into a different object.

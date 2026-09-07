@@ -1840,7 +1840,7 @@ fn eviction_type_weight(type_byte: u8) -> u8 {
 
 /// Parse a hex-encoded hash string into 32 bytes.
 pub fn parse_hash_hex(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
+    if hex.len() != 64 || !hex.is_ascii() {
         return None;
     }
     let mut out = [0u8; 32];
@@ -1872,6 +1872,12 @@ mod hex {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multibyte_hashes_are_rejected_without_panicking() {
+        let hash = format!("€{}", "0".repeat(61));
+        assert!(parse_hash_hex(&hash).is_none());
+    }
 
     fn test_store() -> CacheStore {
         test_store_with_budget(1_073_741_824)
@@ -2157,7 +2163,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"0123456789abcdef");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
 
@@ -2178,7 +2184,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"0123456789abcdef");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
 
@@ -2199,7 +2205,7 @@ mod tests {
 
         let data1 = Bytes::from_static(b"aaaa");
         let hash1 = blake3::hash(&data1);
-        let key1 = test_key(&hash1.to_hex().to_string());
+        let key1 = test_key(hash1.to_hex().as_ref());
         store.put(&key1, data1.clone(), hash1.as_bytes()).unwrap();
         assert_eq!(store.current_bytes(), 4);
 
@@ -2220,7 +2226,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"same object twice");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
@@ -2271,7 +2277,7 @@ mod tests {
             std::thread::spawn(move || {
                 let data = Bytes::from(vec![byte; 60]);
                 let hash = blake3::hash(&data);
-                let key = test_key(&hash.to_hex().to_string());
+                let key = test_key(hash.to_hex().as_ref());
                 barrier.wait();
                 store.put(&key, data, hash.as_bytes())
             })
@@ -2329,7 +2335,7 @@ mod tests {
             let store = CacheStore::open(root.clone(), 1_000_000, db.connect().unwrap()).unwrap();
             let data = Bytes::from(vec![0u8; 100]);
             let hash = blake3::hash(&data);
-            let key = test_key(&hash.to_hex().to_string());
+            let key = test_key(hash.to_hex().as_ref());
             store.put(&key, data, hash.as_bytes()).unwrap();
             assert_eq!(store.current_bytes(), 100);
         }
@@ -2350,7 +2356,7 @@ mod tests {
         let db_path = root.join(CACHE_DB_FILE);
         let data = Bytes::from(vec![0xAB; 40]);
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         {
             let db = CacheDb::open_or_create(&db_path).unwrap();
@@ -2429,7 +2435,7 @@ mod tests {
         let db_path = root.join(CACHE_DB_FILE);
         let data = Bytes::from(vec![0xCD; 64]);
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         {
             let db = CacheDb::open_or_create(&db_path).unwrap();
@@ -2488,7 +2494,7 @@ mod tests {
         // Insert one xorb and one shard.
         let d1 = Bytes::from_static(b"xorb-data");
         let h1 = blake3::hash(&d1);
-        let k1 = test_key(&h1.to_hex().to_string());
+        let k1 = test_key(h1.to_hex().as_ref());
         store.put(&k1, d1.clone(), h1.as_bytes()).unwrap();
 
         let d2 = Bytes::from_static(b"shard-data!!");
@@ -2543,7 +2549,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"cached while sqlite row vanishes");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         let meta_key = make_meta_key(ObjectType::Xorb, hash.as_bytes());
@@ -2575,7 +2581,7 @@ mod tests {
 
         let data = Bytes::from_static(b"cached before metadata reset");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
         {
             let store = CacheStore::open(root.clone(), 1_000_000, db.connect().unwrap()).unwrap();
             store.put(&key, data.clone(), hash.as_bytes()).unwrap();
@@ -2608,7 +2614,7 @@ mod tests {
         let store = test_store_with_budget(32);
         let data = Bytes::from_static(b"cached object that vanished");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         std::fs::remove_file(store.object_path(&key)).unwrap();
@@ -2623,7 +2629,7 @@ mod tests {
 
         let replacement = Bytes::from_static(b"replacement bytes fit");
         let replacement_hash = blake3::hash(&replacement);
-        let replacement_key = test_key(&replacement_hash.to_hex().to_string());
+        let replacement_key = test_key(replacement_hash.to_hex().as_ref());
         store
             .put(
                 &replacement_key,
@@ -2639,7 +2645,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"range object that vanished");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         std::fs::remove_file(store.object_path(&key)).unwrap();
@@ -2660,7 +2666,7 @@ mod tests {
 
         let data = Bytes::from(vec![0xAA; 51]);
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         let err = store.put(&key, data, hash.as_bytes()).unwrap_err();
         assert!(matches!(err, CacheServiceError::DiskFull { .. }));
@@ -2675,7 +2681,7 @@ mod tests {
         for i in 0u8..20 {
             let data = Bytes::from(vec![i; 10]);
             let hash = blake3::hash(&data);
-            let key = test_key(&hash.to_hex().to_string());
+            let key = test_key(hash.to_hex().as_ref());
             store.put(&key, data, hash.as_bytes()).unwrap();
         }
         assert_eq!(store.current_bytes(), 200);
@@ -2698,7 +2704,7 @@ mod tests {
         for i in 0u8..5 {
             let data = Bytes::from(vec![i; 10]);
             let hash = blake3::hash(&data);
-            let key = test_key(&hash.to_hex().to_string());
+            let key = test_key(hash.to_hex().as_ref());
             store.put(&key, data, hash.as_bytes()).unwrap();
         }
 
@@ -2738,12 +2744,12 @@ mod tests {
         // Insert 2 xorbs and 2 shards.
         let d1 = Bytes::from_static(b"xorb-one");
         let h1 = blake3::hash(&d1);
-        let k1 = test_key(&h1.to_hex().to_string());
+        let k1 = test_key(h1.to_hex().as_ref());
         store.put(&k1, d1.clone(), h1.as_bytes()).unwrap();
 
         let d2 = Bytes::from_static(b"xorb-two");
         let h2 = blake3::hash(&d2);
-        let k2 = test_key(&h2.to_hex().to_string());
+        let k2 = test_key(h2.to_hex().as_ref());
         store.put(&k2, d2.clone(), h2.as_bytes()).unwrap();
 
         let d3 = Bytes::from_static(b"shard-one");
@@ -2796,7 +2802,7 @@ mod tests {
 
         let d1 = Bytes::from_static(b"data-a");
         let h1 = blake3::hash(&d1);
-        let k1 = test_key(&h1.to_hex().to_string());
+        let k1 = test_key(h1.to_hex().as_ref());
         store.put(&k1, d1, h1.as_bytes()).unwrap();
 
         let filter = EvictFilter { object_type: None };

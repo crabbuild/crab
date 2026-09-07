@@ -38,7 +38,9 @@ explicit configuration choice and still does not cache mutations.
 
 The binary is bounded by request timeouts, concurrency limits, and a maximum
 object size. Authentication supports mTLS, bearer, and PSK modes. A PSK is
-configured as a BLAKE3 hash, never as the raw secret.
+configured as a BLAKE3 hash, never as the raw secret. `auth.psk_hash` must
+contain exactly 64 ASCII hexadecimal characters; malformed input returns a
+configuration error before service startup.
 
 ## Configuration and usage
 
@@ -71,9 +73,13 @@ TLS can be configured in `[tls]` or terminated by a trusted reverse proxy.
 Run readiness checks before serving traffic:
 
 ```text
-cargo run -p crab-cache-server -- --config cache.toml check --json
-cargo run -p crab-cache-server -- --config cache.toml serve
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-cache-dev \
+  cargo run -p crab-cache-server -- --config cache.toml check --json
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-cache-dev \
+  cargo run -p crab-cache-server -- --config cache.toml serve
 ```
+
+Use a unique target directory for the checkout on the mounted workspace volume.
 
 The CLI also provides `evidence` verification/gating and `onboarding`
 render/check/probe commands for repeatable deployment proof.

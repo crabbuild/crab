@@ -109,12 +109,7 @@ pub fn start_evictor_task(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "test assertions"
-)]
+#[expect(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use crate::cache_store::{CacheStore, ObjectType, ServerObjectKey};
     use crate::db::{CACHE_DB_FILE, CacheDb};

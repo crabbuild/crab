@@ -1374,11 +1374,10 @@ async fn test_restricted_dedup_scope_authorizes_matching_repo() {
     assert!(result.unknown.is_empty());
 
     let stats = admin_stats(server.addr).await;
-    assert_eq!(
+    assert!(
         stats["dedup_index"]["requires_repo_context"]
             .as_bool()
-            .unwrap(),
-        true
+            .unwrap()
     );
 
     let _ = server.shutdown.send(());
@@ -1458,7 +1457,7 @@ async fn test_bad_shard_push_warming_rejects_and_does_not_index() {
 
     let fixture = build_real_shard();
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let shard_path = global_path("shards", &wrong_hash);
+    let shard_path = global_path("shards", wrong_hash);
 
     let err = client
         .put(&shard_path, fixture.shard_bytes.clone())
@@ -1484,7 +1483,7 @@ async fn test_bad_xorb_push_warming_rejects() {
 
     let fixture = build_real_shard();
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let xorb_path = global_path("xorbs", &wrong_hash);
+    let xorb_path = global_path("xorbs", wrong_hash);
 
     let err = client
         .put(&xorb_path, fixture.xorb_bytes.clone())
@@ -1523,7 +1522,7 @@ async fn test_bad_origin_shard_read_miss_rejects_and_does_not_index() {
 
     let fixture = build_real_shard();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let shard_path = global_path("shards", &wrong_hash);
+    let shard_path = global_path("shards", wrong_hash);
     server
         .origin
         .put(
@@ -1611,7 +1610,7 @@ async fn test_bad_origin_xorb_read_miss_rejects() {
 
     let fixture = build_real_shard();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let xorb_path = global_path("xorbs", &wrong_hash);
+    let xorb_path = global_path("xorbs", wrong_hash);
     server
         .origin
         .put(

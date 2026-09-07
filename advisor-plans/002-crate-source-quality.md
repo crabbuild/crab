@@ -58,7 +58,7 @@ not claims that the named code is defective.
 | crab-auth | Credential Debug output; token-cache lifecycle remains | Diagnostic slice verified |
 | crab-auth-store | Credential refresh and storage adapter error boundaries | Pending |
 | crab-auth-server | Receive cleanup and error-to-response mapping | Pending |
-| crab-cache-server | Eviction concurrency, shutdown, request validation | Pending |
+| crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
 | crab-http-server | Request validation, embedded assets, service errors | Pending |
 | crab-workflow | Retry validation; cancellation, cache identity, resume remain | Retry parsing slice verified |
 
@@ -474,3 +474,34 @@ returns None. These tests qualify startup decisions, not all cache read behavior
 Strict all-target cache-store Clippy passes with remote-client. The refactor
 adds no production API and reduces nesting; added tests protect constructor
 behavior across enabled and disabled feature configurations.
+
+## Cache-server hexadecimal input
+
+The config PSK decoder and public cache hash decoder checked only byte length
+before slicing two-byte string ranges. A 64-byte value beginning with a
+three-byte character panicked at a UTF-8 boundary. Both now reject non-ASCII
+input before indexing, preserving their existing error/None contracts and all
+ASCII hex decoding behavior.
+
+Entry points: TOML config parsing through parse_auth and the binary's config
+loader; cache_store hash decoding for shard verification, persisted object-name
+recovery, and storage IDs. The new public-config regression covers multibyte
+characters at different alignments. The cache helper has its own regression.
+Both panicked before the guards were added. No auth hash format changed.
+
+Sibling search: HTTP api::decode_hex already validates ASCII hex digits before
+slicing. HTTP contents::validate_path, workflow stage_runtime::parse_cached_hash,
+metadata split_commit_graph::parse_sha1_hex, and macOS auth token_cache::hex_to_key
+have similar unchecked byte slicing and require the next cross-crate pass.
+Their callers and regressions are not yet qualified; this cache-server change
+must not be presented as a completed fix for every hexadecimal parser.
+
+README specifies the PSK input shape and uses external target directories for
+service commands. The repeated frontend CI failure on run 34103916186 is again
+the release tooltip contrast assertion (29 browser tests passed); the unchanged,
+mocked frontend surface remains outside this Rust change.
+
+Validation: 15 config tests and 41 cache-store tests pass; strict all-target
+cache-server Clippy passes. Removed unnecessary allocations/borrows and stale
+lint expectations in tests, retaining assertions. Moved the request logging
+helper before the test module without changing its structured fields.
