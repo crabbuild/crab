@@ -6,7 +6,7 @@ use crab_metadata::{manifest_store, manifests::Manifest, ref_journal};
 use crab_storage::{Store, StoreLayout};
 use crab_write::{
     WriteError,
-    journal::{commit_edits, compact_for_owner, compact_for_reader},
+    journal::{CommitOptions, commit_edits, compact_for_owner, compact_for_reader},
 };
 use futures_util::TryStreamExt;
 use object_store::ObjectStoreExt;
@@ -40,8 +40,7 @@ async fn pending(store: &Store, layout: &StoreLayout<Store>) -> PushLock {
         None,
         Vec::new(),
         Vec::new(),
-        TTL,
-        &tokio_util::sync::CancellationToken::new(),
+        CommitOptions::new(TTL, &tokio_util::sync::CancellationToken::new()),
     )
     .await
     .unwrap();
@@ -95,8 +94,7 @@ async fn independently_locked_creates_cannot_publish_conflicting_ref_names() {
             Some(parent.to_owned()),
             vec![],
             vec![],
-            TTL,
-            &cancel
+            CommitOptions::new(TTL, &cancel)
         ),
         commit_edits(
             &store,
@@ -106,8 +104,7 @@ async fn independently_locked_creates_cannot_publish_conflicting_ref_names() {
             Some(child.to_owned()),
             vec![],
             vec![],
-            TTL,
-            &cancel
+            CommitOptions::new(TTL, &cancel)
         ),
     );
     first.release().await.unwrap();
@@ -149,8 +146,7 @@ async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits
             None,
             vec![],
             vec![],
-            TTL,
-            &cancel,
+            CommitOptions::new(TTL, &cancel),
         ),
     )
     .await
@@ -167,8 +163,7 @@ async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits
         None,
         vec![],
         vec![],
-        TTL,
-        &cancel,
+        CommitOptions::new(TTL, &cancel),
     );
     tokio::pin!(create);
     assert!(
@@ -237,8 +232,7 @@ async fn namespace_recovery_uses_the_configured_lease_ttl() {
             Some(ref_name.to_owned()),
             vec![],
             vec![],
-            Duration::from_secs(1),
-            &CancellationToken::new(),
+            CommitOptions::new(Duration::from_secs(1), &CancellationToken::new()),
         ),
     )
     .await
@@ -271,8 +265,7 @@ async fn atomic_namespace_replacement_removes_the_parent_before_creating_childre
         Some(child.clone()),
         vec![],
         vec![],
-        TTL,
-        &CancellationToken::new(),
+        CommitOptions::new(TTL, &CancellationToken::new()),
     )
     .await
     .unwrap();
@@ -319,8 +312,7 @@ async fn late_namespace_lease_loss_preserves_the_committed_result_and_new_holder
                 None,
                 vec![],
                 vec![],
-                TTL,
-                &cancel,
+                CommitOptions::new(TTL, &cancel),
             )
             .await?;
             let replacement = Bytes::from_static(
@@ -389,8 +381,7 @@ async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction
         None,
         vec![],
         vec![],
-        TTL,
-        &tokio_util::sync::CancellationToken::new(),
+        CommitOptions::new(TTL, &tokio_util::sync::CancellationToken::new()),
     )
     .await
     .unwrap();
@@ -410,8 +401,7 @@ async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction
         Some(dev.to_owned()),
         vec![],
         vec![],
-        TTL,
-        &tokio_util::sync::CancellationToken::new(),
+        CommitOptions::new(TTL, &tokio_util::sync::CancellationToken::new()),
     )
     .await
     .unwrap();
@@ -483,8 +473,7 @@ async fn invalid_or_stale_batch_leaves_no_journal_artifacts() {
             None,
             vec![],
             vec![],
-            TTL,
-            &tokio_util::sync::CancellationToken::new(),
+            CommitOptions::new(TTL, &tokio_util::sync::CancellationToken::new()),
         )
         .await;
         if stale {

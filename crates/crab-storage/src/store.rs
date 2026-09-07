@@ -879,6 +879,23 @@ impl Store {
         .await
     }
 
+    /// Reads one bounded object while bounding the complete transport attempt.
+    pub async fn get_with_etag_bounded_with_timeout(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+        timeout: Duration,
+    ) -> Result<(Bytes, ETag)> {
+        tokio::time::timeout(timeout, self.get_with_etag_bounded(path, max_bytes))
+            .await
+            .map_err(|_| StorageError::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("bounded object read exceeded {timeout:?}: {path}"),
+                ),
+            })?
+    }
+
     /// Reads one exact provider object version and returns its metadata.
     ///
     /// # Errors

@@ -38,8 +38,7 @@ pub async fn commit_edits(
     head: Option<String>,
     packs: Vec<PackManifestEntry>,
     shards: Vec<String>,
-    lock_ttl: Duration,
-    cancel: &CancellationToken,
+    options: CommitOptions<'_>,
 ) -> Result<RefJournalCommitResult> {
     commit_edits_inner(
         store,
@@ -51,11 +50,24 @@ pub async fn commit_edits(
         shards,
         CommitContext {
             plan_id: None,
-            lock_ttl,
-            cancel,
+            lock_ttl: options.lock_ttl,
+            cancel: options.cancel,
         },
     )
     .await
+}
+
+/// Lease and cancellation policy for one journal commit.
+pub struct CommitOptions<'a> {
+    lock_ttl: Duration,
+    cancel: &'a CancellationToken,
+}
+
+impl<'a> CommitOptions<'a> {
+    #[must_use]
+    pub fn new(lock_ttl: Duration, cancel: &'a CancellationToken) -> Self {
+        Self { lock_ttl, cancel }
+    }
 }
 
 /// Mirror-plan attribution and cancellation for one journal commit.

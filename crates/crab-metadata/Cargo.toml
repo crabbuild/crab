@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb"]
+file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio"]
 local-index = ["dep:rusqlite"]
 remote-index = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb"]
 storage = ["dep:base64", "dep:crab-storage", "dep:futures-util", "dep:object_store"]
@@ -30,7 +30,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 slatedb = { version = "=0.15.0", optional = true, features = ["wal_disable", "zstd"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tokio = { workspace = true, features = ["sync", "rt"], optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

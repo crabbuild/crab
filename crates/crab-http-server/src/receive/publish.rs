@@ -224,8 +224,7 @@ pub(crate) async fn publish_default_branch(
             Some(branch.to_owned()),
             vec![],
             vec![],
-            TTL,
-            cancel,
+            crab_write::journal::CommitOptions::new(TTL, cancel),
         )
         .await?;
         Ok(())
@@ -534,8 +533,7 @@ async fn publish(
         head,
         packs,
         vec![],
-        TTL,
-        cancel,
+        crab_write::journal::CommitOptions::new(TTL, cancel),
     )
     .await?;
     // From this point no failure means rejection. A disconnected/cancelled

@@ -8587,8 +8587,7 @@ impl PushPipeline {
                     head,
                     packs,
                     shards,
-                    self.config.lock_ttl,
-                    &self.cancel,
+                    crab_write::journal::CommitOptions::new(self.config.lock_ttl, &self.cancel),
                 )
                 .await?
             }
@@ -24789,8 +24788,7 @@ mod tests {
             Some("refs/heads/main/child".to_owned()),
             vec![],
             vec![],
-            Duration::from_secs(60),
-            &cancel,
+            crab_write::journal::CommitOptions::new(Duration::from_secs(60), &cancel),
         )
         .await
         .unwrap();
