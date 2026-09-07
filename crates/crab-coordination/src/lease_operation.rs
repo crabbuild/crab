@@ -54,15 +54,9 @@ where
                             renewal_error = Some(error);
                         }
                     }
-                    result = &mut operation => {
-                        return match result {
-                            Err(error) => Err(error),
-                            Ok(value) => match renewal_error {
-                                Some(error) => Err(E::from(error)),
-                                None => Ok(value),
-                            },
-                        };
-                    }
+                    // This branch starts only before renewal has failed. If work
+                    // finishes first, retain its result without waiting for the backend.
+                    result = &mut operation => return result,
                 }
             }
         }

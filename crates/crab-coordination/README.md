@@ -33,14 +33,25 @@ Single repository mutation                 Active-active mutation
 It has a default five-minute TTL, holder-checked release, renewal, and
 expired-lease reclamation. Enable it with `object-store-lock`.
 
-`while_renewing` awaits a stateful operation while renewing its borrowed lease.
-Renewal failure signals the optional cancellation token, then drains the
-operation so callers can close writers and finish cleanup before releasing the
-lease. An operation error takes precedence over a renewal error. A completed
-operation can return while a backend renewal retry is pending. Callers must
-await this future to completion and explicitly release the lock afterwards;
-dropping it does not provide asynchronous cleanup. CLI maintenance and shared
-journal compaction use this same renewal path.
+### Lease lifecycle
+
+`while_renewing` borrows a `PushLock` and polls work alongside lease renewal.
+CLI maintenance and shared journal compaction use this path.
+
+| Event | Result and cleanup contract |
+| --- | --- |
+| Work finishes before renewal | Return the work result without waiting for a pending backend retry. |
+| Renewal fails | Signal the supplied cancellation token, stop renewing, and await the work to completion. |
+| Work and renewal both fail | Return the work error. |
+| Work succeeds after renewal failed | Return the renewal error. |
+| Caller drops the wrapper future | Work is not drained; the borrowed lock is not released. |
+
+Await the wrapper to completion, then explicitly release the lease on both
+success and error paths. The operation must cooperate with the cancellation
+token and close its own resources before returning. Without a token, renewal
+failure still waits for the operation; the wrapper cannot stop it for the caller.
+
+### Admission and active-active writes
 
 `PushAdmissionTicket` bounds expensive single-repository push pipelines with a
 fixed number of reusable CAS lease slots. Waiting writers own no object and
@@ -52,9 +63,20 @@ than FIFO.
 `WriteCoordinator` exposes health, begin/upload/commit/materialize/abort,
 ref lookup, GC safety snapshots, repair snapshots, and write fencing. The
 provider-specific DynamoDB, Spanner, and Cosmos DB implementations share the
-same CAS-backed state contract. `commit_uploaded_push` is the canonical
-helper for the monotonic begin → upload-confirmation → commit → regional
-materialization path.
+same CAS-backed state contract.
+
+For production publication, use `commit_uploaded_push_refs` after uploading
+immutable objects, then persist the regional manifest projection before calling
+`mark_region_materialized`. Both CLI push and protected receive use this order:
+
+```text
+upload objects → commit_uploaded_push_refs → persist regional projection
+                                                 → mark_region_materialized
+```
+
+`commit_uploaded_push` combines the coordinator transitions and immediately
+marks the writer region materialized. It does not write a manifest projection;
+the in-memory example below exercises coordinator state only.
 
 ## Usage
 

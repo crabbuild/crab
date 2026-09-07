@@ -269,3 +269,26 @@ all-target Clippy passes. Production line count across the three source modules
 is unchanged while five outcome decisions become one. The README now has a
 publication-flow diagram, subsystem headings, and a compact test evidence table
 instead of uncited historical timing paragraphs.
+
+## Lease renewal control flow
+
+`crab-coordination::while_renewing` duplicated primary-error selection inside
+its pending-renewal branch. That branch is guarded by `renewal_error.is_none()`;
+when work completes there, no renewal failure has been recorded. It now returns
+the operation result directly. The outer path still drains work after renewal
+failure and preserves its primary error. No polling priority, timer, lease
+release, or public API changed.
+
+Callee: `PushLock::renew` performs holder-checked CAS and updates the stored
+ETag only after success. Callers in CLI metadb and crab-write journal/catalog
+await the wrapper and release explicitly. Namespace publication separately
+records a committed outcome before processing lease errors. Existing main
+behavior includes both primary-error draining and an operation winning over a
+stalled backend retry; these remain the intended contracts.
+
+The lost-lease test passes before and after simplification. All 108 coordination
+library tests with `object-store-lock` and strict all-target Clippy pass locally.
+The CLI stalled-renewal consumer test is still building; it is not yet claimed
+as passed. README now gives an outcome table and distinguishes coordinator
+commit from durable regional projection. CLI push and protected receive both
+persist that projection before acknowledging regional materialization.
