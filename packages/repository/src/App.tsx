@@ -578,7 +578,7 @@ function RepositoryPage({
             aria-current={view === "pulls" ? "page" : undefined}
             href={repoHref(repo, { view: "pulls" })}
           >
-            <GitPullRequestIcon /> Pull requests
+            <GitPullRequestIcon /> Pulls
           </Link>
           <Link
             className={view === "issues" || view === "labels" ? "active" : ""}
@@ -674,7 +674,7 @@ function RepositoryPage({
               <Suspense
                 fallback={
                   <div className="notice" role="status">
-                    <Spinner size="small" /> Loading pull requests…
+                    <Spinner size="small" /> Loading pulls…
                   </div>
                 }
               >

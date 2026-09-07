@@ -184,9 +184,7 @@ export function PullRequests({
       <div className="notice">
         <h2>This repository is read-only</h2>
         <p>Unarchive it before creating a pull request.</p>
-        <Link href={repoHref(repo, { view: "pulls" })}>
-          Back to pull requests
-        </Link>
+        <Link href={repoHref(repo, { view: "pulls" })}>Back to pulls</Link>
       </div>
     ) : (
       <NewPull repo={repo} refs={refs} url={url} csrf={csrf} theme={theme} />
@@ -197,9 +195,7 @@ export function PullRequests({
       return (
         <div className="notice error">
           <h1>Pull request not found</h1>
-          <Link href={repoHref(repo, { view: "pulls" })}>
-            Back to pull requests
-          </Link>
+          <Link href={repoHref(repo, { view: "pulls" })}>Back to pulls</Link>
         </div>
       );
     return (
@@ -226,7 +222,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
   return (
     <section className="pulls-page">
       <div className="section-heading">
-        <h2>Pull requests</h2>
+        <h2>Pulls</h2>
         {!repo.archived && (
           <Button
             variant="primary"
@@ -240,7 +236,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
       </div>
       <p className="muted">Review and discuss changes between branches.</p>
       <DiscussionSearch
-        label="Search pull requests"
+        label="Search pulls"
         placeholder="Search titles, descriptions, or authors"
         value={query}
         onSearch={(value) =>
@@ -272,7 +268,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
               })}
             >
               {value === "all"
-                ? "All pull requests"
+                ? "All pulls"
                 : `${value[0].toUpperCase()}${value.slice(1)}`}
             </Link>
           ))}
@@ -330,14 +326,12 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
               <div className="notice issue-empty">
                 <GitPullRequestIcon size={32} />
                 <h3>
-                  {query
-                    ? `No pull requests match “${query}”`
-                    : "No matching pull requests"}
+                  {query ? `No pulls match “${query}”` : "No matching pulls"}
                 </h3>
                 <p>
                   {query
                     ? data.next
-                      ? "Try another search or continue to older pull requests."
+                      ? "Try another search or continue to older pulls."
                       : "Try another title, description, or author."
                     : "Compare two branches to start a review."}
                 </p>
@@ -352,7 +346,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
                     q: query || undefined,
                   })}
                 >
-                  Newest pull requests
+                  Newest pulls
                 </Link>
               )}
               {data.next && (
@@ -364,7 +358,7 @@ function PullList({ repo, url }: { repo: Repository; url: URL }) {
                     before: String(data.next),
                   })}
                 >
-                  Older pull requests →
+                  Older pulls →
                 </Link>
               )}
             </div>
@@ -415,9 +409,7 @@ function NewPull({
   const comparable = Boolean(baseOid && headOid && baseOid !== headOid);
   return (
     <section className="pulls-page pull-compose">
-      <Link href={repoHref(repo, { view: "pulls" })}>
-        ← Back to pull requests
-      </Link>
+      <Link href={repoHref(repo, { view: "pulls" })}>← Back to pulls</Link>
       <div className="compare-heading">
         <h2>Compare changes</h2>
         <p className="muted">

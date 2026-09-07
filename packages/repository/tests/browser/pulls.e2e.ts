@@ -375,13 +375,13 @@ test("pull request creation, discussion, and files follow the GitHub review flow
   ).toBeVisible();
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
-  const search = page.getByRole("search", { name: "Search pull requests" });
+  const search = page.getByRole("search", { name: "Search pulls" });
   await search.getByRole("textbox").fill("missing workflow");
   await search.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page).toHaveURL(/q=missing\+workflow/);
   await expect(
     page.getByRole("heading", {
-      name: "No pull requests match “missing workflow”",
+      name: "No pulls match “missing workflow”",
     }),
   ).toBeVisible();
   await search.getByRole("button", { name: "Clear", exact: true }).click();
