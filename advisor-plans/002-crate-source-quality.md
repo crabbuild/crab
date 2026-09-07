@@ -6,11 +6,14 @@ The agent-guide work is complete in PR #158. This follow-up addresses source
 correctness, ownership, diagnostics, readability, and executable documentation.
 A crate is not qualified merely because its guide exists or its code formats.
 
-Verified source batches on `codex/crate-quality`:
+Verified source batches:
 
-- `56dc3076fe9`: pointer error sources.
-- `83a657f8516`: ordered large-term diff matching.
-- `67a2413955a`: auth/storage credential Debug redaction.
+- pointer error sources.
+- ordered large-term diff matching.
+- auth/storage credential Debug redaction.
+- shared Git delta instruction decoder.
+- refresh adapter API and retry-boundary documentation.
+- LFS upload file error causes.
 
 These commits cover specific invariants, not completion of the all-crate goal.
 
@@ -35,14 +38,14 @@ not claims that the named code is defective.
 | Crate | Next source inspection | State |
 | --- | --- | --- |
 | crab-types | Pointer error sources; timestamp range contracts remain | Pointer slice verified |
-| crab-git | Pointer classification versus parsing; process error context | Pending |
+| crab-git | Shared delta decoder; discovery and process contracts remain | Delta slice verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Range arithmetic, malformed payloads, reconstruction checks | Pending |
 | crab-storage | Credential diagnostics; retry/error classification remains | Diagnostic slice verified |
 | crab-metadata | Reader/writer closure and feature boundaries | Pending |
 | crab-staging | Flush-before-publication and recovery ownership | Pending |
 | crab-coordination | Renewal cancellation and lock release ownership | Pending |
-| crab-lfs | Integrity validation and shared versus CLI lock ownership | Pending |
+| crab-lfs | Upload I/O causes; integrity and lock ownership remain | Upload diagnostic slice verified |
 | crab-cache | Cache keys, token/path diagnostics, cache invalidation | Pending |
 | crab-cache-store | Origin authority, corrupt-cache repair, range validation | Pending |
 | crab-read | Hydration integrity and error propagation to consumers | Pending |
@@ -142,7 +145,8 @@ workspace dependency against the TOML manifests; no dependency changes.
 ## Local verification environment
 
 User authorized `/Volumes/Workspace` because `$HOME/Workspace` is absent.
-Use this worktree's directories on every Cargo invocation:
+The checks above ran in worktree `089c` with these directories. Other
+checkouts must use their own target directory, as required by root AGENTS.md:
 
 ```sh
 RUSTC_WRAPPER= \
@@ -155,3 +159,51 @@ The separate Cargo home avoids pre-existing dangling registry cache/source
 symlinks into another checkout. Do not repair or reuse that checkout's paths.
 The wrapper override bypasses the shared `sccache` process, which stalled the
 first compilation attempt. Other checkouts' processes are left untouched.
+
+## Shared Git delta decoder
+
+`crab-git/src/delta.rs` now gives validation and reconstruction one private
+instruction walker. Previously each decoded copy/insert commands separately.
+The refactor removes that duplication while retaining output allocation limits,
+base-length checks, per-instruction cancellation, and typed corruption errors.
+
+Callers: incoming-pack quarantine applies deltas before retaining objects;
+`crab-remote-git/src/reader.rs` applies them for object reads and validates them
+for metadata-only inspection. The locked `gix-pack` delta implementation confirms
+copy-field decoding and the implicit 64 KiB copy size. No public API changes.
+
+Proof: seven delta tests pass before and after the refactor, including malformed
+instruction parity and implicit-copy-size coverage. Nine incoming-pack tests
+pass, including native Git full/thin reconstruction and cleanup. Remote-reader
+REF_DELTA, OFS_DELTA, and metadata-only tree-listing tests pass. Strict all-target
+crab-git Clippy passes. Production decoding shrinks by removing the second loop;
+tests retain the shared integrity contract.
+
+## LFS upload error context
+
+`LfsObjectStore::put_stream_with_size` and `stream_file_parts` both annotate local
+file failures. The old wrapper converted the OS error to text. A private typed
+context now retains that cause and the filename inside the existing I/O variant.
+CLI and auth-server conversions both retain the I/O error; download fallback
+classification remains unchanged. No dependency or public enum change.
+
+The public upload regression fails against the old wrapper because no original
+I/O source is available. All 31 object-store tests pass with the replacement,
+including upload error sources, multipart round trips, corruption rejection,
+and abort behavior. Strict all-target Clippy passes for crab-lfs and crab-git.
+
+## Refresh adapter contract documentation
+
+`crab-auth-store/src/refreshing_store.rs` exposes backend parts and the refresh
+constructor without describing their consistency requirements. Rustdoc now
+records shared state, target binding, constructor preconditions, and capability
+queries that do not themselves refresh. The README distinguishes unary retries,
+stream bodies, raw upload handles, and stable-ID multipart calls.
+
+Evidence: traced the CLI builder in `crab/src/auth/mod.rs`, all three unary
+retry helpers, list/delete adapters, and raw multipart creation. Existing tests
+cover proactive refresh, one authentication retry, fresh permission denial,
+shared handles, and target/destination rejection. The locked object_store 0.14.1
+MultipartUpload contract confirms that its returned handle owns subsequent
+part/completion/abort calls. This is documentation of current behavior; no
+refresh policy was changed or newly qualified against a live identity service.
