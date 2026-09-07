@@ -105,6 +105,21 @@ the storage reservation contract. JSON extractor rejections retain their HTTP
 status through `app::Error`, while internal storage failures use a separate
 response classification.
 
+## Admission ownership
+
+A handler returning a response and a client finishing its response body are
+different lifecycle events:
+
+| Surface | Ownership |
+| --- | --- |
+| Collaboration middleware in [app.rs](src/app.rs) | Holds an application slot while producing the response; applies a 30-second handler timeout |
+| Release download in [releases.rs](src/releases.rs) | Moves a separate transfer permit and cancellation guard into the response stream |
+
+Keep body-stream resources with the stream. The middleware timeout cannot stand
+in for transfer deadlines or worker cleanup after a response has been returned.
+The production server initializes eight application slots and four shared Git
+transfer slots in [server.rs](src/server.rs); test fixtures use smaller limits.
+
 ## Work on this crate
 
 Start with [AGENTS.md](AGENTS.md) for entry points, ownership, and invariants.

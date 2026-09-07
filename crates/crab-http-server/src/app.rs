@@ -286,6 +286,8 @@ pub(crate) async fn admit(
         )
             .into_response();
     };
+    // Admission covers producing the response, not consuming its body. Streaming
+    // handlers must retain their own transfer permit and cancellation ownership.
     let started = Instant::now();
     let response = tokio::select! {
         () = server.cancellation.cancelled() => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":{"message":"Server is shutting down; retry the same submission after restart"}}))).into_response(),
