@@ -62,7 +62,8 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
   `crates/crab-cache-server/src/cache_store.rs`.
 - Administrative eviction and staged publication use `CacheStore::run_mutation`.
   Keep the admission
-  permit in the blocking worker and serialize tracker closure with spawning;
+  permit and drain token with its result until consumption or cleanup, and
+  serialize tracker closure with spawning;
   cancelled requests must not detach mutations from `PreparedServer::shutdown`.
   Move staged-file ownership and budget/commit work together. Origin fallback
   retains the commit recovery handle; shard-index ingestion stays with its caller.

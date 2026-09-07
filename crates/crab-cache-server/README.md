@@ -118,6 +118,8 @@ blocking worker. Admission allows one such mutation at a time; cancelling a queu
 already admitted mutation finishes before server shutdown returns. Cancellation
 does not roll back an admitted eviction or publication. The worker owns staged
 files through commit; cancelled queued publications remove their temporary files.
+Unclaimed recovery results retain admission and drain ownership until their
+temporary-file cleanup finishes.
 Startup recovery and other synchronous disk reads are outside this worker's drain.
 
 Periodic eviction runs disk/SQLite work on a blocking worker, one batch at a

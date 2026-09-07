@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -336,6 +337,15 @@ pub enum CacheRangeRead {
 // CacheStore
 // ---------------------------------------------------------------------------
 
+// Drop the result before releasing admission and the drain token. A cancelled
+// caller can leave a recovery result owning a TempPath; its cleanup remains
+// part of the mutation even after the blocking closure has returned.
+struct MutationOutput<T> {
+    result: Result<T>,
+    _permit: OwnedSemaphorePermit,
+    _task: TaskTrackerToken,
+}
+
 /// On-disk cache with LRU eviction metadata.
 pub struct CacheStore {
     root: PathBuf,
@@ -403,7 +413,7 @@ impl CacheStore {
     }
 
     // Admit one request mutation at a time before entering the blocking pool.
-    // The permit lives in the worker, so cancelling its caller cannot admit
+    // The permit follows the worker result, so cancelling its caller cannot admit
     // an unbounded queue of jobs waiting on the synchronous mutation lock.
     pub(crate) async fn run_mutation<T: Send + 'static>(
         self: &Arc<Self>,
@@ -420,14 +430,17 @@ impl CacheStore {
             ));
         }
         let store = Arc::clone(self);
-        let worker = tasks.spawn_blocking(move || {
-            let _permit = permit;
-            mutation(&store)
+        let token = tasks.token();
+        let worker = tokio::task::spawn_blocking(move || MutationOutput {
+            result: mutation(&store),
+            _permit: permit,
+            _task: token,
         });
         drop(tasks);
-        worker
+        let output = worker
             .await
-            .map_err(|error| CacheServiceError::InternalError(error.into()))?
+            .map_err(|error| CacheServiceError::InternalError(error.into()))?;
+        output.result
     }
 
     pub(crate) async fn shutdown_mutations(&self) {
@@ -2484,6 +2497,65 @@ mod tests {
         );
         assert!(waited, "shutdown detached the admitted eviction");
         assert_eq!(store.current_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_unclaimed_result_cleanup() {
+        struct Cleanup {
+            entered: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+            _file: TempPath,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.entered.take().unwrap().send(());
+                let _ = self.release.recv_timeout(std::time::Duration::from_secs(3));
+            }
+        }
+        let store = Arc::new(test_store());
+        let temp_path = store
+            .create_temp_object_path(&pack_key("unclaimed"))
+            .unwrap();
+        let path = temp_path.to_path_buf();
+        let (cleanup_entered, cleanup_started) = tokio::sync::oneshot::channel();
+        let (release_cleanup, cleanup_release) = std::sync::mpsc::channel();
+        let cleanup = Cleanup {
+            entered: Some(cleanup_entered),
+            release: cleanup_release,
+            _file: temp_path,
+        };
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (finish, finishing) = std::sync::mpsc::channel();
+        let request_store = Arc::clone(&store);
+        let request = tokio::spawn(async move {
+            request_store
+                .run_mutation(move |_| {
+                    entered.send(()).unwrap();
+                    finishing
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                    Ok(cleanup)
+                })
+                .await
+        });
+        started.await.unwrap();
+        request.abort();
+        let _ = request.await;
+        finish.send(()).unwrap();
+        cleanup_started.await.unwrap();
+        let mut shutdown = Box::pin(store.shutdown_mutations());
+        let waited = tokio::time::timeout(std::time::Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err();
+        release_cleanup.send(()).unwrap();
+        if waited {
+            shutdown.await;
+        }
+        assert!(waited, "shutdown returned before unclaimed result cleanup");
+        assert!(
+            !path.exists(),
+            "unclaimed result retained its temporary file"
+        );
     }
 
     #[tokio::test]

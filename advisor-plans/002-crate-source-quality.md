@@ -3583,3 +3583,36 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
 - NFS run `34154546592` is terminal/cancelled. Retained-evidence job
   `101858226689` failed: missing required suite `mount-nfs-windows`. Linux and
   macOS jobs passed on the earlier head; Windows remains unqualified.
+
+
+### Drain unclaimed mutation results before releasing ownership
+
+- Follow-up audit found a gap in the new request-worker implementation on
+  `b6755c4b503`: TaskTracker's blocking wrapper drops its token before returning
+  the result to Tokio. If the request cancelled its join, Tokio disposes of the
+  unclaimed output afterward. A `TempPathCommitError` can still own a staged
+  file at that point, allowing drain to finish before its cleanup.
+- Upstream evidence: tokio-util `TaskTracker::spawn_blocking` explicitly drops
+  the token before returning `res`; Tokio 1.52 `Harness::complete` drops the
+  output when `is_join_interested` is false. Main's synchronous implementation
+  does not have this newly introduced worker-output boundary.
+- `MutationOutput` now carries the result, owned admission permit, and explicit
+  tracker token. Field order cleans the result first, then releases admission
+  and drain ownership. A live caller extracts the result and assumes its
+  ownership; a cancelled caller leaves cleanup covered by the token. Spawn
+  still shares the admission/closure lock, and panic/join errors retain their
+  sources. No public API or dependency change.
+- Regression holds destruction of an unclaimed result that owns a real temp
+  file. It failed before the fix (`shutdown returned before unclaimed result
+  cleanup`) and passes afterward, also verifying the temporary file is gone
+  when shutdown completes.
+- Callers/siblings: staged origin fallback is the resource-owning output;
+  streamed PUT uses the same worker and discards recovery through its existing
+  error mapping. Admin outcomes are plain eviction stats. Periodic eviction
+  separately joins its worker and returns no temporary-file recovery handle.
+  This closes the identified result-ownership gap, not all server cancellation.
+- Validation: 47 cache-store tests and 47 handler tests pass, including queued
+  cancellation, admitted eviction/publication drain, and unclaimed-result
+  cleanup. Strict all-target Clippy, rustdoc, binary build, formatting and diff
+  checks pass. New non-test code represents the missing ownership lifetime;
+  neither a detached cleanup task nor a timeout would provide equivalent proof.
