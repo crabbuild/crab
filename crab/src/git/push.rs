@@ -5120,9 +5120,24 @@ async fn verify_prepared_xorb_plan(
         len, &footer, &metadata, file_hash, xorb_hash, planned,
     )?;
 
-    // The upload boundary hashes this file immediately before sending it.
-    // Hashing here too would reread every large prepared body without adding
-    // protection against a later mutation.
+    let mut payload_reader = tokio::fs::File::open(path).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = payload_reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if hasher.finalize() != expected_payload_hash {
+        return Err(CrabError::StagingCorrupt(format!(
+            "prepared xorb {} for file {} payload digest does not match its plan",
+            xorb_hash.hex(),
+            file_hash.hex()
+        )));
+    }
+
     Ok((placements, *expected_payload_hash.as_bytes()))
 }
 
@@ -14698,7 +14713,10 @@ impl PushPipeline {
 
         let result = tokio::time::timeout(
             GLOBAL_CHUNK_LOOKUP_BUDGET,
-            chunk_store.get_batch_with_candidates_bounded(chunk_hashes, chunk_hashes.len()),
+            chunk_store.get_batch_with_candidates_bounded(
+                chunk_hashes,
+                GLOBAL_CHUNK_LOOKUP_REMOTE_BATCH_SIZE,
+            ),
         )
         .await;
         let (refs, remote_candidates, skipped_remote) = match result {
@@ -15122,6 +15140,18 @@ impl PushPipeline {
     ) -> Result<()> {
         let file_store = guard.file_index().await?;
         let chunk_store = guard.chunk_index().await?;
+
+        for (file_hash, shard_index) in file_index_plan {
+            if shard_hashes.get(*shard_index).is_none() {
+                return Err(CrabError::IncompleteShardReconstruction {
+                    file_hash: file_hash.hex(),
+                    path: None,
+                    uncovered_chunks: 0,
+                    example_chunk_hash: String::new(),
+                    example_chunk_index: u32::MAX,
+                });
+            }
+        }
 
         // Snapshot every recipe used by this file-index plan once. The same
         // immutable roots feed file-index records, committed chunk receipts,

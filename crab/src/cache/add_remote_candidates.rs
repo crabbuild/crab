@@ -583,10 +583,16 @@ mod tests {
         }
     }
 
+    fn cache_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        let root = dir.path().join("cache");
+        crab_cache::ensure_private_cache_directory(&root).expect("private cache root");
+        root.join("cache.sqlite")
+    }
+
     #[test]
     fn persistent_candidates_round_trip() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("remote-candidates.sqlite");
+        let path = cache_path(&dir);
         let cache = AddRemoteCandidateCache::open(&path).expect("open");
         let hash = MerkleHash::from([7; 32]);
         cache
@@ -602,7 +608,7 @@ mod tests {
     #[test]
     fn persistent_negative_entries_round_trip_and_refresh() {
         let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
         let hash = MerkleHash::from([4; 32]);
         cache
             .persist_results(&[(hash, None)])
@@ -624,7 +630,7 @@ mod tests {
     #[test]
     fn persistent_duplicate_results_keep_input_order() {
         let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
         let hash = MerkleHash::from([6; 32]);
 
         cache
@@ -647,7 +653,7 @@ mod tests {
     #[test]
     fn expired_negative_entries_are_not_reused() {
         let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
         let hash = MerkleHash::from([5; 32]);
         cache
             .persist_results(&[(hash, None)])
@@ -684,7 +690,7 @@ mod tests {
     #[test]
     fn memory_cache_distinguishes_negative_entries() {
         let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
         let hash = MerkleHash::from([3; 32]);
         assert!(
             !cache
@@ -702,7 +708,7 @@ mod tests {
     #[test]
     fn memory_batch_cache_preserves_positive_negative_and_misses() {
         let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
         let positive_hash = MerkleHash::from([8; 32]);
         let negative_hash = MerkleHash::from([9; 32]);
         let missing_hash = MerkleHash::from([10; 32]);
@@ -721,7 +727,7 @@ mod tests {
     #[test]
     fn persistent_lookup_batches_large_requests() {
         let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
         let entries = (0..600u16)
             .map(|seed| {
                 let mut bytes = [0; 32];
@@ -743,7 +749,7 @@ mod tests {
     #[test]
     fn persistent_negative_writes_batch_large_requests() {
         let dir = tempdir().expect("tempdir");
-        let cache = AddRemoteCandidateCache::open(&dir.path().join("cache.sqlite")).expect("open");
+        let cache = AddRemoteCandidateCache::open(&cache_path(&dir)).expect("open");
         let entries = (0..600u16)
             .map(|seed| {
                 let mut bytes = [0; 32];
