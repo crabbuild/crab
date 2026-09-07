@@ -844,7 +844,8 @@ class ProtocolV2PartialCloneSmoke:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                fields = event.get("fields")
+                # Git stderr can contain JSON scalars; only objects are tracing events.
+                fields = event.get("fields") if isinstance(event, dict) else None
                 if not isinstance(fields, dict):
                     continue
                 if "storage_request" in fields:
@@ -874,7 +875,7 @@ class ProtocolV2PartialCloneSmoke:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                fields = event.get("fields")
+                fields = event.get("fields") if isinstance(event, dict) else None
                 if not isinstance(fields, dict) or fields.get("protocol_version") != 2:
                     continue
                 if "planned_objects" not in fields and "transferred_bytes" not in fields:
@@ -1209,7 +1210,7 @@ class ProtocolV2PartialCloneSmoke:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                fields = event.get("fields")
+                fields = event.get("fields") if isinstance(event, dict) else None
                 if (
                     isinstance(fields, dict)
                     and fields.get("message") == "protocol-v2 upload-pack plan selected"
