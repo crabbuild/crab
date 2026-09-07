@@ -1582,3 +1582,32 @@ all-target auth Clippy pass. Production code shrinks; added code is regression
 coverage. Native Windows and live identity-provider/Keychain proof are not
 claimed. Latest observed CI for 9aff4e32456 had nine successes, fifteen running,
 seven skipped, with no reported failures at that observation.
+
+### HTTP response-stream cancellation investigation
+
+Release-asset downloads and LFS downloads both wrap their source stream in
+`take_until` for cancellation/deadline handling, retain a transfer permit and
+cancellation guard in the response stream, and send an explicit Content-Length.
+The ordinary release download integration test verifies the complete payload;
+it does not inject mid-body cancellation.
+
+Pinned dependency evidence changes the initial hypothesis: futures-util 0.3.32
+returns stream EOF when take_until's stopping future resolves, but Hyper 1.9.0's
+HTTP/1 length encoder rejects end-of-stream while declared bytes remain. Its
+connection end_body path closes writing and returns a body-write-aborted error
+instead of completing a reusable response. The server enables Axum's http1
+feature, not http2. Thus stream EOF alone is insufficient evidence of a silent
+successful truncated HTTP download. No speculative transport fix was made.
+
+Owner map: app::admit bounds handler response creation; releases::download_asset
+and lfs::download own transfer state; Body::from_stream hands frames to Hyper's
+HTTP/1 writer. Archive output has a separate channel-backed body and cannot be
+assumed to share the length-delimited contract. Future qualification should
+inject cancellation after response headers, assert client body failure and
+permit release, and inspect archive worker shutdown independently. Source
+inspection is not substituted for that live client/transport test.
+
+The published head remains 636f2a6b9f5 while CI runs. Two local HTTP documentation
+commits describe request validation/reservation ownership and distinguish handler
+admission from response-body ownership. Latest observed checks: eight successes,
+twelve running, one queued, nine skipped; no reported failures at that observation.
