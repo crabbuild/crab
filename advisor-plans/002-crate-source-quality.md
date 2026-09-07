@@ -958,3 +958,37 @@ The baseline checkout and Cargo target are separate on the mounted workspace.
 Local diagnostics are `/tmp/crab-089c-{main,current}-cli-clippy.jsonl`; comparison
 is `/tmp/crab-089c-clippy-comparison.json`. CLI test linking reports an unwind-table
 size warning for the large test binary; no Rust test failure was reported.
+
+## VFS chunk completion notification
+
+Owner: `crates/crab-vfs/src/hydration.rs`, `InflightEntry` and `fetch_chunk`.
+Current main waits unconditionally on `Notify::notified()` after cloning an
+occupied DashMap entry. The fetcher can store completion and call notify_waiters
+between those steps, leaving the reader waiting for a second notification that
+will never occur.
+
+The locked Tokio source guarantees notify_waiters delivery after Notified future
+creation, even before polling; it does not retain earlier broadcasts for newly
+created futures. `InflightEntry::wait` now creates that future before checking
+stored completion. Either the state is already complete or the future observes
+the subsequent broadcast. Cache verification and fetch-error behavior stay with
+`fetch_chunk`; notification does not substitute for a successful cache read.
+
+Consumer and sibling evidence:
+
+- Engine reads call `HydrationService::read_range`; its chunk path calls fetch_chunk.
+- Overlay promotion also calls fetch_chunk while materializing backing files.
+- The separate read-window cache uses AsyncMutex acquisition followed by a cache
+  recheck, rather than Notify; it does not share this missed-broadcast protocol.
+- Background whole-file hydration calls do_fetch_chunk directly, so it does not
+  wait on an InflightEntry. Prefetch task ownership remains separate unfinished work.
+
+The completed-before-subscription regression failed against the original wait
+logic, with a 100 ms timeout. It covers both successful and failed completion.
+A second regression registers two pending readers and checks both are released
+on either completion result. Tests use the actual private wait boundary called
+by fetch_chunk, without test-only production hooks or native mounting.
+All 30 hydration tests passed with NFS and FUSE enabled, including both new
+regressions on the multi-thread Tokio runtime. Strict all-target VFS Clippy
+passed with NFS and FUSE enabled. The API and dependency graph are unchanged;
+native mount and complete hydration shutdown qualification remain open.

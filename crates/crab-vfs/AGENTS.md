@@ -34,6 +34,9 @@ mount/control owners consume the pipeline output separately.
   Source: `crates/crab-vfs/src/pipeline.rs`.
 - Cached read windows retain integrity checks; corruption must not be served merely because the byte length matches.
   Source: `crates/crab-vfs/src/hydration.rs`.
+- Chunk waiters subscribe before checking stored completion; a notification alone
+  cannot represent a fetch that finished before subscription.
+  Source: `crates/crab-vfs/src/hydration.rs` (`InflightEntry::wait`).
 - Review cancellation, hydration worker shutdown, leases, and control resources in both FUSE and NFS owners before changing teardown.
   Source: `crates/crab-vfs/src/nfs_mount.rs`.
 

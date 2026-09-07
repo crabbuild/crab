@@ -178,6 +178,15 @@ impl InflightEntry {
         })
     }
 
+    async fn wait(&self) {
+        // Subscribe before checking completion: notify_waiters remembers calls
+        // after future creation, but not a fetch completed before subscription.
+        let notified = self.done.notified();
+        if self.succeeded().is_none() {
+            notified.await;
+        }
+    }
+
     fn complete(&self, ok: bool) {
         if let Ok(mut guard) = self.success.lock() {
             *guard = Some(ok);
@@ -795,7 +804,7 @@ impl HydrationService {
 
         if !is_fetcher {
             // Wait for the fetcher to complete.
-            entry.done.notified().await;
+            entry.wait().await;
 
             if entry.succeeded() == Some(true)
                 && let Some(cached) = self.cache.get(&chunk_hash)
@@ -1466,6 +1475,49 @@ mod tests {
     use crab_xet::xorb::builder::{RunId, XorbBuilder};
     use crab_xet::xorb::format::Chunk;
     use object_store::memory::InMemory;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunk_completion_releases_all_registered_readers() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        for succeeded in [true, false] {
+            let entry = InflightEntry::new();
+            let first = entry.wait();
+            let second = entry.wait();
+            tokio::pin!(first, second);
+            std::future::poll_fn(|context| {
+                assert!(first.as_mut().poll(context).is_pending());
+                assert!(second.as_mut().poll(context).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            entry.complete(succeeded);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), async {
+                    tokio::join!(first, second);
+                })
+                .await
+                .is_ok(),
+                "completion must release every registered reader"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completed_chunk_fetch_does_not_wait_for_another_notification() {
+        for succeeded in [true, false] {
+            let entry = InflightEntry::new();
+            entry.complete(succeeded);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(100), entry.wait())
+                    .await
+                    .is_ok(),
+                "a completed fetch must release readers arriving after notification"
+            );
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn canonical_ranges_survive_unavailable_chunk_storage_and_reuse_warm_bytes() {
