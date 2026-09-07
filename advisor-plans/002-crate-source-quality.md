@@ -4040,3 +4040,34 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
 - Both focused upload tests pass (success boundary matrix and failure case),
   as does strict all-target Clippy. No production, dependency, or public API
   changes in this checkpoint; previous build/docs proof remains applicable.
+
+
+### Storage diagnostic contract audit: source retention remains incomplete
+
+- map_object_store_error preserves object_store::Error for NetworkTransient,
+  NotSupported, and ObjectStore. Throttled keeps only retry_after; conflict,
+  missing-object, and permission variants retain a path but discard the source.
+  Unauthenticated maps to the source-free NoCredentials variant. Current main
+  has the same mapping. The caller-supplied path is unused for other variants;
+  corrected rustdoc that implied it supplied missing context.
+- Generic throttling is display-text classification, with no typed status or
+  Retry-After extraction. classify_auth_error is separate and has one product
+  caller in fetch::download_and_install. Read the locked object_store AWS
+  RequestError conversion before proposing provider-specific type handling;
+  do not infer a portable typed HTTP contract from a Generic error.
+- Concrete next implementation boundary: retain throttling provenance through
+  StorageError, its retry classifier, From<StorageError> for CrabError,
+  ReadFailure diagnostics, and push::storage_error_from_crab. Inspect
+  all synthetic throttling constructors too; they have no provider error to
+  retain. Keep existing retry delay and CRAB error classification behavior.
+  Other source-free domain variants require the same broader audit, rather
+  than claiming universal source retention after one variant is repaired.
+- Existing tests assert mapped variants and retry delays, not preservation
+  across those conversions. Required regression: mapped provider throttling
+  retains its nested typed cause through CLI and read-error boundaries while
+  synthetic throttling and retry timing still work. This remains unimplemented.
+- README now exposes the actual classification/source-retention distinction
+  as a short table. Documentation-only checkpoint; no retry policy or public
+  error shape changed, and no live provider qualification claimed.
+- Validation: strict public crab-storage rustdoc, cargo fmt --all, and
+  git diff --check pass. PR checks remain live on the published head.

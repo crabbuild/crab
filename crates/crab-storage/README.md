@@ -61,6 +61,24 @@ File downloads share one bounded download path. Returned errors trigger a
 best-effort removal of partial files; callers own cleanup if they cancel by
 dropping the future. No check requires buffering the complete object.
 
+## Error classification
+
+Classification and source retention are separate contracts in the current
+storage API:
+
+| Mapped error | Retained provider source |
+| --- | --- |
+| `NetworkTransient`, `NotSupported`, `ObjectStore` | Original `object_store::Error` |
+| `Throttled` | No source; only an optional retry delay |
+| `StateConflict`, `NotFound`, `Forbidden` | Object path, without the provider source |
+| `NoCredentials` | Neither provider source nor object path |
+
+Generic throttling detection currently examines display text; it does not
+extract a typed HTTP status or `Retry-After` header. Other generic errors map
+to `NetworkTransient`. Auth-specific classification is a separate helper;
+callers must invoke it explicitly. See `src/error_map.rs` for classification
+and `src/retry.rs` for retry decisions.
+
 ## Usage
 
 ```rust

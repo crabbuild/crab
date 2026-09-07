@@ -33,9 +33,10 @@ pub fn classify_auth_error(err: &object_store::Error) -> Option<StorageError> {
 
 /// Classifies an `object_store::Error` into a storage-domain error.
 ///
-/// `path` is supplied by the caller because some object-store variants do not
-/// carry one, but callers normally know which key they were operating on.
-/// Variants that already embed a path use the source path.
+/// Variants with an embedded path use that path. The caller-supplied `path`
+/// currently adds no context to variants without one. Generic throttling is
+/// detected from display text; other generic failures become network errors.
+/// This mapping does not run [`classify_auth_error`].
 #[must_use]
 pub fn map_object_store_error(err: object_store::Error, path: &str) -> StorageError {
     match err {
