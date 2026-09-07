@@ -2976,8 +2976,10 @@ mod tests {
 
     #[test]
     fn nfs_setattr_size_requires_regular_file() {
-        let mut attr = sattr3::default();
-        attr.size = nfs::set_size3::Some(10);
+        let attr = sattr3 {
+            size: nfs::set_size3::Some(10),
+            ..sattr3::default()
+        };
 
         assert_eq!(validate_setattr_target(NodeType::File, &attr), Ok(()));
         assert_eq!(
@@ -2992,8 +2994,10 @@ mod tests {
 
     #[test]
     fn nfs_setattr_metadata_allows_non_regular_nodes() {
-        let mut attr = sattr3::default();
-        attr.mode = nfs::set_mode3::Some(0o755);
+        let attr = sattr3 {
+            mode: nfs::set_mode3::Some(0o755),
+            ..sattr3::default()
+        };
 
         assert_eq!(validate_setattr_target(NodeType::Dir, &attr), Ok(()));
         assert_eq!(validate_setattr_target(NodeType::Symlink, &attr), Ok(()));
@@ -3553,8 +3557,10 @@ mod tests {
             .ids
             .id_for_path("time.bin", NodeType::File)
             .unwrap();
-        let mut attr = sattr3::default();
-        attr.atime = nfs::set_atime::SET_TO_SERVER_TIME;
+        let attr = sattr3 {
+            atime: nfs::set_atime::SET_TO_SERVER_TIME,
+            ..sattr3::default()
+        };
 
         <CrabNfsFs as NfsFileSystem>::setattr(&fixture.fs, &FileHandleU64::new(id), attr)
             .await
@@ -3629,8 +3635,10 @@ mod tests {
             seconds: 1_700_000_000,
             nseconds: 0,
         };
-        let mut attr = sattr3::default();
-        attr.mtime = nfs::set_mtime::SET_TO_CLIENT_TIME(mtime);
+        let attr = sattr3 {
+            mtime: nfs::set_mtime::SET_TO_CLIENT_TIME(mtime),
+            ..sattr3::default()
+        };
 
         let (handle, returned_attr) =
             <CrabNfsFs as NfsFileSystem>::symlink(&fixture.fs, &root, &name, &target, &attr)
@@ -3657,8 +3665,10 @@ mod tests {
         let root = FileHandleU64::new(ROOT_ID);
         let name = filename3::from(b"bad-link.bin".as_slice());
         let target = nfspath3::from(b"target.bin".as_slice());
-        let mut attr = sattr3::default();
-        attr.size = nfs::set_size3::Some(4);
+        let attr = sattr3 {
+            size: nfs::set_size3::Some(4),
+            ..sattr3::default()
+        };
 
         let err = <CrabNfsFs as NfsFileSystem>::symlink(&fixture.fs, &root, &name, &target, &attr)
             .await

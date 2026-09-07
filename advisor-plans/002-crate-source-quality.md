@@ -722,3 +722,14 @@ explicit test assertion instead of the panicking subtraction operator. Six
 backoff tests and the elapsed-retry test pass. Strict all-target nfs Clippy now
 reports 246 diagnostics (13 fewer); timing diagnostics are gone. No assertions
 or lint settings were weakened, and runtime timing policy is unchanged.
+
+## VFS fixture setup clarity
+
+Five NFS attribute fixtures initialize their changed field together with the
+remaining defaults. Snapshot borrowing uses slice::from_ref instead of a clone.
+The Unix control test retains its concrete endpoint and wraps it only for the
+optional server argument, removing an unnecessary unwrap. Assertions unchanged.
+Four attribute tests, four symlink tests, the Unix control socket shutdown test,
+and snapshot pointer round-trip pass. Strict nfs Clippy decreases from 246 to
+238 diagnostics; remaining categories are test unwrap/panic and match style.
+No production behavior or lint policy changed; strict qualification remains open.

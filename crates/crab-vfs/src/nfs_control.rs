@@ -1741,7 +1741,7 @@ mod tests {
         let mountpoint = tmp.path().join("view");
         let socket_dir = tmp.path().join("control");
         let socket_path = socket_dir.join("nfs-control.sock");
-        let endpoint = Some(format!("unix:{}", socket_path.display()));
+        let endpoint = format!("unix:{}", socket_path.display());
         let cancel = CancellationToken::new();
         let state = NfsControlState {
             mountpoint: mountpoint.clone(),
@@ -1758,8 +1758,7 @@ mod tests {
                 startup_ms: 8,
             },
         };
-        let handle = spawn_server(endpoint.clone(), state, cancel.clone()).unwrap();
-        let endpoint = endpoint.unwrap();
+        let handle = spawn_server(Some(endpoint.clone()), state, cancel.clone()).unwrap();
 
         let status = wait_for_status(&endpoint).await;
 

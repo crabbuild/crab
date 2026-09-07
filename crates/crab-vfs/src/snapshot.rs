@@ -1190,7 +1190,7 @@ mod tests {
         let (_dir, store) = temp_store();
         let node = make_pointer_node("model.bin");
         store
-            .publish_generation("oid1", "refs/heads/main", &[node.clone()])
+            .publish_generation("oid1", "refs/heads/main", std::slice::from_ref(&node))
             .unwrap();
 
         let retrieved = store.get_node(1, "model.bin").unwrap().unwrap();
