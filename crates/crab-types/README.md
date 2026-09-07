@@ -55,6 +55,11 @@ assert_eq!(Pointer::parse(&bytes)?.size, 3);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+`is_pointer` is a detection heuristic, not a validation result. Call
+`Pointer::parse` before using pointer fields; for example, a decimal size can
+look like a pointer but overflow `u64`. Parsing failures expose underlying
+UTF-8 and integer errors through `std::error::Error::source()`.
+
 Use `serde`/`schemars` derives on shared configuration types when a contract
 must cross a JSON or YAML boundary. Keep implementation-specific state in its
 owner crate; do not move a type here merely because two modules currently
