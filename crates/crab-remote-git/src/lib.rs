@@ -3,7 +3,6 @@
 mod budget;
 mod cache;
 mod commit_graph;
-mod delta;
 mod error;
 mod metrics;
 mod objects;

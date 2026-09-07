@@ -123,7 +123,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: ${{ github.workspace }}/target/crab-protocol-v2
   CRAB_RELEASE_ARCHIVE: crab-protocol-v2-linux-x86_64.tar.gz
-  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+  # Keep the producer/consumer name stable when GitHub reruns only failed jobs.
+  # The release build is shared by every attempt of this workflow run.
+  CRAB_RELEASE_ARTIFACT: crab-protocol-v2-linux-x86_64-${{ github.run_id }}
 
 jobs:
   unit-and-transcript:

@@ -6,6 +6,27 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// A file lookup could not acquire process-wide execution capacity.
+    #[cfg(feature = "file-index-reader")]
+    #[error("file lookup admission closed")]
+    FileLookupAdmission {
+        #[source]
+        source: tokio::sync::AcquireError,
+    },
+    /// A file lookup's blocking parser failed to join.
+    #[cfg(feature = "file-index-reader")]
+    #[error("file lookup worker failed")]
+    FileLookupWorker {
+        #[source]
+        source: tokio::task::JoinError,
+    },
+    /// A snapshot-bound file lookup exhausted its caller-owned budget.
+    #[cfg(feature = "file-index-reader")]
+    #[error("file lookup exceeds {resource} limit ({maximum})")]
+    FileLookupLimit {
+        resource: &'static str,
+        maximum: usize,
+    },
     /// Local filesystem operation failed.
     #[error("metadata I/O error: {source}")]
     Io {
@@ -41,6 +62,24 @@ pub enum MetadataError {
     Storage {
         #[from]
         source: crab_storage::StorageError,
+    },
+
+    /// Publication was cancelled before attempting the active marker.
+    #[cfg(feature = "storage")]
+    #[error("ref journal publication cancelled before commit")]
+    RefJournalCancelled,
+
+    /// The commit marker write failed and its exact bytes could not be confirmed.
+    #[cfg(feature = "storage")]
+    #[error(
+        "ref journal transaction {transaction_id} may have committed; verify remote refs before retrying"
+    )]
+    RefJournalCommitUncertain {
+        transaction_id: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        /// Readback failure, when the marker was not simply absent.
+        verification: Option<Box<crab_storage::StorageError>>,
     },
 
     /// SlateDB metadata reader could not be opened.

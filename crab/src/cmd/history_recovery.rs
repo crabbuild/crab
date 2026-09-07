@@ -1,5 +1,6 @@
 //! Historical manifest inspection, verification, and restoration.
 
+use crab_write::generation::CommittedManifestAnchor;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -24,9 +25,7 @@ use crate::audit::{AuditEvent, AuditOutcome, NewAuditEvent, append_event, defaul
 use crate::coordination::heartbeat::LockHeartbeat;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::output::{OutputMode, emit_json};
-use crate::git::push::{
-    CommittedManifestAnchor, CommittedPackIndex, publish_committed_pack_locators,
-};
+use crate::git::push::{CommittedPackIndex, publish_committed_pack_locators};
 use crate::metadata::manifest::{
     Manifest, ManifestHistoryEntry, PackManifestEntry, list_manifest_history, read_bulk_pack_list,
     read_bulk_shard_list, read_manifest, read_pack_index, read_shard_index,

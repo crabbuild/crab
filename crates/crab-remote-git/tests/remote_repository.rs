@@ -340,6 +340,17 @@ impl PackFixture {
                 (0o100644, "blob", non_utf8_blob, b"\xffx"),
             ],
         );
+        let ordered_tree = make_tree(
+            &git_dir,
+            &[
+                (0o100644, "blob", deep_blob, b"item.ext"),
+                (0o040000, "tree", nested_tree, b"item"),
+                (0o100644, "blob", deep_blob, b"item0"),
+                (0o100644, "blob", non_utf8_blob, b"\xfe.ext"),
+                (0o040000, "tree", nested_tree, b"\xfe"),
+                (0o100644, "blob", non_utf8_blob, b"\xfe0"),
+            ],
+        );
         let submodule_commit = parse_oid(&git(
             &[
                 "--git-dir",
@@ -380,6 +391,7 @@ impl PackFixture {
             (0o100644, "blob", non_utf8_blob, b"\xff.txt".to_vec()),
             (0o040000, "tree", directory_tree, b"dir".to_vec()),
             (0o040000, "tree", raw_name_tree, b"raw".to_vec()),
+            (0o040000, "tree", ordered_tree, b"ordered".to_vec()),
             (0o160000, "commit", submodule_commit, b"module".to_vec()),
         ]);
         let tree = make_tree_owned(&git_dir, &root_entries);
@@ -508,6 +520,7 @@ impl PackFixture {
                 directory_tree.to_string(),
                 submodule_tree.to_string(),
                 raw_name_tree.to_string(),
+                ordered_tree.to_string(),
                 submodule_commit.to_string(),
                 tree.to_string(),
                 semantic_type_tree.to_string(),
@@ -1666,6 +1679,70 @@ async fn thin_subset_pack_uses_only_client_proven_delta_bases() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn incoming_thin_pack_resolves_bases_through_bounded_remote_reads() {
+    use crab_git::incoming_pack::{BaseObject, ReceiveLimits, quarantine};
+
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let base = fixture_ref_delta_base(&fixture);
+    let cancel = CancellationToken::new();
+    let generated = fixture
+        .repository
+        .generate_pack_with_bases(&[fixture.target], &[base], &cancel)
+        .await
+        .expect("generate actual thin pack");
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancel)
+        .await
+        .expect("open base read operation");
+    let handle = tokio::runtime::Handle::current();
+    let incoming = tokio::task::spawn_blocking(move || {
+        let root = tempfile::tempdir().expect("quarantine parent");
+        let limits = ReceiveLimits {
+            max_pack_bytes: 8 * 1024 * 1024,
+            max_objects: 1000,
+            max_object_bytes: 1024 * 1024,
+            max_inflated_bytes: 16 * 1024 * 1024,
+            max_delta_depth: 32,
+        };
+        let mut requested = Vec::new();
+        let received = quarantine(
+            fs::File::open(generated.path()).expect("incoming pack"),
+            root.path(),
+            limits,
+            || cancel.is_cancelled(),
+            |oid| {
+                requested.push(*oid);
+                let object = handle.block_on(operation.read_object(*oid))?;
+                Ok(Some(BaseObject {
+                    kind: object.kind,
+                    data: object.data.to_vec(),
+                }))
+            },
+        );
+        handle
+            .block_on(operation.finish(Ok(())))
+            .expect("close base operation");
+        let incoming = received.expect("quarantine received pack");
+        assert_eq!(requested, vec![base]);
+        // The parent owns the quarantine; keep both alive until verification.
+        (root, incoming)
+    })
+    .await
+    .expect("receive worker");
+    assert_eq!(
+        incoming
+            .1
+            .read_object(&fixture.target)
+            .expect("read quarantined object")
+            .expect("target exists")
+            .data,
+        fixture.expected
+    );
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn generated_pack_cache_reuses_one_verified_immutable_artifact() {
     let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
     let mut object_ids = fixture_object_ids(&fixture);
@@ -2192,6 +2269,59 @@ async fn public_api_opens_resolves_snapshots_lists_and_reads_without_a_filesyste
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn recursive_tree_listing_reads_metadata_without_blob_bodies() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Tree, &cancellation)
+        .await
+        .expect("operation");
+    let result = async {
+        let snapshot = fixture
+            .repository
+            .snapshot(&Revision::Reference("main".to_owned()), &operation)
+            .await?;
+        let revision = snapshot.commit_oid().to_string();
+        let entries = snapshot.list_tree_recursive(&operation).await?;
+        let mut actual = entries
+            .iter()
+            .map(|entry| entry.path.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let mut expected = git(
+            &[
+                "--git-dir",
+                path(&fixture.source_git_dir),
+                "ls-tree",
+                "-r",
+                "-t",
+                "--full-tree",
+                "--name-only",
+                "-z",
+                &revision,
+            ],
+            None,
+        )
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert!(entries.iter().any(|entry| {
+            entry.path == fixture.target_path
+                && entry.kind == EntryKind::Blob
+                && entry.size.is_none()
+        }));
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.expect("finish operation");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn visibility_rebuild_batches_remote_object_reads() {
     let options = RepositoryOptions::new(
         ObjectLimits::default(),
@@ -2337,6 +2467,69 @@ async fn browser_paths_preserve_modes_and_never_follow_links_or_gitlinks() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn directory_pages_preserve_git_order_for_shared_file_and_tree_prefixes() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Tree, &cancellation)
+        .await
+        .expect("operation");
+    let result = async {
+        let snapshot = fixture
+            .repository
+            .snapshot(&Revision::Reference("main".to_owned()), &operation)
+            .await?;
+        let revision = format!("{}:ordered", snapshot.commit_oid());
+        let expected = git(
+            &[
+                "--git-dir",
+                path(&fixture.source_git_dir),
+                "ls-tree",
+                "--name-only",
+                "-z",
+                &revision,
+            ],
+            None,
+        )
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+        let directory = GitPath::new(Bytes::from_static(b"ordered"))?;
+        for metadata in [DirectoryMetadata::None, DirectoryMetadata::BlobSizes] {
+            for limit in [1, 2, 3] {
+                let mut cursor = None;
+                let mut names = Vec::new();
+                for _ in 0..=expected.len() {
+                    let request = PageRequest::new(limit, cursor.take())?;
+                    let page = snapshot
+                        .list_directory_with_metadata(&directory, &request, metadata, &operation)
+                        .await?;
+                    names.extend(
+                        page.items
+                            .iter()
+                            .map(|entry| entry.path.file_name().expect("child name").to_vec()),
+                    );
+                    cursor = page.next;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    (&names, cursor.is_none()),
+                    (&expected, true),
+                    "metadata={metadata:?}, page size={limit}"
+                );
+            }
+        }
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.expect("finish operation");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn directory_cursor_binds_raw_path_tree_commit_and_page_shape() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
@@ -2365,6 +2558,23 @@ async fn directory_cursor_binds_raw_path_tree_commit_and_page_shape() {
             )
             .await?;
         assert_eq!(second.items[0].path.file_name(), Some(b"\xff".as_slice()));
+
+        let mut absent_name = encoded.as_bytes().to_vec();
+        *absent_name.last_mut().expect("cursor name") = 0xfd;
+        let absent_name = PageCursor::from_bytes(Bytes::from(absent_name))?;
+        let absent_entry = snapshot
+            .list_directory(
+                &raw_path,
+                &PageRequest::new(1, Some(absent_name))?,
+                &operation,
+            )
+            .await;
+        assert!(matches!(
+            absent_entry,
+            Err(Error::InvalidCursor {
+                reason: CursorError::ContextMismatch
+            })
+        ));
 
         let wrong_shape = snapshot
             .list_directory(
@@ -2816,6 +3026,53 @@ async fn distinct_delta_objects_share_one_cold_base_fetch() {
         fixture.backend.pack_gets(),
         3,
         "two deltas must share their one full base fetch"
+    );
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn batched_objects_materialize_selected_delta_bases_from_one_range() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let setup = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .expect("setup operation");
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &setup)
+        .await
+        .expect("snapshot");
+    let mut oids = Vec::new();
+    for (path, _) in &fixture.blob_paths {
+        oids.push(
+            snapshot
+                .entry(path, &setup)
+                .await
+                .expect("blob entry")
+                .expect("blob exists")
+                .oid,
+        );
+    }
+    setup.finish(Ok(())).await.expect("finish setup");
+
+    fixture.backend.reset_pack_gets();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .expect("batch operation");
+    let objects = operation.read_objects(&oids).await.expect("batch objects");
+    for (object, (_, expected)) in objects.iter().zip(&fixture.blob_paths) {
+        assert_eq!(object.kind, gix_object::Kind::Blob);
+        assert_eq!(object.data.as_ref(), expected);
+    }
+    operation.finish(Ok(())).await.expect("finish batch");
+    assert_eq!(
+        fixture.backend.pack_gets(),
+        1,
+        "selected delta bases must reuse their coalesced batch range"
     );
     fixture.runtime.shutdown().await;
 }
@@ -3367,6 +3624,77 @@ async fn history_pages_are_deterministic_and_bound_to_start_and_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ahead_history_excludes_every_base_ancestor_and_binds_both_commits() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::History, &cancellation)
+        .await
+        .expect("operation");
+    let result = async {
+        let head = fixture
+            .repository
+            .snapshot(&Revision::Reference("main".to_owned()), &operation)
+            .await?;
+        let head_oid = head.commit_oid();
+        let base = fixture
+            .repository
+            .snapshot(&Revision::Commit(fixture.root_commit), &operation)
+            .await?;
+        let first = head
+            .ahead_history(&base, &PageRequest::new(1, None)?, &operation)
+            .await?;
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|commit| commit.oid)
+                .collect::<Vec<_>>(),
+            vec![head_oid]
+        );
+        let cursor = first.next.expect("ahead-history continuation");
+        let second = head
+            .ahead_history(
+                &base,
+                &PageRequest::new(1, Some(cursor.clone()))?,
+                &operation,
+            )
+            .await?;
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|commit| commit.oid)
+                .collect::<Vec<_>>(),
+            vec![fixture.side_commit]
+        );
+        assert!(second.next.is_none());
+
+        let other_base = fixture
+            .repository
+            .snapshot(&Revision::Commit(fixture.semantic_base_commit), &operation)
+            .await?;
+        assert!(matches!(
+            head.ahead_history(&other_base, &PageRequest::new(1, Some(cursor))?, &operation,)
+                .await,
+            Err(Error::InvalidCursor {
+                reason: CursorError::ContextMismatch
+            })
+        ));
+        let equal = head
+            .ahead_history(&head, &PageRequest::new(10, None)?, &operation)
+            .await?;
+        assert!(equal.items.is_empty());
+        assert!(equal.next.is_none());
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.expect("finish operation");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn incomplete_commit_graph_cannot_hide_raw_history() {
     let fixture = publish_with_summary(DeltaKind::Ref, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
@@ -3506,6 +3834,29 @@ async fn semantic_changes_cover_modes_types_rename_like_paths_binary_and_pointer
                 Some(expected)
             );
         }
+
+        let mode_path = GitPath::new(Bytes::from_static(b"mode.txt"))?;
+        let first = head
+            .path_history(
+                &mode_path,
+                HistoryTraversal::FirstParent,
+                &PageRequest::new(1, None)?,
+                &operation,
+            )
+            .await?;
+        assert_eq!(first.items[0].commit.oid, fixture.semantic_head_commit);
+        assert_eq!(first.items[0].kind, ChangeKind::ModeChanged);
+        let second = head
+            .path_history(
+                &mode_path,
+                HistoryTraversal::FirstParent,
+                &PageRequest::new(1, first.next)?,
+                &operation,
+            )
+            .await?;
+        assert_eq!(second.items[0].commit.oid, fixture.semantic_base_commit);
+        assert_eq!(second.items[0].kind, ChangeKind::Added);
+        assert!(second.next.is_none());
 
         let binary = head
             .diff(
@@ -3869,6 +4220,7 @@ async fn blame_unchanged_blob_does_not_spend_comparison_budget() {
     let options = RepositoryOptions::new(
         ObjectLimits::default(),
         OperationLimits {
+            max_logical_objects: 7,
             max_blame_comparison_cells: 1,
             ..OperationLimits::default()
         },
@@ -4139,6 +4491,59 @@ async fn rejects_wrong_kind_and_unreachable_retained_commit() {
         })
     ));
     operation.finish(Ok(())).await.expect("finish operation");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_commit_resolution_checks_both_merge_parents_before_deeper_history() {
+    for (first_parent, maximum) in [(true, 2), (false, 3)] {
+        let options = RepositoryOptions::new(
+            ObjectLimits::default(),
+            OperationLimits {
+                max_history_commits: maximum,
+                ..OperationLimits::default()
+            },
+        )
+        .expect("repository options");
+        let fixture = publish(DeltaKind::Ref, false, options).await;
+        let (mut manifest, etag) = read_manifest(&fixture.store, &fixture.layout)
+            .await
+            .expect("manifest");
+        manifest.refs.retain(|name, _| name == "refs/heads/main");
+        manifest.peeled_refs.clear();
+        manifest.seal_git_validation();
+        write_manifest_cas(&fixture.store, &fixture.layout, &manifest, &etag)
+            .await
+            .expect("publish merge as the only ref");
+        let cancellation = CancellationToken::new();
+        let repository = RemoteGitRepository::open(
+            fixture.store.clone(),
+            fixture.layout.clone(),
+            fixture.repository.identity().clone(),
+            Arc::clone(&fixture.runtime),
+            options,
+            &cancellation,
+        )
+        .await
+        .expect("reopen fixture");
+        let target = if first_parent {
+            fixture.root_commit
+        } else {
+            fixture.side_commit
+        };
+        let operation = repository
+            .operation(OperationKind::Resolve, &cancellation)
+            .await
+            .expect("operation");
+        let result = repository
+            .resolve(&Revision::Commit(target), &operation)
+            .await;
+        let resolved = operation.finish(result).await;
+        fixture.runtime.shutdown().await;
+        assert_eq!(
+            resolved.expect("nearby parent fits the budget").commit,
+            target
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

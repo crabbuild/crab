@@ -23,6 +23,8 @@ pub const GIT_OBJECT_LOCATOR_RESOURCE: &str = "git-object-locator";
 pub const GIT_GENERATION_OWNER_RESOURCE: &str = "git-generation-owner";
 /// Internal resource serializing unified manifest publication.
 pub const GIT_MANIFEST_RESOURCE: &str = "git-manifest";
+/// Internal resource serializing ref-name creation/deletion and initial imports.
+pub const GIT_REF_NAMESPACE_RESOURCE: &str = "git-ref-namespace";
 /// Internal resource used when a push has no destination ref.
 pub const BATCH_RESOURCE: &str = "batch";
 /// Internal resource serializing history recovery without existing refs.

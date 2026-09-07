@@ -814,7 +814,17 @@ impl RemoteGitRuntime {
                     })?;
                     self.tasks.spawn(async move {
                         let _admission = admission;
-                        let result = task_work(runtime.background_cancellation()).await;
+                        // Cache publication belongs to the producer: retiring the
+                        // flight first lets a delayed waiter repeat the origin HEAD.
+                        let result = match runtime.cached_pack_index_source_size(&task_key).await {
+                            Some(size) => Ok(size),
+                            None => task_work(runtime.background_cancellation()).await,
+                        };
+                        if let Ok(size) = result {
+                            runtime
+                                .insert_pack_index_source_size(task_key.clone(), size)
+                                .await;
+                        }
                         runtime
                             .pack_index_size_flights
                             .lock()
@@ -898,10 +908,18 @@ impl RemoteGitRuntime {
                 })?;
                 self.tasks.spawn(async move {
                     let _admission = admission;
-                    let result = task_work(runtime.background_cancellation())
+                    // Admission can outlast a previous flight; its verified index
+                    // remains usable only within this caller's source-byte limit.
+                    let result = match runtime
+                        .cached_pack_index(&cache_key, max_source_bytes)
                         .await
-                        .map(Arc::new)
-                        .map_err(Arc::new);
+                    {
+                        Some(index) => Ok(index),
+                        None => task_work(runtime.background_cancellation())
+                            .await
+                            .map(Arc::new)
+                            .map_err(Arc::new),
+                    };
                     if let Ok(index) = &result {
                         runtime
                             .insert_pack_index(cache_key, Arc::clone(index))
@@ -1498,6 +1516,76 @@ mod tests {
             second.await.expect("second joins").expect("second size"),
             128
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn completed_size_flight_publishes_cache_before_retirement() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+        let key = PackIndexCacheKey::new(&identity, crab_xet::hash::compute_data_hash(b"index"));
+        let cancel = CancellationToken::new();
+        let first = runtime
+            .load_pack_index_size_singleflight(key.clone(), &cancel, |_| async { Ok(128) })
+            .await
+            .unwrap();
+        let second = runtime
+            .load_pack_index_size_singleflight(key, &cancel, |_| async { Ok(256) })
+            .await
+            .unwrap();
+        assert_eq!((first, second), (128, 128));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retired_index_flight_reuses_only_cache_within_the_source_limit() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+        let key = PackIndexCacheKey::new(&identity, crab_xet::hash::compute_data_hash(b"index"));
+        let index = Arc::new(PackIndex {
+            object_ids: Vec::new(),
+            pack_offsets: Vec::new(),
+            crc32: Vec::new(),
+            offset_order: Vec::new(),
+            pack_data_end: 0,
+            pack_checksum: [0; 20],
+            source_bytes: 128,
+        });
+        runtime
+            .insert_pack_index(key.clone(), Arc::clone(&index))
+            .await;
+        let cancel = CancellationToken::new();
+        let reused = runtime
+            .load_pack_index_singleflight(key.clone(), 128, &cancel, |_| async {
+                Err(Error::InternalInvariant {
+                    invariant: "cached index must not be fetched twice",
+                })
+            })
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&index, &reused));
+        let strict = runtime
+            .load_pack_index_singleflight(key, 64, &cancel, |_| async {
+                Err(Error::LimitExceeded {
+                    limit: "pack index bytes",
+                    actual: 128,
+                    maximum: 64,
+                })
+            })
+            .await
+            .err()
+            .unwrap();
+        let error = match &strict {
+            Error::SharedRead { source } => source.as_ref(),
+            error => error,
+        };
+        assert!(matches!(
+            error,
+            Error::LimitExceeded {
+                limit: "pack index bytes",
+                ..
+            }
+        ));
         runtime.shutdown().await;
     }
 

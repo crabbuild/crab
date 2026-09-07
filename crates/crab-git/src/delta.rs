@@ -1,28 +1,61 @@
-use tokio_util::sync::CancellationToken;
+//! Bounded Git delta decoding shared by remote reads and incoming packs.
 
-use crate::DeltaCorruption;
+/// Structural failures in Git delta instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DeltaCorruption {
+    /// Size header is absent, truncated, overflowing, or not addressable.
+    #[error("invalid delta size header")]
+    SizeHeader,
+    /// Delta declared a base size different from the supplied base.
+    #[error("declared base size does not match the base object")]
+    BaseSizeMismatch,
+    /// Copy offset or length overflows addressable memory.
+    #[error("copy range overflows")]
+    CopyOverflow,
+    /// Copy command reads beyond the base object.
+    #[error("copy range exceeds the base object")]
+    CopyOutOfBounds,
+    /// Zero is a reserved delta command.
+    #[error("delta command zero is reserved")]
+    ReservedCommand,
+    /// Insert command length overflows addressable memory.
+    #[error("insert range overflows")]
+    InsertOverflow,
+    /// Delta instruction bytes are truncated.
+    #[error("delta instruction is truncated")]
+    InstructionTruncated,
+    /// Reconstructed output exceeds or disagrees with its declaration.
+    #[error("reconstructed size does not match the delta declaration")]
+    ResultSizeMismatch,
+}
 
-#[derive(Debug)]
-pub(crate) enum DeltaError {
-    Invalid(DeltaCorruption),
-    ResultTooLarge {
-        actual: usize,
-        maximum: usize,
-    },
+/// Structural, allocation, limit or cancellation failure in a delta program.
+#[derive(Debug, thiserror::Error)]
+pub enum DeltaError {
+    #[error(transparent)]
+    Invalid(#[from] DeltaCorruption),
+    #[error("delta result {actual} exceeds limit {maximum}")]
+    ResultTooLarge { actual: usize, maximum: usize },
+    #[error("cannot allocate {requested} delta bytes")]
     Allocation {
         requested: usize,
+        #[source]
         source: std::collections::TryReserveError,
     },
+    #[error("delta operation cancelled")]
     Cancelled,
 }
 
-pub(crate) struct Delta<'a> {
-    pub(crate) base_size: usize,
-    pub(crate) result_size: usize,
-    pub(crate) instructions: &'a [u8],
+/// Parsed and size-bounded Git delta program.
+pub struct Delta<'a> {
+    pub base_size: usize,
+    pub result_size: usize,
+    pub instructions: &'a [u8],
 }
 
-pub(crate) fn parse(bytes: &[u8], maximum: usize) -> std::result::Result<Delta<'_>, DeltaError> {
+/// Parses delta size headers and rejects results larger than `maximum` before allocation.
+pub fn parse(bytes: &[u8], maximum: usize) -> std::result::Result<Delta<'_>, DeltaError> {
     let mut cursor = 0;
     let base_size = decode_size(bytes, &mut cursor)?;
     let result_size = decode_size(bytes, &mut cursor)?;
@@ -39,10 +72,11 @@ pub(crate) fn parse(bytes: &[u8], maximum: usize) -> std::result::Result<Delta<'
     })
 }
 
-pub(crate) fn apply(
+/// Applies a parsed delta, rejecting invalid ranges, sizes and cancellation.
+pub fn apply(
     base: &[u8],
     delta: Delta<'_>,
-    cancellation: &CancellationToken,
+    cancelled: impl Fn() -> bool,
 ) -> std::result::Result<Vec<u8>, DeltaError> {
     if base.len() != delta.base_size {
         return Err(DeltaError::Invalid(DeltaCorruption::BaseSizeMismatch));
@@ -57,7 +91,7 @@ pub(crate) fn apply(
         })?;
     let mut cursor = 0;
     while let Some(&command) = delta.instructions.get(cursor) {
-        if cancellation.is_cancelled() {
+        if cancelled() {
             return Err(DeltaError::Cancelled);
         }
         cursor += 1;
@@ -105,14 +139,15 @@ pub(crate) fn apply(
     Ok(output)
 }
 
-pub(crate) fn validate(
+/// Validates every instruction without allocating the reconstructed object.
+pub fn validate(
     delta: &Delta<'_>,
-    cancellation: &CancellationToken,
+    cancelled: impl Fn() -> bool,
 ) -> std::result::Result<(), DeltaError> {
     let mut cursor = 0;
     let mut output_len = 0usize;
     while let Some(&command) = delta.instructions.get(cursor) {
-        if cancellation.is_cancelled() {
+        if cancelled() {
             return Err(DeltaError::Cancelled);
         }
         cursor += 1;
@@ -172,7 +207,11 @@ fn decode_size(bytes: &[u8], cursor: &mut usize) -> std::result::Result<usize, D
             return Err(invalid(DeltaCorruption::SizeHeader));
         }
         let byte = next(bytes, cursor)?;
-        value |= u64::from(byte & 0x7f) << shift;
+        let component = u64::from(byte & 0x7f);
+        if component > (u64::MAX >> shift) {
+            return Err(invalid(DeltaCorruption::SizeHeader));
+        }
+        value |= component << shift;
         if byte & 0x80 == 0 {
             return usize::try_from(value).map_err(|_| invalid(DeltaCorruption::SizeHeader));
         }
@@ -213,10 +252,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejects_overflowing_size_headers_before_allocation() {
+        let mut bytes = vec![0xff; 9];
+        bytes.extend_from_slice(&[0x02, 0]);
+        assert!(matches!(
+            parse(&bytes, usize::MAX),
+            Err(DeltaError::Invalid(DeltaCorruption::SizeHeader))
+        ));
+    }
+
+    #[test]
     fn applies_copy_and_insert_instructions() {
         let bytes = [5, 8, 0x90, 3, 3, b'X', b'Y', b'Z', 0x91, 3, 2];
         let delta = parse(&bytes, 8).expect("parse delta");
-        let result = apply(b"abcde", delta, &CancellationToken::new()).expect("apply delta");
+        let result = apply(b"abcde", delta, || false).expect("apply delta");
         assert_eq!(result, b"abcXYZde");
     }
 
@@ -224,7 +273,7 @@ mod tests {
     fn rejects_copy_beyond_base() {
         let bytes = [3, 4, 0x91, 2, 4];
         let delta = parse(&bytes, 4).expect("parse delta");
-        assert!(apply(b"abc", delta, &CancellationToken::new()).is_err());
+        assert!(apply(b"abc", delta, || false).is_err());
     }
 
     #[test]
@@ -232,7 +281,7 @@ mod tests {
         let bytes = [3, 4, 0x91, 2, 4];
         let delta = parse(&bytes, 4).expect("parse delta");
         assert!(matches!(
-            validate(&delta, &CancellationToken::new()),
+            validate(&delta, || false),
             Err(DeltaError::Invalid(DeltaCorruption::CopyOutOfBounds))
         ));
     }
@@ -241,11 +290,9 @@ mod tests {
     fn metadata_validation_honors_cancellation() {
         let bytes = [3, 3, 0x90, 3];
         let delta = parse(&bytes, 3).expect("parse delta");
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
 
         assert!(matches!(
-            validate(&delta, &cancellation),
+            validate(&delta, || true),
             Err(DeltaError::Cancelled)
         ));
     }

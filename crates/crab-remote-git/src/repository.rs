@@ -144,7 +144,7 @@ pub struct OperationLimits {
     pub max_diff_input_bytes: u64,
     pub max_diff_output_bytes: u64,
     pub max_blame_lines: u64,
-    /// Maximum dynamic-programming cells used by line attribution.
+    /// Maximum conservative comparison work charged by line attribution.
     pub max_blame_comparison_cells: u64,
     pub max_archive_entries: u64,
     pub max_archive_bytes: u64,
@@ -595,6 +595,12 @@ impl RemoteGitRepository {
         self.state.generation
     }
 
+    /// Return whether this handle loaded a complete graph for its pinned generation.
+    #[must_use]
+    pub fn commit_graph_available(&self) -> bool {
+        self.state.commit_graph.is_some()
+    }
+
     pub(crate) fn git_validation_digest(&self) -> &str {
         &self.state.git_validation_digest
     }
@@ -959,7 +965,26 @@ impl RemoteGitRepository {
                 )
             }
             Revision::Commit(commit) => {
-                if !prove_reachable(*commit, &self.state.refs, operation).await? {
+                let roots = self
+                    .state
+                    .refs
+                    .entries
+                    .iter()
+                    .map(|entry| entry.peeled.unwrap_or(entry.target))
+                    .collect::<Vec<_>>();
+                let reachable = match self.commits_reachable_from(
+                    &[*commit],
+                    &roots,
+                    operation.cancellation(),
+                )? {
+                    Some(reachable) => {
+                        reachable.first().copied().ok_or(Error::InternalInvariant {
+                            invariant: "commit graph reachability omitted its candidate",
+                        })?
+                    }
+                    None => prove_reachable(*commit, &self.state.refs, operation).await?,
+                };
+                if !reachable {
                     return Err(Error::Revision {
                         reason: RevisionError::NotReachable,
                     });
@@ -1104,7 +1129,9 @@ impl TryFrom<&crab_metadata::manifests::Manifest> for RepositoryRefs {
                 peeled,
             });
         }
-        let (head, unborn_head) = if entries.is_empty() {
+        let (head, unborn_head) = if !manifest.refs.contains_key(&manifest.head)
+            && (entries.is_empty() || manifest.head.starts_with("refs/heads/"))
+        {
             (None, Some(manifest.head.clone()))
         } else {
             let target = manifest
@@ -1272,7 +1299,9 @@ async fn prove_reachable(
     refs: &RepositoryRefs,
     operation: &OperationContext,
 ) -> Result<bool> {
-    let mut pending = Vec::new();
+    // Visit nearby commits before descending either side of a merge. A depth-first
+    // walk can exhaust the read budget before checking even HEAD's first parent.
+    let mut pending = std::collections::VecDeque::new();
     for reference in &refs.entries {
         match peel_to_commit(reference.target, operation).await {
             Ok((commit, _)) => {
@@ -1281,7 +1310,7 @@ async fn prove_reachable(
                         stage: crate::CorruptionStage::Tag,
                     });
                 }
-                pending.push(commit);
+                pending.push_back(commit);
             }
             Err(Error::Revision {
                 reason: RevisionError::NotCommit,
@@ -1290,7 +1319,7 @@ async fn prove_reachable(
         }
     }
     let mut visited = std::collections::HashSet::new();
-    while let Some(commit_oid) = pending.pop() {
+    while let Some(commit_oid) = pending.pop_front() {
         if !visited.insert(commit_oid) {
             continue;
         }

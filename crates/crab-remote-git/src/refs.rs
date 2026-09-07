@@ -26,7 +26,7 @@ pub struct RepositoryRefs {
     /// Resolved symbolic `HEAD`, absent when the repository is empty or HEAD
     /// points at an unborn branch.
     pub head: Option<HeadReference>,
-    /// Symbolic `HEAD` target for an empty repository.
+    /// Symbolic `HEAD` target when its branch has no commit, even if other refs exist.
     pub unborn_head: Option<String>,
     /// References sorted by their complete bytewise names.
     pub entries: Vec<RepositoryRef>,

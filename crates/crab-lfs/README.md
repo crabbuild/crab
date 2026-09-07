@@ -36,6 +36,14 @@ checks to avoid re-reading the object body. A configured primary fallback can
 serve reads when a selected replica is stale or unavailable; receipts are
 written to the source that passed verification.
 
+`verify_origin(oid, expected_size)` performs a fresh SHA-256 and exact-size check
+without reading/writing verification receipts or using the configured fallback.
+Supply an origin-only store and bound the expected size and request deadline at
+the caller. It checks response metadata before consuming the body and rejects
+streams that exceed it. Four body verifications may run per process; hashing
+runs on blocking workers that retain admission after caller cancellation. The
+ordinary receipt-aware path uses the same body verifier when a receipt misses.
+
 `LfsLockManager` provides the shared CAS-backed LFS lock record format at
 `{prefix}/lfs/locks/{blake3(path)}`. Crab's CLI uses this namespace so locks
 remain visible across local clients and worktrees.

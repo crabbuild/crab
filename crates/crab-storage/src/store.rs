@@ -20,6 +20,7 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::Stream;
@@ -168,6 +169,18 @@ impl Store {
             read_byte_observer: None,
             read_request_observer: None,
         }
+    }
+
+    /// Returns a clone that uses `retry` for subsequent storage operations.
+    ///
+    /// The underlying object store and routing state remain shared. Callers
+    /// use this for operations whose outcome has a separate recovery protocol
+    /// and therefore must not inherit the broad transport retry budget.
+    #[must_use]
+    pub fn with_retry_policy(&self, retry: RetryPolicy) -> Self {
+        let mut store = self.clone();
+        store.retry = retry;
+        store
     }
 
     /// Attaches a [`BucketIdentity`] so [`Store::bucket_identity`]
@@ -661,6 +674,27 @@ impl Store {
         .await
     }
 
+    /// Writes one exact object while bounding the complete transport attempt.
+    ///
+    /// This is for visibility boundaries whose outcome has an explicit
+    /// readback protocol. The timeout also covers provider-client retries,
+    /// which may otherwise outlive this store's retry policy.
+    pub async fn put_exact_with_timeout(
+        &self,
+        path: &Path,
+        bytes: Bytes,
+        timeout: Duration,
+    ) -> Result<()> {
+        tokio::time::timeout(timeout, self.put_exact(path, bytes))
+            .await
+            .map_err(|_| StorageError::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("exact object write exceeded {timeout:?}: {path}"),
+                ),
+            })?
+    }
+
     fn exact_write_target(&self, path: &Path) -> (Path, Arc<dyn ObjectStore>, bool) {
         let Some(state) = &self.staging_writes else {
             return (path.clone(), self.inner.clone(), false);
@@ -843,6 +877,23 @@ impl Store {
             }
         })
         .await
+    }
+
+    /// Reads one bounded object while bounding the complete transport attempt.
+    pub async fn get_with_etag_bounded_with_timeout(
+        &self,
+        path: &Path,
+        max_bytes: u64,
+        timeout: Duration,
+    ) -> Result<(Bytes, ETag)> {
+        tokio::time::timeout(timeout, self.get_with_etag_bounded(path, max_bytes))
+            .await
+            .map_err(|_| StorageError::Io {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("bounded object read exceeded {timeout:?}: {path}"),
+                ),
+            })?
     }
 
     /// Reads one exact provider object version and returns its metadata.
