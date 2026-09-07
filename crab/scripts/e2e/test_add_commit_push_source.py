@@ -66,6 +66,17 @@ class SourceWorkflowTests(unittest.TestCase):
             Path(self.smoke.crab_bin)
         )
 
+    @unittest.skipUnless(os.name == "posix", "POSIX cache permission contract")
+    def test_preflight_creates_a_private_cache_under_permissive_umask(self) -> None:
+        previous = os.umask(0o022)
+        try:
+            with patch.object(self.smoke, "write_report", side_effect=RuntimeError("stop before tools")):
+                with self.assertRaisesRegex(RuntimeError, "stop before tools"):
+                    self.smoke.preflight()
+        finally:
+            os.umask(previous)
+        self.assertEqual(self.smoke.cache_dir.stat().st_mode & 0o777, 0o700)
+
     def test_source_clone_uses_pinned_commit_without_copying_dirty_worktree(self) -> None:
         (self.source / "tracked.txt").write_text("later commit\n", encoding="utf-8")
         self.git("commit", "-am", "later")

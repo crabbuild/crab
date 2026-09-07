@@ -15640,7 +15640,9 @@ impl PushPipeline {
     #[tracing::instrument(level = "info", name = "push.post_commit", skip_all)]
     async fn post_success_cleanup(&self) -> PostSuccessCleanupStats {
         let mut stats = PostSuccessCleanupStats::default();
+        let release_phase = PhaseTimer::start("push", "post_success_lock_release");
         self.stop_heartbeat_and_release_lock().await;
+        self.emit_perf_phase(release_phase.finish(0, 0, 0));
 
         // Build the per-shard chunk→xorb entries outside the ChunkIndex
         // lock to minimize lock contention. The metadata path hands us a
@@ -15651,6 +15653,7 @@ impl PushPipeline {
         // the shard session). We use `file_shard_index` to map each file
         // back to its shard, then group the file's chunk placements under
         // that shard for the session-local ChunkIndex.
+        let entries_phase = PhaseTimer::start("push", "post_success_index_prepare");
         let shard_entries = match self.precomputed_chunk_index_entries.lock().await.take() {
             Some(entries) => entries,
             None => {
@@ -15743,7 +15746,9 @@ impl PushPipeline {
             }
         };
 
+        self.emit_perf_phase(entries_phase.finish(0, 0, shard_entries.len() as u64));
         if !shard_entries.is_empty() {
+            let invalidation_phase = PhaseTimer::start("push", "post_success_miss_invalidation");
             // Only successful visibility publication invalidates cached misses.
             // Reuse the prepared shard membership; do not rescan recipes or
             // promote pre-CAS candidates into add-time remote authority.
@@ -15775,6 +15780,8 @@ impl PushPipeline {
                     Err(error) => warn!(error = %error, "add cache invalidation task failed"),
                 }
             }
+            self.emit_perf_phase(invalidation_phase.finish(0, 0, 0));
+            let install_phase = PhaseTimer::start("push", "post_success_index_install");
             let mut chunk_index = self.chunk_index.lock().await;
             for (shard_hash, entries) in shard_entries.iter() {
                 let already_installed = chunk_index.has_shard(shard_hash);
@@ -15788,6 +15795,7 @@ impl PushPipeline {
                 shards = shard_entries.len(),
                 "step 13: installed shards into ChunkIndex"
             );
+            self.emit_perf_phase(install_phase.finish(0, 0, shard_entries.len() as u64));
         }
 
         // Warm advisory xorb caches with small xorbs just uploaded. Streamed
@@ -15796,6 +15804,7 @@ impl PushPipeline {
         // Very large initial pushes already made the origin durable; copying
         // those bytes again before returning would make cache warming dominate
         // the user-visible push path.
+        let warm_phase = PhaseTimer::start("push", "post_success_xorb_cache");
         let uploaded = std::mem::take(&mut *self.uploaded_xorbs.lock().await)
             .into_iter()
             .filter(|uploaded_xorb| uploaded_xorb.cache_warm)
@@ -15906,6 +15915,12 @@ impl PushPipeline {
             }
         }
 
+        self.emit_perf_phase(warm_phase.finish(
+            stats.xorb_cache_warm_bytes,
+            0,
+            stats.xorb_cache_warm_items,
+        ));
+        let retirement_phase = PhaseTimer::start("push", "post_success_staging_retirement");
         let has_staging_snapshot = *self.staging_push_marked.lock().await;
         if has_staging_snapshot {
             self.commit_staging_push_snapshot().await;
@@ -15924,6 +15939,7 @@ impl PushPipeline {
             }
         }
 
+        self.emit_perf_phase(retirement_phase.finish(0, 0, 0));
         debug!("step 13: post-success cleanup complete");
         stats
     }
@@ -16569,10 +16585,12 @@ impl PushPipeline {
                 CrabError::Internal("push ref preflight result is missing".to_owned())
             });
             let (sha_map, decisions) = self.at_stage(PushFailureStage::RefCommit, preflight)?;
+            let manifest_prepare_phase = PhaseTimer::start("push", "manifest_prepare");
             let apply_result = self
                 .apply_decisions_with_sha_map(&decisions, self.config.atomic, &sha_map)
                 .await;
             let (manifest, bulk) = self.at_stage(PushFailureStage::RefCommit, apply_result)?;
+            self.emit_perf_phase(manifest_prepare_phase.finish(0, 0, 0));
             let metadata_phase = PhaseTimer::start("push", "candidate_metadb");
             let metadata_result = self.publish_candidate_metadb(&manifest).await;
             self.at_stage(PushFailureStage::RefCommit, metadata_result)?;
@@ -23660,13 +23678,13 @@ mod tests {
             Some(&RefPushOutcome::Ok)
         );
         assert!(
-            !crate::git::upload_pack_wire::snapshot_available(
+            crate::git::upload_pack_wire::snapshot_available(
                 store.as_storage(),
                 repo_prefix,
                 &CancellationToken::new(),
             )
             .await,
-            "protocol v2 must remain withheld while the generation owner protects the active journal"
+            "protocol v2 must remain available while fetch admission waits for the active owner"
         );
         let (manifest, _) = read_manifest(&store, &router)
             .await
@@ -24066,6 +24084,72 @@ mod tests {
         assert!(admitted.manifest.generation > initial.generation);
         assert!(admitted.manifest.refs.contains_key("refs/heads/main"));
         assert_eq!(repository.generation(), admitted.manifest.generation);
+        let storage_router =
+            crab_storage::StoreLayout::new(store.as_storage().clone(), repo_prefix.to_owned());
+        assert!(
+            crab_metadata::git_visibility::ensure_catalog_bound(
+                store.as_storage(),
+                &storage_router,
+                &admitted.manifest,
+            )
+            .await
+            .expect("bind the base catalog proof")
+        );
+        let pushed = Box::pin(
+            PushPipeline::new(
+                PushConfig::default(),
+                vec![make_spec("refs/heads/dev")],
+                Some(store.clone()),
+                None,
+                None,
+                repo_prefix.to_owned(),
+                router.clone(),
+                None,
+                CancellationToken::new(),
+                None,
+            )
+            .execute(),
+        )
+        .await;
+        assert_eq!(
+            pushed.outcomes.get("refs/heads/dev"),
+            Some(&RefPushOutcome::Ok)
+        );
+        // Pause at the same boundary as a concurrent reader: the compacted
+        // manifest is visible, but its ordinal handoff is not materialized.
+        let compacted = crab_metadata::manifest_store::compact_ref_journal(
+            store.as_storage(),
+            &storage_router,
+            admitted.manifest.created_at.clone(),
+            None,
+            "pending-admission".to_owned(),
+        )
+        .await
+        .expect("compact the journal")
+        .expect("journal compaction exists");
+        assert!(!compacted.git_visibility_published);
+        assert!(
+            crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "durable pending visibility evidence must preserve protocol v2"
+        );
+        assert!(
+            !git_visibility_proof_available_for_manifest(&store, &router, &compacted.manifest)
+                .await
+                .expect("capability discovery must leave materialization to admission")
+        );
+        let (repository, _) = crate::git::upload_pack_wire::open_repository_with_visibility(
+            store.as_storage(),
+            repo_prefix,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("admission completes the pending handoff");
+        assert_eq!(repository.generation(), compacted.manifest.generation);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -24261,6 +24345,15 @@ mod tests {
             git_generation_owner_is_active(&store, &router)
                 .await
                 .expect("inspect active generation owner")
+        );
+        assert!(
+            crate::git::upload_pack_wire::snapshot_available(
+                store.as_storage(),
+                repo_prefix,
+                &CancellationToken::new(),
+            )
+            .await,
+            "an active owner must not disable protocol v2 when visibility evidence exists"
         );
         let cancellation = CancellationToken::new();
         cancellation.cancel();

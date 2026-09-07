@@ -115,3 +115,104 @@ scale/probe data and completed canary data/buckets were removed; reports and
 logs were retained. Qualification covers the exercised local RustFS lifecycle,
 not 100 GiB of unique entropy, all historical large-file versions, all CLI
 commands, or production S3/GCS/Azure behavior.
+
+## Edited-push retirement follow-up
+
+The completed 100-GiB qualification reported edited pushes of 245.025 and
+277.197 seconds for 57,579,824 and 57,285,483 uploaded bytes. The aggregate
+`post_success_cache_warm` phase included staging retirement and took 108.758
+and 131.536 seconds; that label did not isolate cache work.
+
+Additional timers now separate lock release, index preparation, negative
+invalidation, index installation, xorb caching and staging retirement, plus
+manifest preparation. No serialized format, version or durability setting
+changes. A smaller reproduction uses the same 50-file/500-code-file shape,
+256 MiB per large file, ten content families and 1-MiB independent edits.
+
+| Local 12.5-GiB reproduction | Uploaded bytes | Push seconds | Retirement seconds | Manifest preparation seconds |
+|---|---:|---:|---:|---:|
+| Original per-file retirement | 57,853,538 | 38.574 | 21.176 | 10.439 |
+| Batched retirement only | 57,796,320 | 25.174 | 3.676 | 11.013 |
+| Batched retirement and valid private cache | 57,494,049 | 16.764 | 1.621 | 3.728 |
+
+The first comparison isolates batching from the cache fixture correction.
+Replaying the same prepared SQLite snapshot with identical deletion SQL took
+16.705 seconds with per-file commits versus 1.686 seconds with one commit.
+The bundled SQLite source documents the default 1,000-page WAL checkpoint
+threshold after commits; repeated commits amplified local index write costs.
+The production fix also runs unowned payload inventory cleanup once per batch.
+
+The smoke harness previously created its cache root with mode 0755 under umask
+022. Crab correctly rejected that root for private proof-cache access. Fresh
+fixture roots now use 0700; existing roots are not chmodded and the product's
+security checks are unchanged. This qualification error must not be attributed
+solely to product retirement performance. Timings use consecutive edits on a
+shared workstation/USB SSD, not an isolated or universally reproducible bound.
+
+| Changed boundary | Entry/caller → owner → callee | Siblings and proof |
+|---|---|---|
+| Batch retirement | `post_success_cleanup` → `StagingAreaReadOnly::retire_push_snapshot` → `Index::remove_files` | Writer/read-only publication, rollback and recovery use the same path; whole-batch rollback and shared prepared payload regression tests |
+| File/chunk deletion | `remove_files` / `delete_chunks_for_file` → transaction-local deletion | Pending rows do not decrement committed live counts; standalone retirement retains file metadata |
+| Body reclamation | Staging batch removal → committed inventory → filesystem unlink | Active recipe/preparation leases retain bodies; failed unlink remains recoverable orphan state |
+| Private test cache | Smoke preflight → fresh directory creation → production private-root validation | POSIX umask regression; existing directories and production permissions unchanged |
+
+Is batching the best fix rather than merely plausible? It removes repeated
+durable commits and global inventory scans at their owning boundary, instead of
+weakening fsync/checkpoint behavior or deferring correctness-critical cleanup.
+The tradeoff is a longer individual write transaction, held for the complete
+retirement set, and potentially more WAL retained until commit, while measured
+total cleanup time falls. Database failures
+now roll back the whole file-removal batch. Ownership publication is still a
+separate transaction; existing retry/recovery handles an interrupted cleanup.
+
+The follow-up staging suite passed 217 tests with one ignored; strict
+all-target staging clippy and the 11 smoke-harness source tests passed. A new
+RustFS bucket passed all 132 lifecycle checks with the batched implementation
+and corrected private cache root. The exercised binary SHA-256 is
+`e03a72a7646e89a9ea08886076f736570ec1a255198e814ca2dfb57c436a31a9`.
+Its runtime source is merged PR #156 plus this retirement/timing patch; the
+build embeds the pre-squash revision `ce3fdecfc033`, whose runtime source is
+identical to the merged `a371fb7d0024`. Reports record the latter checkout as
+dirty. The fresh 100-GiB follow-up passed all 1,223 checks: 50 large files
+(2 GiB each, ten shared content families), 500 small code files, three versions,
+commit/push, cold clone/hydration, dehydration and rehydration. All 1,100
+SHA-256 comparisons passed. Final Git fsck passed and the harness removed its
+isolated repository/cache data and fresh RustFS bucket, retaining reports.
+
+The full default-feature Crab library replay passed 4,145 tests with three
+ignored. Earlier runs exposed unchanged timing-sensitive cache-lock and
+50-ms cancellation tests under competing disk activity; a long external
+temporary-directory override also exceeded a Unix-socket path limit. The
+final run used normal temporary paths after the large live workload finished;
+no assertions were weakened. The Crab CI lint-category gate passed with its
+existing allowed warnings, as did workspace formatting and diff checks.
+
+Its first edited push completed in 113.972 seconds versus the previous
+245.025 seconds, uploading exactly the same 57,579,824 bytes. Aggregate
+post-success work fell from 108.758 to 29.793 seconds; the new retirement
+subphase measured 28.510 seconds. Manifest preparation took 22.873 seconds,
+candidate metadata publication 13.819 seconds, and xorb upload 2.262 seconds.
+This is a substantial reduction, not a claim that a 55-MiB delta costs only
+its network transfer time: validation and metadata still scale with the file
+recipes being published.
+
+The first edited add took 867.690 seconds versus 620.299 previously. Its
+chunking worker time was essentially unchanged and remote lookup worker time
+was lower, so the wall-time difference is not isolated to a code regression.
+Initial add/push also slowed from 559.033/593.262 to 682.618/706.740 seconds on
+the shared SSD. These separate runs do not establish improved add latency.
+Initial-push miss invalidation (29.323 seconds) and proof-cache work (27.308
+seconds) remain additional opportunities; on the first edited push those
+subphases took only 0.320 and 0.942 seconds, respectively.
+
+The second edited push completed in 108.308 seconds versus 277.197 previously,
+again with identical uploaded bytes (57,285,483). Aggregate post-success work
+fell from 131.536 to 30.215 seconds, including 29.892 seconds of retirement.
+Manifest preparation took 16.788 seconds and candidate metadata publication
+11.088 seconds. The second edited add took 737.900 seconds versus 642.509
+previously. After this push, an immutable read of the closed staging database
+found zero files, chunks, pending chunks, recipes, chunk/prepared payloads,
+push snapshots and path leases; `PRAGMA quick_check` returned `ok`, and no
+prepared plan/payload files remained. Cold hydration took 2,336.695 seconds,
+dehydration 214.653 seconds and rehydration 993.962 seconds. These results prove
+the exercised lifecycle, not universal low latency or 100 GiB of unique data.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,18 @@ class EvidenceLogsTest(unittest.TestCase):
         self.runner = RUNNER.ProtocolV2PartialCloneSmoke.__new__(RUNNER.ProtocolV2PartialCloneSmoke)
         self.runner.command_index = 0
         self.runner.logs = Path(self.directory.name) / "logs"
+
+    def test_telemetry_ignores_non_event_stderr_without_losing_events(self) -> None:
+        self.runner.logs.mkdir()
+        fields = {"protocol_version": 2, "planned_objects": 3,
+                  "storage_request": "range_get", "storage_bytes": 7}
+        for value in (5481203632, None, True, "progress", [], {"fields": 7}):
+            with self.subTest(value=value):
+                (self.runner.logs / "mixed.stderr.log").write_text(
+                    "ordinary stderr\n" + json.dumps(value) + "\n"
+                    + json.dumps({"fields": fields}) + "\n", encoding="utf-8")
+                self.assertEqual(len(self.runner.protocol_telemetry()), 1)
+                self.assertEqual(self.runner.storage_telemetry()["bytes"], 7)
 
     def test_long_labels_are_writable_and_remain_unique(self) -> None:
         paths = []
