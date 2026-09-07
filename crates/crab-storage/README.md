@@ -53,17 +53,24 @@ identity; integrity callers must not infer one from their display text.
 
 ```rust
 use bytes::Bytes;
-use crab_storage::{StoreLayout, StorageProviderKind, build_static_env_store};
+use crab_storage::{StorageProviderKind, StoreLayout, build_static_env_store};
 
-let store = build_static_env_store("models", StorageProviderKind::S3)?;
-let layout = StoreLayout::new(store.clone(), "team/repository".to_owned());
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let store = build_static_env_store("models", StorageProviderKind::S3)?;
+    let layout = StoreLayout::new(store.clone(), "team/repository".to_owned());
 
-store
-    .put(&layout.repo_path("example.txt"), Bytes::from_static(b"hello"))
-    .await?;
-let (body, _etag) = store.get_with_etag(&layout.repo_path("example.txt")).await?;
-assert_eq!(&body[..], b"hello");
-# Ok::<(), Box<dyn std::error::Error>>(())
+    store
+        .put(
+            &layout.repo_path("example.txt"),
+            Bytes::from_static(b"hello"),
+        )
+        .await?;
+    let (body, _etag) = store
+        .get_with_etag(&layout.repo_path("example.txt"))
+        .await?;
+    assert_eq!(&body[..], b"hello");
+    Ok(())
+}
 ```
 
 Use `build_object_store` or `build_object_store_with_endpoint` when credentials

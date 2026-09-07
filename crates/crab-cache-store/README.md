@@ -98,20 +98,20 @@ use crab_cache_store::{CacheConfig, CachingStore};
 use crab_types::storage::StorageProviderKind;
 use object_store::path::Path;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let origin = build_store_from_credentials(
-    "bucket",
-    CloudCredentials::StaticEnv {
-        provider: StorageProviderKind::S3,
-    },
-)?;
-let cached = CachingStore::new(origin, CacheConfig::default())?;
-let (bytes, _etag) = cached
-    .get_with_etag(&Path::from("repositories/team/manifest"))
-    .await?;
-# let _ = bytes;
-# Ok(())
-# }
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let origin = build_store_from_credentials(
+        "bucket",
+        CloudCredentials::StaticEnv {
+            provider: StorageProviderKind::S3,
+        },
+    )?;
+    let cached = CachingStore::new(origin, CacheConfig::default())?;
+    let (bytes, _etag) = cached
+        .get_with_etag(&Path::from("repositories/team/manifest"))
+        .await?;
+    println!("read {} bytes", bytes.len());
+    Ok(())
+}
 ```
 
 For an optional service, enable `remote-client` and set

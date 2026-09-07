@@ -56,19 +56,21 @@ targets in the product's push path.
 ## Usage
 
 ```rust
-use crab_git::{classify, PointerKind, RepositoryUrl};
+use crab_git::{PointerKind, RepositoryUrl, classify};
 
-let repository = RepositoryUrl::parse("s3://models/team/repository")?;
-assert_eq!(repository.bucket, "models");
-assert_eq!(repository.repo_prefix, "team/repository");
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let repository = RepositoryUrl::parse("s3://models/team/repository")?;
+    assert_eq!(repository.bucket, "models");
+    assert_eq!(repository.repo_prefix, "team/repository");
 
-let blob_bytes = b"ordinary Git content";
-match classify(blob_bytes) {
-    PointerKind::Crab(pointer) => println!("Crab file: {} bytes", pointer.size),
-    PointerKind::Lfs(pointer) => println!("LFS object: {} bytes", pointer.size),
-    PointerKind::NotAPointer => println!("ordinary Git blob"),
+    let blob_bytes = b"ordinary Git content";
+    match classify(blob_bytes) {
+        PointerKind::Crab(pointer) => println!("Crab file: {} bytes", pointer.size),
+        PointerKind::Lfs(pointer) => println!("LFS object: {} bytes", pointer.size),
+        PointerKind::NotAPointer => println!("ordinary Git blob"),
+    }
+    Ok(())
 }
-# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 For a local repository, use `discover_git_dir_from` and the ref helpers before

@@ -65,10 +65,11 @@ deps:
 Parse a workflow and inspect its execution order:
 
 ```rust
-use crab_workflow::{parse_yaml, Graph};
+use crab_workflow::{Graph, parse_yaml};
 
-let workflow = parse_yaml(
-    r#"
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let workflow = parse_yaml(
+        r#"
 stages:
   prepare:
     cmd: "python prepare.py"
@@ -78,11 +79,12 @@ stages:
     deps: ["data/prepared.txt"]
     outs: ["model.bin"]
 "#,
-)?;
+    )?;
 
-let graph = Graph::build(&workflow.stages)?;
-assert_eq!(graph.toposort().len(), 2);
-# Ok::<(), Box<dyn std::error::Error>>(())
+    let graph = Graph::build(&workflow.stages)?;
+    assert_eq!(graph.toposort().len(), 2);
+    Ok(())
+}
 ```
 
 Use `crab-workflow` for parsing, planning, hashing, and state contracts. The

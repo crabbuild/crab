@@ -73,17 +73,20 @@ use crab_auth_store::build_store_from_credentials;
 use crab_types::storage::StorageProviderKind;
 use object_store::path::Path;
 
-let store = build_store_from_credentials(
-    "bucket",
-    CloudCredentials::StaticEnv {
-        provider: StorageProviderKind::S3,
-    },
-)?;
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let store = build_store_from_credentials(
+        "bucket",
+        CloudCredentials::StaticEnv {
+            provider: StorageProviderKind::S3,
+        },
+    )?;
 
-let (bytes, _etag) = store
-    .get_with_etag(&Path::from("repositories/team/manifest"))
-    .await?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+    let (bytes, _etag) = store
+        .get_with_etag(&Path::from("repositories/team/manifest"))
+        .await?;
+    println!("read {} bytes", bytes.len());
+    Ok(())
+}
 ```
 
 For a protected push, use the upload prefix issued by the prepare step:

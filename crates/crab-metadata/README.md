@@ -132,16 +132,18 @@ process bound and include admission queue time in their deadline.
 Create and validate a manifest payload without enabling any storage runtime:
 
 ```rust
-use crab_metadata::manifests::{validate_manifest_payload, Manifest};
+use crab_metadata::manifests::{Manifest, validate_manifest_payload};
 
-let mut manifest = Manifest::default_for_repo("refs/heads/main");
-manifest.refs.insert(
-    "refs/heads/main".into(),
-    "0000000000000000000000000000000000000000".into(),
-);
-manifest.seal_git_validation();
-validate_manifest_payload(&manifest)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let mut manifest = Manifest::default_for_repo("refs/heads/main");
+    manifest.refs.insert(
+        "refs/heads/main".into(),
+        "0000000000000000000000000000000000000000".into(),
+    );
+    manifest.seal_git_validation();
+    validate_manifest_payload(&manifest)?;
+    Ok(())
+}
 ```
 
 For remote indexes, enable the feature in a consuming Crab workspace member

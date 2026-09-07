@@ -283,19 +283,19 @@ use bytes::Bytes;
 use crab_cache::{CacheKey, LocalCache};
 use crab_xet::hash::compute_data_hash;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let cache = LocalCache::new(".cache/crab".into());
-let payload = Bytes::from_static(b"cached chunk");
-let hash = compute_data_hash(payload.as_ref());
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let cache = LocalCache::new(".cache/crab".into());
+    let payload = Bytes::from_static(b"cached chunk");
+    let hash = compute_data_hash(payload.as_ref());
 
-let result = cache
-    .get_or_fetch(&CacheKey::Chunk(hash), || async {
-        Ok::<_, crab_cache::CacheError>(payload.clone())
-    })
-    .await?;
-assert_eq!(result, payload);
-# Ok(())
-# }
+    let result = cache
+        .get_or_fetch(&CacheKey::Chunk(hash), || async {
+            Ok::<_, crab_cache::CacheError>(payload.clone())
+        })
+        .await?;
+    assert_eq!(result, payload);
+    Ok(())
+}
 ```
 
 For a cache service, enable `remote-client` and construct `CacheClient` with

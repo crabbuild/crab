@@ -52,22 +52,22 @@ dynamic providers:
 
 ```rust
 use crab_auth::{
-    create_credential_provider, CredentialProvider, CredentialProviderConfig,
-    StaticAuthConfig,
+    CredentialProviderConfig, StaticAuthConfig, create_credential_provider,
 };
 use crab_types::storage::StorageProviderKind;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let provider = create_credential_provider(CredentialProviderConfig::Static(
-    StaticAuthConfig {
-        storage_provider: StorageProviderKind::S3,
-    },
-))?;
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let provider =
+        create_credential_provider(CredentialProviderConfig::Static(StaticAuthConfig {
+            storage_provider: StorageProviderKind::S3,
+        }))?;
 
-let resolution = provider.resolve("bucket", "repositories/team", "fetch").await?;
-assert!(resolution.storage_scope.is_none());
-# Ok(())
-# }
+    let resolution = provider
+        .resolve("bucket", "repositories/team", "fetch")
+        .await?;
+    assert!(resolution.storage_scope.is_none());
+    Ok(())
+}
 ```
 
 In a consuming Crab workspace member, enable only the provider clients needed

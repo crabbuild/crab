@@ -75,24 +75,24 @@ use crab_staging::StagingArea;
 use crab_xet::hash::compute_data_hash;
 use std::path::PathBuf;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let staging = StagingArea::open(PathBuf::from(".crab/staging")).await?;
-let data = b"hello Crab";
-let chunk_hash = compute_data_hash(data);
-let file_hash = compute_data_hash(data);
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let staging = StagingArea::open(PathBuf::from(".crab/staging")).await?;
+    let data = b"hello Crab";
+    let chunk_hash = compute_data_hash(data);
+    let file_hash = compute_data_hash(data);
 
-staging.pre_register_file(&file_hash, data.len() as u64)?;
-staging
-    .stage_chunks_batch(&[(&chunk_hash, &data[..])], &file_hash, 0)
-    .await?;
-staging.flush_pending().await?;
-assert_eq!(
-    staging.get_chunk(&chunk_hash).await?.unwrap(),
-    bytes::Bytes::copy_from_slice(data)
-);
-staging.close().await?;
-# Ok(())
-# }
+    staging.pre_register_file(&file_hash, data.len() as u64)?;
+    staging
+        .stage_chunks_batch(&[(&chunk_hash, &data[..])], &file_hash, 0)
+        .await?;
+    staging.flush_pending().await?;
+    assert_eq!(
+        staging.get_chunk(&chunk_hash).await?.unwrap(),
+        bytes::Bytes::copy_from_slice(data)
+    );
+    staging.close().await?;
+    Ok(())
+}
 ```
 
 Production cleaners normally use `stream` or `recipe` helpers and submit

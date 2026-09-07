@@ -99,12 +99,14 @@ crab-vfs = { workspace = true, features = ["fuse"] }
 ```rust
 use crab_vfs::source::MountSource;
 
-let source = MountSource::parse("crab://models/team/project")?;
-assert!(matches!(source, MountSource::Remote { .. }));
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let source = MountSource::parse("crab://models/team/project")?;
+    assert!(matches!(source, MountSource::Remote { .. }));
 
-let local = MountSource::parse("./working-copy")?;
-assert!(matches!(local, MountSource::Local { .. }));
-# Ok::<(), Box<dyn std::error::Error>>(())
+    let local = MountSource::parse("./working-copy")?;
+    assert!(matches!(local, MountSource::Local { .. }));
+    Ok(())
+}
 ```
 
 For a real mount, construct a `PipelineConfig`, run

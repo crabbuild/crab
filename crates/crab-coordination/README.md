@@ -84,28 +84,27 @@ Use the in-memory coordinator to exercise the transaction contract in a test
 or local integration:
 
 ```rust
-use crab_coordination::{
-    commit_uploaded_push, CommitRequest, InMemoryWriteCoordinator,
-};
+use crab_coordination::{CommitRequest, InMemoryWriteCoordinator, commit_uploaded_push};
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let coordinator = InMemoryWriteCoordinator::new();
-let outcome = commit_uploaded_push(
-    &coordinator,
-    CommitRequest {
-        operation_id: "push-123".into(),
-        writer: "writer-a".into(),
-        region: "west".into(),
-        manifest_generation: 7,
-        refs: vec![],
-        uploaded_objects: vec!["objects/manifest-7".into()],
-        target_regions: vec!["west".into()],
-    },
-).await?;
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let coordinator = InMemoryWriteCoordinator::new();
+    let outcome = commit_uploaded_push(
+        &coordinator,
+        CommitRequest {
+            operation_id: "push-123".into(),
+            writer: "writer-a".into(),
+            region: "west".into(),
+            manifest_generation: 7,
+            refs: vec![],
+            uploaded_objects: vec!["objects/manifest-7".into()],
+            target_regions: vec!["west".into()],
+        },
+    )
+    .await?;
 
-assert_eq!(outcome.operation_id, "push-123");
-# Ok(())
-# }
+    assert_eq!(outcome.operation_id, "push-123");
+    Ok(())
+}
 ```
 
 For a lock-backed critical section, compile with `object-store-lock` and

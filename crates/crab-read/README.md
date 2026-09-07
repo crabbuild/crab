@@ -87,20 +87,20 @@ use crab_cache_store::{CacheConfig, CachingStore};
 use crab_read::{ReadRuntimeBuilder, ReadStoreLayout};
 use crab_types::storage::StorageProviderKind;
 
-# async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-let origin = build_store_from_credentials(
-    "bucket",
-    CloudCredentials::StaticEnv {
-        provider: StorageProviderKind::S3,
-    },
-)?;
-let cached = CachingStore::new(origin.clone(), CacheConfig::default())?;
-let layout = ReadStoreLayout::new(origin, "repositories/team/project".to_owned());
-let hydrator = ReadRuntimeBuilder::new(cached, layout, 16).build()?;
-let bytes = hydrator.reconstruct_from_pointer(pointer_bytes).await?;
-# let _ = bytes;
-# Ok(())
-# }
+async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let origin = build_store_from_credentials(
+        "bucket",
+        CloudCredentials::StaticEnv {
+            provider: StorageProviderKind::S3,
+        },
+    )?;
+    let cached = CachingStore::new(origin.clone(), CacheConfig::default())?;
+    let layout = ReadStoreLayout::new(origin, "repositories/team/project".to_owned());
+    let hydrator = ReadRuntimeBuilder::new(cached, layout, 16).build()?;
+    let bytes = hydrator.reconstruct_from_pointer(pointer_bytes).await?;
+    println!("read {} bytes", bytes.len());
+    Ok(())
+}
 ```
 
 Use `reconstruct_range_from_pointer` for partial reads and

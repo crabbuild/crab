@@ -56,14 +56,16 @@ use crab_lfs::LfsObjectStore;
 use crab_storage::{StorageProviderKind, build_static_env_store};
 use sha2::{Digest, Sha256};
 
-let store = build_static_env_store("models", StorageProviderKind::S3)?;
-let lfs = LfsObjectStore::new(store, "team/repository");
-let data = Bytes::from_static(b"large-object-content");
-let oid: [u8; 32] = Sha256::digest(&data).into();
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let store = build_static_env_store("models", StorageProviderKind::S3)?;
+    let lfs = LfsObjectStore::new(store, "team/repository");
+    let data = Bytes::from_static(b"large-object-content");
+    let oid: [u8; 32] = Sha256::digest(&data).into();
 
-lfs.put(&oid, data.clone()).await?;
-assert_eq!(lfs.verify(&oid).await?, data);
-# Ok::<(), Box<dyn std::error::Error>>(())
+    lfs.put(&oid, data.clone()).await?;
+    assert_eq!(lfs.verify(&oid).await?, data);
+    Ok(())
+}
 ```
 
 For large local files, use `put_stream(&oid, path)` so the upload uses bounded

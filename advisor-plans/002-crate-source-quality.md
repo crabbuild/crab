@@ -1067,3 +1067,19 @@ All 15 coordinator tests and strict all-target VFS Clippy pass with NFS and
 FUSE enabled. The ten-second cooperative grace value is unchanged; final joining
 can take longer if a blocking hydration step is still running. No native mount
 or entire-process shutdown qualification is claimed.
+
+## README example presentation
+
+Fourteen crate READMEs exposed rustdoc-only `#` harness lines in GitHub code
+blocks. These READMEs are not included by the crate documentation tests.
+Their usage snippets now show explicit functions with visible error propagation
+and normal Rust indentation; fetched bytes have a visible use. The examples
+retain their existing API calls, feature requirements, and storage assumptions.
+
+Validation: extracted all fourteen revised snippets verbatim into separate
+modules in a temporary CLI example, then ran `cargo check -p crab --locked
+--example codex_readme_quality_probe` with the dedicated external target and
+Cargo home. The fixture uses the CLI's enabled dependency features; this checks
+API/type compatibility, not isolated minimal feature sets. Removed the temporary
+fixture after checking. No cloud requests or filesystem examples were executed.
+This pass covers the revised snippets, not every code block in all 21 READMEs.

@@ -41,18 +41,20 @@ format used by the data plane.
 ## Usage
 
 ```rust
-use crab_types::pointer::{is_pointer, Pointer};
+use crab_types::pointer::{Pointer, is_pointer};
 
-let pointer = Pointer {
-    file_hash: [0x42; 32],
-    size: 3,
-    shard_hint: None,
-};
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let pointer = Pointer {
+        file_hash: [0x42; 32],
+        size: 3,
+        shard_hint: None,
+    };
 
-let bytes = pointer.serialize();
-assert!(is_pointer(&bytes));
-assert_eq!(Pointer::parse(&bytes)?.size, 3);
-# Ok::<(), Box<dyn std::error::Error>>(())
+    let bytes = pointer.serialize();
+    assert!(is_pointer(&bytes));
+    assert_eq!(Pointer::parse(&bytes)?.size, 3);
+    Ok(())
+}
 ```
 
 `is_pointer` is a detection heuristic, not a validation result. Call
