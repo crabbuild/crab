@@ -4024,3 +4024,19 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   retaining the previously recorded macOS unwind-section linker warning.
   Broad PR CI is still live on 5d248c18c60; these local follow-ups need fresh
   checks when published. No runtime/native pass is inferred from this build.
+
+
+### LFS upload admission failure proof
+
+- Extended the real MultipartUpload observing fixture with a first-part
+  transport failure. With four full parts queued and a one-byte EOF tail,
+  stream_file_parts returns the original ConnectionReset source without
+  submitting the tail. All retained part futures are released before return.
+- The test then explicitly aborts the in-memory upload and confirms no object
+  exists. This proves the helper's failure/admission boundary, not production
+  abort invocation or remote provider cleanup. Source inspection confirms
+  put_stream_with_size still awaits abort on helper failure and returns the
+  original error if abort also fails; that production path is unchanged.
+- Both focused upload tests pass (success boundary matrix and failure case),
+  as does strict all-target Clippy. No production, dependency, or public API
+  changes in this checkpoint; previous build/docs proof remains applicable.
