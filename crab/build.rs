@@ -76,8 +76,7 @@ struct ClassEntry {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
-    println!("cargo:rerun-if-changed=../.git/HEAD");
-    println!("cargo:rerun-if-changed=../.git/index");
+    track_git_metadata();
     println!("cargo:rerun-if-changed=pricing/data/{PRICING_VERSION}.yaml");
     println!("cargo:rerun-if-env-changed=CRAB_BUILD_VERSION");
     println!("cargo:rerun-if-env-changed=GIT_SHA");
@@ -390,6 +389,43 @@ pub fn lookup_price(provider: &str, region: &str, class: &str) -> Option<&'stati
 }
 
 // ── Git helpers ─────────────────────────────────────────────────────
+
+fn track_git_metadata() {
+    let branch = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok());
+    let mut command = Command::new("git");
+    command.args(["rev-parse", "--path-format=absolute", "--git-path", "HEAD"]);
+    if let Some(branch) = &branch {
+        command.args(["--git-path", branch.trim(), "--git-path", "packed-refs"]);
+    }
+    let Ok(output) = command.output() else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let Ok(paths) = String::from_utf8(output.stdout) else {
+        return;
+    };
+    // Worktrees keep HEAD outside .git. Watch only the current branch, since
+    // unrelated worktrees and tool checkpoints also update the shared refs.
+    for (index, path) in paths.lines().enumerate() {
+        let mut path = PathBuf::from(path);
+        if index == 1 {
+            // A packed branch has no loose file until its next update. Watch
+            // its nearest existing parent so recreating that file is detected.
+            while !path.exists() && path.pop() {}
+        }
+        // Missing optional paths make Cargo rerun the script on every build.
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
+}
 
 /// Returns the short HEAD sha of the workspace, or `None` on any failure.
 fn git_short_sha() -> Option<String> {

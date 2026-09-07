@@ -46,21 +46,21 @@ not claims that the named code is defective.
 | crab-xet | Broader parser/reconstruction and aggregate memory qualification remain | Coverage, decoded-length/offset checks, and bounded decompression output verified |
 | crab-storage | Broader retry/error classification and cancellation cleanup remain | Diagnostics, multipart cleanup, and stream framing verified |
 | crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
-| crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
+| crab-staging | Flush/publication, scale, and remaining clock-policy qualification remain | Recovery errors and invalid cleanup clocks verified through fsck |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
-| crab-cache | Cache keys and invalidation remain | Diagnostic slice and README navigation verified |
-| crab-cache-store | Range and broader integrity qualification remain | Startup, conditional/versioned bypass, and metadata authority documented and verified |
+| crab-cache | Broader cache-key and invalidation qualification remain | Diagnostics, exact cached-file ranges, repair/accounting, and README navigation verified |
+| crab-cache-store | Broader source-chain integrity and deployed-service qualification remain | Warm ranges, conditional/versioned bypass, metadata authority, and corruption provenance verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
-| crab-remote-git | Range and consumer qualification remain | Lifecycle documentation and README navigation verified |
+| crab-remote-git | Provider ranges, aggregate resource limits, and broader consumer qualification remain | Lifecycle documentation, README navigation, and coalescing admission boundaries verified |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
 | crab-auth | Key-source policy, power-loss durability, non-Unix locking remain | Diagnostic, load-outcome, and key-publication slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
 | crab-http-server | Archive worker draining, production-route cancellation, embedded assets, service errors remain | HTTP/1 LFS and archive framing verified; request/admission ownership documented |
-| crab-workflow | Async lock waiting, cache/resume, native qualification remain | Retry parsing, lock readability, metadata identity, and default API docs verified |
+| crab-workflow | Async lock waiting, remaining cancellation ownership, and broader native qualification remain | Retry parsing, metadata identity, serialized replay, root-relative materialization, and cleanup slices verified |
 
 ## Pointer diagnostic change
 
@@ -2343,3 +2343,79 @@ macOS linker warning. This closes the consumer-build gap recorded above.
 Formatting and diff checks pass; the only new source is the 20-line test.
 Published c808a1553d2 CI remains running; local commits are still awaiting the
 next grouped update rather than cancelling that qualification.
+
+### Build metadata tracking in linked worktrees
+
+Consecutive focused CLI builds exposed avoidable recompilation. build.rs watched
+../.git/HEAD and ../.git/index, but .git is a file in this linked worktree.
+A small Cargo fixture using those exact directives reproduces an unchanged
+rebuild; Cargo verbose output states that ../.git/HEAD is missing.
+
+The build script now asks Git for absolute HEAD, current-branch, and packed-refs
+paths and emits watches only for existing paths. HEAD tracks detached commits
+and branch switches. The current loose ref and packed-refs track branch movement;
+when the loose ref is absent, its nearest existing parent detects recreation. The index is not an input
+to the embedded short HEAD SHA. No build version, timestamp, pricing generation,
+or environment-override semantics change. Existing missing-Git/archive metadata
+behavior remains best effort.
+
+Dependency evidence: installed Cargo documentation says directory watches scan
+for modifications. Installed Git rev-parse documentation specifies absolute
+path output and git-path relocation handling. Native Git resolves HEAD into
+this worktree's private Git directory and branch refs into its common Git directory.
+No sibling build script in the workspace emits Git watches. Current origin/main
+has the two literal paths reproduced by the fixture.
+
+A disposable Cargo/native-Git probe executes the new helper verbatim with
+separate target directories per checkout. Twenty observations cover the old
+unchanged rebuild, new normal/linked-worktree build reuse, unrelated checkpoint
+updates, branch commits,
+packing refs, commits after packing, detached checkout, and detached commits.
+Every invalidating operation rebuilds and embeds the expected native short SHA;
+unchanged runs after each operation remain fresh. This is local files-backend
+Git 2.50.1 evidence, not cross-platform or reftable qualification. Probe output
+is in /tmp/crab-089c-build-watch-results.json; no production fixture or dependency
+was added. Git metadata paths that cannot be represented in Cargo's textual
+watch directives remain outside this qualification.
+
+Is this the best fix? Resolving Git's own paths addresses both worktree layout
+and branch metadata without watching the entire Git object directory or shared
+refs tree. Watching
+only the gitfile would miss commits. Watching nonexistent optional paths would
+retain the repeated-build defect. The helper owns real build invalidation;
+its added lines replace two incorrect watches rather than adding another mode.
+
+
+Published-head qualification update: c808a1553d2 passes RustFS race/crash/scale
+(job 101789745232, run 34136856427) and binary/integration contracts
+(job 101789745447, run 34136856340). These replace older-head evidence for
+those surfaces. Workflow, cache-service, protocol platform, and split-crate
+jobs remain live; unpublished follow-ups are outside this CI scope.
+
+
+The first full CLI build passed with the initial shared-refs watch, but the
+unchanged rerun compiled again. Inspection found Codex checkpoint refs updated
+inside that shared tree during verification. Narrowed the watch to the current
+branch and added unrelated-ref probe coverage. Stopped the superseded rebuild
+with SIGINT (exit 130); that was an intentional stop after a source correction,
+not a timeout or a failed compiler result. The corrected full build followed by
+an immediate unchanged build completed successfully as one sequential process.
+The full build took 207.21 seconds; the unchanged run took 4.88 seconds and
+did not compile Crab. These are observed local timings, not a controlled
+benchmark. The existing macOS linker warning remains.
+
+
+Current-head browser qualification: job 101796901979 (run 34136856236)
+failed on the release-delete tooltip, contrast 1.43 versus 4.5. Filtered job
+logs identify “Delete Crab 1.0 patched”; browser source and rust.yml still
+match recorded origin/main. This is source isolation, not a new main runtime
+reproduction or a reason to suppress the accessibility check. The draft PR
+records this alongside the successful RustFS and binary/integration gates.
+
+
+Final build-tracking verification: all 20 fixture observations pass and the
+actual linked-worktree CLI remains fresh on its unchanged rerun. Build metadata
+is still invalidated by the commit changes exercised in the fixtures. No source
+or dependency changes followed the successful sequential build. Formatting and
+diff checks pass. This batch is ready for grouped publication; current PR CI
+continues to qualify c808a1553d2, not these local follow-ups.
