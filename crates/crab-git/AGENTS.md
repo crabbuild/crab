@@ -33,6 +33,9 @@ Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate`
   Source: `crates/crab-git/src/refname.rs`.
 - A receive plan is not publication authority: callers supply policy, verify pointer dependencies, and recheck the captured base under writer leases.
   Source: `crates/crab-git/src/receive_plan.rs`.
+- Read `GIT_DIR` with `var_os`; an explicit OS path must not disappear because
+  it is non-Unicode. Check the feature-gated CLI config resolver sibling too.
+  Sources: `crates/crab-git/src/discover.rs`, `crab/src/core/config_resolver.rs`.
 - Keep common-directory discovery distinct from the current working tree; discovery has an explicit .git result outside repositories.
   Source: `crates/crab-git/src/discover.rs`.
 

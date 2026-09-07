@@ -238,10 +238,10 @@ fn non_empty(s: &str) -> Option<String> {
 /// to get a git-dir path.
 pub fn discover_git_dir_from(start: &Path) -> Result<PathBuf> {
     // Honour `GIT_DIR` if set, to match discover's behavior.
-    if let Ok(dir) = std::env::var("GIT_DIR") {
-        if !dir.is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+    if let Some(dir) = std::env::var_os("GIT_DIR")
+        && !dir.is_empty()
+    {
+        return Ok(PathBuf::from(dir));
     }
     match gix_discover::upwards(start) {
         Ok((repo_path, _trust)) => {
@@ -259,6 +259,41 @@ pub fn discover_git_dir_from(start: &Path) -> Result<PathBuf> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn git_dir_override_preserves_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::process::Command;
+
+        const CHILD: &str = "CRAB_TEST_CONFIG_GIT_DIR_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let expected = PathBuf::from(std::env::var_os("GIT_DIR").expect("override"));
+            assert_eq!(
+                discover_git_dir_from(Path::new(".")).expect("discover"),
+                expected
+            );
+            return;
+        }
+        let fixture = tempfile::tempdir().expect("fixture");
+        let git_dir = std::ffi::OsString::from_vec(b"repo-\xff.git".to_vec());
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "core::config_resolver::tests::git_dir_override_preserves_non_utf8",
+                "--nocapture",
+            ])
+            .current_dir(fixture.path())
+            .env(CHILD, "1")
+            .env("GIT_DIR", git_dir)
+            .output()
+            .expect("discovery child");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     /// Local overrides must win over values supplied via the
     /// in-memory config. Synthesized in a single `[section]` block

@@ -47,13 +47,9 @@ pub struct FilterAttrCache {
 impl FilterAttrCache {
     /// Build a new cache by parsing `.gitattributes` rooted at `repo_root`.
     ///
-    /// Recursively walks subdirectories for nested `.gitattributes` files,
-    /// appending their entries in walk order (deepest last = highest priority
-    /// per git semantics).
-    ///
-    /// Prefer [`collect_all_entries`] + [`from_entries`] when you also need
-    /// the raw LFS patterns (e.g. for the legacy `is_lfs_tracked` fallback)
-    /// — that avoids a second tree walk.
+    /// Collects the root file and index-tracked nested `.gitattributes` files.
+    /// Prefer [`collect_all_entries`] + [`Self::from_entries`] when the caller
+    /// also needs raw entries, avoiding duplicate index scans and file reads.
     pub fn from_repo_root(repo_root: &Path) -> Self {
         let (entries, root_mtime) = collect_all_entries(repo_root);
         Self {
@@ -62,11 +58,10 @@ impl FilterAttrCache {
         }
     }
 
-    /// Build a cache from pre-collected entries, avoiding a tree walk.
+    /// Build a cache from pre-collected entries.
     ///
-    /// Use [`collect_all_entries`] to produce the entries. This constructor
-    /// lets callers that need the entries for other purposes (e.g. LFS
-    /// pattern extraction) reuse a single walk result.
+    /// Use [`collect_all_entries`] to share the input with other consumers,
+    /// such as LFS pattern extraction, without rereading attribute files.
     pub fn from_entries(entries: Vec<FilterEntry>, root_mtime: Option<SystemTime>) -> Self {
         Self {
             entries,

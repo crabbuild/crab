@@ -3082,3 +3082,72 @@ output/startup behavior. No repository-browser file, dependency, or CI workflow
 has been changed by these source batches. The UI root cause has not been
 reproduced on main; the failed gate remains recorded rather than relabeled green.
 Native dispatch34148861825 still has a live Windows smoke step at this point.
+
+
+### Git directory environment-path inspection
+
+Shared discover_git_dir_from and the CLI config resolver both read GIT_DIR
+through std::env::var. Rust's documented/source contract rejects non-Unicode
+values there; var_os retains an OsString. Both public entry points already
+accept nonempty overrides without validating existence, so silently ignoring
+an opaque OS path can instead select a different repository or the .git
+fallback. The shared code on origin/main has the same behavior.
+
+The shared regression runs the actual helper in a child with an invalid-UTF8
+GIT_DIR and fails before the fix: .git is returned instead of the exact override.
+The first attempted native Git setup could not create that filename on this
+Mac filesystem (Illegal byte sequence); it is not valid native-path evidence.
+The retained test limits real Git init/rev-parse comparison to Linux, while the
+OS-string override test runs on Unix without requiring that filename to exist.
+A separate CLI config-resolver regression is compiling in session37928.
+
+Callers inspected: shared ref_resolve's unqualified ref/HEAD helpers, the CLI
+Git discover adapter, FetchConfig's default git_dir, and LFS publication's
+common-directory comparison. The CLI config resolver is a sibling with a
+different no-repository policy (error instead of .git fallback), so that policy
+must stay distinct. current_worktree_root bypasses the override deliberately;
+commondir text decoding is a separate remaining path-format concern. Other
+GIT_DIR string reads found by workspace search are test environment restorers,
+not additional production discovery implementations.
+
+
+The config-resolver default-feature test invocation selected zero tests because
+that module is gated by gix-config. The corrected feature-enabled regression
+failed before the fix with a discovery error instead of the supplied override.
+Both production readers now use var_os and keep their existing absent/empty
+and no-repository policies. Six shared discovery tests pass with and without
+facade, six ref-resolution tests pass, and strict facade all-target Clippy
+passes. Strict rustdoc found a bare from_entries link and a redundant FindExt
+link; both are corrected and strict docs pass. CLI feature consumer/adapter
+checks and build remain running in session99689.
+
+### Windows native smoke evidence retention
+
+Dispatch34148861825 is terminal failed. Windows job101828929585 finished both
+builds and successful mount-doctor checks by18:11:58UTC, then reached the60-minute
+job limit at18:57:44UTC. This was not a compiler timeout. Retained artifacts
+contain no mount.log because Invoke-Native collected all output in a variable
+before teeing it after command completion. Cleanup reports a stale mount was
+removed, which alone does not identify the mount-startup failure.
+
+The wrapper now pipes native output directly through Tee-Object while retaining
+LASTEXITCODE checking and working-directory restoration. All call sites invoke
+the wrapper for side effects, not as a value-returning API. Microsoft documents
+[Tee-Object](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/tee-object?view=powershell-7.6)
+as forwarding and retaining pipeline output; the native exit-code check remains
+separate from cmdlet pipeline success. The change removes script-level buffering
+so future CI logs can expose progress before timeout. It does not fix or waive
+the Windows native mount hang, extend its timeout, or establish crash-durable
+logging. Local PowerShell is unavailable; all three script contracts and their
+self-test pass, with actual PowerShell execution pending the next native run.
+
+
+Git-dir validation completed: seven gix-config resolver tests, three CLI Git
+adapter tests, and the feature-enabled CLI build pass. The CLI build retains
+its known macOS debug-unwind linker warning. Attribute-cache constructor docs
+also now describe the actual index-based collection instead of a recursive
+filesystem walk; strict rustdoc passes after that prose correction. No public
+signature, stored format, default feature, or dependency changed. Native Linux
+non-UTF8 directory proof remains for CI; local tests prove the OS-string
+boundary and all selected consumers, not a native Mac filesystem path that the
+host filesystem cannot create.

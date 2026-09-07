@@ -32,6 +32,10 @@ whitespace, including carriage returns in paths. Line mode accepts CRLF; returne
 string fields still use lossy UTF-8 conversion. See Git's
 [porcelain format](https://git-scm.com/docs/git-worktree#_porcelain_format).
 
+Discovery honors a nonempty `GIT_DIR` as a native OS path, without requiring
+Unicode or checking that the directory exists. An absent or empty override
+uses upward discovery. Linked-worktree `commondir` parsing remains separate.
+
 The main surfaces are:
 
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository

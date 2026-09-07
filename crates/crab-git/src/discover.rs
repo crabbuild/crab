@@ -13,12 +13,15 @@ pub fn discover_git_dir() -> PathBuf {
 
 /// Like [`discover_git_dir`] but starts from an explicit directory.
 ///
+/// A nonempty `GIT_DIR` overrides discovery and retains its native OS path,
+/// including non-Unicode values. The override is not checked for existence.
+///
 /// Discovery falls back to `.git` when the start path is not inside a Git
 /// repository, matching the historical CLI helper used by `crab init`-style
 /// flows.
 #[must_use]
 pub fn discover_git_dir_from(start: &Path) -> PathBuf {
-    if let Ok(git_dir) = std::env::var("GIT_DIR")
+    if let Some(git_dir) = std::env::var_os("GIT_DIR")
         && !git_dir.is_empty()
     {
         return PathBuf::from(git_dir);
@@ -83,6 +86,70 @@ pub fn resolve_common_dir(git_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn git_dir_override_preserves_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        use std::process::Command;
+
+        const CHILD: &str = "CRAB_TEST_GIT_DIR_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let expected = PathBuf::from(std::env::var_os("GIT_DIR").expect("override"));
+            assert_eq!(discover_git_dir_from(Path::new(".")), expected);
+            return;
+        }
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let git_dir = fixture
+            .path()
+            .join(std::ffi::OsString::from_vec(b"repo-\xff.git".to_vec()));
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let init = Command::new("git")
+                .args(["init", "--bare"])
+                .arg(&git_dir)
+                .env_remove("GIT_DIR")
+                .output()
+                .expect("git init");
+            assert!(
+                init.status.success(),
+                "{}",
+                String::from_utf8_lossy(&init.stderr)
+            );
+            let native = Command::new("git")
+                .args(["rev-parse", "--git-dir"])
+                .current_dir(fixture.path())
+                .env("GIT_DIR", &git_dir)
+                .output()
+                .expect("native discovery");
+            assert!(native.status.success());
+            assert_eq!(
+                native.stdout.strip_suffix(b"\n"),
+                Some(git_dir.as_os_str().as_bytes())
+            );
+        }
+
+        // Environment overrides stay in the child, avoiding process-global
+        // environment mutation while other discovery tests run concurrently.
+        let child = Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "discover::tests::git_dir_override_preserves_non_utf8",
+                "--nocapture",
+            ])
+            .current_dir(fixture.path())
+            .env(CHILD, "1")
+            .env("GIT_DIR", &git_dir)
+            .output()
+            .expect("discovery child");
+        assert!(
+            child.status.success(),
+            "{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+    }
 
     #[test]
     fn fallback_returns_dot_git_when_no_repo() {
