@@ -30,7 +30,7 @@ Use the ordered recipe tests when changing this chain.
 
 - Consume every ordered recipe occurrence, including duplicates; missing placements and count mismatches must remain errors.
   Source: `crates/crab-xet/src/reconstruction.rs`.
-- Term coverage counts are not complete payload integrity proof; retain parser digest/chunk checks and final read-side file verification.
+- Coverage validation uses checked term counts, not per-chunk bookkeeping. Counts are not complete payload integrity proof; retain parser digest/chunk checks and final read-side file verification.
   Source: `crates/crab-xet/src/xorb/parser.rs`.
 - Check representable format sizes before changing builder state; do not silently truncate serialized chunk metadata.
   Source: `crates/crab-xet/src/xorb/builder.rs`.

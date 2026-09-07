@@ -43,7 +43,7 @@ not claims that the named code is defective.
 | crab-types | Pointer error sources; timestamp range contracts remain | Pointer slice verified |
 | crab-git | Shared delta decoder; discovery and process contracts remain | Delta slice verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
-| crab-xet | Range arithmetic, malformed payloads, reconstruction checks | Pending |
+| crab-xet | Coverage count simplification; parser and reconstruction qualification remain | Coverage slice verified |
 | crab-storage | Credential diagnostics; retry/error classification remains | Diagnostic slice verified |
 | crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
@@ -389,3 +389,28 @@ fresh indexes, and configured paths.
 Validation: all five remote-index tests and strict all-target Clippy with
 `remote-index` pass. Added production logic is one preflight loop; the remaining
 source growth documents durability and exercises both database selections.
+
+## Reconstruction coverage validation
+
+`crab-xet::validate_term_coverage` allocated a per-file boolean vector to mark a
+contiguous prefix and repeated the same checked sum after equality was already
+established. The validator now computes the diagnostic position directly from
+its checked count. Reversed ranges, count overflow, missing/excess counts, and
+existing example-hash diagnostics remain unchanged; repeated Xorb ranges stay
+valid. Removed bookkeeping reduces production code and avoids allocation
+proportional to the input chunk count on mismatch.
+
+Caller map: CLI exports a forwarding wrapper and has coverage regression tests;
+no production invocation of that validator was found. Production recipe
+construction instead calls FileTermBuilder push/finish. The latter is unchanged.
+Parser siblings separately verify serialized payload digests and decoded chunk
+hashes; whole-file identity remains with crab-read. Documentation now makes
+these distinct guarantees explicit and corrects the builder's constant-memory
+claim: emitted terms and distinct starts can grow with recipe fragmentation.
+
+All five reconstruction tests pass before and after the refactor, including
+missing/excess diagnostics, malformed/overflow ranges, and repeated chunks.
+Strict all-target Clippy passes with default features. Locked Cargo dependency
+trees also show xet-core-structures -> xet-runtime -> reqwest even with no Crab
+features; README no longer claims the default transitive graph is runtime-free.
+This is a source/API simplification, not a measured production performance claim.
