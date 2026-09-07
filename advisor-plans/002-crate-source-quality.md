@@ -3530,3 +3530,37 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   native filesystem behavior, or success criterion changed. Fresh Windows
   execution is still required to locate the remaining stall; no hang fix is
   claimed. Private helper logs remain excluded from uploaded artifacts.
+
+
+### Staged publication joins the mutation owner
+
+- Streamed PUT and origin-fill publication now call `commit_staged_object`.
+  It moves the validated staged file and owned key into the same tracked worker
+  used by admin eviction, keeping budget estimation, emergency eviction, and
+  authoritative publication together. Both callers retain their response,
+  metrics, and shard-index ingestion responsibilities.
+- Removed duplicated emergency-eviction policy and the origin path's redundant
+  post-eviction budget precheck. `put_unverified_temp_path_recoverable` checks
+  the budget under the mutation lock; on rejection its recovery handle still
+  supplies the staged bytes to the origin response. Worker admission/join errors
+  remain distinct from recoverable commit errors. No new fallback was added.
+- Evidence map: `write_object` stages and validates PUT bytes before publication;
+  `fetch_and_cache_data` stages origin bytes before this same helper. Callee
+  budget/commit/persistence and TempPath ownership were inspected in the previous
+  batches. Sibling admin calls use the same worker; periodic eviction retains
+  its own joined task. Startup recovery, disk reads, shard indexing, and the
+  lifetime of abandoned serving futures remain separate qualification work.
+- Tests: the cancelled-mutation fixture now exercises both eviction and real
+  temp-file publication while holding the mutation lock; after cancellation,
+  shutdown waits and published bytes remain readable. Handler tests prove
+  cancellation while queued deletes the owned temp file and oversized origin
+  publication returns staged bytes without publishing or changing accounting.
+- Validation: 47 handler tests, 46 cache-store tests, 6 push-warming HTTP tests,
+  10 origin HTTP tests, and 2 eviction HTTP tests pass. The expanded cancellation
+  fixture also passes independently. Strict Clippy, rustdoc, binary build,
+  formatting, and diff checks pass. No public method signature, serialized
+  format, dependency, or lockfile changes; ServerObjectKey gains Clone so the
+  asynchronous owner can retain an independent key.
+- Non-test handler code shrinks by consolidating two decision paths. The new
+  helper carries both worker and commit outcomes because only the latter owns
+  a recoverable file; merging them would lose that distinction.

@@ -113,11 +113,12 @@ Batch eviction sums actual removal results instead of counting stale candidates.
 
 ## Shutdown ownership
 
-Administrative eviction uses a service-owned blocking worker. Admission allows
-one such mutation at a time; cancelling a queued request removes it, while an
+Administrative eviction and staged upload/origin publication use a service-owned
+blocking worker. Admission allows one such mutation at a time; cancelling a queued request removes it, while an
 already admitted mutation finishes before server shutdown returns. Cancellation
-does not roll back an eviction. Upload/origin publication and startup recovery
-still use synchronous paths and are not covered by this worker's drain.
+does not roll back an admitted eviction or publication. The worker owns staged
+files through commit; cancelled queued publications remove their temporary files.
+Startup recovery and other synchronous disk reads are outside this worker's drain.
 
 Periodic eviction runs disk/SQLite work on a blocking worker, one batch at a
 time. Evictor shutdown stops polling and waits for any admitted batch before

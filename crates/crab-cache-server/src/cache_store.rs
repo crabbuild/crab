@@ -39,6 +39,7 @@ const META_VAL_LEN: usize = 32;
 ///
 /// This is intentionally separate from `crab_cache::CacheKey`, which keys
 /// local/client cache entries by content identity.
+#[derive(Clone)]
 pub struct ServerObjectKey {
     pub bucket: String,
     pub repo_path: String,
@@ -2524,55 +2525,83 @@ mod tests {
         use std::sync::Arc;
         use std::time::Duration;
 
-        let store = Arc::new(test_store());
-        let key = pack_key("cancelled-admin-eviction");
-        store
-            .put_unverified(&key, Bytes::from_static(b"payload"))
-            .unwrap();
-        let (locked, ready) = tokio::sync::oneshot::channel();
-        let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
-        let (release, release_rx) = std::sync::mpsc::channel();
-        let locked_store = Arc::clone(&store);
-        let blocker = std::thread::spawn(move || {
-            let _guard = locked_store.mutation_guard().unwrap();
-            locked.send(()).unwrap();
-            let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
-            if responsive {
-                let _ = release_rx.recv_timeout(Duration::from_secs(3));
-            }
-            responsive
-        });
-        ready.await.unwrap();
-        let request_store = Arc::clone(&store);
-        let (entered, entering) = tokio::sync::oneshot::channel();
-        let request = tokio::spawn(async move {
-            request_store
-                .run_mutation(move |store| {
-                    let _ = entered.send(());
-                    store.evict_key(&key)
-                })
+        for publish in [false, true] {
+            let store = Arc::new(test_store());
+            let key = pack_key("cancelled-mutation");
+            let staged = if publish {
+                let path = store.create_temp_object_path(&key).unwrap();
+                std::fs::write(&path, b"payload").unwrap();
+                Some(path)
+            } else {
+                store
+                    .put_unverified(&key, Bytes::from_static(b"payload"))
+                    .unwrap();
+                None
+            };
+            let staged_path = staged.as_ref().map(|path| path.to_path_buf());
+            let (locked, ready) = tokio::sync::oneshot::channel();
+            let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let locked_store = Arc::clone(&store);
+            let blocker = std::thread::spawn(move || {
+                let _guard = locked_store.mutation_guard().unwrap();
+                locked.send(()).unwrap();
+                let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+                if responsive {
+                    let _ = release_rx.recv_timeout(Duration::from_secs(3));
+                }
+                responsive
+            });
+            ready.await.unwrap();
+            let request_store = Arc::clone(&store);
+            let (entered, entering) = tokio::sync::oneshot::channel();
+            let request = tokio::spawn(async move {
+                request_store
+                    .run_mutation(move |store| {
+                        let _ = entered.send(());
+                        if let Some(path) = staged {
+                            store.put_unverified_temp_path(&key, path, 7)
+                        } else {
+                            store.evict_key(&key).map(|_| ())
+                        }
+                    })
+                    .await
+            });
+            entering.await.unwrap();
+            let _ = heartbeat.send(());
+            request.abort();
+            let _ = request.await;
+            let mut shutdown = Box::pin(store.shutdown_mutations());
+            let waited = tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
                 .await
-        });
-        entering.await.unwrap();
-        let _ = heartbeat.send(());
-        request.abort();
-        let _ = request.await;
-        let mut shutdown = Box::pin(store.shutdown_mutations());
-        let waited = tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
-            .await
-            .is_err();
-        let _ = release.send(());
-        let responsive = blocker.join().unwrap();
-        if waited {
-            shutdown.await;
+                .is_err();
+            let _ = release.send(());
+            let responsive = blocker.join().unwrap();
+            if waited {
+                shutdown.await;
+            }
+            assert!(responsive, "mutation blocked the async executor");
+            assert!(waited, "shutdown detached a cancelled request's mutation");
+            assert_eq!(store.current_bytes(), if publish { 7 } else { 0 });
+            if let Some(path) = staged_path {
+                assert!(
+                    !path.exists(),
+                    "admitted publication retained its temporary path"
+                );
+                assert_eq!(
+                    store
+                        .get(&pack_key("cancelled-mutation"))
+                        .unwrap()
+                        .unwrap()
+                        .as_ref(),
+                    b"payload"
+                );
+            }
+            assert!(
+                store.run_mutation(|_| Ok(())).await.is_err(),
+                "shutdown must close admission"
+            );
         }
-        assert!(responsive, "mutation blocked the async executor");
-        assert!(waited, "shutdown detached a cancelled request's mutation");
-        assert_eq!(store.current_bytes(), 0);
-        assert!(
-            store.run_mutation(|_| Ok(())).await.is_err(),
-            "shutdown must close admission"
-        );
     }
 
     #[test]

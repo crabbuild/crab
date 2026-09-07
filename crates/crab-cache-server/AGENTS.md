@@ -60,10 +60,12 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
 - Use removal's `EvictStats` for both count and bytes. Zero bytes can mean an
   empty object; a stale candidate contributes no eviction. Source:
   `crates/crab-cache-server/src/cache_store.rs`.
-- Administrative eviction uses `CacheStore::run_mutation`. Keep the admission
+- Administrative eviction and staged publication use `CacheStore::run_mutation`.
+  Keep the admission
   permit in the blocking worker and serialize tracker closure with spawning;
   cancelled requests must not detach mutations from `PreparedServer::shutdown`.
-  Upload/origin publication remains a separate synchronous ownership path.
+  Move staged-file ownership and budget/commit work together. Origin fallback
+  retains the commit recovery handle; shard-index ingestion stays with its caller.
 - Periodic eviction runs blocking work off the async executor. Shutdown signals
   the loop and joins the admitted batch; do not abort its outer task and detach
   a mutation. Source: `crates/crab-cache-server/src/evictor.rs`.
