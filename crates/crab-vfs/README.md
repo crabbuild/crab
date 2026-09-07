@@ -104,6 +104,18 @@ cleaner without exposing join handles. Listener drop notifies the cleaner, but
 neither that notification nor joining the listener proves child-task completion.
 Native unmount and backend task cleanup need separate verification.
 
+## NFS control deadlines
+
+Each control call owns a fresh socket. Its timeout covers connection setup,
+request writes, and the response read: ten seconds normally, thirty minutes for
+commit. TCP and Unix sockets share the same JSON exchange. Timeout or caller
+cancellation drops the socket; the client does not retry a mutation whose result
+is unknown. A timeout does not prove that the helper stopped an admitted commit.
+
+These are asynchronous I/O deadlines, not CPU preemption or a deadline for the
+native OS mount command. See `nfs_control::tests` for stalled-write and socket
+closure regressions.
+
 ## Usage
 
 Source detection requires `fuse` or `nfs`. This crate is not published to the

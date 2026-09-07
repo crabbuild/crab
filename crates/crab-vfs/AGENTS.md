@@ -55,6 +55,9 @@ mount/control owners consume the pipeline output separately.
   Source: `crates/crab-vfs/src/read_lease_pool.rs`.
 - Review cancellation, hydration worker shutdown, leases, and control resources in both FUSE and NFS owners before changing teardown.
   Source: `crates/crab-vfs/src/nfs_mount.rs`.
+- NFS control deadlines cover connect/write/read on a request-owned socket.
+  Timeout closes that socket; it does not roll back a helper mutation. Do not
+  retry an uncertain commit. Source: `crates/crab-vfs/src/nfs_control.rs`.
 
 ## Features and platform
 

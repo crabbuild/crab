@@ -3151,3 +3151,48 @@ signature, stored format, default feature, or dependency changed. Native Linux
 non-UTF8 directory proof remains for CI; local tests prove the OS-string
 boundary and all selected consumers, not a native Mac filesystem path that the
 host filesystem cannot create.
+
+
+### NFS control exchange deadlines
+
+Owner: `crates/crab-vfs/src/nfs_control.rs`, reached by mount-control status,
+refresh, switch, commit and shutdown, daemon readiness, and CLI background
+readiness. Both TCP and Unix transports previously timed only `next_line`;
+connect, write_all and flush ran outside that timeout. The same implementation
+is present on inspected origin/main a371fb7d002. Two local socket regressions
+with a listener that never reads and an 8 MiB synthetic commit request both
+exceeded a three-second watchdog despite a 100 ms operation timeout.
+
+The timeout now owns connection setup and one shared JSON exchange. TCP retains
+its token envelope; Unix retains the plain request. Normal requests keep ten
+seconds and commits thirty minutes. Each call owns its socket, so timeout drops
+all transport state without leaving a reusable, partially written stream or
+retrying an uncertain mutation. This reduces production code by 38 lines before
+imports/constant renaming; added lines are regression coverage and documentation.
+Tokio 1.52.1 timeout source documents cancellation by dropping the future and
+its cooperative polling limit: this is not CPU preemption. Socket closure does
+not cancel a helper operation already dispatched.
+
+Existing real local control-server tests cover authenticated TCP and Unix
+status/shutdown. New coverage proves both stalled writes time out and an
+unanswered ping closes the TCP connection after sending the request. All 19
+control tests and ten mount-control consumer tests pass. Strict all-target
+Clippy initially rejected an expect in the test helper; changed it to the
+module's existing unwrap convention without a new suppression. Final all-target Clippy,
+strict docs and the no-default-features NFS CLI build pass. The CLI emits 13
+feature-specific warnings and its macOS debug-unwind linker warning; this is
+not a claim of warning-free CLI qualification. No default feature, dependency,
+public signature, wire shape, or successful response changed.
+
+Sibling follow-up: FUSE's reusable IpcClient::send_with_timeout also bounds only
+the response read. It must invalidate or close a partially exchanged connection
+before reuse, so transplanting a timeout alone would be incomplete. Qualify that
+client's callers and cancellation contract next. Server-side connection tasks
+and mutation completion after disconnect also remain separate ownership work.
+
+Windows startup inspection found a minimum-four-worker CLI runtime, ruling out
+a single-thread runtime explanation. Native mount commands and Windows
+is_mounted still invoke synchronous subprocess output with no subprocess
+deadline. This NFS control fix does not prove or claim to fix that native hang.
+Native run34154546592 on6ae0432975e has started its feature gate; preserve that
+run for the earlier macOS uncached-read and Windows streaming-log evidence.
