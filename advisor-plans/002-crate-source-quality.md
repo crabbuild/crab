@@ -1785,3 +1785,53 @@ wrapper data type, storage format, or public field was introduced; added manual
 field comparison is required by the existing tagged Eq contract.
 
 Dependency contract: https://doc.rust-lang.org/std/cmp/trait.Eq.html.
+
+### Workflow orphan cleanup requires ownership and a recognized name
+
+Current main's inline run path sweeps sidecars before acquiring SchedulerLock,
+passing an empty active-run set. YAML single-stage and DAG paths already acquire
+before sweeping. A contention regression holds a real scheduler guard, creates
+a materialization sidecar, and invokes inline execution with no-wait. Before the
+fix it returns WorkflowLockTimeout but has already deleted the holder's file.
+The fixed path leaves the exact bytes present. The private CLI sweep helper now
+requires a borrowed scheduler guard at all three call sites.
+
+The shared resume sweep also treated any filename containing .crab.tmp. as a
+sidecar, including malformed run IDs; its docs promised UUID recognition.
+materialize::sidecar_path is the producer and appends the run UUID. Cleanup now
+parses that suffix once before classifying a file or directory for deletion,
+then checks the supplied active set. Malformed names remain ordinary entries;
+ordinary directories still permit traversal to recognized nested sidecars.
+A second regression proves malformed file and directory names survive; the old
+implementation removes both. The five existing/new sweep tests cover active
+preservation, orphan removal, recursion, missing roots, and unknown names.
+
+Owner map: CLI inline/YAML/DAG orchestration -> private sweep_orphans -> shared
+resume::sweep_orphan_sidecars -> UUID recognition and filesystem removal.
+SchedulerLock owns exclusion; materialize.rs owns sidecar creation. No other
+production sweep callers were found. The zero-active-set precondition is now
+explicit in public rustdoc and the crate README/agent guide. The change preserves
+file/directory cleanup and active UUID behavior without adding a second policy.
+
+Both regressions fail on the original paths and pass after the fix. Five shared
+sweep tests, the real-lock CLI contention regression, and strict all-target
+workflow Clippy pass. This does not qualify every concurrent publication path:
+async lock waiting, pre-lock dependency/lockfile reads, cache-only execution,
+and adversarial directory replacement remain separate open work.
+
+Published head 636f2a6b9f5 completed with 29 successful checks, 12 skipped, and
+one failed browser contrast check. Both Windows jobs finished successfully.
+These completed results do not qualify the later local commits; publication
+will start fresh validation for the accumulated changes.
+
+CLI library Clippy still reports 489 warnings versus 494 on the recorded main
+baseline: 484 match unchanged main source, and the remaining five large-future
+messages match the prior comparison. The cleanup change introduces no new
+observed diagnostic; the CLI is not claimed warning-free.
+
+The debug CLI build passes with a macOS linker warning that __eh_frame exceeds
+16 MiB; no warning-free binary-build claim is made. A separate Python process
+holds the real advisory lock while the built crab run command attempts no-wait
+execution in a temporary fixture on the workspace volume. It returns CRAB-E0230,
+preserves the holder sidecar bytes, and creates no final stage output. This
+adds native command-to-filesystem proof for the contention path.

@@ -40,6 +40,11 @@ execution. Parsing and graph construction are sequential caller-owned steps.
   `SchedulerLock::acquire` blocks its calling thread while waiting.
   Source: `crates/crab-workflow/src/scheduler_lock.rs`.
 
+- Sidecar cleanup requires a valid run UUID and excludes active run IDs. An empty
+  active set is safe only when the caller has excluded other schedulers; the CLI
+  sweep helper requires a live scheduler guard in inline, YAML, and DAG paths.
+  Source: `crates/crab-workflow/src/resume.rs` and `crab/src/cmd/run.rs`.
+
 - Unknown schema keys must fail visibly; parse/expand before planning so typos cannot silently alter execution.
   Source: `crates/crab-workflow/src/yaml.rs`.
 - Stage and default retry policies share range checks with semantic validation;

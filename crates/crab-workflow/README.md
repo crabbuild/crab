@@ -128,6 +128,11 @@ The caller chooses the timeout and retains the guard for the protected work.
 | PID diagnostic | Best-effort holder information, not ownership proof. |
 | Windows `.lock.pid` | Readable sidecar, removed before releasing the lock. |
 
+Orphan cleanup recognizes only `.crab.tmp.<UUID>` sidecars. Callers must supply
+active run IDs or hold scheduler ownership before sweeping with an empty list.
+An inline run that cannot acquire the lock must leave the holder's sidecars
+untouched; malformed sidecar-like names remain ordinary user files.
+
 ## Boundaries
 
 - [`crab-types`](../crab-types/README.md) owns shared stage hashes and

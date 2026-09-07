@@ -693,16 +693,12 @@ async fn run_inline_single_stage(
         .await;
     }
 
-    // Normal execution path. Sweep orphan sidecars + resume prior
-    // non-terminal journals before opening ours.
-    let run_id = Uuid::now_v7();
-    sweep_orphans(&workflow_root, repo_root, &outs)?;
-
-    // Serialize against other `crab run` invocations on this repo
-    // (design §"Concurrency model"). We hold the lock for the full
-    // remainder of the run; drop on return releases it.
+    // The prior scheduler may still be publishing sidecars while we wait.
+    // Acquire ownership before deciding that its temporary outputs are orphaned.
     let lock_timeout = compute_lock_timeout(args, config);
-    let _scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let run_id = Uuid::now_v7();
+    sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &outs)?;
 
     // Process-local metrics Arc. The counters bumped here are
     // observability-only; they're not persisted across `crab run`
@@ -1306,10 +1302,10 @@ async fn run_yaml_single_stage(
 
     // Lock and journal setup mirrors inline single-stage.
     let lock_timeout = compute_lock_timeout(args, config);
-    let _scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
 
     let run_id = Uuid::now_v7();
-    sweep_orphans(&workflow_root, repo_root, &stage.outs)?;
+    sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &stage.outs)?;
 
     let metrics = Arc::new(Metrics::new());
     scan_prior_journals(&workflow_root, run_id, args, metrics.as_ref())?;
@@ -1437,14 +1433,14 @@ async fn run_dag(
     // Acquire scheduler lock once for the whole DAG — design's
     // concurrency model is "one `crab run` per repo".
     let lock_timeout = compute_lock_timeout(args, config);
-    let _scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
 
     let run_id = Uuid::now_v7();
     // Sweep orphan sidecars across every declared out path so a
     // prior crashed run doesn't leave artifacts that poison this
     // one. Each stage's sweep is scoped to its out's parent dir.
     for stage in workflow.stages.values() {
-        sweep_orphans(&workflow_root, repo_root, &stage.outs)?;
+        sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &stage.outs)?;
     }
 
     let metrics = Arc::new(Metrics::new());
@@ -4796,11 +4792,14 @@ fn scan_prior_journals(
     Ok(())
 }
 
-fn sweep_orphans(workflow_root: &Path, repo_root: &Path, outs: &[Out]) -> Result<()> {
-    // Phase 1 scope: sweep the parent directory of each declared out
-    // plus the workflow scratch root. Active run_ids are empty — we
-    // haven't opened ours yet, and the full active-run tracking lives
-    // in task 3.7's DAG scheduler.
+fn sweep_orphans(
+    _scheduler_lock: &SchedulerLock,
+    workflow_root: &Path,
+    repo_root: &Path,
+    outs: &[Out],
+) -> Result<()> {
+    // The caller holds this repository's scheduler lock and has not started
+    // its run, so no cooperating scheduler owns an active materialization.
     let active: Vec<Uuid> = Vec::new();
     let _ = resume::sweep_orphan_sidecars(workflow_root, &active)?;
     for out in outs {
@@ -5152,6 +5151,33 @@ mod tests {
                 tmp.join("b.txt").to_string_lossy().into(),
             ],
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn contended_inline_run_preserves_holder_sidecars() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), b"input").unwrap();
+        let workflow_root = tmp.path().join(".crab/workflow");
+        let _holder = SchedulerLock::try_acquire(&workflow_root).unwrap().unwrap();
+        let sidecar = tmp
+            .path()
+            .join(format!("b.txt.crab.tmp.{}", Uuid::now_v7()));
+        fs::write(&sidecar, b"active output").unwrap();
+        let mut args = base_args(tmp.path());
+        args.no_wait = true;
+        let result = run_inline_single_stage(
+            &args,
+            tmp.path(),
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CrabError::WorkflowLockTimeout { .. })),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(sidecar).unwrap(), b"active output");
     }
 
     #[tokio::test(flavor = "multi_thread")]
