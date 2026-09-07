@@ -1093,12 +1093,23 @@ async fn stream_file_parts(
     Ok(())
 }
 
-/// Wraps an I/O error with the source path so callers can report which
-/// local file the upload was reading.
+#[derive(Debug, thiserror::Error)]
+#[error("{source} (reading {path})")]
+struct FileReadError {
+    path: std::path::PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+// Keep file context and the original OS cause together: CLI and server
+// conversions retain this I/O error and can inspect its source chain.
 fn annotate_io_error(source: std::io::Error, file_path: &StdPath) -> LfsError {
     let wrapped = std::io::Error::new(
         source.kind(),
-        format!("{} (reading {})", source, file_path.display()),
+        FileReadError {
+            path: file_path.to_owned(),
+            source,
+        },
     );
     LfsError::Io { source: wrapped }
 }
@@ -1153,6 +1164,36 @@ mod tests {
 
     fn test_store() -> LfsObjectStore {
         LfsObjectStore::new(test_base_store(), "repo")
+    }
+
+    #[tokio::test]
+    async fn missing_upload_file_retains_os_error_source() {
+        use std::error::Error;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-upload");
+        let error = test_store().put_stream(&[0; 32], &path).await.unwrap_err();
+        let original = error
+            .source()
+            .and_then(Error::source)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("original file open error");
+
+        assert_eq!(original.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn upload_read_error_keeps_file_context_and_error_kind() {
+        let original = std::io::Error::from_raw_os_error(13);
+        let expected_kind = original.kind();
+        let error = annotate_io_error(original, StdPath::new("upload.bin"));
+        let LfsError::Io { source } = error else {
+            panic!("expected I/O error")
+        };
+
+        assert!(
+            source.kind() == expected_kind && source.to_string().contains("reading upload.bin")
+        );
     }
 
     fn test_base_store() -> Store {

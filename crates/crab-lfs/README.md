@@ -71,6 +71,10 @@ multipart buffers and aborts an incomplete upload on hash failure. Use
 `object_path_for` when a higher-level Crab read path needs the canonical object
 key.
 
+Local upload failures retain the filename, I/O error kind, and original OS
+error through `std::error::Error::source()`. Callers can report file context
+and inspect the underlying cause without parsing the message.
+
 ## Boundaries
 
 - [`crab-git`](../crab-git/README.md) parses and classifies the pointer blob.
