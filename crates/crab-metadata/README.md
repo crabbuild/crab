@@ -74,8 +74,9 @@ Canonical scans still serialize through their session cache.
 
 Await `close()` after the operation's readers finish. Close rejects new lookups
 and waits for active lookups before closing SlateDB, even if handle clones
-remain. Await close to completion; dropping the owner or close future cannot
-perform asynchronous cleanup. Scoped stores retain write-free canonical reads.
+remain. Concurrent close calls also wait for reader cleanup. Await close to
+completion; dropping the owner or close future cannot perform asynchronous
+cleanup. Scoped stores retain write-free canonical reads.
 
 ### Snapshot-bound lookup
 

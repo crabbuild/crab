@@ -45,7 +45,7 @@ not claims that the named code is defective.
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Broader parser/reconstruction and aggregate memory qualification remain | Coverage, decoded-length/offset checks, and bounded decompression output verified |
 | crab-storage | Broader retry/error classification and cancellation cleanup remain | Diagnostics, multipart cleanup, and stream framing verified |
-| crab-metadata | Catalog lifecycle, cancellation, and broader index qualification remain | Writer admission and diagnostic candidate ordering verified |
+| crab-metadata | Catalog lifecycle, cancellation, and broader index qualification remain | Writer admission, diagnostic candidate ordering, and shared-reader close serialization verified |
 | crab-staging | Flush/publication, scale, and remaining clock-policy qualification remain | Recovery errors and invalid cleanup clocks verified through fsck |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
@@ -3897,3 +3897,39 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   lookup/cleanup commits still need their own CI; this is not full-crate proof.
 - Documentation validation: reviewed the corrected contract against source and
   completed regression evidence; cargo fmt --all and git diff --check pass.
+
+
+### Shared reader closure: concurrent owners wait for checkpoint cleanup
+
+- Evidence map: SharedFileIndexLookup::close owns the reader boundary. Callers
+  include read term-batch cleanup, Hydrator batch closure, and PrefetchQueue
+  shutdown. Both point and batch lookup use the same session lock. The callee
+  FileIndexLookupSession::close awaits SlateDB 0.15 DbReader::close, whose
+  shutdown_task cancels and joins the managed-reader task; its cleanup persists
+  checkpoint removal before returning. Tokio's write guard releases access on
+  drop. These locked dependency sources were inspected directly.
+- Current origin/main and the previous PR head take the reader through a
+  temporary write guard, then release the guard before awaiting reader close.
+  A second close can therefore return Ok while the first still persists cleanup.
+  Concurrent production invocation is not established; this is a shared-owner
+  API correctness regression, not a claim of an observed CLI shutdown failure.
+- Regression uses a real seeded SlateDB reader and the existing object-store
+  fixture, extended to pause the next write after opening. With checkpoint
+  removal paused, a second close must remain pending. The fixture observes one
+  checkpoint while paused and none after release. The old implementation fails
+  specifically because the second close returns early; the new one passes.
+- Best fix assessment: retain the existing exclusive guard through close. This
+  gives both close callers the same completion boundary without a second task,
+  lock, shutdown API, or error adapter. Point/batch admission still rejects work
+  once closure starts; the existing paused-read regression passes unchanged.
+  One-shot FileIndexLookupSession owners have no cloneable close boundary and
+  are unaffected. Their cancellation cleanup remains separate tracked work.
+- Close must still be awaited; this does not repair dropped close futures or
+  runtime shutdown. Error ownership is unchanged: the caller performing cleanup
+  receives its error; later idempotent calls do not replay it.
+- Proof: 24 metadata lookup tests, strict metadata all-target Clippy and rustdoc,
+  and the downstream read regression covering abandonment during work/cleanup
+  across all three term APIs pass. Formatting and diff checks pass. Production
+  growth is one named guard plus its invariant comment, with no dependency,
+  feature, serialized-format, or public-signature change. Fresh broad CI remains
+  needed after publication; current PR CI is allowed to finish first.

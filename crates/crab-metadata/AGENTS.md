@@ -37,7 +37,8 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
   Source: `crates/crab-metadata/src/remote_index.rs`.
 - Shared lookup initialization must not serialize its first lookup. Both point
   and batch reads keep shared access until completion; close takes exclusive
-  access and rejects new work. Use the metadata-owned SharedFileIndexLookup.
+  access and rejects new work. Keep exclusive access through reader cleanup so
+  concurrent close calls cannot finish early. Use SharedFileIndexLookup.
   Source: `crates/crab-metadata/src/file_index_lookup.rs`.
 - Keep explicit close ownership when adding index readers/writers; inspect error and cancellation paths as well as successful reads.
   Source: `crates/crab-metadata/src/git_object_locator`.

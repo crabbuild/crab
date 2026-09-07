@@ -703,11 +703,15 @@ impl SharedFileIndexLookup {
 
     /// Reject new nonempty lookups and close the reader after active reads finish.
     ///
-    /// Other handle clones need not be dropped. Await this future through completion;
-    /// dropping it does not perform asynchronous cleanup.
+    /// Other handle clones need not be dropped. Concurrent close calls wait for
+    /// reader cleanup. Await this future through completion; dropping it does not
+    /// perform asynchronous cleanup.
     pub async fn close(self) -> Result<()> {
         self.inner.closed.store(true, Ordering::Release);
-        let Some(session) = self.inner.session.write().await.take() else {
+        // Retain exclusive ownership through cleanup: another close must not
+        // mistake an empty slot for a reader whose checkpoint is already gone.
+        let mut guard = self.inner.session.write().await;
+        let Some(session) = guard.take() else {
             return Ok(());
         };
         session.close().await

@@ -12,28 +12,33 @@ use tokio::sync::{Notify, Semaphore};
 use tokio::time::timeout;
 
 #[derive(Debug)]
-struct PausedShardStore {
+struct PausedLookupStore {
     inner: Arc<dyn ObjectStore>,
     shard: ObjectPath,
     paused: AtomicBool,
+    pause_write: AtomicBool,
     entered: Notify,
     release: Semaphore,
 }
 
-impl std::fmt::Display for PausedShardStore {
+impl std::fmt::Display for PausedLookupStore {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("paused shard fixture")
     }
 }
 
 #[async_trait::async_trait]
-impl ObjectStore for PausedShardStore {
+impl ObjectStore for PausedLookupStore {
     async fn put_opts(
         &self,
         path: &ObjectPath,
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        if self.pause_write.swap(false, Ordering::AcqRel) {
+            self.entered.notify_one();
+            self.release.acquire().await.unwrap().forget();
+        }
         self.inner.put_opts(path, payload, options).await
     }
 
@@ -101,10 +106,11 @@ async fn first_lookup_allows_index_hits_while_close_waits_for_active_reads() {
         let layout = crab_storage::StoreLayout::new(storage.clone(), prefix.to_owned());
         let shard = layout.shard_path(&shard_hash);
         storage.put(&shard, Bytes::from(body)).await.unwrap();
-        let store = Arc::new(PausedShardStore {
+        let store = Arc::new(PausedLookupStore {
             inner,
             shard,
             paused: AtomicBool::new(false),
+            pause_write: AtomicBool::new(false),
             entered: Notify::new(),
             release: Semaphore::new(0),
         });
@@ -157,4 +163,56 @@ async fn first_lookup_allows_index_hits_while_close_waits_for_active_reads() {
             "first_is_batch={first_is_batch}"
         );
     }
+}
+
+#[tokio::test]
+async fn concurrent_close_waits_for_reader_checkpoint_cleanup() {
+    let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let file_hash = hash_from_seed(42);
+    let shard_hash = hash_from_seed(43);
+    let prefix = "shared/close";
+    seed_file_index(Arc::clone(&inner), prefix, &[(file_hash, shard_hash)]).await;
+    let store = Arc::new(PausedLookupStore {
+        inner: Arc::clone(&inner),
+        shard: ObjectPath::from("unused-shard"),
+        paused: AtomicBool::new(true),
+        pause_write: AtomicBool::new(false),
+        entered: Notify::new(),
+        release: Semaphore::new(0),
+    });
+    let admin = slatedb::admin::Admin::builder(file_index_path(prefix), inner).build();
+    let lookup = SharedFileIndexLookup::new(store.clone(), prefix);
+    assert_eq!(lookup.lookup(&file_hash).await.unwrap(), Some(shard_hash));
+    assert_eq!(admin.list_checkpoints(None).await.unwrap().len(), 1);
+
+    // Closing a managed reader persists checkpoint removal. Hold that write
+    // so a second owner cannot mistake an empty session slot for completion.
+    store.pause_write.store(true, Ordering::Release);
+    let first = tokio::spawn(lookup.clone().close());
+    timeout(Duration::from_secs(5), store.entered.notified())
+        .await
+        .expect("reader cleanup reached checkpoint persistence");
+    let second = lookup.close();
+    tokio::pin!(second);
+    let second_waited = futures_util::poll!(second.as_mut()).is_pending();
+    let pending_checkpoints = admin.list_checkpoints(None).await.unwrap().len();
+    store.release.add_permits(1);
+    timeout(Duration::from_secs(5), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    if second_waited {
+        timeout(Duration::from_secs(5), second)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    assert_eq!(pending_checkpoints, 1);
+    assert!(admin.list_checkpoints(None).await.unwrap().is_empty());
+    assert!(
+        second_waited,
+        "concurrent close returned before reader cleanup"
+    );
 }
