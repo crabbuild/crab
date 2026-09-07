@@ -505,3 +505,26 @@ Validation: 15 config tests and 41 cache-store tests pass; strict all-target
 cache-server Clippy passes. Removed unnecessary allocations/borrows and stale
 lint expectations in tests, retaining assertions. Moved the request logging
 helper before the test module without changing its structured fields.
+
+## Workflow URL digest decoding
+
+Pinned URL input reached two-byte string slicing after a byte-length check,
+so a 64-byte multibyte value panicked through DepUrlHashExt. The new public
+regression reproduced that panic. Pinned and cached values now share the
+private parse_b3_digest decoder, with ASCII validation before slicing.
+Prefix, length, and invalid-character configuration diagnostics remain at
+the pinned-input boundary; no error includes the supplied digest.
+
+All three cached consumers (HTTP, object-store object, object-store prefix)
+receive hashes from ExternalHashIndex::reusable, which already validates
+ASCII hex. The helper regression failed in isolation, but that does not prove
+a reachable cached-input panic. Index rejection and fresh-content reads stay
+unchanged. No persisted shape, dependency, or public signature changed.
+
+HTTP contents, metadata split-commit-graph, and macOS keychain decoding remain
+identified follow-up surfaces; their full caller proof is still pending.
+
+All 15 stage-runtime tests pass, including real loopback HTTP reads and index
+reuse, object/prefix hashing, and both baseline-failing decoder regressions.
+Production parsing shrank by five lines; added tests cover the input contract.
+Strict all-target workflow Clippy and formatting pass.

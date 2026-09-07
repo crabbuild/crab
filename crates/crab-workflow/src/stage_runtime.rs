@@ -262,15 +262,10 @@ fn parse_pinned_url_digest(url: &str, digest: &str) -> Result<[u8; 32]> {
         });
     }
 
-    let mut out = [0u8; 32];
-    for (index, byte) in out.iter_mut().enumerate() {
-        let pair = &hex[index * 2..index * 2 + 2];
-        *byte = u8::from_str_radix(pair, 16).map_err(|_| CrabError::Configuration {
-            key: format!("url dep '{subject}' digest"),
-            origin: "b3 digest contains non-hex characters".to_owned(),
-        })?;
-    }
-    Ok(out)
+    parse_b3_digest(digest).ok_or_else(|| CrabError::Configuration {
+        key: format!("url dep '{subject}' digest"),
+        origin: "b3 digest contains non-hex characters".to_owned(),
+    })
 }
 
 fn hash_live_url_dep(url: &str, index_path: Option<&Path>) -> Result<[u8; 32]> {
@@ -330,7 +325,7 @@ fn hash_http_url_dep(url: &str, index_path: Option<&Path>) -> Result<[u8; 32]> {
             }
         };
         if let Some(value) = index.reusable("http", &locator, &scope, size, Some(&validator))
-            && let Some(hash) = parse_cached_hash(value)
+            && let Some(hash) = parse_b3_digest(value)
         {
             return Ok(hash);
         }
@@ -407,9 +402,9 @@ fn strong_validator(response: &reqwest::blocking::Response) -> Option<String> {
     (!value.is_empty() && !value.trim_start().starts_with("W/")).then(|| value.to_owned())
 }
 
-fn parse_cached_hash(value: &str) -> Option<[u8; 32]> {
+fn parse_b3_digest(value: &str) -> Option<[u8; 32]> {
     let value = value.strip_prefix("b3:")?;
-    if value.len() != 64 {
+    if value.len() != 64 || !value.is_ascii() {
         return None;
     }
     let mut hash = [0_u8; 32];
@@ -553,7 +548,7 @@ async fn hash_object_store_location(
                 meta.size,
                 Some(&validator),
             )
-            && let Some(hash) = parse_cached_hash(value)
+            && let Some(hash) = parse_b3_digest(value)
         {
             return Ok(hash);
         }
@@ -615,7 +610,7 @@ async fn hash_object_store_location(
                         meta.size,
                         Some(validator),
                     )
-                    .and_then(parse_cached_hash)
+                    .and_then(parse_b3_digest)
             })
         });
         let file_hash = if let Some(hash) = cached_hash {
@@ -825,6 +820,28 @@ pub mod test_support {
 mod tests {
     use super::*;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn url_hash_rejects_multibyte_pinned_digest() {
+        for value in [
+            format!("€{}", "0".repeat(61)),
+            format!("0é{}", "0".repeat(61)),
+        ] {
+            let dep = Dep::Url {
+                url: "https://example.com/data.bin".to_owned(),
+                digest: Some(format!("b3:{value}")),
+            };
+            assert!(matches!(
+                dep.url_hash(),
+                Err(CrabError::Configuration { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn cached_hash_rejects_multibyte_digest() {
+        assert!(parse_b3_digest(&format!("b3:€{}", "0".repeat(61))).is_none());
+    }
 
     #[test]
     fn url_hash_accepts_pinned_b3_digest() {

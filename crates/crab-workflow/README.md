@@ -43,6 +43,23 @@ Feature gates keep optional integrations narrow: `watch` adds filesystem
 watching, `gix-facade` adds the Git facade, `testing` exposes test helpers, and
 `crash-injection` enables failure testing.
 
+## URL dependency digests
+
+Pinned URL dependencies use `b3:` followed by 64 ASCII hexadecimal characters:
+
+```yaml
+deps:
+  - url:
+      url: https://example.com/data.bin
+      digest: b3:abababababababababababababababababababababababababababababababab
+```
+
+- Invalid pinned digests return a configuration error before network access.
+- Unpinned dependencies read and hash content unless a validated external hash
+  index entry has a matching strong validator, size, and credential scope.
+- Digest parsing accepts upper- and lowercase hex; non-ASCII text in the
+  hex field is rejected without byte-boundary panics.
+
 ## Usage
 
 Parse a workflow and inspect its execution order:
