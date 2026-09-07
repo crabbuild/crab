@@ -30022,15 +30022,14 @@ mod tests {
             .lookup_verified_global_chunk_refs(&chunk_hashes)
             .await
             .expect("lookup global refs");
-        assert_eq!(lookup.stale_hits, missing_chunk_hashes.len());
-        assert_eq!(lookup.refs.len(), 2);
-        for chunk_hash in &chunk_hashes[missing_chunk_hashes.len()..] {
-            let xorb_ref = lookup
-                .refs
-                .get(chunk_hash)
-                .expect("present xorb hit should survive stale earlier batch");
-            assert_eq!(xorb_ref.xorb_hash, present_xorb);
-        }
+        assert!(lookup.refs.is_empty());
+        assert!(lookup.lookup_unavailable);
+        assert_eq!(
+            lookup.skipped_after_unavailable,
+            chunk_hashes.len(),
+            "a remote proof set larger than the budget must be skipped atomically"
+        );
+        assert_eq!(lookup.stale_hits, 0);
 
         pipeline.close_metadb().await;
     }

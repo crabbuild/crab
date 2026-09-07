@@ -1260,8 +1260,8 @@ mod tests {
         }
         assert_eq!(
             metrics.snapshot().metadb_batch_get_count,
-            2,
-            "one head lookup and one proof-record lookup should cover all remote misses"
+            4,
+            "two pages require one head lookup and one proof-record lookup each"
         );
 
         ctx.db.close().await.expect("close");
