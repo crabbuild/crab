@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bstr::ByteSlice;
 use crab_types::pointer::Pointer;
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, params_from_iter};
 
 use crate::core::error::{CrabError, Result};
 
@@ -66,16 +66,6 @@ impl AddValidationCache {
         }
 
         Ok(Self { connection })
-    }
-
-    pub(crate) fn contains(&self, path: &[u8], token: &[u8; 32]) -> Result<bool> {
-        self.connection
-            .prepare_cached("SELECT 1 FROM add_validations WHERE path = ?1 AND token = ?2")
-            .map_err(|error| database_error("prepare add validation cache query", error))?
-            .query_row(params![path, token.as_slice()], |_| Ok(()))
-            .optional()
-            .map(|row| row.is_some())
-            .map_err(|error| database_error("query add validation cache", error))
     }
 
     pub(crate) fn contains_batch(
@@ -315,8 +305,12 @@ mod tests {
 
         cache.upsert(&[(literal_path.clone(), token)]).unwrap();
 
-        assert!(cache.contains(&literal_path, &token).unwrap());
-        assert!(!cache.contains(b"model.bin", &token).unwrap());
+        assert_eq!(
+            cache
+                .contains_batch(&[(&literal_path, &token), (b"model.bin", &token)])
+                .unwrap(),
+            HashSet::from([literal_path])
+        );
     }
 
     #[test]
