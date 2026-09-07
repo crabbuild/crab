@@ -559,7 +559,7 @@ mod tests {
     fn persisted_list_reads_registry_entries() {
         let _env_lock = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(tmp.path());
         let mountpoint = tmp.path().join("view");
@@ -605,7 +605,7 @@ mod tests {
     fn list_keeps_registry_entries_when_live_probe_fails() {
         let _env_lock = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(tmp.path());
         let mountpoint = tmp.path().join("view");
@@ -756,7 +756,7 @@ mod tests {
     fn nfs_control_status_and_shutdown_route_through_registry_endpoint() {
         let _env_lock = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(tmp.path());
         let raw_mountpoint = tmp.path().join("view");
@@ -819,7 +819,7 @@ mod tests {
     fn nfs_control_list_refreshes_live_registry_entries() {
         let _env_lock = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(tmp.path());
         let raw_mountpoint = tmp.path().join("view");
@@ -863,7 +863,7 @@ mod tests {
     fn nfs_control_refresh_and_switch_route_to_helper_endpoint() {
         let _env_lock = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(tmp.path());
         let raw_mountpoint = tmp.path().join("view");
@@ -907,7 +907,7 @@ mod tests {
     fn nfs_context_uses_registry_backend_and_endpoint() {
         let _env_lock = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(tmp.path());
         let mountpoint = tmp.path().join("view");
@@ -941,7 +941,7 @@ mod tests {
     fn nfs_context_ignores_non_nfs_registry_entries() {
         let _env_lock = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(tmp.path());
         let mountpoint = tmp.path().join("view");

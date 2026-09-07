@@ -279,7 +279,7 @@ mod tests {
     fn git<const N: usize>(repo: &Path, args: [&str; N]) {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -295,7 +295,7 @@ mod tests {
     fn git_in<const N: usize>(dir: &Path, args: [&str; N]) {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -311,7 +311,7 @@ mod tests {
     fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> String {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -328,7 +328,7 @@ mod tests {
     fn git_dir_stdout<const N: usize>(git_dir: &Path, args: [&str; N]) -> String {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new("git")
             .arg("--git-dir")
             .arg(git_dir)

@@ -1,7 +1,7 @@
 //! Bounded set of chunk hashes verified during this process lifetime.
 //!
 //! Prevents redundant blake3 re-verification for chunks that have already
-//! been verified since the daemon started. Uses a `DashSet` for lock-free
+//! been verified since the daemon started. Uses a `DashSet` for sharded
 //! concurrent reads and a `Mutex<VecDeque>` for FIFO eviction ordering.
 
 use std::collections::VecDeque;
@@ -61,7 +61,7 @@ impl VerifiedSet {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Recheck after acquiring the lock to close the TOCTOU window
-        // between the lock-free check above and the mutex acquisition.
+        // between the initial check above and the mutex acquisition.
         if self.set.contains(&hash) {
             return;
         }
@@ -79,7 +79,7 @@ impl VerifiedSet {
 
     /// Number of entries currently in the set.
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.set.len()
     }
 }

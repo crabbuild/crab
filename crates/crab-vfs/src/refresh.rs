@@ -1328,7 +1328,7 @@ mod tests {
     {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -1353,7 +1353,7 @@ mod tests {
     {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = Command::new("git")
             .args(args)
             .current_dir(cwd)
@@ -1377,7 +1377,7 @@ mod tests {
     {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = Command::new("git")
             .arg("-C")
             .arg(repo)

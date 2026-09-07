@@ -702,3 +702,14 @@ Strict all-target nfs Clippy now reports 277 diagnostics, down from 417; all
 140 unreadable_literal diagnostics disappeared and all other lint counts remain
 unchanged. The command still fails, so this is measured backlog reduction rather
 than a clean VFS gate. Formatting and diff checks pass.
+
+## VFS helper and locking clarity
+
+Replaced 17 identical poison-error closures with PoisonError::into_inner;
+recovery semantics are unchanged. VerifiedSet::len exists only under cfg(test)
+and only its child tests call it, so made it private instead of expanding the
+API with an unused is_empty helper. Corrected the lock-free read claim: locked
+DashMap 6 source obtains a shard read guard in _get. Five verified-set tests
+pass. Strict all-target nfs Clippy decreases from 277 to 259 diagnostics: exactly
+17 redundant-closure and one public-length-helper warnings removed. Remaining
+lint counts are unchanged; the strict gate still fails. No suppressions added.
