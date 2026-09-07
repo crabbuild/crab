@@ -288,7 +288,8 @@ stalled backend retry; these remain the intended contracts.
 
 The lost-lease test passes before and after simplification. All 108 coordination
 library tests with `object-store-lock` and strict all-target Clippy pass locally.
-The CLI stalled-renewal consumer test is still building; it is not yet claimed
-as passed. README now gives an outcome table and distinguishes coordinator
+The CLI `completed_owner_does_not_wait_for_stalled_renewal` consumer test also
+passes. Its test binary emitted an Apple linker warning about the size of the
+DWARF unwind section; compilation and execution succeeded. README now gives an outcome table and distinguishes coordinator
 commit from durable regional projection. CLI push and protected receive both
 persist that projection before acknowledging regional materialization.
