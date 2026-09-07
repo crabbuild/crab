@@ -305,6 +305,7 @@ async fn missing_visibility_never_reports_ready_or_rolls_back_a_committed_ref() 
         None,
         vec![],
         vec![],
+        TTL,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -421,6 +422,7 @@ async fn a_new_journal_during_catalog_admission_requires_another_readiness_pass(
         None,
         vec![],
         vec![],
+        TTL,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await

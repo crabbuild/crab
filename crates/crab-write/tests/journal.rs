@@ -40,6 +40,7 @@ async fn pending(store: &Store, layout: &StoreLayout<Store>) -> PushLock {
         None,
         Vec::new(),
         Vec::new(),
+        TTL,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -94,6 +95,7 @@ async fn independently_locked_creates_cannot_publish_conflicting_ref_names() {
             Some(parent.to_owned()),
             vec![],
             vec![],
+            TTL,
             &cancel
         ),
         commit_edits(
@@ -104,6 +106,7 @@ async fn independently_locked_creates_cannot_publish_conflicting_ref_names() {
             Some(child.to_owned()),
             vec![],
             vec![],
+            TTL,
             &cancel
         ),
     );
@@ -146,6 +149,7 @@ async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits
             None,
             vec![],
             vec![],
+            TTL,
             &cancel,
         ),
     )
@@ -163,6 +167,7 @@ async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits
         None,
         vec![],
         vec![],
+        TTL,
         &cancel,
     );
     tokio::pin!(create);
@@ -195,6 +200,59 @@ async fn namespace_gate_allows_existing_ref_updates_and_cancellable_create_waits
 }
 
 #[tokio::test]
+async fn namespace_recovery_uses_the_configured_lease_ttl() {
+    let (store, layout) = storage("namespace-recovery-ttl").await;
+    manifest_store::create_manifest(&store, &layout, &Manifest::default_for_repo(REF))
+        .await
+        .unwrap();
+    let ref_name = "refs/heads/new";
+    let ref_lease = PushLock::acquire_ref(
+        store.inner(),
+        layout.repo_prefix(),
+        ref_name,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let namespace_lease = PushLock::acquire_internal(
+        store.inner(),
+        layout.repo_prefix(),
+        crab_coordination::GIT_REF_NAMESPACE_RESOURCE,
+        Duration::from_secs(300),
+    )
+    .await
+    .unwrap();
+    std::mem::forget(namespace_lease);
+
+    let snapshot = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        commit_edits(
+            &store,
+            &layout,
+            &snapshot,
+            vec![edit(ref_name, None, Some('a'))],
+            Some(ref_name.to_owned()),
+            vec![],
+            vec![],
+            Duration::from_secs(1),
+            &CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("namespace admission must honor the configured wait bound");
+    assert!(matches!(
+        result,
+        Err(WriteError::Coordination(
+            CoordinationError::PushLockHeld { .. }
+        ))
+    ));
+    ref_lease.release().await.unwrap();
+}
+
+#[tokio::test]
 async fn atomic_namespace_replacement_removes_the_parent_before_creating_children() {
     let (store, layout) = storage("namespace-replacement").await;
     let main = pending(&store, &layout).await;
@@ -213,6 +271,7 @@ async fn atomic_namespace_replacement_removes_the_parent_before_creating_childre
         Some(child.clone()),
         vec![],
         vec![],
+        TTL,
         &CancellationToken::new(),
     )
     .await
@@ -260,6 +319,7 @@ async fn late_namespace_lease_loss_preserves_the_committed_result_and_new_holder
                 None,
                 vec![],
                 vec![],
+                TTL,
                 &cancel,
             )
             .await?;
@@ -329,6 +389,7 @@ async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction
         None,
         vec![],
         vec![],
+        TTL,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -349,6 +410,7 @@ async fn batches_preserve_causal_parents_and_exact_ref_changes_before_compaction
         Some(dev.to_owned()),
         vec![],
         vec![],
+        TTL,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await
@@ -421,6 +483,7 @@ async fn invalid_or_stale_batch_leaves_no_journal_artifacts() {
             None,
             vec![],
             vec![],
+            TTL,
             &tokio_util::sync::CancellationToken::new(),
         )
         .await;

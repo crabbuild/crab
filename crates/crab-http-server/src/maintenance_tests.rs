@@ -85,6 +85,7 @@ pub(super) async fn commit_without_proof(repo: &Repository) -> PushLock {
         None,
         vec![],
         vec![],
+        TTL,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await

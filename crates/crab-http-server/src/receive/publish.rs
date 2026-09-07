@@ -224,6 +224,7 @@ pub(crate) async fn publish_default_branch(
             Some(branch.to_owned()),
             vec![],
             vec![],
+            TTL,
             cancel,
         )
         .await?;
@@ -533,6 +534,7 @@ async fn publish(
         head,
         packs,
         vec![],
+        TTL,
         cancel,
     )
     .await?;

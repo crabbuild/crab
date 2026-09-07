@@ -27,6 +27,7 @@ const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = 5;
 /// and publishes through the journal's atomic active marker. It does not publish
 /// a readable catalog or release the caller's leases. Ref-name changes acquire
 /// a separate namespace lease and recheck a fresh snapshot before publication.
+/// `lock_ttl` bounds that namespace lease with the caller's mutation lease.
 /// Await completion without dropping the
 /// future; a storage error at the marker may require commit-outcome recovery.
 pub async fn commit_edits(
@@ -37,6 +38,7 @@ pub async fn commit_edits(
     head: Option<String>,
     packs: Vec<PackManifestEntry>,
     shards: Vec<String>,
+    lock_ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<RefJournalCommitResult> {
     commit_edits_inner(
@@ -49,6 +51,7 @@ pub async fn commit_edits(
         shards,
         CommitContext {
             plan_id: None,
+            lock_ttl,
             cancel,
         },
     )
@@ -58,13 +61,18 @@ pub async fn commit_edits(
 /// Mirror-plan attribution and cancellation for one journal commit.
 pub struct MirrorPlanContext<'a> {
     plan_id: &'a str,
+    lock_ttl: Duration,
     cancel: &'a CancellationToken,
 }
 
 impl<'a> MirrorPlanContext<'a> {
     #[must_use]
-    pub fn new(plan_id: &'a str, cancel: &'a CancellationToken) -> Self {
-        Self { plan_id, cancel }
+    pub fn new(plan_id: &'a str, lock_ttl: Duration, cancel: &'a CancellationToken) -> Self {
+        Self {
+            plan_id,
+            lock_ttl,
+            cancel,
+        }
     }
 }
 
@@ -89,6 +97,7 @@ pub async fn commit_edits_for_plan(
         shards,
         CommitContext {
             plan_id: Some(context.plan_id),
+            lock_ttl: context.lock_ttl,
             cancel: context.cancel,
         },
     )
@@ -97,6 +106,7 @@ pub async fn commit_edits_for_plan(
 
 struct CommitContext<'a> {
     plan_id: Option<&'a str>,
+    lock_ttl: Duration,
     cancel: &'a CancellationToken,
 }
 
@@ -110,7 +120,11 @@ async fn commit_edits_inner(
     shards: Vec<String>,
     context: CommitContext<'_>,
 ) -> Result<RefJournalCommitResult> {
-    let CommitContext { plan_id, cancel } = context;
+    let CommitContext {
+        plan_id,
+        lock_ttl,
+        cancel,
+    } = context;
     check_cancelled(cancel)?;
     let parents = edits
         .iter()
@@ -128,20 +142,13 @@ async fn commit_edits_inner(
         return commit_transaction(store, router, transaction, plan_id, cancel).await;
     }
     check_namespace(snapshot, &transaction)?;
-    crate::with_ref_namespace(
-        store,
-        router,
-        crab_coordination::DEFAULT_PUSH_LOCK_TTL,
-        cancel,
-        |scoped| async move {
-            check_cancelled(&scoped)?;
-            let fresh =
-                crab_metadata::manifest_store::read_repository_snapshot(store, router).await?;
-            check_old_values(router, &fresh, &transaction)?;
-            check_namespace(&fresh, &transaction)?;
-            commit_transaction(store, router, transaction, plan_id, &scoped).await
-        },
-    )
+    crate::with_ref_namespace(store, router, lock_ttl, cancel, |scoped| async move {
+        check_cancelled(&scoped)?;
+        let fresh = crab_metadata::manifest_store::read_repository_snapshot(store, router).await?;
+        check_old_values(router, &fresh, &transaction)?;
+        check_namespace(&fresh, &transaction)?;
+        commit_transaction(store, router, transaction, plan_id, &scoped).await
+    })
     .await
 }
 

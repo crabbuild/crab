@@ -9,6 +9,8 @@ use super::*;
 use crate::CacheServiceAuth;
 use crate::cache_client::{CacheClient, build_cache_service_http_client};
 
+const TEST_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
+
 struct Endpoint {
     address: SocketAddr,
     requests: Arc<AtomicUsize>,
@@ -202,7 +204,7 @@ async fn header_and_body_timeouts_preserve_sources_and_suppress_followups() {
         let endpoint = Endpoint::start(200, !stalled_body, stalled_body).await;
         let mut client = endpoint.client();
         client.client =
-            build_cache_service_http_client(Duration::from_millis(100), None, None, None).unwrap();
+            build_cache_service_http_client(TEST_REQUEST_TIMEOUT, None, None, None).unwrap();
         let error = if stalled_body {
             let response = client.get_stream("object").await.unwrap().unwrap();
             let results: Vec<_> = response.into_stream().collect().await;
@@ -223,7 +225,7 @@ async fn cancelled_header_probe_releases_admission_for_later_recovery() {
     let endpoint = Endpoint::start(200, true, false).await;
     let mut client = endpoint.client();
     client.client =
-        build_cache_service_http_client(Duration::from_millis(100), None, None, None).unwrap();
+        build_cache_service_http_client(TEST_REQUEST_TIMEOUT, None, None, None).unwrap();
     assert!(client.get("first").await.is_err());
     client.client = build_cache_service_http_client(REQUEST_TIMEOUT, None, None, None).unwrap();
     advance_recovery(&client);
@@ -242,7 +244,7 @@ async fn cancelled_header_probe_releases_admission_for_later_recovery() {
     assert_eq!(endpoint.count(), 2);
     advance_recovery(&client);
     client.client =
-        build_cache_service_http_client(Duration::from_millis(100), None, None, None).unwrap();
+        build_cache_service_http_client(TEST_REQUEST_TIMEOUT, None, None, None).unwrap();
     assert!(client.get("next-probe").await.is_err());
     assert_eq!(endpoint.count(), 3);
     endpoint.stop().await;

@@ -8570,7 +8570,11 @@ impl PushPipeline {
                     head,
                     packs,
                     shards,
-                    crab_write::journal::MirrorPlanContext::new(plan_id, &self.cancel),
+                    crab_write::journal::MirrorPlanContext::new(
+                        plan_id,
+                        self.config.lock_ttl,
+                        &self.cancel,
+                    ),
                 )
                 .await?
             }
@@ -8583,6 +8587,7 @@ impl PushPipeline {
                     head,
                     packs,
                     shards,
+                    self.config.lock_ttl,
                     &self.cancel,
                 )
                 .await?
@@ -24784,6 +24789,7 @@ mod tests {
             Some("refs/heads/main/child".to_owned()),
             vec![],
             vec![],
+            Duration::from_secs(60),
             &cancel,
         )
         .await
