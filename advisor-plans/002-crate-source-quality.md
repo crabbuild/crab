@@ -2965,3 +2965,49 @@ pass. A temporary local file accepts F_NOCACHE and preserves bytes over repeated
 reads; that checks the host API only. Native macOS CI remains required. The
 initial verifier invocation used --self-test and was rejected by argparse; the
 actual documented self-test subcommand was then run and passed.
+
+
+### Cache-service JSON output completion
+
+The cache-server binary had seven report-specific JSON emitters. They logged
+serde_json write errors but returned unit, so all successful preflight,
+evidence, and onboarding commands could still exit0 after output failure.
+The same code is present on origin/main. Ten call sites were inspected: eight
+normal report paths now return exit1 on output failure; the two configuration
+error paths already return None and exit1 independently of report emission.
+
+An initial read-only-stdout fixture was invalid for this purpose: Rust standard
+stdout intentionally treats EBADF as a successful write/flush (local toolchain
+std/io/stdio.rs, StdoutRaw through handle_ebadf). It failed both before and after
+the proposed fix and has been replaced. The actual regression closes a Unix
+socket peer before starting the CLI. Old evidence verify logs Broken pipe but
+exits0; fixed verify and summarize exit1 without panic. Successful invocations
+with identical input are checked first. The old-source recheck in session96010
+failed as expected and restored the fixed source afterward.
+
+One private write_json writer now checks serialization, the trailing newline,
+and flush. Stdout is locked across that sequence, and emit_json reports failure
+to all normal command owners. Evidence-file output uses the same writer and
+keeps its original file handle through the newline, removing the reopen-for-
+append path. No wire shape, public API, manifest, dependency, or lockfile changes.
+
+Locked serde_json source shows to_writer_pretty serializes without flushing;
+its From<serde_json::Error> for io::Error returns the original I/O error for
+writer failures. The helper uses that conversion, and injected body, newline,
+and flush failures retain BrokenPipe. Serialization-specific errors remain
+wrapped through that dependency conversion rather than stringified.
+
+Four binary tests and40 cache-server CLI tests pass, including normal preflight,
+evidence release/gate/doctor, and onboarding contracts. Strict all-target Clippy
+and the cache-server binary build are running in session25957. The subprocess
+failure fixture is Unix-specific; the writer failure matrix is platform-neutral.
+This is JSON output completion, not whole-process output or durable publication
+qualification. Text emitters still use print macros and need their own error
+propagation cleanup; runtime creation still has three expect sites. No claim is
+made that failed artifact writes preserve the previous destination atomically.
+
+
+JSON validation completed: strict all-target Clippy and cache-server binary
+build both pass. Formatting and diff checks pass. Production source shrinks by
+39 lines after excluding the added failure-matrix test; duplicate emitters and
+the file reopen path were removed. This batch is ready for grouped publication.

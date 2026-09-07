@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -304,7 +305,7 @@ fn load_config(path: Option<&PathBuf>, json: bool) -> Option<CacheServerConfig> 
     let Some(path) = path else {
         let err = CacheServiceError::ConfigError("--config is required".to_string());
         if json {
-            emit_preflight_json(&CacheServerPreflightReport::from_config_error(&err));
+            emit_json(&CacheServerPreflightReport::from_config_error(&err));
         } else {
             eprintln!("error: {err}");
         }
@@ -314,7 +315,7 @@ fn load_config(path: Option<&PathBuf>, json: bool) -> Option<CacheServerConfig> 
         Ok(config) => Some(config),
         Err(err) => {
             if json {
-                emit_preflight_json(&CacheServerPreflightReport::from_config_error(&err));
+                emit_json(&CacheServerPreflightReport::from_config_error(&err));
             } else {
                 eprintln!("error: {err}");
             }
@@ -373,7 +374,9 @@ fn check(
     );
 
     if json {
-        emit_preflight_json(&report);
+        if !emit_json(&report) {
+            return ExitCode::from(1);
+        }
     } else if let Err(e) = report.write_text(std::io::stdout()) {
         eprintln!("error: failed to write preflight output: {e}");
         return ExitCode::from(1);
@@ -403,7 +406,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
         EvidenceCommand::Verify { report, json } => {
             let verification = verify_evidence_report(&report);
             if json {
-                emit_evidence_json(&verification);
+                if !emit_json(&verification) {
+                    return ExitCode::from(1);
+                }
             } else {
                 emit_evidence_text(&verification);
             }
@@ -438,7 +443,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
                 }
             }
             if json {
-                emit_release_evidence_json(&verification);
+                if !emit_json(&verification) {
+                    return ExitCode::from(1);
+                }
             } else {
                 emit_release_evidence_text(&verification);
             }
@@ -490,7 +497,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
             };
 
             if json {
-                emit_release_evidence_json(&verification);
+                if !emit_json(&verification) {
+                    return ExitCode::from(1);
+                }
             } else {
                 emit_release_evidence_text(&verification);
                 if let Some(doctor) = &doctor {
@@ -506,7 +515,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
         EvidenceCommand::Summarize { report, json } => {
             let summary = summarize_evidence_report(&report);
             if json {
-                emit_evidence_summary_json(&summary);
+                if !emit_json(&summary) {
+                    return ExitCode::from(1);
+                }
             } else {
                 emit_evidence_summary_text(&summary);
             }
@@ -519,7 +530,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
         EvidenceCommand::Doctor { verification, json } => {
             let report = doctor_evidence_verification(&verification);
             if json {
-                emit_evidence_doctor_json(&report);
+                if !emit_json(&report) {
+                    return ExitCode::from(1);
+                }
             } else {
                 emit_evidence_doctor_text(&report);
             }
@@ -579,7 +592,9 @@ fn onboarding(command: OnboardingCommand) -> ExitCode {
         OnboardingCommand::Check { bundle_dir, json } => {
             let report = check_onboarding_bundle(&bundle_dir);
             if json {
-                emit_onboarding_check_json(&report);
+                if !emit_json(&report) {
+                    return ExitCode::from(1);
+                }
             } else {
                 emit_onboarding_check_text(&report);
             }
@@ -615,7 +630,9 @@ fn onboarding(command: OnboardingCommand) -> ExitCode {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let report = rt.block_on(probe_onboarding_bundle(&bundle_dir, &options));
             if json {
-                emit_onboarding_probe_json(&report);
+                if !emit_json(&report) {
+                    return ExitCode::from(1);
+                }
             } else {
                 emit_onboarding_probe_text(&report);
             }
@@ -802,28 +819,18 @@ fn evidence_doctor_text(report: &EvidenceDoctorReport) -> String {
     output
 }
 
-fn emit_evidence_json(report: &EvidenceVerificationReport) {
-    if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), report) {
-        eprintln!("error: failed to write evidence verification JSON: {e}");
-    } else {
-        println!();
-    }
+fn write_json(mut output: impl Write, value: &impl serde::Serialize) -> io::Result<()> {
+    serde_json::to_writer_pretty(&mut output, value)?;
+    output.write_all(b"\n")?;
+    output.flush()
 }
 
-fn emit_release_evidence_json(report: &EvidenceReleaseVerification) {
-    if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), report) {
-        eprintln!("error: failed to write release evidence verification JSON: {e}");
-    } else {
-        println!();
+fn emit_json(value: &impl serde::Serialize) -> bool {
+    if let Err(error) = write_json(io::stdout().lock(), value) {
+        eprintln!("error: failed to write JSON output: {error}");
+        return false;
     }
-}
-
-fn emit_evidence_doctor_json(report: &EvidenceDoctorReport) {
-    if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), report) {
-        eprintln!("error: failed to write evidence doctor JSON: {e}");
-    } else {
-        println!();
-    }
+    true
 }
 
 fn write_json_output<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> bool {
@@ -847,23 +854,9 @@ fn write_json_output<T: serde::Serialize>(path: &Path, value: &T, label: &str) -
             return false;
         }
     };
-    if let Err(error) = serde_json::to_writer_pretty(file, value) {
+    if let Err(error) = write_json(file, value) {
         eprintln!(
             "error: failed to write {label} output {}: {error}",
-            path.display()
-        );
-        return false;
-    }
-    if let Err(error) = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .and_then(|mut file| {
-            use std::io::Write;
-            file.write_all(b"\n")
-        })
-    {
-        eprintln!(
-            "error: failed to finalize {label} output {}: {error}",
             path.display()
         );
         return false;
@@ -892,22 +885,6 @@ fn write_text_output(path: &Path, value: &str, label: &str) -> bool {
     true
 }
 
-fn emit_evidence_summary_json(summary: &EvidenceSummary) {
-    if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), summary) {
-        eprintln!("error: failed to write evidence summary JSON: {e}");
-    } else {
-        println!();
-    }
-}
-
-fn emit_preflight_json(report: &CacheServerPreflightReport) {
-    if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), report) {
-        eprintln!("error: failed to write preflight JSON: {e}");
-    } else {
-        println!();
-    }
-}
-
 fn emit_onboarding_check_text(report: &OnboardingCheckReport) {
     println!(
         "cache-service onboarding check: {}",
@@ -927,14 +904,6 @@ fn emit_onboarding_check_text(report: &OnboardingCheckReport) {
         if let Some(remediation) = check.remediation {
             println!("  remediation: {remediation}");
         }
-    }
-}
-
-fn emit_onboarding_check_json(report: &OnboardingCheckReport) {
-    if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), report) {
-        eprintln!("error: failed to write onboarding check JSON: {e}");
-    } else {
-        println!();
     }
 }
 
@@ -985,14 +954,6 @@ fn emit_onboarding_probe_text(report: &OnboardingProbeReport) {
     }
 }
 
-fn emit_onboarding_probe_json(report: &OnboardingProbeReport) {
-    if let Err(e) = serde_json::to_writer_pretty(std::io::stdout(), report) {
-        eprintln!("error: failed to write onboarding probe JSON: {e}");
-    } else {
-        println!();
-    }
-}
-
 fn preflight_status(status: PreflightStatus) -> &'static str {
     match status {
         PreflightStatus::Ok => "ok",
@@ -1035,6 +996,48 @@ fn fmt_bool(value: Option<bool>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_output_propagates_body_newline_and_flush_errors() {
+        struct FailingOutput {
+            remaining: usize,
+            fail_flush: bool,
+        }
+
+        impl Write for FailingOutput {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+                let count = bytes.len().min(self.remaining);
+                self.remaining -= count;
+                Ok(count)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                if self.fail_flush {
+                    Err(io::ErrorKind::BrokenPipe.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        for (stage, remaining, fail_flush) in [
+            ("body", 0, false),
+            ("newline", 2, false),
+            ("flush", usize::MAX, true),
+        ] {
+            let output = FailingOutput {
+                remaining,
+                fail_flush,
+            };
+            assert!(
+                matches!(write_json(output, &42), Err(error) if error.kind() == io::ErrorKind::BrokenPipe),
+                "{stage} failure must propagate with its I/O kind"
+            );
+        }
+    }
 
     fn report(status: PreflightStatus) -> CacheServerPreflightReport {
         CacheServerPreflightReport {

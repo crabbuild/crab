@@ -38,6 +38,9 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
   waiting stays inside the serving future; listener failure must not detach it.
   Preserve the separate HTTP and TLS drain policies.
   Source: `crates/crab-cache-server/src/server.rs`.
+- JSON command success includes output completion. Propagate serialization,
+  newline, and flush errors; keep stdout and evidence-file JSON on one writer.
+  Source: `crates/crab-cache-server/src/bin/crab_cache.rs`.
 - Validate ASCII before byte-indexed hex decoding. Malformed PSK config and cache hashes must return errors rather than panic on UTF-8 boundaries.
   Sources: `crates/crab-cache-server/src/config.rs`, `crates/crab-cache-server/src/cache_store.rs`.
 

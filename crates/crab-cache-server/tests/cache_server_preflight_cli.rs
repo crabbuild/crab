@@ -1503,6 +1503,41 @@ fn evidence_summarize_rejects_report_tampering() {
     }));
 }
 
+#[cfg(unix)]
+#[test]
+fn json_output_failure_is_not_reported_as_success() {
+    let fixture = EvidenceFixture::new();
+    for command in ["verify", "summarize"] {
+        let args = [
+            "evidence",
+            command,
+            "--report",
+            fixture.report_path.to_str().unwrap(),
+            "--json",
+        ];
+        let successful = Command::new(bin()).args(args).output().unwrap();
+        assert_succeeded(&successful);
+
+        // Close the peer before starting the child so writes fail with EPIPE.
+        // Rust's standard stdout deliberately suppresses EBADF instead.
+        let (stdout, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(reader);
+        let stdout = std::os::fd::OwnedFd::from(stdout);
+        let failed = Command::new(bin())
+            .args(args)
+            .stdout(stdout)
+            .output()
+            .unwrap();
+        assert_eq!(
+            failed.status.code(),
+            Some(1),
+            "{command}: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&failed.stderr).contains("panicked"));
+    }
+}
+
 fn run_evidence_verify(report_path: &Path) -> Output {
     Command::new(bin())
         .args([
