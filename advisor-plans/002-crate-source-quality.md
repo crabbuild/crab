@@ -874,3 +874,47 @@ requirements against build.rs, configuration against the deployment example and
 loopback validation, and the focused test route against server.rs. Formatting
 and git diff --check pass. This documentation-only change needs no Rust rebuild;
 historical verification claims were retained, not re-certified.
+
+## Timestamp range defect and migration boundary
+
+A compiled probe of the current crab-types time module produced:
+
+| Epoch milliseconds | Current output |
+| --- | --- |
+| 253402300799999 | `9999-12-31T23:59:59.999Z` |
+| 253402300800000 | `10000-01-01T00:00:00.000Z` |
+| 18446744073709551615 | `8354187-08-01T14:25:51.615Z` |
+
+[RFC 3339 section 5.6](https://www.rfc-editor.org/rfc/rfc3339#section-5.6)
+requires a four-digit year. from_epoch_millis accepts all u64 values without
+validation; epoch_secs_to_utc additionally narrows its day count to u32.
+now_rfc3339_millis silently maps pre-epoch clocks to the epoch and narrows u128
+milliseconds. This is an open correctness defect, not a formatting-only issue.
+The probe compiled the actual module with rustc into this checkout's external
+target directory; it did not copy the arithmetic into a separate implementation.
+
+Caller map and required follow-through:
+
+- Shared writes: crab-write journal compaction, crab-auth-server receive/view,
+  and crab-workflow executor construct persisted timestamps. Resolve clock errors
+  before starting the affected publication/transition and preserve typed causes.
+- VFS daemon's serde hook can return a serializer error; it currently also
+  clamps pre-epoch SystemTime and narrows milliseconds. mounts_registry has a
+  separate whole-second civil-date implementation and a CLI mount display caller.
+- CLI import assemble converts signed window ends with saturating multiplication
+  and substitutes u64::MAX for negative values. Its commit_window already returns
+  Result. Window grouping uses signed seconds and can saturate window ends;
+  validate at the conversion boundary instead of manufacturing another date.
+- CLI tier/experiment/queue paths and JSON/JSONL envelopes consume the wall-clock
+  helper. Envelope error construction itself needs a timestamp, so blindly
+  propagating a clock error into the same error formatter would recurse.
+
+The time helper and required string timestamp field are present in release tag
+v1.1.0. Preserve valid serialized output; do not silently change timestamp fields
+to nullable or emit expanded-year strings. The next implementation should make
+range failure explicit, migrate callers together, and give terminal output a
+non-recursive clock-error path. Do not add a second unchecked formatter or retain
+clamping as a compatibility shim. Validate year-9999 boundary/overflow, signed
+import inputs, serializer failure, and publication-before-error ordering. Full
+caller migration and tests remain outstanding; no production source changed in
+this investigation.
