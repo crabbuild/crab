@@ -122,7 +122,10 @@ clamped length and underlying xorb/chunk integrity, not the whole-file hash.
 ## Diff term resolution
 
 `TermResolver` serves diff callers that need reconstruction terms or ordered
-chunk sequences rather than file output.
+chunk sequences rather than file output. `TermResolver::new` returns a
+configuration error for zero concurrency or values above Tokio's maximum permit
+count. One semaphore limits admitted metadata work across this resolver's
+concurrent batches; it does not bound the number of queued task allocations.
 
 | API | Per-file resolution failure |
 | --- | --- |

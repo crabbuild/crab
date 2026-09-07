@@ -52,27 +52,34 @@ pub struct TermResolver {
     store: CachingStore,
     router: StoreLayout,
     cache: Arc<LocalCache>,
-    concurrency: usize,
+    semaphore: Arc<Semaphore>,
 }
 
 impl TermResolver {
     /// Create a new resolver.
     ///
     /// `concurrency` controls the maximum number of concurrent metadata
-    /// downloads (file-index lookups + shard fetches). Defaults to 8 in
-    /// the diff pipeline.
+    /// downloads (file-index lookups + shard fetches), shared across batches
+    /// using this resolver. Defaults to 8 in the diff pipeline.
+    /// Returns a configuration error outside `1..=Semaphore::MAX_PERMITS`.
     pub fn new(
         store: CachingStore,
         router: StoreLayout,
         cache: Arc<LocalCache>,
         concurrency: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        if !(1..=Semaphore::MAX_PERMITS).contains(&concurrency) {
+            return Err(ReadError::Configuration {
+                key: format!("concurrency must be in 1..={}", Semaphore::MAX_PERMITS),
+                origin: "term resolver".into(),
+            });
+        }
+        Ok(Self {
             store,
             router,
             cache,
-            concurrency,
-        }
+            semaphore: Arc::new(Semaphore::new(concurrency)),
+        })
     }
 
     /// Resolve a batch of file hashes to their reconstruction terms.
@@ -100,7 +107,7 @@ impl TermResolver {
             return Ok(HashMap::new());
         }
 
-        let semaphore = Arc::new(Semaphore::new(self.concurrency));
+        let semaphore = Arc::clone(&self.semaphore);
         let shard_readers: Arc<Mutex<HashMap<MerkleHash, Arc<ShardReader>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let results: Arc<Mutex<HashMap<MerkleHash, Vec<FileDataSequenceEntry>>>> =
@@ -223,7 +230,7 @@ impl TermResolver {
             return Ok(HashMap::new());
         }
 
-        let semaphore = Arc::new(Semaphore::new(self.concurrency));
+        let semaphore = Arc::clone(&self.semaphore);
         let shard_readers: Arc<Mutex<HashMap<MerkleHash, Arc<ShardReader>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let xorb_chunks: Arc<Mutex<HashMap<MerkleHash, Arc<Vec<XorbChunkSequenceEntry>>>>> =
@@ -800,6 +807,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolver_rejects_invalid_capacity() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(temp.path().join("cache")));
+        let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(origin.clone(), "org/repo".into());
+        let store = CachingStore::new_with_local_cache(
+            origin,
+            crab_cache_store::CacheConfig::default(),
+            Arc::clone(&cache),
+        )
+        .unwrap();
+        for invalid in [0, Semaphore::MAX_PERMITS + 1] {
+            assert!(matches!(
+                TermResolver::new(store.clone(), router.clone(), Arc::clone(&cache), invalid),
+                Err(ReadError::Configuration { .. })
+            ));
+        }
+    }
+
     #[tokio::test]
     async fn cancelled_batches_release_workers_waiting_for_admission() {
         let temp = tempfile::tempdir().unwrap();
@@ -812,8 +839,9 @@ mod tests {
             Arc::clone(&cache),
         )
         .unwrap();
-        // No permits makes admission deterministic without issuing metadata I/O.
-        let resolver = TermResolver::new(store, router, cache, 0);
+        let resolver = TermResolver::new(store, router, cache, 1).unwrap();
+        // Occupy the resolver's shared capacity without issuing metadata I/O.
+        let _occupied = resolver.semaphore.acquire().await.unwrap();
         for mode in ["terms", "sequences", "strict"] {
             let cancel = CancellationToken::new();
             let batch = async {

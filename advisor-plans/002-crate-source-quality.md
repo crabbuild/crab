@@ -3646,3 +3646,34 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   unescaped generic type in the touched module header; formatted it as code.
   The initial CLI test invocation used an incorrect target path and failed
   before compilation; rerunning with the approved per-worktree target passed.
+
+
+### Validate term-resolution capacity at ownership boundaries
+
+- `TermResolver::new` now returns Result and rejects concurrency outside
+  `1..=Semaphore::MAX_PERMITS`. Its semaphore belongs to the resolver and is
+  shared by its batches, preventing concurrent calls from each creating a new
+  full allowance. This bounds admitted metadata work, not queued task count.
+- The CLI facade propagates constructor failure, and both diff/diff-driver
+  callers use `?`. Resolved root configuration validates download_concurrency
+  before consumers construct semaphores; local loading and remote overlay
+  resolution both invoke this validator. No zero-disabled mode or local clamp.
+- Evidence: both product entry points pass the resolved field directly; main
+  stored unchecked usize and constructed per-batch semaphores. Tokio 1.52
+  documents panic above MAX_PERMITS; a zero-permit semaphore admits no work.
+  Root config overlay assigns the same field used by diff and Git fetch.
+  Hydrate's separate adaptive concurrency setting remains a distinct policy
+  requiring its own qualification; this change does not reinterpret it.
+- Baseline regression demonstrated zero accepted by resolved configuration.
+  New cases verify typed rejection at configuration, remote overlay, and direct
+  resolver construction, plus acceptance of legal boundary values in config.
+- Updated the cancellation fixture to hold valid resolver capacity instead of
+  constructing an invalid zero-capacity instance. All three batch APIs still
+  prove that cancellation releases waiting workers without metadata I/O.
+- Public API change: shared and CLI TermResolver constructors return Result.
+  Workspace search found only the facade and two CLI construction sites; all
+  were updated together. No dependency, format, or new configuration surface.
+- Validation: six term-resolution tests, all 137 configuration tests, strict
+  crate Clippy/rustdoc, and the CLI binary build pass. The build retains the
+  macOS unwind-size warning. Spawned task allocation and cleanup after dropped
+  batch futures remain open work.
