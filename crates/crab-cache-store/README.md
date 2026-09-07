@@ -55,6 +55,8 @@ do not publish any local placement metadata. Hydration's
 `get_xorb_chunks_without_install` reads a bounded complete body and installs
 no duplicate full xorb; decoded-range caching belongs to `crab-read`'s runtime.
 
+### Process-local result retention
+
 The process-local xorb result cache retains at most 4,096 entries and charges
 up to 64 MiB for owned result buffers, offsets, both range-key copies, and entry
 structures. It copies retained slices so a few requested bytes cannot pin an
@@ -67,6 +69,23 @@ results, transient decode buffers, and queued work need their own admission.
 `CacheConfig` controls service URL, cache/dedup mode, push warming, and TLS or
 client-authentication material. The `remote-client` feature is required when a
 remote service URL is configured; local caching remains available without it.
+
+## Construction and startup
+
+| Constructor | Remote service behavior | Failure result |
+| --- | --- | --- |
+| `new` | Build the configured client without probing health. | Configuration/client construction error. |
+| `new_with_local_cache` | Same client setup, using the caller's existing local cache. | Configuration/client construction error. |
+| `try_build_healthy` | Probe health and the route/capability contract before enabling remote access. | `None` on construction error; otherwise keep a local-only wrapper when the probe fails. |
+
+`new` configures its local cache from `CacheConfig::max_bytes`.
+`new_with_local_cache` retains the supplied cache's own limits; it does not
+reconfigure that shared instance. These retention limits do not bound aggregate
+read memory, decode buffers, or caller-held results.
+
+A configured service URL without `remote-client` is a construction error.
+The optional-return helper converts that error to `None`; callers then decide
+whether and how to use the origin directly.
 
 ## Usage
 

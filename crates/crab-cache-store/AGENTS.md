@@ -28,6 +28,9 @@ Trace one path: `StoreClient` in `crates/crab-read/src/store_client.rs` →
 
 ## Invariants
 
+- Construction errors make `try_build_healthy` return None; probe failure keeps a local-only wrapper. `new` does not probe health, and explicit local-cache instances retain their own limits.
+  Source: `crates/crab-cache-store/src/lib.rs`.
+
 - Mutable paths and HEAD operations must retain origin authority; inspect bypass tests before extending cache admission.
   Source: `crates/crab-cache-store/src/lib.rs`.
 - One xorb attempt uses one source; retrying cached corruption must not combine cache metadata with origin payload bytes.

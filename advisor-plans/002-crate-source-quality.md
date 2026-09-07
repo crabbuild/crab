@@ -50,7 +50,7 @@ not claims that the named code is defective.
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | Upload I/O causes; integrity and lock ownership remain | Upload diagnostic slice verified |
 | crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
-| crab-cache-store | Origin authority, corrupt-cache repair, range validation | Pending |
+| crab-cache-store | Startup outcomes; origin authority and range qualification remain | Startup slice verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
@@ -449,3 +449,28 @@ draft; no test, baseline, stylesheet, or workflow was changed to silence it.
 
 Remote Git validation: the finish doctest and both native-fixture shutdown
 integration tests pass. Runtime behavior and public signatures are unchanged.
+
+## Cache-store startup outcomes
+
+`CachingStore::try_build_healthy` nested health, capability retrieval, and route
+validation inside four levels of control flow. Guard clauses now expose each
+exit directly, preserving the same log messages and remote-client disabling
+policy. No new fallback or configuration mode was added.
+
+The old rustdoc incorrectly promised Some unconditionally. Construction errors
+return None; runtime probe failures retain a local-only wrapper. `new` constructs
+the configured client without probing health. An explicit LocalCache keeps its
+own limits rather than inheriting CacheConfig::max_bytes. Rustdoc and a README
+constructor table now describe those differences.
+
+Caller map: filter-process chooses the origin on None; add, push, and remote
+helper also consume the optional wrapper. Callees: CacheClient construction,
+its bounded health request, capability decoding, and the shared route-contract
+comparison. The canonical read fallback and xorb verification paths are unchanged.
+A loopback cache-server test passes before and after for authorized and rejected
+credentials. The no-default-features test confirms unsupported service config
+returns None. These tests qualify startup decisions, not all cache read behavior.
+
+Strict all-target cache-store Clippy passes with remote-client. The refactor
+adds no production API and reduces nesting; added tests protect constructor
+behavior across enabled and disabled feature configurations.

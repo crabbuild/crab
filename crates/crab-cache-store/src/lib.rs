@@ -118,9 +118,9 @@ impl From<&CacheConfig> for CacheConfig {
 /// Store wrapper that routes immutable reads through a local disk cache
 /// and an optional feature-gated remote cache service.
 ///
-/// The local cache is always active. The remote cache client is only
-/// used when the `remote-client` feature is enabled, configured, and healthy.
-/// On any cache error the wrapper falls back to the origin transparently.
+/// The local cache is always active. The remote cache client requires the
+/// `remote-client` feature and configuration; [`Self::try_build_healthy`] also
+/// probes startup health. Optional cache read failures fall back to origin.
 ///
 /// Cheap to clone: `Store` is `Arc`-backed, `LocalCache` is `Arc`-wrapped,
 /// and the feature-gated `CacheClient` is clone-cheap as well.
@@ -166,7 +166,8 @@ impl CachingStore {
     /// Build a `CachingStore` with an explicit local cache instance.
     ///
     /// This keeps callers that already own cache placement from relying on
-    /// process-wide cache-root environment state.
+    /// process-wide cache-root environment state. The supplied cache retains
+    /// its own limits; `CacheConfig::max_bytes` does not reconfigure it.
     pub fn new_with_local_cache<S, C>(
         origin: S,
         cache_config: C,
@@ -223,10 +224,10 @@ impl CachingStore {
     /// Build a `CachingStore` with local disk cache always active and
     /// the remote cache service enabled only when configured and healthy.
     ///
-    /// Always returns `Some` because the local cache is unconditional.
-    /// When the remote service is down or not configured, the returned
-    /// `CachingStore` still provides local disk caching for immutable
-    /// objects (shards and xorbs).
+    /// Returns `None` if client/configuration construction fails. Otherwise,
+    /// an absent, unhealthy, or incompatible service leaves local caching active.
+    /// Remote access requires successful health and capability checks. Callers
+    /// choose their origin policy when construction returns `None`.
     pub async fn try_build_healthy<S, C>(origin: S, cache_config: C) -> Option<Self>
     where
         S: Into<Store>,
@@ -244,40 +245,39 @@ impl CachingStore {
         #[cfg(feature = "remote-client")]
         {
             let mut cs = cs;
-            // Health-check the remote cache service. If unhealthy, disable
-            // the remote client but keep the local cache active.
-            if let Some(client) = &cs.cache_client {
-                if client.is_healthy().await {
-                    match client.capabilities().await {
-                        Ok(capabilities) => {
-                            if !cache_service_capabilities_route_contract_current(&capabilities) {
-                                tracing::warn!(
-                                    "cache service route contract missing or mismatched, using local cache only"
-                                );
-                                cs.cache_client = None;
-                            } else {
-                                let max_object_bytes = capabilities.limits.max_object_bytes;
-                                cs.max_push_warming_object_bytes = Some(max_object_bytes);
-                                tracing::info!(
-                                    url = %cache_config.service_url.as_deref().unwrap_or(""),
-                                    max_object_bytes,
-                                    "cache service healthy, enabling cache-accelerated push"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "cache service capabilities unavailable, using local cache only"
-                            );
-                            cs.cache_client = None;
-                        }
-                    }
-                } else {
-                    tracing::info!("cache service not healthy, using local cache only");
-                    cs.cache_client = None;
-                }
+            let Some(client) = &cs.cache_client else {
+                return Some(cs);
+            };
+            if !client.is_healthy().await {
+                tracing::info!("cache service not healthy, using local cache only");
+                cs.cache_client = None;
+                return Some(cs);
             }
+            let capabilities = match client.capabilities().await {
+                Ok(capabilities) => capabilities,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "cache service capabilities unavailable, using local cache only"
+                    );
+                    cs.cache_client = None;
+                    return Some(cs);
+                }
+            };
+            if !cache_service_capabilities_route_contract_current(&capabilities) {
+                tracing::warn!(
+                    "cache service route contract missing or mismatched, using local cache only"
+                );
+                cs.cache_client = None;
+                return Some(cs);
+            }
+            let max_object_bytes = capabilities.limits.max_object_bytes;
+            cs.max_push_warming_object_bytes = Some(max_object_bytes);
+            tracing::info!(
+                url = %cache_config.service_url.as_deref().unwrap_or(""),
+                max_object_bytes,
+                "cache service healthy, enabling cache-accelerated push"
+            );
             Some(cs)
         }
 
@@ -2389,6 +2389,34 @@ mod tests {
             addr,
             shutdown: Some(shutdown_tx),
         }
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn healthy_builder_keeps_local_store_when_service_auth_fails() {
+        let server = start_test_cache_server().await;
+        for authorized in [true, false] {
+            let mut config = cache_service_config(server.addr);
+            if !authorized {
+                config.service_auth = CacheServiceAuth::Psk("incorrect-test-key".into());
+            }
+            let store = CachingStore::try_build_healthy(origin_store(), config)
+                .await
+                .expect("service failure retains local caching");
+            assert_eq!(store.has_cache_service(), authorized);
+        }
+    }
+
+    #[cfg(not(feature = "remote-client"))]
+    #[tokio::test]
+    async fn healthy_builder_returns_none_for_unsupported_service_config() {
+        let mut config = no_cache_config();
+        config.service_url = Some("http://127.0.0.1:1".into());
+        assert!(
+            CachingStore::try_build_healthy(origin_store(), config)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
