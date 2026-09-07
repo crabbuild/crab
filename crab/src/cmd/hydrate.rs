@@ -3963,7 +3963,12 @@ mod tests {
         let cache_path = crate::cache::add_validation::cache_path_for_context(&context);
         let cache = crate::cache::add_validation::AddValidationCache::open(&cache_path).unwrap();
 
-        assert!(cache.contains(b"model.bin", &token).unwrap());
+        assert!(
+            cache
+                .contains_batch(&[(b"model.bin", &token)])
+                .unwrap()
+                .contains(b"model.bin".as_slice())
+        );
     }
 
     #[cfg(unix)]
