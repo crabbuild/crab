@@ -4,11 +4,12 @@
 //! the actual ordered chunk hashes so reused content is recognized even when
 //! packing moved it to a different xorb or xorb offset.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use crab_xet::hash::MerkleHash;
 use tracing::debug;
 
+use crate::ordered_match::greedy_ordered_matches;
 use crate::types::{
     ChunkDiffMetrics, ChunkDiffReport, ChunkSequenceSourceKind, FileStatus, SegmentDiff,
     SegmentStatus,
@@ -292,7 +293,7 @@ fn unanchored_lcs_matches(old: &[ChunkSpan], new: &[ChunkSpan]) -> Vec<(usize, u
         ceiling = EXACT_MATCH_PAIR_CEILING,
         "using bounded greedy chunk sequence diff for highly repetitive file"
     );
-    greedy_ordered_matches(old, new)
+    greedy_ordered_matches(old, new, |span| span.chunk_hash)
 }
 
 fn has_shared_chunk(old: &[ChunkSpan], new: &[ChunkSpan]) -> bool {
@@ -381,33 +382,6 @@ fn lower_bound(items: &[usize], target: usize) -> usize {
         }
     }
     left
-}
-
-fn greedy_ordered_matches(old: &[ChunkSpan], new: &[ChunkSpan]) -> Vec<(usize, usize)> {
-    let mut positions: HashMap<MerkleHash, VecDeque<usize>> = HashMap::new();
-    for (idx, span) in new.iter().enumerate() {
-        positions.entry(span.chunk_hash).or_default().push_back(idx);
-    }
-
-    let mut matches = Vec::new();
-    let mut next_allowed = 0usize;
-    for (old_idx, span) in old.iter().enumerate() {
-        let Some(queue) = positions.get_mut(&span.chunk_hash) else {
-            continue;
-        };
-        while let Some(&front) = queue.front() {
-            if front < next_allowed {
-                queue.pop_front();
-            } else {
-                break;
-            }
-        }
-        if let Some(new_idx) = queue.pop_front() {
-            matches.push((old_idx, new_idx));
-            next_allowed = new_idx.saturating_add(1);
-        }
-    }
-    matches
 }
 
 fn changed_ranges(

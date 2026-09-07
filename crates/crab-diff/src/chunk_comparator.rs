@@ -2,6 +2,7 @@
 
 use crab_xet::shard::FileDataSequenceEntry;
 
+use crate::ordered_match::greedy_ordered_matches;
 use crate::types::{ChunkDiffReport, FileStatus, SegmentDiff, SegmentStatus};
 
 /// Key used for segment equality: `(xorb_hash, chunk_index_start, chunk_index_end)`.
@@ -34,52 +35,9 @@ fn lcs_table(old: &[FileDataSequenceEntry], new: &[FileDataSequenceEntry]) -> Ve
     dp
 }
 
-/// Maximum combined segment count where we use the exact LCS algorithm.
-/// The DP table is `(m+1) × (n+1) × 4 bytes`. At m=n=8k this is ~256 MB,
-/// which is still acceptable on typical dev machines. Above this we fall
-/// back to order-preserving set comparison that classifies entries as
-/// unchanged/added/removed without computing the longest-common-subsequence.
-/// See finding CR8-F1.
+// The exact table peaks near 64 MiB when both lists have 4,096 entries.
+// Larger inputs use ordered greedy matching to keep memory linear.
 const LCS_SEGMENT_CEILING: usize = 8_192;
-
-/// Classify segments using set membership rather than LCS.
-///
-/// Entries present in both old and new are marked `Unchanged`.
-/// Entries only in old are `Removed`; entries only in new are `Added`.
-/// This approximation loses the ability to detect "same segment moved
-/// to a different position" (LCS would report both copies as unchanged,
-/// set comparison reports the extra copy as removed and the new
-/// position as added) but uses O(m+n) space regardless of input size.
-fn classify_segments_by_set(
-    old: &[FileDataSequenceEntry],
-    new: &[FileDataSequenceEntry],
-) -> (Vec<SegmentStatus>, Vec<SegmentStatus>) {
-    let old_keys: std::collections::HashSet<SegmentKey> = old.iter().map(segment_key).collect();
-    let new_keys: std::collections::HashSet<SegmentKey> = new.iter().map(segment_key).collect();
-
-    let old_status: Vec<SegmentStatus> = old
-        .iter()
-        .map(|e| {
-            if new_keys.contains(&segment_key(e)) {
-                SegmentStatus::Unchanged
-            } else {
-                SegmentStatus::Removed
-            }
-        })
-        .collect();
-    let new_status: Vec<SegmentStatus> = new
-        .iter()
-        .map(|e| {
-            if old_keys.contains(&segment_key(e)) {
-                SegmentStatus::Unchanged
-            } else {
-                SegmentStatus::Added
-            }
-        })
-        .collect();
-
-    (old_status, new_status)
-}
 
 /// Backtrace the LCS table to classify each segment.
 /// Returns `(old_status, new_status)` where each element is either
@@ -114,7 +72,8 @@ fn classify_segments(
 
 /// Compare two reconstruction term lists and produce a diff report.
 ///
-/// Uses LCS to find the optimal alignment between old and new segment lists.
+/// Uses exact LCS up to 8,192 combined terms, then linear-space ordered greedy
+/// matching. Large-input matching preserves occurrences but may miss reuse.
 /// Two entries are "equal" when `(xorb_hash, chunk_index_start, chunk_index_end)` match.
 pub fn compare_terms(
     path: &str,
@@ -155,20 +114,21 @@ pub fn compare_terms(
         };
     }
 
-    // Choose the comparison strategy based on input size. The exact LCS
-    // uses O(m × n) space, which for very large files (tens of thousands
-    // of chunks) can exceed process memory. Above LCS_SEGMENT_CEILING
-    // we fall back to set-based classification that uses O(m + n) space
-    // at the cost of losing "moved segment" detection. See finding CR8-F1.
     let (old_status, new_status) = if old_terms.len() + new_terms.len() > LCS_SEGMENT_CEILING {
         tracing::debug!(
             path,
             old = old_terms.len(),
             new = new_terms.len(),
             threshold = LCS_SEGMENT_CEILING,
-            "using set-based segment classification for large file"
+            "using ordered greedy segment classification for large file"
         );
-        classify_segments_by_set(old_terms, new_terms)
+        let mut old_status = vec![SegmentStatus::Removed; old_terms.len()];
+        let mut new_status = vec![SegmentStatus::Added; new_terms.len()];
+        for (old_idx, new_idx) in greedy_ordered_matches(old_terms, new_terms, segment_key) {
+            old_status[old_idx] = SegmentStatus::Unchanged;
+            new_status[new_idx] = SegmentStatus::Unchanged;
+        }
+        (old_status, new_status)
     } else {
         let dp = lcs_table(old_terms, new_terms);
         classify_segments(old_terms, new_terms, &dp)
@@ -474,6 +434,53 @@ mod tests {
         assert_eq!(report.delta_bytes, 0);
         assert_eq!(report.status, FileStatus::Modified);
         assert!(report.changed_byte_ranges.is_empty());
+    }
+
+    #[test]
+    fn large_duplicate_lists_preserve_occurrence_counts() {
+        let old = vec![make_entry(1, 0, 1, 10); LCS_SEGMENT_CEILING / 2 + 1];
+        let mut new = old.clone();
+        new.push(make_entry(1, 0, 1, 10));
+
+        for (old, new) in [(&old, &new), (&new, &old)] {
+            let report = compare_terms(
+                "repeated.bin",
+                old,
+                new,
+                old.len() as u64 * 10,
+                new.len() as u64 * 10,
+            );
+
+            assert_eq!(
+                (
+                    report.unchanged_bytes + report.removed_bytes,
+                    report.unchanged_bytes + report.added_bytes,
+                    report.segment_details.len(),
+                ),
+                (
+                    old.len() as u64 * 10,
+                    new.len() as u64 * 10,
+                    old.len().max(new.len())
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn large_reordered_lists_only_pair_equal_segments() {
+        let old: Vec<_> = (0..=LCS_SEGMENT_CEILING / 2)
+            .map(|seed| make_entry(seed as u64, 0, 1, 10))
+            .collect();
+        let mut new = old.clone();
+        new.reverse();
+        let size = old.len() as u64 * 10;
+        let report = compare_terms("reordered.bin", &old, &new, size, size);
+
+        assert!(report.segment_details.iter().all(|detail| {
+            detail.status != SegmentStatus::Unchanged
+                || (detail.old_xorb_hash == detail.new_xorb_hash
+                    && detail.old_chunk_range == detail.new_chunk_range)
+        }));
     }
 
     #[test]

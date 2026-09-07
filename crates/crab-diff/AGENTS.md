@@ -13,7 +13,8 @@ Owns pure file pairing and chunk/term comparison. Callers gather staging or remo
 2. `crates/crab-diff/src/types.rs` — `ChunkDiffReport / ChunkDiffMetrics`: report fields and byte metrics.
 3. `crates/crab-diff/src/chunk_sequence.rs` — `compare_sequences / ChunkSequence`: ordered hash matching and bounded matching work.
 4. `crates/crab-diff/src/chunk_comparator.rs` — `compare_terms`: term-level comparison.
-5. `crates/crab-diff/src/pointer_pairs.rs` — `pair_files`: sorted file pairing.
+5. `crates/crab-diff/src/ordered_match.rs` — shared bounded greedy matching for terms and chunks.
+6. `crates/crab-diff/src/pointer_pairs.rs` — `pair_files`: sorted file pairing.
 
 Trace one path: `crab/src/cmd/diff.rs` → `compare_sequences` in
 `crates/crab-diff/src/chunk_sequence.rs` → its matching/metric helpers
@@ -50,6 +51,7 @@ writable. Stop if unavailable; never fall back to a local target directory.
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-diff --locked --lib chunk_sequence::tests
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-diff --locked --lib chunk_comparator::tests
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-089c" cargo test -p crab-diff --locked --lib pointer_pairs::tests
 ```
 
