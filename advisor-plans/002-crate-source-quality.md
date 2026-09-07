@@ -1835,3 +1835,36 @@ holds the real advisory lock while the built crab run command attempts no-wait
 execution in a temporary fixture on the workspace volume. It returns CRAB-E0230,
 preserves the holder sidecar bytes, and creates no final stage output. This
 adds native command-to-filesystem proof for the contention path.
+
+### Inline cache-only replay shares scheduler admission
+
+The inline cache-only branch returned before SchedulerLock acquisition, even
+though local and remote cache hits call materialize_hit through the same
+sidecar publication helpers as execution. A native reproduction on published
+787e7089b9a seeds a real stage cache, removes its output, and holds the scheduler
+lock in a separate process. Cache-only replay incorrectly returns success and
+restores the output while that holder remains active.
+
+Acquisition now occurs once before choosing replay versus execution. It covers
+remote cache pulls and final cache-hit materialization, while the normal path
+retains its guard through sweeping and execution. Timeout/no-wait policy remains
+caller-owned. The retained contention regression now checks both inline modes;
+no duplicate test/helper or new lock implementation was added.
+
+The debug CLI build and two-case regression pass. A fresh native smoke verifies
+CRAB-E0230 and no output under contention, then exact restored bytes after lock
+release. A command-execution marker remains unchanged during replay, proving
+that the positive control uses cached output rather than rerunning the stage.
+The native fixture lives on the workspace volume and is removed after use.
+The build retains the previously observed macOS debug unwind-size linker warning.
+
+Source map: run_inline_single_stage -> cache_only_path -> cache_only_emit_hit ->
+materialize_hit -> shared materialize helpers. The YAML execution paths already
+hold scheduler guards during materialization; YAML interpretation of cache-only
+flags remains a separate inspection target. Async lock waiting and pre-lock
+input/lockfile reads remain open. This change qualifies inline replay ownership,
+not every workflow invocation mode or remote-provider race.
+
+CLI library Clippy remains at 489 warnings versus the recorded main baseline's
+494. Of these, 484 match unchanged source and five large-future messages match
+the preceding comparison exactly. No new diagnostic was observed for this fix.

@@ -657,6 +657,11 @@ async fn run_inline_single_stage(
         .as_ref()
         .and_then(|remote| remote.artifact_stores.clone());
 
+    // Cache replay also publishes output sidecars. Both replay and execution
+    // must exclude another scheduler before materialization or orphan cleanup.
+    let lock_timeout = compute_lock_timeout(args, config);
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+
     if args.cache_only {
         let cache_only_ctx = CacheOnlyContext {
             args,
@@ -693,10 +698,6 @@ async fn run_inline_single_stage(
         .await;
     }
 
-    // The prior scheduler may still be publishing sidecars while we wait.
-    // Acquire ownership before deciding that its temporary outputs are orphaned.
-    let lock_timeout = compute_lock_timeout(args, config);
-    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
     let run_id = Uuid::now_v7();
     sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &outs)?;
 
@@ -5163,21 +5164,24 @@ mod tests {
             .path()
             .join(format!("b.txt.crab.tmp.{}", Uuid::now_v7()));
         fs::write(&sidecar, b"active output").unwrap();
-        let mut args = base_args(tmp.path());
-        args.no_wait = true;
-        let result = run_inline_single_stage(
-            &args,
-            tmp.path(),
-            OutputMode::Text,
-            &Config::default(),
-            RunInvocationOptions::default(),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(CrabError::WorkflowLockTimeout { .. })),
-            "{result:?}"
-        );
-        assert_eq!(fs::read(sidecar).unwrap(), b"active output");
+        for cache_only in [false, true] {
+            let mut args = base_args(tmp.path());
+            args.no_wait = true;
+            args.cache_only = cache_only;
+            let result = run_inline_single_stage(
+                &args,
+                tmp.path(),
+                OutputMode::Text,
+                &Config::default(),
+                RunInvocationOptions::default(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CrabError::WorkflowLockTimeout { .. })),
+                "{result:?}"
+            );
+            assert_eq!(fs::read(&sidecar).unwrap(), b"active output");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

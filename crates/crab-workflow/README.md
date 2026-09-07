@@ -120,6 +120,8 @@ the product retry loop owns waiting, output cleanup, and journal transitions.
 `SchedulerLock::acquire` blocks the calling thread while waiting;
 `try_acquire` returns immediately when another holder owns the lock.
 The caller chooses the timeout and retains the guard for the protected work.
+Inline execution and `--cache-only` replay both acquire it: replay can publish
+outputs even though it does not execute a command or create a journal.
 
 | Resource | Contract |
 | --- | --- |

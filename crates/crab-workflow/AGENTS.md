@@ -37,7 +37,8 @@ execution. Parsing and graph construction are sequential caller-owned steps.
 
 - Scheduler contention is fs4's `Ok(false)` outcome, not an I/O failure.
   The guard owns the advisory lock; PID files are only diagnostics.
-  `SchedulerLock::acquire` blocks its calling thread while waiting.
+  `SchedulerLock::acquire` blocks its calling thread while waiting. Inline
+  cache-only replay must hold the same guard as normal output publication.
   Source: `crates/crab-workflow/src/scheduler_lock.rs`.
 
 - Sidecar cleanup requires a valid run UUID and excludes active run IDs. An empty
