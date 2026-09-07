@@ -48,7 +48,7 @@ not claims that the named code is defective.
 | crab-metadata | Catalog lifecycle, cancellation, and broader index qualification remain | Writer admission, diagnostic candidate ordering, and shared-reader close serialization verified |
 | crab-staging | Flush/publication, scale, and remaining clock-policy qualification remain | Recovery errors and invalid cleanup clocks verified through fsck |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
-| crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
+| crab-lfs | Final-part admission, first-verification cost, and lock ownership remain | Upload cleanup, identity, shared stream framing, and typed lock decode errors verified |
 | crab-cache | Broader cache-key and invalidation qualification remain | Diagnostics, exact cached-file ranges, repair/accounting, and README navigation verified |
 | crab-cache-store | Broader source-chain integrity and deployed-service qualification remain | Warm ranges, conditional/versioned bypass, metadata authority, and corruption provenance verified |
 | crab-read | Aggregate memory/source-chain, sibling close ownership, and runtime-shutdown qualification remain | Bounded workers, canonical lookup ownership, typed join sources, and abandoned-batch checkpoint cleanup verified |
@@ -3933,3 +3933,52 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   growth is one named guard plus its invariant comment, with no dependency,
   feature, serialized-format, or public-signature change. Fresh broad CI remains
   needed after publication; current PR CI is allowed to finish first.
+
+
+### Shared LFS lock diagnostics and public documentation
+
+- Current main and the previous PR head stringify serde_json::Error inside
+  decode_record. Point lookup, lock/unlock, conflict checks, and listing reuse
+  this decoder, so callers lose typed category and location despite retaining
+  an object-key message. Replace the Corrupt variant's reason String with a
+  source serde_json::Error and preserve the same contextual display.
+- Regression stores malformed JSON through the real in-memory object store and
+  exercises find_by_path and list_page. Before the fix, the standard source
+  chain is empty; after the fix both retain the object key, EOF category, and
+  parser line. Locked serde_json source documents classify and one-based line.
+  All four lock tests and strict all-target Clippy pass.
+- Workspace consumer search finds no external construction or matching of this
+  shared error and no production LfsLockManager caller. Public Rust variant
+  fields change; serialized lock records, storage layout, and lock policy do
+  not. No compatibility alias or duplicate string is retained.
+- Sibling boundary: CLI LockManager is a separate implementation with its own
+  CrabError conversion and still stringifies malformed records. Consolidation
+  and its error mapping remain explicit follow-up work; this is not a CLI
+  diagnostic fix. HTTP locks_unavailable returns 501 after repository access
+  validation. verify_locks intentionally returns malformed object keys rather
+  than failing on each parse error, so its reporting contract is unchanged.
+- Correct shared force_unlock rustdoc: absence returns NotFound; an existing
+  tombstone succeeds unchanged. The CLI's force_unlock treats absence as
+  success. README and type docs now identify the separate implementation.
+- Strict public rustdoc exposed two links to private upload constants. Replace
+  that paragraph with the actual streaming model: bounded part buffering plus
+  read/assembly/provider allocations, not a 32 MiB process-memory promise.
+  Strict public rustdoc and formatting/diff checks pass after correction.
+- Follow-up found during the memory-contract audit: stream_file_parts applies
+  queue backpressure to full parts but dispatches a partial EOF tail directly.
+  A four-part queue can therefore retain a fifth tail. Reproduce at the upload
+  boundary and give every dispatch the same admission path; no fix or memory
+  qualification is claimed by this documentation change.
+- Best fix for diagnostics is the existing enum's typed source, shared by all
+  its decode consumers. No new adapter, dependency, or lockfile change. Broader
+  lock ownership and production wiring remain unqualified.
+
+### Metadata concurrent-close consumer build
+
+- CLI build for a2ed7851024 succeeds with the already recorded macOS unwind
+  section linker warning. This covers the metadata close fix, not the later
+  LFS edits. It ran in the approved external target directory.
+- PR head 5d248c18c60 still has live/queued checks. Native diagnostic run
+  34166389306 has passed its feature gate and queued Linux/macOS/Windows jobs;
+  native Windows outcome remains unknown. No live run was cancelled to publish
+  these local follow-ups.

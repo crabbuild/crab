@@ -47,6 +47,8 @@ either product surface.
   Source: `crates/crab-lfs/src/object_store.rs`.
 - Fresh origin verification differs from receipt-aware reads and replica fallback; callers needing publication proof must retain the origin-only boundary.
   Source: `crates/crab-lfs/src/object_store/origin.rs`.
+- Retain the typed JSON cause and object key when decoding lock records. Do
+  not collapse corrupt metadata into absence or a display-only error.
 - Release locks with holder/ID checks and CAS tombstones; a stale unlock must not remove a replacement lock.
   Source: `crates/crab-lfs/src/lock.rs`.
 

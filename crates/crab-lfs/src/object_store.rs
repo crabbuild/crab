@@ -284,12 +284,10 @@ impl LfsObjectStore {
     /// incrementally, and push parts to the object store via
     /// [`object_store::MultipartUpload`].
     ///
-    /// This is the large-object counterpart of [`Self::put`]. Where
-    /// `put` materializes the entire payload in memory (unavoidable
-    /// for its `Bytes` contract), `put_stream` caps peak memory at
-    /// [`STREAM_PART_SIZE`] × [`MAX_IN_FLIGHT_PARTS`] (~32 MiB at
-    /// defaults) regardless of the source file's size. A 50 GiB LFS
-    /// object now uploads without OOMing.
+    /// This is the large-object counterpart of [`Self::put`]. It sends
+    /// 8 MiB parts through a bounded queue instead of retaining the whole file.
+    /// Memory also includes the read and assembly buffers and provider-owned
+    /// allocations; the part queue is not a total process-memory limit.
     ///
     /// Integrity is verified in one pass: the SHA-256 hasher consumes
     /// every byte as it leaves the file, and the final digest is

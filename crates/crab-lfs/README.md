@@ -61,8 +61,16 @@ runs on blocking workers that retain admission after caller cancellation. The
 ordinary receipt-aware path uses the same body verifier when a receipt misses.
 
 `LfsLockManager` provides the shared CAS-backed LFS lock record format at
-`{prefix}/lfs/locks/{blake3(path)}`. Crab's CLI uses this namespace so locks
-remain visible across local clients and worktrees.
+`{prefix}/lfs/locks/{blake3(path)}`. The CLI uses the same namespace through a
+separate lock manager; the shared manager has no production caller today, and
+HTTP locking is unavailable. Changes here do not automatically reach those
+product surfaces.
+
+Malformed shared lock records retain their object key and typed
+`serde_json::Error` source, including its category and location. Shared
+`force_unlock` returns an existing tombstone unchanged but reports `NotFound`
+when the record is absent; the CLI's separate force-unlock treats absence as
+success.
 
 ## Usage
 
