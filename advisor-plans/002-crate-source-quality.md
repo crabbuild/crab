@@ -43,7 +43,7 @@ not claims that the named code is defective.
 | crab-types | Pointer causes and checked timestamps; broader contract qualification remains | Pointer and timestamp slices verified |
 | crab-git | Discovery, process ownership, non-UTF-8 paths, and quoted line-mode fields remain | Delta and NUL worktree framing slices verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
-| crab-xet | Broader parser/reconstruction and decompression admission remain | Coverage, decoded-length checks, and decoded-offset layout verified |
+| crab-xet | Broader parser/reconstruction and aggregate memory qualification remain | Coverage, decoded-length/offset checks, and bounded decompression output verified |
 | crab-storage | Broader retry/error classification and cancellation cleanup remain | Diagnostics, multipart cleanup, and stream framing verified |
 | crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
@@ -53,7 +53,7 @@ not claims that the named code is defective.
 | crab-cache-store | Range and broader integrity qualification remain | Startup, conditional/versioned bypass, and metadata authority documented and verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
-| crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
+| crab-remote-git | Range and consumer qualification remain | Lifecycle documentation and README navigation verified |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
 | crab-auth | Key-source policy, power-loss durability, non-Unix locking remain | Diagnostic, load-outcome, and key-publication slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
@@ -2210,3 +2210,32 @@ and their CLAUDE.md symlink targets are verified. Prior published dc28b041ca0
 CI is terminal: 29 success, 11 skipped, two failures described above (browser
 contrast and rollback-artifact HTTP 504). New grouped changes require fresh CI;
 this evidence is not a full-workspace green verdict.
+
+
+### Remote Git README navigation
+
+The 280-line README mixed first-use guidance with detailed performance and
+qualification contracts. The entry page now presents the ownership/read path,
+an API selection table, the explicit operation-completion example, content
+representation ownership, and direct links to qualification instructions.
+The complete previous README body (14,290 characters) is preserved verbatim in
+REFERENCE.md, with a link back to the entry page. The scoped guide links both.
+
+Evidence: checked public exports and the open, operation, snapshot, finish,
+archive_stream, and runtime shutdown implementations against the entry page.
+The example remains byte-identical to its previous form and follows the
+finish rustdoc example. Explicit finish retains semantic and close errors;
+archive_stream owns that context, and shutdown waits for tracked contexts.
+Empty repository opening versus EmptyRepository snapshot failure is explicit.
+
+This is documentation navigation, not range/cancellation qualification or a
+runtime behavior change. No source, dependency, feature, fixture, or baseline
+changes. Local file links and all linked Markdown heading anchors resolve.
+The all-crate objective remains incomplete; the added reference preserves
+existing details without claiming fresh proof for every historical assertion.
+
+Validation: the matching OperationContext::finish doctest compiles and passes;
+formatting and diff checks pass. No runtime test expansion is needed for this
+prose-only batch. Published c808a1553d2 CI currently has two running and 19
+queued checks; keep that head stable while qualification runs and include this
+local documentation commit in the next grouped publication.

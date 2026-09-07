@@ -62,7 +62,8 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 
 ## Related documentation
 
-- `crates/crab-remote-git/README.md` — usage and detailed contracts.
+- `crates/crab-remote-git/README.md` — usage, entry points, and ownership map.
+- `crates/crab-remote-git/REFERENCE.md` — detailed consistency, lifecycle, performance, and qualification contracts.
 - `crates/crab-remote-git/Cargo.toml` — dependency and feature authority.
 
 Update this guide when entry points, ownership, invariants, features, or test
