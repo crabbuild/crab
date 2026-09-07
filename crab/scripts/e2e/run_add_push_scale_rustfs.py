@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from run_add_commit_push_rustfs_smoke import AddCommitPushSmoke, sha256_file
@@ -74,6 +75,17 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
             for index in range(args.code_files):
                 with (code / f"module_{index:04}.rs").open("a") as stream:
                     stream.write(f"pub const VERSION_{version}: u64 = {version};\n")
+        if version == 1:
+            selected = str(paths[0].relative_to(repo))
+            runner.run_crab(repo, ["add", "--skip-git-add", selected], name="deferred preparation")
+            runner.run_git(repo, ["add", selected], name="deferred Git publication")
+        if version == 2 and len(paths) > 1:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                pending = [pool.submit(runner.run_crab, repo,
+                           ["add", str(path.relative_to(repo))], name=f"concurrent add {path.name}")
+                           for path in paths[:2]]
+                for result in pending:
+                    result.result()
         runner.run_crab(repo, ["add", "models/"], name=f"v{version} add")
         runner.run_git(repo, ["add", "src"])
         runner.run_git(repo, ["commit", "-m", f"version {version}"])
