@@ -6,12 +6,24 @@ use serde::Deserialize;
 
 const MAX_ACTIVE_PROBE_RESPONSE_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone, Copy)]
+/// Borrowed probe credentials; Debug output omits their values.
+#[derive(Clone, Copy)]
 pub enum ActiveProbeAuth<'a> {
     None,
     Psk(&'a str),
     Bearer(&'a str),
     Mtls,
+}
+
+impl std::fmt::Debug for ActiveProbeAuth<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "None",
+            Self::Psk(_) => "Psk([REDACTED])",
+            Self::Bearer(_) => "Bearer([REDACTED])",
+            Self::Mtls => "Mtls",
+        })
+    }
 }
 
 #[derive(Debug)]

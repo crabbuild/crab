@@ -45,6 +45,10 @@ Empty default. `active-probe` adds HTTP probing; `remote-client` includes active
 
 Inline local_cache tests exercise fills and corrupt entries; path_class tests cover route admission. Inspect lifecycle/private filesystem tests for cache root changes.
 
+Credential Debug regressions live in `crates/crab-cache/tests/credential_debug.rs`.
+Run that integration target with no default features and with `remote-client`;
+the latter includes active-probe credentials and stored client headers.
+
 Run from repository root. The target below is the example for worktree `089c`;
 replace it with a unique directory for your checkout. Before compilation, verify
 `$HOME/Workspace` resolves to the mounted workspace volume and the target is

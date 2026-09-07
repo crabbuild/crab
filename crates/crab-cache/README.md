@@ -302,6 +302,10 @@ For a cache service, enable `remote-client` and construct `CacheClient` with
 the deployment's PSK, bearer, or mTLS settings. Call `is_healthy` and
 `capabilities` before using service-specific features.
 
+Cache credentials remain available to request construction, but their values
+are omitted from `Debug` output for `CacheServiceAuth`, `ActiveProbeAuth`, and
+`CacheClient`. The client reports its auth header name, not the stored value.
+
 ## Boundaries
 
 - [`crab-cache-store`](../crab-cache-store/README.md) composes these cache

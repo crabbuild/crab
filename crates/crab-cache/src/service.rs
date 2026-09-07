@@ -108,7 +108,9 @@ impl std::str::FromStr for CacheServiceMode {
 }
 
 /// Authentication mode for the cache service client.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// Debug output identifies the mode without exposing its credential.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum CacheServiceAuth {
     /// No authentication.
     #[default]
@@ -119,6 +121,17 @@ pub enum CacheServiceAuth {
     Bearer(String),
     /// mTLS client identity with no additional HTTP auth header.
     Mtls,
+}
+
+impl std::fmt::Debug for CacheServiceAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "None",
+            Self::Psk(_) => "Psk([REDACTED])",
+            Self::Bearer(_) => "Bearer([REDACTED])",
+            Self::Mtls => "Mtls",
+        })
+    }
 }
 
 #[cfg(test)]
