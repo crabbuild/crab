@@ -1,7 +1,6 @@
 //! `crab.yaml` schema and parser.
 //!
-//! See design §"`crab.yaml` Schema" for the shape. The parser is
-//! deliberately strict: unknown keys fail so typos surface at parse
+//! The parser is deliberately strict: unknown keys fail so typos surface at parse
 //! time rather than silently becoming no-ops.
 //!
 //! The grammar is forgiving only where users obviously want it to
@@ -10,9 +9,9 @@
 //! structured dep forms; `outs` accept a path string, Crab's
 //! explicit `path:` map, or DVC's path-key override form.
 //!
-//! Stage names are validated at parse time per R17. The returned
-//! [`Workflow`] carries already-validated [`Stage`] structs so the
-//! executor can trust their invariants.
+//! Parsing validates stage names and expands declarations. Callers must also
+//! run [`validate_semantics`] and build the dependency graph before treating
+//! the returned [`Workflow`] as an executable plan.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -30,11 +29,12 @@ use crate::{
 /// Parse a `crab.yaml` document from a string.
 ///
 /// Unknown keys at any level fail the parse. Stage names are
-/// validated against R17 as soon as each stage is materialized.
+/// validated as soon as each stage is materialized.
 /// Returns [`WorkflowError::YamlParse`] for syntax errors (the
 /// source error carries line / column via
 /// [`serde_yaml::Error::location`]) and
 /// [`WorkflowError::StageNameInvalid`] for name violations.
+/// Invalid retry ranges return [`WorkflowError::WorkflowValidation`].
 ///
 /// Template `${...}` expressions are resolved when a non-empty
 /// [`TemplateContext`] is supplied via [`parse_with_context`]. This
@@ -1719,7 +1719,7 @@ impl RawRetry {
             Some(s) => parse_duration(s, stage, "retry.max_backoff")?,
             None => default.max_backoff,
         };
-        Ok(RetryPolicy {
+        let policy = RetryPolicy {
             max_attempts: self.max_attempts.unwrap_or(default.max_attempts),
             initial_backoff,
             max_backoff,
@@ -1729,8 +1729,33 @@ impl RawRetry {
             on_exit_codes: self.on_exit_codes,
             on_signals: self.on_signals,
             on_timeout: self.on_timeout.unwrap_or(default.on_timeout),
-        })
+        };
+        if let Some(error) = retry_validation_errors(stage, &policy).into_iter().next() {
+            return Err(error);
+        }
+        Ok(policy)
     }
+}
+
+// Execution parses policies without running aggregate semantic validation.
+// Keep both entry points on the same range checks before a retry is scheduled.
+fn retry_validation_errors(stage: &StageName, retry: &RetryPolicy) -> Vec<WorkflowError> {
+    let mut errors = Vec::new();
+    if retry.max_attempts == 0 {
+        errors.push(WorkflowError::WorkflowValidation {
+            field: format!("stage '{stage}' retry.max_attempts"),
+            value: "0".to_owned(),
+            expected: "integer >= 1".to_owned(),
+        });
+    }
+    if !retry.backoff_multiplier.is_finite() || retry.backoff_multiplier < 0.0 {
+        errors.push(WorkflowError::WorkflowValidation {
+            field: format!("stage '{stage}' retry.backoff_multiplier"),
+            value: retry.backoff_multiplier.to_string(),
+            expected: "finite number >= 0".to_owned(),
+        });
+    }
+    errors
 }
 
 impl RawResources {
@@ -1898,9 +1923,10 @@ fn parse_memory(raw: &str, stage: &StageName) -> Result<u64> {
 ///
 /// Checks performed:
 /// - Self-loops: a stage dep that is also one of its own outs.
-/// - Timeout/retry value ranges (max_attempts >= 1, backoff > 0).
-/// - Duplicate out paths across stages (also caught by Graph::build,
-///   but included here for completeness in --validate mode).
+/// - Timeout and retry value ranges; zero retry delays are permitted.
+///
+/// Duplicate output ownership and dependency cycles are checked separately by
+/// [`crate::Graph::build`]. This function does not build an execution graph.
 pub fn validate_semantics(workflow: &Workflow) -> Vec<WorkflowError> {
     let mut errors = Vec::new();
 
@@ -1919,22 +1945,8 @@ pub fn validate_semantics(workflow: &Workflow) -> Vec<WorkflowError> {
             }
         }
 
-        // Retry value range checks.
         if let Some(ref retry) = stage.retry {
-            if retry.max_attempts == 0 {
-                errors.push(WorkflowError::WorkflowValidation {
-                    field: format!("stage '{name}' retry.max_attempts"),
-                    value: "0".to_owned(),
-                    expected: "integer >= 1".to_owned(),
-                });
-            }
-            if retry.backoff_multiplier < 0.0 {
-                errors.push(WorkflowError::WorkflowValidation {
-                    field: format!("stage '{name}' retry.backoff_multiplier"),
-                    value: retry.backoff_multiplier.to_string(),
-                    expected: "positive number".to_owned(),
-                });
-            }
+            errors.extend(retry_validation_errors(name, retry));
         }
 
         // Timeout range check: zero timeout is likely a mistake.
@@ -2705,6 +2717,71 @@ stages:
             .unwrap();
         assert!(stage.nondeterministic);
         assert!(stage.always_changed());
+    }
+
+    #[test]
+    fn semantic_validation_rejects_non_finite_retry_multipliers() {
+        for multiplier in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            // Programmatic callers can construct policies without YAML parsing.
+            let mut workflow = parse("stages:\n  a:\n    cmd: 'true'\n").unwrap();
+            let stage = workflow.stages.values_mut().next().unwrap();
+            stage.retry = Some(RetryPolicy {
+                backoff_multiplier: multiplier,
+                ..RetryPolicy::no_retry()
+            });
+            let errors = validate_semantics(&workflow);
+
+            assert!(
+                errors.iter().any(|error| matches!(
+                    error,
+                    WorkflowError::WorkflowValidation { field, .. }
+                        if field == "stage 'a' retry.backoff_multiplier"
+                )),
+                "accepted {multiplier}"
+            );
+        }
+    }
+
+    #[test]
+    fn parsing_rejects_invalid_stage_and_default_retry_policies() {
+        for (field, value) in [
+            ("max_attempts", "0"),
+            ("backoff_multiplier", "-1"),
+            ("backoff_multiplier", ".nan"),
+            ("backoff_multiplier", ".inf"),
+            ("backoff_multiplier", "-.inf"),
+        ] {
+            for (yaml, owner) in [
+                (
+                    format!("stages:\n  a:\n    cmd: 'true'\n    retry:\n      {field}: {value}\n"),
+                    "a",
+                ),
+                (
+                    format!(
+                        "defaults:\n  retry:\n    {field}: {value}\nstages:\n  a:\n    cmd: 'true'\n"
+                    ),
+                    "_defaults",
+                ),
+            ] {
+                let error = parse(&yaml).expect_err("invalid retry policy");
+                assert!(matches!(
+                    error,
+                    WorkflowError::WorkflowValidation { field: actual, .. }
+                        if actual == format!("stage '{owner}' retry.{field}")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn parsing_preserves_nonnegative_finite_retry_multipliers() {
+        for multiplier in [0.0, 0.5, 1.0, 2.0] {
+            let yaml = format!(
+                "stages:\n  a:\n    cmd: 'true'\n    retry:\n      backoff_multiplier: {multiplier}\n"
+            );
+            let workflow = parse(&yaml).expect("valid finite multiplier");
+            assert!(validate_semantics(&workflow).is_empty());
+        }
     }
 
     #[test]

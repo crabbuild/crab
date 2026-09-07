@@ -31,6 +31,9 @@ execution. Parsing and graph construction are sequential caller-owned steps.
 
 - Unknown schema keys must fail visibly; parse/expand before planning so typos cannot silently alter execution.
   Source: `crates/crab-workflow/src/yaml.rs`.
+- Stage and default retry policies share range checks with semantic validation;
+  reject invalid values during parsing so execution cannot bypass the checks.
+  Source: `crates/crab-workflow/src/yaml.rs`.
 - Reject duplicate output ownership and cycles before execution; preserve deterministic topological decisions.
   Source: `crates/crab-workflow/src/graph.rs`.
 - Keep per-attempt journal transitions separate from retry and DAG scheduling; inspect resume and journal consumers before changing durable state.

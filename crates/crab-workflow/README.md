@@ -72,6 +72,30 @@ Use `crab-workflow` for parsing, planning, hashing, and state contracts. The
 product command owns user-facing repository discovery and chooses when to
 invoke the executor, scheduler, or status renderer.
 
+## Retry policy
+
+Retry policy counts the initial execution in `max_attempts`. Configure both
+delay fields when retries should wait: their defaults are zero, and
+`max_backoff` caps even the first delay.
+Parsing rejects zero attempt budgets and negative or non-finite multipliers
+in both stage policies and defaults, before execution can schedule a retry.
+
+```yaml
+stages:
+  download:
+    cmd: "python download.py"
+    retry:
+      max_attempts: 4
+      initial_backoff: "500ms"
+      max_backoff: "2s"
+      backoff_multiplier: 2
+      on_exit_codes: [1]
+```
+
+Four consecutive failures with exit code 1 produce three retry delays:
+`500ms → 1s → 2s`. `retry::should_retry` only decides eligibility and delay;
+the product retry loop owns waiting, output cleanup, and journal transitions.
+
 ## Boundaries
 
 - [`crab-types`](../crab-types/README.md) owns shared stage hashes and
