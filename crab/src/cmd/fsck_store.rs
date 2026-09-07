@@ -1771,7 +1771,10 @@ mod tests {
             CrabError::AuthExpired {
                 path: "xorb".to_owned(),
             },
-            CrabError::Throttled { retry_after: None },
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            },
             CrabError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
             CrabError::Cancelled,
         ] {

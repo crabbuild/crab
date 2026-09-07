@@ -63,7 +63,7 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
             class => class,
         },
         CrabError::NetworkTransient(_) => RetryClass::Transient,
-        CrabError::Throttled { retry_after } => RetryClass::Throttled {
+        CrabError::Throttled { retry_after, .. } => RetryClass::Throttled {
             retry_after: *retry_after,
         },
         CrabError::CasConflict { .. } => RetryClass::StateDependent,
@@ -542,6 +542,7 @@ mod tests {
     fn classifies_throttled_and_carries_retry_after() {
         let err = CrabError::Throttled {
             retry_after: Some(Duration::from_millis(250)),
+            source: None,
         };
         assert_eq!(
             retry_class(&err),
@@ -671,6 +672,7 @@ mod tests {
                 if n == 0 {
                     Err(CrabError::Throttled {
                         retry_after: Some(retry_after),
+                        source: None,
                     })
                 } else {
                     Ok(7)

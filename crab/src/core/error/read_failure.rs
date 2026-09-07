@@ -65,9 +65,14 @@ impl ReadFailure {
                         });
                     }
                     StorageError::Io { source } => return diagnostic(Cause::Io(source)),
-                    StorageError::Throttled { retry_after } => CrabError::Throttled {
-                        retry_after: *retry_after,
-                    },
+                    StorageError::Throttled { retry_after, .. } => {
+                        // This temporary value formats the product diagnostic;
+                        // the provider cause stays in the original ReadError chain.
+                        CrabError::Throttled {
+                            retry_after: *retry_after,
+                            source: None,
+                        }
+                    }
                     StorageError::StateConflict { path } => CrabError::CasConflict {
                         path: path.clone(),
                         expected_etag: None,
@@ -272,8 +277,12 @@ mod tests {
             },
             StorageError::Throttled {
                 retry_after: Some(Duration::from_millis(275)),
+                source: Some(transport()),
             },
-            StorageError::Throttled { retry_after: None },
+            StorageError::Throttled {
+                retry_after: None,
+                source: None,
+            },
             StorageError::StateConflict { path: path() },
             StorageError::NotFound { path: path() },
             StorageError::InvalidHash {
@@ -353,6 +362,40 @@ mod tests {
             },
             StorageError::Internal("invariant failed".into()),
         ]
+    }
+
+    #[test]
+    fn throttling_source_survives_direct_and_read_diagnostics() {
+        let storage = || {
+            crab_storage::map_object_store_error(
+                object_store::Error::Generic {
+                    store: "test provider",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "service unavailable",
+                    )),
+                },
+                "repo/object",
+            )
+        };
+        for error in [
+            CrabError::from(storage()),
+            CrabError::Read(ReadFailure(ReadError::Storage(storage()))),
+        ] {
+            assert_eq!(error.code(), "CRAB-E0002");
+            assert_eq!(
+                error.details_json(),
+                serde_json::json!({"retry_after_ms": null})
+            );
+            assert_eq!(
+                retry_class(&error),
+                RetryClass::Throttled { retry_after: None }
+            );
+            let cause = std::iter::successors(error.source(), |source| (*source).source())
+                .find_map(|source| source.downcast_ref::<std::io::Error>())
+                .unwrap();
+            assert_eq!(cause.kind(), std::io::ErrorKind::WouldBlock);
+        }
     }
 
     #[test]

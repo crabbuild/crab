@@ -64,7 +64,7 @@ pub enum RetryClass {
 pub fn retry_class(err: &StorageError) -> RetryClass {
     match err {
         StorageError::NetworkTransient { .. } => RetryClass::Transient,
-        StorageError::Throttled { retry_after } => RetryClass::Throttled {
+        StorageError::Throttled { retry_after, .. } => RetryClass::Throttled {
             retry_after: *retry_after,
         },
         StorageError::StateConflict { .. } => RetryClass::StateDependent,
@@ -209,7 +209,10 @@ mod tests {
     #[test]
     fn classifies_throttled_and_carries_retry_after() {
         let retry_after = Some(Duration::from_millis(250));
-        let err = StorageError::Throttled { retry_after };
+        let err = StorageError::Throttled {
+            retry_after,
+            source: None,
+        };
 
         assert_eq!(retry_class(&err), RetryClass::Throttled { retry_after });
     }
@@ -365,6 +368,7 @@ mod tests {
                 if n == 0 {
                     Err(StorageError::Throttled {
                         retry_after: Some(retry_after),
+                        source: None,
                     })
                 } else {
                     Ok(7)

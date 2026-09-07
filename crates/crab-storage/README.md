@@ -69,7 +69,7 @@ storage API:
 | Mapped error | Retained provider source |
 | --- | --- |
 | `NetworkTransient`, `NotSupported`, `ObjectStore` | Original `object_store::Error` |
-| `Throttled` | No source; only an optional retry delay |
+| `Throttled` | Original provider error when mapped; local admission failures have no source |
 | `StateConflict`, `NotFound`, `Forbidden` | Object path, without the provider source |
 | `NoCredentials` | Neither provider source nor object path |
 

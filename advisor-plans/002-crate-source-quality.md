@@ -1,6 +1,9 @@
 # Rust crate source quality
 
-Status: in progress. Scope: all 21 crates under `crates/`.
+PR scope finalized at the user’s request. Coverage: all 21 crates under `crates/`.
+The ledger distinguishes verified changes from remaining qualification and
+follow-up opportunities; finalizing the PR does not certify every platform or
+assert that no further code-quality work exists.
 Review: [PR #159](https://github.com/crabbuild/crab/pull/159).
 
 The agent-guide work is complete in PR #158. This follow-up addresses source
@@ -4071,3 +4074,46 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   error shape changed, and no live provider qualification claimed.
 - Validation: strict public crab-storage rustdoc, cargo fmt --all, and
   git diff --check pass. PR checks remain live on the published head.
+
+
+### Throttling retains provider causes across storage and product boundaries
+
+- Baseline regression fails because map_object_store_error discards the nested
+  provider cause when it recognizes throttling. StorageError::Throttled and
+  CrabError::Throttled now retain an optional object_store::Error source.
+  Mapped provider errors carry Some; local admission and serialized push-summary
+  reconstruction have no provider cause and explicitly use None.
+- Source moves through From<StorageError> for CrabError and push's reverse
+  storage_error_from_crab conversion. ReadFailure keeps its original ReadError
+  chain; the temporary product value used only for formatting has no duplicate
+  source. Never clone/stringify the original provider error to build diagnostics.
+- Both retry classifiers still use only retry_after. CRAB-E0002, category,
+  details JSON, admission cooldown, and PushRejectReason's serialized summary
+  stay unchanged. A protocol summary remains a summary, not a source-bearing
+  error. Other source-free storage variants and text-based throttling detection
+  remain separate follow-up opportunities.
+- Evidence map includes storage error mapping/retry, both product conversion
+  directions, ReadFailure, push rejection summaries, command reconstruction,
+  and local read/push admission producers. Workspace search found all variant
+  uses; constructor/match updates compile in the CLI library test build.
+- Proof: 16 storage mapping tests, 15 storage retry tests, two new CLI source
+  tests, three read diagnostic/parity tests, 24 CLI retry tests, two throttled
+  admission/classification tests, and one push-summary test pass. CLI tests ran
+  through the freshly built library test executable; storage checks used Cargo.
+  Strict shared-storage all-target Clippy and public rustdoc pass.
+- Best fix assessment: retain the original cause in the existing variants and
+  move it through owned conversions. Optionality represents local throttling
+  without a provider failure; it is not a compatibility fallback. Non-test
+  growth consists of the field, its ownership comment, and explicit constructors.
+  No dependency, retry-policy, wire-format, or serialized-data change.
+
+### PR finalization
+
+- User requested finalization. Freeze implementation scope after the current
+  throttling batch; remaining ledger items are follow-up/qualification records,
+  not authorization to continue expanding this PR indefinitely.
+- Publish all validated local commits, refresh the PR description and mark it
+  ready for review. Do not merge. Fresh CI must qualify the final source head;
+  native Windows evidence remains a disclosed limitation until its run finishes.
+- Final local verification: CLI binary build passes with the recorded
+  macOS unwind-section linker warning; formatting and diff checks pass.

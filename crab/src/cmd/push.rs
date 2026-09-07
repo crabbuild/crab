@@ -367,6 +367,7 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
             RefPushOutcome::Rejected(PushRejectReason::Throttled { retry_after_secs }) => {
                 return CrabError::Throttled {
                     retry_after: retry_after_secs.map(std::time::Duration::from_secs),
+                    source: None,
                 };
             }
             RefPushOutcome::Rejected(reason) => {
@@ -2274,7 +2275,7 @@ mod tests {
         assert!(matches!(
             push_failure_source(std::slice::from_ref(&spec), &result),
             CrabError::Throttled {
-                retry_after: Some(delay)
+                retry_after: Some(delay), ..
             } if delay == std::time::Duration::from_secs(3)
         ));
 
@@ -2291,6 +2292,7 @@ mod tests {
 
         let setup_error = CrabError::Throttled {
             retry_after: Some(std::time::Duration::from_secs(3)),
+            source: None,
         };
         let setup_result = push_result_from_retryable_error(
             std::slice::from_ref(&spec),

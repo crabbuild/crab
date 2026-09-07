@@ -32,7 +32,11 @@ pub enum CrabError {
     // `retry_after` is advisory; the retry layer reads it directly rather
     // than parsing it back out of the Display output.
     #[error("throttled [CRAB-E0002]")]
-    Throttled { retry_after: Option<Duration> },
+    Throttled {
+        retry_after: Option<Duration>,
+        #[source]
+        source: Option<object_store::Error>,
+    },
 
     // Conflict — state-dependent.
     #[error("CAS conflict on {path} [CRAB-E0010]")]
@@ -1863,9 +1867,13 @@ impl From<crab_storage::error::StorageError> for CrabError {
             crab_storage::error::StorageError::NetworkTransient { source } => {
                 Self::NetworkTransient(source)
             }
-            crab_storage::error::StorageError::Throttled { retry_after } => {
-                Self::Throttled { retry_after }
-            }
+            crab_storage::error::StorageError::Throttled {
+                retry_after,
+                source,
+            } => Self::Throttled {
+                retry_after,
+                source,
+            },
             crab_storage::error::StorageError::StateConflict { path } => Self::CasConflict {
                 path,
                 expected_etag: None,
@@ -3007,7 +3015,7 @@ impl CrabError {
             Self::NetworkTransient(err) | Self::Storage(err) => {
                 serde_json::json!({ "source": err.to_string() })
             }
-            Self::Throttled { retry_after } => {
+            Self::Throttled { retry_after, .. } => {
                 serde_json::json!({
                     "retry_after_ms": retry_after.map(|d| d.as_millis() as u64)
                 })
@@ -3872,6 +3880,7 @@ mod tests {
             },
             CrabError::Throttled {
                 retry_after: Some(Duration::from_secs(3)),
+                source: None,
             },
             CrabError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
         ] {
@@ -3935,6 +3944,7 @@ mod tests {
             },
             CrabError::Throttled {
                 retry_after: Some(Duration::from_secs(3)),
+                source: None,
             },
             CrabError::Cancelled,
         ] {
@@ -4215,7 +4225,14 @@ mod tests {
             .exit_code(),
             1
         );
-        assert_eq!(CrabError::Throttled { retry_after: None }.exit_code(), 1);
+        assert_eq!(
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .exit_code(),
+            1
+        );
         assert_eq!(CrabError::StagingLocked { holder_pid: None }.exit_code(), 1);
     }
 
@@ -4277,7 +4294,11 @@ mod tests {
             "CRAB-E0001"
         );
         assert_eq!(
-            CrabError::Throttled { retry_after: None }.code(),
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .code(),
             "CRAB-E0002"
         );
         assert_eq!(
@@ -4343,7 +4364,11 @@ mod tests {
             ErrorCategory::Transient
         );
         assert_eq!(
-            CrabError::Throttled { retry_after: None }.category(),
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .category(),
             ErrorCategory::Transient
         );
     }
@@ -4439,7 +4464,13 @@ mod tests {
             })
             .is_retryable()
         );
-        assert!(CrabError::Throttled { retry_after: None }.is_retryable());
+        assert!(
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .is_retryable()
+        );
         assert!(
             CrabError::CasConflict {
                 path: "p".into(),
@@ -4541,6 +4572,7 @@ mod tests {
     fn details_json_optional_field() {
         let err = CrabError::Throttled {
             retry_after: Some(Duration::from_millis(500)),
+            source: None,
         };
         let d = err.details_json();
         assert_eq!(d["retry_after_ms"], 500);
@@ -4804,7 +4836,10 @@ mod tests {
                 store: "test",
                 source: "net".into(),
             }),
-            CrabError::Throttled { retry_after: None },
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            },
             CrabError::CasConflict {
                 path: "p".into(),
                 expected_etag: None,

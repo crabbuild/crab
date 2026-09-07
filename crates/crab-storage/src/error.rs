@@ -15,9 +15,14 @@ pub enum StorageError {
         source: object_store::Error,
     },
 
-    /// Provider throttling, optionally carrying a server retry hint.
+    /// Throttling with an optional retry hint and original provider failure.
+    /// Local admission failures have no provider source.
     #[error("storage throttled")]
-    Throttled { retry_after: Option<Duration> },
+    Throttled {
+        retry_after: Option<Duration>,
+        #[source]
+        source: Option<object_store::Error>,
+    },
 
     /// State-dependent conflict such as a failed compare-and-swap.
     #[error("storage state conflict: {path}")]

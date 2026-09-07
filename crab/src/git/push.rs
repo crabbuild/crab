@@ -3652,7 +3652,7 @@ impl PushRejectReason {
                 Self::NetworkTransient(error.to_string())
             }
             CrabError::NetworkTransient(_) => Self::NetworkTransient(err.to_string()),
-            CrabError::Throttled { retry_after } => Self::Throttled {
+            CrabError::Throttled { retry_after, .. } => Self::Throttled {
                 retry_after_secs: retry_after.map(|delay| {
                     delay
                         .as_secs()
@@ -5768,7 +5768,10 @@ async fn acquire_push_admission_lock(
                     if let Err(error) = ticket.release().await {
                         warn!(error = %error, "timed-out push admission ticket release failed");
                     }
-                    return Err(CrabError::Throttled { retry_after: None });
+                    return Err(CrabError::Throttled {
+                        retry_after: None,
+                        source: None,
+                    });
                 }
                 let delay =
                     push_admission_wait_delay(attempt, deadline.saturating_duration_since(now));
@@ -5870,7 +5873,7 @@ async fn while_admitted_until_commit<T>(
         tokio::select! {
             result = &mut operation => {
                 let cooldown = match (&result, &renewal_error) {
-                    (Err(CrabError::Throttled { retry_after }), None) => Some(
+                    (Err(CrabError::Throttled { retry_after, .. }), None) => Some(
                         push_admission_throttle_cooldown(*retry_after, permit.ttl())
                     ),
                     _ => None,
@@ -18315,7 +18318,13 @@ impl HeadBatchStore for StoreHeadBatch {
 fn storage_error_from_crab(error: CrabError) -> StorageError {
     match error {
         CrabError::NetworkTransient(source) => StorageError::NetworkTransient { source },
-        CrabError::Throttled { retry_after } => StorageError::Throttled { retry_after },
+        CrabError::Throttled {
+            retry_after,
+            source,
+        } => StorageError::Throttled {
+            retry_after,
+            source,
+        },
         CrabError::CasConflict { path, .. } => StorageError::StateConflict { path },
         CrabError::Io(source) => StorageError::Io { source },
         CrabError::CorruptObject { path, reason } => StorageError::CorruptObject { path, reason },
@@ -25225,6 +25234,7 @@ mod tests {
             async {
                 Err::<(), _>(CrabError::Throttled {
                     retry_after: Some(Duration::from_secs(2)),
+                    source: None,
                 })
             },
             committed_rx,
@@ -37084,6 +37094,27 @@ mod tests {
     }
 
     #[test]
+    fn storage_roundtrip_retains_throttling_source() {
+        use std::error::Error;
+
+        let error = crab_storage::StorageError::Throttled {
+            retry_after: Some(Duration::from_millis(275)),
+            source: Some(object_store::Error::Generic {
+                store: "test provider",
+                source: Box::new(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+            }),
+        };
+        let error = storage_error_from_crab(CrabError::from(error));
+        assert!(matches!(&error, crab_storage::StorageError::Throttled {
+            retry_after: Some(delay), ..
+        } if *delay == Duration::from_millis(275)));
+        let cause = std::iter::successors(error.source(), |source| (*source).source())
+            .find_map(|source| source.downcast_ref::<std::io::Error>())
+            .unwrap();
+        assert_eq!(cause.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
     fn from_error_preserves_retryable_transport_failures() {
         let network = CrabError::NetworkTransient(object_store::Error::Generic {
             store: "test",
@@ -37091,6 +37122,7 @@ mod tests {
         });
         let throttled = CrabError::Throttled {
             retry_after: Some(Duration::from_millis(1_500)),
+            source: None,
         };
 
         let network_reason = PushRejectReason::from_error(&network);
@@ -37118,7 +37150,10 @@ mod tests {
     fn from_error_retries_uncertain_ref_journal_commit() {
         let metadata = crab_metadata::error::MetadataError::RefJournalCommitUncertain {
             transaction_id: "a".repeat(64),
-            source: Box::new(crab_storage::StorageError::Throttled { retry_after: None }),
+            source: Box::new(crab_storage::StorageError::Throttled {
+                retry_after: None,
+                source: None,
+            }),
             verification: None,
         };
         let error = CrabError::Io(std::io::Error::other(metadata));
