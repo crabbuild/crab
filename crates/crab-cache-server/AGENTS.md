@@ -34,6 +34,9 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
   background task startup. Await `PreparedServer::shutdown` after preparation
   succeeds; dropping an evictor handle does not stop its task.
   Sources: `crates/crab-cache-server/src/server.rs`, `crates/crab-cache-server/src/evictor.rs`.
+- Handle fallible Tokio runtime creation at the binary boundary for serve,
+  check, and onboarding probe; resource exhaustion is a startup error, not an
+  `expect` panic. Source: `crates/crab-cache-server/src/bin/crab_cache.rs`.
 - Register shutdown signals before preparing runtime dependencies. TLS signal
   waiting stays inside the serving future; listener failure must not detach it.
   Preserve the separate HTTP and TLS drain policies.

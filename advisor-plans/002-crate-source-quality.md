@@ -58,7 +58,7 @@ not claims that the named code is defective.
 | crab-auth | Key-source policy, power-loss durability, non-Unix locking remain | Diagnostic, load-outcome, and key-publication slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
-| crab-cache-server | Eviction concurrency, shutdown, request validation | Hex guards and startup rejection verified; preflight, strict lint/docs pass |
+| crab-cache-server | Eviction concurrency, broader shutdown and request validation remain | Startup/TLS ownership, checked JSON/text output, and runtime resource-error slices verified |
 | crab-http-server | Archive worker draining, production-route cancellation, embedded assets, service errors remain | HTTP/1 LFS and archive framing verified; request/admission ownership documented |
 | crab-workflow | Remaining cancellation ownership and broader native qualification remain | Async lock waiting, retry parsing, metadata identity, serialized replay, root-relative materialization, and cleanup slices verified |
 
@@ -3042,3 +3042,43 @@ output commits are retained locally for grouped publication while PR head
 b81b4fdda9c has active CI, including cache-service smoke and native workflow
 checks. Native dispatch34148861825 still has its Windows smoke step running;
 no competing dispatch or restart has been issued.
+
+
+### Cache-service runtime resource failure
+
+All three binary runtime creation sites (serve, check, onboarding probe) called
+Runtime::new().expect. Locked Tokio1.52.1 Runtime::new delegates to the unchanged
+multi-thread builder with all drivers enabled; the builder propagates
+Driver::new errors, and the I/O driver propagates mio::Poll::new errors. These
+recoverable errors now share one binary handler, preserve the I/O diagnostic,
+and exit1 before block_on. Runtime flavor, workers, and driver settings remain
+unchanged. This does not catch arbitrary dependency panics or prove every OS
+thread-creation failure is recoverable.
+
+An isolated Unix test child lowers its descriptor limit via sh, loads the test
+binary, and then fills available descriptors before invoking onboarding probe.
+Old code panics on the real "Too many open files" runtime error. New code
+returns normally with exit1 and the startup diagnostic; no probe work starts.
+An earlier standalone experiment filled descriptors before exec and aborted in
+loading, so it was rejected as evidence; the retained test fills only after the
+child binary has loaded. Host limits are unchanged. The test-only child marker
+is not a production configuration or runtime override.
+
+Five binary tests,41 cache-server CLI tests, strict all-target Clippy, and the
+cache-server binary build pass. The two sibling handlers use the same fallible
+runtime owner and immediate failure return; their normal CLI contracts pass.
+No expect call remains in the binary production source. The Unix failure test
+still needs Linux CI execution; this local proof ran on macOS.
+
+### Published-head browser gate observation
+
+PR head b81b4fdda9c has a failed Repository browser interactions job101837452434
+in run34152047506.29 scenarios pass; the release-page scenario fails axe color
+contrast on the delete tooltip (#171b21 foreground over #0f1319, ratio1.07).
+The packages/repository tree object is exactly identical to origin/main
+(4889f8fd8012415770e0d8fa50ef54f8dbb85ace). Its release test mocks /api/** and
+Playwright serves Vite, so this observation does not exercise Rust cache-server
+output/startup behavior. No repository-browser file, dependency, or CI workflow
+has been changed by these source batches. The UI root cause has not been
+reproduced on main; the failed gate remains recorded rather than relabeled green.
+Native dispatch34148861825 still has a live Windows smoke step at this point.

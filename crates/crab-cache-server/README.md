@@ -86,6 +86,10 @@ evicting cache data. Invalid origin configuration therefore leaves the cache
 untouched and starts no maintenance task. Successful client construction does
 not prove origin connectivity; the readiness check also probes the origin.
 
+If Tokio cannot initialize its runtime, serve, check, and onboarding probe
+return exit code 1 with the underlying startup error on stderr. They do not
+begin asynchronous service or probe work in that case.
+
 The CLI also provides `evidence` verification/gating and `onboarding`
 render/check/probe commands for repeatable deployment proof.
 

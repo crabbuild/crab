@@ -335,6 +335,16 @@ fn init_tracing() {
         .init();
 }
 
+fn runtime() -> Option<tokio::runtime::Runtime> {
+    match tokio::runtime::Runtime::new() {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            eprintln!("error: failed to create Tokio runtime: {error}");
+            None
+        }
+    }
+}
+
 fn run(config: CacheServerConfig) -> ExitCode {
     tracing::info!(
         listen_addr = %config.listen_addr,
@@ -344,7 +354,9 @@ fn run(config: CacheServerConfig) -> ExitCode {
         "crab-cache-server configured"
     );
 
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let Some(rt) = runtime() else {
+        return ExitCode::from(1);
+    };
 
     match rt.block_on(run_server(config)) {
         Ok(()) => {
@@ -365,7 +377,9 @@ fn check(
     profile: CheckProfile,
     trusted_proxy_boundary: bool,
 ) -> ExitCode {
-    let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+    let Some(rt) = runtime() else {
+        return ExitCode::from(1);
+    };
     let report = apply_preflight_profile(
         rt.block_on(run_preflight(config)),
         PreflightProfileOptions {
@@ -642,7 +656,9 @@ fn onboarding(command: OnboardingCommand) -> ExitCode {
                 trusted_proxy_boundary,
                 client_probe_repo,
             };
-            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            let Some(rt) = runtime() else {
+                return ExitCode::from(1);
+            };
             let report = rt.block_on(probe_onboarding_bundle(&bundle_dir, &options));
             if json {
                 if !emit_json(&report) {
@@ -1107,6 +1123,52 @@ mod tests {
                 "{stage} failure must propagate with its I/O kind"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(clippy::unwrap_used, reason = "isolated subprocess test setup")]
+    fn runtime_resource_failure_returns_normal_error() {
+        const CHILD: &str = "CRAB_TEST_RUNTIME_RESOURCE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new("sh")
+                .args(["-c", "ulimit -n 64 || exit 90; exec \"$@\"", "runtime-test"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::runtime_resource_failure_returns_normal_error",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("failed to create Tokio runtime")
+            );
+            return;
+        }
+
+        // Fill descriptors only after the test binary has loaded. Exhausting
+        // them before exec can fail in the dynamic loader instead of Tokio.
+        let mut descriptors = Vec::new();
+        while let Ok(file) = std::fs::File::open("/dev/null") {
+            descriptors.push(file);
+        }
+        let status = onboarding(OnboardingCommand::Probe {
+            bundle_dir: PathBuf::from("unused-runtime-failure-bundle"),
+            json: true,
+            fail_on_warn: false,
+            trusted_proxy_boundary: false,
+            client_probe: false,
+            client_probe_repo: None,
+        });
+        drop(descriptors);
+        assert_eq!(status, ExitCode::from(1));
     }
 
     fn report(status: PreflightStatus) -> CacheServerPreflightReport {
