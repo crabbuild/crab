@@ -47,11 +47,11 @@ not claims that the named code is defective.
 | crab-storage | Credential diagnostics; retry/error classification remains | Diagnostic slice verified |
 | crab-metadata | Reader/writer closure and feature boundaries | Pending |
 | crab-staging | Flush-before-publication and recovery ownership | Pending |
-| crab-coordination | Renewal cancellation and lock release ownership | Pending |
+| crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | Upload I/O causes; integrity and lock ownership remain | Upload diagnostic slice verified |
 | crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
 | crab-cache-store | Origin authority, corrupt-cache repair, range validation | Pending |
-| crab-read | Hydration integrity and error propagation to consumers | Pending |
+| crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Operation finish/shutdown and range error propagation | Pending |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
@@ -293,3 +293,35 @@ passes. Its test binary emitted an Apple linker warning about the size of the
 DWARF unwind section; compilation and execution succeeded. README now gives an outcome table and distinguishes coordinator
 commit from durable regional projection. CLI push and protected receive both
 persist that projection before acknowledging regional materialization.
+
+## Term-resolution cancellation ownership
+
+Owner: `crab-read/src/term_resolver.rs`. Both term and sequence batching on
+current main can return on cancellation while spawned workers remain detached,
+bypassing `close_file_index_lookup`. Locked Tokio 1.52.1 `JoinHandle` docs
+explicitly describe detach-on-drop. The callee's `FileIndexLookupSession::close`
+consumes and closes its SlateDB reader; dropping worker handles is insufficient.
+
+Both batch paths now stop spawning on cancellation, drain all existing handles,
+and then close the lookup session before selecting the returned error. Workers
+waiting for admission observe cancellation directly. A shared drain routine
+retains strict first-error behavior and cancellation precedence. Already admitted
+I/O is allowed to finish; this is orderly cleanup, not an I/O timeout or an
+asynchronous drop guarantee. README and scoped guidance state that callers must
+await batch futures through cancellation.
+
+Callers: the CLI diff facade forwards terms and sequences; `cmd/diff.rs` and
+`cmd/diff_driver.rs` compose it. The strict sequence method is exported but has
+no current workspace production caller. Both sequence policies use the same
+cleanup path. Normal per-file best-effort omission remains unchanged.
+
+The drain regression failed with the original early-return branch extracted
+into the common routine, then passed after retaining cancellation until all
+workers joined. It proves shared ownership is released before return in both
+strict and best-effort modes. Public batch admission cancellation is additionally
+checked for all three APIs. Existing origin/cache shard reuse and corrupt-range
+repair tests remain the integrity regression coverage. Broader hydration and
+real SlateDB cancellation qualification remain separate work.
+
+Validation: all four term-resolution tests and strict all-target Clippy pass.
+Production code shrank; added lines are regression tests and lifecycle docs.

@@ -34,7 +34,7 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
   Source: `crates/crab-read/src/fetch_admission.rs`.
 - Preserve the difference between full-file hash verification and range/chunk verification; partial output is not proof of the complete file.
   Source: `crates/crab-read/src/hydrator.rs`.
-- Close file-index lookup sessions after successful, failed, and cancelled resolution; follow the explicit close helper when changing batching.
+- Drain every spawned term-resolution worker before closing the shared file-index lookup session, including cancellation and strict errors. Await batch futures through cancellation; dropping a future does not perform asynchronous cleanup.
   Source: `crates/crab-read/src/term_resolver.rs`.
 
 ## Features and platform

@@ -87,6 +87,10 @@ impl TermResolver {
     /// On per-file failure (missing file-index or shard), a `warn!` is
     /// logged and the file is omitted from the result map. The caller
     /// handles graceful degradation.
+    ///
+    /// Cancellation stops admission, drains admitted work, and closes the shared
+    /// file-index session before returning. Await this future to completion;
+    /// dropping it cannot perform asynchronous cleanup.
     pub async fn resolve_batch(
         &self,
         file_hashes: &[(MerkleHash, Option<MerkleHash>)],
@@ -106,7 +110,9 @@ impl TermResolver {
         let mut handles = Vec::with_capacity(file_hashes.len());
 
         for &(file_hash, shard_hint) in file_hashes {
-            check_cancelled(cancel)?;
+            if cancel.is_cancelled() {
+                break;
+            }
 
             let semaphore = Arc::clone(&semaphore);
             let shard_readers = Arc::clone(&shard_readers);
@@ -118,10 +124,10 @@ impl TermResolver {
             let file_index_lookup = Arc::clone(&file_index_lookup);
 
             let handle = tokio::spawn(async move {
-                let _permit = semaphore
-                    .acquire()
-                    .await
-                    .map_err(|_| ReadError::Cancelled)?;
+                let _permit = tokio::select! {
+                    permit = semaphore.acquire() => permit.map_err(|_| ReadError::Cancelled)?,
+                    () = cancel.cancelled() => return Err(ReadError::Cancelled),
+                };
                 check_cancelled(&cancel)?;
 
                 match resolve_single(
@@ -163,22 +169,10 @@ impl TermResolver {
             handles.push(handle);
         }
 
-        // Await all tasks, propagating cancellation.
-        for handle in handles {
-            check_cancelled(cancel)?;
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(ReadError::Cancelled)) => return Err(ReadError::Cancelled),
-                Ok(Err(e)) => {
-                    warn!(err = %e, "unexpected error in term resolution task");
-                }
-                Err(e) => {
-                    warn!(err = %e, "term resolution task panicked");
-                }
-            }
-        }
-
+        let outcome = drain_resolution_tasks(handles, false).await;
         close_file_index_lookup(file_index_lookup).await;
+        check_cancelled(cancel)?;
+        outcome?;
 
         let map = match Arc::try_unwrap(results) {
             Ok(mutex) => mutex.into_inner(),
@@ -191,7 +185,8 @@ impl TermResolver {
     ///
     /// Uses the same lookup and caching path as [`Self::resolve_batch`],
     /// then expands each file's reconstruction terms through xorb metadata
-    /// so callers can compare actual chunk hashes.
+    /// so callers can compare actual chunk hashes. Cancellation and cleanup
+    /// follow [`Self::resolve_batch`]; await the future through cancellation.
     pub async fn resolve_sequences_batch(
         &self,
         files: &[(MerkleHash, Option<MerkleHash>, u64)],
@@ -240,7 +235,9 @@ impl TermResolver {
         let mut handles = Vec::with_capacity(files.len());
 
         for &(file_hash, shard_hint, file_size) in files {
-            check_cancelled(cancel)?;
+            if cancel.is_cancelled() {
+                break;
+            }
 
             let semaphore = Arc::clone(&semaphore);
             let shard_readers = Arc::clone(&shard_readers);
@@ -253,10 +250,10 @@ impl TermResolver {
             let file_index_lookup = Arc::clone(&file_index_lookup);
 
             let handle = tokio::spawn(async move {
-                let _permit = semaphore
-                    .acquire()
-                    .await
-                    .map_err(|_| ReadError::Cancelled)?;
+                let _permit = tokio::select! {
+                    permit = semaphore.acquire() => permit.map_err(|_| ReadError::Cancelled)?,
+                    () = cancel.cancelled() => return Err(ReadError::Cancelled),
+                };
                 check_cancelled(&cancel)?;
 
                 let context = SequenceResolveContext {
@@ -299,39 +296,10 @@ impl TermResolver {
             handles.push(handle);
         }
 
-        let mut first_error = None;
-        for handle in handles {
-            check_cancelled(cancel)?;
-            match handle.await {
-                Ok(Ok(())) => {}
-                Ok(Err(ReadError::Cancelled)) => return Err(ReadError::Cancelled),
-                Ok(Err(e)) => {
-                    if strict {
-                        if first_error.is_none() {
-                            first_error = Some(e);
-                        }
-                        continue;
-                    }
-                    warn!(err = %e, "unexpected error in chunk sequence resolution task");
-                }
-                Err(e) => {
-                    if strict {
-                        if first_error.is_none() {
-                            first_error = Some(ReadError::internal(format!(
-                                "chunk sequence resolution task panicked: {e}"
-                            )));
-                        }
-                        continue;
-                    }
-                    warn!(err = %e, "chunk sequence resolution task panicked");
-                }
-            }
-        }
-
+        let outcome = drain_resolution_tasks(handles, strict).await;
         close_file_index_lookup(file_index_lookup).await;
-        if let Some(error) = first_error {
-            return Err(error);
-        }
+        check_cancelled(cancel)?;
+        outcome?;
 
         let map = match Arc::try_unwrap(results) {
             Ok(mutex) => mutex.into_inner(),
@@ -339,6 +307,28 @@ impl TermResolver {
         };
         Ok(map)
     }
+}
+
+// Join every worker before the caller closes the shared lookup session. Dropping
+// a JoinHandle detaches its task, leaving the reader in use after batch return.
+async fn drain_resolution_tasks(
+    handles: Vec<tokio::task::JoinHandle<Result<()>>>,
+    strict: bool,
+) -> Result<()> {
+    let mut first_error = None;
+    for handle in handles {
+        let error = match handle.await {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error,
+            Err(error) => ReadError::internal(format!("term resolution task failed: {error}")),
+        };
+        if matches!(error, ReadError::Cancelled) || (strict && first_error.is_none()) {
+            first_error = Some(error);
+        } else if !strict {
+            warn!(err = %error, "term resolution task failed");
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 /// Resolve a single file hash to its reconstruction terms.
@@ -758,6 +748,83 @@ mod tests {
     use super::*;
     use crab_xet::xorb::builder::{RunId, XorbBuilder};
     use crab_xet::xorb::format::Chunk;
+
+    #[tokio::test]
+    async fn cancellation_drains_workers_before_returning_shared_state() {
+        for strict in [false, true] {
+            let shared = Arc::new(());
+            let worker_shared = Arc::clone(&shared);
+            let (finish, waiting) = tokio::sync::oneshot::channel();
+            let (observed, cancellation) = tokio::sync::oneshot::channel();
+            let cancelled = tokio::spawn(async {
+                observed.send(()).unwrap();
+                Err(ReadError::Cancelled)
+            });
+            cancellation.await.unwrap();
+            let pending = tokio::spawn(async move {
+                waiting.await.unwrap();
+                drop(worker_shared);
+                Ok(())
+            });
+            let drain = drain_resolution_tasks(vec![cancelled, pending], strict);
+            tokio::pin!(drain);
+            assert!(
+                futures_util::poll!(&mut drain).is_pending(),
+                "cancellation must wait for the worker that still owns shared state"
+            );
+            finish.send(()).unwrap();
+            assert!(matches!(drain.await, Err(ReadError::Cancelled)));
+            assert!(
+                Arc::try_unwrap(shared).is_ok(),
+                "all workers released ownership"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_batches_release_workers_waiting_for_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(temp.path().join("cache")));
+        let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(origin.clone(), "org/repo".into());
+        let store = CachingStore::new_with_local_cache(
+            origin,
+            crab_cache_store::CacheConfig::default(),
+            Arc::clone(&cache),
+        )
+        .unwrap();
+        // No permits makes admission deterministic without issuing metadata I/O.
+        let resolver = TermResolver::new(store, router, cache, 0);
+        for mode in ["terms", "sequences", "strict"] {
+            let cancel = CancellationToken::new();
+            let batch = async {
+                let hash = MerkleHash::default();
+                let files = [(hash, None, 0)];
+                let source = ChunkSequenceSourceKind::Committed;
+                match mode {
+                    "terms" => resolver
+                        .resolve_batch(&[(hash, None)], &cancel)
+                        .await
+                        .map(|_| ()),
+                    "sequences" => resolver
+                        .resolve_sequences_batch(&files, source, &cancel)
+                        .await
+                        .map(|_| ()),
+                    _ => resolver
+                        .resolve_sequences_batch_strict(&files, source, &cancel)
+                        .await
+                        .map(|_| ()),
+                }
+            };
+            tokio::pin!(batch);
+            assert!(futures_util::poll!(&mut batch).is_pending());
+            cancel.cancel();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), batch)
+                .await
+                .expect("cancelled admission must not strand batch workers");
+            assert!(matches!(result, Err(ReadError::Cancelled)), "{mode}");
+        }
+    }
 
     fn chunk(seed: u8, size: usize) -> Chunk {
         Chunk::new(bytes::Bytes::from(vec![seed; size]))

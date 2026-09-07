@@ -119,6 +119,23 @@ Size violations are integrity errors; other source failures are preserved
 rather than relabeled as short output. Partial-range success checks the exact
 clamped length and underlying xorb/chunk integrity, not the whole-file hash.
 
+## Diff term resolution
+
+`TermResolver` serves diff callers that need reconstruction terms or ordered
+chunk sequences rather than file output.
+
+| API | Per-file resolution failure |
+| --- | --- |
+| `resolve_batch` | Log and omit the unresolved file. |
+| `resolve_sequences_batch` | Log and omit the unresolved file. |
+| `resolve_sequences_batch_strict` | Return the first worker error after draining the batch. |
+
+Cancellation stops admission and drains workers before closing the shared
+file-index lookup session. Workers waiting for a concurrency permit observe the
+cancellation token; already admitted metadata reads finish before cleanup.
+Await the batch through cancellation. Dropping the future does not join its
+spawned workers or close the session asynchronously.
+
 ## Boundaries
 
 Dependency preflight consumes `crab-git`'s validated pointer contracts and
