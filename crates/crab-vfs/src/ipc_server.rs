@@ -1034,6 +1034,10 @@ async fn handle_shutdown(coordinator: &Arc<Mutex<Coordinator>>) -> IpcResponse {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected protocol variants"
+)]
 mod tests {
     use super::*;
 

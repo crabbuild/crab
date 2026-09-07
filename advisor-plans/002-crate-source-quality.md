@@ -749,3 +749,14 @@ Simplified two error-result matches to let-else and made the source variant
 match exhaustive. Both error-path tests and all 24 source tests pass. Strict
 all-target crab-vfs Clippy with nfs now passes. This qualifies that feature/lint
 surface only: fuse/platform and lifecycle-completion proof remain outstanding.
+
+## VFS FUSE feature lint qualification
+
+Strict all-target Clippy now passes with fuse and with nfs separately. FUSE-only
+builds exposed shared async APIs whose awaits exist only with nfs: daemon
+shutdown_mount_session/read_status and mount_control::reset_overlay. Added
+feature-conditional expectations naming that API contract, rather than changing
+public signatures or duplicating backend entry points. read_status mutability
+is now scoped to nfs. Test-panic expectations are limited to FUSE test modules;
+four test pointer conversions use pointer::cast without changing addresses.
+No mounting was performed; this is compile/lint proof, not native teardown proof.

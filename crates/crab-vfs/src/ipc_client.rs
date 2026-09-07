@@ -537,6 +537,10 @@ pub async fn try_ipc_reset_overlay(mountpoint: &str) -> Result<crate::publish::O
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected protocol variants"
+)]
 mod tests {
     use super::*;
     use crate::ipc_server::{IpcRequest, IpcResponse};

@@ -381,6 +381,13 @@ pub async fn commit(
     }
 }
 
+#[cfg_attr(
+    not(feature = "nfs"),
+    expect(
+        clippy::unused_async,
+        reason = "shared backend API awaits NFS operations when enabled"
+    )
+)]
 pub async fn reset_overlay(path: &Path) -> Result<Option<crate::publish::OverlayDiff>> {
     #[cfg(feature = "nfs")]
     if let Some(context) = nfs_context(path)? {

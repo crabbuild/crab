@@ -1579,6 +1579,13 @@ impl DaemonService {
     }
 }
 
+#[cfg_attr(
+    not(feature = "nfs"),
+    expect(
+        clippy::unused_async,
+        reason = "shared backend API awaits NFS operations when enabled"
+    )
+)]
 async fn shutdown_mount_session(
     name: &str,
     session: RepoMountSession,
@@ -1809,8 +1816,17 @@ fn publishable_overlay_state(overlay: &OverlayStore) -> (i64, Vec<String>) {
 }
 
 /// Read persisted repo state and verify a live daemon-owned NFS control plane.
+#[cfg_attr(
+    not(feature = "nfs"),
+    expect(
+        clippy::unused_async,
+        reason = "shared backend API awaits NFS operations when enabled"
+    )
+)]
 pub async fn read_status(config: &RepoConfig, daemon_root: &Path) -> RepoStatus {
-    let mut status = read_persisted_status(config, daemon_root);
+    let status = read_persisted_status(config, daemon_root);
+    #[cfg(feature = "nfs")]
+    let mut status = status;
     #[cfg(feature = "nfs")]
     if config.backend == DaemonMountBackend::Nfs {
         let paths = config.computed_paths(daemon_root);
