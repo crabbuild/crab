@@ -642,91 +642,99 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
         "mount pipeline ready"
     );
 
-    match backend {
-        ResolvedMountBackend::Nfs => {
-            #[cfg(feature = "nfs")]
-            {
-                use crate::vfs::nfs_mount;
-                use std::sync::Arc;
+    let hydration = std::sync::Arc::clone(&output.hydration);
+    let result = async {
+        match backend {
+            ResolvedMountBackend::Nfs => {
+                #[cfg(feature = "nfs")]
+                {
+                    use crate::vfs::nfs_mount;
+                    use std::sync::Arc;
 
-                if !opts.foreground {
-                    warn!("NFS daemon mode helper unavailable, running in foreground");
+                    if !opts.foreground {
+                        warn!("NFS daemon mode helper unavailable, running in foreground");
+                    }
+                    let config = nfs_mount::NfsMountConfig {
+                        mountpoint: mountpoint.clone(),
+                        git_dir: pipeline_config.git_dir.display().to_string(),
+                        exclusive_verifiers_path: pipeline_config
+                            .cache_dir
+                            .join("nfs-exclusive-verifiers.json"),
+                        read_only: opts.read_only,
+                        auto_refresh_interval: (!opts.read_only && !opts.no_refresh)
+                            .then_some(Duration::from_secs(30)),
+                        control_endpoint_override: None,
+                    };
+                    nfs_mount::install_signal_handler(opts.cancel.clone());
+                    let resolver = Arc::clone(&output.resolver);
+                    let engine = Arc::clone(&output.engine);
+                    let runtime = crate::vfs::nfs_control::NfsMountRuntime {
+                        output,
+                        config: pipeline_config.clone(),
+                    };
+                    let mounted =
+                        nfs_mount::mount(&config, resolver, engine, Some(runtime)).await?;
+
+                    println!("Mounted via NFS at {}", mountpoint.display());
+                    println!("Press Ctrl+C to unmount.");
+
+                    nfs_mount::run_until_cancelled(mounted, opts.cancel).await?;
+                    println!("Unmounted.");
                 }
-                let config = nfs_mount::NfsMountConfig {
-                    mountpoint: mountpoint.clone(),
-                    git_dir: pipeline_config.git_dir.display().to_string(),
-                    exclusive_verifiers_path: pipeline_config
-                        .cache_dir
-                        .join("nfs-exclusive-verifiers.json"),
-                    read_only: opts.read_only,
-                    auto_refresh_interval: (!opts.read_only && !opts.no_refresh)
-                        .then_some(Duration::from_secs(30)),
-                    control_endpoint_override: None,
-                };
-                nfs_mount::install_signal_handler(opts.cancel.clone());
-                let resolver = Arc::clone(&output.resolver);
-                let engine = Arc::clone(&output.engine);
-                let runtime = crate::vfs::nfs_control::NfsMountRuntime {
-                    output,
-                    config: pipeline_config.clone(),
-                };
-                let mounted = nfs_mount::mount(&config, resolver, engine, Some(runtime)).await?;
-
-                println!("Mounted via NFS at {}", mountpoint.display());
-                println!("Press Ctrl+C to unmount.");
-
-                nfs_mount::run_until_cancelled(mounted, opts.cancel).await?;
-                println!("Unmounted.");
+                #[cfg(not(feature = "nfs"))]
+                {
+                    return Err(CrabError::Configuration {
+                        key: "NFS support was not compiled into this Crab build".into(),
+                        origin: "crab mount --backend=nfs".into(),
+                    });
+                }
             }
-            #[cfg(not(feature = "nfs"))]
-            {
-                return Err(CrabError::Configuration {
-                    key: "NFS support was not compiled into this Crab build".into(),
-                    origin: "crab mount --backend=nfs".into(),
-                });
+            ResolvedMountBackend::Fuse => {
+                #[cfg(feature = "fuse")]
+                {
+                    use crate::vfs::mount;
+
+                    let config = mount::MountConfig {
+                        mountpoint: mountpoint.clone(),
+                        git_dir: pipeline_config.git_dir.display().to_string(),
+                        write_pid: !opts.foreground,
+                        crab_dir: pipeline_config.cache_dir.clone(),
+                        read_only: opts.read_only,
+                    };
+                    if !opts.foreground {
+                        warn!("daemon mode not supported on this platform, running in foreground");
+                    }
+                    mount::install_signal_handler(opts.cancel.clone(), &rt);
+                    let mounted =
+                        mount::mount(&config, output.resolver, output.engine, rt.clone())?;
+
+                    println!("Mounted via FUSE at {}", mountpoint.display());
+                    println!("Press Ctrl+C to unmount.");
+
+                    mount::run_until_cancelled(
+                        mounted.session,
+                        &mountpoint,
+                        opts.cancel,
+                        &pipeline_config.cache_dir,
+                        rt,
+                    )?;
+                    println!("Unmounted.");
+                }
+                #[cfg(not(feature = "fuse"))]
+                {
+                    return Err(CrabError::Configuration {
+                        key: "FUSE support was not compiled into this Crab build".into(),
+                        origin: "crab mount --backend=fuse".into(),
+                    });
+                }
             }
         }
-        ResolvedMountBackend::Fuse => {
-            #[cfg(feature = "fuse")]
-            {
-                use crate::vfs::mount;
 
-                let config = mount::MountConfig {
-                    mountpoint: mountpoint.clone(),
-                    git_dir: pipeline_config.git_dir.display().to_string(),
-                    write_pid: !opts.foreground,
-                    crab_dir: pipeline_config.cache_dir.clone(),
-                    read_only: opts.read_only,
-                };
-                if !opts.foreground {
-                    warn!("daemon mode not supported on this platform, running in foreground");
-                }
-                mount::install_signal_handler(opts.cancel.clone(), &rt);
-                let mounted = mount::mount(&config, output.resolver, output.engine, rt.clone())?;
-
-                println!("Mounted via FUSE at {}", mountpoint.display());
-                println!("Press Ctrl+C to unmount.");
-
-                mount::run_until_cancelled(
-                    mounted.session,
-                    &mountpoint,
-                    opts.cancel,
-                    &pipeline_config.cache_dir,
-                    rt,
-                )?;
-                println!("Unmounted.");
-            }
-            #[cfg(not(feature = "fuse"))]
-            {
-                return Err(CrabError::Configuration {
-                    key: "FUSE support was not compiled into this Crab build".into(),
-                    origin: "crab mount --backend=fuse".into(),
-                });
-            }
-        }
+        Ok(())
     }
-
-    Ok(())
+    .await;
+    hydration.shutdown().await;
+    result
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2224,15 +2232,26 @@ async fn run_foreground_mode(
     // Install signal handler for graceful shutdown.
     mount::install_signal_handler(cancel.clone(), &rt);
 
-    let mounted = mount::mount(&config, resolver, engine, rt.clone())?;
+    let result = (|| {
+        let mounted = mount::mount(
+            &config,
+            resolver,
+            std::sync::Arc::clone(&engine),
+            rt.clone(),
+        )?;
 
-    println!("Mounted at {}", mountpoint.display());
-    println!("Press Ctrl+C to unmount.");
+        println!("Mounted at {}", mountpoint.display());
+        println!("Press Ctrl+C to unmount.");
 
-    mount::run_until_cancelled(mounted.session, mountpoint, cancel, crab_dir, rt)?;
+        mount::run_until_cancelled(mounted.session, mountpoint, cancel, crab_dir, rt)?;
 
-    println!("Unmounted.");
-    Ok(())
+        println!("Unmounted.");
+        Ok(())
+    })();
+    // Component preparation owns a separate hydration token. Cancelling the
+    // session token alone cannot finish those workers or their cache writes.
+    engine.shutdown_background().await;
+    result
 }
 
 /// Run the mount in daemon mode: delegate to the coordinator via IPC.
@@ -6007,10 +6026,8 @@ mod tests {
             result.err()
         );
 
-        let (resolver, engine) = result.unwrap();
-        // Verify the resolver and engine are valid Arc pointers.
-        assert!(std::sync::Arc::strong_count(&resolver) >= 1);
-        assert!(std::sync::Arc::strong_count(&engine) >= 1);
+        let (_, engine) = result.unwrap();
+        engine.shutdown_background().await;
     }
 
     /// Verify that `build_mount_components` respects the `git_ref` parameter.
@@ -6058,6 +6075,8 @@ mod tests {
             "build_mount_components with ref failed: {:?}",
             result.err()
         );
+        let (_, engine) = result.unwrap();
+        engine.shutdown_background().await;
     }
 
     /// Verify that `build_mount_components` fails gracefully when .git

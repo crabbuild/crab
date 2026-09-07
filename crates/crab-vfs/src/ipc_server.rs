@@ -642,6 +642,7 @@ async fn handle_mount(
     let crab_dir = cache_dir.join(".crab");
     if let Err(e) = std::fs::create_dir_all(&crab_dir) {
         cancel_token.cancel();
+        output.hydration.shutdown().await;
         release_mount_reservation(coordinator, reservation).await;
         return IpcResponse::err(format!("failed to create .crab dir: {e}"));
     }
@@ -665,6 +666,7 @@ async fn handle_mount(
         Ok(s) => s,
         Err(e) => {
             cancel_token.cancel();
+            output.hydration.shutdown().await;
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("FUSE mount failed: {e}"));
         }
@@ -675,6 +677,7 @@ async fn handle_mount(
         Ok(s) => s,
         Err(e) => {
             cancel_token.cancel();
+            output.hydration.shutdown().await;
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("FUSE background session failed: {e}"));
         }
@@ -710,7 +713,7 @@ async fn handle_mount(
         let error = failure.error.to_string();
         let failed_handle = failure.handle;
         failed_handle.cancel_token.cancel();
-        let cleanup = unmount_removed_mount(failed_handle, &mountpoint_buf);
+        let cleanup = unmount_removed_mount(failed_handle, &mountpoint_buf).await;
         let cleanup_suffix = cleanup
             .err()
             .map(|e| format!("; cleanup failed: {e}"))
@@ -742,7 +745,7 @@ async fn handle_unmount(coordinator: &Arc<Mutex<Coordinator>>, mountpoint: Strin
         }
     };
 
-    let unmount_result = unmount_removed_mount(handle, &mp);
+    let unmount_result = unmount_removed_mount(handle, &mp).await;
     coordinator.lock().await.finish_mount_removal();
 
     match unmount_result {

@@ -30,8 +30,8 @@ mount/control owners consume the pipeline output separately.
 
 ## Invariants
 
-- Start queue workers only after fallible preparation succeeds and their handles
-  can pass directly to the owner. Daemon task startup belongs inside runtime
+- Start queue workers only after fallible preparation succeeds and the hydration
+  service can pass directly to the owner. Daemon task startup belongs inside runtime
   installation, after backend setup. Inspect both pipeline and daemon paths.
 - Separate pipeline preparation from backend mount/control lifetime; a built engine does not prove a mounted, usable filesystem.
   Source: `crates/crab-vfs/src/pipeline.rs`.
@@ -40,9 +40,11 @@ mount/control owners consume the pipeline output separately.
 - Chunk waiters subscribe before checking stored completion; a notification alone
   cannot represent a fetch that finished before subscription.
   Source: `crates/crab-vfs/src/hydration.rs` (`InflightEntry::wait`).
-- A shutdown timeout must retain unfinished join handles. Abort and await them
-  before releasing worker-owned cache state; dropping a handle detaches its task.
-  Source: `crates/crab-vfs/src/coordinator.rs` (`join_hydrators_with_grace`).
+- Hydration task admission must serialize with shutdown. Await the service's
+  `shutdown` after backend teardown and before releasing cache ownership; its
+  tracker includes queue workers and read-window prefetch. A timed-out wait does
+  not complete background work. Synchronous cleanup can only request shutdown.
+  Source: `crates/crab-vfs/src/hydration.rs` and `crates/crab-vfs/src/coordinator.rs`.
 - Review cancellation, hydration worker shutdown, leases, and control resources in both FUSE and NFS owners before changing teardown.
   Source: `crates/crab-vfs/src/nfs_mount.rs`.
 

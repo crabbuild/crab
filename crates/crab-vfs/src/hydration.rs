@@ -15,7 +15,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
@@ -23,6 +23,7 @@ use dashmap::DashMap;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{Instrument, debug, trace, warn};
 
 use crate::ChunkCache;
@@ -206,11 +207,17 @@ impl InflightEntry {
 // HydrationService
 // ---------------------------------------------------------------------------
 
+enum BackgroundState {
+    Ready,
+    Running,
+    Stopped,
+}
+
 /// On-demand chunk-level hydration service.
 ///
-/// Provides `read_range` for synchronous (priority-0) reads and a background
-/// worker pool for prefetch tasks. Inflight dedup via `DashMap` ensures
-/// concurrent requests for the same chunk share a single network fetch.
+/// Foreground reads bypass the queue. Queue workers and read-window prefetch
+/// share background task ownership; await [`Self::shutdown`] after unmounting
+/// to finish their cache work. Foreground request lifetime belongs to the backend.
 pub struct HydrationService {
     /// Priority queue of pending hydration tasks.
     queue: Mutex<BinaryHeap<HydrationTask>>,
@@ -249,8 +256,11 @@ pub struct HydrationService {
     work_ready: Arc<Notify>,
     /// Cancellation token for graceful shutdown.
     cancel: CancellationToken,
-    /// Guards against double-spawn: workers are started at most once.
-    workers_spawned: AtomicBool,
+    /// Serializes task admission with shutdown; never held across an await.
+    background_state: Mutex<BackgroundState>,
+    background_tasks: TaskTracker,
+    /// Stops background queue workers without cancelling foreground reads.
+    background_cancel: CancellationToken,
 }
 
 impl std::fmt::Debug for HydrationService {
@@ -298,44 +308,72 @@ impl HydrationService {
             terms_cache: Mutex::new(HashMap::new()),
             concurrency: concurrency.unwrap_or(DEFAULT_CONCURRENCY),
             work_ready: Arc::new(Notify::new()),
+            background_cancel: cancel.child_token(),
             cancel,
-            workers_spawned: AtomicBool::new(false),
+            background_state: Mutex::new(BackgroundState::Ready),
+            background_tasks: TaskTracker::new(),
         })
     }
 
-    /// Spawn background worker tasks that process the priority queue.
+    /// Start the owned queue workers once; calls after shutdown do nothing.
     ///
-    /// The first call starts the pool; later calls return an empty vector.
-    /// Cancel the token supplied to [`Self::new`] and await these handles to
-    /// join the queue workers. Cancellation discards queued tasks after the
-    /// current synchronous hydration step returns.
-    ///
-    /// These handles do not include independently spawned read-window prefetch
-    /// tasks. Joining them alone does not prove all hydration activity stopped.
-    pub fn spawn_workers(self: &Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
-        // Prevent duplicate worker pools: if spawn_workers is called
-        // multiple times, only the first invocation creates workers.
-        if self
-            .workers_spawned
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            debug!("spawn_workers called again; workers already running, skipping");
-            return Vec::new();
+    /// Await [`Self::shutdown`] to finish both workers and read-window prefetch.
+    pub fn spawn_workers(self: &Arc<Self>) {
+        let mut state = self
+            .background_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, BackgroundState::Ready) || self.cancel.is_cancelled() {
+            return;
         }
-
-        let mut handles = Vec::with_capacity(self.concurrency);
+        *state = BackgroundState::Running;
         for worker_id in 0..self.concurrency {
-            let svc = Arc::clone(self);
-            handles.push(tokio::spawn(async move {
-                svc.worker_loop(worker_id).await;
-            }));
+            let service = Arc::clone(self);
+            self.background_tasks.spawn(async move {
+                service.worker_loop(worker_id).await;
+            });
         }
         debug!(workers = self.concurrency, "hydration workers spawned");
-        handles
     }
 
-    /// Enqueue a hydration task into the priority queue.
+    /// Close background admission and request queue-worker cancellation.
+    ///
+    /// This synchronous method does not wait for task completion. Use
+    /// [`Self::shutdown`] before releasing cache ownership in an async owner.
+    pub fn request_shutdown(&self) {
+        let mut state = self
+            .background_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = BackgroundState::Stopped;
+        // TaskTracker::close alone permits new spawns. The admission lock keeps
+        // every accepted spawn before closure, so an empty tracker is final.
+        self.background_tasks.close();
+        self.background_cancel.cancel();
+        self.drain_queue();
+    }
+
+    /// Stop background admission and await all admitted background work.
+    ///
+    /// In-progress reconstruction and blocking cache writes run to completion;
+    /// this is not a hard deadline. Owners must separately stop backend requests
+    /// before releasing mount/cache state. Concurrent or repeated calls await the
+    /// same completion boundary. Dropping this future stops waiting; another call
+    /// can resume waiting safely.
+    pub async fn shutdown(&self) {
+        self.request_shutdown();
+        self.background_tasks.wait().await;
+    }
+
+    /// Enqueue background hydration unless shutdown has closed admission.
     pub fn enqueue(&self, task: HydrationTask) {
+        let state = self
+            .background_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*state, BackgroundState::Stopped) || self.cancel.is_cancelled() {
+            return;
+        }
         if let Ok(mut q) = self.queue.lock() {
             trace!(path = %task.path, priority = task.priority, "enqueuing hydration task");
             q.push(task);
@@ -405,13 +443,21 @@ impl HydrationService {
             end: window.window_end,
         };
         let cache_path = read_window_cache_path(&cache_root, &key);
+        let state = self
+            .background_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(*state, BackgroundState::Stopped) || self.cancel.is_cancelled() {
+            self.read_stats.record_read_window_prefetch_skipped();
+            return false;
+        }
         if !self.claim_read_window_prefetch(key) {
             self.read_stats.record_read_window_prefetch_skipped();
             return false;
         }
         let service = Arc::clone(self);
         self.read_stats.record_read_window_prefetch_scheduled();
-        tokio::spawn(async move {
+        self.background_tasks.spawn(async move {
             if let Err(error) = service
                 .ensure_read_window_cached(&hydrator, &pointer, &key, &cache_path)
                 .await
@@ -863,14 +909,14 @@ impl HydrationService {
         debug!(worker_id, "hydration worker started");
         loop {
             // Check cancellation between tasks.
-            if self.cancel.is_cancelled() {
+            if self.background_cancel.is_cancelled() {
                 debug!(worker_id, "hydration worker cancelled, draining queue");
                 self.drain_queue();
                 break;
             }
 
             tokio::select! {
-                () = self.cancel.cancelled() => {
+                () = self.background_cancel.cancelled() => {
                     debug!(worker_id, "hydration worker cancelled");
                     self.drain_queue();
                     break;
@@ -878,7 +924,7 @@ impl HydrationService {
                 () = self.work_ready.notified() => {
                     // Drain all available work before waiting again.
                     while self.step_one(worker_id) {
-                        if self.cancel.is_cancelled() {
+                        if self.background_cancel.is_cancelled() {
                             self.drain_queue();
                             return;
                         }
@@ -1517,6 +1563,151 @@ mod tests {
                 "a completed fetch must release readers arriving after notification"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_waits_for_admitted_prefetch_and_preserves_foreground_reads() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = Bytes::from_static(b"prefetch must finish its cache write");
+        let stored =
+            crate::test_support::StoredPointer::new(&tmp.path().join("shared"), payload.clone())
+                .await;
+        let service = window_service(tmp.path(), &stored, CancellationToken::new());
+        let key = ReadWindowKey {
+            file_hash: stored.pointer.file_hash,
+            start: 0,
+            end: stored.pointer.size,
+        };
+        let lock = Arc::new(AsyncMutex::new(()));
+        let held = lock.lock().await;
+        service.read_range_inflight.insert(key, Arc::clone(&lock));
+        assert!(service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), service.shutdown())
+                .await
+                .is_err()
+        );
+
+        let first = service.shutdown();
+        let second = service.shutdown();
+        tokio::pin!(first, second);
+        std::future::poll_fn(|context| {
+            assert!(first.as_mut().poll(context).is_pending());
+            assert!(second.as_mut().poll(context).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(first, second);
+        })
+        .await
+        .unwrap();
+
+        // A completed shutdown includes the prefetch's persisted cache write;
+        // stopping background work must not cancel a remaining foreground read.
+        stored.origin.block_body_reads_for(&stored.xorb_path);
+        assert_eq!(
+            service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
+            payload
+        );
+        assert!(service.background_tasks.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_pool_starts_once_and_shutdown_releases_service_ownership() {
+        let (_tmp, service) = test_service_without_read_window_cache();
+        let observer = Arc::downgrade(&service);
+        service.spawn_workers();
+        service.spawn_workers();
+        assert_eq!(service.background_tasks.len(), service.concurrency);
+        service.shutdown().await;
+        drop(service);
+        assert!(observer.upgrade().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_serializes_with_worker_startup_and_rejects_late_queue_work() {
+        let (_tmp, service) = test_service_without_read_window_cache();
+        let barrier = Arc::new(tokio::sync::Barrier::new(9));
+        let mut attempts = Vec::new();
+        for _ in 0..8 {
+            let service = Arc::clone(&service);
+            let barrier = Arc::clone(&barrier);
+            attempts.push(tokio::spawn(async move {
+                barrier.wait().await;
+                service.spawn_workers();
+                service.spawn_workers();
+            }));
+        }
+        barrier.wait().await;
+        service.shutdown().await;
+        for attempt in attempts {
+            attempt.await.unwrap();
+        }
+        service.spawn_workers();
+        service.enqueue(HydrationTask {
+            path: "late".into(),
+            pointer: test_pointer(),
+            priority: PRIORITY_CODE,
+            seq: 1,
+        });
+        assert_eq!(
+            (service.background_tasks.len(), service.queue_depth()),
+            (0, 0)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_rejects_unseen_prefetch_without_cancelling_foreground() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &tmp.path().join("shared"),
+            Bytes::from_static(b"foreground remains available"),
+        )
+        .await;
+        let cancel = CancellationToken::new();
+        let service = window_service(tmp.path(), &stored, cancel.clone());
+        service.shutdown().await;
+        assert!(!service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        assert!(!cancel.is_cancelled());
+        assert_eq!(
+            service.read_range(&stored.pointer, 0, 10).await.unwrap(),
+            Bytes::from_static(b"foreground")
+        );
+    }
+
+    fn window_service(
+        root: &Path,
+        stored: &crate::test_support::StoredPointer,
+        cancel: CancellationToken,
+    ) -> Arc<HydrationService> {
+        crate::pipeline::create_hydration(
+            Arc::new(ChunkCache::open(root.join("chunks"), Some(1024)).unwrap()),
+            Arc::new(VerifiedSet::new(16)),
+            cancel,
+            Some(stored.context.store_layout.clone()),
+            Some(stored.context.hydrator.clone()),
+            Some(root.join("windows")),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_service_rejects_read_window_prefetch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &tmp.path().join("shared"),
+            Bytes::from_static(b"prefetch payload"),
+        )
+        .await;
+        let cancel = CancellationToken::new();
+        let service = window_service(tmp.path(), &stored, cancel.clone());
+        cancel.cancel();
+        assert!(!service.prefetch_read_window(stored.pointer.clone(), 0, 4));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1215,6 +1215,14 @@ impl VfsEngine {
         });
     }
 
+    /// Finish owned background hydration after backend requests have stopped.
+    ///
+    /// Foreground requests remain owned by the backend. This waits for queued
+    /// workers and admitted prefetch, including their in-progress cache writes.
+    pub async fn shutdown_background(&self) {
+        self.hydration.shutdown().await;
+    }
+
     /// Snapshot hydration read counters for mount diagnostics.
     pub fn hydration_read_stats_snapshot(&self) -> HydrationReadStatsSnapshot {
         self.hydration.read_stats_snapshot()

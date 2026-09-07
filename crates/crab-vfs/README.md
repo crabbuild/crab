@@ -65,21 +65,23 @@ tests are not native mounted-filesystem or whole-process resource proof.
 
 | Task | Handle owner | Completion boundary |
 | --- | --- | --- |
-| Hydration queue workers | `PipelineOutput::hydrator_handles` or daemon runtime | Cancel the service token, then await the handles; queued tasks are discarded |
-| Read-window prefetch | Spawned independently by `HydrationService` | Not included in queue-worker handles |
+| Hydration queue workers and read-window prefetch | `HydrationService`, retained by the mount owner | Await `shutdown()` after backend teardown; queued work is discarded and admitted prefetch finishes |
 | NFS server, refresh, control | NFS mount runtime | Backend teardown controls these separately from hydration |
 
 The daemon starts hydration and refresh tasks only when installing them into a
 successfully mounted runtime. Engine or backend setup failure therefore starts
 no such workers. Native backend tasks have their own cleanup boundaries.
 
-Cancellation is cooperative. A queue worker observes it between synchronous
-hydration steps; requesting abort does not prove that a running step has ended.
-The coordinator gives queue workers a grace period, then aborts and joins any
-remaining workers. Its shutdown can exceed that period while a blocking step
-finishes. Daemon teardown aborts and joins its refresh, watcher, and queue-worker
-tasks. Neither path establishes completion of detached read-window prefetch.
-Full teardown qualification remains outstanding.
+Background admission and task registration share a lock. `shutdown()` closes
+admission, cancels queue workers, and awaits their shared task tracker. Repeated
+or concurrent shutdown calls observe the same completion boundary. Blocking
+hydration and cache writes can delay completion; shutdown does not abort them.
+
+The coordinator warns after ten seconds and continues waiting with mount/cache
+ownership intact. Daemon teardown separately aborts and joins refresh/watcher
+tasks. Synchronous coordinator shutdown and Drop request hydration shutdown but
+cannot await it; use the async shutdown path for background completion.
+Foreground request ownership and native teardown still require backend proof.
 
 The locked `nfs3_server` listener also spawns connection handlers and a transaction
 cleaner without exposing join handles. Listener drop notifies the cleaner, but

@@ -339,6 +339,7 @@ pub async fn run_until_cancelled(
         session.server_handle.abort();
         let _ = (&mut session.server_handle).await;
     }
+    session.engine.shutdown_background().await;
     let stats = session.runtime_snapshot();
     debug!(
         read_lease_entries = stats.read_leases.entries,

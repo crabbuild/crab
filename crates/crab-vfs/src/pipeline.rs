@@ -12,7 +12,7 @@
 //! 7. Prepare hydration → wire chunk cache
 //! 8. Create resolver → merge snapshot + overlay
 //! 9. Create engine → wire resolver + overlay + hydration + ODB reader
-//! 10. Start hydration workers → return their handles to the caller
+//! 10. Start owned hydration workers → return the service to the caller
 //!
 //! FUSE mount and the refresh loop are handled outside `execute()` by
 //! the caller (coordinator, daemon, or CLI foreground mode).
@@ -96,9 +96,6 @@ pub struct PipelineOutput {
     pub head_ref: String,
     /// Snapshot generation published during this pipeline run.
     pub generation: i64,
-    /// Queue-worker handles; cancel the configured token and await completion.
-    /// Read-window prefetch tasks are not included in this collection.
-    pub hydrator_handles: Vec<JoinHandle<()>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +105,7 @@ pub struct PipelineOutput {
 /// Builder that encapsulates the 11-step mount pipeline.
 ///
 /// Construct via [`MountPipelineBuilder::new`], optionally configure
-/// shared resources, then call [`execute`] to run the full pipeline.
+/// shared resources, then call [`Self::execute`] to run the full pipeline.
 pub struct MountPipelineBuilder {
     config: PipelineConfig,
     /// Shared chunk cache. If not provided, a per-mount cache is created.
@@ -227,8 +224,8 @@ impl MountPipelineBuilder {
         let engine = self.step_create_engine(&resolver, overlay.as_ref(), &hydration, &snapshot)?;
 
         // All fallible preparation must finish before workers retain cache state.
-        // From here their handles pass directly to the successful pipeline owner.
-        let hydrator_handles = hydration.spawn_workers();
+        // From here the service passes directly to the successful pipeline owner.
+        hydration.spawn_workers();
 
         info!(
             generation,
@@ -245,7 +242,6 @@ impl MountPipelineBuilder {
             head_oid,
             head_ref,
             generation,
-            hydrator_handles,
         })
     }
 
@@ -813,20 +809,18 @@ mod tests {
             1,
             "failed setup retained a worker-owned cache"
         );
-        // Retrying the same preparation must still hand live worker handles to its owner.
+        // Retrying preparation must return a service whose work the owner can finish.
         std::fs::remove_file(state.join("blob_cache")).unwrap();
-        let mut output = MountPipelineBuilder::new(config.clone())
+        let output = MountPipelineBuilder::new(config.clone())
             .with_chunk_cache(Arc::clone(&cache))
             .execute()
             .unwrap();
-        assert!(!output.hydrator_handles.is_empty());
         config.cancel_token.cancel();
-        for worker in output.hydrator_handles.drain(..) {
-            tokio::time::timeout(Duration::from_secs(5), worker)
-                .await
-                .unwrap()
-                .unwrap();
-        }
+        tokio::time::timeout(Duration::from_secs(5), output.hydration.shutdown())
+            .await
+            .unwrap();
+        drop(output);
+        assert_eq!(Arc::strong_count(&cache), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -853,19 +847,16 @@ mod tests {
         })
         .with_read_context(stored.context.clone());
         let service = builder.step_create_hydration().unwrap();
-        let workers = service.spawn_workers();
+        service.spawn_workers();
         assert_eq!(
             service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
             content
         );
         assert_eq!(stored.xorb_body_requests(), 1);
         cancel.cancel();
-        for worker in workers {
-            tokio::time::timeout(Duration::from_secs(5), worker)
-                .await
-                .unwrap()
-                .unwrap();
-        }
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read(state.join("chunks")).unwrap(),
             b"unavailable cache"
