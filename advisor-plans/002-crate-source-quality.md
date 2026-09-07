@@ -43,7 +43,7 @@ not claims that the named code is defective.
 | crab-types | Pointer causes and checked timestamps; broader contract qualification remains | Pointer and timestamp slices verified |
 | crab-git | Discovery, process ownership, non-UTF-8 paths, and quoted line-mode fields remain | Delta and NUL worktree framing slices verified |
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
-| crab-xet | Coverage count simplification; parser and reconstruction qualification remain | Coverage slice verified |
+| crab-xet | Broader parser/reconstruction and decompression admission remain | Coverage, decoded-length checks, and decoded-offset layout verified |
 | crab-storage | Broader retry/error classification and cancellation cleanup remain | Diagnostics, multipart cleanup, and stream framing verified |
 | crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
@@ -2099,3 +2099,66 @@ GitHub Releases. Four curl attempts returned HTTP 504; the step exited 22.
 This is missing compatibility evidence, not a demonstrated Git behavior
 failure. Published head remains dc28b041ca0; local batches are not covered by
 that running CI. The browser tooltip-contrast failure remains separate.
+
+### Xorb readers share decoded-length and hash verification
+
+The parser had two decompression paths. `decompress_chunk_data`, used by the
+compressed-payload verifier, checked the decoded length and chunk hash. The
+Bytes path used by get_chunk, verify_all_chunks, and range reads checked only
+the hash. A malformed recorded decoded length was therefore rejected by one
+public verifier but accepted by the other readers. A retained regression fails
+on the prior source at raw single-chunk retrieval; the fixed matrix covers
+None, LZ4, and byte-grouped LZ4 across all reader forms.
+
+Both paths now use the same decoder returning Cow bytes after size/length/hash
+checks. Pinned xet-core-structures 1.6.0 CompressionScheme returns borrowed
+bytes for None and owned bytes for compressed schemes. Its Chunk constructor
+only computes compute_data_hash and stores the bytes. The Bytes wrapper can
+therefore reuse the verified hash and preserve its original allocation without
+copying or hashing twice. Decompression errors still retain CoreError sources.
+The verification-only raw path also avoids the old into_owned copy.
+
+A second regression shows the parser accepted metadata whose decoded total
+exceeds u32 offsets, while the builder rejects that layout. Metadata parsing
+and detached range decoding now share checked decoded-size accumulation.
+The exact u32::MAX structural boundary remains accepted; the test constructs
+only small metadata and does not allocate the claimed payload. Range assembly
+no longer reserves a buffer from unverified advertised sizes; it grows after
+individual chunks pass length and hash checks.
+
+Evidence map: XorbParser get_chunk/verify_all_chunks/get_chunk_range_bytes and
+public decode_chunk_range_bytes -> shared decompress_chunk_data -> pinned
+CompressionScheme and compute_data_hash. Siblings: verify_compressed_chunk is
+used by local-cache file verification and cache-server verification; cached
+selective reads call decode_chunk_range_bytes. Builder push/finalize already
+check cumulative decoded size in u32. Payload-digest verification remains a
+separate explicit operation, documented alongside layout and chunk checks.
+
+Is this the best fix? Sharing the real verifier removes the divergence while
+preserving zero-copy raw reads. Adding another length check only to the Bytes
+path would retain duplicate hashing/error policy. Narrowing every decoded
+xorb to the compressed-size limit would reject a layout the builder supports;
+the shared u32 accumulation instead matches its existing contract.
+
+Proof: 20 parser tests pass, including malformed-length matrices, decoded-total
+rejection/boundary acceptance, compressed offsets, corruption, and raw-buffer
+sharing. Local-cache failed-file/accounting repair passes. Both cache-store
+origin-provenance and cache-service corruption tests pass with remote-client;
+the service fixture is loopback, not a deployed-provider claim. Strict default
+all-target Clippy and warnings-denied rustdoc pass. Production parser source
+changes from 486 to 484 lines; regression tests account for the net growth.
+
+Remaining limits: upstream decompression output admission and whole-process
+allocation budgets remain separate qualification work. Incremental assembly
+avoids trusting advertised totals, but is not a promise that arbitrary valid
+multi-gigabyte decoded results fit memory. This does not replace content-address
+comparison, serialized-payload verification, or final reconstructed-file checks.
+
+Compatibility proof: v1.1.0 and recorded origin/main both enforce the u32
+cumulative decoded bound in builder push/finalize. The parser's new rejection
+aligns with that shipped producer contract rather than changing valid producer
+output. Origin/main retains the divergent Bytes verifier reproduced above.
+The debug CLI build passes through data-plane consumers, with the existing
+macOS unwind-size warning. Formatting and diff checks pass. Publication waits
+for the currently running Windows workflow check on dc28b041ca0; this local
+commit is not yet covered by that published-head CI.

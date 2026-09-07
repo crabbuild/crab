@@ -32,6 +32,8 @@ Use the ordered recipe tests when changing this chain.
   Source: `crates/crab-xet/src/reconstruction.rs`.
 - Coverage validation uses checked term counts, not per-chunk bookkeeping. Counts are not complete payload integrity proof; retain parser digest/chunk checks and final read-side file verification.
   Source: `crates/crab-xet/src/xorb/parser.rs`.
+- Borrowed and owned chunk decoding share length/hash verification. Parser metadata and detached range decoding must enforce the builder's `u32` decoded-total limit before assembling output offsets.
+  Source: `crates/crab-xet/src/xorb/parser.rs` and `crates/crab-xet/src/xorb/builder.rs`.
 - Check representable format sizes before changing builder state; do not silently truncate serialized chunk metadata.
   Source: `crates/crab-xet/src/xorb/builder.rs`.
 

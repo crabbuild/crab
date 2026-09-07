@@ -68,6 +68,25 @@ For a lower-level read path, parse a complete serialized Xorb with
 `xorb::builder::XorbBuilder` and upload each `XorbResult` through the owning
 storage or staging layer.
 
+## Xorb verification
+
+| API | What it verifies |
+| --- | --- |
+| `XorbParser::parse` | Footer, metadata layout, contiguous payload bounds, chunk sizes, and the `u32` decoded-total limit. Computes the metadata-derived Xorb hash. |
+| `verify_payload_digest` | Exact serialized payload bytes against the footer digest. |
+| `get_chunk`, chunk-range reads, `verify_all_chunks` | Decoded length and content hash for every chunk they read. |
+| Metadata-only helpers | Layout and metadata-derived identity; they do not read or verify chunk payloads. |
+
+Callers compare the computed Xorb hash with the requested content address.
+Parsing alone does not verify payload bytes. Raw chunk reads retain slices of
+the original allocation; compressed reads return owned decoded data. Both use
+the same length and hash checks.
+
+The builder and parser share the `u32` decoded-offset limit. Range assembly
+grows after validating decoded chunks instead of reserving an untrusted
+advertised total. These format checks are separate from request admission and
+whole-process memory limits.
+
 ## Feature flags and invariants
 
 - `chunker` adds the Xet gearhash chunker and `GearChunker`.
