@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Qualify add/push with sparse 100-GiB content and cold cross-repo chunk reuse.
+"""Qualify add/push with 100-GiB content and cold cross-repo chunk reuse.
 
-Uses a fresh bucket and disposable run directory. Logical size is deliberately
-reported separately from physical size: this is not 100 GiB of unique entropy.
+Uses a fresh bucket and disposable run directory. Ten distinct non-zero bases
+are copied with filesystem copy-on-write, then edited independently. The default
+workload is 100 GiB logical with 20 GiB of unique initial entropy, not sparse zeros.
 Reuse the ordinary smoke runner's command logs, credentials, and S3 contracts.
 """
 
@@ -13,6 +14,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -54,24 +56,26 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
     models = repo / "models"
     models.mkdir()
     paths = [models / f"model-{index:03}.bin" for index in range(args.files)]
+    families = min(10, len(paths))
+    available_before = shutil.disk_usage(args.root).free
     for index, path in enumerate(paths):
-        with path.open("wb") as stream:
-            stream.truncate(size)
-            for offset in (0, size // 2, size - MIB):
-                stream.seek(offset)
-                stream.write(hashlib.shake_256(f"{index}:{offset}".encode()).digest(MIB))
-    # One incompressible region exceeds one remote-candidate page. Zero-heavy
-    # scale data alone would never detect the large cold-cache lookup cliff.
-    with paths[0].open("r+b") as stream:
-        for index in range(512):
-            stream.write(hashlib.shake_256(f"entropy:{index}".encode()).digest(MIB))
+        if index < families:
+            with path.open("wb") as stream:
+                for block in range(args.file_mib):
+                    stream.write(hashlib.shake_256(f"family:{index}:{block}".encode()).digest(MIB))
+        else:
+            clone_flag = "-c" if sys.platform == "darwin" else "--reflink=always"
+            runner.run_cmd(f"copy-on-write fixture {index}",
+                           ["cp", clone_flag, str(paths[index % families]), str(path)], repo)
     code = repo / "src"
     code.mkdir()
     for index in range(args.code_files):
         (code / f"module_{index:04}.rs").write_text(f"pub const VALUE: u64 = {index};\n")
     runner.check("workload-shape", True, {
         "large_files": len(paths), "logical_bytes": sum(p.stat().st_size for p in paths),
-        "physical_bytes": sum(p.stat().st_blocks * 512 for p in paths),
+        "distinct_basis_bytes": families * size,
+        "allocated_file_bytes_including_shared_extents": sum(p.stat().st_blocks * 512 for p in paths),
+        "observed_free_space_delta": available_before - shutil.disk_usage(args.root).free,
         "small_code_files": args.code_files, "versions": args.versions,
     })
     for version in range(args.versions):
