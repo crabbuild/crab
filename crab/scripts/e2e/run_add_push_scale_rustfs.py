@@ -42,6 +42,14 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
     runner.check("disk-capacity", shutil.disk_usage(args.root).free >= required,
                  {"required_bytes": required})
     repo, remote, _ = runner.prepare_repo("scale")
+    outside = runner.run_root / "symlink-target"
+    outside.mkdir()
+    (outside / "model.bin").write_bytes(b"external bytes must not enter staging")
+    (repo / "linked").symlink_to(outside, target_is_directory=True)
+    runner.run_crab(repo, ["add", "linked/model.bin"], name="symlink ancestor add", check=False)
+    index = repo / ".crab" / "staging" / "index.db"
+    inventory = runner.staging_payload_inventory(repo) if index.exists() else {}
+    runner.check("symlink-ancestor-created-no-payload", not any(inventory.values()), inventory)
     size = args.file_mib * MIB
     models = repo / "models"
     models.mkdir()
@@ -140,7 +148,7 @@ def verify(args: argparse.Namespace, runner: AddCommitPushSmoke) -> None:
         # All targets were created by this invocation; retain reports and logs.
         for path in (repo.parent, consumer.parent, clone, consumer_clone,
                      runner.cache_dir, runner.run_root / "consumer-cache",
-                     runner.run_root / "consumer-clone-cache", runner.run_root / "cold-clone-cache"):
+                     runner.run_root / "consumer-clone-cache", runner.run_root / "cold-clone-cache", outside):
             if path.exists():
                 shutil.rmtree(path)
         runner.run_cmd("clean isolated bucket", ["aws", "--endpoint-url", args.endpoint_url,
