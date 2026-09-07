@@ -126,6 +126,11 @@ user-facing decision without re-parsing error strings.
 
 ## Incoming pack boundary
 
+`delta::validate` and `delta::apply` share one instruction decoder, so metadata
+inspection and reconstruction enforce the same copy ranges and output sizes.
+Validation does not allocate the reconstructed object; application also checks
+the supplied base length and reserves output fallibly.
+
 `incoming_pack::quarantine` accepts a reader, an existing temporary directory,
 explicit resource bounds, a cancellation probe and a thin-base lookup. Invoke it
 on a blocking worker. Input reads and base lookups need caller-owned deadlines;

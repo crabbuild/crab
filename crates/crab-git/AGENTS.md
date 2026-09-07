@@ -24,7 +24,7 @@ Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate`
 | Task | Start here | Also inspect |
 | --- | --- | --- |
 | Native receive validation | `crates/crab-git/src/receive_plan.rs` | `crates/crab-http-server/src/receive/validate.rs` |
-| Pack decoding | `crates/crab-git/src/incoming_pack.rs` | `crates/crab-remote-git/src/reader.rs` |
+| Pack decoding | `crates/crab-git/src/incoming_pack.rs`, `crates/crab-git/src/delta.rs` | `crates/crab-remote-git/src/reader.rs` |
 | Pointer classification | `crates/crab-git/src/pointer_detect.rs` | `crates/crab-types/src/pointer.rs` |
 
 ## Invariants
@@ -43,6 +43,11 @@ Only `facade` is declared; there is no declared default feature. It enables the 
 ## Verification
 
 Read inline discovery/ref tests and `crates/crab-git/src/receive_plan/tests.rs`; pack quarantine regressions live in `crates/crab-git/src/incoming_pack/tests.rs`.
+
+Delta instruction validation and reconstruction share a private walker. Run
+`cargo test -p crab-git --locked --lib delta::tests` with the external target
+directory configured; include incoming-pack and remote-reader consumer tests
+when changing instruction semantics.
 
 Run from repository root. The target below is the example for worktree `089c`;
 replace it with a unique directory for your checkout. Before compilation, verify
