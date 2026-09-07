@@ -1,32 +1,17 @@
-//! Workflow scheduler lock — serializes `crab run` invocations
-//! against the same repo.
+//! Serializes workflow schedulers with an exclusive advisory file lock.
 //!
-//! Design §"Concurrency model": one `crab run` at a time per repo
-//! via file-lock at `.crab/workflow/.lock`. Losers honor
-//! `--lock-timeout` (default 600s, R24) or `--no-wait`. The lock file
-//! records the holder's PID so the loser can render a
-//! [`CrabError::WorkflowLockTimeout { held_by, waited_ms }`] that
-//! points at the process to kill or wait on.
+//! The caller supplies a workflow root; the guard locks its `.lock` file and
+//! creates missing parent directories. `acquire` waits synchronously, while
+//! `try_acquire` reports contention immediately. Timeout policy belongs to the
+//! caller, including the CLI's `--lock-timeout` and `--no-wait` options.
 //!
-//! This is a thin cousin of the staging-area lock at `crab-staging`:
-//! same PID on-disk diagnostic, but simpler: there's a single
-//! exclusive holder, there's no reader/writer split, and the
-//! lifetime of the lock matches the lifetime of a `crab run`
-//! invocation.
+//! The holder PID is a best-effort diagnostic, not proof of ownership. Windows
+//! waiters read an unlocked `.lock.pid` sidecar because the locked file cannot
+//! be read through a second handle. Unix waiters read the lockfile itself.
 //!
-//! The lock file itself lives at `{workflow_root}/.lock`, where
-//! `workflow_root` is `{repo_root}/.crab/workflow`. The parent
-//! directory is created on demand so the first `crab run` in a
-//! fresh repo doesn't fail on a missing directory.
-//!
-//! # Drop behavior
-//!
-//! On drop the guard explicitly unlocks before closing its handle,
-//! so a descriptor inherited by a concurrent fork cannot prolong ownership.
-//! The lockfile is deliberately
-//! retained so a waiter cannot acquire the inode and then have its
-//! pathname unlinked by the previous holder. The next holder
-//! overwrites the diagnostic PID before returning.
+//! Drop removes the Windows sidecar while still holding the lock, then explicitly
+//! unlocks before closing the descriptor. The lockfile remains: unlinking it could
+//! let a new caller lock a different inode while a waiter still holds the old one.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -37,7 +22,7 @@ use fs4::fs_std::FileExt as LockFileExt;
 
 use tracing::{debug, warn};
 
-use crate::{Result, WorkflowError as CrabError};
+use crate::{Result, WorkflowError};
 
 /// Name of the lockfile inside the workflow root.
 const LOCKFILE_NAME: &str = ".lock";
@@ -86,36 +71,35 @@ impl SchedulerLock {
     /// Acquire the scheduler lock at `{workflow_root}/.lock`, waiting
     /// up to `timeout` for a currently-held lock to release.
     ///
-    /// Passing [`Duration::ZERO`] is equivalent to [`try_acquire`]
+    /// Passing [`Duration::ZERO`] is equivalent to [`Self::try_acquire`]
     /// returning a `WorkflowLockTimeout` on contention — `--no-wait`
     /// routes through here with a zero timeout.
     ///
-    /// On success the parent directory exists, the lockfile at
-    /// `{workflow_root}/.lock` contains the current PID (as ASCII
-    /// digits, no trailing newline), and the returned guard holds
-    /// the flock.
+    /// This blocks the calling thread while waiting. On success the returned
+    /// guard holds the lock; writing the PID diagnostic is best-effort and
+    /// does not determine acquisition success.
     ///
     /// # Errors
     ///
-    /// Returns [`CrabError::WorkflowLockTimeout`] when another
+    /// Returns [`WorkflowError::WorkflowLockTimeout`] when another
     /// process still holds the lock after `timeout` elapses. The
     /// `held_by` field carries the holder's PID parsed from the
     /// lockfile (or `None` when the file is missing, empty, or
     /// otherwise unreadable). `waited_ms` is the actual wall-clock
     /// wait time, not the budgeted timeout.
     ///
-    /// Returns [`CrabError::Io`] for other filesystem failures
+    /// Returns [`WorkflowError::Io`] for other filesystem failures
     /// (permission denied, ENOSPC, etc.).
     pub fn acquire(workflow_root: &Path, timeout: Duration) -> Result<Self> {
-        std::fs::create_dir_all(workflow_root).map_err(CrabError::Io)?;
+        std::fs::create_dir_all(workflow_root).map_err(WorkflowError::Io)?;
         let path = workflow_root.join(LOCKFILE_NAME);
         let start = Instant::now();
         let mut delay = POLL_INITIAL;
 
         loop {
             let file = open_lockfile(&path)?;
-            match try_flock_exclusive(&file) {
-                Ok(()) => {
+            match LockFileExt::try_lock_exclusive(&file) {
+                Ok(true) => {
                     write_pid(&file, &path);
                     debug!(
                         path = %path.display(),
@@ -127,7 +111,7 @@ impl SchedulerLock {
                         path,
                     });
                 }
-                Err(e) if is_would_block(&e) => {
+                Ok(false) => {
                     let elapsed = start.elapsed();
                     if elapsed >= timeout {
                         let held_by = read_holder_pid(&path);
@@ -138,19 +122,17 @@ impl SchedulerLock {
                             waited_ms,
                             "workflow scheduler lock timeout"
                         );
-                        return Err(CrabError::WorkflowLockTimeout { held_by, waited_ms });
+                        return Err(WorkflowError::WorkflowLockTimeout { held_by, waited_ms });
                     }
-                    // Drop the unfcocked handle before sleeping so we
-                    // don't hold an extra fd across the sleep. A fresh
-                    // open on the next iteration still sees the same
-                    // inode the holder's fd points at.
+                    // No descriptor is needed during backoff. The retained
+                    // lockfile keeps the next attempt on the holder's inode.
                     drop(file);
                     let remaining = timeout.saturating_sub(elapsed);
                     let nap = delay.min(remaining);
                     std::thread::sleep(nap);
                     delay = (delay * POLL_MULTIPLIER).min(POLL_MAX);
                 }
-                Err(e) => return Err(CrabError::Io(e)),
+                Err(e) => return Err(WorkflowError::Io(e)),
             }
         }
     }
@@ -159,29 +141,29 @@ impl SchedulerLock {
     ///
     /// Returns `Ok(Some(guard))` when the lock was free,
     /// `Ok(None)` when another process holds it, or `Err` on
-    /// filesystem failure. Unlike [`acquire`], `try_acquire` never
+    /// filesystem failure. Unlike [`Self::acquire`], `try_acquire` never
     /// returns `WorkflowLockTimeout` — contention is reported via
     /// the `None` variant so the caller can branch without pattern
     /// matching on a specific error.
     ///
     /// # Errors
     ///
-    /// Returns [`CrabError::Io`] on permission / disk / parent
+    /// Returns [`WorkflowError::Io`] on permission / disk / parent
     /// directory failures. Does NOT return any lock-timeout error.
     pub fn try_acquire(workflow_root: &Path) -> Result<Option<Self>> {
-        std::fs::create_dir_all(workflow_root).map_err(CrabError::Io)?;
+        std::fs::create_dir_all(workflow_root).map_err(WorkflowError::Io)?;
         let path = workflow_root.join(LOCKFILE_NAME);
         let file = open_lockfile(&path)?;
-        match try_flock_exclusive(&file) {
-            Ok(()) => {
+        match LockFileExt::try_lock_exclusive(&file) {
+            Ok(true) => {
                 write_pid(&file, &path);
                 Ok(Some(Self {
                     file: Some(file),
                     path,
                 }))
             }
-            Err(e) if is_would_block(&e) => Ok(None),
-            Err(e) => Err(CrabError::Io(e)),
+            Ok(false) => Ok(None),
+            Err(e) => Err(WorkflowError::Io(e)),
         }
     }
 }
@@ -207,8 +189,6 @@ impl Drop for SchedulerLock {
     }
 }
 
-// --- Internal helpers ---
-
 /// Open (or create) the lockfile with the permissions the flock
 /// family expects: read+write, truncate-free (so the holder's PID
 /// survives a racing `try_acquire` on a stale file), create-if-
@@ -220,7 +200,7 @@ fn open_lockfile(path: &Path) -> Result<File> {
         .create(true)
         .truncate(false)
         .open(path)
-        .map_err(CrabError::Io)
+        .map_err(WorkflowError::Io)
 }
 
 /// Write `std::process::id()` into the lockfile. Best-effort: the
@@ -238,10 +218,8 @@ fn write_pid(file: &File, _path: &Path) {
     let _ = handle.seek(SeekFrom::Start(0));
     let _ = handle.write_all(pid.to_string().as_bytes());
     let _ = (&mut &*file).flush();
-    // fsync for durability — another process reading the PID
-    // shouldn't race against an uncommitted write. `sync_all`
-    // failures are non-fatal; worst case the reader falls back to
-    // `held_by: None`.
+    // Persist the diagnostic best-effort. PID durability and read visibility
+    // do not establish ownership; the advisory lock does.
     let _ = file.sync_all();
 
     // Windows denies reads through a second handle while LockFileEx
@@ -292,21 +270,6 @@ fn remove_pid_sidecar(path: &Path, lock_path: &Path) {
             );
         }
     }
-}
-
-/// Attempt a non-blocking exclusive file lock on `file`. The `fs4`
-/// adapter uses `flock` on Unix and `LockFileEx` on Windows, keeping
-/// the scheduler lock contract identical across native runners.
-fn try_flock_exclusive(file: &File) -> std::io::Result<()> {
-    if LockFileExt::try_lock_exclusive(file)? {
-        Ok(())
-    } else {
-        Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
-    }
-}
-
-fn is_would_block(err: &std::io::Error) -> bool {
-    err.kind() == std::io::ErrorKind::WouldBlock
 }
 
 #[cfg(test)]
@@ -450,7 +413,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         match err {
-            CrabError::WorkflowLockTimeout { held_by, waited_ms } => {
+            WorkflowError::WorkflowLockTimeout { held_by, waited_ms } => {
                 // held_by is present — task A wrote its PID (same as
                 // ours in-process) before handing off. We don't
                 // assert the exact value because all threads share a
@@ -553,7 +516,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(
-            matches!(err, CrabError::WorkflowLockTimeout { .. }),
+            matches!(err, WorkflowError::WorkflowLockTimeout { .. }),
             "wrong variant: {err}"
         );
         assert!(

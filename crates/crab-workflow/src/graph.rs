@@ -1,6 +1,6 @@
 //! Workflow DAG planner.
 //!
-//! [`petgraph::DiGraph`] wrapper with path-based
+//! [`petgraph::graph::DiGraph`] wrapper with path-based
 //! edge inference, cycle detection, and deterministic topological
 //! sort.
 //!

@@ -97,7 +97,7 @@ pub fn stage_ref(stage_hash: &StageHash) -> String {
 ///
 /// Returns a relative object-store key with no leading slash — callers
 /// prepend the per-repo `{repo_prefix}` when they talk to the
-/// [`object_store::ObjectStore`](::object_store::ObjectStore).
+/// [`object_store::ObjectStore`].
 pub fn stage_entry_object_path(stage_hash: &StageHash) -> String {
     let hex = stage_hash.as_hex();
     // `StageHash::as_hex` yields exactly 64 hex characters, so the
@@ -376,11 +376,7 @@ pub fn build_exp_meta_ref_cas(
 
 /// Minimal read surface for fetching experiment metadata.
 ///
-/// Abstracted as a trait so tests can exercise
-/// [`read_experiment_metadata`] with an in-memory double, mirroring
-/// how [`crate::coordination::pipelined_commit::CasStore`] is used
-/// for the write side. Production callers back this with the crate's
-/// [`crate::storage::Store`] via a thin adapter.
+/// Callers supply ref and object reads for [`read_experiment_metadata`].
 ///
 /// Implementations must be infallible for "not found" — the
 /// absence of a ref or object is a normal state, not an error. All

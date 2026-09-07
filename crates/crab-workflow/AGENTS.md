@@ -29,6 +29,11 @@ execution. Parsing and graph construction are sequential caller-owned steps.
 
 ## Invariants
 
+- Scheduler contention is fs4's `Ok(false)` outcome, not an I/O failure.
+  The guard owns the advisory lock; PID files are only diagnostics.
+  `SchedulerLock::acquire` blocks its calling thread while waiting.
+  Source: `crates/crab-workflow/src/scheduler_lock.rs`.
+
 - Unknown schema keys must fail visibly; parse/expand before planning so typos cannot silently alter execution.
   Source: `crates/crab-workflow/src/yaml.rs`.
 - Stage and default retry policies share range checks with semantic validation;

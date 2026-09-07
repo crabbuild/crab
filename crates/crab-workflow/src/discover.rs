@@ -45,9 +45,7 @@ fn is_workflow_yaml(name: &str) -> bool {
     name == WORKFLOW_FILE_NAME || name.ends_with(WORKFLOW_YAML_SUFFIX)
 }
 
-/// Discovery mode: `Root` or `Recursive`. Mirrors
-/// [`crate::core::config::WorkflowDiscover`] so the caller can thread
-/// it from CLI flags or config without a second enum.
+/// Select root-only or recursive workflow-file discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscoverMode {
     /// Only consider the repo-root `crab.yaml`. Nested yaml files

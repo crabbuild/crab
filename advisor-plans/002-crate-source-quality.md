@@ -60,7 +60,7 @@ not claims that the named code is defective.
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
 | crab-http-server | Request validation, embedded assets, service errors | Pending |
-| crab-workflow | Retry validation; cancellation, cache identity, resume remain | Retry parsing slice verified |
+| crab-workflow | Async lock waiting, experiment metadata identity, cache/resume remain | Retry parsing, lock readability, and default API docs verified |
 
 ## Pointer diagnostic change
 
@@ -1281,3 +1281,52 @@ OS cleanup boundaries, not guarantees established by these tests. The earlier
 LFS framing follow-up is addressed here. Before publication, CI for head
 2caa1315d26 reported 11 successful, 13 running and 12 skipped checks, with no
 failures yet; it was not complete.
+
+## Workflow lock readability and API documentation
+
+SchedulerLock converted fs4's contention boolean to an artificial WouldBlock
+I/O error, then immediately classified it back into contention. Both acquisition
+methods now match the dependency result directly. Remove the two conversion
+helpers and the stale private CrabError alias; genuine filesystem errors still
+map to WorkflowError::Io. Lock lifetime, polling delays, PID writes, timeout
+values, and release order are unchanged.
+
+Evidence map:
+
+- Owner: crab-workflow scheduler_lock.rs, acquire/try_acquire/Drop.
+- Callers: async CLI run_inline_single_stage, run_yaml_single_stage and run_dag
+  retain the acquire guard; workflow journal GC uses immediate try_acquire.
+- Callee: Cargo.lock pins fs4 0.13.1. FileExt::try_lock_exclusive returns
+  Result<bool>; Unix maps WouldBlock to Ok(false), Windows maps IO_PENDING and
+  LOCK_VIOLATION to Ok(false). Other failures remain errors. Direct matching
+  preserves these contracts without a second classification layer.
+- Sibling: staging's shared/exclusive adapter still performs the same conversion.
+  It has different multi-reader acquisition paths; this refactor does not change
+  contention semantics or require a staging behavior change. Simplifying that
+  separate adapter remains a readability opportunity.
+- Main: contains the same synthetic-error conversion and legacy lock commentary.
+- Tests: all twelve existing scheduler-lock tests pass, including real same-process
+  handle contention, timeout, release/reacquisition, zero-wait and retained fork-like
+  duplicate descriptors. No assertion-only duplicate tests were added.
+
+Module docs now distinguish advisory ownership from best-effort PID diagnostics,
+explain the Windows sidecar and retained inode, and state that acquisition blocks
+the caller. The README adds a short resource/contract table. Public method links
+use Self:: targets, and PID sync comments no longer claim fsync establishes read
+visibility or ownership.
+
+A strict rustdoc check then found seven old intra-doc links into the monolithic
+CLI layout or incorrect dependency/type paths. Fixed the graph/error targets;
+reworded discovery, parameter output, and experiment-reader docs around actual
+library ownership instead of inventing product dependencies. The only found
+ExperimentMetaRead implementation is its test mock, so the old production-adapter
+claim was removed. API docs now build using cargo doc -p crab-workflow --no-deps
+with RUSTDOCFLAGS='-D warnings'. Strict all-target workflow Clippy also passes.
+Native Windows/Linux runtime qualification remains with workflow-native.yml CI.
+
+Best-fix assessment: use the existing dependency's three outcomes directly;
+no new lock abstraction, fallback, or timeout configuration is needed. Source and
+documentation shrink. Correctness follow-ups found while tracing callers: the
+three async CLI paths invoke blocking acquire directly, read_holder_pid has an
+unbounded diagnostic read, and read_experiment_metadata ignores its referenced
+content hash. These are not resolved or qualified by this readability batch.

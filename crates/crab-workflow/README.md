@@ -115,6 +115,19 @@ Four consecutive failures with exit code 1 produce three retry delays:
 `500ms → 1s → 2s`. `retry::should_retry` only decides eligibility and delay;
 the product retry loop owns waiting, output cleanup, and journal transitions.
 
+## Scheduler ownership
+
+`SchedulerLock::acquire` blocks the calling thread while waiting;
+`try_acquire` returns immediately when another holder owns the lock.
+The caller chooses the timeout and retains the guard for the protected work.
+
+| Resource | Contract |
+| --- | --- |
+| Advisory lock | Establishes exclusive scheduler ownership. |
+| `.lock` file | Retained after release so waiters use the same inode. |
+| PID diagnostic | Best-effort holder information, not ownership proof. |
+| Windows `.lock.pid` | Readable sidecar, removed before releasing the lock. |
+
 ## Boundaries
 
 - [`crab-types`](../crab-types/README.md) owns shared stage hashes and

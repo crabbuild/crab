@@ -297,11 +297,7 @@ pub fn read_at_ref(repo_root: &Path, ref_name: &str, paths: &[PathBuf]) -> Resul
     Ok(merged)
 }
 
-/// Resolve the `.git` directory for `repo_root` by walking upwards
-/// via `gix-discover`. Unlike [`crate::git::discover::discover_git_dir`],
-/// this does not consult the `GIT_DIR` env var: callers pass an
-/// explicit `repo_root` and we honor that, so env-var-driven
-/// redirection (used by other tests in this crate) doesn't leak in.
+/// Resolve the Git directory by calling [`gix_discover::upwards()`] from `repo_root`.
 pub fn find_git_dir(repo_root: &Path) -> Result<PathBuf> {
     match gix_discover::upwards(repo_root) {
         Ok((repo_path, _trust)) => {
@@ -637,9 +633,7 @@ pub fn render_table(diff: &ScalarDiff, opts: RenderOptions) -> String {
     out
 }
 
-/// Render a [`ScalarDiff`] as JSON. The output shape matches the
-/// envelope `data` payload — a sibling of, not a replacement for,
-/// [`Envelope`](crate::core::output::Envelope).
+/// Render a [`ScalarDiff`] as pretty JSON; callers own any surrounding response envelope.
 pub fn render_json(diff: &ScalarDiff) -> String {
     serde_json::to_string_pretty(diff).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
 }
