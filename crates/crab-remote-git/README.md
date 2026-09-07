@@ -57,7 +57,43 @@ tracked best-effort cleanup fallback, while explicit completion preserves close
 errors. `OperationLimits::max_duration` bounds locator open and semantic work;
 expiration cancels the operation and returns a typed timeout.
 
+## Completing an operation
+
+Keep the semantic result until `finish` has closed the locator session:
+
+```rust
+use crab_remote_git::{OperationKind, RemoteGitRepository, RemoteGitSnapshot, Result, Revision};
+use tokio_util::sync::CancellationToken;
+
+async fn snapshot(
+    repository: &RemoteGitRepository,
+    revision: &Revision,
+    cancel: &CancellationToken,
+) -> Result<RemoteGitSnapshot> {
+    let operation = repository.operation(OperationKind::Snapshot, cancel).await?;
+    let result = repository.snapshot(revision, &operation).await;
+    operation.finish(result).await
+}
+```
+
+| Semantic result | Locator close | Returned result |
+| --- | --- | --- |
+| Success | Success | Value |
+| Error | Success | Semantic error |
+| Success | Error | Metadata close error |
+| Error | Error | `CloseAfterFailure`, retaining both typed errors |
+
+Deadline expiration converts success or cancellation into `Timeout` before
+close-result selection. Other semantic errors retain their identity.
+
+At service shutdown, stop admission and finish or drop live contexts before
+awaiting `RemoteGitRuntime::shutdown`. Shutdown cancels work and waits for
+tracked tasks and contexts; it cannot complete while its own caller holds an
+unfinished context. Keep the Tokio runtime alive until cleanup finishes.
+
 ## Performance model
+
+### Caches and aggregate budgets
 
 Object storage is the correctness authority. Runtime memory is disposable and
 bounded. Exact locators avoid pack scans, range reads avoid complete pack
@@ -66,11 +102,13 @@ manifest, inventory, negative, blame-result, and pack-index caches are byte
 bounded. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
+
 Shared base/index reads recheck their caches after admission: a caller that
 missed before a previous producer finished must reuse its verified result.
 Index-size producers publish their cache entry before retiring the shared task.
 Object checksum/size checks and operation budgets still apply to late cache hits;
 parsed indexes are reused only within the caller's source-byte limit.
+
 Batch scheduling is lazy and its concurrency is the minimum of origin,
 blocking-decode, object-flight, logical-object, storage-request, fetched-byte,
 and inflated-byte limits. Batched object reads fetch selected entries and their
@@ -78,15 +116,19 @@ delta dependencies together, then retain verified bases in the bounded object
 cache so later history waves do not repeat the same locator and range reads.
 Archive traversal produces one entry at a time; its pending tree work is bounded
 by the verified tree-object limit.
+
 Services may keep a bounded cache of cloned immutable repository handles.
 `is_current` detects manifest changes only; observing uncompacted journal commits
 requires reopening after the freshness interval. A changed manifest always
 requires a new complete open handshake; cached state is never refreshed in place.
 
+### Generated response packs
+
 Response packs can be persisted beneath the repository's immutable
 `generated-packs/v1` namespace. Selection-bound keys cover physical repository
 identity, manifest Git state, the visible authorization union, canonical
 request semantics, output policy, and canonicalized object selection.
+
 Request-bound keys let identical non-deepening shallow fetches acquire the
 renewable cross-process producer lease before reachability planning; the
 producer must return a verified self-contained pack. Both key forms include
@@ -95,6 +137,7 @@ naturally miss after a format change. Complete pack bodies and descriptors are
 verified on every read. Runtime single-flight and the renewable internal-lock
 contract coalesce concurrent producers; cancelling one waiter does not cancel
 work still needed by another process.
+
 Catalog-exact dense filters (`blob:none` and `object:type`) can assemble a
 large selected response directly from verified packed entries, preserving
 delta payloads and materializing only bases omitted from the selection. The
@@ -104,9 +147,12 @@ until their reachability proofs can bound the same optimization. Repository
 GC treats these objects as a soft acceleration cache: recent descriptors
 retain their referenced artifacts through the configured grace period, after
 which stale descriptor/artifact pairs become collectible.
+
 GC resolves recent descriptors with bounded list-concurrency and streams
 validated pairs, keeping response-cache cleanup from turning into an
 unbounded read or memory wave as request history grows.
+
+### Source pack reuse
 
 Large response producers download committed source `.pack`, `.idx`, and `.rev`
 artifacts. The pack body and both sidecars are validated against the pinned
@@ -115,6 +161,8 @@ the CPU and I/O cost of rebuilding a source index. Shallow selection also keeps
 the source installation bounded by skipping an OID enumeration that the
 selection planner does not consume; exact response-set validation remains in
 place.
+
+### Trees and history
 
 Directory listing reads only the selected tree. Recursive listing batches tree
 reads and returns metadata without reading blob bodies. Child sizes are absent
@@ -134,6 +182,8 @@ acceleration falls back to raw parent order and can never hide a reachable
 commit. First-parent path cursors carry the next verified raw parent, so later
 pages do not replay newer commits. A matching complete graph groups bounded raw
 commit and tree reads for range coalescing without becoming the history authority.
+
+### Diagnostics and deployment
 
 Each operation emits one structured span with only its bounded operation kind,
 process-local correlation ID, outcome, and safe error category. Raw OIDs,
@@ -168,9 +218,12 @@ warm directory/blob reads, history, path history, compare, diff, blame, and a
 complete archive through one shared runtime:
 
 ```console
-cargo run -p crab-remote-git --release --example qualify_remote -- \
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-remote-qualification \
+  cargo run -p crab-remote-git --release --example qualify_remote -- \
   <bucket> <repository-prefix> <path-changed-by-head>
 ```
+
+Use a unique target directory for your checkout on the mounted workspace volume.
 
 The example reports elapsed time plus canonical `crab-storage` read attempts
 and bytes for each operation. Those counters include manifest, inventory,

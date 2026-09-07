@@ -292,7 +292,19 @@ impl OperationContext {
     ///
     /// When both the semantic operation and close fail, the semantic error is
     /// retained as the source and the typed close error remains available for
-    /// protected diagnostics.
+    /// protected diagnostics. Pass the operation result without propagating it
+    /// first, so an error cannot bypass explicit cleanup:
+    ///
+    /// ```no_run
+    /// use crab_remote_git::{OperationKind, RemoteGitRepository, RemoteGitSnapshot, Result, Revision};
+    /// use tokio_util::sync::CancellationToken;
+    ///
+    /// # async fn snapshot(repository: &RemoteGitRepository, revision: &Revision, cancel: &CancellationToken) -> Result<RemoteGitSnapshot> {
+    /// let operation = repository.operation(OperationKind::Snapshot, cancel).await?;
+    /// let result = repository.snapshot(revision, &operation).await;
+    /// operation.finish(result).await
+    /// # }
+    /// ```
     pub async fn finish<T>(mut self, operation: Result<T>) -> Result<T> {
         let timed_out = tokio::time::Instant::now() >= self.deadline;
         self.deadline_stop.cancel();

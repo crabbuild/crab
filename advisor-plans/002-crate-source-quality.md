@@ -53,7 +53,7 @@ not claims that the named code is defective.
 | crab-cache-store | Origin authority, corrupt-cache repair, range validation | Pending |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
-| crab-remote-git | Operation finish/shutdown and range error propagation | Pending |
+| crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
 | crab-auth | Credential Debug output; token-cache lifecycle remains | Diagnostic slice verified |
 | crab-auth-store | Credential refresh and storage adapter error boundaries | Pending |
@@ -414,3 +414,38 @@ Strict all-target Clippy passes with default features. Locked Cargo dependency
 trees also show xet-core-structures -> xet-runtime -> reqwest even with no Crab
 features; README no longer claims the default transitive graph is runtime-free.
 This is a source/API simplification, not a measured production performance claim.
+
+## Remote Git operation documentation
+
+Reviewed OperationContext open/finish/drop, tracked locator close, runtime
+shutdown/task tokens, and the qualification example's semantic-result pattern.
+Existing cleanup retains both semantic and close failures and drains tracked
+contexts. No behavior change was needed in that examined path.
+
+Added a compiled rustdoc example that passes the semantic result to finish
+without an intervening early return. README carries the same usage pattern,
+a close-outcome table, deadline precedence, and process shutdown ordering.
+Runtime rustdoc now states that shutdown waits for live operation contexts,
+not just single-flight tasks. Locked tokio-util 0.7.18 tracker code confirms
+that tokens count as outstanding work until released. Existing shutdown tests
+cover active and dropped contexts.
+
+The README's long performance section now has cache/budget, generated-pack,
+source-reuse, traversal, and deployment subsections. Qualification commands
+use an explicit external target directory. The operation example compiles as
+a doctest. These documentation improvements do not claim complete remote-read
+or provider qualification.
+
+## CI observation: repository browser contrast
+
+Run 34103218613, job 101682532999 failed the release browser accessibility
+assertion at releases.e2e.ts:275: the delete tooltip measured 1.42:1 contrast
+in dark mode. The other 29 browser tests passed. The entire packages/repository
+tree is identical to origin/main (tree 4889f8fd8012415770e0d8fa50ef54f8dbb85ace),
+as is the job definition. Playwright starts Vite and this test mocks /api/**;
+it does not invoke any changed Rust crate. This is an unrelated existing
+frontend surface, not a passing gate. Logs were retained by CI. The PR stays
+draft; no test, baseline, stylesheet, or workflow was changed to silence it.
+
+Remote Git validation: the finish doctest and both native-fixture shutdown
+integration tests pass. Runtime behavior and public signatures are unchanged.
