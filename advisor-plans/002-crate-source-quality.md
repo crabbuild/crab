@@ -1330,3 +1330,34 @@ documentation shrink. Correctness follow-ups found while tracing callers: the
 three async CLI paths invoke blocking acquire directly, read_holder_pid has an
 unbounded diagnostic read, and read_experiment_metadata ignores its referenced
 content hash. These are not resolved or qualified by this readability batch.
+
+### Experiment metadata identity: consumer investigation
+
+The unchecked hash in the exported workflow reader is a library-contract gap,
+not evidence that the CLI accepts mismatched remote metadata. Workspace-wide
+search finds only the test implementation of `ExperimentMetaRead`; all calls to
+`read_experiment_metadata` are its module tests.
+
+The production sibling `crab/src/cmd/exp.rs::read_remote_metadata` checks the
+requested experiment ID and compares `ExperimentMetadata::content_hash()` with
+the ref target. Its callers include push's existing-object path and the remote
+experiment read paths. Publication writes `canonical_json()` bytes before the
+hash ref. Therefore verification must compare the canonical metadata hash, not
+invent a raw JSON byte-hash contract: harmless serialization whitespace must
+not change logical identity.
+
+Best-fix direction: establish one shared metadata decoding/identity-validation
+boundary used by both the library reader and CLI reader, retaining caller-owned
+storage lookup and missing-object policy. First inspect workflow-to-CLI error
+conversion and schema compatibility: the shared reader probes schema before
+full deserialization, whereas the CLI currently deserializes directly. Preserve
+typed parsing causes and expose identity failures without making consumers parse
+error text. Add public-entry regressions for incorrect ID, incorrect ref hash,
+and noncanonical whitespace with a valid canonical hash. Do not silently broaden
+this into a storage layout or publication concurrency change.
+
+Evidence status: source/caller/writer contract inspected; no new regression or
+runtime qualification performed in this investigation. The previously recorded
+unchecked library-reader issue remains open. CI observed for c9bb054a23d: three
+successes, eighteen in progress, one queued, four skipped; no reported failures
+at this observation, not a completed CI qualification.
