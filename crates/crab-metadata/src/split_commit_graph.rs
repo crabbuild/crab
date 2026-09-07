@@ -265,12 +265,16 @@ impl SplitCommitGraph {
     }
 
     /// Parse a hexadecimal SHA-1 and return whether it is in this graph.
+    ///
+    /// Invalid hexadecimal input returns `false`.
     #[must_use]
     pub fn contains_hex(&self, oid: &str) -> bool {
         parse_sha1_hex(oid).is_some_and(|oid| self.contains(&oid))
     }
 
     /// Compute a shallow boundary from hexadecimal SHA-1 tips.
+    ///
+    /// Invalid hexadecimal tips return `None`.
     #[must_use]
     pub fn shallow_boundary_hex(&self, tips: &[String], depth: u32) -> Option<Vec<String>> {
         let tips = tips
@@ -282,6 +286,8 @@ impl SplitCommitGraph {
     }
 
     /// Return hexadecimal commit OIDs reachable without crossing `boundary`.
+    ///
+    /// Invalid hexadecimal tips or boundaries return `None`.
     #[must_use]
     pub fn reachable_to_boundary_hex(
         &self,
@@ -301,6 +307,8 @@ impl SplitCommitGraph {
     }
 
     /// Return whether `want` is reachable from any hexadecimal root.
+    ///
+    /// Returns `None` if `want` or a root needed for the search is invalid.
     #[must_use]
     pub fn is_reachable_from_hex(&self, roots: &[String], want: &str) -> Option<bool> {
         let want = parse_sha1_hex(want)?;
@@ -1012,7 +1020,7 @@ fn sha1_hex(oid: &[u8; 20]) -> String {
 }
 
 fn parse_sha1_hex(value: &str) -> Option<[u8; 20]> {
-    if value.len() != 40 {
+    if value.len() != 40 || !value.is_ascii() {
         return None;
     }
     let mut oid = [0_u8; 20];
@@ -1081,6 +1089,29 @@ mod tests {
             .collect();
         let graph = SplitCommitGraph::new(descriptor, layers).unwrap();
         (write, graph)
+    }
+
+    #[test]
+    fn hex_traversal_rejects_multibyte_commit_ids() {
+        use crate::commit_graph::CommitGraphTraversal;
+
+        let (_, graph) = append(None, 1, &[oid(1)], vec![input(1, 10, &[])]);
+        let valid = vec![sha1_hex(&oid(1))];
+        for invalid in [
+            format!("€{}", "0".repeat(37)),
+            format!("0é{}", "0".repeat(37)),
+        ] {
+            let invalid_ids = vec![invalid.clone()];
+            let rejected = [
+                !graph.contains_oid(&invalid),
+                CommitGraphTraversal::shallow_boundary(&graph, &invalid_ids, 1).is_none(),
+                CommitGraphTraversal::reachable_to_boundary(&graph, &invalid_ids, &valid).is_none(),
+                CommitGraphTraversal::reachable_to_boundary(&graph, &valid, &invalid_ids).is_none(),
+                CommitGraphTraversal::is_reachable_from(&graph, &valid, &invalid).is_none(),
+                CommitGraphTraversal::is_reachable_from(&graph, &invalid_ids, &valid[0]).is_none(),
+            ];
+            assert_eq!(rejected, [true; 6]);
+        }
     }
 
     #[test]

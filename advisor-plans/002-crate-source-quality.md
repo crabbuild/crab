@@ -528,3 +528,25 @@ All 15 stage-runtime tests pass, including real loopback HTTP reads and index
 reuse, object/prefix hashing, and both baseline-failing decoder regressions.
 Production parsing shrank by five lines; added tests cover the input contract.
 Strict all-target workflow Clippy and formatting pass.
+
+## Split commit-graph hexadecimal IDs
+
+The public CommitGraphTraversal implementation forwarded IDs to a decoder
+that checked 40-byte length before slicing UTF-8. A public trait regression
+reproduced the panic. The decoder now rejects non-ASCII IDs; membership returns
+false, and traversal returns None when an invalid ID is needed for its answer.
+The regression covers membership, shallow tips, reachability tips/boundaries,
+and roots/wants. Existing successful ancestry and shallow tests remain intact.
+
+Callers inspected: CLI repack graph/manifest identity checks, fetch traversal-root
+admission, and shallow pack filtering. Callees use fixed-size OIDs and positional
+graph records. The sibling CommitGraphSummary uses string comparisons/maps,
+not byte slicing; its distinct completeness semantics are unchanged. No binary
+layer format, generation binding, public signature, or provider contract changed.
+Rustdoc now states invalid-input outcomes, including short-circuit root traversal.
+
+Eight split-graph tests pass with no default features. That build reports five
+pre-existing dead-code warnings in ref_registry and shallow_closure; feature-gate
+cleanup remains a separate quality item. HTTP contents and macOS auth keychain
+hex decoding still need completion of their caller and regression proof.
+Strict all-target metadata Clippy with remote-index passes.
