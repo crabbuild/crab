@@ -1512,6 +1512,10 @@ fn unix_path_from_endpoint(endpoint: &str) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
     use crate::engine::{ReadSourceKey, VfsReadLease};

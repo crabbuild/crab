@@ -2457,6 +2457,10 @@ fn ensure_readable_file(node_type: NodeType, path: &str) -> Result<()> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected result variants"
+)]
 mod tests {
     use super::*;
     use crate::data_plane::{FileIndexResolver, ReconstructionTerm, ShardLoader, XorbFetcher};
@@ -3253,9 +3257,8 @@ mod tests {
 
         fixture.engine.open_read("empty.txt").unwrap();
         fixture.engine.resolver.set_generation(2);
-        let err = match fixture.engine.open_read("empty.txt") {
-            Ok(_) => panic!("stale generation unexpectedly opened a cached read lease"),
-            Err(error) => error,
+        let Err(err) = fixture.engine.open_read("empty.txt") else {
+            panic!("stale generation unexpectedly opened a cached read lease");
         };
 
         assert!(matches!(err, CrabError::NotFound { .. }));

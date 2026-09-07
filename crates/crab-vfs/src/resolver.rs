@@ -492,6 +492,10 @@ fn moved_base_node(mut base: BaseNode, path: &str, entry: &OverlayEntry) -> Base
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
 

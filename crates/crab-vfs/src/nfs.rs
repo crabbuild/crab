@@ -2364,8 +2364,12 @@ fn current_ids() -> (u32, u32) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "test setup and assertions reject unexpected errors and variants"
+)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
 
     use super::*;
     use crate::ChunkCache;
@@ -3283,11 +3287,11 @@ mod tests {
         let fixture = nfs_read_fixture(Vec::new());
         let gitfile = FileHandleU64::new(GITFILE_ID);
 
-        let err =
-            match <CrabNfsFs as NfsReadFileSystem>::readdirplus(&fixture.fs, &gitfile, 0).await {
-                Ok(_) => panic!("READDIRPLUS on synthetic .git unexpectedly succeeded"),
-                Err(error) => error,
-            };
+        let Err(err) =
+            <CrabNfsFs as NfsReadFileSystem>::readdirplus(&fixture.fs, &gitfile, 0).await
+        else {
+            panic!("READDIRPLUS on synthetic .git unexpectedly succeeded");
+        };
 
         assert_eq!(err, nfsstat3::NFS3ERR_NOTDIR);
     }

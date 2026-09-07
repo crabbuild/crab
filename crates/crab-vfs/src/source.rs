@@ -172,6 +172,10 @@ fn resolve_gitdir_file(git_file: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected result variants"
+)]
 mod tests {
     use super::*;
 
@@ -255,7 +259,7 @@ mod tests {
                     "expected path ending with my-repo, got: {path:?}"
                 );
             }
-            other => panic!("expected Local, got: {other:?}"),
+            other @ MountSource::Remote { .. } => panic!("expected Local, got: {other:?}"),
         }
     }
 

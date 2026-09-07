@@ -504,6 +504,10 @@ async fn send_fuse_request_with_timeout(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
 

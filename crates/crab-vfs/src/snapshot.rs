@@ -939,6 +939,10 @@ fn deserialize_base_node(data: &[u8]) -> Result<BaseNode> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
 

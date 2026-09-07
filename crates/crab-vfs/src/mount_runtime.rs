@@ -270,6 +270,10 @@ fn resolve_ref(git_dir: &Path, ref_name: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
     use crate::engine::OverlayWriter;

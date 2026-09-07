@@ -733,3 +733,19 @@ Four attribute tests, four symlink tests, the Unix control socket shutdown test,
 and snapshot pointer round-trip pass. Strict nfs Clippy decreases from 246 to
 238 diagnostics; remaining categories are test unwrap/panic and match style.
 No production behavior or lint policy changed; strict qualification remains open.
+
+## VFS test lint scope
+
+Checked every remaining unwrap/panic diagnostic against its source: all 235
+were inside cfg(test) modules. Root policy prohibits production panics and permits
+test assertions. Added explicit, reasoned expect annotations only on affected
+test modules, matching existing test conventions. Production crate deny rules
+remain unchanged. These annotations acknowledge intentional test failures;
+they are not runtime fixes or deleted assertions. Expectations become warnings
+if no longer fulfilled. Combined the NFS module's existing unwrap expectation
+with its test-panic expectation to keep attribute style consistent.
+
+Simplified two error-result matches to let-else and made the source variant
+match exhaustive. Both error-path tests and all 24 source tests pass. Strict
+all-target crab-vfs Clippy with nfs now passes. This qualifies that feature/lint
+surface only: fuse/platform and lifecycle-completion proof remain outstanding.
