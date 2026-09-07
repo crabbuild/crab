@@ -45,7 +45,7 @@ not claims that the named code is defective.
 | crab-diff | Large term comparison: ordered matches and duplicate counts | Comparison slice verified |
 | crab-xet | Broader parser/reconstruction and aggregate memory qualification remain | Coverage, decoded-length/offset checks, and bounded decompression output verified |
 | crab-storage | Broader retry/error classification and cancellation cleanup remain | Diagnostics, multipart cleanup, and stream framing verified |
-| crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
+| crab-metadata | Catalog lifecycle, cancellation, and broader index qualification remain | Writer admission and diagnostic candidate ordering verified |
 | crab-staging | Flush/publication, scale, and remaining clock-policy qualification remain | Recovery errors and invalid cleanup clocks verified through fsck |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
 | crab-lfs | First-verification cost and lock ownership remain | Upload cleanup, identity, and shared stream framing verified |
@@ -2507,3 +2507,52 @@ build. Broad qualification of the new combined head still requires fresh CI.
 The published review branch remains c808a1553d2 while its Windows workflow job
 101789745148 finishes. Updating that branch after the rebase requires an exact
 force-with-lease against the verified published head, rather than a fast-forward.
+
+
+## Metadata diagnostic candidate ordering
+
+`read_chunk_index_entry` prefers the stored head, then scans immutable placement
+rows if the head is absent. On main a371fb7d002, the scan kept the first receipt
+at a generation while both writers selected the greatest placement ID within
+that generation. A real SlateDB regression reproduces the inconsistency: after
+publishing two competing placements in one batch, deleting only the head changes
+the diagnostic result from chunk index 0 to chunk index 1.
+
+The scan now compares (committed generation, placement ID). It retains the
+already validated key ID alongside the selected receipt, avoiding repeated
+placement hashing. Key/value identity, proof and anchor validation, error
+propagation, and explicit reader close remain unchanged. Rustdoc distinguishes
+candidate lookup from proof of current source visibility or object availability.
+
+Evidence map: the changed public diagnostic reader calls key_codec decoding,
+decode_placement, resolve_receipt, and SlateDB DbReader. Its workspace consumer
+is the auth-server receive publication test; production reconstruction uses
+crab-read. RemoteIndexWriter::write_entries and product ChunkIndexStore's
+save_committed_receipts already agree on the generation/ID tie-break. Product
+get_committed_candidates_page reads heads directly; receipt-pinned reads use
+exact immutable IDs and preserve a prior candidate after head replacement.
+Neither production read path uses this diagnostic history scan.
+
+The locked SlateDB 0.15.0 prefix scan uses suffix-relative bounds; `..` covers
+all placement IDs for the chunk. The regression writes to real SlateDB over
+InMemory storage, closes each writer, removes the head, closes again, and reads
+through the public helper. Deletion buffers with await_durable=false because
+this writer disables timer flushes and owns the final close barrier. An initial
+test-build attempt was intentionally interrupted after correcting the fixture's
+default durable-write wait; it was not an observation timeout or source failure.
+The corrected before-fix test fails on the selection assertion.
+
+Is this the best fix? The scan adopts the existing writer ordering with a local
+comparison, without a new public abstraction or format change. Its agreement is
+within a batch: a stored head can reflect a later batch rather than the maximum
+generation across all history. No claim of global freshness, dedup corruption,
+or byte-reconstruction failure follows from this diagnostic discrepancy.
+
+All six remote-index tests pass, including equal/different generations in both
+input orders. Strict all-target Clippy and warnings-denied rustdoc pass with
+remote-index. Most source growth is the retained I/O regression and shared test
+fixture; production growth explains the selection and candidate contract.
+The auth-server receive publication test also passes, exercising committed file
+and chunk-index publication through the existing public diagnostic consumer.
+Formatting and diff checks pass. This batch is locally qualified; its broader
+CI evidence must follow publication with the next grouped PR update.
