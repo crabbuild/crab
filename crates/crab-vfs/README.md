@@ -74,6 +74,11 @@ The coordinator currently bounds its wait with a grace period, while daemon
 teardown aborts and joins its refresh, watcher, and queue-worker tasks. Neither path establishes completion of detached
 read-window prefetch. Full teardown qualification remains outstanding.
 
+The locked `nfs3_server` listener also spawns connection handlers and a transaction
+cleaner without exposing join handles. Listener drop notifies the cleaner, but
+neither that notification nor joining the listener proves child-task completion.
+Native unmount and backend task cleanup need separate verification.
+
 ## Usage
 
 Source detection requires `fuse` or `nfs`. This crate is not published to the
