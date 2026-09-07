@@ -30,6 +30,11 @@ Store consumers compose those results in `crates/crab-auth-store/src/lib.rs`.
 
 ## Invariants
 
+- Prepare and sync complete key-file bytes before publishing the final name.
+  Use non-overwriting publication so a failed write or a competing initializer
+  cannot replace the authoritative key. Preserve private Unix permissions.
+  Source: `crates/crab-auth/src/token_cache.rs`.
+
 - Keychain initialization must not update an existing encryption key after a
   failed lookup. Use create-only insertion and read the stored winner after a
   failed insertion. Never return an unstored candidate.

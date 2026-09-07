@@ -504,31 +504,20 @@ fn read_key_file(path: &Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-/// Write the key file with 0600 permissions on Unix.
+/// Publish a complete key without replacing an existing key file.
 fn write_key_file(path: &Path, key: &[u8; 32]) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(key)?;
-        f.flush()?;
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        f.write_all(key)?;
-        f.flush()?;
-        Ok(())
-    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "key path has no parent")
+    })?;
+    // tempfile creates Unix files with mode 0600. Prepare and sync all bytes
+    // before exposing the final name, so a failed write cannot leave a short key.
+    let mut prepared = tempfile::NamedTempFile::new_in(parent)?;
+    prepared.write_all(key)?;
+    prepared.as_file().sync_all()?;
+    prepared
+        .persist_noclobber(path)
+        .map_err(|error| AuthError::Io(error.error))?;
+    Ok(())
 }
 
 /// Resolve `~/.config/crab/` for the key file location.
@@ -680,6 +669,73 @@ mod tests {
             })
         });
         assert!(matches!(result, Err(AuthError::KeyStore(_))));
+    }
+
+    #[test]
+    fn key_file_publication_preserves_the_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".token-key");
+        write_key_file(&path, &[42; 32]).unwrap();
+        let conflict = write_key_file(&path, &[24; 32]);
+        assert!(
+            matches!(conflict, Err(AuthError::Io(ref error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(read_key_file(&path).unwrap(), [42; 32]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_publication_keeps_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".token-key");
+        write_key_file(&path, &[42; 32]).unwrap();
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_write_failure_does_not_publish_an_incomplete_key() {
+        const CHILD_DIR: &str = "CRAB_TEST_KEY_WRITE_FAILURE_DIR";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            fs::write(PathBuf::from(&dir).join("child-ran"), b"").unwrap();
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: Only this subprocess changes its signal disposition and
+            // file-size limit. The limit pointer is valid for the FFI call.
+            unsafe {
+                assert_ne!(libc::signal(libc::SIGXFSZ, libc::SIG_IGN), libc::SIG_ERR);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            let path = PathBuf::from(dir).join(".token-key");
+            assert!(matches!(
+                write_key_file(&path, &[42; 32]),
+                Err(AuthError::Io(_))
+            ));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "token_cache::tests::key_file_write_failure_does_not_publish_an_incomplete_key",
+                "--test-threads=1",
+            ])
+            .env(CHILD_DIR, dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(dir.path().join("child-ran").exists());
+        assert!(!dir.path().join(".token-key").exists());
     }
 
     /// Build a minimal JWT with the given claims JSON as the payload.

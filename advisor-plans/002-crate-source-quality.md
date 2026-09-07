@@ -55,7 +55,7 @@ not claims that the named code is defective.
 | crab-write | Shared cleanup error precedence; commit-graph coverage remains | Maintenance cleanup slice verified |
 | crab-remote-git | Finish/shutdown docs; range and consumer qualification remain | Lifecycle documentation verified |
 | crab-vfs | Mount teardown and shared FUSE/NFS lifecycle invariants | Pending |
-| crab-auth | Key-file publication, key-source policy, non-Unix locking remain | Diagnostic, load-outcome, and Keychain race slices verified |
+| crab-auth | Key-source policy, power-loss durability, non-Unix locking remain | Diagnostic, load-outcome, and key-publication slices verified |
 | crab-auth-store | Shared bounded auth retry; provider concurrency and gateway qualification remain | Unary retry slice verified |
 | crab-auth-server | Shared output classification; receive/view cleanup qualification remains | Output slice verified |
 | crab-cache-server | Eviction concurrency, shutdown, request validation | Hex input guards verified; broader lifecycle proof pending |
@@ -1546,3 +1546,39 @@ security, changes the host Keychain, or accesses a real key file. Native Keychai
 service integration remains unqualified; these are deterministic algorithm
 regressions backed by the installed command contract. Production code shrinks;
 the net increase is regression coverage and documentation.
+
+
+### Publish complete key files without replacing the winner
+
+`write_key_file` now writes and syncs a NamedTempFile in the destination directory
+before persist_noclobber publishes its final name. The old create_new writer
+exposed an empty/partial final file before write_all completed; a write failure
+left that invalid key for subsequent initializers. The new path preserves the
+existing AlreadyExists contract consumed by file_based_key's winner read and
+removes duplicated Unix/non-Unix write implementations.
+
+Dependency evidence: Cargo.lock pins tempfile 3.27.0. Its create_named Unix
+implementation defaults to mode 0600. persist_noclobber never overwrites the
+destination; Unix uses no-replace rename where supported, otherwise hard-link
+then unlink, and Windows uses MoveFileExW without replacement. The documented
+hard-link path may leave an extra temporary link on interruption. This patch
+claims complete-byte publication and non-overwrite behavior, not universally
+atomic cleanup or full power-loss durability; directory-entry durability and
+non-Unix access/locking qualification remain open.
+
+Owner/caller proof: TokenCache::new → load_or_create_key → file_based_key →
+write_key_file/read_key_file. The existing loader reads an AlreadyExists winner;
+Keychain insertion was separately fixed to preserve its winner. Encrypted token
+updates intentionally use replacing publication, so this create-only key rule
+must not be copied indiscriminately into token refresh.
+
+Regression: an isolated Unix subprocess sets RLIMIT_FSIZE to zero and ignores
+SIGXFSZ, forcing the real filesystem write to fail. The parent proves the child
+ran and the final key path remains absent. Against the original writer, the
+same test fails because the final path exists. Resource limits affect only the
+child; all files and keys are fixtures. Separate tests cover preserved winner
+bytes and Unix permissions. All 24 token-cache tests and strict default
+all-target auth Clippy pass. Production code shrinks; added code is regression
+coverage. Native Windows and live identity-provider/Keychain proof are not
+claimed. Latest observed CI for 9aff4e32456 had nine successes, fifteen running,
+seven skipped, with no reported failures at that observation.

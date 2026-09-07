@@ -93,6 +93,10 @@ The Keychain loader creates without replacing an existing item. If insertion
 fails, it rereads the stored key so concurrent initializers converge on the
 winner. It never returns a candidate that was not successfully stored.
 
+Key files are prepared and synced in a sibling temporary file before publication.
+Publication never replaces an existing key, and a failed write cannot expose a
+short key at the final path. Unix key files retain private `0600` permissions.
+
 Decoder errors never include the supplied key. Token-cache tests use synthetic
 keys and temporary directories; they do not qualify live Keychain integration.
 
