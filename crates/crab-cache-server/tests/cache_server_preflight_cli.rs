@@ -1505,17 +1505,24 @@ fn evidence_summarize_rejects_report_tampering() {
 
 #[cfg(unix)]
 #[test]
-fn json_output_failure_is_not_reported_as_success() {
+fn output_failure_is_not_reported_as_success() {
     let fixture = EvidenceFixture::new();
-    for command in ["verify", "summarize"] {
-        let args = [
+    for (command, json) in [
+        ("verify", true),
+        ("summarize", true),
+        ("verify", false),
+        ("summarize", false),
+    ] {
+        let mut args = vec![
             "evidence",
             command,
             "--report",
             fixture.report_path.to_str().unwrap(),
-            "--json",
         ];
-        let successful = Command::new(bin()).args(args).output().unwrap();
+        if json {
+            args.push("--json");
+        }
+        let successful = Command::new(bin()).args(&args).output().unwrap();
         assert_succeeded(&successful);
 
         // Close the peer before starting the child so writes fail with EPIPE.
@@ -1524,18 +1531,54 @@ fn json_output_failure_is_not_reported_as_success() {
         drop(reader);
         let stdout = std::os::fd::OwnedFd::from(stdout);
         let failed = Command::new(bin())
-            .args(args)
+            .args(&args)
             .stdout(stdout)
             .output()
             .unwrap();
         assert_eq!(
             failed.status.code(),
             Some(1),
-            "{command}: {}",
+            "{command} (json={json}): {}",
             String::from_utf8_lossy(&failed.stderr)
         );
         assert!(!String::from_utf8_lossy(&failed.stderr).contains("panicked"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn onboarding_render_returns_output_error_after_writing_bundle() {
+    let fixture = TempDir::new().unwrap();
+    let bundle = fixture.path().join("bundle");
+    let (stdout, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    drop(reader);
+    let output = Command::new(bin())
+        .args([
+            "onboarding",
+            "render",
+            "--output-dir",
+            bundle.to_str().unwrap(),
+            "--psk-hash",
+            DEFAULT_PSK_BLAKE3,
+            "--origin-url",
+            "s3://example-bucket",
+            "--cache-service-url",
+            "https://cache.example.test",
+            "--repo-prefix",
+            "org/example/*",
+        ])
+        .stdout(std::os::fd::OwnedFd::from(stdout))
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+    assert!(bundle.join("server-config.toml").is_file());
 }
 
 fn run_evidence_verify(report_path: &Path) -> Output {

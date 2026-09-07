@@ -3011,3 +3011,34 @@ JSON validation completed: strict all-target Clippy and cache-server binary
 build both pass. Formatting and diff checks pass. Production source shrinks by
 39 lines after excluding the added failure-matrix test; duplicate emitters and
 the file reopen path were removed. This batch is ready for grouped publication.
+
+
+### Cache-service text output sibling
+
+Extending the same closed-peer fixture to text mode exposed a separate normal-
+error problem: evidence verify panics in std::io printing and exits101 instead
+of returning an output error. The regression failed before the text refactor.
+All binary stdout print/println calls are now checked write/writeln operations
+on locked stdout, with explicit flushes. Evidence, optional gate doctor,
+onboarding check/probe/render, and preflight owners propagate output errors.
+JSON and text share the final output-error reporting boundary. Text formatting
+strings and field order remain unchanged; no second renderer or output mode
+was introduced. Diagnostic stderr/tracing failures are not qualified here.
+
+The onboarding-render regression also verifies the written bundle survives an
+output failure. Its first attempt omitted required origin/service/prefix CLI
+arguments and exited2 before rendering; the fixture was corrected to include
+those required arguments. It now exercises the intended post-write output
+failure.41 CLI tests and four binary tests pass. Strict Clippy identified one
+collapsible optional-doctor guard; it was collapsed without a lint suppression.
+Final Clippy/build proof follows. The additional text error propagation adds
+explicit ownership of output completion;46 unchecked stdout macros are removed.
+
+
+Text validation completed: strict all-target Clippy and the cache-server binary
+build pass after the guard cleanup. The41 CLI/four binary tests passed before
+that equivalent guard simplification. Formatting and diff checks pass. Both
+output commits are retained locally for grouped publication while PR head
+b81b4fdda9c has active CI, including cache-service smoke and native workflow
+checks. Native dispatch34148861825 still has its Windows smoke step running;
+no competing dispatch or restart has been issued.

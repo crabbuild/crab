@@ -12,8 +12,9 @@ use crab_cache_server::evidence::{
     summarize_evidence_report, verify_evidence_report, verify_release_evidence_report,
 };
 use crab_cache_server::onboarding::{
-    OnboardingCheckReport, OnboardingProbeOptions, OnboardingProbeReport, OnboardingRenderOptions,
-    check_onboarding_bundle, probe_onboarding_bundle, render_onboarding_bundle,
+    OnboardingBundle, OnboardingCheckReport, OnboardingProbeOptions, OnboardingProbeReport,
+    OnboardingRenderOptions, check_onboarding_bundle, probe_onboarding_bundle,
+    render_onboarding_bundle,
 };
 use crab_cache_server::preflight::{
     CacheServerPreflightReport, PreflightProfile, PreflightProfileOptions, PreflightStatus,
@@ -377,7 +378,10 @@ fn check(
         if !emit_json(&report) {
             return ExitCode::from(1);
         }
-    } else if let Err(e) = report.write_text(std::io::stdout()) {
+    } else if let Err(e) = report
+        .write_text(io::stdout().lock())
+        .and_then(|()| io::stdout().flush())
+    {
         eprintln!("error: failed to write preflight output: {e}");
         return ExitCode::from(1);
     }
@@ -410,7 +414,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             } else {
-                emit_evidence_text(&verification);
+                if !output_succeeded(emit_evidence_text(&verification)) {
+                    return ExitCode::from(1);
+                }
             }
             if verification.status == EvidenceVerificationStatus::Passed {
                 ExitCode::SUCCESS
@@ -447,7 +453,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             } else {
-                emit_release_evidence_text(&verification);
+                if !output_succeeded(emit_release_evidence_text(&verification)) {
+                    return ExitCode::from(1);
+                }
             }
             if verification.status == EvidenceVerificationStatus::Passed {
                 ExitCode::SUCCESS
@@ -501,9 +509,13 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             } else {
-                emit_release_evidence_text(&verification);
-                if let Some(doctor) = &doctor {
-                    emit_evidence_doctor_text(doctor);
+                if !output_succeeded(emit_release_evidence_text(&verification)) {
+                    return ExitCode::from(1);
+                }
+                if let Some(doctor) = &doctor
+                    && !output_succeeded(emit_evidence_doctor_text(doctor))
+                {
+                    return ExitCode::from(1);
                 }
             }
             if verification.status == EvidenceVerificationStatus::Passed {
@@ -519,7 +531,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             } else {
-                emit_evidence_summary_text(&summary);
+                if !output_succeeded(emit_evidence_summary_text(&summary)) {
+                    return ExitCode::from(1);
+                }
             }
             if summary.status == EvidenceVerificationStatus::Passed {
                 ExitCode::SUCCESS
@@ -534,7 +548,9 @@ fn evidence(command: EvidenceCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             } else {
-                emit_evidence_doctor_text(&report);
+                if !output_succeeded(emit_evidence_doctor_text(&report)) {
+                    return ExitCode::from(1);
+                }
             }
             if report.status == EvidenceVerificationStatus::Passed {
                 ExitCode::SUCCESS
@@ -574,14 +590,11 @@ fn onboarding(command: OnboardingCommand) -> ExitCode {
 
             match render_onboarding_bundle(&options) {
                 Ok(bundle) => {
-                    println!(
-                        "wrote cache-service enterprise onboarding bundle: {}",
-                        bundle.output_dir.display()
-                    );
-                    for file in bundle.files {
-                        println!("  - {}", file.display());
+                    if output_succeeded(emit_onboarding_bundle(&bundle)) {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::from(1)
                     }
-                    ExitCode::SUCCESS
                 }
                 Err(error) => {
                     eprintln!("error: {error}");
@@ -596,7 +609,9 @@ fn onboarding(command: OnboardingCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             } else {
-                emit_onboarding_check_text(&report);
+                if !output_succeeded(emit_onboarding_check_text(&report)) {
+                    return ExitCode::from(1);
+                }
             }
             if report.status == PreflightStatus::Fail {
                 ExitCode::from(1)
@@ -634,7 +649,9 @@ fn onboarding(command: OnboardingCommand) -> ExitCode {
                     return ExitCode::from(1);
                 }
             } else {
-                emit_onboarding_probe_text(&report);
+                if !output_succeeded(emit_onboarding_probe_text(&report)) {
+                    return ExitCode::from(1);
+                }
             }
             if status_exit_success(report.status, fail_on_warn) {
                 ExitCode::SUCCESS
@@ -663,62 +680,75 @@ fn release_report_path(report: Option<&Path>, evidence_dir: Option<&Path>) -> Op
     }
 }
 
-fn emit_release_evidence_text(report: &EvidenceReleaseVerification) {
-    println!(
+fn emit_release_evidence_text(report: &EvidenceReleaseVerification) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
         "cache service release evidence: {}",
         evidence_status(report.status)
-    );
-    println!("report: {}", report.report);
-    println!("expected_run_id: {}", report.expected_run_id);
+    )?;
+    writeln!(output, "report: {}", report.report)?;
+    writeln!(output, "expected_run_id: {}", report.expected_run_id)?;
     if let Some(run_id) = &report.run_id {
-        println!("run_id: {run_id}");
+        writeln!(output, "run_id: {run_id}")?;
     }
-    println!("verified checks: {}", report.verified_checks);
+    writeln!(output, "verified checks: {}", report.verified_checks)?;
     let failed = report.failed_check_names();
     if !failed.is_empty() {
-        println!("failed checks:");
+        writeln!(output, "failed checks:")?;
         for name in failed {
-            println!("  - {name}");
+            writeln!(output, "  - {name}")?;
         }
     }
+    output.flush()
 }
 
-fn emit_evidence_text(report: &EvidenceVerificationReport) {
-    println!("cache service evidence: {}", evidence_status(report.status));
-    println!("report: {}", report.report);
+fn emit_evidence_text(report: &EvidenceVerificationReport) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
+        "cache service evidence: {}",
+        evidence_status(report.status)
+    )?;
+    writeln!(output, "report: {}", report.report)?;
     if let Some(run_id) = &report.run_id {
-        println!("run_id: {run_id}");
+        writeln!(output, "run_id: {run_id}")?;
     }
-    println!("verified checks: {}", report.verified_checks);
+    writeln!(output, "verified checks: {}", report.verified_checks)?;
     let failed = report.failed_check_names();
     if !failed.is_empty() {
-        println!("failed checks:");
+        writeln!(output, "failed checks:")?;
         for name in failed {
-            println!("  - {name}");
+            writeln!(output, "  - {name}")?;
         }
     }
+    output.flush()
 }
 
-fn emit_evidence_summary_text(summary: &EvidenceSummary) {
-    println!(
+fn emit_evidence_summary_text(summary: &EvidenceSummary) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
         "cache service evidence: {}",
         evidence_status(summary.status)
-    );
-    println!("report: {}", summary.report);
+    )?;
+    writeln!(output, "report: {}", summary.report)?;
     if let Some(run_id) = &summary.run_id {
-        println!("run_id: {run_id}");
+        writeln!(output, "run_id: {run_id}")?;
     }
-    println!("verified checks: {}", summary.verified_checks);
-    println!(
+    writeln!(output, "verified checks: {}", summary.verified_checks)?;
+    writeln!(
+        output,
         "cache: hit_rate={} hits={} origin_avoided={} origin_fetches={} fallback_rate={}",
         fmt_f64(summary.cache.cache_hit_rate),
         fmt_f64(summary.cache.cache_hit_total),
         fmt_f64(summary.cache.origin_avoided_reads_total),
         fmt_f64(summary.cache.origin_fetch_total),
         fmt_f64(summary.cache.origin_fallback_rate),
-    );
+    )?;
     for hydrate in &summary.hydrates {
-        println!(
+        writeln!(
+            output,
             "hydrate {}: origin_get_delta={} origin_fetches={} cache_hits={} cache_misses={} origin_avoided={}",
             hydrate.name,
             fmt_i64(hydrate.origin_gets_delta),
@@ -726,19 +756,21 @@ fn emit_evidence_summary_text(summary: &EvidenceSummary) {
             fmt_i64(hydrate.cache_hits_delta),
             fmt_i64(hydrate.cache_misses_delta),
             fmt_i64(hydrate.origin_avoided_reads_delta),
-        );
+        )?;
     }
     if let Some(dedup) = &summary.dedup {
-        println!(
+        writeln!(
+            output,
             "dedup: queries={} known_chunks={} cacheable_origin_gets={} mutable_origin_gets={} xorb_puts={}",
             fmt_i64(dedup.dedup_queries_delta),
             fmt_i64(dedup.dedup_known_chunks_delta),
             fmt_i64(dedup.cacheable_origin_gets_delta),
             fmt_i64(dedup.mutable_origin_gets_delta),
             fmt_i64(dedup.xorb_puts_delta),
-        );
+        )?;
     }
-    println!(
+    writeln!(
+        output,
         "enterprise: preflight={} policy={} mutable_paths={} max_object_bytes={} policy_rules={} authz_read={} authz_write={} authz_dedup={} authz_admin={}",
         fmt_str(summary.enterprise.preflight_status.as_deref()),
         fmt_str(summary.enterprise.policy.as_deref()),
@@ -749,8 +781,9 @@ fn emit_evidence_summary_text(summary: &EvidenceSummary) {
         fmt_bool(summary.enterprise.authz_write),
         fmt_bool(summary.enterprise.authz_dedup),
         fmt_bool(summary.enterprise.authz_admin),
-    );
-    println!(
+    )?;
+    writeln!(
+        output,
         "routes: capabilities_status={} route_schema={} prefix={} immutable={}/{} mutable={}/{} retired={} read_probes={} read_unique={} write_probes={} write_unique={}",
         fmt_i64(summary.routes.capabilities_status),
         fmt_str(summary.routes.route_schema.as_deref()),
@@ -764,36 +797,40 @@ fn emit_evidence_summary_text(summary: &EvidenceSummary) {
         fmt_usize(summary.routes.mutable_read_probe_unique_patterns),
         fmt_usize(summary.routes.mutable_write_probe_count),
         fmt_usize(summary.routes.mutable_write_probe_unique_patterns),
-    );
+    )?;
     if !summary.routes.retired_routes.is_empty() {
-        println!("retired routes:");
+        writeln!(output, "retired routes:")?;
         for route in &summary.routes.retired_routes {
-            println!("  - {route}");
+            writeln!(output, "  - {route}")?;
         }
     }
     if !summary.artifacts.is_empty() {
-        println!("artifacts:");
+        writeln!(output, "artifacts:")?;
         for artifact in &summary.artifacts {
-            println!(
+            writeln!(
+                output,
                 "  - {} sha256={} bytes={}",
                 artifact.name,
                 fmt_str(artifact.sha256.as_deref()),
                 artifact
                     .bytes
                     .map_or_else(|| "missing".to_string(), |bytes| bytes.to_string()),
-            );
+            )?;
         }
     }
     if !summary.failed_checks.is_empty() {
-        println!("failed checks:");
+        writeln!(output, "failed checks:")?;
         for name in &summary.failed_checks {
-            println!("  - {name}");
+            writeln!(output, "  - {name}")?;
         }
     }
+    output.flush()
 }
 
-fn emit_evidence_doctor_text(report: &EvidenceDoctorReport) {
-    print!("{}", evidence_doctor_text(report));
+fn emit_evidence_doctor_text(report: &EvidenceDoctorReport) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    write!(output, "{}", evidence_doctor_text(report))?;
+    output.flush()
 }
 
 fn evidence_doctor_text(report: &EvidenceDoctorReport) -> String {
@@ -826,8 +863,12 @@ fn write_json(mut output: impl Write, value: &impl serde::Serialize) -> io::Resu
 }
 
 fn emit_json(value: &impl serde::Serialize) -> bool {
-    if let Err(error) = write_json(io::stdout().lock(), value) {
-        eprintln!("error: failed to write JSON output: {error}");
+    output_succeeded(write_json(io::stdout().lock(), value))
+}
+
+fn output_succeeded(result: io::Result<()>) -> bool {
+    if let Err(error) = result {
+        eprintln!("error: failed to write output: {error}");
         return false;
     }
     true
@@ -885,73 +926,102 @@ fn write_text_output(path: &Path, value: &str, label: &str) -> bool {
     true
 }
 
-fn emit_onboarding_check_text(report: &OnboardingCheckReport) {
-    println!(
+fn emit_onboarding_bundle(bundle: &OnboardingBundle) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
+        "wrote cache-service enterprise onboarding bundle: {}",
+        bundle.output_dir.display()
+    )?;
+    for file in &bundle.files {
+        writeln!(output, "  - {}", file.display())?;
+    }
+    output.flush()
+}
+
+fn emit_onboarding_check_text(report: &OnboardingCheckReport) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
         "cache-service onboarding check: {}",
         preflight_status(report.status)
-    );
-    println!("bundle: {}", report.bundle_dir);
+    )?;
+    writeln!(output, "bundle: {}", report.bundle_dir)?;
     for check in &report.checks {
-        println!(
+        writeln!(
+            output,
             "[{}] {}: {}",
             preflight_status(check.status),
             check.name,
             check.detail
-        );
+        )?;
         if let Some(code) = check.code {
-            println!("  code: {code}");
+            writeln!(output, "  code: {code}")?;
         }
         if let Some(remediation) = check.remediation {
-            println!("  remediation: {remediation}");
+            writeln!(output, "  remediation: {remediation}")?;
         }
     }
+    output.flush()
 }
 
-fn emit_onboarding_probe_text(report: &OnboardingProbeReport) {
-    println!(
+fn emit_onboarding_probe_text(report: &OnboardingProbeReport) -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    writeln!(
+        output,
         "cache-service onboarding probe: {}",
         preflight_status(report.status)
-    );
-    println!(
+    )?;
+    writeln!(
+        output,
         "bundle check: {}",
         preflight_status(report.bundle_check.status)
-    );
-    println!("bundle: {}", report.bundle_check.bundle_dir);
+    )?;
+    writeln!(output, "bundle: {}", report.bundle_check.bundle_dir)?;
     for check in &report.bundle_check.checks {
-        println!(
+        writeln!(
+            output,
             "[{}] bundle {}: {}",
             preflight_status(check.status),
             check.name,
             check.detail
-        );
+        )?;
     }
     if let Some(server_preflight) = &report.server_preflight {
-        println!(
+        writeln!(
+            output,
             "server preflight: {}",
             preflight_status(server_preflight.status)
-        );
+        )?;
         for check in &server_preflight.checks {
-            println!(
+            writeln!(
+                output,
                 "[{}] server {}: {}",
                 preflight_status(check.status),
                 check.name,
                 check.detail
-            );
+            )?;
         }
     }
     if let Some(client_probe) = &report.client_probe {
-        println!("client probe: {}", preflight_status(client_probe.status));
-        println!("client probe repo: {}", client_probe.repo_path);
-        println!("client probe service: {}", client_probe.service_url);
+        writeln!(
+            output,
+            "client probe: {}",
+            preflight_status(client_probe.status)
+        )?;
+        writeln!(output, "client probe repo: {}", client_probe.repo_path)?;
+        writeln!(output, "client probe service: {}", client_probe.service_url)?;
         for check in &client_probe.checks {
-            println!(
+            writeln!(
+                output,
                 "[{}] client {}: {}",
                 preflight_status(check.status),
                 check.name,
                 check.detail
-            );
+            )?;
         }
     }
+    output.flush()
 }
 
 fn preflight_status(status: PreflightStatus) -> &'static str {

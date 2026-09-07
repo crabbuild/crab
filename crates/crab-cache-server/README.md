@@ -89,10 +89,11 @@ not prove origin connectivity; the readiness check also probes the origin.
 The CLI also provides `evidence` verification/gating and `onboarding`
 render/check/probe commands for repeatable deployment proof.
 
-For `--json`, success includes writing the complete report, trailing newline,
-and flushing stdout. A reported output error returns exit code 1 even when the
-checks pass. Evidence files use the same JSON writer; this is not an atomic
-publication or power-loss durability guarantee.
+For JSON and text reports, success includes writing the complete output and
+flushing stdout. A reported output error returns exit code 1 even when the
+checks pass. If onboarding render cannot print its result, already-written
+bundle files remain available. Evidence files use the same JSON writer as
+stdout; this is not an atomic publication or power-loss durability guarantee.
 
 ## Shutdown ownership
 
