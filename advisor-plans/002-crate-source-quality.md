@@ -855,3 +855,22 @@ Validation: all eight refreshing_store tests pass with refreshing-store;
 strict all-target Clippy passes with managed-service (which includes the refresh
 feature). Formatting and diff whitespace checks pass. Provider refresh races,
 live identity-service behavior, and complete gateway qualification remain open.
+
+## HTTP-server documentation entry point
+
+The 1,282-line README mixed setup, API contracts, historical local measurements,
+and product completion tracking. It is now a 93-line entry point with an
+architecture diagram, build/run commands, and task-oriented links. REFERENCE.md
+preserves the complete original content, adds a browser/API section anchor, and
+labels historical qualification as distinct from current production readiness.
+The native-write design's incoming push link and scoped agent guide now point
+to the reference where appropriate. No runtime behavior changed.
+
+Validation: compared the reference body byte-for-byte with the previous README
+after removing only the added navigation/title changes; all 21 local Markdown
+links/anchors in the four touched documents resolve. CLAUDE.md remains a sibling
+symlink to AGENTS.md. Checked quick-start arguments against main.rs, embedding
+requirements against build.rs, configuration against the deployment example and
+loopback validation, and the focused test route against server.rs. Formatting
+and git diff --check pass. This documentation-only change needs no Rust rebuild;
+historical verification claims were retained, not re-certified.

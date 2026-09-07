@@ -3,7 +3,7 @@
 Status: native HTTP receive is composed and has an isolated RustFS integration
 proof for standard repository publication. Exact branch/tag creates, fast-forward
 updates and deletions work; forced rewrites are rejected atomically. See
-[Native Git push](README.md#native-git-push) for limits and remaining qualification.
+[Native Git push](REFERENCE.md#native-git-push) for limits and remaining qualification.
 Shared intake/graph/dependency proofs below are historical component evidence;
 only the HTTP integration tests establish an accepted native push.
 

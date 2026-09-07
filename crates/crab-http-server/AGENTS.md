@@ -65,7 +65,8 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 
 ## Related documentation
 
-- `crates/crab-http-server/README.md` — usage and detailed contracts.
+- `crates/crab-http-server/README.md` — quick start and reading routes.
+- `crates/crab-http-server/REFERENCE.md` — detailed contracts and qualification history.
 - `crates/crab-http-server/Cargo.toml` — dependency and feature authority.
 
 Read `crates/crab-http-server/build.rs` and `packages/repository/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks.
