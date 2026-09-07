@@ -63,9 +63,8 @@ pub enum LfsError {
 const STREAM_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// Maximum number of parts in flight simultaneously during a streaming
-/// upload. Bounds peak memory to `STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS`
-/// — 32 MiB at defaults — regardless of file size. Matches the xorb
-/// uploader's bound.
+/// upload, including the final partial part. This bounds queued payload bytes;
+/// read/assembly buffers and provider allocations are additional memory.
 const MAX_IN_FLIGHT_PARTS: usize = 4;
 
 /// Size of the read buffer used when streaming a file into part
@@ -996,9 +995,7 @@ async fn stream_file_parts(
     use futures_util::stream::{FuturesUnordered, StreamExt};
 
     let mut hasher = Sha256::new();
-    let mut pending: FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = object_store::Result<()>> + Send>>,
-    > = FuturesUnordered::new();
+    let mut pending: FuturesUnordered<object_store::UploadPart> = FuturesUnordered::new();
 
     // `buf` is the currently-assembling part; we flush it as a part
     // whenever it reaches STREAM_PART_SIZE. Pre-allocated to avoid
@@ -1019,7 +1016,7 @@ async fn stream_file_parts(
         if n == 0 {
             // EOF. Flush whatever remains in `buf` as the final part.
             if !buf.is_empty() {
-                dispatch_part(upload, &mut buf, &mut pending)?;
+                dispatch_part(upload, std::mem::take(&mut buf), &mut pending, remote_path).await?;
             }
             break;
         }
@@ -1032,21 +1029,6 @@ async fn stream_file_parts(
         // Multiple loop iterations handle the (rare) case where a
         // single read delivered more than one part's worth of bytes.
         while buf.len() >= STREAM_PART_SIZE {
-            // Backpressure: if we're at the concurrency ceiling, wait
-            // for one in-flight part to complete before dispatching a
-            // new one. This bounds peak memory to the part size times
-            // MAX_IN_FLIGHT_PARTS regardless of file size.
-            if pending.len() >= MAX_IN_FLIGHT_PARTS
-                && let Some(result) = pending.next().await
-            {
-                result.map_err(|e| {
-                    LfsError::from(crab_storage::map_object_store_error(
-                        e,
-                        remote_path.as_ref(),
-                    ))
-                })?;
-            }
-
             // Peel one STREAM_PART_SIZE chunk off the front of `buf`
             // and dispatch it. `split_off` + swap keeps the remainder
             // (if any) in `buf` for the next iteration without an
@@ -1054,7 +1036,7 @@ async fn stream_file_parts(
             let mut part = buf;
             let tail = part.split_off(STREAM_PART_SIZE);
             buf = tail;
-            dispatch_part_owned(upload, part, &mut pending)?;
+            dispatch_part(upload, part, &mut pending, remote_path).await?;
         }
     }
 
@@ -1117,33 +1099,26 @@ fn annotate_io_error(source: std::io::Error, file_path: &StdPath) -> LfsError {
     LfsError::Io { source: wrapped }
 }
 
-/// Dispatch the accumulated buffer as a new part, leaving `buf` empty
-/// and ready to accept more bytes. Used when `buf` is moved in its
-/// entirety (EOF with a partial final part).
-fn dispatch_part(
-    upload: &mut dyn MultipartUpload,
-    buf: &mut Vec<u8>,
-    pending: &mut futures_util::stream::FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = object_store::Result<()>> + Send>>,
-    >,
-) -> Result<()> {
-    let part_bytes = std::mem::take(buf);
-    dispatch_part_owned(upload, part_bytes, pending)
-}
-
-/// Dispatch a caller-owned `Vec<u8>` as a new part. Zero-copies into
-/// `Bytes` via `Bytes::from(Vec<u8>)` so the allocation travels with
-/// the in-flight future.
-fn dispatch_part_owned(
+async fn dispatch_part(
     upload: &mut dyn MultipartUpload,
     part_bytes: Vec<u8>,
-    pending: &mut futures_util::stream::FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = object_store::Result<()>> + Send>>,
-    >,
+    pending: &mut futures_util::stream::FuturesUnordered<object_store::UploadPart>,
+    remote_path: &Path,
 ) -> Result<()> {
+    // Every part, including the EOF tail, waits for capacity before handing
+    // its payload to the provider. Otherwise the final part bypasses the bound.
+    if pending.len() >= MAX_IN_FLIGHT_PARTS
+        && let Some(result) = pending.next().await
+    {
+        result.map_err(|error| {
+            LfsError::from(crab_storage::map_object_store_error(
+                error,
+                remote_path.as_ref(),
+            ))
+        })?;
+    }
     let payload: PutPayload = Bytes::from(part_bytes).into();
-    let fut = upload.put_part(payload);
-    pending.push(Box::pin(fut));
+    pending.push(upload.put_part(payload));
     Ok(())
 }
 
@@ -1570,7 +1545,7 @@ mod tests {
     /// repeating byte `fill`. Returns the temp file handle so the
     /// caller controls cleanup; the path is accessible via
     /// `.path()` for as long as the handle is alive.
-    fn temp_file_of_size(size: usize, fill: u8) -> (tempfile::NamedTempFile, [u8; 32]) {
+    pub(super) fn temp_file_of_size(size: usize, fill: u8) -> (tempfile::NamedTempFile, [u8; 32]) {
         use std::io::Write as _;
         let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
         // Write in 1 MiB chunks so we don't hold size bytes in memory
@@ -1767,3 +1742,6 @@ mod tests {
         assert_eq!(Sha256::digest(&got).as_slice(), oid.as_slice());
     }
 }
+
+#[cfg(test)]
+mod upload_tests;

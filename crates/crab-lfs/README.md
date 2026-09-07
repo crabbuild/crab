@@ -36,7 +36,9 @@ checks to avoid re-reading the object body. A configured primary fallback can
 serve reads when a selected replica is stale or unavailable; receipts are
 written to the source that passed verification.
 
-Streamed uploads verify size and SHA-256 before completion. Read, part, hash,
+Streamed uploads admit at most four part futures, including the final partial
+part. Read/assembly buffers and provider allocations sit outside that queue
+bound. Uploads verify size and SHA-256 before completion. Read, part, hash,
 and completion failures attempt multipart abort; a cleanup failure preserves
 the original upload error. Await the operation to finish cleanup: dropping its
 future or terminating the process cannot guarantee remote part reclamation.

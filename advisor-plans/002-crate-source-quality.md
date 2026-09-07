@@ -48,7 +48,7 @@ not claims that the named code is defective.
 | crab-metadata | Catalog lifecycle, cancellation, and broader index qualification remain | Writer admission, diagnostic candidate ordering, and shared-reader close serialization verified |
 | crab-staging | Flush/publication, scale, and remaining clock-policy qualification remain | Recovery errors and invalid cleanup clocks verified through fsck |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
-| crab-lfs | Final-part admission, first-verification cost, and lock ownership remain | Upload cleanup, identity, shared stream framing, and typed lock decode errors verified |
+| crab-lfs | First-verification cost and lock ownership remain | Upload admission/cleanup, identity, shared stream framing, and typed lock decode errors verified |
 | crab-cache | Broader cache-key and invalidation qualification remain | Diagnostics, exact cached-file ranges, repair/accounting, and README navigation verified |
 | crab-cache-store | Broader source-chain integrity and deployed-service qualification remain | Warm ranges, conditional/versioned bypass, metadata authority, and corruption provenance verified |
 | crab-read | Aggregate memory/source-chain, sibling close ownership, and runtime-shutdown qualification remain | Bounded workers, canonical lookup ownership, typed join sources, and abandoned-batch checkpoint cleanup verified |
@@ -3982,3 +3982,45 @@ Follow-up audit after `374410f6dc1`; implementation remains open.
   34166389306 has passed its feature gate and queued Linux/macOS/Windows jobs;
   native Windows outcome remains unknown. No live run was cancelled to publish
   these local follow-ups.
+
+
+### LFS upload admission includes the final partial part
+
+- Current main has the same EOF bypass. Reproduced it through stream_file_parts and a
+  real in-memory multipart upload. An observing wrapper counts retained part
+  futures from put_part invocation until completion/drop. A 32 MiB + 1 byte
+  file retains five futures before the fix, exceeding MAX_IN_FLIGHT_PARTS=4.
+  The exact 32 MiB boundary passes before the fix. Fixtures complete the real
+  upload and verify output length and SHA-256, not just the counter.
+- Both full and EOF-tail dispatch now await one canonical dispatch_part helper.
+  It reaps a queued result before submitting another part when at capacity.
+  Remove the tail-only wrapper and use object_store::UploadPart directly,
+  avoiding the redundant boxed future. Production source shrinks by 22 lines.
+- Evidence map: CLI transfer_agent::do_upload calls the shared
+  put_stream_with_size, which calls stream_file_parts and aborts on its error;
+  completion still uses the shared complete_upload owner. put_stream delegates
+  to that same sized entry point. Hash/size checks and error mapping remain in
+  their existing owners. The locked object_store MultipartUpload contract
+  permits concurrent part futures but requires their completion before commit.
+- Siblings: storage's byte-chunk and local-file multipart loops enforce their
+  bound before every chunk, including the remainder. CLI export flushes full
+  parts synchronously and awaits the final part, so it has no corresponding
+  queued-tail bypass. This fix changes shared LFS stream admission only.
+- Best fix assessment: put the invariant at the existing provider-dispatch
+  boundary rather than adding a second EOF-specific capacity branch. No new
+  product configuration or semaphore. Read/assembly/provider memory remains
+  outside the part-queue bound; no total process-memory qualification claimed.
+- Proof: all 36 object-store tests pass, including three admission cases
+  (exact boundary, one-byte tail, and another full part plus tail), existing
+  multipart round trips, corruption/abort, pointer-size, and receipt tests.
+  Strict all-target Clippy, strict public rustdoc, formatting, and diff checks
+  pass. README and agent guide describe the shared admission owner.
+- Dependency review: add the existing workspace async-trait as a dev-dependency
+  for the real MultipartUpload observing adapter. Cargo.lock changes only the
+  crab-lfs dependency edge; no package version, checksum, override, or runtime
+  dependency changes. The first fixture build used offline resolution; all
+  subsequent checks use --locked.
+- CLI consumer build passes for the upload and typed lock-source changes,
+  retaining the previously recorded macOS unwind-section linker warning.
+  Broad PR CI is still live on 5d248c18c60; these local follow-ups need fresh
+  checks when published. No runtime/native pass is inferred from this build.
