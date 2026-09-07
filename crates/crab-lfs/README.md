@@ -41,6 +41,17 @@ and completion failures attempt multipart abort; a cleanup failure preserves
 the original upload error. Await the operation to finish cleanup: dropping its
 future or terminating the process cannot guarantee remote part reclamation.
 
+Verified HTTP/range streams require a strong ETag or object version. The
+response must match the version that passed verification; a same-size
+replacement is rejected before its stream is returned. Without such a validator,
+use `download_to_file`, which hashes the bytes from one read before succeeding.
+
+Receipts use verifier `crab-lfs/2`. Older receipts trigger fresh hashing because
+the previous writer could attach an unrelated HEAD response to an upload's
+verified bytes. New uploads no longer write HEAD-based receipts: the first
+receipt-aware verifier hashes the stored body and records that response's
+metadata. This adds one full verification read before later receipt hits.
+
 `verify_origin(oid, expected_size)` performs a fresh SHA-256 and exact-size check
 without reading/writing verification receipts or using the configured fallback.
 Supply an origin-only store and bound the expected size and request deadline at

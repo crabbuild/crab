@@ -35,6 +35,11 @@ either product surface.
 
 ## Invariants
 
+- Bind a receipt to the metadata returned with verified bytes, never a later
+  HEAD. Serving a second response requires matching strong ETag/version identity;
+  old verifier receipts cannot establish that proof.
+  Source: `crates/crab-lfs/src/object_store.rs`.
+
 - Non-resumable multipart completion uses `crab_storage::multipart::complete_upload`: abort on failure, preserve the completion error, and await cleanup before retry. Durable journal sessions retain their separate recovery protocol.
   Source: `crates/crab-storage/src/multipart.rs`.
 

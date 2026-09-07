@@ -48,7 +48,7 @@ not claims that the named code is defective.
 | crab-metadata | Remote writer selection and close contract; catalog lifecycle remains | Writer selection slice verified |
 | crab-staging | Recovery lookup errors; flush/publication and scale qualification remain | Recovery slice verified |
 | crab-coordination | Renewal control flow; provider and GC fencing contracts remain | Renewal slice verified |
-| crab-lfs | Receipt/stream identity races and lock ownership remain | Upload diagnostics and completion cleanup verified |
+| crab-lfs | Read framing, first-verification cost, and lock ownership remain | Upload cleanup and receipt/stream identity verified |
 | crab-cache | Credential diagnostics; cache keys and invalidation remain | Diagnostic slice verified |
 | crab-cache-store | Startup outcomes; origin authority and range qualification remain | Startup slice verified |
 | crab-read | Term cancellation cleanup; hydration and source-chain qualification remain | Batch cleanup slice verified |
@@ -1154,3 +1154,69 @@ entire packages/repository tree and the browser workflow match origin/main;
 this Node-only job does not build or execute Rust. The latest main run skipped
 that job, so no main runtime reproduction is claimed. Rust CI remained running
 at observation. This is an outstanding PR check, not a green qualification.
+
+## LFS verification identity
+
+Three public-entry regressions failed before the fix: a same-size replacement
+between verification and serving was returned successfully; a later HEAD could
+produce a receipt accepting corrupt replacement bytes after upload; and a stream
+without any validator reused an earlier hash. A fourth regression showed an old
+`crab-lfs/1` receipt could continue accepting that unverified HEAD metadata.
+
+Receipts now use verifier `crab-lfs/2`, keeping the same optional receipt encoding
+and key layout. Earlier verifier receipts miss and require fresh body hashing.
+All receipt writers receive metadata from a verified read; the fresh-HEAD writer
+and its callers are removed. Repair verification records its own read metadata.
+New uploads create no receipt until a subsequent verifier hashes stored bytes.
+This avoids expanding Store's write API or guessing a write validator, at the
+cost of one full read for the first post-upload verification. Repeated valid
+receipt checks remain available; measuring that first-read cost and designing
+exact write-result propagation remain performance follow-ups.
+
+Stream admission requires a nonempty object version or nonempty, non-weak ETag,
+then compares both validator fields on the served response with the verified
+metadata. Same-size replacements are rejected before returning the stream. No
+validator produces StorageError::NotSupported; download_to_file still hashes one
+read to a local destination and works without validators. Existing primary
+fallback can retry a rejected replica against its own independently verified
+object. Receipt admission and creation use the same validator predicate.
+
+Evidence map:
+
+- Entry: HTTP lfs::download calls get_stream before constructing the response;
+  integrity rejection maps to HTTP 422, unsupported storage to HTTP 503. CLI
+  transfer/publication/migration call put_stream_with_size and verify_size.
+- Owner: crab-lfs owns SHA-256/size checks and receipt trust. crab-storage owns
+  response transport and preserves each GET's ObjectMeta with its body stream.
+- Callee: locked object_store 0.14.1 ObjectMeta defines ETag as the unique object
+  identifier and version as its version indicator. RFC 9110 section 8.8.3.2
+  excludes weak ETags from strong comparison:
+  https://www.rfc-editor.org/rfc/rfc9110.html#section-8.8.3.2.
+- Siblings: verify_origin continues to ignore receipts and hash the same response
+  whose metadata it returns; download_to_file hashes the downloaded stream itself.
+  Both remain usable with no validator. Repair and existing-object upload receipt
+  paths now retain their verified metadata rather than re-reading HEAD.
+- Main: origin/main contains the unchecked second GET and fresh-HEAD receipt
+  writer reproduced above. Old receipts cannot be grandfathered into new trust.
+
+Best-fix assessment: checking only stream validators leaves a poisoned receipt
+able to bless the same corrupt version. Removing unsafe receipt provenance,
+invalidating old verifier claims, and binding served responses address both ends
+of that contract. No new storage mode, runtime config, or unbounded body buffer
+is introduced. Provider validators and response-body consistency remain dependency
+contracts; this does not prove arbitrary faulty/custom providers safe.
+
+Validation: the old-receipt regression failed against the original verifier and
+passes with verifier 2. All 35 selected LFS object-store tests pass, including
+origin verification and upload/repair behavior. Six cross-crate integration tests
+cover full/range replacement races, ordinary and streamed upload receipt races,
+missing/weak validators, version-only metadata, primary fallback, and the real
+local object-store backend. The existing HTTP batch/upload/download test passes
+with its request router and actual object storage. Strict all-target LFS Clippy
+and the new integration target pass; the CLI library retains its recorded 489
+warnings. No native/cloud E2E result is claimed. Formatting and diff checks pass.
+Production Rust grows by seven lines for validator admission and response identity
+checks while deleting the unsafe HEAD receipt path. The earlier ledger's two LFS
+identity follow-ups are addressed by this batch; framing and first-read cost
+remain qualification work. Before publication, CI for head eb2605ff9a2 had 12
+successful, 12 running, and 12 skipped checks, with no failed check reported yet.
