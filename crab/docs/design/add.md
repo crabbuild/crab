@@ -83,6 +83,10 @@ only the selected subtree (with the same nested ignore handling), while globs,
 magic pathspecs, and missing paths use the full walker so matching and
 diagnostics stay unchanged.
 
+Literal selection checks every path component for symlinks, matching the full
+walker's no-follow boundary. A symlinked ancestor must not cause an external
+file to enter staging merely because its final component is a regular file.
+
 The classifier has two modes:
 
 - With `gix-pathmatch`, it delegates path matching to
