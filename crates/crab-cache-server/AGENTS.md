@@ -34,6 +34,10 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
   background task startup. Await `PreparedServer::shutdown` after preparation
   succeeds; dropping an evictor handle does not stop its task.
   Sources: `crates/crab-cache-server/src/server.rs`, `crates/crab-cache-server/src/evictor.rs`.
+- Register shutdown signals before preparing runtime dependencies. TLS signal
+  waiting stays inside the serving future; listener failure must not detach it.
+  Preserve the separate HTTP and TLS drain policies.
+  Source: `crates/crab-cache-server/src/server.rs`.
 - Validate ASCII before byte-indexed hex decoding. Malformed PSK config and cache hashes must return errors rather than panic on UTF-8 boundaries.
   Sources: `crates/crab-cache-server/src/config.rs`, `crates/crab-cache-server/src/cache_store.rs`.
 
@@ -50,6 +54,7 @@ No declared Cargo features. Binary `crab-cache-server` is declared at src/bin/cr
 
 ## Verification
 
+The Unix TLS startup fixture requires `openssl` to generate temporary certificates.
 Inline state/handlers tests exercise routes and range errors; cache_store tests cover hash mismatch and persistence. Full service qualification is defined in `.github/workflows/cache-service.yml`.
 
 Run from repository root. The target below is the example for worktree `089c`;

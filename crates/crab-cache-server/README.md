@@ -89,6 +89,20 @@ not prove origin connectivity; the readiness check also probes the origin.
 The CLI also provides `evidence` verification/gating and `onboarding`
 render/check/probe commands for repeatable deployment proof.
 
+## Shutdown ownership
+
+Signal registration happens before runtime dependencies are prepared. A
+registration error returns through the server error path. TLS keeps signal
+waiting inside the serving future, so a failed bind leaves no signal task.
+
+| Transport | Normal shutdown |
+| --- | --- |
+| Plain HTTP | Stop accepting, then wait for in-flight requests without a hard deadline |
+| TLS / mTLS | Stop accepting, then apply the configured drain timeout |
+
+Abandoning the entire server future is a separate lifecycle concern; normal
+shutdown tests do not prove completion of every dependency-owned task.
+
 ## Boundaries
 
 - [`crab-cache`](../crab-cache/README.md) defines client-facing cache keys,

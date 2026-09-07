@@ -2826,3 +2826,60 @@ matches. The separately selected inline contention test also passes for normal
 and cache-only execution, preserving holder sidecars. The CLI build passes with
 the same macOS debug-unwind linker warning. Runtime behavior is unchanged after
 those checks; the final edit only improves module-doc wording.
+
+## Cache-server signal and runtime inspection (next batch)
+
+Read server bootstrap/plain/TLS paths, signal helpers, error mapping, and
+binary serve/check/onboarding-probe dispatch. TLS starts a signal task without
+retaining its handle, then can return on listener bind/serve failure. Plain
+HTTP instead owns its shutdown future through axum. Signal registration uses
+expect on Unix and non-Unix paths. Three binary Runtime::new calls also expect:
+serve, check, and onboarding probe. These are distinct startup failure surfaces.
+
+For TLS completion ownership, prefer an owned signal future alongside the serve
+future rather than an independently spawned task. Locked axum-server0.8.0's
+Handle::graceful_shutdown uses notify_waiters; its waiter does not check a
+sticky shutdown flag. A refactor must register the signal before serving and
+ensure the listener has entered its wait before notifying, including a signal
+arriving during startup. Preserve the current bounded TLS drain and indefinite
+plain-HTTP drain; timeout-policy changes require their own product decision.
+The existing cache-service mTLS smoke already generates temporary certificates
+with openssl. No server/binary source has changed in this inspection.
+
+Current native NFS dispatch34148861825 passed its feature gate; Linux native,
+Linux RustFS/Xet, macOS, and Windows native jobs are all running on d58bcf91151.
+Refresh0cd4fea1b07 and scheduler9503226fede remain local pending grouped push.
+
+### TLS signal lifetime regression and fix
+
+A real occupied loopback listener and generated temporary TLS certificate expose
+the old failure path: serve_tls returns a bind error but leaves one Tokio signal
+task alive. Session2578 exits101 at that task-count assertion. The current-thread
+fixture isolates task counts and covers both TLS and mTLS acceptor branches.
+
+Signal registration now happens at run_server entry, before prepared cache state
+or maintenance tasks exist. Registration errors preserve their io::Error through
+InternalError instead of panicking. TLS owns its signal future alongside the
+serve future, polls serving first, and waits for listener readiness before the
+dependency's non-sticky graceful notification. The router make-service's
+poll_ready/call are immediately ready in locked axum0.8.9; this supports that
+ordering. Plain HTTP retains axum's graceful drain behavior. Bind/serve errors
+now retain typed I/O causes instead of converting them to strings.
+
+Four server tests pass, including typed AddrInUse and an already-ready shutdown
+signal in both TLS modes. The initial generic HTTP signal parameter needed
+axum's Send+'static bound; it is now declared explicitly. Preflight, strict lint,
+strict docs, and binary build are running in session46431. Tokio Windows ctrl_c
+registration/recv contracts were read alongside the Unix path; Windows execution
+still requires CI. Unix test setup requires openssl, already used by the
+cache-service mTLS smoke, and writes only temporary synthetic certificates.
+
+Dependency caveat: axum's graceful serve implementation itself spawns a signal
+future. Normal awaited HTTP completion includes that signal; abandoning the
+whole serve future can leave dependency work. This batch does not qualify
+abandoned-server cleanup or fix the three binary Runtime::new expect sites.
+
+TLS signal validation completed: four server tests,16 preflight tests, strict
+all-target Clippy, strict rustdoc, and the cache-server binary build pass.
+Published PR head d58bcf91151 has no reported failures; its Windows workflow
+test job is the only remaining PR check at this observation.

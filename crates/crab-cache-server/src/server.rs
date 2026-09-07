@@ -62,6 +62,7 @@ impl PreparedServer {
 /// then builds the router with middleware, binds to `config.listen_addr`, and
 /// serves until SIGTERM triggers graceful shutdown.
 pub async fn run_server(config: CacheServerConfig) -> Result<(), CacheServiceError> {
+    let shutdown = shutdown_signal(config.drain_timeout)?;
     let metrics = CacheMetrics::new().map_err(|e| {
         CacheServiceError::InternalError(
             format!("failed to install prometheus recorder: {e}").into(),
@@ -86,9 +87,9 @@ pub async fn run_server(config: CacheServerConfig) -> Result<(), CacheServiceErr
     tracing::info!(%listen_addr, tls = tls.is_some(), "starting cache server");
 
     let result = if let Some(tls) = tls {
-        serve_tls(router, listen_addr, tls, drain_timeout).await
+        serve_tls(router, listen_addr, tls, drain_timeout, shutdown).await
     } else {
-        serve_plain(router, listen_addr, drain_timeout).await
+        serve_plain(router, listen_addr, shutdown).await
     };
 
     prepared.shutdown().await;
@@ -229,20 +230,18 @@ pub fn prepare_server(
 async fn serve_plain(
     router: Router,
     listen_addr: std::net::SocketAddr,
-    drain_timeout: std::time::Duration,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), CacheServiceError> {
     let listener = tokio::net::TcpListener::bind(listen_addr)
         .await
-        .map_err(|e| {
-            CacheServiceError::InternalError(format!("failed to bind {listen_addr}: {e}").into())
-        })?;
+        .map_err(|error| CacheServiceError::InternalError(error.into()))?;
 
     tracing::info!(%listen_addr, "listening (plain HTTP)");
 
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal(drain_timeout))
+        .with_graceful_shutdown(shutdown)
         .await
-        .map_err(|e| CacheServiceError::InternalError(format!("server error: {e}").into()))
+        .map_err(|error| CacheServiceError::InternalError(error.into()))
 }
 
 /// Serve over TLS via `axum_server` + rustls with graceful shutdown on SIGTERM.
@@ -251,6 +250,7 @@ async fn serve_tls(
     listen_addr: std::net::SocketAddr,
     tls: TlsConfig,
     drain_timeout: std::time::Duration,
+    signal: impl std::future::Future<Output = ()>,
 ) -> Result<(), CacheServiceError> {
     let native_mtls = tls.client_ca_path.is_some();
     let rustls_config = build_rustls_config(&tls)?;
@@ -258,29 +258,35 @@ async fn serve_tls(
     tracing::info!(%listen_addr, native_mtls, "listening (TLS)");
 
     let handle = axum_server::Handle::new();
-    let shutdown_handle = handle.clone();
-
-    tokio::spawn(async move {
-        wait_for_sigterm().await;
-        tracing::info!("SIGTERM received, starting graceful shutdown");
-        shutdown_handle.graceful_shutdown(Some(drain_timeout));
-    });
-
-    let result = if native_mtls {
-        let acceptor = TlsIdentityAcceptor::new(RustlsAcceptor::new(rustls_config));
-        axum_server::bind(listen_addr)
-            .acceptor(acceptor)
-            .handle(handle)
-            .serve(router.into_make_service())
-            .await
-    } else {
-        axum_server::bind_rustls(listen_addr, rustls_config)
-            .handle(handle)
-            .serve(router.into_make_service())
-            .await
+    let server = async {
+        if native_mtls {
+            let acceptor = TlsIdentityAcceptor::new(RustlsAcceptor::new(rustls_config));
+            axum_server::bind(listen_addr)
+                .acceptor(acceptor)
+                .handle(handle.clone())
+                .serve(router.into_make_service())
+                .await
+        } else {
+            axum_server::bind_rustls(listen_addr, rustls_config)
+                .handle(handle.clone())
+                .serve(router.into_make_service())
+                .await
+        }
     };
-
-    result.map_err(|e| CacheServiceError::InternalError(format!("TLS server error: {e}").into()))
+    let shutdown = async {
+        signal.await;
+        // The dependency's graceful notification is not sticky. Wait for bind
+        // and poll serving first so an early signal cannot miss its waiter.
+        let _ = handle.listening().await;
+        handle.graceful_shutdown(Some(drain_timeout));
+    };
+    tokio::pin!(server);
+    let result = tokio::select! {
+        biased;
+        result = &mut server => result,
+        () = shutdown => server.await,
+    };
+    result.map_err(|error| CacheServiceError::InternalError(error.into()))
 }
 
 /// Builds the rustls server config used by startup and preflight validation.
@@ -443,36 +449,22 @@ fn tls_client_identity(
     })
 }
 
-/// Wait for SIGTERM (Unix) then log and return.
-async fn wait_for_sigterm() {
+// Register before serving so registration errors follow normal startup cleanup.
+fn shutdown_signal(
+    drain_timeout: Duration,
+) -> Result<impl std::future::Future<Output = ()>, CacheServiceError> {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
-        sigterm.recv().await;
-    }
-    #[cfg(not(unix))]
-    {
-        // On non-Unix platforms, fall back to ctrl-c.
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to register ctrl-c handler");
-    }
-}
-
-/// Future that resolves on SIGTERM, used by `axum::serve::with_graceful_shutdown`.
-async fn shutdown_signal(drain_timeout: std::time::Duration) {
-    wait_for_sigterm().await;
-    tracing::info!(
-        drain_timeout_secs = drain_timeout.as_secs(),
-        "SIGTERM received, draining in-flight requests"
-    );
-    // axum::serve handles the actual drain; we just need to return.
-    // The drain_timeout is informational here — axum::serve will stop
-    // accepting new connections immediately and wait for in-flight
-    // requests to complete. For a hard deadline, the caller can wrap
-    // the serve future in tokio::time::timeout.
+    let signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    #[cfg(windows)]
+    let signal = tokio::signal::windows::ctrl_c();
+    let mut signal = signal.map_err(|error| CacheServiceError::InternalError(error.into()))?;
+    Ok(async move {
+        signal.recv().await;
+        tracing::info!(
+            drain_timeout_secs = drain_timeout.as_secs(),
+            "shutdown signal received, draining in-flight requests"
+        );
+    })
 }
 
 #[cfg(test)]
@@ -523,6 +515,85 @@ mod tests {
                     (before, false),
                     "failed preparation retained state (evictor enabled: {start_evictor})"
                 );
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tls_startup_owns_signal_lifetime() {
+        let temp = tempfile::tempdir().unwrap();
+        let cert_path = temp.path().join("cert.pem");
+        let key_path = temp.path().join("key.pem");
+        let generated = std::process::Command::new("openssl")
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-keyout",
+            ])
+            .arg(&key_path)
+            .arg("-out")
+            .arg(&cert_path)
+            .output()
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "openssl certificate generation failed"
+        );
+        for client_ca_path in [None, Some(cert_path.clone())] {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let tls = TlsConfig {
+                cert_path: cert_path.clone(),
+                key_path: key_path.clone(),
+                client_ca_path,
+            };
+            runtime.block_on(async {
+                let before = runtime.metrics().num_alive_tasks();
+                let result = serve_tls(
+                    Router::new(),
+                    listener.local_addr().unwrap(),
+                    tls.clone(),
+                    Duration::from_secs(1),
+                    std::future::pending(),
+                )
+                .await;
+                let error = result.err().unwrap();
+                let source = std::error::Error::source(&error).unwrap();
+                assert_eq!(
+                    source.downcast_ref::<io::Error>().unwrap().kind(),
+                    io::ErrorKind::AddrInUse
+                );
+                assert_eq!(
+                    runtime.metrics().num_alive_tasks(),
+                    before,
+                    "failed TLS bind detached a signal waiter"
+                );
+                // A signal ready before the first serve poll must still reach
+                // the dependency's listener, whose notification is not sticky.
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    serve_tls(
+                        Router::new(),
+                        "127.0.0.1:0".parse().unwrap(),
+                        tls,
+                        Duration::from_millis(100),
+                        std::future::ready(()),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
             });
         }
     }
