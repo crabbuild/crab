@@ -140,13 +140,15 @@ pub async fn prepare_file_push_plans_with_progress(
         return prepare_cached_file_plans_with_progress(
             staging,
             files,
-            &existing_refs,
-            build_xorb_builder,
-            &mut prepared_cache,
-            summary,
-            &mut verified_sequences,
-            cancel,
-            on_progress,
+            CachedFilePlanContext {
+                existing_refs: &existing_refs,
+                build_xorb_builder,
+                prepared_cache: &mut prepared_cache,
+                summary,
+                verified_sequences: &mut verified_sequences,
+                cancel,
+                on_progress,
+            },
         )
         .await;
     }
@@ -192,17 +194,30 @@ struct PreparedFilePlan {
     summary: FilePlanSummary,
 }
 
+struct CachedFilePlanContext<'existing, 'builder, 'cache, 'verified, 'cancel, 'progress> {
+    existing_refs: &'existing Option<HashMap<MerkleHash, Option<ExistingChunkCandidate>>>,
+    build_xorb_builder: &'builder (dyn Fn() -> XorbBuilder + Send + Sync),
+    prepared_cache: &'cache mut PreparedXorbCache,
+    summary: AddPushPlanSummary,
+    verified_sequences: &'verified mut HashSet<(MerkleHash, [u8; 32], u64)>,
+    cancel: &'cancel CancellationToken,
+    on_progress: Option<&'progress mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
+}
+
 async fn prepare_cached_file_plans_with_progress(
     staging: &StagingArea,
     files: &[AddPlanFile<'_>],
-    existing_refs: &Option<HashMap<MerkleHash, Option<ExistingChunkCandidate>>>,
-    build_xorb_builder: &(dyn Fn() -> XorbBuilder + Send + Sync),
-    prepared_cache: &mut PreparedXorbCache,
-    mut summary: AddPushPlanSummary,
-    verified_sequences: &mut HashSet<(MerkleHash, [u8; 32], u64)>,
-    cancel: &CancellationToken,
-    mut on_progress: Option<&mut (dyn FnMut(&AddPushPlanSummary) + Send)>,
+    context: CachedFilePlanContext<'_, '_, '_, '_, '_, '_>,
 ) -> Result<AddPushPlanSummary> {
+    let CachedFilePlanContext {
+        existing_refs,
+        build_xorb_builder,
+        prepared_cache,
+        mut summary,
+        verified_sequences,
+        cancel,
+        mut on_progress,
+    } = context;
     let mut prepared_plans = Vec::with_capacity(files.len());
     let mut ownership_cache = HashMap::new();
     for file in files {
@@ -866,7 +881,7 @@ async fn prepare_one_file_plan_with_existing_refs(
                 break;
             }
 
-            if materialize_prepared_xorb(staging.root(), &candidate).await? {
+            if materialize_prepared_xorb(staging.root(), candidate).await? {
                 let mut planned = candidate.planned.clone();
                 planned.upload = true;
                 if let Some(authority) = plan
@@ -951,24 +966,6 @@ async fn prepare_one_file_plan_with_existing_refs(
         recipe,
         summary: file_summary,
     })
-}
-
-fn ranked_prepared_candidates<'a>(
-    prepared_cache: &'a PreparedXorbCache,
-    chunk_hash: &MerkleHash,
-    expected_size: u64,
-    chunk_states: &HashMap<MerkleHash, FileChunkState>,
-    unusable_cached_candidates: &HashSet<*const PreparedXorbCandidate>,
-) -> Vec<PreparedCandidateChoice<'a>> {
-    let mut matching_scratch = HashSet::new();
-    ranked_prepared_candidates_with_scratch(
-        prepared_cache,
-        chunk_hash,
-        expected_size,
-        chunk_states,
-        unusable_cached_candidates,
-        &mut matching_scratch,
-    )
 }
 
 fn ranked_prepared_candidates_with_scratch<'a>(
@@ -1736,8 +1733,15 @@ mod tests {
                 ..FileChunkState::default()
             },
         )]);
-        let choices =
-            ranked_prepared_candidates(&cache, &chunk_hash, 10, &chunk_states, &HashSet::new());
+        let mut matching_scratch = HashSet::new();
+        let choices = ranked_prepared_candidates_with_scratch(
+            &cache,
+            &chunk_hash,
+            10,
+            &chunk_states,
+            &HashSet::new(),
+            &mut matching_scratch,
+        );
         assert_eq!(choices.len(), 2);
         let first_candidate = choices
             .iter()
@@ -1745,12 +1749,13 @@ mod tests {
             .expect("first source candidate")
             .candidate;
 
-        let filtered = ranked_prepared_candidates(
+        let filtered = ranked_prepared_candidates_with_scratch(
             &cache,
             &chunk_hash,
             10,
             &chunk_states,
             &HashSet::from([prepared_candidate_id(first_candidate)]),
+            &mut matching_scratch,
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].candidate.source, second_source);
@@ -1998,7 +2003,7 @@ mod tests {
         let file_hash = MerkleHash::from(staged.file_hash);
         assert!(
             staging
-                .chunks_for_file_with_locators(&file_hash)
+                .segment_payloads_exist(&staged_pairs)
                 .expect("raw chunk rows")
                 .is_empty(),
             "direct staging must not retain a raw segment copy"

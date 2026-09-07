@@ -3032,15 +3032,6 @@ impl StagingArea {
             .prepared_payload_exclusive_to_recipe(&<[u8; 32]>::from(*xorb_hash), recipe_hash)
     }
 
-    pub(crate) fn chunks_for_file_with_locators(
-        &self,
-        file_hash: &MerkleHash,
-    ) -> Result<Vec<StagedChunkLocator>> {
-        let fh: [u8; 32] = (*file_hash).into();
-        let chunks = lock_index(&self.index)?.chunks_for_file_with_locators(&fh)?;
-        Ok(chunks.into_iter().map(StagedChunkLocator::from).collect())
-    }
-
     pub(crate) fn file_chunks_match(
         &self,
         file_hash: &MerkleHash,

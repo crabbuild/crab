@@ -6378,11 +6378,6 @@ impl Index {
         Ok(found)
     }
 
-    /// Replace one recipe's normalized remote and prepared authority.
-    pub fn insert_file_push_plan(&self, write: FilePushPlanWrite<'_>) -> Result<Vec<[u8; 32]>> {
-        self.insert_file_push_plans(std::slice::from_ref(&write))
-    }
-
     /// Replace several recipes' normalized remote and prepared authority atomically.
     pub fn insert_file_push_plans(
         &self,
@@ -6993,19 +6988,6 @@ impl Index {
             StagingError::Internal(format!("failed to commit file push plan tx: {e}"))
         })?;
         Ok(removed_payloads)
-    }
-
-    pub fn recipe_remote_chunk_page(
-        &self,
-        recipe_hash: &[u8; 32],
-        start_occurrence: u64,
-    ) -> Result<Vec<ExistingChunkWrite>> {
-        let end_occurrence = start_occurrence
-            .checked_add(crate::recipe::RECIPE_PAGE_ENTRIES as u64)
-            .ok_or_else(|| {
-                StagingError::StagingCorrupt("remote authority page range overflow".to_owned())
-            })?;
-        self.recipe_remote_chunk_range(recipe_hash, start_occurrence, end_occurrence)
     }
 
     pub fn recipe_remote_chunk_range(
@@ -11538,14 +11520,15 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let recipe_hash: [u8; 32] = recipe.hash().into();
-        idx.insert_file_push_plan(FilePushPlanWrite {
+        let write = FilePushPlanWrite {
             file_hash: &file_hash,
             recipe_hash: &recipe_hash,
             recording_batch_id: None,
             existing_chunks: &existing,
             prepared_xorbs: &[],
-        })
-        .expect("planned existing authority");
+        };
+        idx.insert_file_push_plans(std::slice::from_ref(&write))
+            .expect("planned existing authority");
 
         let stored: i64 = idx
             .conn
