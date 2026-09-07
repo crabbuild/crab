@@ -2470,3 +2470,19 @@ rustdoc pass with object-store-lock. Heartbeat source confirms any renewal error
 cancels the push and stops the heartbeat. Formatting and diff checks pass.
 Production growth provides the common checked expiry and platform-checked retry
 deadline; regression coverage accounts for the remaining source growth.
+
+### Checked deadline consumer qualification
+
+The CLI heartbeat now has a retained regression for invalid renewal deadlines:
+a live stored lease is observed, the heartbeat is given an oversized duration,
+and push cancellation must occur without changing the stored bytes or ETag.
+All 11 local heartbeat tests pass; the dedicated S3-compatible provider case
+remains ignored. Existing cases cover stolen/deleted/released leases, renewal,
+clean stop, and independent shutdown ownership. The debug CLI build passes
+through coordination's consumers with the existing macOS linker warning.
+Formatting and diff checks pass. This closes the pre-rebase consumer-build gap.
+
+Fetched origin/main has advanced to a371fb7d002 (add/push hardening, #156),
+affecting staging, cache-store, and product callers. Its Cargo.lock diff only
+reorders an existing windows-sys dependency. Rebase and overlap qualification
+are required before publication; the above consumer results precede that rebase.

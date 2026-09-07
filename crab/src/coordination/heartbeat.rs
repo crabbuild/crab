@@ -281,6 +281,32 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn invalid_lease_deadline_cancels_push_without_rewriting_lock() {
+        let store = memory_store();
+        let path = "repo/locks/refs/heads/main/lock";
+        put_lock(&store, path, "holder", 300).await;
+        let before = store.get_with_etag(&Path::from(path)).await.unwrap();
+        let cancel = CancellationToken::new();
+        let heartbeat = LockHeartbeat::spawn(
+            store.clone(),
+            path.to_owned(),
+            "holder".to_owned(),
+            Duration::MAX,
+            Duration::from_secs(10),
+            cancel.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(15), cancel.cancelled())
+            .await
+            .expect("invalid renewal deadline must cancel the push");
+        heartbeat.stop().await;
+        let after = store.get_with_etag(&Path::from(path)).await.unwrap();
+        assert_eq!(
+            after, before,
+            "invalid renewal must leave the existing lease unchanged"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn heartbeat_detects_stolen_lock() {
         let store = memory_store();
         let lock_path = "repo/locks/refs/heads/main/lock";
