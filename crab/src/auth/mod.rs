@@ -440,18 +440,26 @@ pub async fn build_repository_url_store(
 ) -> Result<Store> {
     let url = url.into();
     let repository_prefix = url.repo_path.clone();
+    let remote_url = format!("crab://{}/{}", url.bucket, url.repo_path);
     let store = build_store(config, url, operation, cancel).await?;
-    validate_repository_store(&store, &repository_prefix).await?;
+    validate_repository_store(&store, &repository_prefix, &remote_url).await?;
     Ok(store)
 }
 
 pub(crate) async fn validate_repository_store(
     store: &Store,
     repository_prefix: &str,
+    remote_url: &str,
 ) -> Result<()> {
     let router = crate::storage::StoreLayout::new(store.clone(), repository_prefix.to_owned());
-    crate::core::remote_layout::open(store, &router).await?;
-    Ok(())
+    match crate::core::remote_layout::open(store, &router).await {
+        Err(CrabError::NotFound { path }) if path == router.layout_descriptor_path().as_ref() => {
+            Err(CrabError::RepositoryNotInitialized {
+                url: remote_url.to_owned(),
+            })
+        }
+        result => result.map(|_| ()),
+    }
 }
 
 pub fn build_store_from_credentials(bucket: &str, creds: CloudCredentials) -> Result<Store> {
@@ -519,11 +527,15 @@ mod tests {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
 
-        let error = validate_repository_store(&store, "org/repo")
+        let error = validate_repository_store(&store, "org/repo", "crab://bucket/org/repo")
             .await
             .expect_err("descriptor-less repository must fail closed");
 
-        assert!(error.to_string().contains("layout descriptor is missing"));
+        assert!(matches!(
+            error,
+            CrabError::RepositoryNotInitialized { ref url }
+                if url == "crab://bucket/org/repo"
+        ));
         assert!(store.head(&router.manifest_path()).await.is_err());
         assert!(store.head(&router.layout_descriptor_path()).await.is_err());
     }
@@ -536,7 +548,7 @@ mod tests {
             .await
             .expect("initialize canonical descriptor");
 
-        validate_repository_store(&store, "org/repo")
+        validate_repository_store(&store, "org/repo", "crab://bucket/org/repo")
             .await
             .expect("canonical descriptor should open");
     }

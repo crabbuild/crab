@@ -1477,7 +1477,7 @@ class AddCommitPushSmoke:
             "non-v1-layout-fails-closed",
             refused.exit_code != 0
             and "canonical v1" in refusal_text
-            and "reset this isolated development repository" in refusal_text,
+            and "not supported" in refusal_text,
             {"exit_code": refused.exit_code},
         )
         missing_manifest = self.run_aws(

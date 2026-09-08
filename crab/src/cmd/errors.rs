@@ -49,8 +49,8 @@ fn category_for_code(code: &str) -> &'static str {
         "CRAB-E0020" | "CRAB-E0021" | "CRAB-E0082" | "CRAB-E0083" | "CRAB-E0084" | "CRAB-E0101" => {
             "integrity"
         }
-        "CRAB-E0030" | "CRAB-E0031" | "CRAB-E0040" | "CRAB-E0041" | "CRAB-E0042" | "CRAB-E0043"
-        | "CRAB-E0091" => "permanent",
+        "CRAB-E0030" | "CRAB-E0031" | "CRAB-E0032" | "CRAB-E0040" | "CRAB-E0041" | "CRAB-E0042"
+        | "CRAB-E0043" | "CRAB-E0091" => "permanent",
         "CRAB-E0050" | "CRAB-E0051" | "CRAB-E0052" => "config",
         "CRAB-E0060" | "CRAB-E0070" | "CRAB-E0071" | "CRAB-E0110" => "transport",
         "CRAB-E0080" | "CRAB-E0081" => "staging",
@@ -70,6 +70,14 @@ mod tests {
         let entry = doc_entry_for_code("CRAB-E0097").expect("catalog entry");
 
         assert_eq!(entry.category, "conflict");
+        assert!(!entry.retryable);
+    }
+
+    #[test]
+    fn uninitialized_repository_catalog_entry_is_non_retryable_permanent() {
+        let entry = doc_entry_for_code("CRAB-E0032").expect("catalog entry");
+
+        assert_eq!(entry.category, "permanent");
         assert!(!entry.retryable);
     }
 }

@@ -125,20 +125,25 @@ fn capture_dispatch(buf: BufferMaker) -> Dispatch {
 /// parallel integration tests in this file don't clobber each other.
 static GIT_DIR_MUTEX: Mutex<()> = Mutex::new(());
 
-/// RAII guard that points `GIT_DIR` at the given directory for the
-/// lifetime of the guard, restoring any previous value on drop.
+/// RAII guard that clears `GIT_DIR` while the fixture is initialized, then
+/// points it at the new repository for the test body.
 struct ScopedGitDir {
     _lock: MutexGuard<'static, ()>,
     prev: Option<String>,
 }
 
 impl ScopedGitDir {
-    fn new(git_dir: &Path) -> Self {
+    fn acquire() -> Self {
         let lock = GIT_DIR_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("GIT_DIR").ok();
         // SAFETY: access is serialised by GIT_DIR_MUTEX.
-        unsafe { std::env::set_var("GIT_DIR", git_dir) };
+        unsafe { std::env::remove_var("GIT_DIR") };
         Self { _lock: lock, prev }
+    }
+
+    fn set_git_dir(&self, git_dir: &Path) {
+        // SAFETY: access is serialised by GIT_DIR_MUTEX (held by self).
+        unsafe { std::env::set_var("GIT_DIR", git_dir) };
     }
 }
 
@@ -265,8 +270,9 @@ fn make_specs() -> Vec<PushSpec> {
 /// set to the delegated pipeline.
 #[tokio::test]
 async fn second_native_push_reuses_prepopulated_walk() {
+    let git = ScopedGitDir::acquire();
     let fixture = GitFixture::new();
-    let _git = ScopedGitDir::new(&fixture.git_dir());
+    git.set_git_dir(&fixture.git_dir());
 
     // First commit seeds the baseline for `PushState`.
     let first_sha = fixture.commit_pointer("a.bin", 0x10, "first pointer");
@@ -361,8 +367,9 @@ async fn second_native_push_reuses_prepopulated_walk() {
 /// `reason = "unresolvable_old_sha"`.
 #[tokio::test]
 async fn stale_push_state_falls_back_to_full_walk() {
+    let git = ScopedGitDir::acquire();
     let fixture = GitFixture::new();
-    let _git = ScopedGitDir::new(&fixture.git_dir());
+    git.set_git_dir(&fixture.git_dir());
 
     let _commit_sha = fixture.commit_pointer("a.bin", 0x30, "only pointer");
 
@@ -425,8 +432,9 @@ async fn stale_push_state_falls_back_to_full_walk() {
 /// record `incremental = false, source = "walk_reachable"`.
 #[tokio::test]
 async fn non_native_push_batch_walks_full_graph() {
+    let git = ScopedGitDir::acquire();
     let fixture = GitFixture::new();
-    let _git = ScopedGitDir::new(&fixture.git_dir());
+    git.set_git_dir(&fixture.git_dir());
 
     let _commit_sha = fixture.commit_pointer("a.bin", 0x40, "first pointer");
 

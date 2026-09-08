@@ -60,10 +60,12 @@ For conceptual background, see [Creating a Repository](/docs/cli/getting-started
 6. **Creates the generation-0 manifest atomically**, or adopts the existing
    canonical manifest on repeat or concurrent initialization
 
-There is no local-only selector. A non-empty prefix without a descriptor, a
-non-v1 descriptor, or a missing manifest during normal repository use fails
-closed. Reset isolated development data explicitly; push and clone do not
-convert or synthesize repository state.
+Push and clone do not create repositories. If a remote points to an empty,
+uninitialized prefix, Crab reports `CRAB-E0032` and tells you to run
+`crab init <REMOTE>`. If the prefix already contains data but has no valid
+layout, init leaves it unchanged so you can verify the URL before deciding how
+to handle that data. Malformed or unsupported descriptors remain corruption
+errors and are never replaced automatically.
 
 ## Examples
 
@@ -75,6 +77,7 @@ crab init crab://my-bucket/ml-models
 # ✓ Initialized git repository
 # ✓ Created .crab/local.toml
 # ✓ Registered filter.crab driver
+# Remote repository ready → crab://my-bucket/ml-models
 # Next: crab setup
 ```
 

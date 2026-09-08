@@ -57,7 +57,7 @@ impl LayoutDescriptor {
             return Err(corrupt(
                 path,
                 format!(
-                    "layout schema {} is not canonical v1; reset this isolated development repository",
+                    "layout schema {} is not supported; expected canonical v1",
                     self.schema_version
                 ),
             ));
@@ -84,7 +84,7 @@ impl LayoutDescriptor {
         {
             return Err(corrupt(
                 path,
-                "layout parameters are not the canonical v1 contract; reset this isolated development repository",
+                "layout parameters do not match the supported canonical v1 contract",
             ));
         }
         let expected = self.expected_digest();
@@ -113,9 +113,7 @@ impl LayoutDescriptor {
         let descriptor: Self = serde_json::from_slice(bytes).map_err(|error| {
             corrupt(
                 path,
-                format!(
-                    "invalid canonical v1 layout descriptor: {error}; reset this isolated development repository"
-                ),
+                format!("invalid canonical v1 layout descriptor: {error}"),
             )
         })?;
         descriptor.validate(path)?;
@@ -152,22 +150,10 @@ pub async fn read_canonical_layout(
     store: &crab_storage::Store,
     router: &crab_storage::StoreLayout<crab_storage::Store>,
 ) -> Result<LayoutDescriptor> {
-    use crab_storage::StorageError;
-
     let path = router.layout_descriptor_path();
-    let bytes = match store
+    let (bytes, _) = store
         .get_with_etag_bounded(&path, MAX_LAYOUT_DESCRIPTOR_BYTES)
-        .await
-    {
-        Ok((bytes, _)) => bytes,
-        Err(StorageError::NotFound { .. }) => {
-            return Err(corrupt(
-                path.as_ref(),
-                "canonical v1 layout descriptor is missing; reset this isolated development repository",
-            ));
-        }
-        Err(error) => return Err(error.into()),
-    };
+        .await?;
     LayoutDescriptor::parse(path.as_ref(), &bytes)
 }
 
@@ -262,7 +248,15 @@ mod tests {
         let store = crab_storage::Store::new(inner);
         let router = crab_storage::StoreLayout::new(store.clone(), "repo".to_owned());
 
-        assert!(read_canonical_layout(&store, &router).await.is_err());
+        let error = read_canonical_layout(&store, &router)
+            .await
+            .expect_err("missing layout must retain its not-found classification");
+        assert!(matches!(
+            error,
+            MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { ref path }
+            } if path == router.layout_descriptor_path().as_ref()
+        ));
         assert!(
             store
                 .list_prefix(&router.repo_path(""))

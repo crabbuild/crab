@@ -8,6 +8,7 @@ CRAB-E0020: Corrupt object detected
 CRAB-E0021: Chunk not found in storage
 CRAB-E0030: Object not found in storage
 CRAB-E0031: Access forbidden
+CRAB-E0032: Remote repository is not initialized
 CRAB-E0040: No credentials available
 CRAB-E0041: Insufficient local disk space
 CRAB-E0042: Authentication failed
