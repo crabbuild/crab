@@ -8,8 +8,8 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use crate::pack::{
-    PackError, VerifiedPackIdentity, install_pack_file_from_path_with_identity,
-    install_pack_files_from_paths_with_identity, verify_and_hash_pack_file,
+    PackError, VerifiedPackIdentity, install_pack_files_from_paths_with_identity,
+    verify_and_hash_pack_file,
 };
 use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
 use sha1::{Digest, Sha1};
@@ -102,6 +102,31 @@ impl GeometricRepackedPack {
 pub struct GeometricRepackedRepository {
     _workspace: tempfile::TempDir,
     packs: Vec<GeometricRepackedPack>,
+}
+
+/// One response pack assembled from a complete, already-verified pack inventory.
+#[derive(Debug)]
+pub struct ConcatenatedPack {
+    _workspace: tempfile::TempDir,
+    pack_path: PathBuf,
+    /// Blake3 content identifier of the pack.
+    pub pack_id: String,
+    /// Raw Blake3 digest used by response-cache integrity verification.
+    pub pack_hash: [u8; 32],
+    /// Pack size.
+    pub pack_size: u64,
+    /// Number of objects in the pack.
+    pub object_count: u64,
+    /// Git-native SHA-1 checksum of the pack.
+    pub git_sha1: String,
+}
+
+impl ConcatenatedPack {
+    /// Returns the verified pack path.
+    #[must_use]
+    pub fn pack_path(&self) -> &Path {
+        &self.pack_path
+    }
 }
 
 impl GeometricRepackedRepository {
@@ -561,11 +586,12 @@ fn consolidate_pack_suffix_with_options(
 /// Join a complete pack inventory without inflating or recompressing entries.
 ///
 /// OFS_DELTA offsets are relative to the current entry, so shifting every
-/// entry in one source pack by the same amount preserves those links. Strict
-/// indexing validates REF_DELTA links after all source bodies are joined.
+/// entry in one source pack by the same amount preserves those links. The
+/// caller must prove that the committed source indexes exactly match its
+/// selected object set; the receiving Git process validates the joined pack.
 pub fn concatenate_complete_pack_inventory(
     sources: &[RepackSource],
-) -> Result<GeometricRepackedRepository, RepackError> {
+) -> Result<ConcatenatedPack, RepackError> {
     if sources.len() < 2 {
         return Err(RepackError::SourceIntegrity {
             pack_id: "complete-pack-concatenation".to_owned(),
@@ -575,9 +601,6 @@ pub fn concatenate_complete_pack_inventory(
 
     let workspace =
         tempfile::tempdir().map_err(|source| io_error("create concatenation workspace", source))?;
-    let source_git = workspace.path().join("source.git");
-    initialize_bare_repository(&source_git)?;
-    let pack_dir = source_git.join("objects/pack");
     let output_path = workspace.path().join("complete-pack-concatenated.pack");
     let mut output = File::create(&output_path)
         .map_err(|source| io_error("create concatenated pack", source))?;
@@ -695,41 +718,14 @@ pub fn concatenate_complete_pack_inventory(
     let pack_size = std::fs::metadata(&output_path)
         .map_err(|source| io_error(format!("stat {}", output_path.display()), source))?
         .len();
-    let canonical_id = blake3::Hash::from_bytes(pack_hash).to_hex().to_string();
-    let identity = VerifiedPackIdentity {
-        git_sha1: checksum,
-        content_hash: pack_hash,
-    };
-    let installed = install_pack_file_from_path_with_identity(
-        &pack_dir,
-        &output_path,
-        &canonical_id,
-        pack_size,
-        true,
-        Some(identity),
-    )?;
-    // `index-pack --fsck-objects` above already validates every copied object
-    // while creating the response index. A second `verify-pack -v` traversal
-    // only repeats repository-sized work on the latency-sensitive response
-    // path; durable maintenance continues to use full validation below.
-    let generated = verified_generated_pack(
-        installed.pack_path,
-        GeneratedPackValidation::Structural,
-        None,
-        Some(identity),
-    )?;
-    if generated.object_count != total_objects {
-        return Err(RepackError::SourceIntegrity {
-            pack_id: generated.pack_id,
-            reason: format!(
-                "concatenated pack contains {} objects but sources contain {total_objects}",
-                generated.object_count
-            ),
-        });
-    }
-    Ok(GeometricRepackedRepository {
+    Ok(ConcatenatedPack {
         _workspace: workspace,
-        packs: vec![generated],
+        pack_path: output_path,
+        pack_id: blake3::Hash::from_bytes(pack_hash).to_hex().to_string(),
+        pack_hash,
+        pack_size,
+        object_count: total_objects,
+        git_sha1: checksum.iter().map(|byte| format!("{byte:02x}")).collect(),
     })
 }
 
@@ -889,6 +885,14 @@ pub fn source_pack_inventory_matches_object_ids(
     for source in sources {
         let locations =
             PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?;
+        if source.verified_identity.is_some_and(|identity| {
+            locations.pack_checksum().as_bytes() != identity.git_sha1.as_slice()
+        }) {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: "pack index checksum does not match the verified pack trailer".to_owned(),
+            });
+        }
         source_oids.extend(locations.sorted_object_ids());
     }
     source_oids.sort_unstable();
@@ -1894,20 +1898,24 @@ mod tests {
         let sources = [first, second];
 
         let concatenated = concatenate_complete_pack_inventory(&sources)?;
-        let generated =
-            concatenated
-                .packs()
-                .first()
-                .ok_or_else(|| RepackError::SourceIntegrity {
-                    pack_id: "complete-pack-concatenation".to_owned(),
-                    reason: "test produced no concatenated pack".to_owned(),
-                })?;
-        assert_eq!(generated.object_count, 3);
-        let mut locations = PackLocationIter::open(
-            generated.index_path(),
-            generated.reverse_index_path(),
-            generated.pack_size,
+        assert_eq!(concatenated.object_count, 3);
+        let index_path = concatenated.pack_path().with_extension("idx");
+        let reverse_index_path = concatenated.pack_path().with_extension("rev");
+        assert!(!index_path.exists());
+        run_git(
+            Command::new("git")
+                .arg("index-pack")
+                .arg("--strict")
+                .arg("--index-version=2")
+                .arg("-o")
+                .arg(&index_path)
+                .arg(concatenated.pack_path())
+                .stdout(Stdio::null()),
+            "index concatenated response pack",
         )?;
+        write_pack_reverse_index(&index_path, &reverse_index_path)?;
+        let mut locations =
+            PackLocationIter::open(&index_path, &reverse_index_path, concatenated.pack_size)?;
         let mut actual = Vec::new();
         for location in &mut locations {
             let location = location?;

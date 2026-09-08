@@ -10,10 +10,11 @@
 //! is fast even for multi-GB repos. Users can then selectively hydrate
 //! with `crab hydrate *.safetensors`.
 
+use std::fmt::Write as _;
 use std::future::Future;
-use std::io::Stdout;
+use std::io::{Stdout, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -71,7 +72,7 @@ pub struct CloneSummary {
 /// Run `crab clone` from the current working directory.
 pub async fn run_clone(args: &CloneArgs, cancel: &CancellationToken) -> Result<CloneSummary> {
     let cwd = std::env::current_dir()?;
-    run_clone_in(&cwd, args, cancel).await
+    Box::pin(run_clone_in(&cwd, args, cancel)).await
 }
 
 fn emit_phase(stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>, payload: PerfPhasePayload) {
@@ -178,7 +179,18 @@ pub async fn run_clone_in(
     }
 
     let phase = PhaseTimer::start("clone", "pack_fetch");
-    run_git_clone_no_checkout(parent, args, &target_dir)?;
+    if args.depth.is_none()
+        && let Some(prepared) = Box::pin(prepare_complete_clone_inventory(
+            target_dir.parent().unwrap_or(parent),
+            args,
+            cancel,
+        ))
+        .await?
+    {
+        run_complete_inventory_clone(parent, args, &target_dir, &prepared)?;
+    } else {
+        run_git_clone_no_checkout(parent, args, &target_dir)?;
+    }
     scrub_git_pack_appledouble_files(&target_dir)?;
     emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
 
@@ -641,6 +653,16 @@ fn run_git_clone(parent: &Path, args: &CloneArgs, target: &Path) -> Result<()> {
 /// config has been written so lazy clones do not accidentally hydrate
 /// during their first worktree update.
 fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> Result<()> {
+    run_git_clone_no_checkout_from(parent, args, target, std::ffi::OsStr::new(&args.url), false)
+}
+
+fn run_git_clone_no_checkout_from(
+    parent: &Path,
+    args: &CloneArgs,
+    target: &Path,
+    source: &std::ffi::OsStr,
+    local: bool,
+) -> Result<()> {
     let bin = crate::cmd::init::crab_binary_path();
 
     let mut cmd = Command::new("git");
@@ -662,10 +684,13 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
     if let Some(depth) = args.depth {
         cmd.arg("--depth").arg(depth.to_string());
     }
+    if local {
+        cmd.arg("--local");
+    }
 
     cmd.arg("--no-checkout");
 
-    cmd.arg(&args.url);
+    cmd.arg(source);
     cmd.arg(target);
     cmd.current_dir(parent);
 
@@ -673,7 +698,7 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    tracing::info!(url = %args.url, "running git clone");
+    tracing::info!(source = ?source, "running git clone");
 
     let status = cmd.status()?;
     if !status.success() {
@@ -683,6 +708,196 @@ fn run_git_clone_no_checkout(parent: &Path, args: &CloneArgs, target: &Path) -> 
         )));
     }
 
+    Ok(())
+}
+
+async fn prepare_complete_clone_inventory(
+    workspace_parent: &Path,
+    args: &CloneArgs,
+    cancel: &CancellationToken,
+) -> Result<Option<PreparedCompleteClone>> {
+    let config = crate::core::config::Config::resolve_local()?;
+    let parsed = crate::git::url::CrabUrl::parse(&args.url)?;
+    let selection =
+        crate::replication::select_read_store(&config, &parsed, "clone:pack-bootstrap", cancel)
+            .await?;
+    let (repository, Some(visibility)) = Box::pin(
+        crate::git::upload_pack_wire::open_repository_with_optional_catalog_visibility(
+            selection.store.as_storage(),
+            selection.router.repo_prefix(),
+            cancel,
+        ),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let visible_refs = crate::git::upload_pack_wire::visible_ref_names(
+        repository.refs(),
+        &config.transfer_hide_refs,
+    )?;
+    let head_visible = repository
+        .refs()
+        .head
+        .as_ref()
+        .is_some_and(|head| visible_refs.iter().any(|name| name == &head.name))
+        || repository
+            .refs()
+            .unborn_head
+            .as_ref()
+            .is_some_and(|head| visible_refs.iter().any(|name| name == head));
+    if !head_visible {
+        return Ok(None);
+    }
+    let wants = visible_refs
+        .iter()
+        .filter_map(|name| repository.refs().find(name).map(|entry| entry.target))
+        .collect::<Vec<_>>();
+    if wants.is_empty() {
+        return Ok(None);
+    }
+    let request = crab_read::UploadPackRequest {
+        wants,
+        ..crab_read::UploadPackRequest::default()
+    };
+    let plan = crab_read::plan_upload_pack_catalog(
+        &repository,
+        &visibility,
+        &visible_refs,
+        &request,
+        cancel,
+    )
+    .await?;
+    let inventory = repository
+        .download_complete_pack_inventory(&plan.object_ids, workspace_parent, cancel)
+        .await
+        .map_err(|error| CrabError::Protocol(error.to_string()))?;
+    Ok(inventory.map(|inventory| PreparedCompleteClone {
+        inventory,
+        refs: repository.refs().clone(),
+        visible_ref_names: visible_refs,
+    }))
+}
+
+struct PreparedCompleteClone {
+    inventory: crab_remote_git::DownloadedPackInventory,
+    refs: crab_remote_git::RepositoryRefs,
+    visible_ref_names: Vec<String>,
+}
+
+fn run_complete_inventory_clone(
+    parent: &Path,
+    args: &CloneArgs,
+    target: &Path,
+    prepared: &PreparedCompleteClone,
+) -> Result<()> {
+    // Git owns clone ref/config semantics while hard-linking the verified
+    // committed pack inventory, avoiding repository-sized re-indexing.
+    let workspace = tempfile::tempdir_in(target.parent().unwrap_or(parent))?;
+    let source = workspace.path().join("source.git");
+    let status = Command::new("git")
+        .args(["init", "--bare", "--quiet", "--"])
+        .arg(&source)
+        .current_dir(parent)
+        .status()?;
+    if !status.success() {
+        return Err(CrabError::Protocol(format!(
+            "git init --bare exited with status {}",
+            status.code().unwrap_or(-1),
+        )));
+    }
+    install_complete_clone_inventory(&source.join("objects/pack"), &prepared.inventory)?;
+    install_complete_clone_refs(&source, &prepared.refs, &prepared.visible_ref_names)?;
+    run_git_clone_no_checkout_from(parent, args, target, source.as_os_str(), true)?;
+    run_git_at(target, &["remote", "set-url", "origin", &args.url])?;
+    Ok(())
+}
+
+fn install_complete_clone_inventory(
+    pack_dir: &Path,
+    inventory: &crab_remote_git::DownloadedPackInventory,
+) -> Result<()> {
+    for source in inventory.packs() {
+        crab_git::pack::install_pack_files_from_paths_with_identity(
+            pack_dir,
+            &source.path,
+            &source.index_path,
+            &source.reverse_index_path,
+            &source.canonical_id,
+            source.size,
+            source.object_count,
+            source.verified_identity,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn install_complete_clone_refs(
+    target: &Path,
+    refs: &crab_remote_git::RepositoryRefs,
+    visible_ref_names: &[String],
+) -> Result<()> {
+    let visible = |name: &str| visible_ref_names.iter().any(|entry| entry == name);
+    let mut updates = String::new();
+    for reference in &refs.entries {
+        if !visible(&reference.name) {
+            continue;
+        }
+        writeln!(
+            &mut updates,
+            "update {} {}",
+            reference.name, reference.target
+        )
+        .map_err(|error| CrabError::Internal(error.to_string()))?;
+    }
+    run_update_ref_stdin(target, updates.as_bytes())?;
+    let head = refs
+        .head
+        .as_ref()
+        .map(|head| head.name.as_str())
+        .or(refs.unborn_head.as_deref())
+        .filter(|name| visible(name))
+        .ok_or_else(|| CrabError::Protocol("remote HEAD is not visible".to_owned()))?;
+    run_git_at(target, &["symbolic-ref", "HEAD", head])
+}
+
+fn run_update_ref_stdin(target: &Path, input: &[u8]) -> Result<()> {
+    let mut child = Command::new("git")
+        .args(["update-ref", "--stdin"])
+        .current_dir(target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| CrabError::Internal("git update-ref stdin is unavailable".to_owned()))?
+        .write_all(input)?;
+    drop(child.stdin.take());
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(CrabError::Protocol(format!(
+            "git update-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn run_git_at(target: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(target)
+        .output()?;
+    if !output.status.success() {
+        return Err(CrabError::Protocol(format!(
+            "git {} failed: {}",
+            args.first().copied().unwrap_or("command"),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
     Ok(())
 }
 
