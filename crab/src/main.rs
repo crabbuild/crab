@@ -3333,7 +3333,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                         Some(config) => {
                             let u = config.remote.url.clone();
                             let _span = tracing::info_span!("init", %u).entered();
-                            crab::cmd::init::run_init_with_storage_provider(
+                            crab::cmd::init::run_init_command_with_storage_provider(
                                 &u,
                                 &cwd,
                                 &cancel,
@@ -3342,8 +3342,6 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                 gc_list_profile,
                             )
                             .await?;
-                            crab::cmd::init::initialize_remote_repository(&u, &cwd, &cancel)
-                                .await?;
                             // Sync .gitattributes with [track] patterns from crab.toml
                             if let Some(ref track) = config.track {
                                 sync_gitattributes_from_track(&cwd, &track.patterns);
@@ -3404,7 +3402,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 }
             };
             let _span = tracing::info_span!("init", url = %resolved_url).entered();
-            crab::cmd::init::run_init_with_storage_provider(
+            crab::cmd::init::run_init_command_with_storage_provider(
                 &resolved_url,
                 &cwd,
                 &cancel,
@@ -3413,8 +3411,6 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 gc_list_profile,
             )
             .await?;
-
-            crab::cmd::init::initialize_remote_repository(&resolved_url, &cwd, &cancel).await?;
 
             // Mirror mode: validate remote, add crab remote, install hooks, write config.
             if let Some(ref mirror_remote) = mirror {

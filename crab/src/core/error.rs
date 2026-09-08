@@ -95,6 +95,9 @@ pub enum CrabError {
     #[error("forbidden: {path} [CRAB-E0031]")]
     Forbidden { path: String },
 
+    #[error("remote repository is not initialized at {url} [CRAB-E0032]")]
+    RepositoryNotInitialized { url: String },
+
     #[error("no credentials available [CRAB-E0040]")]
     NoCredentials,
 
@@ -2347,6 +2350,7 @@ impl CrabError {
             // General user/operational errors.
             Self::Protocol(_)
             | Self::NotFound { .. }
+            | Self::RepositoryNotInitialized { .. }
             | Self::InsufficientSpace { .. }
             | Self::Throttled { .. }
             | Self::NetworkTransient(_)
@@ -2448,6 +2452,7 @@ impl CrabError {
             Self::ChunkNotFound { .. } => "CRAB-E0021",
             Self::NotFound { .. } => "CRAB-E0030",
             Self::Forbidden { .. } => "CRAB-E0031",
+            Self::RepositoryNotInitialized { .. } => "CRAB-E0032",
             Self::NoCredentials => "CRAB-E0040",
             Self::InsufficientSpace { .. } => "CRAB-E0041",
             Self::AuthFailed { .. } => "CRAB-E0042",
@@ -2664,6 +2669,7 @@ impl CrabError {
             | Self::LfsObjectCorrupt { .. } => ErrorCategory::Integrity,
 
             Self::NotFound { .. }
+            | Self::RepositoryNotInitialized { .. }
             | Self::Forbidden { .. }
             | Self::NoCredentials
             | Self::AuthFailed { .. }
@@ -2868,6 +2874,7 @@ impl CrabError {
             | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::NotFound { .. }
+            | Self::RepositoryNotInitialized { .. }
             | Self::Forbidden { .. }
             | Self::NoCredentials
             | Self::AuthFailed { .. }
@@ -3076,6 +3083,10 @@ impl CrabError {
             | Self::Forbidden { path }
             | Self::AuthFailed { path }
             | Self::AuthExpired { path } => serde_json::json!({ "path": path }),
+            Self::RepositoryNotInitialized { url } => serde_json::json!({
+                "remote_url": url,
+                "command": format!("crab init {url}"),
+            }),
             Self::ManagedRepository { diagnostic } => serde_json::json!({
                 "kind": diagnostic.kind(),
                 "message": diagnostic.to_string(),
@@ -3809,6 +3820,9 @@ impl CrabError {
             Self::NotFound { .. } => Some(
                 "Check the requested path and remote. For a new repository, run `crab configure <REMOTE>`; otherwise run `crab doctor`.",
             ),
+            Self::RepositoryNotInitialized { .. } => {
+                Some("Run `crab init <REMOTE>` with the remote URL above, then retry the command.")
+            }
             Self::Forbidden { .. } => Some(
                 "Grant the active cloud identity access to this bucket and repository prefix, then run `crab doctor` to verify it.",
             ),
@@ -3835,6 +3849,7 @@ impl CrabError {
             Self::Read(error) => error.docs_anchor(),
             Self::HydrationFailed { source, .. } => source.docs_anchor(),
             Self::NotFound { .. } => Some("cli/diagnostics/error-codes"),
+            Self::RepositoryNotInitialized { .. } => Some("cli/getting-started/first-repository"),
             Self::Forbidden { .. }
             | Self::NoCredentials
             | Self::AuthFailed { .. }
@@ -4055,6 +4070,29 @@ mod tests {
             crate::storage::retry::retry_class(&error),
             crate::storage::retry::RetryClass::Fatal
         );
+    }
+
+    #[test]
+    fn uninitialized_repository_has_actionable_terminal_and_machine_output() {
+        let error = CrabError::RepositoryNotInitialized {
+            url: "crab://team-data/models".to_owned(),
+        };
+
+        assert_eq!(error.code(), "CRAB-E0032");
+        assert_eq!(error.exit_code(), 1);
+        assert_eq!(error.category(), ErrorCategory::Permanent);
+        assert!(!error.is_retryable());
+        assert_eq!(
+            error.details_json(),
+            serde_json::json!({
+                "remote_url": "crab://team-data/models",
+                "command": "crab init crab://team-data/models",
+            })
+        );
+        let rendered = crate::core::error_catalog::render(&error).text;
+        assert!(rendered.contains("remote repository is not initialized"));
+        assert!(rendered.contains("crab init crab://team-data/models"));
+        assert!(rendered.contains("cli/getting-started/first-repository"));
     }
 
     #[test]

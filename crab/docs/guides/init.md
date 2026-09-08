@@ -110,11 +110,12 @@ Azure credentials, user config, or environment variables.
    canonical manifest after validating the descriptor.
 9. Prints the next `crab setup` and `crab ship` steps.
 
-There is no local-only initialization mode. If the remote prefix contains
-objects but lacks a canonical descriptor, or contains a non-v1 descriptor,
-init fails closed and directs development repositories through the explicit
-reset procedure. Push, clone, and `git ls-remote` never synthesize missing
-repository state.
+Push, clone, and `git ls-remote` never create repositories. If the configured
+remote points to an empty, uninitialized prefix, Crab reports `CRAB-E0032` and
+directs the user to `crab init <REMOTE>`. If that prefix already contains data
+but lacks a valid descriptor, init leaves it unchanged and asks the user to
+verify the URL before deleting disposable data. Malformed or unsupported
+descriptors remain corruption errors and are never replaced automatically.
 
 ## Auto-Tracking
 

@@ -100,6 +100,7 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
         | CrabError::FileChangedDuringStaging { .. }
         | CrabError::ChunkNotFound { .. }
         | CrabError::NotFound { .. }
+        | CrabError::RepositoryNotInitialized { .. }
         | CrabError::Forbidden { .. }
         | CrabError::NoCredentials
         | CrabError::AuthFailed { .. }
@@ -564,6 +565,15 @@ mod tests {
             hash: "deadbeef".into(),
         };
         assert_eq!(retry_class(&err), RetryClass::Fatal);
+    }
+
+    #[test]
+    fn classifies_uninitialized_repository_as_fatal() {
+        let error = CrabError::RepositoryNotInitialized {
+            url: "crab://bucket/repo".into(),
+        };
+
+        assert_eq!(retry_class(&error), RetryClass::Fatal);
     }
 
     #[test]

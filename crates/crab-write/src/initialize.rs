@@ -30,7 +30,7 @@ pub async fn initialize_repository(
             if store.list_prefix_bounded(&prefix, 0).await?.is_none() {
                 return Err(WriteError::CorruptObject {
                     path: layout.layout_descriptor_path().to_string(),
-                    reason: "canonical v1 layout descriptor is missing but repository objects already exist; reset this isolated development repository instead of converting it in place".to_owned(),
+                    reason: "the remote prefix contains data but is not an initialized Crab repository; Crab left it unchanged. Verify the remote URL before deleting disposable data".to_owned(),
                 });
             }
             ensure_canonical_layout(store, layout).await?;

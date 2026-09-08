@@ -37,12 +37,13 @@ pub async fn build_repository_store(
             })
         }
         crab_git::RepositoryLocator::Managed(repository) => {
+            let canonical_url = repository.canonical_url();
             let cache_dir = expand_token_cache_path(&config.auth.token_cache_path);
             let managed = ManagedRepositoryResolver::new(cache_dir)
                 .resolve(&repository, operation, cancel)
                 .await?;
             let store = Store::from_storage(managed.store);
-            validate_repository_store(&store, &managed.repository_prefix).await?;
+            validate_repository_store(&store, &managed.repository_prefix, &canonical_url).await?;
             Ok(RepositoryStore {
                 store,
                 repository_prefix: managed.repository_prefix,

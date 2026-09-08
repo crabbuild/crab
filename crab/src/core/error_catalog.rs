@@ -41,6 +41,7 @@ pub const ALL_CODES: &[&str] = &[
     "CRAB-E0021",
     "CRAB-E0030",
     "CRAB-E0031",
+    "CRAB-E0032",
     "CRAB-E0040",
     "CRAB-E0041",
     "CRAB-E0042",
@@ -247,6 +248,17 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
             remediation: "\
   Check your IAM policies and bucket permissions. Ensure your\n\
   credentials have read/write access to the repository prefix.",
+        }),
+        "CRAB-E0032" => Some(ErrorExplanation {
+            code: "CRAB-E0032",
+            summary: "Remote repository is not initialized",
+            causes: "\
+  - The remote URL points to a new repository prefix\n\
+  - The configured bucket or repository path is incorrect\n\
+  - Local setup completed before remote initialization succeeded",
+            remediation: "\
+  Verify the remote URL, then run `crab init <REMOTE>` to create the\n\
+  repository. Retry the original command after initialization completes.",
         }),
         "CRAB-E0040" => Some(ErrorExplanation {
             code: "CRAB-E0040",
@@ -1398,6 +1410,7 @@ pub fn error_code(err: &CrabError) -> &'static str {
         CrabError::ChunkNotFound { .. } => "CRAB-E0021",
         CrabError::NotFound { .. } => "CRAB-E0030",
         CrabError::Forbidden { .. } => "CRAB-E0031",
+        CrabError::RepositoryNotInitialized { .. } => "CRAB-E0032",
         CrabError::NoCredentials => "CRAB-E0040",
         CrabError::InsufficientSpace { .. } => "CRAB-E0041",
         CrabError::AuthFailed { .. } => "CRAB-E0042",
@@ -1560,7 +1573,13 @@ pub fn render(err: &CrabError) -> UserMessage {
     let code = error_code(err);
     let mut text = format!("error: {err}");
 
-    if let Some(hint) = err.hint() {
+    if let CrabError::RepositoryNotInitialized { url } = err {
+        use std::fmt::Write as _;
+        let _ = write!(
+            text,
+            "\nhelp: Run `crab init {url}`, then retry the command."
+        );
+    } else if let Some(hint) = err.hint() {
         text.push_str("\nhelp: ");
         text.push_str(hint);
     } else {
@@ -1638,6 +1657,9 @@ mod tests {
             CrabError::Internal("test".into()),
             CrabError::Protocol("test".into()),
             CrabError::NoCredentials,
+            CrabError::RepositoryNotInitialized {
+                url: "crab://bucket/repo".into(),
+            },
             CrabError::StagingLocked { holder_pid: None },
         ];
         for err in &samples {

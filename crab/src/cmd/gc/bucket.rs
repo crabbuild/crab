@@ -3096,11 +3096,11 @@ mod tests {
             .await
             .expect_err("bucket root repair must reject a repository without its v1 descriptor");
 
-        assert!(
-            error
-                .to_string()
-                .contains("canonical v1 layout descriptor is missing")
-        );
+        assert!(matches!(
+            error,
+            CrabError::NotFound { ref path }
+                if path == router.layout_descriptor_path().as_ref()
+        ));
     }
 
     #[tokio::test]

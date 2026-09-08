@@ -160,7 +160,7 @@ pub async fn run_init_with_storage_provider(
     storage_provider: Option<StorageProvider>,
     gc_list_profile: Option<GcListProfile>,
 ) -> Result<()> {
-    run_init_inner(
+    let payload = run_init_inner(
         url,
         root,
         cancel,
@@ -168,9 +168,44 @@ pub async fn run_init_with_storage_provider(
         storage_provider,
         gc_list_profile,
         None,
-        true,
     )
-    .await
+    .await?;
+    emit_init_success(&payload, mode, true)
+}
+
+/// Apply local initialization, create the remote repository, then report success.
+///
+/// This is the standalone CLI boundary. It withholds terminal success output
+/// until the canonical remote roots exist.
+///
+/// # Errors
+///
+/// Returns a local configuration, authentication, storage, or output error.
+pub async fn run_init_command_with_storage_provider(
+    url: &str,
+    root: &Path,
+    cancel: &CancellationToken,
+    mode: OutputMode,
+    storage_provider: Option<StorageProvider>,
+    gc_list_profile: Option<GcListProfile>,
+) -> Result<()> {
+    let payload = run_init_inner(
+        url,
+        root,
+        cancel,
+        mode,
+        storage_provider,
+        gc_list_profile,
+        None,
+    )
+    .await?;
+    if let Err(error) = initialize_remote_repository(url, root, cancel).await {
+        if !mode.is_machine() {
+            eprintln!("Local configuration was saved, but the remote repository is not ready.");
+        }
+        return Err(error);
+    }
+    emit_init_success(&payload, mode, true)
 }
 
 /// Initialize a repository as the first phase of guided configuration.
@@ -190,9 +225,9 @@ pub(crate) async fn run_init_for_configure(
         storage_provider,
         gc_list_profile,
         aws_profile,
-        false,
     )
     .await
+    .map(|_| ())
 }
 
 async fn run_init_inner(
@@ -203,8 +238,7 @@ async fn run_init_inner(
     storage_provider: Option<StorageProvider>,
     gc_list_profile: Option<GcListProfile>,
     aws_profile: Option<&str>,
-    show_next_steps: bool,
-) -> Result<()> {
+) -> Result<InitPayload> {
     check_cancelled(cancel)?;
 
     // Parse and normalize the URL before doing any work. Provider-prefixed
@@ -392,18 +426,14 @@ async fn run_init_inner(
         }
     };
 
-    // Emit JSON payload when in machine mode.
-    if mode == OutputMode::Json {
-        let payload = InitPayload {
-            url: remote_url.clone(),
-            storage_provider: selected_storage_provider
-                .as_ref()
-                .map(|provider| provider.toml_value().to_owned()),
-            gc_list_profile: gc_list_profile.map(|profile| profile.as_str().to_owned()),
-            credential_status,
-        };
-        emit_json(INIT_SCHEMA, INIT_VERSION, payload)?;
-    }
+    let payload = InitPayload {
+        url: remote_url.clone(),
+        storage_provider: selected_storage_provider
+            .as_ref()
+            .map(|provider| provider.toml_value().to_owned()),
+        gc_list_profile: gc_list_profile.map(|profile| profile.as_str().to_owned()),
+        credential_status,
+    };
 
     // Remote publication runs after local setup has written the provider and
     // credential configuration needed to build the Store.
@@ -424,15 +454,22 @@ async fn run_init_inner(
         );
     }
 
-    tracing::info!("crab init complete — local config written and git drivers registered");
+    tracing::info!("local Crab configuration ready");
+    Ok(payload)
+}
 
+fn emit_init_success(payload: &InitPayload, mode: OutputMode, show_next_steps: bool) -> Result<()> {
+    if mode == OutputMode::Json {
+        emit_json(INIT_SCHEMA, INIT_VERSION, payload)?;
+    }
+    tracing::info!(url = %payload.url, "crab init complete");
     if !mode.is_machine() && show_next_steps {
+        eprintln!("Remote repository ready → {}", payload.url);
         eprintln!("\nNext:");
         eprintln!("  1. crab setup            # detect large files and write .gitattributes");
         eprintln!("  2. git status            # review crab.toml and tracking rules");
         eprintln!("  3. crab ship -m 'init'   # commit and push to Crab");
     }
-
     Ok(())
 }
 
@@ -1942,7 +1979,7 @@ storage_provider = "azure"
             .await
             .expect_err("non-empty repository without a descriptor must fail closed");
 
-        assert!(error.to_string().contains("reset"));
+        assert!(error.to_string().contains("Crab left it unchanged"));
         assert!(store.head(&router.layout_descriptor_path()).await.is_err());
         assert!(store.head(&router.manifest_path()).await.is_err());
     }
