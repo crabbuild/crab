@@ -7,6 +7,11 @@ Implementation location: `crates/crab-sdk/`.
 
 ## 1. Outcome and scope
 
+The proposed [S3 gateway](crab-s3-gateway.md) is a separate server consumer of
+this SDK. Its logical `crabfs://REPO/REF/KEY` namespace does not replace direct
+storage locators. S3 protocol support and gateway-specific metadata/multipart
+contracts require their own implementation and qualification.
+
 Deliver a supported Rust client for two workflows:
 
 1. Access and modify a remote Crab repository without a checkout or local Git
