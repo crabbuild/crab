@@ -1754,6 +1754,7 @@ PRIVATE_INTERNAL_PACKAGES = {
     "crab-lfs",
     "crab-metadata",
     "crab-read",
+    "crab-s3-gateway",
     "crab-storage",
     "crab-types",
     "crab-workflow",
@@ -1764,11 +1765,17 @@ SHIPPED_BINARY_PACKAGES = {
     "crab-auth-server": {"crab-auth-receive", "crab-auth-view"},
     "crab-cache-server": {"crab-cache-server"},
 }
-SERVER_PACKAGES = {"crab-auth-server", "crab-cache-server", "crab-http-server"}
+SERVER_PACKAGES = {
+    "crab-auth-server",
+    "crab-cache-server",
+    "crab-http-server",
+    "crab-s3-gateway",
+}
 ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-http-server": set(),
     "crab-auth-server": set(),
     "crab-cache-server": {"crab", "crab-cache-store"},
+    "crab-s3-gateway": set(),
 }
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
@@ -1857,6 +1864,21 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-xet",
         },
     },
+    # The S3 gateway is a product composition boundary for protocol, repository,
+    # read, write, coordination, LFS, cache, and storage behavior.
+    "crab-s3-gateway": {
+        "normal": {
+            "crab-cache-store",
+            "crab-coordination",
+            "crab-git",
+            "crab-lfs",
+            "crab-metadata",
+            "crab-read",
+            "crab-remote-git",
+            "crab-storage",
+            "crab-write",
+        },
+    },
     "crab-remote-git": {
         "normal": {"crab-git", "crab-metadata", "crab-storage", "crab-xet"},
         "dev": {"crab-metadata"},
@@ -1898,6 +1920,7 @@ WORKSPACE_DEPENDENCY_PATHS = {
     "crab-metadata": "crates/crab-metadata",
     "crab-read": "crates/crab-read",
     "crab-remote-git": "crates/crab-remote-git",
+    "crab-s3-gateway": "crates/crab-s3-gateway",
     "crab-staging": "crates/crab-staging",
     "crab-storage": "crates/crab-storage",
     "crab-types": "crates/crab-types",

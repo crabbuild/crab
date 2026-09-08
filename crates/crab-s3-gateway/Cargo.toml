@@ -1,0 +1,49 @@
+[package]
+name = "crab-s3-gateway"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "S3-compatible gateway for Crab repositories."
+publish = false
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = "0.22"
+bytes = { workspace = true }
+blake3 = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+crab-coordination = { workspace = true, features = ["object-store-lock"] }
+crab-cache-store = { workspace = true }
+crab-lfs = { workspace = true }
+crab-metadata = { workspace = true, features = ["storage"] }
+crab-remote-git = { workspace = true }
+crab-read = { workspace = true }
+crab-git = { workspace = true }
+crab-storage = { workspace = true }
+crab-write = { workspace = true }
+crc-fast = "1"
+flate2 = { workspace = true }
+futures-util = { workspace = true }
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-object = { workspace = true }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "http1", "http2", "tokio"] }
+md-5 = { workspace = true }
+object_store = { workspace = true }
+percent-encoding = "2"
+s3s = "=0.14.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = "0.10"
+sha2 = "0.10"
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["io", "rt"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ulid = "1"

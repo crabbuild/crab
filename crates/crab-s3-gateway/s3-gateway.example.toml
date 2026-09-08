@@ -1,0 +1,19 @@
+listen = "127.0.0.1:8080"
+region = "us-east-1"
+
+[[credentials]]
+access_key = "replace-with-issued-access-key"
+secret_key_file = "/run/secrets/crab-s3-secret"
+principal = "service-account:analytics"
+
+[[repositories]]
+name = "analytics-repository"
+provider = "s3"
+bucket = "physical-storage-bucket"
+prefix = "repositories/analytics"
+default_branch = "main"
+protected_branches = ["release"]
+
+[[repositories.members]]
+principal = "service-account:analytics"
+access = "write"

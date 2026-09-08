@@ -15,6 +15,7 @@ members = [
     "crates/crab-metadata",
     "crates/crab-read",
     "crates/crab-remote-git",
+    "crates/crab-s3-gateway",
     "crates/crab-staging",
     "crates/crab-storage",
     "crates/crab-types",
@@ -43,6 +44,7 @@ crab-lfs = { path = "crates/crab-lfs", default-features = false }
 crab-metadata = { path = "crates/crab-metadata", default-features = false }
 crab-read = { path = "crates/crab-read", default-features = false }
 crab-remote-git = { path = "crates/crab-remote-git", default-features = false }
+crab-s3-gateway = { path = "crates/crab-s3-gateway", default-features = false }
 crab-staging = { path = "crates/crab-staging", default-features = false }
 crab-storage = { path = "crates/crab-storage", default-features = false }
 crab-types = { path = "crates/crab-types", default-features = false }
