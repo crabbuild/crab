@@ -1161,6 +1161,16 @@ fn contains_limit_exceeded(error: &Error, expected_limit: &str) -> bool {
     }
 }
 
+fn contains_crc_mismatch(error: &Error, expected_oid: gix_hash::ObjectId) -> bool {
+    // Single-flight readers can retain shared ownership of the original error.
+    // Check the integrity cause and object identity, independent of scheduling.
+    match error {
+        Error::PackedEntryCrcMismatch { oid } => *oid == expected_oid,
+        Error::SharedRead { source } => contains_crc_mismatch(source, expected_oid),
+        _ => false,
+    }
+}
+
 fn contains_cancelled(error: &Error) -> bool {
     match error {
         Error::Cancelled => true,
@@ -1658,7 +1668,11 @@ async fn subset_pack_generation_rejects_a_corrupt_packed_entry() {
         .await
         .expect_err("corrupt selected entry must fail");
 
-    assert!(matches!(error, Error::PackedEntryCrcMismatch { .. }));
+    assert!(
+        contains_crc_mismatch(&error, fixture.target),
+        "expected CRC mismatch for {}, got {error:?}",
+        fixture.target
+    );
     fixture.runtime.shutdown().await;
 }
 
@@ -3225,7 +3239,11 @@ async fn rejects_packed_entry_with_wrong_crc() {
     let error = read_target(&fixture)
         .await
         .expect_err("CRC mismatch must fail");
-    assert!(matches!(error, Error::PackedEntryCrcMismatch { .. }));
+    assert!(
+        contains_crc_mismatch(&error, fixture.target),
+        "expected CRC mismatch for {}, got {error:?}",
+        fixture.target
+    );
     assert_runtime_is_within_configured_bounds(&fixture.runtime, RuntimeOptions::default()).await;
     fixture.runtime.shutdown().await;
 }
