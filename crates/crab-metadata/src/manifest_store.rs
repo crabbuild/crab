@@ -903,8 +903,12 @@ mod tests {
         let manifest = Manifest::default_for_repo("refs/heads/main");
         create_manifest(&store, &router, &manifest).await.unwrap();
         let missing = read_repository_snapshot(&store, &router).await.unwrap_err();
-        assert!(matches!(missing, MetadataError::CorruptObject { path, .. }
-            if path == router.layout_descriptor_path().as_ref()));
+        assert!(matches!(
+            missing,
+            MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { ref path }
+            } if path == router.layout_descriptor_path().as_ref()
+        ));
         assert!(store.head(&router.layout_descriptor_path()).await.is_err());
 
         crate::layout_descriptor::ensure_canonical_layout(&store, &router)
