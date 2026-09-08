@@ -5,6 +5,29 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.2.0 - 2026-09-08
+
+### Git And Large Files
+
+- Hardened resumable uploads, bounded push publication, native Git
+  compatibility, and mirror reconciliation.
+- Reduced add and edited-push latency with larger classification batches,
+  cached preparation, paged deduplication, and batched staging retirement.
+- Batched previsibility index publication and tightened data integrity,
+  cleanup, and diagnostic contracts across shared crates.
+
+### Hosting And Cache
+
+- Added authenticated Git hosting and repository collaboration.
+- Consolidated canonical reads and hardened local cache behavior.
+- Hardened the macOS NFS mount lifecycle.
+
+### Documentation
+
+- Standardized repository object-store layout documentation, moved the
+  pointer specification to crab.build, and refreshed embedded agent skills.
+- Published the Kubernetes RustFS benchmark and Rust SDK design plan.
+
 ## 1.0.1 - 2026-08-31
 
 ### Push And Large Files
