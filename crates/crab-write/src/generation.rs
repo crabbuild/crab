@@ -6,7 +6,8 @@ use std::{
 };
 
 use crab_coordination::{
-    CoordinationError, GIT_OBJECT_LOCATOR_RESOURCE, PushLock, PushLockAcquireContext,
+    CoordinationError, GIT_GENERATION_OWNER_RESOURCE, GIT_OBJECT_LOCATOR_RESOURCE,
+    GcFenceHeartbeat, GcFenceLease, PushLock, PushLockAcquireContext,
 };
 use crab_metadata::{
     git_object_locator::{
@@ -31,6 +32,82 @@ use tokio_util::sync::CancellationToken;
 use crate::{Result, WriteError, catalog::publish_inventory, finish_after_cleanup};
 
 const COMMIT_GRAPH_BATCH_SIZE: usize = 512;
+
+struct WriterFence {
+    lease: GcFenceLease,
+    heartbeat: GcFenceHeartbeat,
+}
+
+impl WriterFence {
+    async fn acquire(
+        store: &Store,
+        domain: &str,
+        ttl: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        check_cancelled(cancel)?;
+        let lease = GcFenceLease::acquire_writer(store.inner(), domain, ttl).await?;
+        let heartbeat = GcFenceHeartbeat::spawn(&lease, cancel.clone(), ttl / 3);
+        Ok(Self { lease, heartbeat })
+    }
+
+    async fn release(self) -> Result<()> {
+        self.heartbeat.stop().await;
+        self.lease.release().await.map_err(Into::into)
+    }
+}
+
+/// Elect one owner and publish all committed repository state needed by readers.
+///
+/// Concurrent callers converge: a caller which loses owner election returns
+/// successfully because the owner is responsible for the same canonical state.
+/// Every acquired lease and GC fence is released before this function returns.
+pub async fn ensure_readable(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    identity: &RepositoryIdentity,
+    runtime: Arc<RemoteGitRuntime>,
+    options: RepositoryOptions,
+    ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let mut context = PushLockAcquireContext::new(Arc::clone(store.inner()));
+    let mut owner = match context
+        .try_acquire_internal(layout.repo_prefix(), GIT_GENERATION_OWNER_RESOURCE, ttl)
+        .await
+    {
+        Ok(owner) => owner,
+        Err(CoordinationError::PushLockHeld { .. }) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let result = crab_coordination::while_renewing(&mut owner, Some(cancel), async {
+        let global = WriterFence::acquire(store, layout.global_prefix(), ttl, cancel).await?;
+        let repo = match WriterFence::acquire(store, layout.repo_prefix(), ttl, cancel).await {
+            Ok(repo) => repo,
+            Err(error) => {
+                let _ = global.release().await;
+                return Err(error);
+            }
+        };
+        let mut result = async {
+            let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
+            let Some(manifest) = make_readable(store, layout, ttl, manifest.pusher, cancel).await?
+            else {
+                return Ok(());
+            };
+            maintain_commit_graph(store, layout, &manifest, identity, runtime, options, cancel)
+                .await
+                .map(drop)
+        }
+        .await;
+        for fence in [repo, global] {
+            result = result.and(fence.release().await);
+        }
+        result
+    })
+    .await;
+    result.and(owner.release().await.map_err(Into::into))
+}
 
 /// Complete the read path for already committed refs using their verified visibility evidence.
 ///

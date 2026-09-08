@@ -1,11 +1,14 @@
 # Crab S3 gateway: executable design and phased implementation plan
 
-Status: implementation plan; all phases below are pending. Gateway crate and
-protocol support are not implemented. Proposed product defaults require the
-phase-0 decision record before dependent implementation.
+Status: initial gateway implemented in `crates/crab-s3-gateway`; broader
+cross-client, cross-provider, failure-injection, and deployment qualification
+remains a release gate. The frozen delivered surface and deliberate limits are
+recorded in `s3-gateway-contract.md`.
 Depends on the [SDK delivery plan](crab-sdk.md), especially remote writes,
 publication recovery and backend qualification. This document does not mark any
-SDK or gateway capability delivered.
+SDK capability delivered beyond the shared contracts used by the gateway.
+Where this phased plan retains proposed or future work, the frozen contract is
+the authority for the currently delivered behavior.
 
 ## Outcome and ownership
 
@@ -81,19 +84,18 @@ and parent components; Git trees also cannot contain both file `a` and file
 lossless object-key representation, including folder markers and Git-client
 round trips. No silent normalization, dropped markers or false full-key parity.
 
-## Versioning and write visibility: decisions pending
+## Versioning and write visibility
 
-Recommended initial model: each successful object mutation publishes a commit;
+Selected initial model: each successful object mutation publishes a commit;
 multipart parts remain invisible until completion. Reads pin a commit per
 request. Writable branches advance through expected-OID publication, while tags
 and commit snapshots are read-only. Unrelated concurrent file writes must not
 overwrite each other; bounded re-preparation must preserve object preconditions.
 Reauthorize and recheck conditions at publication, not just upload admission.
 
-The alternative is durable uncommitted branch state plus explicit commit.
+The rejected initial alternative is durable uncommitted branch state plus explicit commit.
 That requires shared overlay/read/commit semantics beyond the current SDK plan;
 it must not be introduced as an invisible gateway-only second repository state.
-The product choice is pending user input.
 
 Repository versioning and AWS object versioning are separate contracts. Full S3
 versioning additionally needs `GetBucketVersioning`, `PutBucketVersioning`,
