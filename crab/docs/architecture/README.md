@@ -11,6 +11,7 @@ each subsystem, and how the components fit together.
 | [System Overview](system-overview.md) | High-level architecture, component diagram, data flow |
 | [Multi-Crate Transition Plan](multi-crate-transition.md) | Phased crate split plan, target workspace DAG, hardening gates |
 | [Rust SDK Design and Delivery Plan](crab-sdk.md) | Public remote/local API, publication recovery, Git compatibility, executable phases and acceptance criteria |
+| [S3 Gateway Design and Delivery Plan](crab-s3-gateway.md) | Logical crabfs URIs, S3 protocol, durable multipart design, phased implementation and acceptance gates |
 | [Storage Layer](storage-layer.md) | Object store abstraction, S3 layout, xorb format, retry/multipart |
 | [Engine: Chunking & Dedup](engine-chunking-dedup.md) | CDC algorithm, dedup tiers, xorb packing, staging area |
 | [Metadata Subsystem](metadata-subsystem.md) | Shards, file-index, chunk-index, bloom filters, pack metadata |
