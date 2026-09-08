@@ -870,18 +870,38 @@ pub fn repack_selected_objects(
     })
 }
 
-/// Check whether source pack indexes contain exactly the requested object set.
+/// Check whether source pack indexes contain each requested object exactly once.
 ///
-/// This reads only verified index sidecars, so response producers can avoid a
-/// whole-pack consolidation when incremental packs contain a small amount of
-/// repeated or extra inventory. Source body integrity remains the caller's
-/// responsibility because this check does not read packed entries.
+/// Source body integrity remains the caller's responsibility because this
+/// check reads only verified index sidecars, not packed entries.
 pub fn source_pack_inventory_matches_object_ids(
     sources: &[RepackSource],
     selected_oids: &[gix_hash::ObjectId],
 ) -> Result<bool, RepackError> {
     let selected = normalize_selected_oids(selected_oids, "selected-pack")?;
-    let mut source_oids = Vec::with_capacity(selected.len());
+    let source_oids = source_pack_inventory_object_ids(sources)?;
+    Ok(source_oids == selected)
+}
+
+/// Check whether source pack indexes cover exactly the requested object set.
+///
+/// Repeated OIDs are allowed because separate packs in one Git object database
+/// may contain the same object. A single response pack must instead use
+/// [`source_pack_inventory_matches_object_ids`].
+pub fn source_pack_inventory_covers_object_ids(
+    sources: &[RepackSource],
+    selected_oids: &[gix_hash::ObjectId],
+) -> Result<bool, RepackError> {
+    let selected = normalize_selected_oids(selected_oids, "selected-pack")?;
+    let mut source_oids = source_pack_inventory_object_ids(sources)?;
+    source_oids.dedup();
+    Ok(source_oids == selected)
+}
+
+fn source_pack_inventory_object_ids(
+    sources: &[RepackSource],
+) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
+    let mut source_oids = Vec::new();
     for source in sources {
         let locations =
             PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?;
@@ -896,8 +916,7 @@ pub fn source_pack_inventory_matches_object_ids(
         source_oids.extend(locations.sorted_object_ids());
     }
     source_oids.sort_unstable();
-    source_oids.dedup();
-    Ok(source_oids == selected)
+    Ok(source_oids)
 }
 
 /// Generate the exact self-contained pack for an existing shallow client's negotiation.
@@ -1946,6 +1965,18 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(source_pack_inventory_matches_object_ids(
             &sources, &expected
+        )?);
+        assert!(source_pack_inventory_covers_object_ids(
+            &sources, &expected
+        )?);
+        let duplicate_sources = [sources[0].clone(), sources[1].clone(), sources[1].clone()];
+        assert!(!source_pack_inventory_matches_object_ids(
+            &duplicate_sources,
+            &expected,
+        )?);
+        assert!(source_pack_inventory_covers_object_ids(
+            &duplicate_sources,
+            &expected,
         )?);
         assert!(!source_pack_inventory_matches_object_ids(
             &sources,

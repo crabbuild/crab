@@ -26,7 +26,7 @@ use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRep
 // the total selection and each coalesced range bounds transient range memory.
 const OBJECT_BATCH_SIZE: usize = 50_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
-pub const GENERATED_PACK_CACHE_VERSION: u32 = 3;
+pub const GENERATED_PACK_CACHE_VERSION: u32 = 4;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 // Generated response packs can require a large catalog lookup plus pack
@@ -403,7 +403,7 @@ impl RemoteGitRepository {
     /// Download the canonical pack inventory when it exactly covers a large selection.
     ///
     /// The selected IDs must already have passed generation-pinned authorization.
-    /// `None` means the inventory is not an exact large-repository clone candidate.
+    /// `None` means the inventory is not a complete large-repository clone candidate.
     pub async fn download_complete_pack_inventory(
         &self,
         object_ids: &[ObjectId],
@@ -417,7 +417,7 @@ impl RemoteGitRepository {
         let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
         if object_ids.len() < COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS
             || inventory.is_empty()
-            || inventory_objects != u64::try_from(object_ids.len()).unwrap_or(u64::MAX)
+            || inventory_objects < u64::try_from(object_ids.len()).unwrap_or(u64::MAX)
             || source_artifact_bytes > self.state.options.operation_limits().max_fetched_bytes
         {
             return Ok(None);
@@ -436,8 +436,8 @@ impl RemoteGitRepository {
                 download_repack_sources(&operation, inventory, &download_dir, cancellation).await?;
             let check_packs = packs.clone();
             let selected_oids = object_ids.to_vec();
-            let matches = tokio::task::spawn_blocking(move || {
-                crab_git::repack::source_pack_inventory_matches_object_ids(
+            let covers = tokio::task::spawn_blocking(move || {
+                crab_git::repack::source_pack_inventory_covers_object_ids(
                     &check_packs,
                     &selected_oids,
                 )
@@ -445,7 +445,7 @@ impl RemoteGitRepository {
             .await
             .map_err(|source| Error::DecodeTask { source })?
             .map_err(|source| Error::ResponsePackConsolidation { source })?;
-            if !matches {
+            if !covers {
                 return Err(Error::Corrupt {
                     stage: crate::CorruptionStage::Inventory,
                 });
