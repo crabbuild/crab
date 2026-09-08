@@ -18,8 +18,9 @@ branch names a mutable view; a tag or full commit ID names an immutable read-onl
 view. Every request resolves and pins one commit before reading. Writes recheck
 authorization, branch protection, and the branch tip under the canonical per-ref
 publication lock. A conflicting branch update returns `OperationAborted` and is
-safe for the S3 client to retry. Conditional PUT and DELETE headers are not part
-of the initial surface and return `NotImplemented` before reading the body.
+safe for the S3 client to retry. `PutObject` supports `If-None-Match: *` for
+atomic creation. Other conditional PUT and DELETE headers are not part of the
+initial surface and return `NotImplemented` before reading the body.
 
 ## Bucket and key namespace
 
@@ -144,7 +145,7 @@ Supported operations:
 | `ListBuckets`, `HeadBucket` | Authorized logical repositories only; deterministic order |
 | `GetObject`, `HeadObject` | metadata, response overrides, RFC dates, ETag/date conditions, one byte range including open and suffix forms |
 | `ListObjects`, `ListObjectsV2` | prefix, delimiter `/`, marker/start-after, max keys, reusable keys, common prefixes |
-| `PutObject` | body up to 5 GiB, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, metadata and standard content headers |
+| `PutObject` | body up to 5 GiB, atomic create with `If-None-Match: *`, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, metadata and standard content headers |
 | `DeleteObject`, `DeleteObjects` | S3 missing-key success, per-key authorization/results, quiet mode, and at most 1000 XML entries |
 | `CopyObject` | pinned source, source conditions/range where defined, `COPY`/`REPLACE`, separately authorized destination |
 | Multipart create/upload/copy/list/abort/complete | durable opaque sessions, part replacement, ordered selection, 10,000 parts, 5 GiB per part, 50 TB completed objects, restart and multi-instance retry |
@@ -158,8 +159,8 @@ the matching checksum mode.
 Conditional reads use S3 precedence: match conditions are evaluated before
 unmodified conditions, then modified conditions; a failed read condition returns
 `NotModified` or `PreconditionFailed` as defined by that header. Conditional
-PUT, DELETE, multipart completion, and destination COPY are not in the initial
-surface.
+DELETE, multipart completion, and destination COPY are not in the initial
+surface. PUT conditions other than `If-None-Match: *` are unsupported.
 
 ## Listings and continuation
 

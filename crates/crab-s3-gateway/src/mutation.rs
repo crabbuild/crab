@@ -30,6 +30,8 @@ pub(crate) enum Error {
     NotDirectory,
     #[error("object path names a directory")]
     IsDirectory,
+    #[error("object write precondition failed")]
+    PreconditionFailed,
     #[error("repository mutation was cancelled")]
     Cancelled,
     #[error("system clock is before the Unix epoch")]
@@ -71,8 +73,16 @@ pub(crate) enum Change {
     Put {
         bytes: Bytes,
         attributes: Box<attributes::PutAttributes>,
+        condition: PutCondition,
     },
     Delete,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum PutCondition {
+    #[default]
+    None,
+    IfNoneMatchAny,
 }
 
 #[derive(Clone, Debug)]
@@ -379,7 +389,14 @@ async fn build_commit(
     let path_string = std::str::from_utf8(path.as_bytes())
         .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
     let (etag, changed, pending_attributes) = match change {
-        Change::Put { bytes, attributes } => {
+        Change::Put {
+            bytes,
+            attributes,
+            condition,
+        } => {
+            if matches!(condition, PutCondition::IfNoneMatchAny) && old.is_some() {
+                return Err(Error::PreconditionFailed);
+            }
             let oid = object_id(Kind::Blob, &bytes)?;
             let digest = md5::Md5::digest(&bytes);
             let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
@@ -789,6 +806,7 @@ mod tests {
                 Change::Put {
                     bytes: Bytes::copy_from_slice(body.as_bytes()),
                     attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
                 },
                 "user",
                 &cancel,
@@ -834,6 +852,7 @@ mod tests {
                 completion_upload_id: Some("upload-id".to_owned()),
                 ..Default::default()
             }),
+            condition: PutCondition::None,
         };
         apply(
             &repository,
@@ -862,6 +881,43 @@ mod tests {
         .unwrap();
         let second = tip(&repository, Arc::clone(&runtime), &cancel).await;
         assert_eq!(first, second);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn if_none_match_wildcard_preserves_an_existing_object() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        let put = |bytes, condition| {
+            apply(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                "refs/heads/main",
+                &path,
+                Change::Put {
+                    bytes,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition,
+                },
+                "user",
+                &cancel,
+            )
+        };
+        put(Bytes::from_static(b"first"), PutCondition::IfNoneMatchAny)
+            .await
+            .unwrap();
+        let result = put(
+            Bytes::from_static(b"replacement"),
+            PutCondition::IfNoneMatchAny,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
+            "first"
+        );
         runtime.shutdown().await;
     }
 }

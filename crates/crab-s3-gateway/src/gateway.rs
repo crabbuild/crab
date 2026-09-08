@@ -701,6 +701,7 @@ impl S3 for Gateway {
             .try_acquire()
             .map_err(|_| s3_error!(SlowDown))?;
         reject_put_extensions(&req.input)?;
+        let condition = put_condition(&req.input)?;
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
         let content_length = req.input.content_length;
@@ -742,6 +743,7 @@ impl S3 for Gateway {
                     expires: req.input.expires,
                     metadata: req.input.metadata.unwrap_or_default().into_iter().collect(),
                 }),
+                condition,
             },
             &principal,
             &self.cancellation,
@@ -973,6 +975,7 @@ impl S3 for Gateway {
             mutation::Change::Put {
                 bytes,
                 attributes: Box::new(attributes),
+                condition: mutation::PutCondition::None,
             },
             &principal,
             &self.cancellation,
@@ -1283,6 +1286,7 @@ impl S3 for Gateway {
             mutation::Change::Put {
                 bytes,
                 attributes: Box::new(attributes),
+                condition: mutation::PutCondition::None,
             },
             &principal,
             &self.cancellation,
@@ -1770,7 +1774,6 @@ fn reject_put_extensions(input: &PutObjectInput) -> S3Result<()> {
         || input.grant_read_acp.is_some()
         || input.grant_write_acp.is_some()
         || input.if_match.is_some()
-        || input.if_none_match.is_some()
         || input.object_lock_legal_hold_status.is_some()
         || input.object_lock_mode.is_some()
         || input.object_lock_retain_until_date.is_some()
@@ -1789,6 +1792,14 @@ fn reject_put_extensions(input: &PutObjectInput) -> S3Result<()> {
         return Err(s3_error!(NotImplemented));
     }
     Ok(())
+}
+
+fn put_condition(input: &PutObjectInput) -> S3Result<mutation::PutCondition> {
+    match input.if_none_match.as_ref() {
+        None => Ok(mutation::PutCondition::None),
+        Some(ETagCondition::Any) => Ok(mutation::PutCondition::IfNoneMatchAny),
+        Some(ETagCondition::ETag(_)) => Err(s3_error!(NotImplemented)),
+    }
 }
 
 #[derive(Clone)]
@@ -2255,6 +2266,7 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
             s3_error!(InvalidObjectState)
         }
         mutation::Error::Cancelled => s3_error!(RequestTimeout),
+        mutation::Error::PreconditionFailed => s3_error!(PreconditionFailed),
         mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => {
             s3_error!(
                 OperationAborted,
