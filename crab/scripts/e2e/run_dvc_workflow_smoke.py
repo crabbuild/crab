@@ -67,6 +67,7 @@ class CommandRecord:
     args: list[str]
     cwd: str
     exit_code: int
+    expected_exit_code: int
     duration_ms: int
     stdout_log: str
     stderr_log: str
@@ -169,6 +170,7 @@ class Smoke:
         cwd: Path,
         *,
         check: bool = True,
+        expected_exit_code: int = 0,
     ) -> CommandRecord:
         self.command_index += 1
         self.logs.mkdir(parents=True, exist_ok=True)
@@ -189,13 +191,14 @@ class Smoke:
             args=command,
             cwd=str(cwd),
             exit_code=proc.returncode,
+            expected_exit_code=expected_exit_code,
             duration_ms=int((time.perf_counter() - start) * 1000),
             stdout_log=str(stdout_log),
             stderr_log=str(stderr_log),
         )
         self.report.commands.append(record.__dict__)
         self.write_report()
-        if check and proc.returncode != 0:
+        if check and proc.returncode != expected_exit_code:
             stdout_tail = stdout_log.read_text(errors="replace")[-2000:]
             stderr_tail = stderr_log.read_text(errors="replace")[-4000:]
             raise SmokeError(
@@ -204,8 +207,22 @@ class Smoke:
             )
         return record
 
-    def crab(self, name: str, args: list[str], cwd: Path, *, check: bool = True) -> CommandRecord:
-        return self.run_cmd(name, ["crab", *args], cwd, check=check)
+    def crab(
+        self,
+        name: str,
+        args: list[str],
+        cwd: Path,
+        *,
+        check: bool = True,
+        expected_exit_code: int = 0,
+    ) -> CommandRecord:
+        return self.run_cmd(
+            name,
+            ["crab", *args],
+            cwd,
+            check=check,
+            expected_exit_code=expected_exit_code,
+        )
 
     def git(self, name: str, args: list[str], cwd: Path) -> CommandRecord:
         return self.run_cmd(name, ["git", *args], cwd)
@@ -1162,7 +1179,23 @@ Path('hydra_metrics.json').write_text(json.dumps({
                 self.crab("clone workflow status json", ["workflow", "status", "--json"], self.clone)
             )
             self.check("clone-workflow-status-json", "data" in clone_status, clone_status.get("data", {}))
-            self.crab("clone run cache-only", ["run", "--cache-only", "--json"], self.clone, check=False)
+            # The export stage has an uncached output, so cache-only replay must
+            # reject it. Retain the expected failure without allowing arbitrary errors.
+            cache_only = self.json_stdout(
+                self.crab(
+                    "clone run cache-only",
+                    ["run", "--cache-only", "--json"],
+                    self.clone,
+                    expected_exit_code=3,
+                )
+            )
+            error = cache_only.get("error", {})
+            self.check(
+                "clone-cache-only-rejects-uncached-output",
+                error.get("code") == "CRAB-E0215"
+                and error.get("details", {}).get("stage") == "export",
+                error,
+            )
 
             self.run_hydra_smoke()
 

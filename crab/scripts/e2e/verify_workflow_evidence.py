@@ -64,7 +64,10 @@ def main() -> int:
     if failed:
         return fail(f"failed smoke checks: {', '.join(failed)}")
     for command in report["commands"]:
-        if command.get("exit_code") != 0:
+        expected = command.get("expected_exit_code")
+        if type(expected) is not int or not 0 <= expected <= 255:
+            return fail(f"command has no valid expected exit code: {command.get('name', '<unnamed>')}")
+        if command.get("exit_code") != expected:
             return fail(f"command failed: {command.get('name', '<unnamed>')}")
     env = report.get("env", {})
     if env.get("AWS_ACCESS_KEY_ID") != "<redacted>" or env.get("AWS_SECRET_ACCESS_KEY") != "<redacted>":
