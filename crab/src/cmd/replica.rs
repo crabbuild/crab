@@ -1787,7 +1787,7 @@ async fn run_add_with_cancel(args: &AddArgs, cancel: &CancellationToken) -> Resu
         plan,
         apply_status,
     };
-    render_add(&payload, mode);
+    render_add(&payload, mode)?;
     Ok(())
 }
 
@@ -1811,7 +1811,7 @@ pub fn run_export(args: &ExportArgs) -> Result<()> {
     );
     let body = export_control_plane_plan(&plan, format)?;
     let payload = ExportPayload { format, plan, body };
-    render_export(&payload, OutputMode::from_flags(args.json, false));
+    render_export(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -1827,7 +1827,7 @@ pub fn run_cost(args: &CostArgs) -> Result<()> {
             origin: "replica cost requires configured replication".into(),
         })?;
     let payload = cost_payload(primary, replication, args.name.as_deref(), assumptions)?;
-    render_cost(&payload, OutputMode::from_flags(args.json, false));
+    render_cost(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -1840,7 +1840,7 @@ pub fn run_runbook(args: &RunbookArgs) -> Result<()> {
         config.replication.as_ref(),
         args.name.as_deref(),
     )?;
-    render_runbook(&payload, OutputMode::from_flags(args.json, false));
+    render_runbook(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -1901,7 +1901,7 @@ pub async fn run_wait(args: &WaitArgs, cancel: &CancellationToken) -> Result<()>
         },
         reason: cutover_blocker.or(status.last_fallback_reason),
     };
-    render_wait(&payload, OutputMode::from_flags(args.json, false));
+    render_wait(&payload, OutputMode::from_flags(args.json, false))?;
     if payload.ready {
         Ok(())
     } else {
@@ -1977,7 +1977,7 @@ pub async fn run_verify(args: &VerifyArgs, cancel: &CancellationToken) -> Result
         summary,
         replicas,
     };
-    render_verify(&payload, OutputMode::from_flags(args.json, false));
+    render_verify(&payload, OutputMode::from_flags(args.json, false))?;
     if payload.verified {
         return Ok(());
     }
@@ -2001,7 +2001,7 @@ pub async fn run_replica_toggle(
         enabled,
         changed,
     };
-    render_toggle(&payload, OutputMode::from_flags(json, false), "replica");
+    render_toggle(&payload, OutputMode::from_flags(json, false), "replica")?;
     Ok(())
 }
 
@@ -2017,7 +2017,7 @@ pub async fn run_replica_enable(args: &EnableArgs, cancel: &CancellationToken) -
         &payload,
         OutputMode::from_flags(args.json, false),
         "replica",
-    );
+    )?;
     Ok(())
 }
 
@@ -2064,7 +2064,7 @@ pub async fn run_backfill_status(args: &BackfillStatusArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let (primary, config) = resolved_replication_context(&cwd)?;
     let payload = backfill_payload(primary.as_deref(), &config, args.name.as_deref()).await?;
-    render_backfill_status(&payload, OutputMode::from_flags(args.json, false));
+    render_backfill_status(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -2108,7 +2108,7 @@ pub fn run_mode(args: &ModeArgs) -> Result<()> {
         mode: replication.mode,
         active_active: active_active_status(Some(&replication)),
     };
-    render_mode(&payload, OutputMode::from_flags(args.json, false));
+    render_mode(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -2121,7 +2121,7 @@ pub fn run_writers(command: WritersCommand) -> Result<()> {
             render_writers(
                 &WritersPayload { writers },
                 OutputMode::from_flags(args.json, false),
-            );
+            )?;
             Ok(())
         }
         WritersCommand::Enable(args) => run_writer_toggle(&args.name, true, args.json),
@@ -2224,7 +2224,7 @@ async fn run_coordinator_add_with_backends(
         plan,
         apply_status,
     };
-    render_coordinator(&payload, mode);
+    render_coordinator(&payload, mode)?;
     Ok(())
 }
 
@@ -2251,7 +2251,7 @@ async fn run_coordinator_status_with_backends(
         configured,
         status: inspect_coordinator_plan_with_backends(&plan, backends).await?,
     };
-    render_coordinator_status_payload(&payload, OutputMode::from_flags(args.json, false));
+    render_coordinator_status_payload(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -2292,7 +2292,7 @@ async fn run_coordinator_remove_with_backends(
         plan: remove_plan,
         apply_status,
     };
-    render_coordinator_remove(&payload, OutputMode::from_flags(args.json, false));
+    render_coordinator_remove(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -2354,7 +2354,7 @@ pub fn run_writer_toggle(name: &str, enabled: bool, json: bool) -> Result<()> {
         enabled,
         changed,
     };
-    render_toggle(&payload, OutputMode::from_flags(json, false), "writer");
+    render_toggle(&payload, OutputMode::from_flags(json, false), "writer")?;
     Ok(())
 }
 
@@ -2385,7 +2385,7 @@ pub async fn run_failover_status(args: &FailoverStatusArgs) -> Result<()> {
             coordinator_health: snapshot.coordinator_health,
         },
         OutputMode::from_flags(args.json, false),
-    );
+    )?;
     Ok(())
 }
 
@@ -2406,13 +2406,13 @@ async fn run_failover_plan(args: &FailoverPlanArgs) -> Result<()> {
             coordinator_health: snapshot.coordinator_health,
         },
         OutputMode::from_flags(args.json, false),
-    );
+    )?;
     Ok(())
 }
 
 async fn run_failover_run(args: &FailoverRunArgs) -> Result<()> {
     let payload = failover_run_payload(args).await?;
-    render_failover_run(&payload, OutputMode::from_flags(args.json, false));
+    render_failover_run(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -2581,7 +2581,7 @@ async fn run_failover_fence(args: &FailoverFenceArgs) -> Result<()> {
         false,
     )
     .await?;
-    render_failover_operation(&payload, OutputMode::from_flags(args.json, false));
+    render_failover_operation(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -2593,7 +2593,7 @@ async fn run_failover_resume(args: &FailoverResumeArgs) -> Result<()> {
         args.repair_verified,
     )
     .await?;
-    render_failover_operation(&payload, OutputMode::from_flags(args.json, false));
+    render_failover_operation(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -2613,7 +2613,7 @@ pub async fn run_repair(args: &RepairArgs, cancel: &CancellationToken) -> Result
     }
 
     let payload = repair_payload(args).await?;
-    render_repair(&payload, OutputMode::from_flags(args.json, args.jsonl));
+    render_repair(&payload, OutputMode::from_flags(args.json, args.jsonl))?;
     Ok(())
 }
 
@@ -2642,7 +2642,7 @@ async fn run_repair_watch(args: &RepairArgs, cancel: &CancellationToken) -> Resu
         let next_interval_seconds =
             repair_watch_next_interval_seconds(args.interval, consecutive_errors);
         let worker = lease.heartbeat(consecutive_errors, next_interval_seconds)?;
-        render_repair_watch_snapshot(&payload, mode, sample, next_interval_seconds, &worker);
+        render_repair_watch_snapshot(&payload, mode, sample, next_interval_seconds, &worker)?;
         if args.samples.is_some_and(|max| sample >= max) {
             return Ok(());
         }
@@ -3605,7 +3605,7 @@ pub async fn run_promote(args: &PromoteArgs, cancel: &CancellationToken) -> Resu
             warn!(%err, "failed to append replica promotion audit event");
         }
     }
-    render_promote(&payload, OutputMode::from_flags(args.json, false));
+    render_promote(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -3706,7 +3706,7 @@ pub async fn run_set_primary(args: &SetPrimaryArgs, cancel: &CancellationToken) 
         payload.applied = true;
     }
 
-    render_set_primary(&payload, OutputMode::from_flags(args.json, false));
+    render_set_primary(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -3721,7 +3721,7 @@ pub async fn run_status(args: &StatusArgs, cancel: &CancellationToken) -> Result
     if args.prometheus {
         print!("{}", prometheus_status(&payload));
     } else {
-        render_status(&payload, mode);
+        render_status(&payload, mode)?;
     }
     Ok(())
 }
@@ -3743,7 +3743,7 @@ async fn run_status_watch(args: &StatusArgs, cancel: &CancellationToken) -> Resu
             sample,
             args.interval,
             previous_health.as_deref(),
-        );
+        )?;
         previous_health = Some(payload.health.clone());
         sample = sample.saturating_add(1);
 
@@ -3811,7 +3811,7 @@ async fn status_payload(deep: bool, cancel: &CancellationToken) -> Result<Status
 
 pub async fn run_doctor(args: &DoctorArgs, cancel: &CancellationToken) -> Result<()> {
     let payload = doctor_payload(args.deep, args.fix_plan, cancel).await?;
-    render_doctor(&payload, OutputMode::from_flags(args.json, false));
+    render_doctor(&payload, OutputMode::from_flags(args.json, false))?;
     Ok(())
 }
 
@@ -3913,7 +3913,7 @@ pub async fn run_diagnostics(args: &DiagnosticsArgs, cancel: &CancellationToken)
         &payload,
         args.output.as_deref(),
         OutputMode::from_flags(args.json, false),
-    );
+    )?;
     Ok(())
 }
 
@@ -4024,7 +4024,7 @@ pub async fn run_certify(args: &CertifyArgs, cancel: &CancellationToken) -> Resu
         &payload,
         args.output.as_deref(),
         OutputMode::from_flags(args.json, false),
-    );
+    )?;
     if payload.certified {
         return Ok(());
     }
@@ -4073,7 +4073,7 @@ fn run_evidence_verify(args: &EvidenceVerifyArgs) -> Result<()> {
         args.profile,
         args.expected_run_id.as_deref(),
     )?;
-    render_evidence_verify(&payload, OutputMode::from_flags(args.json, false));
+    render_evidence_verify(&payload, OutputMode::from_flags(args.json, false))?;
     if payload.verified {
         return Ok(());
     }
@@ -8666,7 +8666,7 @@ pub async fn run_remove(args: &RemoveArgs, cancel: &CancellationToken) -> Result
         apply_status,
     };
     if args.json {
-        emit_json(SCHEMA, SCHEMA_VERSION, payload);
+        emit_json(SCHEMA, SCHEMA_VERSION, payload)?;
     } else if removed {
         println!("Removed replica '{}'", args.name);
     } else {
@@ -11959,10 +11959,10 @@ fn parse_writer_spec(raw: &str) -> Result<WriterConfig> {
     })
 }
 
-fn render_add(payload: &AddPayload, mode: OutputMode) {
+fn render_add(payload: &AddPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json(SCHEMA, SCHEMA_VERSION, payload);
-        return;
+        emit_json(SCHEMA, SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
 
     if payload.configured {
@@ -11990,20 +11990,22 @@ fn render_add(payload: &AddPayload, mode: OutputMode) {
             println!("  - {} {}", request.action, request.target);
         }
     }
+    Ok(())
 }
 
-fn render_export(payload: &ExportPayload, mode: OutputMode) {
+fn render_export(payload: &ExportPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.export", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.export", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     print!("{}", payload.body);
+    Ok(())
 }
 
-fn render_cost(payload: &CostPayload, mode: OutputMode) {
+fn render_cost(payload: &CostPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.cost", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.cost", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Replication cost estimate:");
     if let Some(primary) = payload.primary.as_ref() {
@@ -12050,12 +12052,13 @@ fn render_cost(payload: &CostPayload, mode: OutputMode) {
         cost_quantity(payload.totals.one_time_backfill_gb),
         cost_quantity(payload.totals.monthly_request_millions)
     );
+    Ok(())
 }
 
-fn render_runbook(payload: &RunbookPayload, mode: OutputMode) {
+fn render_runbook(payload: &RunbookPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.runbook", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.runbook", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Replica runbook: {}", payload.scenario.as_str());
     if let Some(primary) = payload.primary.as_ref() {
@@ -12090,6 +12093,7 @@ fn render_runbook(payload: &RunbookPayload, mode: OutputMode) {
             println!("   risk: destructive if run against the wrong scope");
         }
     }
+    Ok(())
 }
 
 fn cost_quantity(value: f64) -> String {
@@ -12100,10 +12104,10 @@ fn cost_quantity(value: f64) -> String {
     }
 }
 
-fn render_coordinator(payload: &CoordinatorPayload, mode: OutputMode) {
+fn render_coordinator(payload: &CoordinatorPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.coordinator", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.coordinator", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Coordinator setup plan for {}", payload.plan.url);
     println!("Provider: {}", payload.plan.provider.as_str());
@@ -12117,12 +12121,16 @@ fn render_coordinator(payload: &CoordinatorPayload, mode: OutputMode) {
     for request in &payload.plan.requests {
         println!("  - {} {}", request.action, request.target);
     }
+    Ok(())
 }
 
-fn render_coordinator_status_payload(payload: &CoordinatorStatusPayload, mode: OutputMode) {
+fn render_coordinator_status_payload(
+    payload: &CoordinatorStatusPayload,
+    mode: OutputMode,
+) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.coordinator.status", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.coordinator.status", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     if payload.configured {
         println!("Configured coordinator:");
@@ -12130,12 +12138,13 @@ fn render_coordinator_status_payload(payload: &CoordinatorStatusPayload, mode: O
         println!("Coordinator target:");
     }
     render_coordinator_status(&payload.status);
+    Ok(())
 }
 
-fn render_coordinator_remove(payload: &CoordinatorRemovePayload, mode: OutputMode) {
+fn render_coordinator_remove(payload: &CoordinatorRemovePayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.coordinator.remove", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.coordinator.remove", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     if payload.applied {
         println!("Coordinator remove applied for {}", payload.plan.url);
@@ -12149,12 +12158,13 @@ fn render_coordinator_remove(payload: &CoordinatorRemovePayload, mode: OutputMod
     for request in &payload.plan.requests {
         println!("  - {} {}", request.action, request.target);
     }
+    Ok(())
 }
 
-fn render_wait(payload: &WaitPayload, mode: OutputMode) {
+fn render_wait(payload: &WaitPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.wait", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.wait", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     let state = if payload.ready { "ready" } else { "not-ready" };
     println!(
@@ -12164,12 +12174,13 @@ fn render_wait(payload: &WaitPayload, mode: OutputMode) {
     if let Some(reason) = payload.reason.as_ref() {
         println!("  reason: {reason}");
     }
+    Ok(())
 }
 
-fn render_verify(payload: &VerifyPayload, mode: OutputMode) {
+fn render_verify(payload: &VerifyPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.verify", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.verify", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     let state = if payload.verified {
         "verified"
@@ -12238,17 +12249,18 @@ fn render_verify(payload: &VerifyPayload, mode: OutputMode) {
             println!("    reason: {reason}");
         }
     }
+    Ok(())
 }
 
-fn render_backfill_status(payload: &BackfillPayload, mode: OutputMode) {
+fn render_backfill_status(payload: &BackfillPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.backfill", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.backfill", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Primary: {}", payload.primary);
     if payload.replicas.is_empty() {
         println!("Backfill: none");
-        return;
+        return Ok(());
     }
     for replica in &payload.replicas {
         println!(
@@ -12270,12 +12282,13 @@ fn render_backfill_status(payload: &BackfillPayload, mode: OutputMode) {
             println!("  fix: {remediation}");
         }
     }
+    Ok(())
 }
 
-fn render_toggle(payload: &TogglePayload, mode: OutputMode, label: &str) {
+fn render_toggle(payload: &TogglePayload, mode: OutputMode, label: &str) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.toggle", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.toggle", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     let state = if payload.enabled {
         "enabled"
@@ -12288,12 +12301,13 @@ fn render_toggle(payload: &TogglePayload, mode: OutputMode, label: &str) {
         "unchanged"
     };
     println!("{label} '{}' {state} ({changed})", payload.name);
+    Ok(())
 }
 
-fn render_mode(payload: &ModePayload, mode: OutputMode) {
+fn render_mode(payload: &ModePayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.mode", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.mode", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Replication mode: {}", payload.mode);
     if let Some(reason) = payload.active_active.reason.as_ref() {
@@ -12301,16 +12315,17 @@ fn render_mode(payload: &ModePayload, mode: OutputMode) {
     } else {
         println!("Active-active writes: ready");
     }
+    Ok(())
 }
 
-fn render_writers(payload: &WritersPayload, mode: OutputMode) {
+fn render_writers(payload: &WritersPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.writers", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.writers", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     if payload.writers.is_empty() {
         println!("Writers: none");
-        return;
+        return Ok(());
     }
     for writer in &payload.writers {
         let state = if writer.enabled {
@@ -12323,12 +12338,13 @@ fn render_writers(payload: &WritersPayload, mode: OutputMode) {
             writer.name, writer.region, state, writer.url
         );
     }
+    Ok(())
 }
 
-fn render_failover(payload: &FailoverPayload, mode: OutputMode) {
+fn render_failover(payload: &FailoverPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.failover", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.failover", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Mode: {}", payload.active_active.mode);
     println!(
@@ -12365,20 +12381,22 @@ fn render_failover(payload: &FailoverPayload, mode: OutputMode) {
     if let Some(coordinator) = payload.coordinator.as_ref() {
         render_coordinator_status(coordinator);
     }
+    Ok(())
 }
 
-fn render_failover_plan(payload: &FailoverPayload, mode: OutputMode) {
+fn render_failover_plan(payload: &FailoverPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.failover.plan", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.failover.plan", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
-    render_failover(payload, mode);
+    render_failover(payload, mode)?;
+    Ok(())
 }
 
-fn render_failover_run(payload: &FailoverRunPayload, mode: OutputMode) {
+fn render_failover_run(payload: &FailoverRunPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.failover.run", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.failover.run", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Apply requested: {}", payload.apply_requested);
     println!("Applied: {}", payload.applied);
@@ -12403,6 +12421,7 @@ fn render_failover_run(payload: &FailoverRunPayload, mode: OutputMode) {
     {
         println!("Repair actions: {}", plan.actions.len());
     }
+    Ok(())
 }
 
 fn render_failover_automation_policy(policy: &FailoverAutomationPolicy) {
@@ -12434,10 +12453,10 @@ fn render_failover_automation_decision(decision: &FailoverAutomationDecision) {
     }
 }
 
-fn render_failover_operation(payload: &FailoverOperationPayload, mode: OutputMode) {
+fn render_failover_operation(payload: &FailoverOperationPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.failover.operation", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.failover.operation", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     println!("Failover operation: {}", payload.operation.as_str());
     println!("Applied: {}", payload.applied);
@@ -12465,20 +12484,22 @@ fn render_failover_operation(payload: &FailoverOperationPayload, mode: OutputMod
         }
         println!("Rerun with --apply to mutate coordinator state.");
     }
+    Ok(())
 }
 
-fn render_repair(payload: &RepairPayload, mode: OutputMode) {
+fn render_repair(payload: &RepairPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.repair", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.repair", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     if mode == OutputMode::Jsonl {
         let stdout = std::io::stdout();
         let mut stream = JsonlStream::new("replica.repair.event", SCHEMA_VERSION, stdout.lock());
-        stream.emit_result(payload);
-        return;
+        stream.emit_result(payload)?;
+        return Ok(());
     }
     render_repair_text(payload);
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -12495,7 +12516,7 @@ fn render_repair_watch_snapshot(
     sample: u64,
     interval_seconds: u64,
     worker: &RepairWatchWorkerState,
-) {
+) -> Result<()> {
     if mode == OutputMode::Jsonl {
         let stdout = std::io::stdout();
         let mut stream = JsonlStream::new("replica.repair.event", SCHEMA_VERSION, stdout.lock());
@@ -12504,8 +12525,8 @@ fn render_repair_watch_snapshot(
             interval_seconds,
             worker,
             repair: payload,
-        });
-        return;
+        })?;
+        return Ok(());
     }
 
     if sample > 1 {
@@ -12517,6 +12538,7 @@ fn render_repair_watch_snapshot(
         worker.worker_id, worker.pid, worker.consecutive_errors, worker.expires_at_ms
     );
     render_repair_text(payload);
+    Ok(())
 }
 
 fn render_repair_text(payload: &RepairPayload) {
@@ -12538,10 +12560,10 @@ fn render_repair_text(payload: &RepairPayload) {
     }
 }
 
-fn render_promote(payload: &PromotePayload, mode: OutputMode) {
+fn render_promote(payload: &PromotePayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.promote", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.promote", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     if payload.dry_run {
         println!(
@@ -12604,12 +12626,17 @@ fn render_promote(payload: &PromotePayload, mode: OutputMode) {
             println!("  - {action}");
         }
     }
+    Ok(())
 }
 
-fn render_diagnostics(payload: &DiagnosticsPayload, written_to: Option<&Path>, mode: OutputMode) {
+fn render_diagnostics(
+    payload: &DiagnosticsPayload,
+    written_to: Option<&Path>,
+    mode: OutputMode,
+) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.diagnostics", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.diagnostics", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
 
     match written_to {
@@ -12622,7 +12649,7 @@ fn render_diagnostics(payload: &DiagnosticsPayload, written_to: Option<&Path>, m
         println!("Published to primary: {}", publication.primary);
         println!("Published object: {}", publication.object_key);
     }
-    render_status(&payload.status, OutputMode::Text);
+    render_status(&payload.status, OutputMode::Text)?;
     println!(
         "Active-active writes: {}",
         payload.active_active.writes_enabled
@@ -12642,22 +12669,23 @@ fn render_diagnostics(payload: &DiagnosticsPayload, written_to: Option<&Path>, m
         }
     }
     if payload.fix_plan.is_empty() {
-        return;
+        return Ok(());
     }
     println!("Fix plan:");
     for action in &payload.fix_plan {
         render_doctor_fix_action(action);
     }
+    Ok(())
 }
 
 fn render_certification(
     payload: &CertificationPayload,
     written_to: Option<&Path>,
     mode: OutputMode,
-) {
+) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.certification", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.certification", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
 
     let state = if payload.certified {
@@ -12705,18 +12733,19 @@ fn render_certification(
         }
     }
     if payload.fix_plan.is_empty() {
-        return;
+        return Ok(());
     }
     println!("Fix plan:");
     for action in &payload.fix_plan {
         render_doctor_fix_action(action);
     }
+    Ok(())
 }
 
-fn render_evidence_verify(payload: &EvidenceVerifyPayload, mode: OutputMode) {
+fn render_evidence_verify(payload: &EvidenceVerifyPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.evidence.verify", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.evidence.verify", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
 
     let state = if payload.verified {
@@ -12763,12 +12792,13 @@ fn render_evidence_verify(payload: &EvidenceVerifyPayload, mode: OutputMode) {
             println!("    error: {error}");
         }
     }
+    Ok(())
 }
 
-fn render_doctor(payload: &DoctorPayload, mode: OutputMode) {
+fn render_doctor(payload: &DoctorPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.doctor", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.doctor", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
 
     render_status(
@@ -12780,7 +12810,7 @@ fn render_doctor(payload: &DoctorPayload, mode: OutputMode) {
             control_plane: payload.control_plane.clone(),
         },
         mode,
-    );
+    )?;
     println!(
         "Active-active writes: {}",
         payload.active_active.writes_enabled
@@ -12800,12 +12830,13 @@ fn render_doctor(payload: &DoctorPayload, mode: OutputMode) {
         }
     }
     if payload.fix_plan.is_empty() {
-        return;
+        return Ok(());
     }
     println!("Fix plan:");
     for action in &payload.fix_plan {
         render_doctor_fix_action(action);
     }
+    Ok(())
 }
 
 fn render_doctor_finding(finding: &DoctorFinding) {
@@ -12882,10 +12913,10 @@ fn render_coordinator_status(status: &CoordinatorControlPlaneStatus) {
     }
 }
 
-fn render_set_primary(payload: &SetPrimaryPayload, mode: OutputMode) {
+fn render_set_primary(payload: &SetPrimaryPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.set_primary", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.set_primary", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     if payload.applied {
         println!(
@@ -12950,18 +12981,19 @@ fn render_set_primary(payload: &SetPrimaryPayload, mode: OutputMode) {
             println!("  - {action}");
         }
     }
+    Ok(())
 }
 
-fn render_status(payload: &StatusPayload, mode: OutputMode) {
+fn render_status(payload: &StatusPayload, mode: OutputMode) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json("replica.status", SCHEMA_VERSION, payload);
-        return;
+        emit_json("replica.status", SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
     if mode == OutputMode::Jsonl {
         let stdout = std::io::stdout();
         let mut stream = JsonlStream::new("replica.status.event", SCHEMA_VERSION, stdout.lock());
-        stream.emit_result(payload);
-        return;
+        stream.emit_result(payload)?;
+        return Ok(());
     }
 
     match payload.primary.as_deref() {
@@ -12971,7 +13003,7 @@ fn render_status(payload: &StatusPayload, mode: OutputMode) {
 
     if payload.replicas.is_empty() {
         println!("Replicas: none");
-        return;
+        return Ok(());
     }
 
     for replica in &payload.replicas {
@@ -13098,6 +13130,7 @@ fn render_status(payload: &StatusPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -13125,21 +13158,21 @@ fn render_status_watch_snapshot(
     sample: u64,
     interval_seconds: u64,
     previous_health: Option<&[ReplicaHealth]>,
-) {
+) -> Result<()> {
     if mode == OutputMode::Jsonl {
         let stdout = std::io::stdout();
         let mut stream = JsonlStream::new("replica.status.event", SCHEMA_VERSION, stdout.lock());
         if let Some(previous) = previous_health {
             for transition in replica_health_transitions(sample, previous, &payload.health) {
-                stream.emit_schema_event("replica.health.transition", "event", transition);
+                stream.emit_schema_event("replica.health.transition", "event", transition)?;
             }
         }
         stream.emit_snapshot(StatusWatchPayload {
             sample,
             interval_seconds,
             status: payload,
-        });
-        return;
+        })?;
+        return Ok(());
     }
 
     if sample > 1 {
@@ -13157,7 +13190,8 @@ fn render_status_watch_snapshot(
         }
     }
     println!("Sample: {sample}");
-    render_status(payload, OutputMode::Text);
+    render_status(payload, OutputMode::Text)?;
+    Ok(())
 }
 
 fn replica_health_transitions(

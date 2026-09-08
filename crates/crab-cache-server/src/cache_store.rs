@@ -8,8 +8,12 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::task::TaskTracker;
+use tokio_util::task::task_tracker::TaskTrackerToken;
 
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -36,6 +40,7 @@ const META_VAL_LEN: usize = 32;
 ///
 /// This is intentionally separate from `crab_cache::CacheKey`, which keys
 /// local/client cache entries by content identity.
+#[derive(Clone)]
 pub struct ServerObjectKey {
     pub bucket: String,
     pub repo_path: String,
@@ -298,7 +303,9 @@ pub struct ObjectMeta {
 /// Statistics from an eviction run.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EvictStats {
+    /// Number of indexed entries removed, including empty objects.
     pub evicted_count: u64,
+    /// Accounted payload bytes removed from the index.
     pub evicted_bytes: u64,
 }
 
@@ -330,12 +337,23 @@ pub enum CacheRangeRead {
 // CacheStore
 // ---------------------------------------------------------------------------
 
+// Drop the result before releasing admission and the drain token. A cancelled
+// caller can leave a recovery result owning a TempPath; its cleanup remains
+// part of the mutation even after the blocking closure has returned.
+struct MutationOutput<T> {
+    result: Result<T>,
+    _permit: OwnedSemaphorePermit,
+    _task: TaskTrackerToken,
+}
+
 /// On-disk cache with LRU eviction metadata.
 pub struct CacheStore {
     root: PathBuf,
     max_bytes: u64,
     conn: Mutex<Connection>,
     mutation_lock: Mutex<()>,
+    mutation_tasks: tokio::sync::Mutex<TaskTracker>,
+    mutation_permits: Arc<Semaphore>,
     current_bytes: AtomicU64,
     startup_integrity: CacheIntegrityStats,
     runtime_integrity: CacheRuntimeIntegrityCounters,
@@ -385,11 +403,56 @@ impl CacheStore {
             max_bytes,
             conn: Mutex::new(conn),
             mutation_lock: Mutex::new(()),
+            mutation_tasks: tokio::sync::Mutex::new(TaskTracker::new()),
+            mutation_permits: Arc::new(Semaphore::new(1)),
             current_bytes: AtomicU64::new(initial_bytes),
             startup_integrity,
             runtime_integrity: CacheRuntimeIntegrityCounters::default(),
             eviction: CacheEvictionCounters::default(),
         })
+    }
+
+    // Admit one request mutation at a time before entering the blocking pool.
+    // The permit follows the worker result, so cancelling its caller cannot admit
+    // an unbounded queue of jobs waiting on the synchronous mutation lock.
+    pub(crate) async fn run_mutation<T: Send + 'static>(
+        self: &Arc<Self>,
+        mutation: impl FnOnce(&Self) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let permit = Arc::clone(&self.mutation_permits)
+            .acquire_owned()
+            .await
+            .map_err(|error| CacheServiceError::InternalError(error.into()))?;
+        let tasks = self.mutation_tasks.lock().await;
+        if tasks.is_closed() {
+            return Err(CacheServiceError::InternalError(
+                std::io::Error::other("cache mutation admission is closed").into(),
+            ));
+        }
+        let store = Arc::clone(self);
+        let token = tasks.token();
+        let worker = tokio::task::spawn_blocking(move || MutationOutput {
+            result: mutation(&store),
+            _permit: permit,
+            _task: token,
+        });
+        drop(tasks);
+        let output = worker
+            .await
+            .map_err(|error| CacheServiceError::InternalError(error.into()))?;
+        output.result
+    }
+
+    pub(crate) async fn shutdown_mutations(&self) {
+        let tasks = {
+            let tasks = self.mutation_tasks.lock().await;
+            // TaskTracker closure alone does not reject new jobs. Serialize
+            // closure with admission so an empty tracker is a final drain.
+            self.mutation_permits.close();
+            tasks.close();
+            tasks.clone()
+        };
+        tasks.wait().await;
     }
 
     /// Current cache size in bytes.
@@ -736,17 +799,7 @@ impl CacheStore {
     }
 
     fn evict_invalid_cache_file(&self, key: &ServerObjectKey, path: &Path) -> Result<()> {
-        let removed_invalid_file = match std::fs::remove_file(path) {
-            Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => Err(CacheServiceError::InternalError(
-                format!(
-                    "failed to remove invalid cache file {}: {e}",
-                    path.display()
-                )
-                .into(),
-            ))?,
-        };
+        let removed_invalid_file = remove_cache_file(path)?;
 
         self.remove_metadata_after_invalid_eviction(key, path)?;
         if removed_invalid_file {
@@ -837,38 +890,26 @@ impl CacheStore {
 
     /// Store a previously validated temp file, returning the temp path when
     /// commit fails before ownership moves to the canonical cache file.
+    /// After persistence, metadata errors return `CommittedObject`; callers
+    /// must not attempt to recover or delete the former temporary path.
     pub fn put_unverified_temp_path_recoverable(
         &self,
         key: &ServerObjectKey,
         temp_path: TempPath,
         size: u64,
     ) -> std::result::Result<(), TempPathCommitError> {
-        let mut temp_path = Some(temp_path);
-        let take_temp_path = |temp_path: &mut Option<TempPath>| {
-            temp_path.take().ok_or_else(|| {
-                TempPathCommitError::after_persist(CacheServiceError::InternalError(
-                    "temp path missing before persist".into(),
-                ))
-            })
-        };
         let now = epoch_millis();
         let _mutation_guard = match self.mutation_guard() {
             Ok(guard) => guard,
             Err(e) => {
-                return Err(TempPathCommitError::with_temp_path(
-                    e,
-                    take_temp_path(&mut temp_path)?,
-                ));
+                return Err(TempPathCommitError::with_temp_path(e, temp_path));
             }
         };
 
         let plan = match self.put_budget_plan(key, size) {
             Ok(plan) => plan,
             Err(e) => {
-                return Err(TempPathCommitError::with_temp_path(
-                    e,
-                    take_temp_path(&mut temp_path)?,
-                ));
+                return Err(TempPathCommitError::with_temp_path(e, temp_path));
             }
         };
         let current_bytes = self.current_bytes();
@@ -876,7 +917,7 @@ impl CacheStore {
         if plan.exceeds_budget(current_bytes, self.max_bytes) {
             return Err(TempPathCommitError::with_temp_path(
                 Self::disk_full_error(current_bytes, plan.growth, self.max_bytes),
-                take_temp_path(&mut temp_path)?,
+                temp_path,
             ));
         }
 
@@ -888,11 +929,10 @@ impl CacheStore {
                 CacheServiceError::InternalError(
                     format!("failed to create dir {}: {e}", parent.display()).into(),
                 ),
-                take_temp_path(&mut temp_path)?,
+                temp_path,
             ));
         }
 
-        let temp_path = take_temp_path(&mut temp_path)?;
         if let Err(e) = temp_path.persist(&path) {
             return Err(TempPathCommitError::with_temp_path(
                 CacheServiceError::InternalError(
@@ -991,6 +1031,8 @@ impl CacheStore {
             max_bytes: 1_073_741_824, // 1 GiB default for stubs
             conn: Mutex::new(conn),
             mutation_lock: Mutex::new(()),
+            mutation_tasks: tokio::sync::Mutex::new(TaskTracker::new()),
+            mutation_permits: Arc::new(Semaphore::new(1)),
             current_bytes: AtomicU64::new(0),
             startup_integrity: CacheIntegrityStats::default(),
             runtime_integrity: CacheRuntimeIntegrityCounters::default(),
@@ -1049,16 +1091,18 @@ impl CacheStore {
     // Eviction
     // -----------------------------------------------------------------------
 
-    /// Remove a single object from disk and metadata, returning freed bytes.
+    /// Remove a single object from disk and metadata, returning eviction statistics.
     ///
     /// The `meta_key` is the 33-byte metadata key (object_type + hash).
-    /// Silently returns 0 if the object is already gone.
-    pub fn remove_object(&self, meta_key: &[u8; META_KEY_LEN]) -> Result<u64> {
+    /// Reports no eviction if the object is already gone, or one eviction even
+    /// when the removed object is empty.
+    /// File-removal errors retain metadata and byte accounting for a later retry.
+    pub fn remove_object(&self, meta_key: &[u8; META_KEY_LEN]) -> Result<EvictStats> {
         let _mutation_guard = self.mutation_guard()?;
 
         // Read the metadata to get size and build the disk path.
         let Some(meta) = self.read_meta(meta_key)? else {
-            return Ok(0);
+            return Ok(EvictStats::default());
         };
         let size = meta.size;
         let object_type = meta.object_type;
@@ -1074,13 +1118,9 @@ impl CacheStore {
             .join(prefix)
             .join(&hash_hex);
 
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "failed to remove cached file");
-            }
-        }
+        // Keep accounting until the payload is removed or confirmed absent;
+        // an unlink failure must not make occupied disk space look available.
+        remove_cache_file(&path)?;
 
         // Remove the metadata entry.
         let conn = self.connection()?;
@@ -1102,7 +1142,10 @@ impl CacheStore {
             "evicted object"
         );
 
-        Ok(size)
+        Ok(EvictStats {
+            evicted_count: 1,
+            evicted_bytes: size,
+        })
     }
 
     /// Evict exactly one object by canonical cache key.
@@ -1113,15 +1156,7 @@ impl CacheStore {
             return Ok(EvictStats::default());
         };
         let meta_key = make_meta_key(key.object_type, &storage_id);
-        let freed = self.remove_object(&meta_key)?;
-        if freed == 0 {
-            return Ok(EvictStats::default());
-        }
-
-        Ok(EvictStats {
-            evicted_count: 1,
-            evicted_bytes: freed,
-        })
+        self.remove_object(&meta_key)
     }
 
     /// Evict objects until `current_bytes <= max_bytes * low_water_ratio`.
@@ -1152,9 +1187,9 @@ impl CacheStore {
             if self.current_bytes() <= low_water {
                 break;
             }
-            let freed = self.remove_object(mk)?;
-            stats.evicted_count += 1;
-            stats.evicted_bytes += freed;
+            let removed = self.remove_object(mk)?;
+            stats.evicted_count += removed.evicted_count;
+            stats.evicted_bytes += removed.evicted_bytes;
         }
 
         debug!(
@@ -1169,8 +1204,9 @@ impl CacheStore {
 
     /// Emergency eviction: evict the oldest 10% of objects by count.
     ///
-    /// Called when a `put` fails with `DiskFull`. Sorts all entries by
-    /// `last_access` ascending and removes the first 10%.
+    /// Used before cache admission when capacity is insufficient. Selects the
+    /// oldest 10% of a metadata snapshot, at least one entry; concurrent removals
+    /// may make the actual eviction count smaller.
     pub fn emergency_evict(&self) -> Result<EvictStats> {
         let mut candidates = self.collect_eviction_candidates()?;
 
@@ -1186,9 +1222,9 @@ impl CacheStore {
 
         let mut stats = EvictStats::default();
         for (mk, _, _) in candidates.iter().take(evict_count) {
-            let freed = self.remove_object(mk)?;
-            stats.evicted_count += 1;
-            stats.evicted_bytes += freed;
+            let removed = self.remove_object(mk)?;
+            stats.evicted_count += removed.evicted_count;
+            stats.evicted_bytes += removed.evicted_bytes;
         }
 
         debug!(
@@ -1236,9 +1272,9 @@ impl CacheStore {
 
         let mut stats = EvictStats::default();
         for mk in &candidates {
-            let freed = self.remove_object(mk)?;
-            stats.evicted_count += 1;
-            stats.evicted_bytes += freed;
+            let removed = self.remove_object(mk)?;
+            stats.evicted_count += removed.evicted_count;
+            stats.evicted_bytes += removed.evicted_bytes;
         }
 
         debug!(
@@ -1700,6 +1736,27 @@ fn reconcile_unindexed_files(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("failed to remove cache file {}: {source}", path.display())]
+struct CacheFileRemovalError {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+fn remove_cache_file(path: &Path) -> Result<bool> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(CacheServiceError::InternalError(Box::new(
+            CacheFileRemovalError {
+                path: path.to_path_buf(),
+                source,
+            },
+        ))),
+    }
+}
+
 fn remove_unindexed_path(path: &Path) -> Result<()> {
     let metadata = std::fs::symlink_metadata(path).map_err(|e| {
         CacheServiceError::InternalError(format!("failed to stat {}: {e}", path.display()).into())
@@ -1840,7 +1897,7 @@ fn eviction_type_weight(type_byte: u8) -> u8 {
 
 /// Parse a hex-encoded hash string into 32 bytes.
 pub fn parse_hash_hex(hex: &str) -> Option<[u8; 32]> {
-    if hex.len() != 64 {
+    if hex.len() != 64 || !hex.is_ascii() {
         return None;
     }
     let mut out = [0u8; 32];
@@ -1872,6 +1929,12 @@ mod hex {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multibyte_hashes_are_rejected_without_panicking() {
+        let hash = format!("€{}", "0".repeat(61));
+        assert!(parse_hash_hex(&hash).is_none());
+    }
 
     fn test_store() -> CacheStore {
         test_store_with_budget(1_073_741_824)
@@ -2157,7 +2220,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"0123456789abcdef");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
 
@@ -2178,7 +2241,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"0123456789abcdef");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
 
@@ -2199,7 +2262,7 @@ mod tests {
 
         let data1 = Bytes::from_static(b"aaaa");
         let hash1 = blake3::hash(&data1);
-        let key1 = test_key(&hash1.to_hex().to_string());
+        let key1 = test_key(hash1.to_hex().as_ref());
         store.put(&key1, data1.clone(), hash1.as_bytes()).unwrap();
         assert_eq!(store.current_bytes(), 4);
 
@@ -2220,7 +2283,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"same object twice");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
@@ -2271,7 +2334,7 @@ mod tests {
             std::thread::spawn(move || {
                 let data = Bytes::from(vec![byte; 60]);
                 let hash = blake3::hash(&data);
-                let key = test_key(&hash.to_hex().to_string());
+                let key = test_key(hash.to_hex().as_ref());
                 barrier.wait();
                 store.put(&key, data, hash.as_bytes())
             })
@@ -2310,11 +2373,307 @@ mod tests {
         assert_eq!(store.get(&key).unwrap().unwrap(), data);
 
         let meta_key = make_meta_key(ObjectType::Pack, &storage_id);
-        let freed = store.remove_object(&meta_key).unwrap();
-        assert_eq!(freed, data.len() as u64);
+        let removed = store.remove_object(&meta_key).unwrap();
+        assert_eq!(removed.evicted_count, 1);
+        assert_eq!(removed.evicted_bytes, data.len() as u64);
         assert!(!path.exists());
         assert!(store.get(&key).unwrap().is_none());
         assert_eq!(store.current_bytes(), 0);
+    }
+
+    #[test]
+    fn eviction_preserves_accounting_when_file_removal_fails() {
+        let evictions: [fn(&CacheStore, &ServerObjectKey) -> Result<EvictStats>; 4] = [
+            CacheStore::evict_key,
+            |store, _| store.evict_to_budget(0.4, 0.2),
+            |store, _| store.emergency_evict(),
+            |store, _| store.evict_by_filter(&EvictFilter { object_type: None }),
+        ];
+        for evict in evictions {
+            let directory = tempfile::tempdir().unwrap();
+            let db = CacheDb::open_or_create(&directory.path().join(CACHE_DB_FILE)).unwrap();
+            let store = CacheStore::open(directory.path().to_path_buf(), 32, db.connect().unwrap())
+                .unwrap();
+            let data = Bytes::from_static(b"stored cache bytes");
+            let hash = blake3::hash(&data);
+            let key = test_key(hash.to_hex().as_ref());
+            store.put(&key, data.clone(), hash.as_bytes()).unwrap();
+            let path = store.object_path(&key);
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+            let marker = path.join("retained");
+            std::fs::write(&marker, "do not delete").unwrap();
+
+            let error = evict(&store, &key).unwrap_err();
+            assert_eq!(store.current_bytes(), data.len() as u64);
+            let meta_key = make_meta_key(key.object_type, hash.as_bytes());
+            assert!(store.read_meta(&meta_key).unwrap().is_some());
+            assert_eq!(store.eviction_stats().total, 0);
+            assert!(marker.exists());
+            let mut cause: &(dyn std::error::Error + 'static) = &error;
+            while let Some(source) = cause.source() {
+                cause = source;
+            }
+            assert!(cause.downcast_ref::<std::io::Error>().is_some());
+        }
+    }
+
+    #[test]
+    fn exact_eviction_counts_empty_objects_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_or_create(&directory.path().join(CACHE_DB_FILE)).unwrap();
+        let store =
+            CacheStore::open(directory.path().to_path_buf(), 32, db.connect().unwrap()).unwrap();
+        let key = pack_key("empty");
+        let data = Bytes::new();
+        store
+            .put(&key, data.clone(), blake3::hash(&data).as_bytes())
+            .unwrap();
+
+        let first = store.evict_key(&key).unwrap();
+        assert_eq!(first.evicted_count, 1);
+        assert_eq!(first.evicted_bytes, 0);
+        assert_eq!(store.eviction_stats().total, 1);
+        let repeated = store.evict_key(&key).unwrap();
+        assert_eq!(repeated.evicted_count, 0);
+        assert_eq!(repeated.evicted_bytes, 0);
+        assert_eq!(store.eviction_stats().total, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_eviction_yields_and_shutdown_drains_it() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let db = CacheDb::open_or_create(&directory.path().join(CACHE_DB_FILE)).unwrap();
+        let store = Arc::new(
+            CacheStore::open(directory.path().to_path_buf(), 32, db.connect().unwrap()).unwrap(),
+        );
+        let data = Bytes::from_static(b"stored cache bytes");
+        let hash = blake3::hash(&data);
+        store
+            .put(&test_key(hash.to_hex().as_ref()), data, hash.as_bytes())
+            .unwrap();
+
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let locked_store = Arc::clone(&store);
+        let blocker = std::thread::spawn(move || {
+            let _guard = locked_store.mutation_guard().unwrap();
+            locked.send(()).unwrap();
+            // Bound failures even if eviction blocks the only async worker.
+            let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+            if responsive {
+                let _ = release_rx.recv_timeout(Duration::from_secs(3));
+            }
+            responsive
+        });
+        ready.await.unwrap();
+
+        let evictor = crate::evictor::start_evictor_task(
+            Arc::clone(&store),
+            0.4,
+            0.2,
+            Duration::from_secs(60),
+        );
+        evictor.nudge();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = heartbeat.send(());
+
+        let mut shutdown = Box::pin(evictor.shutdown());
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err();
+        let _ = release.send(());
+        let responsive = blocker.join().unwrap();
+        if waited {
+            shutdown.await;
+        }
+        assert!(
+            responsive,
+            "cache lock contention blocked the async executor"
+        );
+        assert!(waited, "shutdown detached the admitted eviction");
+        assert_eq!(store.current_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_unclaimed_result_cleanup() {
+        struct Cleanup {
+            entered: Option<tokio::sync::oneshot::Sender<()>>,
+            release: std::sync::mpsc::Receiver<()>,
+            _file: TempPath,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.entered.take().unwrap().send(());
+                let _ = self.release.recv_timeout(std::time::Duration::from_secs(3));
+            }
+        }
+        let store = Arc::new(test_store());
+        let temp_path = store
+            .create_temp_object_path(&pack_key("unclaimed"))
+            .unwrap();
+        let path = temp_path.to_path_buf();
+        let (cleanup_entered, cleanup_started) = tokio::sync::oneshot::channel();
+        let (release_cleanup, cleanup_release) = std::sync::mpsc::channel();
+        let cleanup = Cleanup {
+            entered: Some(cleanup_entered),
+            release: cleanup_release,
+            _file: temp_path,
+        };
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (finish, finishing) = std::sync::mpsc::channel();
+        let request_store = Arc::clone(&store);
+        let request = tokio::spawn(async move {
+            request_store
+                .run_mutation(move |_| {
+                    entered.send(()).unwrap();
+                    finishing
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                    Ok(cleanup)
+                })
+                .await
+        });
+        started.await.unwrap();
+        request.abort();
+        let _ = request.await;
+        finish.send(()).unwrap();
+        cleanup_started.await.unwrap();
+        let mut shutdown = Box::pin(store.shutdown_mutations());
+        let waited = tokio::time::timeout(std::time::Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err();
+        release_cleanup.send(()).unwrap();
+        if waited {
+            shutdown.await;
+        }
+        assert!(waited, "shutdown returned before unclaimed result cleanup");
+        assert!(
+            !path.exists(),
+            "unclaimed result retained its temporary file"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_does_not_admit_a_mutation() {
+        let store = Arc::new(test_store());
+        let running_store = Arc::clone(&store);
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let running = tokio::spawn(async move {
+            running_store
+                .run_mutation(move |_| {
+                    entered.send(()).unwrap();
+                    released
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entering.await.unwrap();
+        let (executed, execution) = tokio::sync::oneshot::channel();
+        let mut queued = Box::pin(store.run_mutation(move |_| {
+            let _ = executed.send(());
+            Ok(())
+        }));
+        assert!(futures_util::poll!(&mut queued).is_pending());
+        drop(queued);
+        release.send(()).unwrap();
+        running.await.unwrap().unwrap();
+        store.shutdown_mutations().await;
+        assert!(
+            execution.await.is_err(),
+            "cancelled waiter executed a mutation"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_mutation_is_drained_before_shutdown() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        for publish in [false, true] {
+            let store = Arc::new(test_store());
+            let key = pack_key("cancelled-mutation");
+            let staged = if publish {
+                let path = store.create_temp_object_path(&key).unwrap();
+                std::fs::write(&path, b"payload").unwrap();
+                Some(path)
+            } else {
+                store
+                    .put_unverified(&key, Bytes::from_static(b"payload"))
+                    .unwrap();
+                None
+            };
+            let staged_path = staged.as_ref().map(|path| path.to_path_buf());
+            let (locked, ready) = tokio::sync::oneshot::channel();
+            let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
+            let (release, release_rx) = std::sync::mpsc::channel();
+            let locked_store = Arc::clone(&store);
+            let blocker = std::thread::spawn(move || {
+                let _guard = locked_store.mutation_guard().unwrap();
+                locked.send(()).unwrap();
+                let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+                if responsive {
+                    let _ = release_rx.recv_timeout(Duration::from_secs(3));
+                }
+                responsive
+            });
+            ready.await.unwrap();
+            let request_store = Arc::clone(&store);
+            let (entered, entering) = tokio::sync::oneshot::channel();
+            let request = tokio::spawn(async move {
+                request_store
+                    .run_mutation(move |store| {
+                        let _ = entered.send(());
+                        if let Some(path) = staged {
+                            store.put_unverified_temp_path(&key, path, 7)
+                        } else {
+                            store.evict_key(&key).map(|_| ())
+                        }
+                    })
+                    .await
+            });
+            entering.await.unwrap();
+            let _ = heartbeat.send(());
+            request.abort();
+            let _ = request.await;
+            let mut shutdown = Box::pin(store.shutdown_mutations());
+            let waited = tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_err();
+            let _ = release.send(());
+            let responsive = blocker.join().unwrap();
+            if waited {
+                shutdown.await;
+            }
+            assert!(responsive, "mutation blocked the async executor");
+            assert!(waited, "shutdown detached a cancelled request's mutation");
+            assert_eq!(store.current_bytes(), if publish { 7 } else { 0 });
+            if let Some(path) = staged_path {
+                assert!(
+                    !path.exists(),
+                    "admitted publication retained its temporary path"
+                );
+                assert_eq!(
+                    store
+                        .get(&pack_key("cancelled-mutation"))
+                        .unwrap()
+                        .unwrap()
+                        .as_ref(),
+                    b"payload"
+                );
+            }
+            assert!(
+                store.run_mutation(|_| Ok(())).await.is_err(),
+                "shutdown must close admission"
+            );
+        }
     }
 
     #[test]
@@ -2329,7 +2688,7 @@ mod tests {
             let store = CacheStore::open(root.clone(), 1_000_000, db.connect().unwrap()).unwrap();
             let data = Bytes::from(vec![0u8; 100]);
             let hash = blake3::hash(&data);
-            let key = test_key(&hash.to_hex().to_string());
+            let key = test_key(hash.to_hex().as_ref());
             store.put(&key, data, hash.as_bytes()).unwrap();
             assert_eq!(store.current_bytes(), 100);
         }
@@ -2350,7 +2709,7 @@ mod tests {
         let db_path = root.join(CACHE_DB_FILE);
         let data = Bytes::from(vec![0xAB; 40]);
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         {
             let db = CacheDb::open_or_create(&db_path).unwrap();
@@ -2429,7 +2788,7 @@ mod tests {
         let db_path = root.join(CACHE_DB_FILE);
         let data = Bytes::from(vec![0xCD; 64]);
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         {
             let db = CacheDb::open_or_create(&db_path).unwrap();
@@ -2488,7 +2847,7 @@ mod tests {
         // Insert one xorb and one shard.
         let d1 = Bytes::from_static(b"xorb-data");
         let h1 = blake3::hash(&d1);
-        let k1 = test_key(&h1.to_hex().to_string());
+        let k1 = test_key(h1.to_hex().as_ref());
         store.put(&k1, d1.clone(), h1.as_bytes()).unwrap();
 
         let d2 = Bytes::from_static(b"shard-data!!");
@@ -2543,7 +2902,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"cached while sqlite row vanishes");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         let meta_key = make_meta_key(ObjectType::Xorb, hash.as_bytes());
@@ -2575,7 +2934,7 @@ mod tests {
 
         let data = Bytes::from_static(b"cached before metadata reset");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
         {
             let store = CacheStore::open(root.clone(), 1_000_000, db.connect().unwrap()).unwrap();
             store.put(&key, data.clone(), hash.as_bytes()).unwrap();
@@ -2608,7 +2967,7 @@ mod tests {
         let store = test_store_with_budget(32);
         let data = Bytes::from_static(b"cached object that vanished");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         std::fs::remove_file(store.object_path(&key)).unwrap();
@@ -2623,7 +2982,7 @@ mod tests {
 
         let replacement = Bytes::from_static(b"replacement bytes fit");
         let replacement_hash = blake3::hash(&replacement);
-        let replacement_key = test_key(&replacement_hash.to_hex().to_string());
+        let replacement_key = test_key(replacement_hash.to_hex().as_ref());
         store
             .put(
                 &replacement_key,
@@ -2639,7 +2998,7 @@ mod tests {
         let store = test_store();
         let data = Bytes::from_static(b"range object that vanished");
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         store.put(&key, data.clone(), hash.as_bytes()).unwrap();
         std::fs::remove_file(store.object_path(&key)).unwrap();
@@ -2660,7 +3019,7 @@ mod tests {
 
         let data = Bytes::from(vec![0xAA; 51]);
         let hash = blake3::hash(&data);
-        let key = test_key(&hash.to_hex().to_string());
+        let key = test_key(hash.to_hex().as_ref());
 
         let err = store.put(&key, data, hash.as_bytes()).unwrap_err();
         assert!(matches!(err, CacheServiceError::DiskFull { .. }));
@@ -2675,7 +3034,7 @@ mod tests {
         for i in 0u8..20 {
             let data = Bytes::from(vec![i; 10]);
             let hash = blake3::hash(&data);
-            let key = test_key(&hash.to_hex().to_string());
+            let key = test_key(hash.to_hex().as_ref());
             store.put(&key, data, hash.as_bytes()).unwrap();
         }
         assert_eq!(store.current_bytes(), 200);
@@ -2698,7 +3057,7 @@ mod tests {
         for i in 0u8..5 {
             let data = Bytes::from(vec![i; 10]);
             let hash = blake3::hash(&data);
-            let key = test_key(&hash.to_hex().to_string());
+            let key = test_key(hash.to_hex().as_ref());
             store.put(&key, data, hash.as_bytes()).unwrap();
         }
 
@@ -2738,12 +3097,12 @@ mod tests {
         // Insert 2 xorbs and 2 shards.
         let d1 = Bytes::from_static(b"xorb-one");
         let h1 = blake3::hash(&d1);
-        let k1 = test_key(&h1.to_hex().to_string());
+        let k1 = test_key(h1.to_hex().as_ref());
         store.put(&k1, d1.clone(), h1.as_bytes()).unwrap();
 
         let d2 = Bytes::from_static(b"xorb-two");
         let h2 = blake3::hash(&d2);
-        let k2 = test_key(&h2.to_hex().to_string());
+        let k2 = test_key(h2.to_hex().as_ref());
         store.put(&k2, d2.clone(), h2.as_bytes()).unwrap();
 
         let d3 = Bytes::from_static(b"shard-one");
@@ -2796,7 +3155,7 @@ mod tests {
 
         let d1 = Bytes::from_static(b"data-a");
         let h1 = blake3::hash(&d1);
-        let k1 = test_key(&h1.to_hex().to_string());
+        let k1 = test_key(h1.to_hex().as_ref());
         store.put(&k1, d1, h1.as_bytes()).unwrap();
 
         let filter = EvictFilter { object_type: None };

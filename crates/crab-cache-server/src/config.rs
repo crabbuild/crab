@@ -411,6 +411,9 @@ fn parse_hex_32(hex: &str) -> Result<[u8; 32], String> {
     if hex.len() != 64 {
         return Err(format!("expected 64 hex characters, got {}", hex.len()));
     }
+    if !hex.is_ascii() {
+        return Err("expected ASCII hex characters".to_owned());
+    }
     let mut out = [0u8; 32];
     for (i, byte) in out.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
@@ -420,12 +423,7 @@ fn parse_hex_32(hex: &str) -> Result<[u8; 32], String> {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "test assertions"
-)]
+#[expect(clippy::unwrap_used, clippy::panic, reason = "test assertions")]
 mod tests {
     use super::*;
 
@@ -660,6 +658,21 @@ url = "s3://bucket"
         unsafe { std::env::remove_var(key) };
         // Verify the env var was readable (the override mechanism works).
         assert_eq!(val, Some("s3://env-bucket".to_string()));
+    }
+
+    #[test]
+    fn psk_config_rejects_multibyte_hashes_without_panicking() {
+        for (prefix, character) in [("", "€"), ("0", "é"), ("", "🦀")] {
+            let value = format!("{prefix}{character}");
+            let hash = format!("{value}{}", "0".repeat(64 - value.len()));
+            let input = format!(
+                "[auth]\nmechanism = \"psk\"\npsk_hash = \"{hash}\"\n[origin]\nurl = \"s3://bucket\"\n"
+            );
+            let error = CacheServerConfig::from_toml_str(&input).unwrap_err();
+            assert!(
+                matches!(error, CacheServiceError::ConfigError(message) if message.contains("auth.psk_hash"))
+            );
+        }
     }
 
     #[test]

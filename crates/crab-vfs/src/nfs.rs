@@ -2364,8 +2364,12 @@ fn current_ids() -> (u32, u32) {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "test setup and assertions reject unexpected errors and variants"
+)]
 mod tests {
-    #![expect(clippy::unwrap_used)]
 
     use super::*;
     use crate::ChunkCache;
@@ -2644,7 +2648,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -2655,7 +2659,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::Dir,
-            mode: 0o040755,
+            mode: 0o040_755,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -2976,8 +2980,10 @@ mod tests {
 
     #[test]
     fn nfs_setattr_size_requires_regular_file() {
-        let mut attr = sattr3::default();
-        attr.size = nfs::set_size3::Some(10);
+        let attr = sattr3 {
+            size: nfs::set_size3::Some(10),
+            ..sattr3::default()
+        };
 
         assert_eq!(validate_setattr_target(NodeType::File, &attr), Ok(()));
         assert_eq!(
@@ -2992,8 +2998,10 @@ mod tests {
 
     #[test]
     fn nfs_setattr_metadata_allows_non_regular_nodes() {
-        let mut attr = sattr3::default();
-        attr.mode = nfs::set_mode3::Some(0o755);
+        let attr = sattr3 {
+            mode: nfs::set_mode3::Some(0o755),
+            ..sattr3::default()
+        };
 
         assert_eq!(validate_setattr_target(NodeType::Dir, &attr), Ok(()));
         assert_eq!(validate_setattr_target(NodeType::Symlink, &attr), Ok(()));
@@ -3156,7 +3164,7 @@ mod tests {
             BaseNode {
                 path: "models/model.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: Some("pointer-blob-oid".to_owned()),
                 pointer: Some(pointer.clone()),
                 size: pointer.size,
@@ -3254,7 +3262,7 @@ mod tests {
         let fixture = nfs_read_fixture(vec![BaseNode {
             path: "unknown.txt".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("0123456789012345678901234567890123456789".to_owned()),
             pointer: None,
             size: 0,
@@ -3279,11 +3287,11 @@ mod tests {
         let fixture = nfs_read_fixture(Vec::new());
         let gitfile = FileHandleU64::new(GITFILE_ID);
 
-        let err =
-            match <CrabNfsFs as NfsReadFileSystem>::readdirplus(&fixture.fs, &gitfile, 0).await {
-                Ok(_) => panic!("READDIRPLUS on synthetic .git unexpectedly succeeded"),
-                Err(error) => error,
-            };
+        let Err(err) =
+            <CrabNfsFs as NfsReadFileSystem>::readdirplus(&fixture.fs, &gitfile, 0).await
+        else {
+            panic!("READDIRPLUS on synthetic .git unexpectedly succeeded");
+        };
 
         assert_eq!(err, nfsstat3::NFS3ERR_NOTDIR);
     }
@@ -3553,8 +3561,10 @@ mod tests {
             .ids
             .id_for_path("time.bin", NodeType::File)
             .unwrap();
-        let mut attr = sattr3::default();
-        attr.atime = nfs::set_atime::SET_TO_SERVER_TIME;
+        let attr = sattr3 {
+            atime: nfs::set_atime::SET_TO_SERVER_TIME,
+            ..sattr3::default()
+        };
 
         <CrabNfsFs as NfsFileSystem>::setattr(&fixture.fs, &FileHandleU64::new(id), attr)
             .await
@@ -3629,8 +3639,10 @@ mod tests {
             seconds: 1_700_000_000,
             nseconds: 0,
         };
-        let mut attr = sattr3::default();
-        attr.mtime = nfs::set_mtime::SET_TO_CLIENT_TIME(mtime);
+        let attr = sattr3 {
+            mtime: nfs::set_mtime::SET_TO_CLIENT_TIME(mtime),
+            ..sattr3::default()
+        };
 
         let (handle, returned_attr) =
             <CrabNfsFs as NfsFileSystem>::symlink(&fixture.fs, &root, &name, &target, &attr)
@@ -3657,8 +3669,10 @@ mod tests {
         let root = FileHandleU64::new(ROOT_ID);
         let name = filename3::from(b"bad-link.bin".as_slice());
         let target = nfspath3::from(b"target.bin".as_slice());
-        let mut attr = sattr3::default();
-        attr.size = nfs::set_size3::Some(4);
+        let attr = sattr3 {
+            size: nfs::set_size3::Some(4),
+            ..sattr3::default()
+        };
 
         let err = <CrabNfsFs as NfsFileSystem>::symlink(&fixture.fs, &root, &name, &target, &attr)
             .await

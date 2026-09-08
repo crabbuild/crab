@@ -41,7 +41,10 @@ fn checked_shard_len(field: &str, start: u32, end: u32) -> Result<u32> {
         .ok_or_else(|| XetError::Internal(format!("shard term {field} has end before start")))
 }
 
-/// Incremental file-term builder whose memory is independent of recipe length.
+/// Incrementally coalesces a recipe without retaining its input chunk list.
+///
+/// Memory grows with emitted terms and distinct term starts; fragmented recipes
+/// can still require one term per chunk occurrence.
 pub struct FileTermBuilder {
     terms: Vec<FileTerm>,
     current: Option<FileTerm>,
@@ -165,7 +168,12 @@ pub fn build_file_terms(
     builder.finish(file_hash, chunk_hashes.len() as u64)
 }
 
-/// Validate that reconstruction terms cover a file's chunk list completely.
+/// Check that term lengths account for exactly the file's chunk count.
+///
+/// Reject reversed ranges, count overflow, and missing or excess occurrences.
+/// Xorb-local ranges may overlap because a file can repeat a chunk. This check
+/// does not compare chunk identities or bytes; reconstruction must still verify
+/// payload integrity and the final file hash.
 pub fn validate_term_coverage(
     file_hash: &MerkleHash,
     chunk_hashes: &[MerkleHash],
@@ -176,56 +184,23 @@ pub fn validate_term_coverage(
         checked_shard_add("covered chunk count", acc, len)
     })?;
     if covered_chunks as usize != chunk_hashes.len() {
-        let mut covered = vec![false; chunk_hashes.len()];
-        let mut pos = 0usize;
-        for term in terms {
-            let len = checked_shard_len("range", term.chunk_start, term.chunk_end)? as usize;
-            for is_covered in covered
-                .iter_mut()
-                .take((pos + len).min(chunk_hashes.len()))
-                .skip(pos)
-            {
-                *is_covered = true;
-            }
-            pos += len;
-        }
-        let (example_chunk_index, example_chunk_hash) = covered
-            .iter()
-            .position(|is_covered| !is_covered)
-            .map(|i| (i as u32, chunk_hashes[i].hex()))
-            .unwrap_or((
-                0,
-                chunk_hashes
-                    .first()
-                    .map(MerkleHash::hex)
-                    .unwrap_or_default(),
-            ));
+        // Terms concatenate in file order. A short count names the first absent
+        // file position; excess coverage retains the first-chunk diagnostic.
+        let example_chunk_index = if (covered_chunks as usize) < chunk_hashes.len() {
+            covered_chunks
+        } else {
+            0
+        };
         return Err(XetError::IncompleteShardReconstruction {
             file_hash: file_hash.hex(),
             path: None,
             uncovered_chunks: chunk_hashes.len().saturating_sub(covered_chunks as usize),
-            example_chunk_hash,
+            example_chunk_hash: chunk_hashes
+                .get(example_chunk_index as usize)
+                .map(MerkleHash::hex)
+                .unwrap_or_default(),
             example_chunk_index,
         });
-    }
-
-    if !terms.is_empty() {
-        let last_file_end = terms.iter().try_fold(0u32, |acc, term| {
-            let len = checked_shard_len("range", term.chunk_start, term.chunk_end)?;
-            checked_shard_add("covered chunk count", acc, len)
-        })?;
-        if (last_file_end as usize) != chunk_hashes.len() {
-            return Err(XetError::IncompleteShardReconstruction {
-                file_hash: file_hash.hex(),
-                path: None,
-                uncovered_chunks: chunk_hashes.len().saturating_sub(last_file_end as usize),
-                example_chunk_hash: chunk_hashes
-                    .get(last_file_end as usize)
-                    .map(MerkleHash::hex)
-                    .unwrap_or_default(),
-                example_chunk_index: last_file_end,
-            });
-        }
     }
 
     Ok(())
@@ -242,6 +217,72 @@ mod tests {
             chunk_index,
             uncompressed_size: size,
         }
+    }
+
+    #[test]
+    fn coverage_diagnostics_preserve_missing_and_excess_counts() {
+        let file_hash = MerkleHash::from([9; 4]);
+        for (file_chunks, term_chunks, missing, example) in
+            [(5, 2, 3, 2), (5, 7, 0, 0), (5, 0, 5, 0), (0, 1, 0, 0)]
+        {
+            let hashes: Vec<_> = (0..file_chunks)
+                .map(|i| MerkleHash::from([i as u64 + 1; 4]))
+                .collect();
+            let terms = [FileTerm {
+                xorb_hash: MerkleHash::default(),
+                chunk_start: 10,
+                chunk_end: 10 + term_chunks,
+                unpacked_bytes: 0,
+            }];
+            let error = validate_term_coverage(&file_hash, &hashes, &terms).unwrap_err();
+            let XetError::IncompleteShardReconstruction {
+                file_hash: got_file,
+                uncovered_chunks,
+                example_chunk_hash,
+                example_chunk_index,
+                ..
+            } = error
+            else {
+                panic!("expected a coverage mismatch");
+            };
+            assert_eq!(
+                (
+                    got_file,
+                    uncovered_chunks,
+                    example_chunk_index,
+                    example_chunk_hash
+                ),
+                (
+                    file_hash.hex(),
+                    missing,
+                    example,
+                    hashes
+                        .get(example as usize)
+                        .map(MerkleHash::hex)
+                        .unwrap_or_default()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_rejects_reversed_ranges_and_count_overflow() {
+        let term = |start, end| FileTerm {
+            xorb_hash: MerkleHash::default(),
+            chunk_start: start,
+            chunk_end: end,
+            unpacked_bytes: 0,
+        };
+        let file_hash = MerkleHash::default();
+        assert!(matches!(
+            validate_term_coverage(&file_hash, &[], &[term(2, 1)]),
+            Err(XetError::Internal(_))
+        ));
+        assert!(matches!(
+            validate_term_coverage(&file_hash, &[], &[term(0, u32::MAX), term(0, 1)]),
+            Err(XetError::ShardFormat { .. })
+        ));
+        validate_term_coverage(&file_hash, &[], &[]).unwrap();
     }
 
     #[test]

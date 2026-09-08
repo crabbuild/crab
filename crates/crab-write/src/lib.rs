@@ -9,6 +9,9 @@ pub use namespace::with_ref_namespace;
 /// Failure while preparing or publishing canonical Git metadata.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    /// The clock cannot produce a valid persisted timestamp.
+    #[error("invalid timestamp: {0}")]
+    Timestamp(#[from] crab_types::time::TimestampError),
     #[error(transparent)]
     Namespace(#[from] crab_git::refname::RefNamespaceError),
     #[error("generation {generation} has no verified Git visibility proof")]
@@ -50,3 +53,49 @@ pub enum WriteError {
 
 /// Shared publication result preserving dependency errors.
 pub type Result<T> = std::result::Result<T, WriteError>;
+
+// Callers await cleanup before choosing an outcome. A cleanup failure surfaces
+// only when the operation succeeded; otherwise retain and return its primary error.
+// Namespace publication separately preserves known commits despite lease errors.
+pub(crate) fn finish_after_cleanup<T, C, E>(
+    operation: Result<T>,
+    cleanup: std::result::Result<C, E>,
+    message: &'static str,
+) -> Result<T>
+where
+    E: std::fmt::Display + Into<WriteError>,
+{
+    match (operation, cleanup) {
+        (Ok(value), Ok(_)) => Ok(value),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+        (Err(error), Err(cleanup_error)) => {
+            tracing::warn!(error = %cleanup_error, "{message}");
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_failure_retains_the_primary_io_cause() {
+        for (operation, expected) in [
+            (Ok(()), "cleanup"),
+            (
+                Err(WriteError::Io(std::io::Error::other("operation"))),
+                "operation",
+            ),
+        ] {
+            let cleanup: std::io::Result<()> = Err(std::io::Error::other("cleanup"));
+            let error = finish_after_cleanup(operation, cleanup, "cleanup also failed")
+                .expect_err("operation or cleanup failed");
+            let WriteError::Io(source) = error else {
+                panic!("original I/O cause must survive");
+            };
+            assert_eq!(source.to_string(), expected);
+        }
+    }
+}

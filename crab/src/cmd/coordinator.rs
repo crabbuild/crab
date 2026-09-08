@@ -403,7 +403,7 @@ async fn run_status(json: bool) -> Result<ExitCode> {
                 "coordinator.status",
                 "1.0",
                 serde_json::json!({ "running": false }),
-            );
+            )?;
         } else {
             eprintln!("Coordinator is not running.");
         }
@@ -433,7 +433,7 @@ async fn run_status(json: bool) -> Result<ExitCode> {
             "hydration_queue_depth": response.hydration_queue_depth,
             "hydration_workers": response.hydration_workers,
         });
-        emit_json("coordinator.status", "1.0", output);
+        emit_json("coordinator.status", "1.0", output)?;
     } else {
         // Human-readable output.
         println!("Coordinator: running");
@@ -716,34 +716,6 @@ mod tests {
         assert!(
             err_msg.contains("another coordinator is already running"),
             "expected flock error, got: {err_msg}"
-        );
-    }
-
-    #[cfg(feature = "fuse")]
-    #[tokio::test]
-    async fn connect_or_spawn_removes_stale_socket_file() {
-        use std::fs;
-
-        use crate::vfs::ipc_client::IpcClient;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let socket_path = tmp.path().join("daemon.sock");
-
-        // Create a stale socket artifact that the IPC client may remove.
-        fs::write(&socket_path, "").unwrap();
-        assert!(socket_path.exists());
-
-        // connect_or_spawn will fail to connect, then try to remove the stale
-        // socket and spawn. The spawn will fail (no real coordinator binary in
-        // test), but the stale socket should be removed before the spawn attempt.
-        let result = IpcClient::connect_or_spawn(&socket_path).await;
-
-        // The call will fail (can't spawn coordinator in test), but the stale
-        // socket should have been removed.
-        assert!(result.is_err());
-        assert!(
-            !socket_path.exists(),
-            "stale socket file should be removed before spawn attempt"
         );
     }
 }

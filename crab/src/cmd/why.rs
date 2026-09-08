@@ -84,7 +84,7 @@ pub fn run_why(file: &str, mode: OutputMode) -> Result<()> {
 
     match mode {
         OutputMode::Json => {
-            emit_json(WHY_SCHEMA, "1.0", &result);
+            emit_json(WHY_SCHEMA, "1.0", &result)?;
         }
         _ => {
             render_text(&result, mode);

@@ -32,7 +32,11 @@ pub enum CrabError {
     // `retry_after` is advisory; the retry layer reads it directly rather
     // than parsing it back out of the Display output.
     #[error("throttled [CRAB-E0002]")]
-    Throttled { retry_after: Option<Duration> },
+    Throttled {
+        retry_after: Option<Duration>,
+        #[source]
+        source: Option<object_store::Error>,
+    },
 
     // Conflict — state-dependent.
     #[error("CAS conflict on {path} [CRAB-E0010]")]
@@ -71,6 +75,9 @@ pub enum CrabError {
     // validation, with a typed payload so dependency causes stay inspectable.
     #[error("corrupt Git pack evidence [CRAB-E0020]: {0}")]
     GitPackCorrupt(#[source] crab_git::pack_locator::PackLocatorError),
+    /// Workflow metadata corruption retains the original JSON decoding cause.
+    #[error("corrupt workflow metadata [CRAB-E0020]: {0}")]
+    WorkflowMetadataCorrupt(#[source] crab_workflow::WorkflowError),
     #[error("origin object at {path} failed integrity verification [CRAB-E0020]: {source}")]
     OriginIntegrity {
         path: String,
@@ -1119,6 +1126,7 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::Cancelled => Self::Cancelled,
             error @ (crab_read::ReadError::Availability { .. }
             | crab_read::ReadError::Runtime(_)
+            | crab_read::ReadError::ResolutionTask(_)
             | crab_read::ReadError::Reconstruction { .. }) => Self::Read(ReadFailure(error)),
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
@@ -1202,10 +1210,23 @@ impl From<crab_vfs::VfsError> for CrabError {
     }
 }
 
+impl From<crab_types::time::TimestampError> for CrabError {
+    fn from(error: crab_types::time::TimestampError) -> Self {
+        Self::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    }
+}
+
 impl From<crab_workflow::WorkflowError> for CrabError {
     fn from(error: crab_workflow::WorkflowError) -> Self {
         match error {
+            crab_workflow::WorkflowError::Timestamp(source) => Self::from(source),
             crab_workflow::WorkflowError::Cancelled => Self::Cancelled,
+            error @ crab_workflow::WorkflowError::ExperimentMetadataMalformed { .. } => {
+                Self::WorkflowMetadataCorrupt(error)
+            }
+            crab_workflow::WorkflowError::CorruptObject { path, reason } => {
+                Self::CorruptObject { path, reason }
+            }
             crab_workflow::WorkflowError::NetworkTransient(source) => {
                 Self::NetworkTransient(source)
             }
@@ -1846,9 +1867,13 @@ impl From<crab_storage::error::StorageError> for CrabError {
             crab_storage::error::StorageError::NetworkTransient { source } => {
                 Self::NetworkTransient(source)
             }
-            crab_storage::error::StorageError::Throttled { retry_after } => {
-                Self::Throttled { retry_after }
-            }
+            crab_storage::error::StorageError::Throttled {
+                retry_after,
+                source,
+            } => Self::Throttled {
+                retry_after,
+                source,
+            },
             crab_storage::error::StorageError::StateConflict { path } => Self::CasConflict {
                 path,
                 expected_etag: None,
@@ -1928,6 +1953,7 @@ impl From<crab_write::WriteError> for CrabError {
                 path,
                 expected_etag: None,
             },
+            crab_write::WriteError::Timestamp(source) => Self::from(source),
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
             crab_write::WriteError::Metadata(source) => Self::from(source),
@@ -2220,6 +2246,7 @@ impl CrabError {
 
             Self::CorruptObject { .. }
             | Self::GitPackCorrupt(_)
+            | Self::WorkflowMetadataCorrupt(_)
             | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
@@ -2414,9 +2441,10 @@ impl CrabError {
             Self::RefAlreadyExists { .. } => "CRAB-E0011",
             Self::PushLockHeld { .. } => "CRAB-E0012",
             Self::NonFastForward { .. } => "CRAB-E0017",
-            Self::CorruptObject { .. } | Self::GitPackCorrupt(_) | Self::OriginIntegrity { .. } => {
-                "CRAB-E0020"
-            }
+            Self::CorruptObject { .. }
+            | Self::GitPackCorrupt(_)
+            | Self::WorkflowMetadataCorrupt(_)
+            | Self::OriginIntegrity { .. } => "CRAB-E0020",
             Self::ChunkNotFound { .. } => "CRAB-E0021",
             Self::NotFound { .. } => "CRAB-E0030",
             Self::Forbidden { .. } => "CRAB-E0031",
@@ -2621,6 +2649,7 @@ impl CrabError {
 
             Self::CorruptObject { .. }
             | Self::GitPackCorrupt(_)
+            | Self::WorkflowMetadataCorrupt(_)
             | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::HashMismatch { .. }
@@ -2835,7 +2864,7 @@ impl CrabError {
             | Self::PushIntegrationFailed { .. }
             | Self::FileChangedDuringStaging { .. }
             | Self::CorruptObject { .. }
-            | Self::GitPackCorrupt(_)
+            | Self::GitPackCorrupt(_) | Self::WorkflowMetadataCorrupt(_)
             | Self::OriginIntegrity { .. }
             | Self::ChunkNotFound { .. }
             | Self::NotFound { .. }
@@ -2986,7 +3015,7 @@ impl CrabError {
             Self::NetworkTransient(err) | Self::Storage(err) => {
                 serde_json::json!({ "source": err.to_string() })
             }
-            Self::Throttled { retry_after } => {
+            Self::Throttled { retry_after, .. } => {
                 serde_json::json!({
                     "retry_after_ms": retry_after.map(|d| d.as_millis() as u64)
                 })
@@ -3030,6 +3059,9 @@ impl CrabError {
                     "path": path,
                     "reason": reason,
                 })
+            }
+            Self::WorkflowMetadataCorrupt(source) => {
+                serde_json::json!({ "source": source.to_string() })
             }
             Self::GitPackCorrupt(source) => serde_json::json!({ "source": source.to_string() }),
             Self::OriginIntegrity { path, source } => serde_json::json!({
@@ -3848,6 +3880,7 @@ mod tests {
             },
             CrabError::Throttled {
                 retry_after: Some(Duration::from_secs(3)),
+                source: None,
             },
             CrabError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
         ] {
@@ -3881,6 +3914,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn term_resolution_task_source_survives_cli_conversion() {
+        use std::error::Error;
+
+        let worker = tokio::spawn(async { panic!("resolution worker fixture") });
+        let error = CrabError::from(crab_read::ReadError::ResolutionTask(
+            worker.await.unwrap_err(),
+        ));
+        let source = std::iter::successors(error.source(), |source| (*source).source())
+            .find_map(|source| source.downcast_ref::<tokio::task::JoinError>())
+            .expect("CLI conversion must preserve the task failure");
+        assert!(source.is_panic());
+        let previous = CrabError::Internal("resolution worker fixture".into());
+        assert_eq!(error.code(), previous.code());
+        assert_eq!(error.exit_code(), previous.exit_code());
+        assert_eq!(error.category(), previous.category());
+        assert_eq!(error.is_retryable(), previous.is_retryable());
+    }
+
     #[test]
     fn availability_preserves_product_diagnostics() {
         use std::error::Error;
@@ -3892,6 +3944,7 @@ mod tests {
             },
             CrabError::Throttled {
                 retry_after: Some(Duration::from_secs(3)),
+                source: None,
             },
             CrabError::Cancelled,
         ] {
@@ -4172,7 +4225,14 @@ mod tests {
             .exit_code(),
             1
         );
-        assert_eq!(CrabError::Throttled { retry_after: None }.exit_code(), 1);
+        assert_eq!(
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .exit_code(),
+            1
+        );
         assert_eq!(CrabError::StagingLocked { holder_pid: None }.exit_code(), 1);
     }
 
@@ -4234,7 +4294,11 @@ mod tests {
             "CRAB-E0001"
         );
         assert_eq!(
-            CrabError::Throttled { retry_after: None }.code(),
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .code(),
             "CRAB-E0002"
         );
         assert_eq!(
@@ -4300,7 +4364,11 @@ mod tests {
             ErrorCategory::Transient
         );
         assert_eq!(
-            CrabError::Throttled { retry_after: None }.category(),
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .category(),
             ErrorCategory::Transient
         );
     }
@@ -4396,7 +4464,13 @@ mod tests {
             })
             .is_retryable()
         );
-        assert!(CrabError::Throttled { retry_after: None }.is_retryable());
+        assert!(
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            }
+            .is_retryable()
+        );
         assert!(
             CrabError::CasConflict {
                 path: "p".into(),
@@ -4498,6 +4572,7 @@ mod tests {
     fn details_json_optional_field() {
         let err = CrabError::Throttled {
             retry_after: Some(Duration::from_millis(500)),
+            source: None,
         };
         let d = err.details_json();
         assert_eq!(d["retry_after_ms"], 500);
@@ -4761,7 +4836,10 @@ mod tests {
                 store: "test",
                 source: "net".into(),
             }),
-            CrabError::Throttled { retry_after: None },
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            },
             CrabError::CasConflict {
                 path: "p".into(),
                 expected_etag: None,

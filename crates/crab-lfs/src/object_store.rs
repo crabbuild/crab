@@ -63,9 +63,8 @@ pub enum LfsError {
 const STREAM_PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// Maximum number of parts in flight simultaneously during a streaming
-/// upload. Bounds peak memory to `STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS`
-/// — 32 MiB at defaults — regardless of file size. Matches the xorb
-/// uploader's bound.
+/// upload, including the final partial part. This bounds queued payload bytes;
+/// read/assembly buffers and provider allocations are additional memory.
 const MAX_IN_FLIGHT_PARTS: usize = 4;
 
 /// Size of the read buffer used when streaming a file into part
@@ -73,7 +72,9 @@ const MAX_IN_FLIGHT_PARTS: usize = 4;
 /// one part without an extra copy in the common case.
 const FILE_READ_BUF: usize = STREAM_PART_SIZE;
 const RECEIPT_MAGIC: &[u8] = b"crab-lfs-receipt\0\x01";
-const RECEIPT_VERIFIER: &str = "crab-lfs/1";
+// Version 1 could bind a verified upload to an unrelated later HEAD response.
+// Its receipts must miss so the next verifier hashes the actual object version.
+const RECEIPT_VERIFIER: &str = "crab-lfs/2";
 const MAX_RECEIPT_FIELD_SIZE: usize = 4 * 1024;
 const MAX_RECEIPT_SIZE: u64 = 16 * 1024;
 
@@ -180,7 +181,10 @@ impl LfsObjectStore {
     /// Verifies an object before opening a backpressured stream.
     ///
     /// Range reads are checked against the complete SHA-256 object first, so a
-    /// corrupt immutable key is never served as a successful transfer.
+    /// corrupt immutable key is never served as a successful transfer. The
+    /// served response must retain the verified strong ETag or object version;
+    /// backends without either return a storage `NotSupported` error. Use
+    /// [`Self::download_to_file`] to verify a single streamed read without one.
     pub async fn get_stream(
         &self,
         oid: &[u8; 32],
@@ -269,25 +273,20 @@ impl LfsObjectStore {
             ExistingObject::Missing => {}
         }
 
-        // The underlying Store.put uses PutMode::Create with idempotent
-        // conflict handling, so a race between the exists check and the
-        // put is harmless — the second writer sees CasConflict and the
-        // Store resolves it by comparing content hashes.
-        self.store.put(&path, bytes).await.map_err(LfsError::from)?;
-        self.record_verification_receipt(oid).await;
-        Ok(())
+        // Create-only writes tolerate a racing equal payload. Store::put returns
+        // no write validator, so a later HEAD cannot certify these bytes; the
+        // first verifier must hash and receipt its own GET response.
+        self.store.put(&path, bytes).await.map_err(LfsError::from)
     }
 
     /// Streaming upload: read the local file in bounded chunks, hash
     /// incrementally, and push parts to the object store via
     /// [`object_store::MultipartUpload`].
     ///
-    /// This is the large-object counterpart of [`Self::put`]. Where
-    /// `put` materializes the entire payload in memory (unavoidable
-    /// for its `Bytes` contract), `put_stream` caps peak memory at
-    /// [`STREAM_PART_SIZE`] × [`MAX_IN_FLIGHT_PARTS`] (~32 MiB at
-    /// defaults) regardless of the source file's size. A 50 GiB LFS
-    /// object now uploads without OOMing.
+    /// This is the large-object counterpart of [`Self::put`]. It sends
+    /// 8 MiB parts through a bounded queue instead of retaining the whole file.
+    /// Memory also includes the read and assembly buffers and provider-owned
+    /// allocations; the part queue is not a total process-memory limit.
     ///
     /// Integrity is verified in one pass: the SHA-256 hasher consumes
     /// every byte as it leaves the file, and the final digest is
@@ -365,10 +364,7 @@ impl LfsObjectStore {
 
         match hash_result {
             Ok(()) => {
-                upload.complete().await.map_err(|e| {
-                    LfsError::from(crab_storage::map_object_store_error(e, path.as_ref()))
-                })?;
-                self.record_verification_receipt(oid).await;
+                crab_storage::multipart::complete_upload(&mut *upload, &path).await?;
                 Ok(())
             }
             Err(e) => {
@@ -627,13 +623,26 @@ impl LfsObjectStore {
         range: Option<Range<u64>>,
     ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
         let verified_meta = Self::verify_size_at(store, prefix, oid, expected_size).await?;
+        if !has_byte_validator(&verified_meta) {
+            return Err(StorageError::NotSupported {
+                source: object_store::Error::NotSupported {
+                    source: "verified LFS streaming requires a strong ETag or object version"
+                        .into(),
+                },
+            }
+            .into());
+        }
         Self::record_verification_receipt_with_meta(store, prefix, oid, &verified_meta).await;
         let path = Self::object_path_at(prefix, oid);
         let (meta, result_range, stream) = store
             .get_stream(&path, range)
             .await
             .map_err(LfsError::from)?;
-        if meta.size != expected_size
+        // This response must identify the bytes hashed earlier, including for
+        // range requests. Equal lengths alone allow a same-size replacement.
+        if meta.e_tag != verified_meta.e_tag
+            || meta.version != verified_meta.version
+            || meta.size != expected_size
             || result_range.start > result_range.end
             || result_range.end > meta.size
         {
@@ -716,35 +725,12 @@ impl LfsObjectStore {
             // A racing repair is successful only when its winning bytes are
             // valid; otherwise preserve the conditional-write failure.
             if self.verify_at_path(path, oid).await.is_ok() {
-                self.record_verification_receipt(oid).await;
                 return Ok(());
             }
             return Err(update_error.into());
         }
 
-        self.verify_at_path(path, oid).await?;
-        self.record_verification_receipt(oid).await;
-        Ok(())
-    }
-
-    async fn record_verification_receipt(&self, oid: &[u8; 32]) {
-        Self::record_verification_receipt_at(&self.store, &self.prefix, oid).await;
-    }
-
-    async fn record_verification_receipt_at(store: &Store, prefix: &str, oid: &[u8; 32]) {
-        let object_path = Self::object_path_at(prefix, oid);
-        let meta = match store.head(&object_path).await {
-            Ok(meta) => meta,
-            Err(error) => {
-                tracing::debug!(
-                    oid = %hex_encode(oid),
-                    error = %error,
-                    "could not read LFS object metadata for verification receipt"
-                );
-                return;
-            }
-        };
-        Self::record_verification_receipt_with_meta(store, prefix, oid, &meta).await;
+        self.verify_at_path(path, oid).await
     }
 
     async fn record_verification_receipt_with_meta(
@@ -754,7 +740,7 @@ impl LfsObjectStore {
         meta: &ObjectMeta,
     ) {
         let object_path = Self::object_path_at(prefix, oid);
-        if meta.e_tag.is_none() && meta.version.is_none() {
+        if !has_byte_validator(meta) {
             // A receipt without a provider validator cannot prove that the
             // bytes observed later are the bytes verified here.
             return;
@@ -789,7 +775,11 @@ impl LfsObjectStore {
 
     async fn verify_at_path(&self, path: &Path, oid: &[u8; 32]) -> Result<()> {
         match self.inspect_existing(path, oid).await? {
-            ExistingObject::Valid(_) => Ok(()),
+            ExistingObject::Valid(meta) => {
+                Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
+                    .await;
+                Ok(())
+            }
             ExistingObject::Missing => Err(LfsError::ObjectMissing {
                 oid: hex_encode(oid),
             }),
@@ -822,6 +812,18 @@ impl LfsObjectStore {
     }
 }
 
+// Weak HTTP validators permit byte differences (RFC 9110 section 8.8.3.2).
+// Receipts and split verification/serving both require exact object identity.
+fn has_byte_validator(meta: &ObjectMeta) -> bool {
+    meta.version
+        .as_deref()
+        .is_some_and(|version| !version.is_empty())
+        || meta
+            .e_tag
+            .as_deref()
+            .is_some_and(|etag| !etag.is_empty() && !etag.starts_with("W/"))
+}
+
 fn receipt_path_at(prefix: &str, oid: &[u8; 32]) -> Path {
     let hex = hex_encode(oid);
     let prefix = prefix.trim_matches('/');
@@ -845,7 +847,7 @@ async fn receipt_matches(
     oid: &[u8; 32],
     meta: &ObjectMeta,
 ) -> bool {
-    if meta.e_tag.is_none() && meta.version.is_none() {
+    if !has_byte_validator(meta) {
         return false;
     }
     let receipt_path = receipt_path_at(prefix, oid);
@@ -993,9 +995,7 @@ async fn stream_file_parts(
     use futures_util::stream::{FuturesUnordered, StreamExt};
 
     let mut hasher = Sha256::new();
-    let mut pending: FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = object_store::Result<()>> + Send>>,
-    > = FuturesUnordered::new();
+    let mut pending: FuturesUnordered<object_store::UploadPart> = FuturesUnordered::new();
 
     // `buf` is the currently-assembling part; we flush it as a part
     // whenever it reaches STREAM_PART_SIZE. Pre-allocated to avoid
@@ -1016,7 +1016,7 @@ async fn stream_file_parts(
         if n == 0 {
             // EOF. Flush whatever remains in `buf` as the final part.
             if !buf.is_empty() {
-                dispatch_part(upload, &mut buf, &mut pending)?;
+                dispatch_part(upload, std::mem::take(&mut buf), &mut pending, remote_path).await?;
             }
             break;
         }
@@ -1029,21 +1029,6 @@ async fn stream_file_parts(
         // Multiple loop iterations handle the (rare) case where a
         // single read delivered more than one part's worth of bytes.
         while buf.len() >= STREAM_PART_SIZE {
-            // Backpressure: if we're at the concurrency ceiling, wait
-            // for one in-flight part to complete before dispatching a
-            // new one. This bounds peak memory to the part size times
-            // MAX_IN_FLIGHT_PARTS regardless of file size.
-            if pending.len() >= MAX_IN_FLIGHT_PARTS
-                && let Some(result) = pending.next().await
-            {
-                result.map_err(|e| {
-                    LfsError::from(crab_storage::map_object_store_error(
-                        e,
-                        remote_path.as_ref(),
-                    ))
-                })?;
-            }
-
             // Peel one STREAM_PART_SIZE chunk off the front of `buf`
             // and dispatch it. `split_off` + swap keeps the remainder
             // (if any) in `buf` for the next iteration without an
@@ -1051,7 +1036,7 @@ async fn stream_file_parts(
             let mut part = buf;
             let tail = part.split_off(STREAM_PART_SIZE);
             buf = tail;
-            dispatch_part_owned(upload, part, &mut pending)?;
+            dispatch_part(upload, part, &mut pending, remote_path).await?;
         }
     }
 
@@ -1093,43 +1078,47 @@ async fn stream_file_parts(
     Ok(())
 }
 
-/// Wraps an I/O error with the source path so callers can report which
-/// local file the upload was reading.
+#[derive(Debug, thiserror::Error)]
+#[error("{source} (reading {path})")]
+struct FileReadError {
+    path: std::path::PathBuf,
+    #[source]
+    source: std::io::Error,
+}
+
+// Keep file context and the original OS cause together: CLI and server
+// conversions retain this I/O error and can inspect its source chain.
 fn annotate_io_error(source: std::io::Error, file_path: &StdPath) -> LfsError {
     let wrapped = std::io::Error::new(
         source.kind(),
-        format!("{} (reading {})", source, file_path.display()),
+        FileReadError {
+            path: file_path.to_owned(),
+            source,
+        },
     );
     LfsError::Io { source: wrapped }
 }
 
-/// Dispatch the accumulated buffer as a new part, leaving `buf` empty
-/// and ready to accept more bytes. Used when `buf` is moved in its
-/// entirety (EOF with a partial final part).
-fn dispatch_part(
-    upload: &mut dyn MultipartUpload,
-    buf: &mut Vec<u8>,
-    pending: &mut futures_util::stream::FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = object_store::Result<()>> + Send>>,
-    >,
-) -> Result<()> {
-    let part_bytes = std::mem::take(buf);
-    dispatch_part_owned(upload, part_bytes, pending)
-}
-
-/// Dispatch a caller-owned `Vec<u8>` as a new part. Zero-copies into
-/// `Bytes` via `Bytes::from(Vec<u8>)` so the allocation travels with
-/// the in-flight future.
-fn dispatch_part_owned(
+async fn dispatch_part(
     upload: &mut dyn MultipartUpload,
     part_bytes: Vec<u8>,
-    pending: &mut futures_util::stream::FuturesUnordered<
-        std::pin::Pin<Box<dyn std::future::Future<Output = object_store::Result<()>> + Send>>,
-    >,
+    pending: &mut futures_util::stream::FuturesUnordered<object_store::UploadPart>,
+    remote_path: &Path,
 ) -> Result<()> {
+    // Every part, including the EOF tail, waits for capacity before handing
+    // its payload to the provider. Otherwise the final part bypasses the bound.
+    if pending.len() >= MAX_IN_FLIGHT_PARTS
+        && let Some(result) = pending.next().await
+    {
+        result.map_err(|error| {
+            LfsError::from(crab_storage::map_object_store_error(
+                error,
+                remote_path.as_ref(),
+            ))
+        })?;
+    }
     let payload: PutPayload = Bytes::from(part_bytes).into();
-    let fut = upload.put_part(payload);
-    pending.push(Box::pin(fut));
+    pending.push(upload.put_part(payload));
     Ok(())
 }
 
@@ -1153,6 +1142,36 @@ mod tests {
 
     fn test_store() -> LfsObjectStore {
         LfsObjectStore::new(test_base_store(), "repo")
+    }
+
+    #[tokio::test]
+    async fn missing_upload_file_retains_os_error_source() {
+        use std::error::Error;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-upload");
+        let error = test_store().put_stream(&[0; 32], &path).await.unwrap_err();
+        let original = error
+            .source()
+            .and_then(Error::source)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("original file open error");
+
+        assert_eq!(original.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn upload_read_error_keeps_file_context_and_error_kind() {
+        let original = std::io::Error::from_raw_os_error(13);
+        let expected_kind = original.kind();
+        let error = annotate_io_error(original, StdPath::new("upload.bin"));
+        let LfsError::Io { source } = error else {
+            panic!("expected I/O error")
+        };
+
+        assert!(
+            source.kind() == expected_kind && source.to_string().contains("reading upload.bin")
+        );
     }
 
     fn test_base_store() -> Store {
@@ -1209,6 +1228,38 @@ mod tests {
             LfsObjectStore::object_path_for_prefix("", &oid).as_ref(),
             "lfs/objects/ab/cd/abcd000000000000000000000000000000000000000000000000000000000000"
         );
+    }
+
+    #[tokio::test]
+    async fn old_receipts_cannot_certify_unhashed_head_metadata() {
+        let store = test_base_store();
+        let oid = sha256_oid(b"hello");
+        let path = LfsObjectStore::object_path_for_prefix("repo", &oid);
+        store
+            .put(&path, Bytes::from_static(b"wrong"))
+            .await
+            .unwrap();
+        let meta = store.head(&path).await.unwrap();
+        let receipt = VerificationReceipt {
+            oid,
+            size: meta.size,
+            object_path: path.to_string(),
+            e_tag: meta.e_tag,
+            version: meta.version,
+            verifier: "crab-lfs/1".to_owned(),
+        };
+        store
+            .put_overwrite(
+                &receipt_path_at("repo", &oid),
+                Bytes::from(encode_receipt(&receipt).unwrap()),
+            )
+            .await
+            .unwrap();
+        let lfs = LfsObjectStore::new(store, "repo");
+        assert!(matches!(
+            lfs.verify_size(&oid, 5).await,
+            Err(LfsError::ObjectCorrupt { .. })
+        ));
     }
 
     #[test]
@@ -1494,7 +1545,7 @@ mod tests {
     /// repeating byte `fill`. Returns the temp file handle so the
     /// caller controls cleanup; the path is accessible via
     /// `.path()` for as long as the handle is alive.
-    fn temp_file_of_size(size: usize, fill: u8) -> (tempfile::NamedTempFile, [u8; 32]) {
+    pub(super) fn temp_file_of_size(size: usize, fill: u8) -> (tempfile::NamedTempFile, [u8; 32]) {
         use std::io::Write as _;
         let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
         // Write in 1 MiB chunks so we don't hold size bytes in memory
@@ -1691,3 +1742,6 @@ mod tests {
         assert_eq!(Sha256::digest(&got).as_slice(), oid.as_slice());
     }
 }
+
+#[cfg(test)]
+mod upload_tests;

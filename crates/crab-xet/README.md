@@ -68,14 +68,59 @@ For a lower-level read path, parse a complete serialized Xorb with
 `xorb::builder::XorbBuilder` and upload each `XorbResult` through the owning
 storage or staging layer.
 
+## Xorb verification
+
+| API | What it verifies |
+| --- | --- |
+| `XorbParser::parse` | Footer, metadata layout, contiguous payload bounds, chunk sizes, and the `u32` decoded-total limit. Computes the metadata-derived Xorb hash. |
+| `verify_payload_digest` | Exact serialized payload bytes against the footer digest. |
+| `get_chunk`, chunk-range reads, `verify_all_chunks` | Decoded length and content hash for every chunk they read. |
+| Metadata-only helpers | Layout and metadata-derived identity; they do not read or verify chunk payloads. |
+
+Callers compare the computed Xorb hash with the requested content address.
+Parsing alone does not verify payload bytes. Raw chunk reads retain slices of
+the original allocation; compressed reads return owned decoded data. Both use
+the same length and hash checks.
+
+LZ4 output streams through a sink that rejects bytes beyond the recorded
+chunk length. BG4 applies its regrouping transform after bounded LZ4 decoding;
+the upstream BG4 reader would buffer before reaching a caller's sink. Decoder
+block buffers, vector capacity, and the BG4 regrouping allocation are additional
+memory costs, so this is not a whole-process memory limit.
+
+The builder and parser share the `u32` decoded-offset limit. Range assembly
+grows after validating decoded chunks instead of reserving an untrusted
+advertised total. These format checks are separate from request admission and
+whole-process memory limits.
+
 ## Feature flags and invariants
 
 - `chunker` adds the Xet gearhash chunker and `GearChunker`.
 - `upload-concurrency` adds Xet client/runtime admission helpers.
-- Default features remain empty so payload-only users do not inherit runtimes
-  or network clients.
+- Default features are empty; the chunker and upload-admission APIs stay opt-in.
+  The locked `xet-core-structures` dependency still pulls in `xet-runtime` and
+  `reqwest`, so this does not make the transitive dependency graph runtime-free.
 
 Hashes cover the exact content or serialized payload they name. Shard terms
 must cover every file chunk in order; callers should use
 `build_file_terms` and `validate_term_coverage` rather than reconstructing
 ranges themselves.
+
+## Verification boundaries
+
+| API | What success establishes |
+| --- | --- |
+| `build_file_terms` | Every supplied recipe occurrence has a placement, including duplicates. |
+| `validate_term_coverage` | Valid range arithmetic and an exact total chunk count. |
+| `XorbParser::parse` | Structurally valid footer and chunk metadata. |
+| `verify_payload_digest` | Serialized payload bytes match the footer digest. |
+| `get_chunk` / `get_chunk_range` | Requested decoded chunks match their stored hashes. |
+
+Term counts do not establish chunk identity or whole-file integrity. Full-file
+reconstruction in `crab-read` also verifies the final file hash and size.
+Repeated chunks can legitimately produce overlapping Xorb ranges.
+
+`FileTermBuilder` accepts occurrences incrementally, so callers need not retain
+the input recipe. Its output terms and term-start set still grow with recipe
+fragmentation; it is not a constant-memory whole-file builder. The coverage
+validator uses a checked count without allocating per-chunk bookkeeping.

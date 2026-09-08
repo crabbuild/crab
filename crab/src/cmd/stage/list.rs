@@ -91,7 +91,7 @@ pub fn run_stage_list(args: &StageListArgs, repo_root: &Path) -> Result<StageLis
     let (workflow, provenance, skipped) = parse_candidates(repo_root, &candidates, args.fail)?;
     let stages = collect_stage_list_entries(repo_root, &workflow, &provenance, &selected)?;
     let payload = StageListPayload { stages, skipped };
-    emit_stage_list(&payload, args.name_only, mode);
+    emit_stage_list(&payload, args.name_only, mode)?;
     Ok(payload)
 }
 
@@ -358,10 +358,10 @@ fn repo_relative_path(repo_root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(repo_root).unwrap_or(path).to_path_buf()
 }
 
-fn emit_stage_list(payload: &StageListPayload, name_only: bool, mode: OutputMode) {
+fn emit_stage_list(payload: &StageListPayload, name_only: bool, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(STAGE_LIST_SCHEMA, SCHEMA_VERSION, payload);
+            emit_json(STAGE_LIST_SCHEMA, SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text if name_only => {
             for stage in &payload.stages {
@@ -385,6 +385,7 @@ fn emit_stage_list(payload: &StageListPayload, name_only: bool, mode: OutputMode
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

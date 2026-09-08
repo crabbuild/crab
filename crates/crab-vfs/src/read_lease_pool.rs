@@ -26,6 +26,7 @@ struct ReadLeasePoolState {
 }
 
 struct PooledReadLease {
+    identity: Arc<()>,
     lease: VfsReadLease,
     pin_count: u32,
     last_access: u64,
@@ -35,6 +36,7 @@ struct PooledReadLease {
 /// Read lease pinned for one in-flight protocol operation.
 pub struct ReadLeasePin {
     key: u64,
+    identity: Arc<()>,
     lease: VfsReadLease,
     pool: Arc<ReadLeasePool>,
 }
@@ -67,9 +69,11 @@ impl ReadLeasePool {
         entry.pin_count = entry.pin_count.saturating_add(1);
         entry.last_access = last_access;
         let lease = entry.lease.clone();
+        let identity = Arc::clone(&entry.identity);
         state.hits = state.hits.saturating_add(1);
         Some(ReadLeasePin {
             key,
+            identity,
             lease,
             pool: Arc::clone(self),
         })
@@ -77,6 +81,10 @@ impl ReadLeasePool {
 
     pub fn insert_and_pin(self: &Arc<Self>, key: u64, lease: VfsReadLease) -> ReadLeasePin {
         let mut state = self.lock_state();
+        let identity = state
+            .entries
+            .get(&key)
+            .map_or_else(|| Arc::new(()), |entry| Arc::clone(&entry.identity));
         let estimated_bytes = lease.estimated_bytes();
         let last_access = state.next_access();
 
@@ -97,6 +105,7 @@ impl ReadLeasePool {
             state.entries.insert(
                 key,
                 PooledReadLease {
+                    identity: Arc::clone(&identity),
                     lease: lease.clone(),
                     pin_count: 1,
                     last_access,
@@ -108,6 +117,7 @@ impl ReadLeasePool {
         state.shrink_unpinned(self.max_entries, self.max_estimated_bytes, Some(key));
         ReadLeasePin {
             key,
+            identity,
             lease,
             pool: Arc::clone(self),
         }
@@ -142,9 +152,13 @@ impl ReadLeasePool {
         state.stale_retries = state.stale_retries.saturating_add(1);
     }
 
-    fn unpin(&self, key: u64) {
+    fn unpin(&self, key: u64, identity: &Arc<()>) {
         let mut state = self.lock_state();
-        if let Some(entry) = state.entries.get_mut(&key) {
+        // Invalidation can retire a pinned entry and reuse its file ID. Only
+        // pins from this entry's lifetime may release its eviction protection.
+        if let Some(entry) = state.entries.get_mut(&key)
+            && Arc::ptr_eq(&entry.identity, identity)
+        {
             entry.pin_count = entry.pin_count.saturating_sub(1);
         }
         state.shrink_unpinned(self.max_entries, self.max_estimated_bytes, None);
@@ -198,7 +212,7 @@ impl ReadLeasePin {
 
 impl Drop for ReadLeasePin {
     fn drop(&mut self) {
-        self.pool.unpin(self.key);
+        self.pool.unpin(self.key, &self.identity);
     }
 }
 
@@ -366,6 +380,32 @@ mod tests {
                 stale_retries: 0,
             }
         );
+    }
+
+    #[test]
+    fn retired_pin_does_not_unpin_reinserted_entry() {
+        for invalidate_all in [false, true] {
+            let pool = ReadLeasePool::new(1, usize::MAX);
+            let retired = pool.insert_and_pin(1, lease("old.bin"));
+            if invalidate_all {
+                pool.invalidate_all();
+            } else {
+                pool.evict(1);
+            }
+            let current = pool.insert_and_pin(1, lease("current.bin"));
+            let other = pool.insert_and_pin(2, lease("other.bin"));
+
+            drop(retired);
+
+            assert!(
+                pool.contains(1),
+                "retired pin evicted an active replacement (invalidate_all={invalidate_all})"
+            );
+            assert_eq!(pool.snapshot().active_pins, 2);
+            drop(current);
+            assert!(!pool.contains(1));
+            drop(other);
+        }
     }
 
     #[test]

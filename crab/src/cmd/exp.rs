@@ -1317,7 +1317,7 @@ pub async fn run_exp_run(args: &RunArgs, repo_root: &Path) -> Result<()> {
         std::env::args().collect(),
     )
     .await?;
-    emit_run(&payload, mode);
+    emit_run(&payload, mode)?;
     Ok(())
 }
 
@@ -1331,7 +1331,7 @@ pub(crate) async fn run_exp_run_with_id(
     name: Option<String>,
     cli_args: Vec<String>,
 ) -> Result<ExpRunPayload> {
-    let started_at = crab_types::time::now_rfc3339_millis();
+    let started_at = crab_types::time::now_rfc3339_millis()?;
     let started_instant = Instant::now();
     let is_queued_run = queue_commit.is_some();
 
@@ -1562,6 +1562,19 @@ pub(crate) async fn run_exp_run_with_id(
         capture_workspace_snapshot(repo_root, &tmpdir_path, &base_commit, &exp_id)?;
     }
 
+    // The completed DAG remains the primary failure if its end time cannot be
+    // recorded. The worktree guard still cleans up on either error path.
+    let ended_at = match crab_types::time::now_rfc3339_millis() {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            if let Err(dag_error) = dag_result {
+                warn!(%error, "could not timestamp failed experiment metadata");
+                return Err(dag_error);
+            }
+            return Err(error.into());
+        }
+    };
+
     // Build and persist the metadata blob BEFORE cleaning up the
     // tmpdir, so a cleanup failure doesn't lose the record.
     let metadata = ExperimentMetadata {
@@ -1578,7 +1591,7 @@ pub(crate) async fn run_exp_run_with_id(
         cli_args,
         host_fingerprint: exp_host_fingerprint(),
         started_at: started_at.clone(),
-        ended_at: Some(crab_types::time::now_rfc3339_millis()),
+        ended_at: Some(ended_at),
     };
 
     write_local_metadata(repo_root, &metadata)?;
@@ -1632,7 +1645,7 @@ pub fn run_exp_show(args: &ShowArgs, repo_root: &Path) -> Result<()> {
         )?;
         apply_show_column_filters(&mut experiments, &filters);
         let payload = ExpShowListPayload { experiments };
-        emit_show_list(&payload, args.output_mode(), args.list_render_options());
+        emit_show_list(&payload, args.output_mode(), args.list_render_options())?;
         return Ok(());
     };
     if args.has_list_only_flags() {
@@ -1661,7 +1674,7 @@ pub fn run_exp_show(args: &ShowArgs, repo_root: &Path) -> Result<()> {
     let payload = ExpShowPayload {
         metadata: metadata_value,
     };
-    emit_show(&payload, &metadata, args.output_mode());
+    emit_show(&payload, &metadata, args.output_mode())?;
     Ok(())
 }
 
@@ -1685,7 +1698,7 @@ pub fn run_exp_diff(args: &DiffArgs, repo_root: &Path) -> Result<()> {
             include_unchanged: args.all,
             no_path: args.no_path,
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -1694,7 +1707,7 @@ pub fn run_exp_ls(args: &LsArgs, repo_root: &Path) -> Result<()> {
     let payload = ExpLsPayload {
         experiments: collect_limited_summaries(repo_root, args.limit)?,
     };
-    emit_ls(&payload, args.output_mode());
+    emit_ls(&payload, args.output_mode())?;
     Ok(())
 }
 
@@ -1711,7 +1724,7 @@ pub fn run_exp_promote(args: &PromoteArgs, repo_root: &Path) -> Result<()> {
         branch,
         commit,
     };
-    emit_promote(&payload, args.output_mode());
+    emit_promote(&payload, args.output_mode())?;
     Ok(())
 }
 
@@ -1740,7 +1753,7 @@ pub fn run_exp_apply(args: &ApplyArgs, repo_root: &Path) -> Result<ExpApplyPaylo
         deleted,
         checkpoint: args.checkpoint.clone(),
     };
-    emit_apply(&payload, args.output_mode());
+    emit_apply(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -1826,7 +1839,7 @@ pub fn run_exp_reset(args: &ResetArgs, repo_root: &Path) -> Result<ExpResetPaylo
             "experiment": exp_id.to_string(),
             "checkpoint": args.checkpoint,
             "reset_stages": reset_stages,
-            "created_at": crab_types::time::now_rfc3339_millis(),
+            "created_at": crab_types::time::now_rfc3339_millis()?,
         });
         write_checkpoint_reset_decision(&temporary, &decision, repo_root)?;
         validate_checkpoint_state(&temporary)?;
@@ -1841,7 +1854,7 @@ pub fn run_exp_reset(args: &ResetArgs, repo_root: &Path) -> Result<ExpResetPaylo
         checkpoint: args.checkpoint.clone(),
         reset_stages,
     };
-    emit_reset(&payload, args.output_mode());
+    emit_reset(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -2154,6 +2167,7 @@ fn apply_checkpoint_record_to(
         });
     }
 
+    let temporary_timestamp = crab_types::time::now_rfc3339_millis()?.replace(':', "");
     let mut prepared = Vec::with_capacity(entries.len());
     for (index, (relative, hash, kind)) in entries.iter().enumerate() {
         let relative = PathBuf::from(relative);
@@ -2221,7 +2235,7 @@ fn apply_checkpoint_record_to(
                 .and_then(|value| value.to_str())
                 .unwrap_or("output"),
             std::process::id(),
-            crab_types::time::now_rfc3339_millis().replace(':', "")
+            temporary_timestamp
         ));
         if let Err(error) = remove_existing_path(&temporary) {
             remove_prepared_checkpoint_temporaries(&prepared);
@@ -2470,7 +2484,7 @@ pub fn run_exp_save(args: &SaveArgs, repo_root: &Path) -> Result<ExpSavePayload>
     }
     let save_selection = resolve_exp_save_selection(args, repo_root)?;
 
-    let started_at = crab_types::time::now_rfc3339_millis();
+    let started_at = crab_types::time::now_rfc3339_millis()?;
     let exp_id = ExperimentId::new_v7();
     let base_commit = resolve_current_head(repo_root)?;
     capture_workspace_snapshot(repo_root, repo_root, &base_commit, &exp_id)?;
@@ -2492,7 +2506,7 @@ pub fn run_exp_save(args: &SaveArgs, repo_root: &Path) -> Result<ExpSavePayload>
         cli_args: std::env::args().collect(),
         host_fingerprint: exp_host_fingerprint(),
         started_at: started_at.clone(),
-        ended_at: Some(crab_types::time::now_rfc3339_millis()),
+        ended_at: Some(crab_types::time::now_rfc3339_millis()?),
     };
     write_local_metadata(repo_root, &metadata)?;
 
@@ -2506,7 +2520,7 @@ pub fn run_exp_save(args: &SaveArgs, repo_root: &Path) -> Result<ExpSavePayload>
         status: "saved".to_owned(),
         started_at,
     };
-    emit_save(&payload, args.output_mode());
+    emit_save(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -2529,7 +2543,7 @@ pub fn run_exp_rename(args: &RenameArgs, repo_root: &Path) -> Result<ExpRenamePa
         old_name,
         new_name,
     };
-    emit_rename(&payload, args.output_mode());
+    emit_rename(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -2575,7 +2589,7 @@ pub async fn run_exp_push(args: &PushArgs, repo_root: &Path) -> Result<ExpPushPa
         (Ok(payload), Ok(())) => payload,
         (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
     };
-    emit_push(&payload, args.output_mode());
+    emit_push(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -2596,7 +2610,7 @@ pub async fn run_exp_pull(args: &PullArgs, repo_root: &Path) -> Result<ExpPullPa
     .await?;
     let ids = resolve_remote_experiment_ids_from_remote(&remote, &args.ids, args.all).await?;
     let payload = pull_experiments_from_remote(&remote, repo_root, &ids, args.force).await?;
-    emit_pull(&payload, args.output_mode());
+    emit_pull(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -2696,7 +2710,7 @@ fn run_exp_remove_local(args: &RemoveArgs, repo_root: &Path) -> Result<ExpRemove
         removed_queue,
         kept_queue,
     };
-    emit_remove(&payload, args.output_mode());
+    emit_remove(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -2750,7 +2764,7 @@ async fn run_exp_remove_remote(args: &RemoveArgs, repo_root: &Path) -> Result<Ex
             (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
         }
     };
-    emit_remove(&payload, args.output_mode());
+    emit_remove(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -2787,7 +2801,7 @@ fn run_exp_remove_queue(args: &RemoveArgs, repo_root: &Path) -> Result<ExpRemove
         removed_queue,
         kept_queue,
     };
-    emit_remove(&payload, args.output_mode());
+    emit_remove(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -3008,7 +3022,7 @@ pub fn run_exp_clean(args: &CleanArgs, repo_root: &Path) -> Result<ExpCleanPaylo
         removed_kill_requests: queue_clean.removed_kill_requests,
         removed_logs: queue_clean.removed_logs,
     };
-    emit_clean(&payload, args.output_mode());
+    emit_clean(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -3064,7 +3078,7 @@ pub fn run_exp_gc(args: &GcArgs, repo_root: &Path) -> Result<ExpGcPayload> {
         removed: removed_summaries.iter().map(|s| s.id.clone()).collect(),
         kept: kept_summaries.iter().map(|s| s.id.clone()).collect(),
     };
-    emit_gc(&payload, args.output_mode());
+    emit_gc(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -3644,29 +3658,17 @@ async fn read_remote_metadata(
 
     let meta_path = remote_exp_meta_object_path(prefix, id);
     let (meta_bytes, _) = store.get_with_etag(&meta_path).await?;
-    let metadata: ExperimentMetadata =
-        serde_json::from_slice(&meta_bytes).map_err(|e| CrabError::CorruptObject {
-            path: meta_path.as_ref().to_owned(),
-            reason: format!("experiment metadata is not valid JSON: {e}"),
-        })?;
-    if metadata.exp_id != *id {
-        return Err(CrabError::CorruptObject {
-            path: meta_path.as_ref().to_owned(),
-            reason: format!(
-                "metadata id {} does not match requested experiment {id}",
-                metadata.exp_id
-            ),
-        });
-    }
-    let actual_hash = metadata.content_hash()?;
-    if expected_hash != actual_hash {
-        return Err(CrabError::CorruptObject {
-            path: ref_path.as_ref().to_owned(),
-            reason: format!(
-                "metadata ref points at {expected_hash}, but object hashes to {actual_hash}"
-            ),
-        });
-    }
+    let contextualize = |error| match error {
+        crab_workflow::WorkflowError::CorruptObject { path, reason } => CrabError::CorruptObject {
+            path: remote_key(prefix, &path),
+            reason,
+        },
+        other => other.into(),
+    };
+    let metadata = ExperimentMetadata::from_json(&meta_bytes, id).map_err(contextualize)?;
+    metadata
+        .verify_identity(id, expected_hash)
+        .map_err(contextualize)?;
     Ok(metadata)
 }
 
@@ -5157,9 +5159,7 @@ fn read_local_metadata(repo_root: &Path, id: &ExperimentId) -> Result<Experiment
         }
         Err(e) => return Err(CrabError::Io(e)),
     };
-    serde_json::from_slice(&bytes).map_err(|e| {
-        CrabError::Internal(format!("experiment metadata malformed JSON for {id}: {e}"))
-    })
+    ExperimentMetadata::from_json(&bytes, id).map_err(CrabError::from)
 }
 
 fn parse_experiment_id(raw: &str) -> Result<ExperimentId> {
@@ -5260,7 +5260,17 @@ fn collect_summaries(repo_root: &Path) -> Result<Vec<ExpSummary>> {
                 continue;
             }
         };
-        let meta: ExperimentMetadata = match serde_json::from_slice(&bytes) {
+        let Some(raw_id) = name.strip_suffix(".meta.json") else {
+            continue;
+        };
+        let id = match parse_experiment_id(raw_id) {
+            Ok(id) => id,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "exp ls: invalid metadata filename");
+                continue;
+            }
+        };
+        let meta = match ExperimentMetadata::from_json(&bytes, &id) {
             Ok(m) => m,
             Err(e) => {
                 warn!(path = %path.display(), error = %e, "exp ls: metadata parse failed");
@@ -5848,10 +5858,10 @@ fn path_to_git_arg(path: &Path, command: &str) -> Result<String> {
         })
 }
 
-fn emit_run(payload: &ExpRunPayload, mode: OutputMode) {
+fn emit_run(payload: &ExpRunPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_RUN_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_RUN_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!("exp run: {} ({})", payload.exp_id, payload.status);
@@ -5866,12 +5876,13 @@ fn emit_run(payload: &ExpRunPayload, mode: OutputMode) {
             println!("  duration_ms: {}", payload.duration_ms);
         }
     }
+    Ok(())
 }
 
-fn emit_show(payload: &ExpShowPayload, m: &ExperimentMetadata, mode: OutputMode) {
+fn emit_show(payload: &ExpShowPayload, m: &ExperimentMetadata, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_SHOW_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_SHOW_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!("exp_id: {}", m.exp_id);
@@ -5934,16 +5945,17 @@ fn emit_show(payload: &ExpShowPayload, m: &ExperimentMetadata, mode: OutputMode)
             }
         }
     }
+    Ok(())
 }
 
 fn emit_show_list(
     payload: &ExpShowListPayload,
     mode: OutputMode,
     options: ExpShowListRenderOptions,
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_SHOW_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_SHOW_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text if options.markdown => {
             print!(
@@ -5959,12 +5971,17 @@ fn emit_show_list(
         }
         OutputMode::Text => print_experiment_table(&payload.experiments, options.precision),
     }
+    Ok(())
 }
 
-fn emit_diff(payload: &ExpDiffPayload, mode: OutputMode, options: ExpDiffRenderOptions) {
+fn emit_diff(
+    payload: &ExpDiffPayload,
+    mode: OutputMode,
+    options: ExpDiffRenderOptions,
+) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_DIFF_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_DIFF_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text if options.markdown => {
             print!("{}", render_exp_diff_markdown(payload, options));
@@ -6043,6 +6060,7 @@ fn emit_diff(payload: &ExpDiffPayload, mode: OutputMode, options: ExpDiffRenderO
             }
         }
     }
+    Ok(())
 }
 
 fn render_exp_diff_markdown(payload: &ExpDiffPayload, options: ExpDiffRenderOptions) -> String {
@@ -6263,13 +6281,14 @@ fn format_float(value: f64, precision: usize) -> String {
     }
 }
 
-fn emit_ls(payload: &ExpLsPayload, mode: OutputMode) {
+fn emit_ls(payload: &ExpLsPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_LS_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_LS_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => print_experiment_table(&payload.experiments, 5),
     }
+    Ok(())
 }
 
 fn print_experiment_table(experiments: &[ExpSummary], precision: usize) {
@@ -6438,10 +6457,10 @@ fn format_summary_metrics(
         .join(", ")
 }
 
-fn emit_promote(payload: &ExpPromotePayload, mode: OutputMode) {
+fn emit_promote(payload: &ExpPromotePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_PROMOTE_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_PROMOTE_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -6450,12 +6469,13 @@ fn emit_promote(payload: &ExpPromotePayload, mode: OutputMode) {
             );
         }
     }
+    Ok(())
 }
 
-fn emit_apply(payload: &ExpApplyPayload, mode: OutputMode) {
+fn emit_apply(payload: &ExpApplyPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_APPLY_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_APPLY_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             if let Some(checkpoint) = &payload.checkpoint {
@@ -6475,12 +6495,13 @@ fn emit_apply(payload: &ExpApplyPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_reset(payload: &ExpResetPayload, mode: OutputMode) {
+fn emit_reset(payload: &ExpResetPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_RESET_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_RESET_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             match &payload.checkpoint {
@@ -6494,12 +6515,13 @@ fn emit_reset(payload: &ExpResetPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_save(payload: &ExpSavePayload, mode: OutputMode) {
+fn emit_save(payload: &ExpSavePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_SAVE_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_SAVE_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!("saved exp {} ({})", payload.exp_id, payload.status);
@@ -6513,12 +6535,13 @@ fn emit_save(payload: &ExpSavePayload, mode: OutputMode) {
             println!("  stages: {}", payload.stages.len());
         }
     }
+    Ok(())
 }
 
-fn emit_rename(payload: &ExpRenamePayload, mode: OutputMode) {
+fn emit_rename(payload: &ExpRenamePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_RENAME_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_RENAME_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             let old = payload.old_name.as_deref().unwrap_or("(none)");
@@ -6528,12 +6551,13 @@ fn emit_rename(payload: &ExpRenamePayload, mode: OutputMode) {
             );
         }
     }
+    Ok(())
 }
 
-fn emit_push(payload: &ExpPushPayload, mode: OutputMode) {
+fn emit_push(payload: &ExpPushPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_PUSH_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_PUSH_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -6549,12 +6573,13 @@ fn emit_push(payload: &ExpPushPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_pull(payload: &ExpPullPayload, mode: OutputMode) {
+fn emit_pull(payload: &ExpPullPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_PULL_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_PULL_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -6570,12 +6595,13 @@ fn emit_pull(payload: &ExpPullPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_remove(payload: &ExpRemovePayload, mode: OutputMode) {
+fn emit_remove(payload: &ExpRemovePayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_REMOVE_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_REMOVE_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             let label = if payload.dry_run {
@@ -6625,12 +6651,13 @@ fn emit_remove(payload: &ExpRemovePayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_clean(payload: &ExpCleanPayload, mode: OutputMode) {
+fn emit_clean(payload: &ExpCleanPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_CLEAN_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_CLEAN_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -6642,12 +6669,13 @@ fn emit_clean(payload: &ExpCleanPayload, mode: OutputMode) {
             );
         }
     }
+    Ok(())
 }
 
-fn emit_gc(payload: &ExpGcPayload, mode: OutputMode) {
+fn emit_gc(payload: &ExpGcPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(EXP_GC_SCHEMA, EXP_SCHEMA_VERSION, payload);
+            emit_json(EXP_GC_SCHEMA, EXP_SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             let label = if payload.dry_run {
@@ -6677,6 +6705,7 @@ fn emit_gc(payload: &ExpGcPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -7334,6 +7363,87 @@ mod tests {
             host_fingerprint: "test".into(),
             started_at: "2024-01-01T00:00:00.000Z".into(),
             ended_at: None,
+        }
+    }
+
+    #[test]
+    fn metadata_decoding_rejects_local_identity_and_schema_mismatches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = ExperimentId::new_v7();
+        for wrong_id in [false, true] {
+            let mut metadata = test_exp_metadata(id, &"a".repeat(40));
+            if wrong_id {
+                metadata.exp_id = ExperimentId::new_v7();
+            } else {
+                metadata.schema_version = 2;
+            }
+            let path = meta_file_path(tmp.path(), &id);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, metadata.canonical_json().unwrap()).unwrap();
+            let result = read_local_metadata(tmp.path(), &id);
+            assert!(
+                matches!(
+                    result,
+                    Err(CrabError::CorruptObject { .. }
+                        | CrabError::WorkflowExperimentMetadataSchemaNewer { .. })
+                ),
+                "wrong_id={wrong_id}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_decoding_preserves_json_cause_and_integrity_code() {
+        let id = ExperimentId::new_v7();
+        let error = CrabError::from(ExperimentMetadata::from_json(b"invalid", &id).unwrap_err());
+        assert_eq!(error.code(), "CRAB-E0020");
+        assert_eq!(crate::core::error_catalog::error_code(&error), error.code());
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(
+            source
+                .source()
+                .unwrap()
+                .downcast_ref::<serde_json::Error>()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_metadata_identity_preserves_prefixed_diagnostics() {
+        let id = ExperimentId::new_v7();
+        let prefix = "repository";
+        for wrong_id in [false, true] {
+            let store = Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
+            let metadata = test_exp_metadata(
+                if wrong_id { ExperimentId::new_v7() } else { id },
+                &"a".repeat(40),
+            );
+            let hash = if wrong_id {
+                metadata.content_hash().unwrap()
+            } else {
+                "00".repeat(32)
+            };
+            store
+                .put(&remote_exp_meta_ref_path(prefix, &id), Bytes::from(hash))
+                .await
+                .unwrap();
+            store
+                .put(
+                    &remote_exp_meta_object_path(prefix, &id),
+                    Bytes::from(metadata.canonical_json().unwrap()),
+                )
+                .await
+                .unwrap();
+            let error = read_remote_metadata(&store, prefix, &id).await.unwrap_err();
+            let expected_path = if wrong_id {
+                remote_exp_meta_object_path(prefix, &id)
+            } else {
+                remote_exp_meta_ref_path(prefix, &id)
+            };
+            assert!(
+                matches!(error, CrabError::CorruptObject { ref path, .. } if path == expected_path.as_ref()),
+                "wrong_id={wrong_id}: {error:?}"
+            );
         }
     }
 

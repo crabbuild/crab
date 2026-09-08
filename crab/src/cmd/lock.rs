@@ -46,7 +46,7 @@ pub async fn run_lock(paths: &[String], mode: OutputMode) -> Result<()> {
     }
 
     if mode == OutputMode::Json {
-        emit_json("lock", "1.1", &records);
+        emit_json("lock", "1.1", &records)?;
     }
 
     if had_error {
@@ -112,7 +112,7 @@ pub async fn run_unlock(paths: &[String], force: bool, mode: OutputMode) -> Resu
     }
 
     if mode == OutputMode::Json {
-        emit_json("unlock", "1.1", &results);
+        emit_json("unlock", "1.1", &results)?;
     }
 
     if had_error {
@@ -156,7 +156,7 @@ pub async fn run_locks(
     }
 
     if mode == OutputMode::Json {
-        emit_json("locks", "1.1", &records);
+        emit_json("locks", "1.1", &records)?;
         return Ok(());
     }
 

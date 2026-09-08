@@ -542,7 +542,7 @@ async fn run_inner(
         }
     }
 
-    let started_at = now_rfc3339_millis();
+    let started_at = now_rfc3339_millis()?;
     let instant_start = Instant::now();
 
     journal.transition(
@@ -3439,7 +3439,7 @@ mod tests {
 
     #[test]
     fn rfc3339_millis_produces_expected_shape() {
-        let s = now_rfc3339_millis();
+        let s = now_rfc3339_millis().unwrap();
         // 2026-04-27T14:23:11.083Z is 24 chars; shape must match.
         assert_eq!(s.len(), 24, "{s}");
         assert!(s.ends_with('Z'));

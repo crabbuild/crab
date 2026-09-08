@@ -294,10 +294,12 @@ pub fn walk_dag(
     Ok(DagResumeReport { actions, order })
 }
 
+/// Remove abandoned materialization sidecars beneath `workdir`.
 ///
-/// Walks `workdir` recursively for files whose names contain
-/// [`SIDECAR_PREFIX`] followed by a UUID that is not in
-/// `active_run_ids`. Returns the number of sidecars removed.
+/// Recognizes only names ending in [`SIDECAR_PREFIX`] followed by a UUID.
+/// Callers must exclude active runs or hold scheduler ownership before passing
+/// an empty `active_run_ids`. Unrecognized names are retained.
+/// Returns the number of sidecars removed, or an I/O error if traversal or removal fails.
 pub fn sweep_orphan_sidecars(workdir: &Path, active_run_ids: &[Uuid]) -> Result<usize> {
     let mut removed = 0_usize;
     sweep_inner(workdir, active_run_ids, &mut removed)?;
@@ -316,14 +318,8 @@ fn sweep_inner(dir: &Path, active: &[Uuid], removed: &mut usize) -> Result<()> {
         let path = entry.path();
         let file_type = entry.file_type().map_err(CrabError::Io)?;
 
-        let name_is_sidecar = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.contains(SIDECAR_PREFIX))
-            .unwrap_or(false);
-
-        if name_is_sidecar {
-            if is_active(&path, active) {
+        if let Some(run_id) = sidecar_run_id(&path) {
+            if active.contains(&run_id) {
                 continue;
             }
             if file_type.is_dir() {
@@ -339,19 +335,10 @@ fn sweep_inner(dir: &Path, active: &[Uuid], removed: &mut usize) -> Result<()> {
     Ok(())
 }
 
-fn is_active(sidecar: &Path, active: &[Uuid]) -> bool {
-    let name = match sidecar.file_name().and_then(|n| n.to_str()) {
-        Some(s) => s,
-        None => return false,
-    };
-    let Some(pos) = name.rfind(SIDECAR_PREFIX) else {
-        return false;
-    };
-    let suffix = &name[pos + SIDECAR_PREFIX.len()..];
-    match Uuid::parse_str(suffix) {
-        Ok(id) => active.contains(&id),
-        Err(_) => false,
-    }
+fn sidecar_run_id(path: &Path) -> Option<Uuid> {
+    let name = path.file_name()?.to_str()?;
+    let (_, suffix) = name.rsplit_once(SIDECAR_PREFIX)?;
+    Uuid::parse_str(suffix).ok()
 }
 
 #[cfg(test)]
@@ -574,6 +561,19 @@ mod tests {
         let removed = sweep_orphan_sidecars(tmp.path(), &[]).unwrap();
         assert_eq!(removed, 0);
         assert!(normal.exists());
+    }
+
+    #[test]
+    fn sweep_preserves_unrecognized_sidecar_names() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("notes.crab.tmp.not-a-run-id");
+        let directory = tmp.path().join("archive.crab.tmp.");
+        fs::write(&file, b"user file").unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("data"), b"user data").unwrap();
+        assert_eq!(sweep_orphan_sidecars(tmp.path(), &[]).unwrap(), 0);
+        assert_eq!(fs::read(file).unwrap(), b"user file");
+        assert_eq!(fs::read(directory.join("data")).unwrap(), b"user data");
     }
 
     #[test]

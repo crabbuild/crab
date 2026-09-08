@@ -1112,11 +1112,12 @@ async fn run_gc_impl(
         && let Ok(mut s) = stream.lock()
     {
         for obj in &grace_skipped {
-            s.emit_warning(WarningPayload {
+            let output = s.emit_warning(WarningPayload {
                 code: "gc-grace-skip".to_owned(),
                 message: format!("skipped (within grace period): {}", obj.key),
                 path: Some(obj.key.clone()),
             });
+            crate::core::output::report_progress_output(output);
         }
     }
 
@@ -1137,12 +1138,13 @@ async fn run_gc_impl(
             if let Some(stream) = jsonl_stream
                 && let Ok(mut s) = stream.lock()
             {
-                s.emit_file_done(FileDonePayload {
+                let output = s.emit_file_done(FileDonePayload {
                     path: obj.key.clone(),
                     bytes: obj.size,
                     duration_ms: 0,
                     status: "skipped".to_owned(),
                 });
+                crate::core::output::report_progress_output(output);
             }
         }
         outcome.log();
@@ -1516,12 +1518,13 @@ async fn execute_deletes(
                     if let Some(stream) = jsonl_stream
                         && let Ok(mut s) = stream.lock()
                     {
-                        s.emit_file_done(FileDonePayload {
+                        let output = s.emit_file_done(FileDonePayload {
                             path: key,
                             bytes: size,
                             duration_ms: start.elapsed().as_millis() as u64,
                             status: "ok".to_owned(),
                         });
+                        crate::core::output::report_progress_output(output);
                     }
                 }
                 Ok(CandidateDelete::Retained) => {

@@ -23,6 +23,7 @@ validation. Inspect detection and parse tests together.
 | Task | Start here | Also inspect |
 | --- | --- | --- |
 | Pointer format | `crates/crab-types/src/pointer.rs` | `crates/crab-git/src/pointer_detect.rs` |
+| Timestamp formatting | `crates/crab-types/src/time.rs` | CLI output, `crab-write` journal, `crab-workflow` executor, auth-server manifests, and VFS serializers |
 | Storage identity or scope | `crates/crab-types/src/storage.rs` | `crates/crab-storage/src/identity.rs` |
 
 ## Invariants
@@ -33,6 +34,9 @@ validation. Inspect detection and parse tests together.
   Source: `crates/crab-types/src/storage.rs`.
 - Cloud alias parsing deliberately excludes local/file aliases; callers must opt into local storage.
   Source: `crates/crab-types/src/storage.rs`.
+- Timestamp formatters reject pre-epoch clocks and dates beyond year 9999. Keep
+  errors typed; callers own cleanup and diagnostic-failure policy.
+  Source: `crates/crab-types/src/time.rs`.
 
 ## Features and platform
 

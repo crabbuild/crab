@@ -4,6 +4,9 @@ pub type Result<T> = std::result::Result<T, AuthServerError>;
 
 #[derive(thiserror::Error, Debug)]
 pub enum AuthServerError {
+    /// The clock cannot produce a valid persisted timestamp.
+    #[error("invalid timestamp: {0}")]
+    Timestamp(#[from] crab_types::time::TimestampError),
     #[error("{0}")]
     Read(#[source] Box<crab_read::ReadError>),
 

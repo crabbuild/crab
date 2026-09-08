@@ -572,7 +572,7 @@ pub fn run_status_in(root: &Path, porcelain: bool, mode: OutputMode) -> Result<(
                 modified: 0,
                 files: Vec::new(),
             };
-            emit_json("status", "1.0", payload);
+            emit_json("status", "1.0", payload)?;
             return Ok(());
         }
         println!("No crab-tracked patterns found in .gitattributes");
@@ -624,7 +624,7 @@ pub fn run_status_in(root: &Path, porcelain: bool, mode: OutputMode) -> Result<(
             modified: modified_count,
             files: entries,
         };
-        emit_json("status", "1.0", payload);
+        emit_json("status", "1.0", payload)?;
     } else if !porcelain {
         print_summary(&stats);
         // Mirror status section: check if crab.toml has a [mirror] config.

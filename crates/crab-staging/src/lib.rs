@@ -2037,7 +2037,7 @@ impl StagingArea {
     }
 
     /// Open the staging area with the default blocking budget
-    /// ([`FLOCK_BLOCKING_DEFAULT_BUDGET`], currently 120 seconds).
+    /// (currently 120 seconds).
     ///
     /// Convenience wrapper for call sites that want the blocking
     /// behavior but don't need to customize the budget.
@@ -2171,7 +2171,7 @@ impl StagingArea {
     /// 4. One flush check at the end
     ///
     /// The file must already exist in the `files` table (via
-    /// [`pre_register_file`]).
+    /// [`Self::pre_register_file`]).
     ///
     /// # Cancel safety
     ///
@@ -2213,7 +2213,7 @@ impl StagingArea {
 
     /// Stage a batch for a file whose stale chunk rows were already retired.
     ///
-    /// Use only when the caller has just called [`retire_file`] for this
+    /// Use only when the caller has just called [`Self::retire_file`] for this
     /// `file_hash` and owns the non-overlapping chunk positions for the
     /// current staging pass. The pending insert still rejects conflicting
     /// positions, but this skips the extra pre-append position probe on
@@ -2415,7 +2415,7 @@ impl StagingArea {
 
     /// Pre-register a file with its original path for UX display.
     ///
-    /// Same as [`pre_register_file`] but also records the file path in
+    /// Same as [`Self::pre_register_file`] but also records the file path in
     /// the `file_paths` side table so the desktop UI can show filenames
     /// instead of raw hashes.
     pub fn pre_register_file_with_path(
@@ -3697,7 +3697,7 @@ impl StagingAreaReadOnly {
     }
 
     /// Read-only open with the default blocking budget
-    /// ([`FLOCK_BLOCKING_DEFAULT_BUDGET`]).
+    /// (currently 120 seconds).
     pub async fn open_blocking_default(root: PathBuf) -> Result<Self> {
         let staging = Self::open_with_lock(
             root,
@@ -3799,7 +3799,7 @@ impl StagingAreaReadOnly {
     /// # Errors
     ///
     /// Returns [`StagingError::ChunkNotFound`] if any requested hash is
-    /// absent from staging. Same verification errors as [`get_chunk`]
+    /// absent from staging. Same verification errors as [`Self::get_chunk`]
     /// on corruption: [`StagingError::CrcMismatch`],
     /// [`StagingError::HashMismatch`], or [`StagingError::Io`].
     pub async fn get_chunks_batch(

@@ -67,7 +67,8 @@ impl OidcDiscovery {
 }
 
 /// Tokens returned by an OIDC token endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Debug output omits tokens; serialization retains the token endpoint payload.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OidcTokens {
     /// OIDC ID token (JWT).
     pub id_token: String,
@@ -79,6 +80,15 @@ pub struct OidcTokens {
     pub expires_in: u64,
     /// Token type, usually `Bearer`.
     pub token_type: String,
+}
+
+impl std::fmt::Debug for OidcTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcTokens")
+            .field("expires_in", &self.expires_in)
+            .field("token_type", &self.token_type)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Fetches the OIDC discovery document for an issuer URL.

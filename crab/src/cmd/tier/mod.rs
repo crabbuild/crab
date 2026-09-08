@@ -200,12 +200,12 @@ pub async fn run_tier(cmd: TierCommand, ctx: &AppContext, mode: OutputMode) -> R
             match mode {
                 OutputMode::Json => {
                     let payload = TierPlanPayload::from_plan(&tier_plan);
-                    emit_json("tier.plan", "1.0", &payload);
+                    emit_json("tier.plan", "1.0", &payload)?;
                 }
                 OutputMode::Jsonl => {
                     let mut stream = JsonlStream::new("tier.event", "1.0", std::io::stdout());
                     let payload = TierPlanPayload::from_plan(&tier_plan);
-                    stream.emit_result(&payload);
+                    stream.emit_result(&payload)?;
                 }
                 OutputMode::Text => {
                     emit_text_plan(lifecycle_provider.as_ref(), &tier_plan, output.as_deref())?;
@@ -297,7 +297,7 @@ fn emit_text_plan(
                 })?
             );
         }
-        Some("json") => emit_json("tier.plan", "1.0", TierPlanPayload::from_plan(plan)),
+        Some("json") => emit_json("tier.plan", "1.0", TierPlanPayload::from_plan(plan))?,
         Some("yaml") => print!(
             "{}",
             serde_yaml::to_string(&TierPlanPayload::from_plan(plan))

@@ -866,7 +866,7 @@ fn commit_window(
     message_template: Option<&str>,
     author_template: Option<&str>,
 ) -> Result<String> {
-    let date = epoch_to_rfc3339(window.window_end);
+    let date = epoch_to_rfc3339(window.window_end)?;
 
     let message = resolve_message(
         message_template,
@@ -941,21 +941,18 @@ fn resolve_message(
 /// Convert an epoch-seconds timestamp to an RFC 3339 string
 /// without sub-second precision. git accepts either form; we use
 /// the whole-second variant to keep commit headers clean.
-fn epoch_to_rfc3339(epoch_secs: i64) -> String {
-    // `from_epoch_millis` is happy to produce a `.000Z` suffix for
-    // seconds. Strip the `.000` so the output matches the commit
-    // header git would emit for a user's own `--date` input.
-    let total_ms = epoch_secs
-        .saturating_mul(1000)
-        .try_into()
-        .unwrap_or(u64::MAX);
-    let with_millis = from_epoch_millis(total_ms);
-    // "YYYY-MM-DDTHH:MM:SS.mmmZ" → "YYYY-MM-DDTHH:MM:SSZ"
-    if let Some(stripped) = with_millis.strip_suffix(".000Z") {
-        format!("{stripped}Z")
-    } else {
-        with_millis
-    }
+fn epoch_to_rfc3339(epoch_secs: i64) -> Result<String> {
+    let total_ms = u64::try_from(epoch_secs)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1000))
+        .ok_or_else(|| CrabError::Configuration {
+            key: "import timestamp".to_owned(),
+            origin: format!("epoch seconds {epoch_secs} are outside the supported range"),
+        })?;
+    let mut timestamp = from_epoch_millis(total_ms)?;
+    timestamp.truncate(19);
+    timestamp.push('Z');
+    Ok(timestamp)
 }
 
 /// List the paths present in a tree (default: HEAD). Used to
@@ -1253,6 +1250,21 @@ mod tests {
     // ── extension_of ─────────────────────────────────────────────
 
     #[test]
+    fn import_timestamp_rejects_negative_and_unrepresentable_seconds() {
+        for seconds in [-1, 253_402_300_800, i64::MAX] {
+            assert!(epoch_to_rfc3339(seconds).is_err(), "{seconds}");
+        }
+    }
+
+    #[test]
+    fn import_timestamp_preserves_last_supported_second() {
+        assert_eq!(
+            epoch_to_rfc3339(253_402_300_799).unwrap(),
+            "9999-12-31T23:59:59Z"
+        );
+    }
+
+    #[test]
     fn extension_of_strips_lowercases_and_tolerates_missing() {
         assert_eq!(
             extension_of("models/a.SafeTensors").as_deref(),
@@ -1500,7 +1512,7 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git log failed");
         let author_date = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let expected = epoch_to_rfc3339(ts);
+        let expected = epoch_to_rfc3339(ts).unwrap();
         assert!(
             author_date.starts_with(&expected[..expected.len() - 1])
                 || author_date == format!("{expected}"),
@@ -1928,7 +1940,7 @@ mod tests {
                 .unwrap();
             assert!(output.status.success());
             let date = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            let expected = epoch_to_rfc3339(ts);
+            let expected = epoch_to_rfc3339(ts).unwrap();
             // git's %aI omits the fractional second; allow either
             // the literal RFC3339 or a zero-offset equivalent.
             assert!(

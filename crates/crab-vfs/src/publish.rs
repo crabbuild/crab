@@ -1942,9 +1942,9 @@ mod tests {
     #[test]
     fn inspect_overlay_reports_all_change_kinds_and_estimated_upload() {
         let (_dir, paths, store) = temp_overlay();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"new").unwrap();
-        store.mkdir("dir", 0o040755).unwrap();
+        store.mkdir("dir", 0o040_755).unwrap();
         store.remove("gone.txt").unwrap();
 
         let diff = inspect_overlay(&paths).unwrap();
@@ -1958,11 +1958,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = OverlayPaths::from_cache_dir(dir.path().join("cache").as_path());
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"new").unwrap();
-        store.create_file("._new.txt", 0o100644).unwrap();
+        store.create_file("._new.txt", 0o100_644).unwrap();
         store.write_file("._new.txt", 0, b"sidecar").unwrap();
-        store.create_file("nested/._other.txt", 0o100644).unwrap();
+        store.create_file("nested/._other.txt", 0o100_644).unwrap();
         store
             .write_file("nested/._other.txt", 0, b"sidecar")
             .unwrap();
@@ -1988,7 +1988,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = OverlayPaths::from_cache_dir(dir.path().join("cache").as_path());
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("nested/new.txt", 0o100644).unwrap();
+        store.create_file("nested/new.txt", 0o100_644).unwrap();
         store.write_file("nested/new.txt", 0, b"new").unwrap();
         store.remove("gone.txt").unwrap();
 
@@ -2017,7 +2017,7 @@ mod tests {
                     old_path: "archive".to_owned(),
                     new_path: "moved-archive".to_owned(),
                     node_type: crate::snapshot::NodeType::Dir,
-                    mode: 0o040755,
+                    mode: 0o040_755,
                     size: 0,
                     source_oid: None,
                 },
@@ -2025,7 +2025,7 @@ mod tests {
                     old_path: "archive/model.bin".to_owned(),
                     new_path: "moved-archive/model.bin".to_owned(),
                     node_type: crate::snapshot::NodeType::File,
-                    mode: 0o100644,
+                    mode: 0o100_644,
                     size: 11,
                     source_oid: Some("base-oid".to_owned()),
                 },
@@ -2080,7 +2080,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = OverlayPaths::from_cache_dir(dir.path().join("cache").as_path());
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("bin/tool", 0o100755).unwrap();
+        store.create_file("bin/tool", 0o100_755).unwrap();
         store.write_file("bin/tool", 0, b"#!/bin/sh\n").unwrap();
 
         let export_dir = dir.path().join("export");
@@ -2100,7 +2100,7 @@ mod tests {
     #[test]
     fn reset_overlay_clears_entries_and_upper_dir() {
         let (_dir, paths, store) = temp_overlay();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"new").unwrap();
 
         let diff = reset_overlay(&paths).unwrap();
@@ -2115,7 +2115,7 @@ mod tests {
     #[test]
     fn reset_overlay_clears_an_open_store_view() {
         let (_dir, paths, live_store) = temp_overlay();
-        live_store.create_file("new.txt", 0o100644).unwrap();
+        live_store.create_file("new.txt", 0o100_644).unwrap();
         live_store.write_file("new.txt", 0, b"new").unwrap();
         live_store.remove("gone.txt").unwrap();
 
@@ -2134,19 +2134,19 @@ mod tests {
 
         {
             let _freeze = store.freeze_writes().unwrap();
-            let err = store.create_file("new.txt", 0o100644).unwrap_err();
+            let err = store.create_file("new.txt", 0o100_644).unwrap_err();
             assert!(matches!(err, CrabError::Forbidden { .. }));
         }
 
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
     }
 
     #[test]
     fn apply_records_skips_precomputed_crab_overlay_files() {
         let (_dir, _paths, store) = temp_overlay();
-        store.create_file("models/model.bin", 0o100644).unwrap();
+        store.create_file("models/model.bin", 0o100_644).unwrap();
         store.write_file("models/model.bin", 0, b"large").unwrap();
-        store.create_file("notes.txt", 0o100644).unwrap();
+        store.create_file("notes.txt", 0o100_644).unwrap();
         store.write_file("notes.txt", 0, b"small").unwrap();
         let records = store.records().unwrap();
         let worktree = tempfile::tempdir().unwrap();
@@ -2165,7 +2165,7 @@ mod tests {
     fn overlay_changes_git_attributes_detects_root_and_nested_attrs() {
         let (_dir, _paths, store) = temp_overlay();
         store
-            .create_file("models/.gitattributes", 0o100644)
+            .create_file("models/.gitattributes", 0o100_644)
             .unwrap();
         store
             .write_file("models/.gitattributes", 0, b"*.bin filter=crab\n")
@@ -2184,7 +2184,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("scratch.bin", 0o100644).unwrap();
+        store.create_file("scratch.bin", 0o100_644).unwrap();
         store
             .write_file("scratch.bin", 0, &patterned_bytes(64 * 1024))
             .unwrap();
@@ -2218,7 +2218,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
 
         let result = commit_overlay(&OverlayCommitOptions {
@@ -2285,7 +2285,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
 
         let committed = commit_overlay(&OverlayCommitOptions {
@@ -2353,7 +2353,7 @@ mod tests {
             .publish_generation(&base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
 
         commit_overlay(&OverlayCommitOptions {
@@ -2390,9 +2390,9 @@ mod tests {
             .publish_generation(&base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("ignored.txt", 0o100644).unwrap();
+        store.create_file("ignored.txt", 0o100_644).unwrap();
         store.write_file("ignored.txt", 0, b"ignored").unwrap();
-        store.create_file("included.txt", 0o100644).unwrap();
+        store.create_file("included.txt", 0o100_644).unwrap();
         store.write_file("included.txt", 0, b"included").unwrap();
 
         commit_overlay(&OverlayCommitOptions {
@@ -2426,7 +2426,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
 
         let missing_remote = fixture.root.path().join("missing-origin.git");
@@ -2505,7 +2505,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
 
         let error = commit_overlay(&OverlayCommitOptions {
@@ -2538,7 +2538,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
         let records = store.records().unwrap();
 
@@ -2613,7 +2613,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
         let records = store.records().unwrap();
 
@@ -2639,7 +2639,7 @@ mod tests {
             true,
             &records,
         );
-        store.create_file("later.txt", 0o100644).unwrap();
+        store.create_file("later.txt", 0o100_644).unwrap();
         store.write_file("later.txt", 0, b"later change").unwrap();
 
         let err = commit_overlay(&OverlayCommitOptions {
@@ -2715,8 +2715,8 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.mkdir("old", 0o040755).unwrap();
-        store.create_file("old/child.txt", 0o100644).unwrap();
+        store.mkdir("old", 0o040_755).unwrap();
+        store.create_file("old/child.txt", 0o100_644).unwrap();
         store
             .write_file("old/child.txt", 0, b"child content")
             .unwrap();
@@ -2776,7 +2776,7 @@ mod tests {
                     crate::snapshot::BaseNode {
                         path: "models".to_owned(),
                         node_type: crate::snapshot::NodeType::Dir,
-                        mode: 0o040755,
+                        mode: 0o040_755,
                         object_oid: None,
                         pointer: None,
                         size: 0,
@@ -2784,7 +2784,7 @@ mod tests {
                     crate::snapshot::BaseNode {
                         path: "models/model.bin".to_owned(),
                         node_type: crate::snapshot::NodeType::File,
-                        mode: 0o100644,
+                        mode: 0o100_644,
                         object_oid: Some(model_oid.clone()),
                         pointer: None,
                         size: content.len() as u64,
@@ -2799,7 +2799,7 @@ mod tests {
                     old_path: "models".to_owned(),
                     new_path: "renamed-models".to_owned(),
                     node_type: crate::snapshot::NodeType::Dir,
-                    mode: 0o040755,
+                    mode: 0o040_755,
                     size: 0,
                     source_oid: None,
                 },
@@ -2807,7 +2807,7 @@ mod tests {
                     old_path: "models/model.bin".to_owned(),
                     new_path: "renamed-models/model.bin".to_owned(),
                     node_type: crate::snapshot::NodeType::File,
-                    mode: 0o100644,
+                    mode: 0o100_644,
                     size: content.len() as u64,
                     source_oid: Some(model_oid),
                 },
@@ -2851,7 +2851,7 @@ mod tests {
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
         let content = patterned_bytes(2 * 1024 * 1024);
         store
-            .create_file("models/.gitattributes", 0o100644)
+            .create_file("models/.gitattributes", 0o100_644)
             .unwrap();
         store
             .write_file(
@@ -2860,9 +2860,9 @@ mod tests {
                 b"*.bin filter=crab diff=crab -text\n",
             )
             .unwrap();
-        store.create_file("models/model.bin", 0o100644).unwrap();
+        store.create_file("models/model.bin", 0o100_644).unwrap();
         store.write_file("models/model.bin", 0, &content).unwrap();
-        store.set_mode("models/model.bin", 0o100755).unwrap();
+        store.set_mode("models/model.bin", 0o100_755).unwrap();
 
         let result = commit_overlay(&OverlayCommitOptions {
             cache_dir,
@@ -2937,7 +2937,7 @@ mod tests {
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
         let content = patterned_bytes(2 * 1024 * 1024);
-        store.create_file("models/model.bin", 0o100755).unwrap();
+        store.create_file("models/model.bin", 0o100_755).unwrap();
         store.write_file("models/model.bin", 0, &content).unwrap();
 
         let result = commit_overlay(&OverlayCommitOptions {
@@ -3034,7 +3034,7 @@ mod tests {
             .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
             .unwrap();
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100644).unwrap();
+        store.create_file("new.txt", 0o100_644).unwrap();
         store.write_file("new.txt", 0, b"overlay content").unwrap();
         fixture.advance_main("remote change");
 

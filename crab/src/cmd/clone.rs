@@ -78,7 +78,8 @@ fn emit_phase(stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>, payload: P
     if let Some(stream) = stream
         && let Ok(mut s) = stream.lock()
     {
-        s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+        let output = s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+        crate::core::output::report_progress_output(output);
     }
 }
 
@@ -164,7 +165,7 @@ pub async fn run_clone_in(
     if let Some(stream) = &jsonl_stream
         && let Ok(mut s) = stream.lock()
     {
-        s.emit_progress(ProgressPayload {
+        let output = s.emit_progress(ProgressPayload {
             operation: "cloning".to_owned(),
             current: 0,
             total: 0,
@@ -173,6 +174,7 @@ pub async fn run_clone_in(
             rate_bytes_per_sec: 0.0,
             xorbs_produced: None,
         });
+        crate::core::output::report_progress_output(output);
     }
 
     let phase = PhaseTimer::start("clone", "pack_fetch");
@@ -282,7 +284,7 @@ pub async fn run_clone_in(
         if let Some(stream) = &jsonl_stream
             && let Ok(mut s) = stream.lock()
         {
-            s.emit_progress(ProgressPayload {
+            let output = s.emit_progress(ProgressPayload {
                 operation: "hydrating".to_owned(),
                 current: 0,
                 total: 0,
@@ -291,6 +293,7 @@ pub async fn run_clone_in(
                 rate_bytes_per_sec: 0.0,
                 xorbs_produced: None,
             });
+            crate::core::output::report_progress_output(output);
         }
 
         let hydrate_args = crate::cmd::hydrate::HydrateArgs {
@@ -316,12 +319,13 @@ pub async fn run_clone_in(
         if let Some(stream) = &jsonl_stream
             && let Ok(mut s) = stream.lock()
         {
-            s.emit_file_done(FileDonePayload {
+            let output = s.emit_file_done(FileDonePayload {
                 path: "(hydration complete)".to_owned(),
                 bytes: 0,
                 duration_ms: start.elapsed().as_millis() as u64,
                 status: "ok".to_owned(),
             });
+            crate::core::output::report_progress_output(output);
         }
 
         if !args.mode.is_machine() {

@@ -126,12 +126,23 @@ impl CacheObjectStream {
 }
 
 /// HTTP client for the crab cache service.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CacheClient {
     client: Client,
     base_url: String,
     auth_header: Option<(HeaderName, String)>,
     availability: Arc<Availability>,
+}
+
+impl std::fmt::Debug for CacheClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheClient")
+            .field(
+                "auth_header",
+                &self.auth_header.as_ref().map(|(name, _)| name),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl CacheClient {

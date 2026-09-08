@@ -367,6 +367,7 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
             RefPushOutcome::Rejected(PushRejectReason::Throttled { retry_after_secs }) => {
                 return CrabError::Throttled {
                     retry_after: retry_after_secs.map(std::time::Duration::from_secs),
+                    source: None,
                 };
             }
             RefPushOutcome::Rejected(reason) => {
@@ -597,10 +598,10 @@ async fn run_push_once(
         };
         if emit_terminal && mode != OutputMode::Text {
             match mode {
-                OutputMode::Json => emit_json("push", "1.0", &summary),
+                OutputMode::Json => emit_json("push", "1.0", &summary)?,
                 OutputMode::Jsonl => {
                     let mut stream = JsonlStream::new("push.event", "1.0", std::io::stdout());
-                    stream.emit_result(&summary);
+                    stream.emit_result(&summary)?;
                 }
                 OutputMode::Text => unreachable!(),
             }
@@ -891,7 +892,7 @@ async fn run_push_once(
             }
             OutputMode::Json => {
                 if emit_terminal {
-                    emit_json("push", "1.0", &summary);
+                    emit_json("push", "1.0", &summary)?;
                 }
             }
             OutputMode::Jsonl => {
@@ -899,7 +900,7 @@ async fn run_push_once(
                     && let Some(ref stream) = jsonl_stream
                     && let Ok(mut s) = stream.lock()
                 {
-                    s.emit_result(&summary);
+                    s.emit_result(&summary)?;
                 }
             }
         }
@@ -946,7 +947,9 @@ fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
                 failure.elapsed,
                 failure.integration.as_ref(),
             );
-            emit_json("push", "1.0", &summary);
+            if let Err(error) = emit_json("push", "1.0", &summary) {
+                eprintln!("could not emit failed push summary: {error}");
+            }
         }
         OutputMode::Jsonl => {
             let summary = build_push_summary(
@@ -957,7 +960,9 @@ fn emit_push_failure(failure: &PushAttemptFailure, mode: OutputMode) {
                 failure.integration.as_ref(),
             );
             let mut stream = JsonlStream::new("push.event", "1.0", std::io::stdout());
-            stream.emit_result(&summary);
+            if let Err(error) = stream.emit_result(&summary) {
+                eprintln!("could not emit failed push summary: {error}");
+            }
         }
     }
 }
@@ -2270,7 +2275,7 @@ mod tests {
         assert!(matches!(
             push_failure_source(std::slice::from_ref(&spec), &result),
             CrabError::Throttled {
-                retry_after: Some(delay)
+                retry_after: Some(delay), ..
             } if delay == std::time::Duration::from_secs(3)
         ));
 
@@ -2287,6 +2292,7 @@ mod tests {
 
         let setup_error = CrabError::Throttled {
             retry_after: Some(std::time::Duration::from_secs(3)),
+            source: None,
         };
         let setup_result = push_result_from_retryable_error(
             std::slice::from_ref(&spec),

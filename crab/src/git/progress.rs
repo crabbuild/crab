@@ -321,7 +321,8 @@ impl<W: Write> HelperProgress<W> {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
                 Ok(())
             }
@@ -336,7 +337,8 @@ impl<W: Write> HelperProgress<W> {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
                 Ok(())
             }
@@ -375,7 +377,8 @@ impl<W: Write> HelperProgress<W> {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
                 Ok(())
             }
@@ -390,7 +393,8 @@ impl<W: Write> HelperProgress<W> {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
                 Ok(())
             }
@@ -422,7 +426,8 @@ impl<W: Write> HelperProgress<W> {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
                 Ok(())
             }
@@ -437,7 +442,8 @@ impl<W: Write> HelperProgress<W> {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
                 Ok(())
             }
@@ -850,7 +856,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::JsonlStderr { stream } => {
@@ -864,7 +871,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::Silent => {}
@@ -897,7 +905,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::JsonlStderr { stream } => {
@@ -911,7 +920,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::Silent => {}
@@ -1065,7 +1075,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::JsonlStderr { stream } => {
@@ -1079,7 +1090,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::Silent => {}
@@ -1113,7 +1125,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::JsonlStderr { stream } => {
@@ -1127,7 +1140,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::Silent => {}
@@ -1160,7 +1174,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::JsonlStderr { stream } => {
@@ -1174,7 +1189,8 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 };
                 if let Ok(mut s) = stream.lock() {
-                    s.emit_progress(payload);
+                    let output = s.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
                 }
             }
             ProgressBackend::Silent => {}
@@ -1386,7 +1402,8 @@ impl NativePushProgress {
         let payload = self.build_jsonl_progress_payload();
         if let Some(payload) = payload {
             if let Ok(mut s) = stream.lock() {
-                s.emit_progress(payload);
+                let output = s.emit_progress(payload);
+                crate::core::output::report_progress_output(output);
             }
         }
     }
@@ -1396,7 +1413,8 @@ impl NativePushProgress {
         let payload = self.build_jsonl_progress_payload();
         if let Some(payload) = payload {
             if let Ok(mut s) = stream.lock() {
-                s.emit_progress(payload);
+                let output = s.emit_progress(payload);
+                crate::core::output::report_progress_output(output);
             }
         }
     }

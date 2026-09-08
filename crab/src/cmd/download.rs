@@ -313,7 +313,7 @@ pub async fn run_download(
         duration_ms: start.elapsed().as_millis() as u64,
     };
 
-    emit_summary(args, &summary, jsonl.as_mut());
+    emit_summary(args, &summary, jsonl.as_mut())?;
     Ok(summary)
 }
 
@@ -486,7 +486,7 @@ fn emit_plan_event(
     jsonl: Option<&mut JsonlStream<std::io::Stdout>>,
 ) {
     if let Some(stream) = jsonl {
-        stream.emit_schema_event(
+        let output = stream.emit_schema_event(
             "download.plan",
             "event",
             DownloadPlanEvent {
@@ -499,12 +499,14 @@ fn emit_plan_event(
                 dry_run: args.dry_run,
             },
         );
+        crate::core::output::report_progress_output(output);
     }
 }
 
 fn emit_file_event(result: &DownloadFileResult, jsonl: Option<&mut JsonlStream<std::io::Stdout>>) {
     if let Some(stream) = jsonl {
-        stream.emit_schema_event("download.file", "event", result);
+        let output = stream.emit_schema_event("download.file", "event", result);
+        crate::core::output::report_progress_output(output);
     }
 }
 
@@ -512,7 +514,7 @@ fn emit_summary(
     args: &DownloadArgs,
     summary: &DownloadSummary,
     jsonl: Option<&mut JsonlStream<std::io::Stdout>>,
-) {
+) -> Result<()> {
     match args.mode {
         OutputMode::Text => {
             for file in &summary.files {
@@ -525,13 +527,14 @@ fn emit_summary(
                 );
             }
         }
-        OutputMode::Json => emit_json(DOWNLOAD_SCHEMA, DOWNLOAD_VERSION, summary),
+        OutputMode::Json => emit_json(DOWNLOAD_SCHEMA, DOWNLOAD_VERSION, summary)?,
         OutputMode::Jsonl => {
             if let Some(stream) = jsonl {
-                stream.emit_schema_event(DOWNLOAD_SCHEMA, "result", summary);
+                stream.emit_schema_event(DOWNLOAD_SCHEMA, "result", summary)?;
             }
         }
     }
+    Ok(())
 }
 
 fn read_local_metadata(path: &Path) -> Result<LocalDownloadMetadata> {

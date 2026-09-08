@@ -2059,7 +2059,7 @@ pub async fn build_service_candidate_manifest(
     );
 
     manifest.generation = generation;
-    manifest.created_at = now_rfc3339_millis();
+    manifest.created_at = now_rfc3339_millis()?;
     manifest.session_id = uuid::Uuid::now_v7().to_string();
     for update in &materialized.ref_updates {
         manifest

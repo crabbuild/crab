@@ -292,7 +292,7 @@ pub async fn run_import(args: &ImportArgs, cancel: &CancellationToken) -> Result
 
     let summary = run_import_inner(args, cancel).await?;
 
-    render_summary(mode, &summary, jsonl.as_ref());
+    render_summary(mode, &summary, jsonl.as_ref())?;
 
     Ok(())
 }
@@ -302,18 +302,19 @@ fn render_summary(
     mode: OutputMode,
     summary: &ImportSummary,
     jsonl: Option<&Mutex<JsonlStream<Stdout>>>,
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Text => render_text_summary(summary),
-        OutputMode::Json => emit_json("import.summary", "v1", summary),
+        OutputMode::Json => emit_json("import.summary", "v1", summary)?,
         OutputMode::Jsonl => {
             if let Some(stream) = jsonl
                 && let Ok(mut guard) = stream.lock()
             {
-                guard.emit_result(summary);
+                guard.emit_result(summary)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Text-mode summary rendering. Written to stderr so piping

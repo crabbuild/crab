@@ -2671,7 +2671,11 @@ fn main() -> ExitCode {
             match mode {
                 OutputMode::Json => {
                     tracing::error!(%err, "command failed");
-                    emit_error_json(schema, "1.0", &err);
+                    if let Err(output_error) = emit_error_json(schema, "1.0", &err) {
+                        // The error envelope needs the same failed clock. Report directly
+                        // so error reporting cannot recursively construct another envelope.
+                        eprintln!("{err}; failed to render JSON error: {output_error}");
+                    }
                 }
                 OutputMode::Jsonl => {
                     tracing::error!(%err, "command failed");
@@ -2681,7 +2685,9 @@ fn main() -> ExitCode {
                     // The leak is harmless — this runs once on the exit path.
                     let event_schema: &'static str = format!("{schema}.event").leak();
                     let mut stream = JsonlStream::new(event_schema, "1.0", std::io::stdout());
-                    stream.emit_error_info(ErrorInfo::from(&err));
+                    if let Err(output_error) = stream.emit_error_info(ErrorInfo::from(&err)) {
+                        eprintln!("{err}; failed to render JSONL error: {output_error}");
+                    }
                 }
                 OutputMode::Text => {
                     eprintln!("{}", crab::core::error_catalog::render(&err));
@@ -3507,14 +3513,14 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
 
             match mode {
                 OutputMode::Json => {
-                    crab::core::output::emit_json("clone", "1.0", &summary);
+                    crab::core::output::emit_json("clone", "1.0", &summary)?;
                 }
                 OutputMode::Jsonl => {
                     // The JSONL stream was created inside run_clone_in;
                     // emit the terminal result here on a fresh stream
                     // (the inner stream is dropped by now).
                     let mut stream = JsonlStream::new("clone.event", "1.0", std::io::stdout());
-                    stream.emit_result(&summary);
+                    stream.emit_result(&summary)?;
                 }
                 OutputMode::Text => {
                     // Text output already handled inside run_clone.
@@ -3533,8 +3539,8 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             if args.is_integrity_operation() {
                 let outcome = crab::cmd::mirror::run_mirror_integrity(args, &cancel).await?;
                 match mode {
-                    OutputMode::Json => outcome.emit_json(),
-                    OutputMode::Jsonl => outcome.emit_jsonl(),
+                    OutputMode::Json => outcome.emit_json()?,
+                    OutputMode::Jsonl => outcome.emit_jsonl()?,
                     OutputMode::Text => {}
                 }
                 if args.ci && !outcome.ci_passed() {
@@ -3547,11 +3553,11 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
 
             match mode {
                 OutputMode::Json => {
-                    crab::core::output::emit_json("mirror", "1.0", &summary);
+                    crab::core::output::emit_json("mirror", "1.0", &summary)?;
                 }
                 OutputMode::Jsonl => {
                     let mut stream = JsonlStream::new("mirror.event", "1.0", std::io::stdout());
-                    stream.emit_result(&summary);
+                    stream.emit_result(&summary)?;
                 }
                 OutputMode::Text => {}
             }
@@ -3790,7 +3796,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                         "gc.repair_closures",
                                         "1.0",
                                         &payload,
-                                    );
+                                    )?;
                                 }
                                 OutputMode::Jsonl => {
                                     let mut stream = JsonlStream::new(
@@ -3798,7 +3804,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                         "1.0",
                                         std::io::stdout(),
                                     );
-                                    stream.emit_result(&payload);
+                                    stream.emit_result(&payload)?;
                                 }
                                 OutputMode::Text => {}
                             }
@@ -3841,11 +3847,11 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                             );
                         }
                         OutputMode::Json => {
-                            crab::core::output::emit_json("gc", "1.0", &summary);
+                            crab::core::output::emit_json("gc", "1.0", &summary)?;
                         }
                         OutputMode::Jsonl => {
                             let mut stream = JsonlStream::new("gc.event", "1.0", std::io::stdout());
-                            stream.emit_result(&summary);
+                            stream.emit_result(&summary)?;
                         }
                     }
                 }
@@ -3982,13 +3988,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                                 );
                             }
                             OutputMode::Json => {
-                                crab::core::output::emit_json("gc", "1.0", &summary);
+                                crab::core::output::emit_json("gc", "1.0", &summary)?;
                             }
                             OutputMode::Jsonl => {
                                 if let Some(stream) = &jsonl_stream
                                     && let Ok(mut stream) = stream.lock()
                                 {
-                                    stream.emit_result(&summary);
+                                    stream.emit_result(&summary)?;
                                 }
                             }
                         }
@@ -4105,13 +4111,13 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
 
             match mode {
                 OutputMode::Json => {
-                    crab::core::output::emit_json("fsck", "1.0", &summary);
+                    crab::core::output::emit_json("fsck", "1.0", &summary)?;
                 }
                 OutputMode::Jsonl => {
                     if let Some(stream) = &jsonl_stream
                         && let Ok(mut s) = stream.lock()
                     {
-                        s.emit_result(&summary);
+                        s.emit_result(&summary)?;
                     }
                 }
                 OutputMode::Text => {
@@ -5512,7 +5518,9 @@ async fn run_optimize_apply(
             step.status = crab::cmd::optimize::OptimizeStepStatus::Failed;
             "cancelled".clone_into(&mut step.detail);
             crab::cmd::optimize::refresh_summary(&mut payload);
-            crab::cmd::optimize::render_apply(&payload, mode);
+            if let Err(output_error) = crab::cmd::optimize::render_apply(&payload, mode) {
+                eprintln!("optimization cancelled; output failed: {output_error}");
+            }
             return Ok(ExitCode::FAILURE);
         }
         let result = {
@@ -5568,13 +5576,15 @@ async fn run_optimize_apply(
                 step.detail = error.to_string();
             }
             crab::cmd::optimize::refresh_summary(&mut payload);
-            crab::cmd::optimize::render_apply(&payload, mode);
+            if let Err(output_error) = crab::cmd::optimize::render_apply(&payload, mode) {
+                eprintln!("{error}; output failed: {output_error}");
+            }
             return Ok(ExitCode::FAILURE);
         }
     }
 
     crab::cmd::optimize::refresh_summary(&mut payload);
-    crab::cmd::optimize::render_apply(&payload, mode);
+    crab::cmd::optimize::render_apply(&payload, mode)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -5646,11 +5656,11 @@ async fn run_repack_command(
 
     match mode {
         OutputMode::Json => {
-            crab::core::output::emit_json("repack", "1.0", &summary);
+            crab::core::output::emit_json("repack", "1.0", &summary)?;
         }
         OutputMode::Jsonl => {
             let mut stream = JsonlStream::new("repack.event", "1.0", std::io::stdout());
-            stream.emit_result(&summary);
+            stream.emit_result(&summary)?;
         }
         OutputMode::Text => {
             if dry_run {
@@ -5781,13 +5791,13 @@ async fn run_prune_command(
 
     match mode {
         OutputMode::Json => {
-            crab::core::output::emit_json("prune", "1.0", &summary);
+            crab::core::output::emit_json("prune", "1.0", &summary)?;
         }
         OutputMode::Jsonl => {
             if let Some(stream) = &jsonl_stream
                 && let Ok(mut s) = stream.lock()
             {
-                s.emit_result(&summary);
+                s.emit_result(&summary)?;
             }
         }
         OutputMode::Text => {}

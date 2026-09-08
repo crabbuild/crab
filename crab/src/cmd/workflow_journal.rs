@@ -255,7 +255,7 @@ pub fn run_show(args: &ShowArgs, repo_root: &Path, mode: OutputMode) -> Result<(
     let run_row = journal.run_row(run_id)?;
     let rows = journal.all_stage_rows_with_limit(run_id, MAX_WORKFLOW_STAGE_ROWS)?;
     let payload = build_show_payload(run_id, run_row.as_ref(), &rows);
-    emit_show(&payload, mode);
+    emit_show(&payload, mode)?;
     Ok(())
 }
 
@@ -266,7 +266,7 @@ pub fn run_ls(_args: &LsArgs, repo_root: &Path, mode: OutputMode) -> Result<()> 
     let payload = LsPayload {
         journals: summaries,
     };
-    emit_ls(&payload, mode);
+    emit_ls(&payload, mode)?;
     Ok(())
 }
 
@@ -329,7 +329,7 @@ pub fn run_gc_with_cancel(
         kept: payload.kept.clone(),
         in_flight: payload.in_flight.clone(),
     };
-    emit_gc(&out, mode);
+    emit_gc(&out, mode)?;
     if !failures.is_empty() || failures_omitted > 0 {
         return Err(CrabError::Internal(format!(
             "workflow journal GC failed to remove {} journal(s): {}{}",
@@ -507,10 +507,10 @@ fn stage_view(row: &StageRunRow) -> StageRowView {
 
 // ─── Output rendering ─────────────────────────────────────────────────
 
-fn emit_show(payload: &ShowPayload, mode: OutputMode) {
+fn emit_show(payload: &ShowPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_JOURNAL_SHOW_SCHEMA, "1.0", payload);
+            emit_json(WORKFLOW_JOURNAL_SHOW_SCHEMA, "1.0", payload)?;
         }
         OutputMode::Text => {
             println!("run_id: {}", payload.run_id);
@@ -523,7 +523,7 @@ fn emit_show(payload: &ShowPayload, mode: OutputMode) {
             }
             if payload.stages.is_empty() {
                 println!("stages: (none)");
-                return;
+                return Ok(());
             }
             println!("stages:");
             for row in &payload.stages {
@@ -545,17 +545,18 @@ fn emit_show(payload: &ShowPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_ls(payload: &LsPayload, mode: OutputMode) {
+fn emit_ls(payload: &LsPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_JOURNAL_LS_SCHEMA, "1.0", payload);
+            emit_json(WORKFLOW_JOURNAL_LS_SCHEMA, "1.0", payload)?;
         }
         OutputMode::Text => {
             if payload.journals.is_empty() {
                 println!("No workflow journals found.");
-                return;
+                return Ok(());
             }
             // Tabular header row: column titles are pure literals by
             // design, even though clippy would prefer them inlined.
@@ -574,12 +575,13 @@ fn emit_ls(payload: &LsPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
-fn emit_gc(payload: &GcPayload, mode: OutputMode) {
+fn emit_gc(payload: &GcPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_JOURNAL_GC_SCHEMA, "1.0", payload);
+            emit_json(WORKFLOW_JOURNAL_GC_SCHEMA, "1.0", payload)?;
         }
         OutputMode::Text => {
             let label = if payload.dry_run {
@@ -611,6 +613,7 @@ fn emit_gc(payload: &GcPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────

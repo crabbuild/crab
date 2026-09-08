@@ -363,7 +363,7 @@ pub struct RunArgs {
     /// paths for modifications. On change, recompute staleness and
     /// re-execute affected stages. Exit on SIGINT/SIGTERM.
     #[cfg(feature = "watch")]
-    #[arg(long, default_value_t = false)]
+    #[arg(long, conflicts_with = "cache_only", default_value_t = false)]
     pub watch: bool,
 
     /// Execute only stages belonging to the named workflow (plus
@@ -462,7 +462,10 @@ pub async fn exec(args: RunArgs) -> Result<()> {
     run_in(&args, &cwd, mode).await
 }
 
-/// Testable entry point that accepts a working directory explicitly.
+/// Run workflows for an explicitly selected repository.
+///
+/// Cached artifacts resolve against `repo_root`, including any stage working
+/// directory prefix already recorded in the cache entry.
 pub async fn run_in(args: &RunArgs, repo_root: &Path, mode: OutputMode) -> Result<()> {
     run_in_with_options(args, repo_root, mode, RunInvocationOptions::default()).await
 }
@@ -506,8 +509,7 @@ pub(crate) async fn run_in_with_options(
 
     if !discovered.is_empty() {
         if args.validate {
-            run_validate(repo_root, &discovered);
-            return Ok(());
+            return run_validate(repo_root, &discovered);
         }
         return run_with_yaml(args, repo_root, &discovered, mode, &config, options).await;
     }
@@ -627,11 +629,11 @@ async fn run_inline_single_stage(
     let cache_hit = cached.is_some() && !args.force;
 
     if args.explain_miss && !cache_hit {
-        emit_miss_explanation(&resolved, &stage_hash, mode, repo_root);
+        emit_miss_explanation(&resolved, &stage_hash, mode, repo_root)?;
     }
 
     if args.dry_run {
-        emit_plan(&resolved, &stage_hash, cache_hit, mode);
+        emit_plan(&resolved, &stage_hash, cache_hit, mode)?;
         return Ok(());
     }
 
@@ -658,52 +660,27 @@ async fn run_inline_single_stage(
         .as_ref()
         .and_then(|remote| remote.artifact_stores.clone());
 
+    // Cache replay also publishes output sidecars. Both replay and execution
+    // must exclude another scheduler before materialization or orphan cleanup.
+    let lock_timeout = compute_lock_timeout(args, config);
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout).await?;
+
     if args.cache_only {
         let cache_only_ctx = CacheOnlyContext {
             args,
-            mode,
             cache_lookup_enabled,
             artifact_stores: remote_artifact_stores.as_ref(),
-            remote: CacheOnlyRemote {
-                selected: remote_store.as_ref().zip(remote_prefix.as_deref()).map(
-                    |(store, prefix)| WorkflowRemoteCandidate {
-                        store,
-                        prefix,
-                        source: "selected",
-                    },
-                ),
-                primary_fallback: remote_primary_fallback_store
-                    .as_ref()
-                    .zip(remote_primary_fallback_prefix.as_deref())
-                    .map(|(store, prefix)| WorkflowRemoteCandidate {
-                        store,
-                        prefix,
-                        source: "primary-fallback",
-                    }),
-            },
+            remote: CacheOnlyRemote::from_remote(remote.as_ref()),
             cache_root: &cache_root,
-            working_dir: Some(repo_root),
+            repo_root,
         };
-        return cache_only_path(
-            &stage_name,
-            &stage_hash,
-            &outs,
-            cached.as_ref(),
-            cache_only_ctx,
-        )
-        .await;
+        let result =
+            cache_only_path(&stage_name, &stage_hash, cached.as_ref(), cache_only_ctx).await?;
+        return emit_result(None, &result, mode);
     }
 
-    // Normal execution path. Sweep orphan sidecars + resume prior
-    // non-terminal journals before opening ours.
     let run_id = Uuid::now_v7();
-    sweep_orphans(&workflow_root, repo_root, &outs)?;
-
-    // Serialize against other `crab run` invocations on this repo
-    // (design §"Concurrency model"). We hold the lock for the full
-    // remainder of the run; drop on return releases it.
-    let lock_timeout = compute_lock_timeout(args, config);
-    let _scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &outs)?;
 
     // Process-local metrics Arc. The counters bumped here are
     // observability-only; they're not persisted across `crab run`
@@ -858,7 +835,7 @@ async fn run_inline_single_stage(
             // Cache hit path: materialize outs via the atomic sidecar
             // write, respecting overwrite policy from task 1.16.
             if used_cache {
-                materialize_hit(&stage_name, run_id, &entry, &cache_root, args)?;
+                materialize_hit(&stage_name, run_id, &entry, &cache_root, repo_root, args)?;
 
                 // P7: on_cache_hit hook execution for inline stages.
                 if stage.side_effects {
@@ -937,7 +914,7 @@ async fn run_inline_single_stage(
         }
     };
 
-    emit_result(jsonl.as_mut(), &result, mode);
+    emit_result(jsonl.as_mut(), &result, mode)?;
     Ok(())
 }
 
@@ -1043,6 +1020,11 @@ async fn run_with_yaml(
         return Ok(());
     }
 
+    if args.cache_only {
+        return replay_yaml_cache(args, repo_root, mode, config, &workflow, &graph, &lock_ctx)
+            .await;
+    }
+
     ensure_workflow_ignored(repo_root)?;
 
     #[cfg(feature = "watch")]
@@ -1060,10 +1042,76 @@ async fn run_with_yaml(
     .await
 }
 
+// Replay the recorded workflow, without resolving live inputs or invoking hooks.
+// The lock protects both the lockfile snapshot and output publication.
+async fn replay_yaml_cache(
+    args: &RunArgs,
+    repo_root: &Path,
+    mode: OutputMode,
+    config: &Config,
+    workflow: &Workflow,
+    graph: &Graph,
+    lock_ctx: &LockfileContext,
+) -> Result<()> {
+    let workflow_root = repo_root.join(".crab/workflow");
+    let cache_root = repo_root.join(".crab/cache");
+    let _lock = SchedulerLock::acquire(&workflow_root, compute_lock_timeout(args, config)).await?;
+    let lockfile = lock_ctx.load(repo_root)?;
+    let selected = filter_stages(args, workflow, graph)?;
+    let remote = try_build_workflow_remote(repo_root, config, args.cache_push).await?;
+    let mut results = Vec::new();
+    let mut succeeded = BTreeSet::new();
+    let started_at = Instant::now();
+    for name in graph.toposort() {
+        if selected
+            .as_ref()
+            .is_some_and(|selected| !selected.contains(&name))
+        {
+            continue;
+        }
+        let recorded = lockfile
+            .get(&name)
+            .ok_or_else(|| CrabError::StageCacheMiss {
+                stage: name.as_str().to_owned(),
+                reason: "no recorded stage in workflow lockfile".to_owned(),
+            })?;
+        let stage = &workflow.stages[&name];
+        let cached = read_local(&cache_root, &recorded.stage_hash)?;
+        let context = CacheOnlyContext {
+            args,
+            cache_lookup_enabled: stage_cache_lookup_enabled(stage, args),
+            artifact_stores: remote
+                .as_ref()
+                .and_then(|remote| remote.artifact_stores.as_ref()),
+            remote: CacheOnlyRemote::from_remote(remote.as_ref()),
+            cache_root: &cache_root,
+            repo_root,
+        };
+        results.push(cache_only_path(&name, &recorded.stage_hash, cached.as_ref(), context).await?);
+        succeeded.insert(name);
+    }
+    let mut jsonl = (mode == OutputMode::Jsonl).then(|| {
+        JsonlStream::new(
+            WORKFLOW_STAGE_EVENT_STREAM_SCHEMA,
+            WORKFLOW_SCHEMA_VERSION,
+            std::io::stdout(),
+        )
+    });
+    emit_dag_summary(
+        jsonl.as_mut(),
+        &results,
+        &succeeded,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        started_at.elapsed().as_millis() as u64,
+        mode,
+    )
+}
+
 /// `crab run --validate` path. Parses `crab.yaml`, runs all
 /// semantic checks, and reports all errors as a structured JSON
 /// array. Exits 0 on valid, 2 on any error.
-fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
+fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) -> Result<()> {
     let mut errors: Vec<serde_json::Value> = Vec::new();
 
     // Layer 1+2: YAML syntax + schema validation (deny_unknown_fields).
@@ -1077,7 +1125,9 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
                     "path": path.display().to_string(),
                     "message": e.to_string(),
                 }));
-                emit_validate_json(&errors);
+                if let Err(error) = emit_validate_json(&errors) {
+                    eprintln!("could not emit workflow validation errors: {error}");
+                }
                 std::process::exit(2);
             }
         };
@@ -1088,7 +1138,9 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
                 errors.push(yaml_error_to_json(&error));
                 // Even on parse failure, try to report what we can.
                 // But we can't do semantic checks without a parsed workflow.
-                emit_validate_json(&errors);
+                if let Err(error) = emit_validate_json(&errors) {
+                    eprintln!("could not emit workflow validation errors: {error}");
+                }
                 std::process::exit(2);
             }
         }
@@ -1097,7 +1149,9 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
             Ok(w) => w,
             Err(e) => {
                 errors.push(yaml_error_to_json(&CrabError::from(e)));
-                emit_validate_json(&errors);
+                if let Err(error) = emit_validate_json(&errors) {
+                    eprintln!("could not emit workflow validation errors: {error}");
+                }
                 std::process::exit(2);
             }
         }
@@ -1163,15 +1217,18 @@ fn run_validate(repo_root: &Path, yaml_paths: &[PathBuf]) {
             result["expanded_count"] = serde_json::json!(expanded_count);
         }
 
-        emit_validate_json(&result);
+        emit_validate_json(&result)?;
     } else {
-        emit_validate_json(&errors);
+        if let Err(error) = emit_validate_json(&errors) {
+            eprintln!("could not emit workflow validation errors: {error}");
+        }
         std::process::exit(2);
     }
+    Ok(())
 }
 
-fn emit_validate_json<T: Serialize>(data: T) {
-    emit_json("workflow.validate", "1.0", data);
+fn emit_validate_json<T: Serialize>(data: T) -> Result<()> {
+    emit_json("workflow.validate", "1.0", data)
 }
 
 /// Convert a [`CrabError`] into a structured JSON value for
@@ -1298,10 +1355,10 @@ async fn run_yaml_single_stage(
 
     // Lock and journal setup mirrors inline single-stage.
     let lock_timeout = compute_lock_timeout(args, config);
-    let _scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout).await?;
 
     let run_id = Uuid::now_v7();
-    sweep_orphans(&workflow_root, repo_root, &stage.outs)?;
+    sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &stage.outs)?;
 
     let metrics = Arc::new(Metrics::new());
     scan_prior_journals(&workflow_root, run_id, args, metrics.as_ref())?;
@@ -1388,7 +1445,7 @@ async fn run_yaml_single_stage(
             upsert_lockfile(&mut lockfile, stage, &entry, repo_root, params)?;
             let yaml_stages: BTreeSet<StageName> = workflow.stages.keys().cloned().collect();
             prune_and_save_lockfile_via_ctx(&mut lockfile, &yaml_stages, lock_ctx, repo_root)?;
-            emit_result(jsonl.as_mut(), &result, mode);
+            emit_result(jsonl.as_mut(), &result, mode)?;
             Ok(())
         }
         Err(err) => {
@@ -1429,14 +1486,14 @@ async fn run_dag(
     // Acquire scheduler lock once for the whole DAG — design's
     // concurrency model is "one `crab run` per repo".
     let lock_timeout = compute_lock_timeout(args, config);
-    let _scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout)?;
+    let scheduler_lock = SchedulerLock::acquire(&workflow_root, lock_timeout).await?;
 
     let run_id = Uuid::now_v7();
     // Sweep orphan sidecars across every declared out path so a
     // prior crashed run doesn't leave artifacts that poison this
     // one. Each stage's sweep is scoped to its out's parent dir.
     for stage in workflow.stages.values() {
-        sweep_orphans(&workflow_root, repo_root, &stage.outs)?;
+        sweep_orphans(&scheduler_lock, &workflow_root, repo_root, &stage.outs)?;
     }
 
     let metrics = Arc::new(Metrics::new());
@@ -2017,7 +2074,7 @@ async fn run_dag(
         jsonl_recovered = Some(inner.into_inner());
     }
 
-    emit_dag_summary(
+    let output = emit_dag_summary(
         jsonl_recovered.as_mut(),
         &stage_results,
         &succeeded,
@@ -2028,6 +2085,9 @@ async fn run_dag(
     );
 
     if !failed.is_empty() {
+        if let Err(output_error) = output {
+            eprintln!("could not emit workflow summary: {output_error}");
+        }
         let first = failed
             .iter()
             .next()
@@ -2041,6 +2101,7 @@ async fn run_dag(
         }));
     }
 
+    output?;
     Ok(())
 }
 
@@ -2200,7 +2261,9 @@ async fn execute_stage_parallel(
                     force,
                     no_overwrite: false,
                 };
-                materialize_hit_with_flags(stage_name, run_id, &entry, cache_root, flags)?;
+                materialize_hit_with_flags(
+                    stage_name, run_id, &entry, cache_root, repo_root, flags,
+                )?;
 
                 // P7: on_cache_hit hook.
                 if stage.side_effects
@@ -2260,7 +2323,8 @@ async fn emit_started_shared(
         attempt: 1,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_cache_checked_shared(
@@ -2280,7 +2344,8 @@ async fn emit_cache_checked_shared(
         hit_source: hit_source.to_owned(),
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_retry_shared(
@@ -2303,7 +2368,8 @@ async fn emit_retry_shared(
         exhausted: false,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    let output = stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_produced_shared(
@@ -2320,7 +2386,8 @@ async fn emit_produced_shared(
         exit_code: 0,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_hashed_shared(
@@ -2346,7 +2413,8 @@ async fn emit_hashed_shared(
             .collect(),
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_committed_shared(
@@ -2364,7 +2432,8 @@ async fn emit_committed_shared(
         cache_hit: result.cache_hit,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 async fn emit_failed_shared(
@@ -2387,8 +2456,11 @@ async fn emit_failed_shared(
         stderr_tail: None,
         elapsed_ms: Some(started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
-    stream.emit_error_info(crate::core::output::ErrorInfo::from(err));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
+    crate::core::output::report_progress_output(output);
+    if let Err(output_error) = stream.emit_error_info(crate::core::output::ErrorInfo::from(err)) {
+        eprintln!("error: {err}; could not emit structured error: {output_error}");
+    }
 }
 
 async fn emit_not_started_shared(
@@ -2405,18 +2477,21 @@ async fn emit_not_started_shared(
                 stage: stage.as_str().to_owned(),
                 reason: reason.to_owned(),
             };
-            stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            let output =
+                stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Json => {
             let payload = WorkflowStageNotStarted {
                 stage: stage.as_str().to_owned(),
                 reason: reason.to_owned(),
             };
-            emit_json(
+            let output = emit_json(
                 WORKFLOW_STAGE_NOT_STARTED_SCHEMA,
                 WORKFLOW_SCHEMA_VERSION,
                 payload,
             );
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Text => {
             warn!(stage = %stage, reason = %reason, "dag: stage not started");
@@ -2530,6 +2605,23 @@ struct CacheOnlyRemote<'a> {
 }
 
 impl<'a> CacheOnlyRemote<'a> {
+    fn from_remote(remote: Option<&'a WorkflowRemote>) -> Self {
+        Self {
+            selected: remote.map(|remote| WorkflowRemoteCandidate {
+                store: &remote.store,
+                prefix: &remote.prefix,
+                source: "selected",
+            }),
+            primary_fallback: remote
+                .and_then(|remote| remote.primary_fallback.as_ref())
+                .map(|fallback| WorkflowRemoteCandidate {
+                    store: &fallback.store,
+                    prefix: &fallback.prefix,
+                    source: "primary-fallback",
+                }),
+        }
+    }
+
     fn candidates(self) -> [Option<WorkflowRemoteCandidate<'a>>; 2] {
         [self.selected, self.primary_fallback]
     }
@@ -2537,12 +2629,11 @@ impl<'a> CacheOnlyRemote<'a> {
 
 struct CacheOnlyContext<'a> {
     args: &'a RunArgs,
-    mode: OutputMode,
     cache_lookup_enabled: bool,
     artifact_stores: Option<&'a RemoteArtifactStores>,
     remote: CacheOnlyRemote<'a>,
     cache_root: &'a Path,
-    working_dir: Option<&'a Path>,
+    repo_root: &'a Path,
 }
 
 /// Build a remote store for workflow cache operations.
@@ -2803,7 +2894,14 @@ async fn execute_one_stage_from_yaml_with_jsonl(
     match exec_result {
         Ok(entry) => {
             if cache_hit {
-                materialize_hit(stage_name, run_id, &entry, &executor_cfg.cache_root, args)?;
+                materialize_hit(
+                    stage_name,
+                    run_id,
+                    &entry,
+                    &executor_cfg.cache_root,
+                    repo_root,
+                    args,
+                )?;
 
                 // P7: on_cache_hit hook execution. Fires only on
                 // cache hits, never on the miss path or during
@@ -2964,18 +3062,21 @@ fn emit_not_started(
             // `workflow.stage.not_started` isn't part of the
             // `WorkflowStageEvent` enum (it has no stage_hash) so
             // we route through the general schema-override path.
-            stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            let output =
+                stream.emit_schema_event(WORKFLOW_STAGE_NOT_STARTED_SCHEMA, "event", &payload);
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Json => {
             let payload = WorkflowStageNotStarted {
                 stage: stage.as_str().to_owned(),
                 reason: reason.to_owned(),
             };
-            emit_json(
+            let output = emit_json(
                 WORKFLOW_STAGE_NOT_STARTED_SCHEMA,
                 WORKFLOW_SCHEMA_VERSION,
                 payload,
             );
+            crate::core::output::report_progress_output(output);
         }
         OutputMode::Text => {
             warn!(stage = %stage, reason = %reason, "dag: stage not started");
@@ -2995,11 +3096,11 @@ fn emit_dag_summary(
     not_started: &BTreeSet<StageName>,
     duration_ms: u64,
     mode: OutputMode,
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Json => {
             let summary = build_run_summary(results, succeeded, failed, not_started, duration_ms);
-            emit_json(WORKFLOW_RUN_SCHEMA, WORKFLOW_SCHEMA_VERSION, summary);
+            emit_json(WORKFLOW_RUN_SCHEMA, WORKFLOW_SCHEMA_VERSION, summary)?;
         }
         OutputMode::Jsonl => {
             // On the JSONL stream the terminal `result` line
@@ -3007,9 +3108,9 @@ fn emit_dag_summary(
             // uses. The stream's umbrella schema stays at
             // `workflow.stage.event`; the run-summary schema
             // rides in on the line's `schema` field.
-            let Some(stream) = jsonl else { return };
+            let Some(stream) = jsonl else { return Ok(()) };
             let summary = build_run_summary(results, succeeded, failed, not_started, duration_ms);
-            stream.emit_schema_event(WORKFLOW_RUN_SCHEMA, "result", &summary);
+            stream.emit_schema_event(WORKFLOW_RUN_SCHEMA, "result", &summary)?;
         }
         OutputMode::Text => {
             info!(
@@ -3021,6 +3122,7 @@ fn emit_dag_summary(
             );
         }
     }
+    Ok(())
 }
 
 /// Build the terminal [`WorkflowRunSummary`] payload from the
@@ -3071,10 +3173,9 @@ fn build_run_summary(
 async fn cache_only_path(
     stage_name: &StageName,
     stage_hash: &StageHash,
-    outs: &[Out],
     cached: Option<&StageCacheEntry>,
     ctx: CacheOnlyContext<'_>,
-) -> Result<()> {
+) -> Result<WorkflowStageResult> {
     if !ctx.cache_lookup_enabled {
         return Err(CrabError::StageCacheMiss {
             stage: stage_name.as_str().to_owned(),
@@ -3095,7 +3196,7 @@ async fn cache_only_path(
                 ctx.artifact_stores,
                 stage_hash,
                 ctx.cache_root,
-                ctx.working_dir,
+                Some(ctx.repo_root),
             )
             .await
             {
@@ -3106,12 +3207,11 @@ async fn cache_only_path(
                         remote_source = candidate.source,
                         "cache-only: remote hit"
                     );
-                    return cache_only_emit_hit(
+                    return cache_only_materialize_hit(
                         stage_name,
-                        outs,
                         ctx.args,
-                        ctx.mode,
                         ctx.cache_root,
+                        ctx.repo_root,
                         remote_entry,
                         true,
                     );
@@ -3141,41 +3241,35 @@ async fn cache_only_path(
         });
     };
 
-    cache_only_emit_hit(
+    cache_only_materialize_hit(
         stage_name,
-        outs,
         ctx.args,
-        ctx.mode,
         ctx.cache_root,
+        ctx.repo_root,
         entry,
         from_remote,
     )
 }
 
-fn cache_only_emit_hit(
+fn cache_only_materialize_hit(
     stage_name: &StageName,
-    outs: &[Out],
     args: &RunArgs,
-    mode: OutputMode,
     cache_root: &Path,
+    repo_root: &Path,
     entry: StageCacheEntry,
     from_remote: bool,
-) -> Result<()> {
+) -> Result<WorkflowStageResult> {
     // Even without a journal, we still run the materialization through
     // the same sidecar path — it's what makes the hit atomic.
     let run_id = Uuid::now_v7();
-    materialize_hit(stage_name, run_id, &entry, cache_root, args)?;
-    // Touch the declared outs list so unused warnings don't fire when
-    // the executor doesn't enumerate outs (they're already in `entry`).
-    let _ = outs;
+    materialize_hit(stage_name, run_id, &entry, cache_root, repo_root, args)?;
 
     let duration_ms = 0;
     let mut result = build_stage_result(stage_name.as_str(), &entry, true, duration_ms);
     if from_remote {
         result.source = Some("Remote".to_owned());
     }
-    emit_result(None, &result, mode);
-    Ok(())
+    Ok(result)
 }
 
 /// Materialize every out from a cache entry, guarded by the overwrite
@@ -3186,13 +3280,14 @@ fn materialize_hit(
     run_id: Uuid,
     entry: &StageCacheEntry,
     cache_root: &Path,
+    repo_root: &Path,
     args: &RunArgs,
 ) -> Result<()> {
     let flags = OverwriteFlags {
         force: args.force,
         no_overwrite: args.no_overwrite,
     };
-    materialize_hit_with_flags(stage_name, run_id, entry, cache_root, flags)
+    materialize_hit_with_flags(stage_name, run_id, entry, cache_root, repo_root, flags)
 }
 
 fn materialize_hit_with_flags(
@@ -3200,15 +3295,19 @@ fn materialize_hit_with_flags(
     run_id: Uuid,
     entry: &StageCacheEntry,
     cache_root: &Path,
+    repo_root: &Path,
     flags: OverwriteFlags,
 ) -> Result<()> {
     for out in cached_artifacts(entry) {
+        // Cached paths already include the stage wdir. Resolve once so reads,
+        // overwrite decisions, and publication cannot use different roots.
+        let target = repo_root.join(&out.path);
         match out.kind {
             OutKind::Directory => {
                 // Directory out: materialize from the tree manifest.
                 if let Some(ref manifest) = out.tree_manifest {
                     crate::workflow::materialize::materialize_directory(
-                        &out.path, manifest, cache_root, run_id,
+                        &target, manifest, cache_root, run_id,
                     )?;
                 } else {
                     // Legacy cache entry without tree manifest — the
@@ -3222,9 +3321,9 @@ fn materialize_hit_with_flags(
                 }
             }
             OutKind::File | OutKind::Stdout => {
-                let current = inspect_existing(&out.path);
+                let current = inspect_existing(&target);
                 let decision =
-                    overwrite_policy(stage_name.as_str(), &out.path, out, current.as_ref(), flags)?;
+                    overwrite_policy(stage_name.as_str(), &target, out, current.as_ref(), flags)?;
 
                 if decision == OverwriteDecision::NoOp {
                     debug!(
@@ -3235,8 +3334,8 @@ fn materialize_hit_with_flags(
                     continue;
                 }
 
-                let bytes = cached_file_bytes(stage_name, cache_root, out)?;
-                write_atomic(&out.path, &bytes, run_id, out.mode)?;
+                let bytes = cached_file_bytes(stage_name, cache_root, &target, out)?;
+                write_atomic(&target, &bytes, run_id, out.mode)?;
             }
         }
     }
@@ -3246,12 +3345,13 @@ fn materialize_hit_with_flags(
 fn cached_file_bytes(
     stage_name: &StageName,
     cache_root: &Path,
+    source: &Path,
     out: &crate::workflow::cache::CachedOut,
 ) -> Result<Vec<u8>> {
     let bytes = if let Some(bytes) = read_local_xorb(cache_root, &out.file_hash)? {
         bytes
     } else {
-        std::fs::read(&out.path).map_err(|e| {
+        std::fs::read(source).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             CrabError::StageCacheMiss {
                 stage: stage_name.as_str().to_owned(),
@@ -4046,7 +4146,12 @@ fn mark_side_effects_skipped(stage: Option<&Stage>, result: &mut WorkflowStageRe
     }
 }
 
-fn emit_plan(resolved: &ResolvedStage, stage_hash: &StageHash, cache_hit: bool, mode: OutputMode) {
+fn emit_plan(
+    resolved: &ResolvedStage,
+    stage_hash: &StageHash,
+    cache_hit: bool,
+    mode: OutputMode,
+) -> Result<()> {
     let plan = WorkflowPlan {
         stage_name: resolved.stage.name.as_str().to_owned(),
         stage_hash: stage_hash.as_hex(),
@@ -4078,11 +4183,11 @@ fn emit_plan(resolved: &ResolvedStage, stage_hash: &StageHash, cache_hit: bool, 
     };
 
     match mode {
-        OutputMode::Json => emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan),
+        OutputMode::Json => emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan)?,
         OutputMode::Jsonl => {
             // Under --jsonl --dry-run we still emit a single envelope:
             // the plan is terminal, no streaming events make sense.
-            emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan);
+            emit_json(WORKFLOW_PLAN_SCHEMA, "1.0", plan)?;
         }
         OutputMode::Text => {
             info!(
@@ -4095,6 +4200,7 @@ fn emit_plan(resolved: &ResolvedStage, stage_hash: &StageHash, cache_hit: bool, 
             );
         }
     }
+    Ok(())
 }
 
 fn emit_dag_plan(
@@ -4134,7 +4240,7 @@ fn emit_dag_plan(
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_DAG_PLAN_SCHEMA, "1.0", plan);
+            emit_json(WORKFLOW_DAG_PLAN_SCHEMA, "1.0", plan)?;
         }
         OutputMode::Text => {
             for stage in &plan.stages {
@@ -4175,13 +4281,13 @@ fn emit_result(
     jsonl: Option<&mut JsonlStream<std::io::Stdout>>,
     result: &WorkflowStageResult,
     mode: OutputMode,
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Json => emit_json(
             WORKFLOW_STAGE_RESULT_SCHEMA,
             WORKFLOW_SCHEMA_VERSION,
             result,
-        ),
+        )?,
         OutputMode::Jsonl => {
             if let Some(stream) = jsonl {
                 // Terminal `result` event carries the canonical
@@ -4189,7 +4295,7 @@ fn emit_result(
                 // stream's umbrella schema is
                 // `workflow.stage.event`, the final payload shape
                 // matches `--json` output byte-for-byte.
-                stream.emit_result(result);
+                stream.emit_result(result)?;
             }
         }
         OutputMode::Text => {
@@ -4203,6 +4309,7 @@ fn emit_result(
             );
         }
     }
+    Ok(())
 }
 
 fn emit_jsonl_started(
@@ -4217,7 +4324,8 @@ fn emit_jsonl_started(
         attempt: 1,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Started(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_cache_checked(
@@ -4235,7 +4343,8 @@ fn emit_jsonl_cache_checked(
         hit_source: hit_source.to_owned(),
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::CacheChecked(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_produced(
@@ -4250,7 +4359,8 @@ fn emit_jsonl_produced(
         exit_code: 0,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Produced(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_hashed(
@@ -4274,7 +4384,8 @@ fn emit_jsonl_hashed(
             .collect(),
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Hashed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_committed(
@@ -4290,7 +4401,8 @@ fn emit_jsonl_committed(
         cache_hit: result.cache_hit,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Committed(&payload));
+    crate::core::output::report_progress_output(output);
 }
 
 fn emit_jsonl_failed(
@@ -4314,10 +4426,13 @@ fn emit_jsonl_failed(
         stderr_tail: None,
         elapsed_ms: None,
     };
-    stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
+    let output = stream.emit_workflow_stage_event(&WorkflowStageEvent::Failed(&payload));
+    crate::core::output::report_progress_output(output);
     // Also flush a structured error-info terminal event so consumers
     // who only consume the final line see the full error envelope.
-    stream.emit_error_info(crate::core::output::ErrorInfo::from(err));
+    if let Err(output_error) = stream.emit_error_info(crate::core::output::ErrorInfo::from(err)) {
+        eprintln!("error: {err}; could not emit structured error: {output_error}");
+    }
 }
 
 fn emit_jsonl_retry(
@@ -4338,7 +4453,8 @@ fn emit_jsonl_retry(
         exhausted: false,
         elapsed_ms: None,
     };
-    stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    let output = stream.emit_schema_event(WORKFLOW_STAGE_RETRY_SCHEMA, "event", &payload);
+    crate::core::output::report_progress_output(output);
 }
 
 /// Map a `CrabError` onto the `workflow.stage.failed` payload's
@@ -4533,7 +4649,7 @@ fn emit_miss_explanation(
     hash: &StageHash,
     mode: OutputMode,
     repo_root: &Path,
-) {
+) -> Result<()> {
     let lockfile_path = repo_root.join("crab.lock");
     let lockfile = Lockfile::load(&lockfile_path).unwrap_or_default();
     let stage_name = &resolved.stage.name;
@@ -4584,7 +4700,7 @@ fn emit_miss_explanation(
                             "diffs": diff_entries,
                         }
                     });
-                    emit_json("workflow.explain_miss", "1.0", payload);
+                    emit_json("workflow.explain_miss", "1.0", payload)?;
                 }
                 OutputMode::Text => {
                     info!(
@@ -4620,7 +4736,7 @@ fn emit_miss_explanation(
                             "diffs": [],
                         }
                     });
-                    emit_json("workflow.explain_miss", "1.0", payload);
+                    emit_json("workflow.explain_miss", "1.0", payload)?;
                 }
                 OutputMode::Text => {
                     info!(
@@ -4632,6 +4748,7 @@ fn emit_miss_explanation(
             }
         }
     }
+    Ok(())
 }
 
 fn hex_lower(bytes: &[u8; 32]) -> String {
@@ -4671,7 +4788,7 @@ pub fn abandon_in(repo_root: &Path, run_id: Uuid, mode: OutputMode) -> Result<()
                 "run_id": run_id.to_string(),
                 "outcome": "aborted",
             });
-            emit_json("workflow.abandon", "1.0", payload);
+            emit_json("workflow.abandon", "1.0", payload)?;
         }
         OutputMode::Text => {
             info!(run_id = %run_id, "workflow journal marked aborted");
@@ -4751,11 +4868,14 @@ fn scan_prior_journals(
     Ok(())
 }
 
-fn sweep_orphans(workflow_root: &Path, repo_root: &Path, outs: &[Out]) -> Result<()> {
-    // Phase 1 scope: sweep the parent directory of each declared out
-    // plus the workflow scratch root. Active run_ids are empty — we
-    // haven't opened ours yet, and the full active-run tracking lives
-    // in task 3.7's DAG scheduler.
+fn sweep_orphans(
+    _scheduler_lock: &SchedulerLock,
+    workflow_root: &Path,
+    repo_root: &Path,
+    outs: &[Out],
+) -> Result<()> {
+    // The caller holds this repository's scheduler lock and has not started
+    // its run, so no cooperating scheduler owns an active materialization.
     let active: Vec<Uuid> = Vec::new();
     let _ = resume::sweep_orphan_sidecars(workflow_root, &active)?;
     for out in outs {
@@ -4885,11 +5005,12 @@ async fn run_watch(
                         changed_paths: changed_paths.clone(),
                         coalesced_events: changed.len(),
                     };
-                    stream.emit_schema_event(
+                    let output = stream.emit_schema_event(
                         WORKFLOW_WATCH_TRIGGERED_SCHEMA,
                         "event",
                         &payload,
                     );
+                    crate::core::output::report_progress_output(output);
                 }
 
                 // Re-execute affected stages.
@@ -5105,6 +5226,36 @@ mod tests {
                 tmp.join("a.txt").to_string_lossy().into(),
                 tmp.join("b.txt").to_string_lossy().into(),
             ],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn contended_inline_run_preserves_holder_sidecars() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.txt"), b"input").unwrap();
+        let workflow_root = tmp.path().join(".crab/workflow");
+        let _holder = SchedulerLock::try_acquire(&workflow_root).unwrap().unwrap();
+        let sidecar = tmp
+            .path()
+            .join(format!("b.txt.crab.tmp.{}", Uuid::now_v7()));
+        fs::write(&sidecar, b"active output").unwrap();
+        for cache_only in [false, true] {
+            let mut args = base_args(tmp.path());
+            args.no_wait = true;
+            args.cache_only = cache_only;
+            let result = run_inline_single_stage(
+                &args,
+                tmp.path(),
+                OutputMode::Text,
+                &Config::default(),
+                RunInvocationOptions::default(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CrabError::WorkflowLockTimeout { .. })),
+                "{result:?}"
+            );
+            assert_eq!(fs::read(&sidecar).unwrap(), b"active output");
         }
     }
 
@@ -5883,6 +6034,13 @@ mod tests {
         let err = RunArgs::try_parse_from(["run", "--cache-only", "--no-run-cache"])
             .expect_err("cache-only conflicts with no-run-cache");
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        #[cfg(feature = "watch")]
+        {
+            let err = RunArgs::try_parse_from(["run", "--cache-only", "--watch"])
+                .expect_err("replay cannot watch for stage execution");
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 
     #[test]
@@ -6045,6 +6203,261 @@ mod tests {
             matches!(err, CrabError::Configuration { .. }),
             "wrong variant: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_only_missing_lockfile_never_runs_stage() {
+        let tmp = TempDir::new().unwrap();
+        let yaml_path = tmp.path().join("crab.yaml");
+        fs::write(
+            &yaml_path,
+            "stages:\n  build:\n    cmd: \"printf executed > marker\"\n    outs:\n      - marker\n",
+        )
+        .unwrap();
+        let mut args = yaml_base_args();
+        args.cache_only = true;
+        let result = run_with_yaml(
+            &args,
+            tmp.path(),
+            &[yaml_path],
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CrabError::StageCacheMiss { .. })),
+            "{result:?}"
+        );
+        assert!(!tmp.path().join("marker").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_only_replays_recorded_selection_without_live_inputs_or_hooks() {
+        let tmp = TempDir::new().unwrap();
+        let yaml_path = tmp.path().join("crab.yaml");
+        fs::write(&yaml_path, "stages:\n  build:\n    cmd: 'false'\n    deps: [missing-input]\n    side_effects: true\n    on_cache_hit: 'false'\n  other:\n    cmd: 'false'\n").unwrap();
+        let entry = StageCacheEntry {
+            schema_version: crate::workflow::cache::ENTRY_SCHEMA_VERSION,
+            stage_hash: StageHash([17; 32]),
+            stage_name: "build".into(),
+            cmd: crate::workflow::cache::CachedCmd::Shell {
+                shell: "previous-command".into(),
+            },
+            outs: Vec::new(),
+            metrics: Vec::new(),
+            plots: Vec::new(),
+            executed_at: "2026-09-07T00:00:00.000Z".into(),
+            duration_ms: 0,
+            exec_id: None,
+            attempts: 1,
+            host_fingerprint: "test".into(),
+        };
+        let mut lockfile = Lockfile::default();
+        lockfile
+            .upsert(&entry, Vec::new(), BTreeMap::new(), BTreeMap::new())
+            .unwrap();
+        let lock_path = tmp.path().join("crab.lock");
+        lockfile.save(&lock_path).unwrap();
+        let recorded_bytes = fs::read(&lock_path).unwrap();
+        let cache_root = tmp.path().join(".crab/cache");
+        crate::workflow::cache::write_local(&cache_root, &entry).unwrap();
+        let mut args = yaml_base_args();
+        args.cache_only = true;
+        args.no_wait = true;
+        args.cmd = vec!["build".into()];
+        let owner = SchedulerLock::acquire(
+            &tmp.path().join(".crab/workflow"),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let replay = run_with_yaml(
+            &args,
+            tmp.path(),
+            std::slice::from_ref(&yaml_path),
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await;
+        assert!(
+            matches!(replay, Err(CrabError::WorkflowLockTimeout { .. })),
+            "{replay:?}"
+        );
+        drop(owner);
+        run_with_yaml(
+            &args,
+            tmp.path(),
+            &[yaml_path],
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read(&lock_path).unwrap(), recorded_bytes);
+        assert!(!tmp.path().join(".crab/workflow/runs").exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn yaml_cache_replay_anchors_artifacts_to_repository_root() {
+        // Both possible destinations stay inside this disposable fixture. No
+        // process-wide cwd mutation is needed to expose the wrong-root write.
+        let cwd = std::env::current_dir().unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replay-root-")
+            .tempdir_in(&cwd)
+            .unwrap();
+        let repo_root = fixture.path().join("repo");
+        fs::create_dir(&repo_root).unwrap();
+        let relative = PathBuf::from(fixture.path().file_name().unwrap()).join("nested/output");
+        let bytes = b"repository-owned artifact";
+        let hash = format!("b3:{}", blake3::hash(bytes).to_hex());
+        let mut outs = Vec::new();
+        for (suffix, kind) in [
+            ("file", OutKind::File),
+            ("stdout", OutKind::Stdout),
+            ("directory", OutKind::Directory),
+        ] {
+            let path = relative.join(suffix);
+            let target = repo_root.join(&path);
+            let manifest = if kind == OutKind::Directory {
+                fs::create_dir_all(&target).unwrap();
+                fs::write(target.join("child"), bytes).unwrap();
+                Some(vec![crate::workflow::cache::TreeManifestEntry {
+                    path: "child".into(),
+                    kind: "file".into(),
+                    hash: hash.clone(),
+                    size: bytes.len() as u64,
+                    mode: 0o644,
+                }])
+            } else {
+                fs::create_dir_all(target.parent().unwrap()).unwrap();
+                fs::write(&target, bytes).unwrap();
+                None
+            };
+            let output_hash = if kind == OutKind::Directory {
+                let tree_hash = crate::workflow::hasher::hash_tree_entries(&[
+                    crate::workflow::hasher::TreeEntry {
+                        path: "child".into(),
+                        kind: crate::workflow::hasher::TreeEntryKind::File,
+                        file_hash: *blake3::hash(bytes).as_bytes(),
+                        size: bytes.len() as u64,
+                        mode: 0o644,
+                    },
+                ]);
+                format!("b3:{}", hex_lower(&tree_hash))
+            } else {
+                hash.clone()
+            };
+            outs.push(crate::workflow::cache::CachedOut {
+                path,
+                kind,
+                push: true,
+                remote: None,
+                file_hash: output_hash,
+                size: bytes.len() as u64,
+                mode: 0o644,
+                tree_manifest: manifest,
+            });
+        }
+        let mut entry = StageCacheEntry {
+            schema_version: crate::workflow::cache::ENTRY_SCHEMA_VERSION,
+            stage_hash: StageHash([19; 32]),
+            stage_name: "build".into(),
+            cmd: crate::workflow::cache::CachedCmd::Shell {
+                shell: "false".into(),
+            },
+            outs,
+            metrics: Vec::new(),
+            plots: Vec::new(),
+            executed_at: "2026-09-07T00:00:00.000Z".into(),
+            duration_ms: 0,
+            exec_id: None,
+            attempts: 1,
+            host_fingerprint: "test".into(),
+        };
+        let cache_root = repo_root.join(".crab/cache");
+        crate::workflow::cache::store_local_xorbs(&cache_root, &entry.outs, Some(&repo_root))
+            .unwrap();
+        crate::workflow::cache::write_local(&cache_root, &entry).unwrap();
+        fs::remove_dir_all(repo_root.join(&relative)).unwrap();
+        let mut lockfile = Lockfile::default();
+        lockfile
+            .upsert(&entry, Vec::new(), BTreeMap::new(), BTreeMap::new())
+            .unwrap();
+        lockfile.save(&repo_root.join("crab.lock")).unwrap();
+        let yaml_path = repo_root.join("crab.yaml");
+        fs::write(
+            &yaml_path,
+            "stages:\n  build:\n    cmd: 'false'\n    deps: [missing-input]\n",
+        )
+        .unwrap();
+        let mut args = yaml_base_args();
+        args.cache_only = true;
+        run_with_yaml(
+            &args,
+            &repo_root,
+            std::slice::from_ref(&yaml_path),
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !cwd.join(&relative).exists(),
+            "replay wrote into process cwd"
+        );
+        for suffix in ["file", "stdout", "directory/child"] {
+            assert_eq!(
+                fs::read(repo_root.join(&relative).join(suffix)).unwrap(),
+                bytes
+            );
+        }
+
+        // A cache entry may reuse verified output bytes when content-cache
+        // objects have been evicted. A mode change forces that read path.
+        fs::remove_dir_all(cache_root.join("xorbs")).unwrap();
+        entry.outs[0].mode = 0o600;
+        crate::workflow::cache::write_local(&cache_root, &entry).unwrap();
+        run_with_yaml(
+            &args,
+            &repo_root,
+            std::slice::from_ref(&yaml_path),
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read(repo_root.join(&relative).join("file")).unwrap(),
+            bytes
+        );
+
+        fs::write(repo_root.join(&relative).join("file"), b"local edit").unwrap();
+        args.no_overwrite = true;
+        let replay = run_with_yaml(
+            &args,
+            &repo_root,
+            &[yaml_path],
+            OutputMode::Text,
+            &Config::default(),
+            RunInvocationOptions::default(),
+        )
+        .await;
+        assert!(
+            matches!(replay, Err(CrabError::StageOverwriteConflict { .. })),
+            "{replay:?}"
+        );
+        assert_eq!(
+            fs::read(repo_root.join(&relative).join("file")).unwrap(),
+            b"local edit"
+        );
+        assert!(!cwd.join(&relative).exists());
     }
 
     #[tokio::test(flavor = "multi_thread")]

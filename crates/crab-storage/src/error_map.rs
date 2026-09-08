@@ -33,9 +33,10 @@ pub fn classify_auth_error(err: &object_store::Error) -> Option<StorageError> {
 
 /// Classifies an `object_store::Error` into a storage-domain error.
 ///
-/// `path` is supplied by the caller because some object-store variants do not
-/// carry one, but callers normally know which key they were operating on.
-/// Variants that already embed a path use the source path.
+/// Variants with an embedded path use that path. The caller-supplied `path`
+/// currently adds no context to variants without one. Generic throttling is
+/// detected from display text; other generic failures become network errors.
+/// This mapping does not run [`classify_auth_error`].
 #[must_use]
 pub fn map_object_store_error(err: object_store::Error, path: &str) -> StorageError {
     match err {
@@ -55,7 +56,10 @@ pub fn map_object_store_error(err: object_store::Error, path: &str) -> StorageEr
         err @ object_store::Error::Generic { .. } => {
             let msg = err.to_string().to_lowercase();
             if is_throttling_message(&msg) {
-                StorageError::Throttled { retry_after: None }
+                StorageError::Throttled {
+                    retry_after: None,
+                    source: Some(err),
+                }
             } else {
                 StorageError::NetworkTransient { source: err }
             }
@@ -89,6 +93,29 @@ mod tests {
 
     fn boxed(msg: &'static str) -> Box<dyn std::error::Error + Send + Sync + 'static> {
         Box::<dyn std::error::Error + Send + Sync>::from(msg)
+    }
+
+    #[test]
+    fn throttling_retains_the_provider_cause() {
+        use std::error::Error;
+
+        let error = map_object_store_error(
+            object_store::Error::Generic {
+                store: "test provider",
+                source: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "service unavailable",
+                )),
+            },
+            "repo/object",
+        );
+        assert!(matches!(error, StorageError::Throttled { .. }));
+        let provider = error.source().expect("provider source");
+        let cause = provider
+            .source()
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .expect("typed transport cause");
+        assert_eq!(cause.kind(), std::io::ErrorKind::WouldBlock);
     }
 
     #[test]
@@ -173,7 +200,10 @@ mod tests {
         };
         assert!(matches!(
             map_object_store_error(err, "repo/objects/x"),
-            StorageError::Throttled { retry_after: None }
+            StorageError::Throttled {
+                retry_after: None,
+                ..
+            }
         ));
     }
 

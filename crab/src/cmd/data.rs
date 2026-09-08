@@ -229,7 +229,7 @@ fn run_list(root: &Path, args: &DataListArgs) -> Result<()> {
                 println!("{}\t{}", entry.kind, entry.path);
             }
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -318,7 +318,7 @@ fn run_import(root: &Path, args: &DataImportArgs) -> Result<()> {
         descriptor,
         true,
         false,
-    );
+    )?;
     Ok(())
 }
 
@@ -415,7 +415,7 @@ fn run_import_url(root: &Path, args: &DataImportUrlArgs) -> Result<()> {
         descriptor,
         true,
         false,
-    );
+    )?;
     Ok(())
 }
 
@@ -463,7 +463,7 @@ fn run_import_db(root: &Path, args: &DataImportDbArgs) -> Result<()> {
         descriptor,
         true,
         false,
-    );
+    )?;
     Ok(())
 }
 
@@ -624,7 +624,7 @@ fn run_update(root: &Path, args: &DataUpdateArgs) -> Result<()> {
                 }
             );
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -656,7 +656,7 @@ fn run_status(root: &Path, args: &DataStatusArgs) -> Result<()> {
                 println!("{}\t{}\t{}", entry.kind, entry.path, dimensions);
             }
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -1961,7 +1961,12 @@ fn hex(bytes: &[u8; 32]) -> String {
     blake3::Hash::from(*bytes).to_hex().to_string()
 }
 
-fn emit_import(mode: OutputMode, descriptor: SourceDescriptor, changed: bool, dry_run: bool) {
+fn emit_import(
+    mode: OutputMode,
+    descriptor: SourceDescriptor,
+    changed: bool,
+    dry_run: bool,
+) -> Result<()> {
     emit(
         mode,
         DataPayload {
@@ -1973,22 +1978,24 @@ fn emit_import(mode: OutputMode, descriptor: SourceDescriptor, changed: bool, dr
             },
         },
         |payload| println!("imported {}", payload.entries.descriptor.target),
-    );
+    )?;
+    Ok(())
 }
 
-fn emit<T, F>(mode: OutputMode, payload: T, text: F)
+fn emit<T, F>(mode: OutputMode, payload: T, text: F) -> Result<()>
 where
     T: Serialize,
     F: FnOnce(&T),
 {
     match mode {
         OutputMode::Text => text(&payload),
-        OutputMode::Json => emit_json(DATA_SCHEMA, "1.0", payload),
+        OutputMode::Json => emit_json(DATA_SCHEMA, "1.0", payload)?,
         OutputMode::Jsonl => {
             let mut stream = JsonlStream::new(DATA_EVENT_SCHEMA, "1.0", std::io::stdout());
-            stream.emit_result(payload);
+            stream.emit_result(payload)?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

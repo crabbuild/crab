@@ -663,6 +663,7 @@ async fn prepare_view_manifest(
     shard_hashes: Vec<String>,
     pack: Option<PackManifestEntry>,
 ) -> Result<Manifest> {
+    let created_at = now_rfc3339_millis()?;
     let packs: Vec<PackManifestEntry> = pack.into_iter().collect();
     let (shard_index_hash, _, shard_index) = compact_shard_index(generation, &shard_hashes)?;
     let (pack_index_hash, _, pack_index) = compact_pack_index(generation, &packs)?;
@@ -675,7 +676,7 @@ async fn prepare_view_manifest(
     let mut manifest = Manifest {
         version: crab_metadata::manifests::MANIFEST_VERSION,
         generation,
-        created_at: now_rfc3339_millis(),
+        created_at,
         pusher: Some("crab-auth-view".to_owned()),
         session_id: uuid::Uuid::now_v7().to_string(),
         refs,

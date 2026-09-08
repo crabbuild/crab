@@ -283,19 +283,20 @@ impl MirrorCommandOutcome {
     }
 
     /// Emit one versioned JSON envelope.
-    pub fn emit_json(&self) {
+    pub fn emit_json(&self) -> crate::core::error::Result<()> {
         match self {
             Self::Check(summary) => {
-                crate::core::output::emit_json(self.schema_name(), "1.0", summary);
+                crate::core::output::emit_json(self.schema_name(), "1.0", summary)?;
             }
             Self::Apply(summary) => {
-                crate::core::output::emit_json(self.schema_name(), "1.0", summary);
+                crate::core::output::emit_json(self.schema_name(), "1.0", summary)?;
             }
         }
+        Ok(())
     }
 
     /// Emit one terminal JSONL result event.
-    pub fn emit_jsonl(&self) {
+    pub fn emit_jsonl(&self) -> crate::core::error::Result<()> {
         match self {
             Self::Check(summary) => {
                 let mut stream = crate::core::output::JsonlStream::new(
@@ -303,7 +304,7 @@ impl MirrorCommandOutcome {
                     "1.0",
                     std::io::stdout(),
                 );
-                stream.emit_result(summary);
+                stream.emit_result(summary)?;
             }
             Self::Apply(summary) => {
                 let mut stream = crate::core::output::JsonlStream::new(
@@ -311,9 +312,10 @@ impl MirrorCommandOutcome {
                     "1.0",
                     std::io::stdout(),
                 );
-                stream.emit_result(summary);
+                stream.emit_result(summary)?;
             }
         }
+        Ok(())
     }
 
     /// Return whether this outcome satisfies the requested CI policy.

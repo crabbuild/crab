@@ -5,7 +5,7 @@
 //! to its per-chunk compression scheme and hash-verified on retrieval.
 
 use bytes::Bytes;
-use xet_core_structures::merklehash::{MerkleHash, xorb_hash};
+use xet_core_structures::merklehash::{MerkleHash, compute_data_hash, xorb_hash};
 use xet_core_structures::xorb_object::Chunk;
 
 use crate::error::{Result, XetError};
@@ -202,7 +202,6 @@ pub fn xorb_chunks_from_metadata(
 
 /// Verify a compressed chunk payload against its metadata.
 pub fn verify_compressed_chunk(meta: &ChunkMeta, compressed: &[u8]) -> Result<()> {
-    validate_chunk_size(meta.uncompressed_len)?;
     let _ = decompress_chunk_data(meta, compressed)?;
     Ok(())
 }
@@ -221,7 +220,9 @@ pub fn decode_chunk_range_bytes(metas: &[ChunkMeta], payload: Bytes) -> Result<(
 
     let payload_start = metas[0].offset as usize;
     let mut expected_offset = payload_start;
+    let mut decoded_size = 0u32;
     for meta in metas {
+        decoded_size = extend_decoded_size(decoded_size, meta.uncompressed_len)?;
         if meta.offset as usize != expected_offset {
             return Err(corrupt("chunk range payloads are not contiguous"));
         }
@@ -244,29 +245,27 @@ pub fn decode_chunk_range_bytes(metas: &[ChunkMeta], payload: Bytes) -> Result<(
             let chunk = decompress_chunk_bytes(meta, payload.slice(start..end))?;
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "xorb payload is bounded below u32::MAX"
+                reason = "validated decoded range fits u32 offsets"
             )]
             offsets.push(start as u32);
             drop(chunk);
         }
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "xorb payload is bounded below u32::MAX"
+            reason = "validated decoded range fits u32 offsets"
         )]
         offsets.push(payload.len() as u32);
         return Ok((payload, offsets));
     }
 
-    let total_size = metas
-        .iter()
-        .map(|meta| meta.uncompressed_len as usize)
-        .sum();
-    let mut data = Vec::with_capacity(total_size);
+    // Metadata is untrusted. Grow only after a decoded chunk has passed both
+    // length and hash checks, rather than reserving its advertised total.
+    let mut data = Vec::new();
     let mut offsets = Vec::with_capacity(metas.len() + 1);
     for meta in metas {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "xorb payload is bounded below u32::MAX"
+            reason = "validated decoded range fits u32 offsets"
         )]
         offsets.push(data.len() as u32);
         let start = meta.offset as usize - payload_start;
@@ -276,7 +275,7 @@ pub fn decode_chunk_range_bytes(metas: &[ChunkMeta], payload: Bytes) -> Result<(
     }
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "xorb payload is bounded below u32::MAX"
+        reason = "validated decoded range fits u32 offsets"
     )]
     offsets.push(data.len() as u32);
     Ok((Bytes::from(data), offsets))
@@ -356,6 +355,7 @@ fn parse_xorb_metadata(
     let mut hash_pairs = Vec::with_capacity(num_chunks);
     let mut cursor = 0usize;
     let mut expected_payload_offset = 0u64;
+    let mut decoded_size = 0u32;
     for _ in 0..num_chunks {
         let hash_bytes: [u8; 32] = metadata[cursor..cursor + 32]
             .try_into()
@@ -382,7 +382,7 @@ fn parse_xorb_metadata(
                 .try_into()
                 .map_err(|_| corrupt("bad uncompressed_len"))?,
         );
-        validate_chunk_size(uncompressed_len)?;
+        decoded_size = extend_decoded_size(decoded_size, uncompressed_len)?;
         cursor += 4;
 
         let scheme_byte = metadata[cursor];
@@ -416,34 +416,90 @@ fn parse_xorb_metadata(
     Ok((chunks, xorb_hash(&hash_pairs)))
 }
 
-fn decompress_chunk_data(meta: &ChunkMeta, compressed: &[u8]) -> Result<Chunk> {
+fn decompress_chunk_data<'a>(
+    meta: &ChunkMeta,
+    compressed: &'a [u8],
+) -> Result<std::borrow::Cow<'a, [u8]>> {
     validate_chunk_size(meta.uncompressed_len)?;
-    let decompressed = meta
-        .scheme
-        .decompress_from_slice(compressed)
-        .map_err(|source| XetError::Decompress {
-            scheme: meta.scheme.into(),
-            source,
-        })?;
-
-    let chunk = Chunk::new(Bytes::from(decompressed.into_owned()));
-
-    if chunk.data.len() != meta.uncompressed_len as usize {
+    let decompressed = if meta.scheme == CompressionScheme::None {
+        std::borrow::Cow::Borrowed(compressed)
+    } else {
+        let mut output = DecodedChunkBuffer {
+            bytes: Vec::new(),
+            limit: meta.uncompressed_len as usize,
+        };
+        // BG4's upstream reader buffers before writing. Decode its LZ4 frame
+        // through the same bound first, then regroup the accepted bytes.
+        let frame_scheme = if meta.scheme == CompressionScheme::ByteGrouping4LZ4 {
+            CompressionScheme::LZ4
+        } else {
+            meta.scheme
+        };
+        frame_scheme
+            .decompress_from_reader(&mut std::io::Cursor::new(compressed), &mut output)
+            .map_err(|source| XetError::Decompress {
+                scheme: meta.scheme.into(),
+                source,
+            })?;
+        let bytes = if meta.scheme == CompressionScheme::ByteGrouping4LZ4 {
+            xet_core_structures::xorb_object::byte_grouping::bg4::bg4_regroup(&output.bytes)
+        } else {
+            output.bytes
+        };
+        std::borrow::Cow::Owned(bytes)
+    };
+    if decompressed.len() != meta.uncompressed_len as usize {
         return Err(corrupt(format!(
             "decompressed chunk length {} does not match metadata length {}",
-            chunk.data.len(),
-            meta.uncompressed_len
+            decompressed.len(),
+            meta.uncompressed_len,
         )));
     }
-
-    if chunk.hash != meta.hash {
+    let hash = compute_data_hash(&decompressed);
+    if hash != meta.hash {
         return Err(XetError::CorruptObject {
             path: format!("chunk at offset {}", meta.offset),
-            reason: format!("hash mismatch: expected {}, got {}", meta.hash, chunk.hash),
+            reason: format!("hash mismatch: expected {}, got {}", meta.hash, hash),
         });
     }
+    Ok(decompressed)
+}
 
-    Ok(chunk)
+struct DecodedChunkBuffer {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for DecodedChunkBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|len| len > self.limit)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "decoded chunk exceeds declared length of {} bytes",
+                    self.limit
+                ),
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn extend_decoded_size(total: u32, chunk_len: u32) -> Result<u32> {
+    validate_chunk_size(chunk_len)?;
+    total
+        .checked_add(chunk_len)
+        .ok_or_else(|| corrupt("decoded xorb size exceeds u32 offset layout"))
 }
 
 fn validate_chunk_size(uncompressed_len: u32) -> Result<()> {
@@ -457,24 +513,16 @@ fn validate_chunk_size(uncompressed_len: u32) -> Result<()> {
 }
 
 fn decompress_chunk_bytes(meta: &ChunkMeta, compressed: Bytes) -> Result<Chunk> {
-    let data = match meta
-        .scheme
-        .decompress_from_slice(&compressed)
-        .map_err(|source| XetError::Decompress {
-            scheme: meta.scheme.into(),
-            source,
-        })? {
+    let data = match decompress_chunk_data(meta, &compressed)? {
         std::borrow::Cow::Borrowed(_) => compressed,
         std::borrow::Cow::Owned(data) => Bytes::from(data),
     };
-    let chunk = Chunk::new(data);
-    if chunk.hash != meta.hash {
-        return Err(XetError::CorruptObject {
-            path: format!("chunk at offset {}", meta.offset),
-            reason: format!("hash mismatch: expected {}, got {}", meta.hash, chunk.hash),
-        });
-    }
-    Ok(chunk)
+    // The shared decoder verified this hash. Preserve the raw Bytes slice
+    // without allocating a copy or hashing the decoded chunk a second time.
+    Ok(Chunk {
+        hash: meta.hash,
+        data,
+    })
 }
 
 fn corrupt(reason: impl AsRef<str>) -> XetError {
@@ -728,6 +776,110 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("chunk is"));
+    }
+
+    #[test]
+    fn chunk_readers_reject_inconsistent_decoded_length() {
+        for scheme in [
+            CompressionScheme::None,
+            CompressionScheme::LZ4,
+            CompressionScheme::ByteGrouping4LZ4,
+        ] {
+            let original = make_chunk(42, 4096);
+            let policy: std::sync::Arc<dyn CompressionPolicy> =
+                std::sync::Arc::new(FixedCompression::new(scheme));
+            let mut builder = XorbBuilder::with_policy(policy);
+            builder.push(&original, RunId(0)).unwrap();
+            let xorb = builder.finalize().unwrap().pop().unwrap();
+            let mut bytes = xorb.bytes.to_vec();
+            let footer_start = bytes.len() - FOOTER_SIZE;
+            let region = xorb_metadata_region(bytes.len(), &bytes[footer_start..]).unwrap();
+            bytes[region.offset + 40..region.offset + 44].copy_from_slice(&4097u32.to_le_bytes());
+            let parser = XorbParser::parse(Bytes::from(bytes)).unwrap();
+            let meta = parser.chunk_meta(0).unwrap();
+            let payload = parser.data.slice(0..region.offset);
+            assert!(verify_compressed_chunk(meta, &payload).is_err(), "{scheme}");
+            assert!(parser.get_chunk(0).is_err(), "{scheme}: single chunk");
+            assert!(parser.verify_all_chunks().is_err(), "{scheme}: all chunks");
+            assert!(
+                parser.get_chunk_range(0, 1).is_err(),
+                "{scheme}: chunk vector"
+            );
+            assert!(
+                parser.get_chunk_range_bytes(0, 1).is_err(),
+                "{scheme}: contiguous range"
+            );
+            assert!(
+                decode_chunk_range_bytes(std::slice::from_ref(meta), payload).is_err(),
+                "{scheme}: detached range"
+            );
+        }
+    }
+
+    #[test]
+    fn compressed_chunks_stop_when_output_exceeds_declared_length() {
+        for scheme in [CompressionScheme::LZ4, CompressionScheme::ByteGrouping4LZ4] {
+            let original = make_chunk(17, 1024 * 1024);
+            let compressed = scheme.compress_from_slice(&original.data).unwrap();
+            let meta = ChunkMeta {
+                hash: original.hash,
+                offset: 0,
+                compressed_len: compressed.len() as u32,
+                uncompressed_len: 128,
+                scheme,
+            };
+            let valid = ChunkMeta {
+                uncompressed_len: original.data.len() as u32,
+                ..meta
+            };
+            verify_compressed_chunk(&valid, &compressed).unwrap();
+            let error = verify_compressed_chunk(&meta, &compressed).unwrap_err();
+            let XetError::Decompress { source, .. } = error else {
+                panic!("{scheme}: expansion must stop in the streaming decoder: {error}");
+            };
+            assert!(
+                matches!(source, xet_core_structures::CoreError::Io(ref error)
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string().contains("exceeds declared length")),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_decoded_total_outside_offset_layout() {
+        let count = 16usize;
+        let metadata_len = count * CHUNK_META_ENTRY_SIZE;
+        let mut bytes = vec![0u8; metadata_len + FOOTER_SIZE];
+        for index in 0..count {
+            let start = index * CHUNK_META_ENTRY_SIZE;
+            bytes[start + 40..start + 44].copy_from_slice(&(MAX_XORB_SIZE as u32).to_le_bytes());
+        }
+        bytes[metadata_len..metadata_len + 4].copy_from_slice(&(count as u32).to_le_bytes());
+        bytes[metadata_len + FOOTER_SIZE - 4..].copy_from_slice(XORB_MAGIC);
+        let parsed = XorbParser::parse(Bytes::copy_from_slice(&bytes));
+        assert!(
+            matches!(parsed, Err(XetError::CorruptObject { .. })),
+            "decoded total cannot fit the builder's u32 offset layout"
+        );
+        let metas = vec![
+            ChunkMeta {
+                hash: MerkleHash::from([0u8; 32]),
+                offset: 0,
+                compressed_len: 0,
+                uncompressed_len: MAX_XORB_SIZE as u32,
+                scheme: CompressionScheme::None,
+            };
+            count
+        ];
+        let error = decode_chunk_range_bytes(&metas, Bytes::new()).unwrap_err();
+        assert!(error.to_string().contains("decoded xorb size"));
+
+        // The wire limit is u32::MAX decoded bytes, not the smaller serialized
+        // xorb size limit. This structural boundary needs no payload allocation.
+        let last_len = (count - 1) * CHUNK_META_ENTRY_SIZE + 40;
+        bytes[last_len..last_len + 4].copy_from_slice(&((MAX_XORB_SIZE - 1) as u32).to_le_bytes());
+        assert!(XorbParser::parse(Bytes::from(bytes)).is_ok());
     }
 
     #[test]

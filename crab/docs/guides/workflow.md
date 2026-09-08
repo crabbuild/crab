@@ -1383,9 +1383,13 @@ re-execution. Atomic semantics apply only after execution completes
 
 ### `--cache-only`
 
-Intentionally does NOT revalidate the working tree. It recomputes the
-stage hash from the lockfile's recorded state and materializes outs
-from the cache. Fails with exit 3 on any miss.
+YAML replay uses the lockfile's recorded stage hashes without revalidating
+working-tree inputs. It materializes cached outputs without executing stage
+commands or cache-hit hooks. Missing records or cache entries fail with exit 3.
+
+Replay holds the scheduler lock through output publication. Stage selection
+uses the same target and dependency filters as a normal run; `--watch` and
+`--cache-only` cannot be combined.
 
 Use this in CI to reproduce a commit's outputs exactly:
 

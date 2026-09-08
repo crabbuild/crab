@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::error_info::ErrorInfo;
-use crab_types::time::now_rfc3339_millis;
+use crab_types::time::{TimestampError, now_rfc3339_millis};
 
 /// Outer wrapper for every `--json` response.
 ///
@@ -31,28 +31,36 @@ pub struct Envelope<T: Serialize> {
 }
 
 impl<T: Serialize> Envelope<T> {
-    /// Build a success envelope with the current timestamp.
-    pub fn ok(schema: &'static str, version: &'static str, data: T) -> Self {
-        Self {
+    /// Builds a success envelope, returning an error for an unrepresentable clock.
+    pub fn ok(
+        schema: &'static str,
+        version: &'static str,
+        data: T,
+    ) -> Result<Self, TimestampError> {
+        Ok(Self {
             schema,
             version,
-            timestamp: now_rfc3339_millis(),
+            timestamp: now_rfc3339_millis()?,
             data: Some(data),
             error: None,
-        }
+        })
     }
 }
 
 impl Envelope<serde_json::Value> {
-    /// Build an error envelope with the current timestamp.
-    pub fn err(schema: &'static str, version: &'static str, error: ErrorInfo) -> Self {
-        Self {
+    /// Builds an error envelope, returning an error for an unrepresentable clock.
+    pub fn err(
+        schema: &'static str,
+        version: &'static str,
+        error: ErrorInfo,
+    ) -> Result<Self, TimestampError> {
+        Ok(Self {
             schema,
             version,
-            timestamp: now_rfc3339_millis(),
+            timestamp: now_rfc3339_millis()?,
             data: None,
             error: Some(error),
-        }
+        })
     }
 }
 

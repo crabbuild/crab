@@ -30,6 +30,8 @@ semantics rather than treating every cache object as interchangeable.
 
 ## Invariants
 
+- Xorb range resolution, identity verification, and reads share one open file. The size-aware resolver accepts caller policy but validates its returned bounds; `get_xorb_range_if_present` keeps exact-range semantics.
+  Source: `crates/crab-cache/src/local_cache.rs`.
 - Manifest keys carry names and optional ETags; do not treat them as content-addressed chunk/shard/xorb identities.
   Source: `crates/crab-cache/src/key.rs`.
 - Path taxonomy is shared with the service and store adapter; review both consumers before changing immutable admission.
@@ -44,6 +46,10 @@ Empty default. `active-probe` adds HTTP probing; `remote-client` includes active
 ## Verification
 
 Inline local_cache tests exercise fills and corrupt entries; path_class tests cover route admission. Inspect lifecycle/private filesystem tests for cache root changes.
+
+Credential Debug regressions live in `crates/crab-cache/tests/credential_debug.rs`.
+Run that integration target with no default features and with `remote-client`;
+the latter includes active-probe credentials and stored client headers.
 
 Run from repository root. The target below is the example for worktree `089c`;
 replace it with a unique directory for your checkout. Before compilation, verify
@@ -62,7 +68,8 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 
 ## Related documentation
 
-- `crates/crab-cache/README.md` — usage and detailed contracts.
+- `crates/crab-cache/README.md` — feature selection, usage, and source map.
+- `crates/crab-cache/REFERENCE.md` — persistence/lifecycle contracts and qualification limits.
 - `crates/crab-cache/Cargo.toml` — dependency and feature authority.
 
 Update this guide when entry points, ownership, invariants, features, or test

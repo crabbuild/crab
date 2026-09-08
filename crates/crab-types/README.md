@@ -41,19 +41,26 @@ format used by the data plane.
 ## Usage
 
 ```rust
-use crab_types::pointer::{is_pointer, Pointer};
+use crab_types::pointer::{Pointer, is_pointer};
 
-let pointer = Pointer {
-    file_hash: [0x42; 32],
-    size: 3,
-    shard_hint: None,
-};
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let pointer = Pointer {
+        file_hash: [0x42; 32],
+        size: 3,
+        shard_hint: None,
+    };
 
-let bytes = pointer.serialize();
-assert!(is_pointer(&bytes));
-assert_eq!(Pointer::parse(&bytes)?.size, 3);
-# Ok::<(), Box<dyn std::error::Error>>(())
+    let bytes = pointer.serialize();
+    assert!(is_pointer(&bytes));
+    assert_eq!(Pointer::parse(&bytes)?.size, 3);
+    Ok(())
+}
 ```
+
+`is_pointer` is a detection heuristic, not a validation result. Call
+`Pointer::parse` before using pointer fields; for example, a decimal size can
+look like a pointer but overflow `u64`. Parsing failures expose underlying
+UTF-8 and integer errors through `std::error::Error::source()`.
 
 Use `serde`/`schemars` derives on shared configuration types when a contract
 must cross a JSON or YAML boundary. Keep implementation-specific state in its
@@ -65,3 +72,25 @@ share it.
 There are no optional features. The dependency surface is intentionally limited
 to serialization and schema generation so this crate can sit at the bottom of
 the workspace dependency graph.
+
+## Timestamp errors
+
+Timestamp formatting returns `Result<String, TimestampError>`. Unix milliseconds
+must be at most `253402300799999` (the last millisecond of year 9999); system
+times before the Unix epoch are rejected instead of being replaced by 1970.
+`from_system_time` truncates sub-millisecond precision and preserves the cause of
+a pre-epoch clock error.
+
+```rust
+use crab_types::time::{TimestampError, from_epoch_millis};
+
+fn main() -> Result<(), TimestampError> {
+    let timestamp = from_epoch_millis(1_777_055_537_123)?;
+    assert_eq!(timestamp, "2026-04-24T18:32:17.123Z");
+    Ok(())
+}
+```
+
+Resolve timestamps before starting the write that records them. Terminal error
+reporting must handle clock failure without recursively constructing another
+timestamped error.

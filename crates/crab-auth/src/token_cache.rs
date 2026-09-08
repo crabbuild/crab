@@ -38,7 +38,8 @@ pub struct TokenCache {
 }
 
 /// Cached token set for a single provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Debug output includes lifetime metadata only; serialization includes tokens.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CachedTokens {
     /// The OIDC ID token (JWT).
     pub id_token: String,
@@ -54,6 +55,15 @@ pub struct CachedTokens {
     /// Unix timestamp at which the access token expires, when known.
     #[serde(default)]
     pub expires_at: Option<u64>,
+}
+
+impl std::fmt::Debug for CachedTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedTokens")
+            .field("issued_at", &self.issued_at)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Identity claims extracted from a JWT ID token.
@@ -156,15 +166,17 @@ impl TokenCache {
     /// Load tokens for the given provider. Returns `None` if not cached.
     ///
     /// Decrypts and deserializes the token file. Returns `None` if the file
-    /// does not exist. Returns an error on decryption or parse failure.
+    /// does not exist. Lock, read, decryption, and parse failures remain errors.
     pub fn load(&self, provider: &str) -> Result<Option<CachedTokens>> {
         let path = self.token_path(provider);
-        if !path.exists() {
-            return Ok(None);
-        }
-
         let _lock = flock_dir(&self.cache_dir)?;
-        let ciphertext = fs::read(&path)?;
+        // Classify absence while holding the same lock as logout. An earlier
+        // existence probe can race deletion and also conceal filesystem errors.
+        let ciphertext = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
         let plaintext = self.decrypt(&ciphertext)?;
 
         let cached: CachedTokens = serde_json::from_slice(&plaintext)
@@ -368,19 +380,24 @@ fn load_or_create_key() -> Result<[u8; 32]> {
 fn keychain_load_key() -> Result<[u8; 32]> {
     use std::process::{Command, Stdio};
 
-    // Pre-check: verify a login keychain is available. `list-keychains` never
-    // triggers a GUI dialog. If no keychain is listed, skip entirely.
-    let list_output = Command::new("security")
-        .args(["list-keychains", "-d", "user"])
-        .stderr(Stdio::null())
-        .output()?;
+    keychain_load_key_with(|args| {
+        Command::new("security")
+            .args(args)
+            .stderr(Stdio::null())
+            .output()
+    })
+}
 
+#[cfg(target_os = "macos")]
+fn keychain_load_key_with(
+    mut run: impl FnMut(&[&str]) -> std::io::Result<std::process::Output>,
+) -> Result<[u8; 32]> {
+    let list_output = run(&["list-keychains", "-d", "user"])?;
     if !list_output.status.success() {
         return Err(AuthError::KeyStore(
             "security list-keychains failed — no usable keychain".into(),
         ));
     }
-
     let keychains = String::from_utf8_lossy(&list_output.stdout);
     if keychains.trim().is_empty() || !keychains.contains("login.keychain") {
         return Err(AuthError::KeyStore(
@@ -390,46 +407,39 @@ fn keychain_load_key() -> Result<[u8; 32]> {
 
     let service = "crab-token-cache";
     let account = "encryption-key";
-
-    // Try to read existing key.
-    let output = Command::new("security")
-        .args(["find-generic-password", "-s", service, "-a", account, "-w"])
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped())
-        .output()?;
-
+    let lookup = ["find-generic-password", "-s", service, "-a", account, "-w"];
+    let output = run(&lookup)?;
     if output.status.success() {
-        let hex_str = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        return hex_to_key(&hex_str);
+        return hex_to_key(String::from_utf8_lossy(&output.stdout).trim());
     }
 
-    // Key doesn't exist — generate and store.
     let mut key = [0u8; 32];
     rand::rng().fill(&mut key);
-    let hex_str = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
-
-    let status = Command::new("security")
-        .args([
-            "add-generic-password",
-            "-s",
-            service,
-            "-a",
-            account,
-            "-w",
-            &hex_str,
-            "-U", // update if exists
-        ])
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .status()?;
-
-    if !status.success() {
-        return Err(AuthError::KeyStore(
-            "failed to store encryption key in macOS Keychain".into(),
-        ));
+    let hex = key.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    // A failed lookup does not prove absence. Create without updating: replacing
+    // an existing key would make every token encrypted with it unreadable.
+    let output = run(&[
+        "add-generic-password",
+        "-s",
+        service,
+        "-a",
+        account,
+        "-w",
+        &hex,
+    ])?;
+    if output.status.success() {
+        return Ok(key);
     }
 
-    Ok(key)
+    // Another creator may have won. Only the stored key is authoritative;
+    // never return the unused candidate when creation fails.
+    let winner = run(&lookup)?;
+    if winner.status.success() {
+        return hex_to_key(String::from_utf8_lossy(&winner.stdout).trim());
+    }
+    Err(AuthError::KeyStore(
+        "failed to create or read encryption key in macOS Keychain".into(),
+    ))
 }
 
 /// Decode a 64-char hex string into a 32-byte key.
@@ -440,6 +450,11 @@ fn hex_to_key(hex: &str) -> Result<[u8; 32]> {
             "keychain key has unexpected length {} (expected 64 hex chars)",
             hex.len()
         )));
+    }
+    if !hex.is_ascii() {
+        return Err(AuthError::KeyStore(
+            "keychain key contains non-ASCII hex characters".to_owned(),
+        ));
     }
     let mut key = [0u8; 32];
     for (i, byte) in key.iter_mut().enumerate() {
@@ -489,31 +504,20 @@ fn read_key_file(path: &Path) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-/// Write the key file with 0600 permissions on Unix.
+/// Publish a complete key without replacing an existing key file.
 fn write_key_file(path: &Path, key: &[u8; 32]) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(key)?;
-        f.flush()?;
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        f.write_all(key)?;
-        f.flush()?;
-        Ok(())
-    }
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "key path has no parent")
+    })?;
+    // tempfile creates Unix files with mode 0600. Prepare and sync all bytes
+    // before exposing the final name, so a failed write cannot leave a short key.
+    let mut prepared = tempfile::NamedTempFile::new_in(parent)?;
+    prepared.write_all(key)?;
+    prepared.as_file().sync_all()?;
+    prepared
+        .persist_noclobber(path)
+        .map_err(|error| AuthError::Io(error.error))?;
+    Ok(())
 }
 
 /// Resolve `~/.config/crab/` for the key file location.
@@ -583,6 +587,156 @@ impl Drop for FlockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_hex_accepts_both_cases() {
+        for value in ["ab".repeat(32), "AB".repeat(32)] {
+            assert_eq!(hex_to_key(&value).unwrap(), [0xab; 32]);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_hex_rejects_multibyte_input() {
+        for value in [
+            format!("€{}", "0".repeat(61)),
+            format!("0é{}", "0".repeat(61)),
+        ] {
+            assert!(matches!(hex_to_key(&value), Err(AuthError::KeyStore(_))));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_creation_preserves_a_concurrent_winners_key() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        let winner = [42; 32];
+        let mut stored: Option<[u8; 32]> = None;
+        let key = keychain_load_key_with(|args| {
+            let (success, stdout) = match args[0] {
+                "list-keychains" => (true, b"login.keychain-db".to_vec()),
+                "find-generic-password" => match stored {
+                    Some(key) => (
+                        true,
+                        key.iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>()
+                            .into_bytes(),
+                    ),
+                    None => (false, Vec::new()),
+                },
+                "add-generic-password" => {
+                    // The competing process publishes after our initial miss.
+                    stored = Some(winner);
+                    if args.contains(&"-U") {
+                        stored = Some(hex_to_key(args[6]).unwrap());
+                        (true, Vec::new())
+                    } else {
+                        (false, Vec::new())
+                    }
+                }
+                _ => panic!("unexpected Keychain operation"),
+            };
+            Ok(Output {
+                status: ExitStatus::from_raw(if success { 0 } else { 256 }),
+                stdout,
+                stderr: Vec::new(),
+            })
+        })
+        .unwrap();
+        assert_eq!((key, stored), (winner, Some(winner)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn keychain_creation_never_returns_an_unstored_candidate() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        let result = keychain_load_key_with(|args| {
+            let listing = args[0] == "list-keychains";
+            Ok(Output {
+                status: ExitStatus::from_raw(if listing { 0 } else { 256 }),
+                stdout: if listing {
+                    b"login.keychain-db".to_vec()
+                } else {
+                    Vec::new()
+                },
+                stderr: Vec::new(),
+            })
+        });
+        assert!(matches!(result, Err(AuthError::KeyStore(_))));
+    }
+
+    #[test]
+    fn key_file_publication_preserves_the_existing_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".token-key");
+        write_key_file(&path, &[42; 32]).unwrap();
+        let conflict = write_key_file(&path, &[24; 32]);
+        assert!(
+            matches!(conflict, Err(AuthError::Io(ref error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(read_key_file(&path).unwrap(), [42; 32]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_publication_keeps_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".token-key");
+        write_key_file(&path, &[42; 32]).unwrap();
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_file_write_failure_does_not_publish_an_incomplete_key() {
+        const CHILD_DIR: &str = "CRAB_TEST_KEY_WRITE_FAILURE_DIR";
+        if let Some(dir) = std::env::var_os(CHILD_DIR) {
+            fs::write(PathBuf::from(&dir).join("child-ran"), b"").unwrap();
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: Only this subprocess changes its signal disposition and
+            // file-size limit. The limit pointer is valid for the FFI call.
+            unsafe {
+                assert_ne!(libc::signal(libc::SIGXFSZ, libc::SIG_IGN), libc::SIG_ERR);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &limit), 0);
+            }
+            let path = PathBuf::from(dir).join(".token-key");
+            assert!(matches!(
+                write_key_file(&path, &[42; 32]),
+                Err(AuthError::Io(_))
+            ));
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "token_cache::tests::key_file_write_failure_does_not_publish_an_incomplete_key",
+                "--test-threads=1",
+            ])
+            .env(CHILD_DIR, dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(dir.path().join("child-ran").exists());
+        assert!(!dir.path().join(".token-key").exists());
+    }
 
     /// Build a minimal JWT with the given claims JSON as the payload.
     fn make_jwt(claims_json: &str) -> String {
@@ -698,6 +852,19 @@ mod tests {
 
         assert_eq!(loaded.access_token.as_deref(), Some("access"));
         assert_eq!(loaded.expires_at, Some(loaded.issued_at + 600));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_invalid_cache_directory_instead_of_reporting_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("tokens");
+        fs::write(&cache_dir, b"not a directory").unwrap();
+        let cache = TokenCache {
+            cache_dir,
+            key: [0; 32],
+        };
+        assert!(matches!(cache.load("provider"), Err(AuthError::Io(_))));
     }
 
     #[test]

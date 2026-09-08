@@ -65,12 +65,19 @@ impl Default for Resources {
 /// Retry policy attached to a workflow stage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetryPolicy {
+    /// Total attempt budget, including the initial execution; must be at least one.
     pub max_attempts: u32,
+    /// Delay after the first failed attempt; zero requests immediate retries.
     pub initial_backoff: Duration,
+    /// Hard delay ceiling, including the first retry; zero disables all waiting.
     pub max_backoff: Duration,
+    /// Finite, nonnegative growth factor; the planner treats values below one as one.
     pub backoff_multiplier: f64,
+    /// Exit codes eligible for retry after a failed attempt.
     pub on_exit_codes: Vec<i32>,
+    /// Termination signal numbers eligible for retry.
     pub on_signals: Vec<i32>,
+    /// Whether a stage timeout is eligible for retry.
     pub on_timeout: bool,
 }
 

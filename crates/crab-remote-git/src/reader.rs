@@ -88,10 +88,10 @@ pub struct RemoteGitObject {
 
 pub(crate) type GitObject = RemoteGitObject;
 
+// Limit merging, not individual entries: a larger admitted entry still needs
+// one complete range. ReaderLimits and OperationBudget bound that request.
 const MAX_COALESCED_RANGE_BYTES: u64 = 8 * 1024 * 1024;
-// Git pack entries are often separated by small unrelated entries. A wider
-// gap removes thousands of object-store round trips while the range-size
-// bound keeps transient response memory bounded.
+// Include small gaps to avoid a separate object-store request for each entry.
 const MAX_COALESCED_GAP_BYTES: u64 = 32 * 1024;
 const DELTA_PREFETCH_BATCH_SIZE: usize = 50_000;
 const MATERIALIZE_CHUNK_SIZE: usize = 256;
@@ -2701,6 +2701,100 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn coalescing_preserves_entries_at_admission_boundaries() {
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let limit = MAX_COALESCED_RANGE_BYTES;
+        for (name, locations, expected) in [
+            (
+                "exact merge limit",
+                vec![(0, limit - 1), (limit - 1, 1)],
+                vec![(0, limit)],
+            ),
+            (
+                "past merge limit",
+                vec![(0, limit), (limit, 1)],
+                vec![(0, limit), (limit, limit + 1)],
+            ),
+            (
+                "exact gap limit",
+                vec![(0, 1), (1 + MAX_COALESCED_GAP_BYTES, 1)],
+                vec![(0, 2 + MAX_COALESCED_GAP_BYTES)],
+            ),
+            (
+                "past gap limit",
+                vec![(0, 1), (2 + MAX_COALESCED_GAP_BYTES, 1)],
+                vec![
+                    (0, 1),
+                    (2 + MAX_COALESCED_GAP_BYTES, 3 + MAX_COALESCED_GAP_BYTES),
+                ],
+            ),
+            (
+                "large admitted entry",
+                vec![(0, limit + 1)],
+                vec![(0, limit + 1)],
+            ),
+            (
+                "last addressable byte",
+                vec![(u64::MAX - 1, 1)],
+                vec![(u64::MAX - 1, u64::MAX)],
+            ),
+        ] {
+            let entries = locations
+                .iter()
+                .rev()
+                .map(|&(pack_offset, entry_len)| {
+                    (
+                        oid,
+                        GitObjectLocator {
+                            ordinal: 0,
+                            pack_id,
+                            location: GitObjectLocation {
+                                pack_offset,
+                                entry_len,
+                                crc32: 0,
+                            },
+                            metadata: Default::default(),
+                        },
+                    )
+                })
+                .collect();
+            let ranges = coalesce_ranges(entries).expect(name);
+            let actual: Vec<_> = ranges
+                .iter()
+                .map(|range| (range.start, range.end))
+                .collect();
+            assert_eq!(actual, expected, "{name}");
+            let mut retained: Vec<_> = ranges
+                .into_iter()
+                .flat_map(|range| range.entries)
+                .map(|(_, locator)| (locator.location.pack_offset, locator.location.entry_len))
+                .collect();
+            retained.sort_unstable();
+            assert_eq!(
+                retained, locations,
+                "{name}: no entry may be dropped or shortened"
+            );
+        }
+        let overflow = GitObjectLocator {
+            ordinal: 0,
+            pack_id,
+            location: GitObjectLocation {
+                pack_offset: u64::MAX,
+                entry_len: 1,
+                crc32: 0,
+            },
+            metadata: Default::default(),
+        };
+        assert!(matches!(
+            coalesce_ranges(vec![(oid, overflow)]),
+            Err(Error::Corrupt {
+                stage: CorruptionStage::PackEntry
+            })
+        ));
     }
 
     #[test]

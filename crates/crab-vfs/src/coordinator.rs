@@ -90,12 +90,14 @@ pub struct MountHandle {
     pub engine: Arc<VfsEngine>,
     /// Hydration service for this mount.
     pub hydration: Arc<HydrationService>,
-    /// Full pipeline output (snapshot, overlay, handles, etc.).
+    /// Prepared snapshot, overlay, and shared filesystem services.
     pub pipeline_output: PipelineOutput,
     /// Configuration used to create this mount.
     pub config: PipelineConfig,
     /// FUSE background session.
     pub fuse_session: Option<fuser::BackgroundSession>,
+    /// Refresh task; cancellation must be followed by completion before release.
+    pub refresh_handle: Option<tokio::task::JoinHandle<()>>,
     /// Live inode index for targeted kernel cache invalidation.
     pub invalidation_index: Option<FuseInvalidationIndex>,
     /// Per-mount cancellation token (child of coordinator's token).
@@ -432,12 +434,12 @@ impl Coordinator {
 
     /// Remove and teardown a single mount.
     ///
-    /// Cancels the mount's token, drops the FUSE session (which unmounts),
-    /// and removes it from the active map.
-    pub fn remove_mount(&mut self, mountpoint: &Path) -> Result<()> {
+    /// Removes the mount, unmounts its backend, and finishes background hydration
+    /// before releasing its cache ownership. The unmount error survives cleanup.
+    pub async fn remove_mount(&mut self, mountpoint: &Path) -> Result<()> {
         let handle = self.take_mount(mountpoint)?;
 
-        let result = unmount_removed_mount(handle, mountpoint);
+        let result = unmount_removed_mount(handle, mountpoint).await;
         self.signal_shutdown_if_idle();
         result?;
 
@@ -677,6 +679,7 @@ impl Coordinator {
             if let Some(handle) = self.mounts.remove(mountpoint) {
                 handle.cancel_token.cancel();
                 unmount_session_logged(handle.fuse_session, mountpoint);
+                handle.hydration.request_shutdown();
                 info!(mountpoint = %mountpoint.display(), "unmounted during shutdown");
             }
         }
@@ -684,14 +687,12 @@ impl Coordinator {
         self.cleanup_files();
     }
 
-    /// Graceful async shutdown: cancel all mount child tokens, wait up to 10s
-    /// for hydrator tasks to complete, log warnings for stuck mounts, then
-    /// clean up daemon files.
+    /// Unmount backends and await all admitted background hydration work.
     ///
-    /// This is the preferred shutdown path when running inside a tokio runtime.
+    /// Warn after ten seconds but retain completion ownership until pending
+    /// reconstruction and cache writes finish. Await this method to completion.
     pub async fn shutdown_graceful(&mut self) {
         use std::time::Duration;
-        use tokio::time::timeout;
 
         const GRACE_PERIOD: Duration = Duration::from_secs(10);
 
@@ -708,8 +709,7 @@ impl Coordinator {
         self.pending_mountpoints.clear();
         self.pending_cache_dirs.clear();
 
-        // Collect all mount handles so we can cancel their tokens and await
-        // their hydrator join handles with a timeout.
+        // Retain every mount's cache lock until background hydration completes.
         let mountpoints: Vec<PathBuf> = self.mounts.keys().cloned().collect();
         let mut mount_handles: Vec<(PathBuf, MountHandle)> = mountpoints
             .into_iter()
@@ -724,43 +724,26 @@ impl Coordinator {
             debug!(mountpoint = %mountpoint.display(), "cancelled mount child token");
         }
 
-        // Wait for hydrator handles with a per-mount timeout.
         for (mountpoint, handle) in &mut mount_handles {
-            let hydrator_count = handle.pipeline_output.hydrator_handles.len();
-            if hydrator_count == 0 {
-                info!(mountpoint = %mountpoint.display(), "mount has no active tasks, unmounting");
-                continue;
+            // Refresh may await a blocking Git fetch. Joining the outer task
+            // after cancellation keeps snapshot/cache ownership through it.
+            if let Some(refresh) = handle.refresh_handle.take() {
+                let _ = refresh.await;
             }
-
-            let handles: Vec<_> = handle.pipeline_output.hydrator_handles.drain(..).collect();
-            let mp_display = mountpoint.display().to_string();
-
-            let wait_result = timeout(GRACE_PERIOD, async {
-                for h in handles {
-                    // Ignore join errors (task may have been aborted or panicked).
-                    let _ = h.await;
-                }
-            })
-            .await;
-
-            match wait_result {
-                Ok(()) => {
-                    info!(mountpoint = %mp_display, "mount tasks completed within grace period");
-                }
-                Err(_) => {
-                    warn!(
-                        mountpoint = %mp_display,
-                        grace_period_secs = GRACE_PERIOD.as_secs(),
-                        "mount did not unmount within grace period"
-                    );
-                }
+            unmount_session_logged(handle.fuse_session.take(), mountpoint);
+            if tokio::time::timeout(GRACE_PERIOD, handle.hydration.shutdown())
+                .await
+                .is_err()
+            {
+                warn!(
+                    mountpoint = %mountpoint.display(),
+                    "waiting for in-progress background hydration after unmount"
+                );
+                // Cancelling the wait does not cancel reconstruction or detach
+                // its blocking cache writes. Retain mount/cache ownership.
+                handle.hydration.shutdown().await;
             }
-        }
-
-        // Unmount FUSE sessions after waiting for tasks.
-        for (mountpoint, handle) in mount_handles {
-            unmount_session_logged(handle.fuse_session, &mountpoint);
-            info!(mountpoint = %mountpoint.display(), "unmounted during shutdown");
+            info!(mountpoint = %mountpoint.display(), "unmounted and drained background hydration");
         }
 
         self.cleanup_files();
@@ -919,6 +902,7 @@ impl Drop for Coordinator {
             if let Some(handle) = self.mounts.remove(mountpoint) {
                 handle.cancel_token.cancel();
                 unmount_session_logged(handle.fuse_session, mountpoint);
+                handle.hydration.request_shutdown();
             }
         }
 
@@ -935,8 +919,14 @@ fn unmount_session(session: Option<fuser::BackgroundSession>, mountpoint: &Path)
     crate::mount::unmount_background_session(session, mountpoint)
 }
 
-pub fn unmount_removed_mount(handle: MountHandle, mountpoint: &Path) -> Result<()> {
-    unmount_session(handle.fuse_session, mountpoint)
+pub async fn unmount_removed_mount(mut handle: MountHandle, mountpoint: &Path) -> Result<()> {
+    handle.cancel_token.cancel();
+    if let Some(refresh) = handle.refresh_handle.take() {
+        let _ = refresh.await;
+    }
+    let result = unmount_session(handle.fuse_session, mountpoint);
+    handle.hydration.shutdown().await;
+    result
 }
 
 fn unmount_session_logged(session: Option<fuser::BackgroundSession>, mountpoint: &Path) {
@@ -1113,6 +1103,10 @@ async fn wait_for_shutdown_signal() {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected protocol variants"
+)]
 mod tests {
     use super::*;
 
@@ -1151,6 +1145,26 @@ mod tests {
 
         let pid = read_daemon_pid(tmp.path());
         assert_eq!(pid, Some(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coordinator_cleans_stale_socket_only_after_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = CoordinatorConfig::with_base_dir(directory.path().to_path_buf());
+        let path = config.socket_path();
+        let lock = acquire_daemon_lock(&config.lock_path()).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+
+        assert!(Coordinator::start(config.clone()).is_err());
+        assert!(
+            path.exists(),
+            "a losing coordinator must leave the socket alone"
+        );
+        drop(lock);
+
+        let _coordinator = Coordinator::start(config).unwrap();
+        assert!(!path.exists(), "the lock holder owns stale socket cleanup");
     }
 
     #[test]
@@ -1313,8 +1327,8 @@ mod tests {
     /// - Multiple mounts share the same cache instance
     /// - Per-mount isolation: each mount has its own Snapshot, Resolver, Engine
     /// - Ref-counting: removing the last mount signals coordinator shutdown
-    #[test]
-    fn shared_resources_and_ref_counting() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shared_resources_and_ref_counting() {
         use crate::ChunkCache;
         use crate::engine::VfsEngine;
         use crate::hydration::HydrationService;
@@ -1413,7 +1427,6 @@ mod tests {
                 head_oid: "deadbeef".into(),
                 head_ref: "refs/heads/main".into(),
                 generation: 0,
-                hydrator_handles: Vec::new(),
             };
 
             MountHandle {
@@ -1423,6 +1436,7 @@ mod tests {
                 pipeline_output,
                 config,
                 fuse_session: None,
+                refresh_handle: None,
                 invalidation_index: None,
                 cancel_token: cancel,
                 _cache_lock: None,
@@ -1439,7 +1453,7 @@ mod tests {
         let cancel_a = coordinator.child_cancel_token();
         let cancel_b = coordinator.child_cancel_token();
 
-        let handle_a = make_mount_handle(
+        let mut handle_a = make_mount_handle(
             &shared_cache,
             &tmp.path().join("mount_a/snapshot.sqlite"),
             "crab://bucket/repo-a",
@@ -1453,6 +1467,18 @@ mod tests {
             true,
             cancel_b.clone(),
         );
+
+        let (fetch_started, started) = tokio::sync::oneshot::channel();
+        let (finish_fetch, fetch_finished) = std::sync::mpsc::channel();
+        handle_a.refresh_handle = Some(tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                fetch_started.send(()).unwrap();
+                fetch_finished.recv().unwrap();
+            })
+            .await
+            .unwrap();
+        }));
+        started.await.unwrap();
 
         // Register both mounts.
         let mp_a = PathBuf::from("/mnt/repo-a");
@@ -1514,7 +1540,22 @@ mod tests {
         assert!(coordinator.pending_mountpoints.is_empty());
         assert!(coordinator.pending_cache_dirs.is_empty());
 
-        coordinator.remove_mount(&mp_a).unwrap();
+        {
+            use std::future::Future;
+            use std::task::Poll;
+
+            let removal = coordinator.remove_mount(&mp_a);
+            tokio::pin!(removal);
+            let waiting = std::future::poll_fn(|context| {
+                Poll::Ready(removal.as_mut().poll(context).is_pending())
+            })
+            .await;
+            // Release the simulated blocking Git fetch even if removal returned
+            // early, so a failing assertion cannot strand the test runtime.
+            finish_fetch.send(()).unwrap();
+            assert!(waiting, "mount removal detached in-progress refresh work");
+            removal.await.unwrap();
+        }
         assert_eq!(coordinator.mount_count(), 1);
         assert!(!coordinator.cancel_token().is_cancelled());
 
@@ -1523,7 +1564,7 @@ mod tests {
         // Mount B's cancel token should still be active.
         assert!(!cancel_b.is_cancelled());
 
-        coordinator.remove_mount(&mp_b).unwrap();
+        coordinator.remove_mount(&mp_b).await.unwrap();
         assert_eq!(coordinator.mount_count(), 0);
         assert!(coordinator.cancel_token().is_cancelled());
 

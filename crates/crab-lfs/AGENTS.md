@@ -35,10 +35,23 @@ either product surface.
 
 ## Invariants
 
+- Bind a receipt to the metadata returned with verified bytes, never a later
+  HEAD. Serving a second response requires matching strong ETag/version identity;
+  old verifier receipts cannot establish that proof.
+  Source: `crates/crab-lfs/src/object_store.rs`.
+
+- Non-resumable multipart completion uses `crab_storage::multipart::complete_upload`: abort on failure, preserve the completion error, and await cleanup before retry. Durable journal sessions retain their separate recovery protocol.
+  Source: `crates/crab-storage/src/multipart.rs`.
+
+- Route full and final partial upload parts through the same admission helper;
+  the EOF tail must not exceed the four-part queue bound.
+  Source: `crates/crab-lfs/src/object_store.rs`.
 - Keep declared SHA-256 identity and size verification together; presence or a matching path alone does not prove object bytes.
   Source: `crates/crab-lfs/src/object_store.rs`.
 - Fresh origin verification differs from receipt-aware reads and replica fallback; callers needing publication proof must retain the origin-only boundary.
   Source: `crates/crab-lfs/src/object_store/origin.rs`.
+- Retain the typed JSON cause and object key when decoding lock records. Do
+  not collapse corrupt metadata into absence or a display-only error.
 - Release locks with holder/ID checks and CAS tombstones; a stale unlock must not remove a replacement lock.
   Source: `crates/crab-lfs/src/lock.rs`.
 

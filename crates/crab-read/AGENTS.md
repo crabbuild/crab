@@ -34,8 +34,26 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
   Source: `crates/crab-read/src/fetch_admission.rs`.
 - Preserve the difference between full-file hash verification and range/chunk verification; partial output is not proof of the complete file.
   Source: `crates/crab-read/src/hydrator.rs`.
-- Close file-index lookup sessions after successful, failed, and cancelled resolution; follow the explicit close helper when changing batching.
+- TermResolver construction rejects zero/oversized permit counts. Its semaphore
+  is shared across batches; do not recreate independent capacity per call.
+  Bound retained worker tasks per batch too; reap completion order while
+  retaining input-order strict errors and cancellation precedence.
   Source: `crates/crab-read/src/term_resolver.rs`.
+- Reuse metadata's SharedFileIndexLookup for term batches; do not duplicate lazy
+  session ownership or depend on unique Arc ownership to close it.
+- Batch cancellation uses a child token and drop guard: abandonment must
+  release admission waiters without cancelling the caller or sibling batches.
+- A batch admission token keeps its closed TaskTracker nonempty while workers
+  can still register. The cleanup task waits for that token and every tracked
+  worker before closing the file-index session. Normal and abandoned batches
+  share this owner; dropping a cleanup await must not interrupt close.
+- Await batch futures through cancellation before shutting down Tokio; cleanup
+  after abandonment requires the runtime to remain alive.
+  Source: `crates/crab-read/src/term_resolver.rs`.
+- Preserve typed worker join failures through `ReadError::ResolutionTask` and
+  consumer conversions. Strict resolution must not stringify away JoinError;
+  best-effort batches still log and omit failed files.
+  Sources: `crates/crab-read/src/error.rs`, `crab/src/core/error.rs`.
 
 ## Features and platform
 

@@ -108,7 +108,7 @@ fn run_log(path: PathBuf, operation: Option<&str>, mode: OutputMode) -> Result<(
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(AUDIT_LOG_SCHEMA, AUDIT_SCHEMA_VERSION, &payload)
+            emit_json(AUDIT_LOG_SCHEMA, AUDIT_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             if payload.events.is_empty() {
@@ -130,7 +130,7 @@ fn run_verify(path: PathBuf, mode: OutputMode) -> Result<()> {
     let payload = verify_log(&path)?;
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(AUDIT_VERIFY_SCHEMA, AUDIT_SCHEMA_VERSION, &payload);
+            emit_json(AUDIT_VERIFY_SCHEMA, AUDIT_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             if payload.invalid == 0 {
@@ -172,7 +172,7 @@ fn run_export(
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(AUDIT_EXPORT_SCHEMA, AUDIT_SCHEMA_VERSION, &payload);
+            emit_json(AUDIT_EXPORT_SCHEMA, AUDIT_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             println!(

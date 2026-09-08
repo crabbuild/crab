@@ -13,7 +13,7 @@ use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::{Result, WriteError};
+use crate::{Result, WriteError, finish_after_cleanup};
 
 const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 // Yield the manifest lease after a bounded wave count, even under continuous writes.
@@ -365,7 +365,7 @@ async fn compact_ref_journal_until_idle(
         let compacted = crab_metadata::manifest_store::compact_ref_journal(
             store,
             router,
-            crab_types::time::now_rfc3339_millis(),
+            crab_types::time::now_rfc3339_millis()?,
             pusher.clone(),
             uuid::Uuid::now_v7().to_string(),
         )
@@ -433,17 +433,12 @@ async fn compact_ref_journal_with_lock(
     )
     .await;
     let release = lock.release().await.map_err(WriteError::from);
-    match (operation, release) {
-        (Ok(compacted), Ok(())) => Ok(compacted.is_some()),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            warn!(
-                error = %release_error,
-                "ref journal compaction lock release also failed after owner error"
-            );
-            Err(error)
-        }
-    }
+    finish_after_cleanup(
+        operation,
+        release,
+        "ref journal compaction lock release also failed after owner error",
+    )
+    .map(|compacted| compacted.is_some())
 }
 
 /// Compact committed ref-journal transactions under the generation owner.
@@ -524,15 +519,9 @@ pub async fn compact_for_reader(
     })
     .await;
     let release = lock.release().await.map_err(WriteError::from);
-    match (operation, release) {
-        (Ok(compacted), Ok(())) => Ok(compacted),
-        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-        (Err(error), Err(release_error)) => {
-            warn!(
-                error = %release_error,
-                "reader ref journal lock release also failed after compaction error"
-            );
-            Err(error)
-        }
-    }
+    finish_after_cleanup(
+        operation,
+        release,
+        "reader ref journal lock release also failed after compaction error",
+    )
 }

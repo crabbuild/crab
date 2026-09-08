@@ -21,21 +21,20 @@ pub struct TermResolver {
 
 impl TermResolver {
     /// Create a resolver from the current CLI storage layout facade.
-    #[must_use]
     pub fn new(
         store: CachingStore,
         router: StoreLayout,
         cache: Arc<LocalCache>,
         concurrency: usize,
-    ) -> Self {
+    ) -> Result<Self> {
         let router = crab_read::ReadStoreLayout::with_global_prefix(
             router.store().as_storage().clone(),
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        Self {
-            inner: crab_read::TermResolver::new(store, router, cache, concurrency),
-        }
+        Ok(Self {
+            inner: crab_read::TermResolver::new(store, router, cache, concurrency)?,
+        })
     }
 
     /// Resolve file hashes to reconstruction terms.

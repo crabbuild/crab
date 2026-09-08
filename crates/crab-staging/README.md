@@ -48,6 +48,34 @@ failure rolls back the batch; an unlink failure leaves an orphan for recovery,
 not a missing live payload. This shares one cleanup path across publication,
 rollback and push, avoiding repeated per-file commits and inventory scans.
 
+## Recovery contract
+
+Opening writable staging runs recovery before creating or reusing its writer.
+Recovery treats missing files differently from failed filesystem operations:
+
+| Observed state | Recovery action |
+| --- | --- |
+| Sealed segment missing or shorter than its indexed size | Reject as staging corruption. |
+| Current segment missing, with promoted chunks | Reject as staging corruption. |
+| Current segment missing, with only pending rows | Discard those rows and reset its durable boundary. |
+| Current segment has a torn tail | Keep complete recoverable records, truncate the tail, and update SQLite's boundary. |
+| Current segment metadata lookup fails for another reason | Return the I/O cause before changing that segment's rows or boundary. |
+| Orphan `current.seg.tmp` entry | Remove the entry; an already absent entry is harmless. |
+
+`flush_pending` is the durability barrier before publication. `close` performs
+that flush explicitly; dropping staging only releases handles. Recovery is not
+a substitute for flushing a successful operation.
+
+## Multipart cleanup
+
+The multipart journal records provider sessions separately from chunk staging.
+`find_abandoned` selects only expired leases whose last update predates the
+grace cutoff. Invalid scan times return an error rather than a candidate list.
+
+Cleanup must acquire the observed row revision with `claim_abandoned` before
+contacting the provider. A scan result alone does not grant ownership; a
+concurrent resume can make that result stale.
+
 ## Usage
 
 The smallest complete staging cycle is:
@@ -57,24 +85,24 @@ use crab_staging::StagingArea;
 use crab_xet::hash::compute_data_hash;
 use std::path::PathBuf;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let staging = StagingArea::open(PathBuf::from(".crab/staging")).await?;
-let data = b"hello Crab";
-let chunk_hash = compute_data_hash(data);
-let file_hash = compute_data_hash(data);
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let staging = StagingArea::open(PathBuf::from(".crab/staging")).await?;
+    let data = b"hello Crab";
+    let chunk_hash = compute_data_hash(data);
+    let file_hash = compute_data_hash(data);
 
-staging.pre_register_file(&file_hash, data.len() as u64)?;
-staging
-    .stage_chunks_batch(&[(&chunk_hash, &data[..])], &file_hash, 0)
-    .await?;
-staging.flush_pending().await?;
-assert_eq!(
-    staging.get_chunk(&chunk_hash).await?.unwrap(),
-    bytes::Bytes::copy_from_slice(data)
-);
-staging.close().await?;
-# Ok(())
-# }
+    staging.pre_register_file(&file_hash, data.len() as u64)?;
+    staging
+        .stage_chunks_batch(&[(&chunk_hash, &data[..])], &file_hash, 0)
+        .await?;
+    staging.flush_pending().await?;
+    assert_eq!(
+        staging.get_chunk(&chunk_hash).await?.unwrap(),
+        bytes::Bytes::copy_from_slice(data)
+    );
+    staging.close().await?;
+    Ok(())
+}
 ```
 
 Production cleaners normally use `stream` or `recipe` helpers and submit

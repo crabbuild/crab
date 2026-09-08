@@ -152,7 +152,7 @@ pub fn run_stage_add(args: &StageAddArgs, repo_root: &Path) -> Result<StageAddPa
         overwritten,
         run: args.run,
     };
-    emit_stage_add(&payload, args.output_mode());
+    emit_stage_add(&payload, args.output_mode())?;
     Ok(payload)
 }
 
@@ -489,10 +489,10 @@ fn run_args_for_added_stage(args: &StageAddArgs) -> crate::cmd::run::RunArgs {
     }
 }
 
-fn emit_stage_add(payload: &StageAddPayload, mode: OutputMode) {
+fn emit_stage_add(payload: &StageAddPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(STAGE_ADD_SCHEMA, SCHEMA_VERSION, payload);
+            emit_json(STAGE_ADD_SCHEMA, SCHEMA_VERSION, payload)?;
         }
         OutputMode::Text => {
             if payload.created_workflow_file {
@@ -510,6 +510,7 @@ fn emit_stage_add(payload: &StageAddPayload, mode: OutputMode) {
             );
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

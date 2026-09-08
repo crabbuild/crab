@@ -1718,7 +1718,10 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     && let Some(stream) = jsonl_stderr_stream
                     && let Ok(mut s) = stream.lock()
                 {
-                    s.emit_result(build_push_result_event(&result, &ordered_specs));
+                    // Git already received the authoritative ref outcomes on stdout.
+                    // Optional stderr diagnostics must not turn that reply into failure.
+                    let output = s.emit_result(build_push_result_event(&result, &ordered_specs));
+                    crate::core::output::report_progress_output(output);
                 }
                 Ok::<(), CrabError>(())
             }

@@ -2,6 +2,7 @@
 
 pub mod chunk_comparator;
 pub mod chunk_sequence;
+mod ordered_match;
 pub mod pointer_pairs;
 pub mod types;
 

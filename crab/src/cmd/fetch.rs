@@ -61,7 +61,8 @@ fn emit_phase(stream: Option<&Mutex<JsonlStream<Stdout>>>, payload: PerfPhasePay
     if let Some(stream) = stream
         && let Ok(mut stream) = stream.lock()
     {
-        stream.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+        let output = stream.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
+        crate::core::output::report_progress_output(output);
     }
 }
 
@@ -233,15 +234,15 @@ fn emit_summary(
                 summary.objects_fetched, summary.bytes_downloaded
             ),
         },
-        OutputMode::Json => emit_json("fetch", "1.0", &summary),
+        OutputMode::Json => emit_json("fetch", "1.0", &summary)?,
         OutputMode::Jsonl => {
             if let Some(stream) = jsonl_stream {
                 stream
                     .lock()
                     .map_err(|_| CrabError::Internal("fetch output lock poisoned".to_owned()))?
-                    .emit_result(&summary);
+                    .emit_result(&summary)?;
             } else {
-                JsonlStream::new("fetch.event", "1.0", std::io::stdout()).emit_result(&summary);
+                JsonlStream::new("fetch.event", "1.0", std::io::stdout()).emit_result(&summary)?;
             }
         }
     }

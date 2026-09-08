@@ -27,7 +27,7 @@ pub async fn run_cache_stats(mode: OutputMode, cancel: &CancellationToken) -> Re
     let report = inspect_cache(&root, config.cache.max_bytes, cancel).await?;
     check_cancelled(cancel)?;
     if mode.is_machine() {
-        emit_json("cache.stats", "1.0", &report);
+        emit_json("cache.stats", "1.0", &report)?;
     } else {
         print_cache_stats(&report);
     }
@@ -138,7 +138,7 @@ pub async fn run_cache_clean(
         report.bytes_reclaimed = report.bytes_reclaimed.saturating_add(range.bytes_freed);
     }
     if mode.is_machine() {
-        emit_json("cache.clean", "1.0", &report);
+        emit_json("cache.clean", "1.0", &report)?;
     } else {
         println!(
             "{} {} cache payload(s), {}; retained {} entries/subtrees, {} busy, {} unsafe",
@@ -241,7 +241,7 @@ pub async fn run_cache_verify_with_cancel(
     };
 
     if mode.is_machine() {
-        emit_json("cache.verify", "1.0", &summary);
+        emit_json("cache.verify", "1.0", &summary)?;
     } else {
         println!(
             "Checked {} cache object(s): {} valid, {} corrupt evicted",

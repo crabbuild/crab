@@ -149,7 +149,7 @@ pub async fn run_diff_driver(
                     router,
                     cache,
                     config.download_concurrency,
-                );
+                )?;
                 resolver
                     .resolve_sequences_batch(
                         &hashes_to_resolve,

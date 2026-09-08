@@ -118,9 +118,9 @@ impl From<&CacheConfig> for CacheConfig {
 /// Store wrapper that routes immutable reads through a local disk cache
 /// and an optional feature-gated remote cache service.
 ///
-/// The local cache is always active. The remote cache client is only
-/// used when the `remote-client` feature is enabled, configured, and healthy.
-/// On any cache error the wrapper falls back to the origin transparently.
+/// The local cache is always active. The remote cache client requires the
+/// `remote-client` feature and configuration; [`Self::try_build_healthy`] also
+/// probes startup health. Optional cache read failures fall back to origin.
 ///
 /// Cheap to clone: `Store` is `Arc`-backed, `LocalCache` is `Arc`-wrapped,
 /// and the feature-gated `CacheClient` is clone-cheap as well.
@@ -166,7 +166,8 @@ impl CachingStore {
     /// Build a `CachingStore` with an explicit local cache instance.
     ///
     /// This keeps callers that already own cache placement from relying on
-    /// process-wide cache-root environment state.
+    /// process-wide cache-root environment state. The supplied cache retains
+    /// its own limits; `CacheConfig::max_bytes` does not reconfigure it.
     pub fn new_with_local_cache<S, C>(
         origin: S,
         cache_config: C,
@@ -223,10 +224,10 @@ impl CachingStore {
     /// Build a `CachingStore` with local disk cache always active and
     /// the remote cache service enabled only when configured and healthy.
     ///
-    /// Always returns `Some` because the local cache is unconditional.
-    /// When the remote service is down or not configured, the returned
-    /// `CachingStore` still provides local disk caching for immutable
-    /// objects (shards and xorbs).
+    /// Returns `None` if client/configuration construction fails. Otherwise,
+    /// an absent, unhealthy, or incompatible service leaves local caching active.
+    /// Remote access requires successful health and capability checks. Callers
+    /// choose their origin policy when construction returns `None`.
     pub async fn try_build_healthy<S, C>(origin: S, cache_config: C) -> Option<Self>
     where
         S: Into<Store>,
@@ -244,40 +245,39 @@ impl CachingStore {
         #[cfg(feature = "remote-client")]
         {
             let mut cs = cs;
-            // Health-check the remote cache service. If unhealthy, disable
-            // the remote client but keep the local cache active.
-            if let Some(client) = &cs.cache_client {
-                if client.is_healthy().await {
-                    match client.capabilities().await {
-                        Ok(capabilities) => {
-                            if !cache_service_capabilities_route_contract_current(&capabilities) {
-                                tracing::warn!(
-                                    "cache service route contract missing or mismatched, using local cache only"
-                                );
-                                cs.cache_client = None;
-                            } else {
-                                let max_object_bytes = capabilities.limits.max_object_bytes;
-                                cs.max_push_warming_object_bytes = Some(max_object_bytes);
-                                tracing::info!(
-                                    url = %cache_config.service_url.as_deref().unwrap_or(""),
-                                    max_object_bytes,
-                                    "cache service healthy, enabling cache-accelerated push"
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "cache service capabilities unavailable, using local cache only"
-                            );
-                            cs.cache_client = None;
-                        }
-                    }
-                } else {
-                    tracing::info!("cache service not healthy, using local cache only");
-                    cs.cache_client = None;
-                }
+            let Some(client) = &cs.cache_client else {
+                return Some(cs);
+            };
+            if !client.is_healthy().await {
+                tracing::info!("cache service not healthy, using local cache only");
+                cs.cache_client = None;
+                return Some(cs);
             }
+            let capabilities = match client.capabilities().await {
+                Ok(capabilities) => capabilities,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "cache service capabilities unavailable, using local cache only"
+                    );
+                    cs.cache_client = None;
+                    return Some(cs);
+                }
+            };
+            if !cache_service_capabilities_route_contract_current(&capabilities) {
+                tracing::warn!(
+                    "cache service route contract missing or mismatched, using local cache only"
+                );
+                cs.cache_client = None;
+                return Some(cs);
+            }
+            let max_object_bytes = capabilities.limits.max_object_bytes;
+            cs.max_push_warming_object_bytes = Some(max_object_bytes);
+            tracing::info!(
+                url = %cache_config.service_url.as_deref().unwrap_or(""),
+                max_object_bytes,
+                "cache service healthy, enabling cache-accelerated push"
+            );
             Some(cs)
         }
 
@@ -311,6 +311,11 @@ impl CachingStore {
 
     /// Expose this cache-aware store as an [`ObjectStore`] for read-only
     /// dependencies such as SlateDB.
+    ///
+    /// Unconditional immutable reads may return synthetic metadata without an
+    /// origin ETag or version. This includes HEAD requests, unlike [`Self::head`].
+    /// Conditional and versioned requests bypass caches to preserve origin
+    /// preconditions and metadata; mutable paths always bypass caches.
     pub fn object_store(&self) -> Arc<dyn ObjectStore> {
         Arc::new(CacheAwareObjectStore {
             store: self.clone(),
@@ -348,27 +353,16 @@ impl CachingStore {
         self.cache_client.is_some() && self.mode.dedup_enabled()
     }
 
-    /// Read an object, returning its body and CAS token.
+    /// Read object bytes and their origin token when available.
     ///
-    /// For immutable paths the lookup order is:
-    /// 1. Local disk cache (hash-verified)
-    /// 2. Remote cache service (when configured)
-    /// 3. Origin S3
+    /// Mutable paths go directly to origin. Immutable reads try local disk,
+    /// then the optional cache service, then origin. Eligible origin reads
+    /// warm the local cache for subsequent requests.
     ///
-    /// On a cache miss the fetched data is written back to the local
-    /// cache for future reads. Mutable paths always go direct to origin.
-    ///
-    /// # ETag semantics for cache hits
-    ///
-    /// When the response is served from a cache (local disk or remote
-    /// service), the returned `ETag` has `e_tag: None` and
-    /// `version: None`. This synthetic ETag must **not** be used for
-    /// subsequent CAS updates - CAS on a cached immutable path would
-    /// reject any update with a meaningless pre-condition. In practice,
-    /// cached paths (shards and xorbs) are content-addressed and
-    /// never updated, so no caller uses the returned ETag for CAS.
-    /// Mutable paths (refs, manifests) skip the cache entirely and
-    /// always get a real ETag from origin. See finding CR11-F3.
+    /// Cache hits return an [`ETag`] with no `e_tag` or `version`; that
+    /// synthetic token cannot authorize CAS updates. Use [`Self::head`] when
+    /// origin metadata is required, and retain conditional origin checks when
+    /// publishing a write.
     pub async fn get_with_etag(&self, path: &Path) -> Result<(Bytes, ETag)> {
         if let Some(max_bytes) = immutable_read_limit(path) {
             return self.get_with_etag_bounded(path, max_bytes).await;
@@ -743,7 +737,9 @@ impl CachingStore {
         let is_immutable = classify_path(path.as_ref()) == PathClass::Immutable;
 
         if is_immutable
-            && let Some((data, _)) = self.local_cached_range_with_size(path, &range).await
+            && let Some((data, _, _)) = self
+                .local_cached_range_with_size(path, &GetRange::Bounded(range.clone()))
+                .await
         {
             return Ok(data);
         }
@@ -772,14 +768,15 @@ impl CachingStore {
     async fn local_cached_range_with_size(
         &self,
         path: &Path,
-        range: &Range<u64>,
-    ) -> Option<(Bytes, u64)> {
+        requested: &GetRange,
+    ) -> Option<(Bytes, Range<u64>, u64)> {
         let key = cache_key_for_path(path.as_ref())?;
         if let CacheKey::Xorb(hash) = &key {
-            return self
+            let (data, size) = self
                 .local_cache
-                .get_xorb_range_with_size_if_present(hash, range.clone())
-                .await;
+                .get_xorb_range_with_size_if_present(hash, |size| requested.as_range(size).ok())
+                .await?;
+            return Some((data, requested.as_range(size).ok()?, size));
         }
 
         let data = self
@@ -796,17 +793,9 @@ impl CachingStore {
             .await
             .ok()?;
         let total_size = data.len() as u64;
-        let Some(slice) = slice_cached_range(&data, range) else {
-            tracing::warn!(
-                path = %path,
-                start = range.start,
-                end = range.end,
-                cached_len = data.len(),
-                "cached immutable object does not cover requested range, falling back to origin",
-            );
-            return None;
-        };
-        Some((slice, total_size))
+        let range = requested.as_range(total_size).ok()?;
+        let slice = slice_cached_range(&data, &range)?;
+        Some((slice, range, total_size))
     }
 
     /// Write an object to the origin store.
@@ -1271,6 +1260,8 @@ impl ObjectStore for CacheAwareObjectStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        // Cache metadata cannot evaluate origin preconditions or select a
+        // version. Forward the complete request before consulting any cache.
         if !cacheable_get_options(&options)
             || classify_path(location.as_ref()) == PathClass::Mutable
         {
@@ -1286,38 +1277,7 @@ impl ObjectStore for CacheAwareObjectStore {
             let meta = head_immutable_object(&self.store, location).await?;
             (Bytes::new(), 0..0, meta.size)
         } else if let Some(range) = options.range {
-            match range {
-                GetRange::Bounded(requested) => {
-                    if let Some((body, range, object_size)) =
-                        bounded_cache_range(&self.store, location, requested.clone()).await?
-                    {
-                        (body, range, object_size)
-                    } else {
-                        let (range, object_size) = resolve_cache_range(
-                            &self.store,
-                            location,
-                            GetRange::Bounded(requested),
-                        )
-                        .await?;
-                        let body = self
-                            .store
-                            .range_get(location, range.clone())
-                            .await
-                            .map_err(|e| cache_error(location, e))?;
-                        (body, range, object_size)
-                    }
-                }
-                range => {
-                    let (range, object_size) =
-                        resolve_cache_range(&self.store, location, range).await?;
-                    let body = self
-                        .store
-                        .range_get(location, range.clone())
-                        .await
-                        .map_err(|e| cache_error(location, e))?;
-                    (body, range, object_size)
-                }
-            }
+            cached_object_range(&self.store, location, range).await?
         } else {
             #[cfg(feature = "remote-client")]
             if cache_key_for_path(location.as_ref()).is_none() {
@@ -1402,40 +1362,40 @@ fn cacheable_get_options(options: &GetOptions) -> bool {
         && options.version.is_none()
 }
 
-async fn bounded_cache_range(
+async fn cached_object_range(
     store: &CachingStore,
     location: &Path,
-    requested: Range<u64>,
-) -> object_store::Result<Option<(Bytes, Range<u64>, u64)>> {
-    GetRange::Bounded(requested.clone())
+    requested: GetRange,
+) -> object_store::Result<(Bytes, Range<u64>, u64)> {
+    requested
         .is_valid()
-        .map_err(|e| object_store::Error::Generic {
+        .map_err(|error| object_store::Error::Generic {
             store: "crab-cache",
-            source: Box::new(e),
+            source: Box::new(error),
         })?;
-
-    if let Some((body, object_size)) = store
+    if let Some(result) = store
         .local_cached_range_with_size(location, &requested)
         .await
     {
-        return Ok(Some((body, requested, object_size)));
+        return Ok(result);
     }
-
-    match store
-        .range_get_cache_service_object(location, requested.clone())
-        .await
-    {
-        Ok(Some(range)) => Ok(Some((range.data, range.range, range.total_size))),
-        Ok(None) => Ok(None),
-        Err(e) => {
-            tracing::warn!(
-                path = %location,
-                error = %e,
-                "cache service bounded range read failed, falling back to resolved range",
-            );
-            Ok(None)
+    if let GetRange::Bounded(range) = &requested {
+        match store
+            .range_get_cache_service_object(location, range.clone())
+            .await
+        {
+            Ok(Some(range)) => return Ok((range.data, range.range, range.total_size)),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(path = %location, error = %error,
+                "cache service bounded range read failed, falling back to resolved range"),
         }
     }
+    let (range, object_size) = resolve_cache_range(store, location, requested).await?;
+    let body = store
+        .range_get(location, range.clone())
+        .await
+        .map_err(|error| cache_error(location, error))?;
+    Ok((body, range, object_size))
 }
 
 async fn resolve_cache_range(
@@ -1551,7 +1511,11 @@ fn immutable_read_limit(path: &Path) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
+#[expect(clippy::unwrap_used, reason = "test assertions")]
+#[cfg_attr(
+    feature = "remote-client",
+    expect(clippy::expect_used, reason = "remote service test assertions")
+)]
 mod tests {
     use super::*;
 
@@ -2389,6 +2353,34 @@ mod tests {
             addr,
             shutdown: Some(shutdown_tx),
         }
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn healthy_builder_keeps_local_store_when_service_auth_fails() {
+        let server = start_test_cache_server().await;
+        for authorized in [true, false] {
+            let mut config = cache_service_config(server.addr);
+            if !authorized {
+                config.service_auth = CacheServiceAuth::Psk("incorrect-test-key".into());
+            }
+            let store = CachingStore::try_build_healthy(origin_store(), config)
+                .await
+                .expect("service failure retains local caching");
+            assert_eq!(store.has_cache_service(), authorized);
+        }
+    }
+
+    #[cfg(not(feature = "remote-client"))]
+    #[tokio::test]
+    async fn healthy_builder_returns_none_for_unsupported_service_config() {
+        let mut config = no_cache_config();
+        config.service_url = Some("http://127.0.0.1:1".into());
+        assert!(
+            CachingStore::try_build_healthy(origin_store(), config)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -3472,6 +3464,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warm_local_cache_handles_all_get_range_forms_without_origin() {
+        let payload = Bytes::from_static(b"local range responses follow object_store semantics");
+        let (xorb, xorb_hash) = test_xorb(&payload);
+        let data_hash = crab_xet::hash::compute_data_hash(&payload).hex();
+        for (kind, body, hash) in [("xorbs", xorb, xorb_hash), ("shards", payload, data_hash)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let origin = origin_store();
+            let path = content_path(kind, &hash);
+            assert_eq!(classify_path(path.as_ref()), PathClass::Immutable);
+            origin.put(&path, body.clone()).await.unwrap();
+            let cached = CachingStore::new_with_local_cache(
+                origin.clone(),
+                no_cache_config(),
+                Arc::new(LocalCache::new(tmp.path().join("cache"))),
+            )
+            .unwrap();
+            cached.get_with_etag(&path).await.unwrap();
+            origin.delete(&path).await.unwrap();
+            let size = body.len() as u64;
+            let requests = [
+                GetRange::Bounded(7..size + 64),
+                GetRange::Offset(7),
+                GetRange::Suffix(7),
+                GetRange::Suffix(size + 64),
+                GetRange::Suffix(0),
+            ];
+            for request in requests {
+                let expected = request.as_range(size).unwrap();
+                let result = cached
+                    .object_store()
+                    .get_opts(
+                        &path,
+                        GetOptions {
+                            range: Some(request.clone()),
+                            ..GetOptions::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{request:?}: {error}"));
+                assert_eq!(result.range, expected, "{request:?}");
+                assert_eq!(result.meta.size, size);
+                assert_eq!(
+                    result.bytes().await.unwrap(),
+                    body.slice(expected.start as usize..expected.end as usize)
+                );
+            }
+            assert_eq!(
+                cached.range_get(&path, 7..size + 64).await.unwrap(),
+                body.slice(7..)
+            );
+            for invalid in [
+                GetRange::Bounded(7..7),
+                GetRange::Bounded(size..size + 1),
+                GetRange::Offset(size),
+            ] {
+                assert!(
+                    cached
+                        .object_store()
+                        .get_opts(
+                            &path,
+                            GetOptions {
+                                range: Some(invalid),
+                                ..GetOptions::default()
+                            }
+                        )
+                        .await
+                        .is_err()
+                );
+            }
+            assert_eq!(
+                cached.get_with_etag(&path).await.unwrap().0,
+                body,
+                "invalid requests must not evict a valid cached object"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn range_get_delegates_to_origin_when_no_cache() {
         let origin = origin_store();
         let path = Path::from(".crab/xorbs/abc123");
@@ -4241,6 +4311,102 @@ mod tests {
         assert!(result.unknown.contains(&120_002));
         if let Some(shutdown) = server.shutdown.take() {
             let _ = shutdown.send(());
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_and_versioned_reads_bypass_a_warm_immutable_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = origin_store();
+        let (body, hash) = test_xorb(b"origin preconditions remain authoritative");
+        let path = content_path("xorbs", &hash);
+        origin.put(&path, body.clone()).await.unwrap();
+        let expected = origin.head(&path).await.unwrap();
+        let cached = CachingStore::new_with_local_cache(
+            origin.clone(),
+            no_cache_config(),
+            Arc::new(LocalCache::new(tmp.path().join("cache"))),
+        )
+        .unwrap();
+        cached.get_with_etag(&path).await.unwrap();
+        let adapter = cached.object_store();
+        let result = adapter
+            .get_opts(
+                &path,
+                GetOptions {
+                    if_match: expected.e_tag.clone(),
+                    ..GetOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            expected.e_tag.is_some(),
+            "fixture must provide an origin ETag"
+        );
+        assert_eq!(result.meta, expected);
+        assert_eq!(result.bytes().await.unwrap(), body);
+
+        origin.delete(&path).await.unwrap();
+        assert_eq!(
+            adapter.get(&path).await.unwrap().bytes().await.unwrap(),
+            body,
+            "positive control must still read the warm immutable cache"
+        );
+        let timestamp = SystemTime::UNIX_EPOCH.into();
+        let cases = [
+            (
+                "if-match",
+                GetOptions {
+                    if_match: Some("*".into()),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "if-none-match",
+                GetOptions {
+                    if_none_match: Some("*".into()),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "if-modified-since",
+                GetOptions {
+                    if_modified_since: Some(timestamp),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "if-unmodified-since",
+                GetOptions {
+                    if_unmodified_since: Some(timestamp),
+                    ..GetOptions::default()
+                },
+            ),
+            (
+                "version",
+                GetOptions {
+                    version: Some("recorded-version".into()),
+                    ..GetOptions::default()
+                },
+            ),
+        ];
+        for (name, options) in cases {
+            for head in [false, true] {
+                let result = adapter
+                    .get_opts(
+                        &path,
+                        GetOptions {
+                            head,
+                            ..options.clone()
+                        },
+                    )
+                    .await;
+                assert!(
+                    matches!(result, Err(object_store::Error::NotFound { .. })),
+                    "{name}, head={head}: {result:?}"
+                );
+            }
         }
     }
 

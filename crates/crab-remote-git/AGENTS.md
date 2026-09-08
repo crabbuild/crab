@@ -37,6 +37,9 @@ and `crates/crab-metadata/src/git_object_locator`.
 - Preserve operation work budgets and cancellation through object lookup/decode, including cache hits; individual request limits do not bound aggregate work.
   Source: `crates/crab-remote-git/src/operation.rs`.
 
+- Range coalescing limits merging, not individual entry admission. Keep per-entry ReaderLimits and aggregate OperationBudget checks before fetching; do not split or truncate a valid larger pack entry to fit the merge threshold.
+  Source: `crates/crab-remote-git/src/reader.rs`.
+
 ## Features and platform
 
 No declared Cargo features. Inspect locked gix-pack/delta and SlateDB session contracts before altering decode or close behavior. Dedicated large-repository/HTTP qualification is separate from local fixture tests.
@@ -62,7 +65,8 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 
 ## Related documentation
 
-- `crates/crab-remote-git/README.md` — usage and detailed contracts.
+- `crates/crab-remote-git/README.md` — usage, entry points, and ownership map.
+- `crates/crab-remote-git/REFERENCE.md` — detailed consistency, lifecycle, performance, and qualification contracts.
 - `crates/crab-remote-git/Cargo.toml` — dependency and feature authority.
 
 Update this guide when entry points, ownership, invariants, features, or test

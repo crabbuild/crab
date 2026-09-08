@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
 use tokio::sync::RwLock;
@@ -226,8 +226,8 @@ struct RepoRuntime {
     snapshot: Option<Arc<SnapshotStore>>,
     /// Overlay store (SQLite + upper dir).
     overlay: Option<Arc<OverlayStore>>,
-    /// Hydration worker join handles.
-    hydrator_handles: Vec<JoinHandle<()>>,
+    /// Owns queue workers and read-window prefetch through teardown.
+    hydration: Option<Arc<crate::hydration::HydrationService>>,
     /// VFS resolver.
     resolver: Option<Arc<FuseResolver>>,
     /// Backend-specific mounted session.
@@ -558,7 +558,7 @@ impl DaemonService {
     /// Create a new daemon service.
     ///
     /// Opens the registry and chunk cache but does not start any mounts.
-    /// Call [`start`] to mount all registered repos.
+    /// Call [`Self::start`] to mount all registered repos.
     pub fn new(root: PathBuf, cancel: CancellationToken) -> Result<Self> {
         let registry_path = root.join("config/repos.sqlite");
         let registry = Registry::open(&registry_path)?;
@@ -789,7 +789,7 @@ impl DaemonService {
             head_oid: None,
             snapshot: None,
             overlay: None,
-            hydrator_handles: Vec::new(),
+            hydration: None,
             resolver: None,
             mount_session: None,
             watcher_handle: None,
@@ -954,7 +954,7 @@ impl DaemonService {
         run_read_tree_head(&paths.git_dir);
 
         // Step 7: Create hydration service with shared cache.
-        info!(step = "hydration", "starting hydration service");
+        info!(step = "hydration", "preparing hydration service");
         let read_context = self.read_resolver.resolve(&config.remote).await?;
         if crab_git::CrabUrl::parse(&config.remote).is_ok() && read_context.is_none() {
             return Err(CrabError::Configuration {
@@ -978,220 +978,216 @@ impl DaemonService {
             read_hydrator,
             read_range_cache_dir,
         )?;
-        let hydrator_handles = hydration.spawn_workers();
+        let result = async {
+            // Step 8: Create ODB reader.
+            let odb_reader = OdbReader::new(&paths.git_dir, &paths.blob_cache_dir).map_err(|e| {
+                error!(step = "odb_reader", error = %e, "failed to create ODB reader");
+                e
+            })?;
 
-        // Step 8: Create ODB reader.
-        let odb_reader = OdbReader::new(&paths.git_dir, &paths.blob_cache_dir).map_err(|e| {
-            error!(step = "odb_reader", error = %e, "failed to create ODB reader");
-            e
-        })?;
-
-        // Step 9: Create resolver (snapshot + overlay).
-        info!(step = "resolver", "creating VFS resolver");
-        let commit_time = crate::pipeline::commit_time_from_head(&paths.git_dir).unwrap_or(0);
-        let overlay_lookup: Option<Arc<dyn OverlayLookup>> = overlay
-            .as_ref()
-            .map(|ov| Arc::clone(ov) as Arc<dyn OverlayLookup>);
-        let resolver = Arc::new(FuseResolver::new(
-            Arc::clone(&snapshot),
-            overlay_lookup,
-            generation,
-            commit_time,
-        ));
-
-        // Step 10: Create engine (resolver + overlay + hydration + ODB reader).
-        info!(step = "engine", "creating VFS engine");
-        let overlay_writer: Option<Arc<dyn crate::engine::OverlayWriter>> = overlay
-            .as_ref()
-            .map(|ov| Arc::clone(ov) as Arc<dyn crate::engine::OverlayWriter>);
-        let engine = Arc::new(VfsEngine::new(
-            Arc::clone(&resolver),
-            overlay_writer,
-            Arc::clone(&hydration),
-            Some(odb_reader),
-            Some(Arc::clone(&snapshot)),
-        ));
-
-        // Step 11: Mount the configured filesystem backend.
-        std::fs::create_dir_all(&paths.mount_path)?;
-        let mount_session = match config.backend {
-            DaemonMountBackend::Fuse => {
-                #[cfg(feature = "fuse")]
-                {
-                    info!(step = "fuse_mount", "mounting FUSE filesystem");
-                    let mount_config = MountConfig {
-                        mountpoint: paths.mount_path.clone(),
-                        git_dir: paths.git_dir.to_string_lossy().into_owned(),
-                        write_pid: true,
-                        crab_dir: paths.repo_dir.join(".crab"),
-                        read_only: config.read_only,
-                    };
-                    let mounted = crate::mount::mount(
-                        &mount_config,
-                        Arc::clone(&resolver),
-                        Arc::clone(&engine),
-                        tokio::runtime::Handle::current(),
-                    )
-                    .map_err(|e| {
-                        error!(step = "fuse_mount", error = %e, "FUSE mount failed");
-                        e
-                    })?;
-                    let session = mounted.session.spawn().map_err(|e| {
-                        error!(step = "fuse_mount", error = %e, "failed to spawn FUSE background session");
-                        CrabError::Internal(format!("FUSE background session: {e}"))
-                    })?;
-                    RepoMountSession::Fuse(session)
-                }
-                #[cfg(not(feature = "fuse"))]
-                {
-                    return Err(CrabError::Configuration {
-                        key: "FUSE support was not compiled into this Crab build".into(),
-                        origin: "crab daemon".into(),
-                    });
-                }
-            }
-            DaemonMountBackend::Nfs => {
-                #[cfg(feature = "nfs")]
-                {
-                    info!(step = "nfs_mount", "mounting NFS filesystem");
-                    let control_endpoint =
-                        crate::nfs_control::fresh_endpoint_for_mountpoint(&paths.mount_path)?;
-                    let mount_config = crate::nfs_mount::NfsMountConfig {
-                        mountpoint: paths.mount_path.clone(),
-                        git_dir: paths.git_dir.to_string_lossy().into_owned(),
-                        exclusive_verifiers_path: paths
-                            .repo_dir
-                            .join("nfs-exclusive-verifiers.json"),
-                        read_only: config.read_only,
-                        auto_refresh_interval: None,
-                        control_endpoint_override: control_endpoint.clone(),
-                    };
-                    crate::nfs_mount::preflight_for_config(&mount_config).ensure_ready()?;
-                    persist_nfs_control_endpoint(paths, control_endpoint.as_deref())?;
-                    let control_runtime = crate::nfs_control::NfsMountRuntime {
-                        output: crate::pipeline::PipelineOutput {
-                            resolver: Arc::clone(&resolver),
-                            engine: Arc::clone(&engine),
-                            hydration: Arc::clone(&hydration),
-                            snapshot: Arc::clone(&snapshot),
-                            overlay: overlay.as_ref().map(Arc::clone),
-                            head_oid: head_oid.clone(),
-                            head_ref: head_ref.clone(),
-                            generation,
-                            hydrator_handles: Vec::new(),
-                        },
-                        config: crate::pipeline::PipelineConfig {
-                            source: config.remote.clone(),
-                            git_dir: paths.git_dir.clone(),
-                            ref_name: Some(head_ref.clone()),
-                            read_only: config.read_only,
-                            cache_dir: paths.repo_dir.clone(),
-                            cancel_token: repo_cancel.clone(),
-                        },
-                    };
-                    let mounted = crate::nfs_mount::mount(
-                        &mount_config,
-                        Arc::clone(&resolver),
-                        Arc::clone(&engine),
-                        Some(control_runtime),
-                    )
-                    .await
-                    .map_err(|e| {
-                        error!(step = "nfs_mount", error = %e, "NFS mount failed");
-                        e
-                    })?;
-                    let cancel = repo_cancel.child_token();
-                    let task_cancel = cancel.clone();
-                    let handle = tokio::spawn(async move {
-                        crate::nfs_mount::run_until_cancelled(mounted, task_cancel).await
-                    });
-                    if let Err(error) =
-                        wait_for_nfs_control(control_endpoint.as_deref(), &handle).await
-                    {
-                        cancel.cancel();
-                        let _ = handle.await;
-                        return Err(error);
-                    }
-                    RepoMountSession::Nfs { cancel, handle }
-                }
-                #[cfg(not(feature = "nfs"))]
-                {
-                    return Err(CrabError::Configuration {
-                        key: "NFS support was not compiled into this Crab build".into(),
-                        origin: "crab daemon".into(),
-                    });
-                }
-            }
-        };
-
-        // Step 12: Start refresh loop (if not read-only and overlay exists).
-        let mut refresh_handle = if let Some(ref ov) = overlay {
-            info!(step = "refresh", "starting refresh loop");
-            let refresh_config = RefreshConfig {
-                remote_poll_interval: Duration::from_secs(config.refresh_interval_secs),
-                local_poll_interval: Duration::from_millis(500),
-                git_dir: paths.git_dir.clone(),
-                tracked_ref: Some(tracked_branch_ref(&config.branch)),
-            };
-
-            let fetcher = Arc::new(GitRemoteRefFetcher::new(paths.git_dir.clone()));
-            let refresh_svc = Arc::new(RefreshService::new(
-                Arc::clone(&resolver),
+            // Step 9: Create resolver (snapshot + overlay).
+            info!(step = "resolver", "creating VFS resolver");
+            let commit_time = crate::pipeline::commit_time_from_head(&paths.git_dir).unwrap_or(0);
+            let overlay_lookup: Option<Arc<dyn OverlayLookup>> = overlay
+                .as_ref()
+                .map(|ov| Arc::clone(ov) as Arc<dyn OverlayLookup>);
+            let resolver = Arc::new(FuseResolver::new(
                 Arc::clone(&snapshot),
-                Arc::clone(ov),
-                fetcher,
-                refresh_config,
-                repo_cancel.clone(),
+                overlay_lookup,
+                generation,
+                commit_time,
             ));
 
-            let handle = tokio::spawn(async move {
-                refresh_svc.run().await;
-            });
-            Some(handle)
-        } else {
-            None
-        };
+            // Step 10: Create engine (resolver + overlay + hydration + ODB reader).
+            info!(step = "engine", "creating VFS engine");
+            let overlay_writer: Option<Arc<dyn crate::engine::OverlayWriter>> = overlay
+                .as_ref()
+                .map(|ov| Arc::clone(ov) as Arc<dyn crate::engine::OverlayWriter>);
+            let engine = Arc::new(VfsEngine::new(
+                Arc::clone(&resolver),
+                overlay_writer,
+                Arc::clone(&hydration),
+                Some(odb_reader),
+                Some(Arc::clone(&snapshot)),
+            ));
 
-        // Update runtime with all components.
-        let mut hydrator_handles = Some(hydrator_handles);
-        let mut mount_session = Some(mount_session);
-        let installed = {
-            let mut running = self.running.write().await;
-            if let Some(rt) = running.get_mut(&config.name) {
-                rt.head_oid = Some(head_oid);
-                rt.snapshot = Some(snapshot);
-                rt.overlay = overlay;
-                rt.hydrator_handles = hydrator_handles.take().unwrap_or_default();
-                rt.resolver = Some(resolver);
-                rt.mount_session = mount_session.take();
-                rt.refresh_handle = refresh_handle.take();
-                true
-            } else {
-                false
-            }
-        };
-        if !installed {
-            repo_cancel.cancel();
-            if let Some(handle) = refresh_handle {
-                handle.abort();
-            }
-            if let Some(handles) = hydrator_handles {
-                for handle in handles {
-                    handle.abort();
+            // Step 11: Mount the configured filesystem backend.
+            std::fs::create_dir_all(&paths.mount_path)?;
+            let mount_session = match config.backend {
+                DaemonMountBackend::Fuse => {
+                    #[cfg(feature = "fuse")]
+                    {
+                        info!(step = "fuse_mount", "mounting FUSE filesystem");
+                        let mount_config = MountConfig {
+                            mountpoint: paths.mount_path.clone(),
+                            git_dir: paths.git_dir.to_string_lossy().into_owned(),
+                            write_pid: true,
+                            crab_dir: paths.repo_dir.join(".crab"),
+                            read_only: config.read_only,
+                        };
+                        let mounted = crate::mount::mount(
+                            &mount_config,
+                            Arc::clone(&resolver),
+                            Arc::clone(&engine),
+                            tokio::runtime::Handle::current(),
+                        )
+                        .map_err(|e| {
+                            error!(step = "fuse_mount", error = %e, "FUSE mount failed");
+                            e
+                        })?;
+                        let session = mounted.session.spawn().map_err(|e| {
+                            error!(step = "fuse_mount", error = %e, "failed to spawn FUSE background session");
+                            CrabError::Internal(format!("FUSE background session: {e}"))
+                        })?;
+                        RepoMountSession::Fuse(session)
+                    }
+                    #[cfg(not(feature = "fuse"))]
+                    {
+                        return Err(CrabError::Configuration {
+                            key: "FUSE support was not compiled into this Crab build".into(),
+                            origin: "crab daemon".into(),
+                        });
+                    }
                 }
-            }
-            if let Some(session) = mount_session {
-                let shutdown_result =
-                    shutdown_mount_session(&config.name, session, Some(paths)).await;
-                remove_nfs_control_endpoint(paths);
-                shutdown_result?;
-            }
-            return Err(CrabError::NotFound {
-                path: format!("daemon repo '{}' was removed while mounting", config.name),
-            });
-        }
+                DaemonMountBackend::Nfs => {
+                    #[cfg(feature = "nfs")]
+                    {
+                        info!(step = "nfs_mount", "mounting NFS filesystem");
+                        let control_endpoint =
+                            crate::nfs_control::fresh_endpoint_for_mountpoint(&paths.mount_path)?;
+                        let mount_config = crate::nfs_mount::NfsMountConfig {
+                            mountpoint: paths.mount_path.clone(),
+                            git_dir: paths.git_dir.to_string_lossy().into_owned(),
+                            exclusive_verifiers_path: paths
+                                .repo_dir
+                                .join("nfs-exclusive-verifiers.json"),
+                            read_only: config.read_only,
+                            auto_refresh_interval: None,
+                            control_endpoint_override: control_endpoint.clone(),
+                        };
+                        crate::nfs_mount::preflight_for_config(&mount_config).ensure_ready()?;
+                        persist_nfs_control_endpoint(paths, control_endpoint.as_deref())?;
+                        let control_runtime = crate::nfs_control::NfsMountRuntime {
+                            output: crate::pipeline::PipelineOutput {
+                                resolver: Arc::clone(&resolver),
+                                engine: Arc::clone(&engine),
+                                hydration: Arc::clone(&hydration),
+                                snapshot: Arc::clone(&snapshot),
+                                overlay: overlay.as_ref().map(Arc::clone),
+                                head_oid: head_oid.clone(),
+                                head_ref: head_ref.clone(),
+                                generation,
+                            },
+                            config: crate::pipeline::PipelineConfig {
+                                source: config.remote.clone(),
+                                git_dir: paths.git_dir.clone(),
+                                ref_name: Some(head_ref.clone()),
+                                read_only: config.read_only,
+                                cache_dir: paths.repo_dir.clone(),
+                                cancel_token: repo_cancel.clone(),
+                            },
+                        };
+                        let mounted = crate::nfs_mount::mount(
+                            &mount_config,
+                            Arc::clone(&resolver),
+                            Arc::clone(&engine),
+                            Some(control_runtime),
+                        )
+                        .await
+                        .map_err(|e| {
+                            error!(step = "nfs_mount", error = %e, "NFS mount failed");
+                            e
+                        })?;
+                        let cancel = repo_cancel.child_token();
+                        let task_cancel = cancel.clone();
+                        let handle = tokio::spawn(async move {
+                            crate::nfs_mount::run_until_cancelled(mounted, task_cancel).await
+                        });
+                        if let Err(error) =
+                            wait_for_nfs_control(control_endpoint.as_deref(), &handle).await
+                        {
+                            cancel.cancel();
+                            let _ = handle.await;
+                            return Err(error);
+                        }
+                        RepoMountSession::Nfs { cancel, handle }
+                    }
+                    #[cfg(not(feature = "nfs"))]
+                    {
+                        return Err(CrabError::Configuration {
+                            key: "NFS support was not compiled into this Crab build".into(),
+                            origin: "crab daemon".into(),
+                        });
+                    }
+                }
+            };
 
-        Ok(())
+            // Prepare refresh state; start tasks only when the runtime accepts ownership.
+            let refresh_service = if let Some(ref ov) = overlay {
+                info!(step = "refresh", "preparing refresh loop");
+                let refresh_config = RefreshConfig {
+                    remote_poll_interval: Duration::from_secs(config.refresh_interval_secs),
+                    local_poll_interval: Duration::from_millis(500),
+                    git_dir: paths.git_dir.clone(),
+                    tracked_ref: Some(tracked_branch_ref(&config.branch)),
+                };
+
+                let fetcher = Arc::new(GitRemoteRefFetcher::new(paths.git_dir.clone()));
+                let refresh_svc = Arc::new(RefreshService::new(
+                    Arc::clone(&resolver),
+                    Arc::clone(&snapshot),
+                    Arc::clone(ov),
+                    fetcher,
+                    refresh_config,
+                    repo_cancel.clone(),
+                ));
+
+                Some(refresh_svc)
+            } else {
+                None
+            };
+
+            // Update runtime with all components.
+            let mut mount_session = Some(mount_session);
+            let installed = {
+                let mut running = self.running.write().await;
+                if let Some(rt) = running.get_mut(&config.name) {
+                    rt.head_oid = Some(head_oid);
+                    rt.snapshot = Some(snapshot);
+                    rt.overlay = overlay;
+                    // No fallible setup or await may separate spawning from ownership.
+                    // Failed preparation must not leave detached cache users behind.
+                    hydration.spawn_workers();
+                    rt.hydration = Some(Arc::clone(&hydration));
+                    rt.resolver = Some(resolver);
+                    rt.mount_session = mount_session.take();
+                    rt.refresh_handle =
+                        refresh_service.map(|service| tokio::spawn(async move { service.run().await }));
+                    true
+                } else {
+                    false
+                }
+            };
+            if !installed {
+                repo_cancel.cancel();
+                if let Some(session) = mount_session {
+                    let shutdown_result =
+                        shutdown_mount_session(&config.name, session, Some(paths)).await;
+                    remove_nfs_control_endpoint(paths);
+                    shutdown_result?;
+                }
+                return Err(CrabError::NotFound {
+                    path: format!("daemon repo '{}' was removed while mounting", config.name),
+                });
+            }
+
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            hydration.shutdown().await;
+        }
+        result
     }
 
     /// Teardown a repo runtime in reverse order.
@@ -1201,15 +1197,18 @@ impl DaemonService {
     async fn teardown_runtime(&self, rt: &mut RepoRuntime) -> Result<()> {
         let name = &rt.config.name;
 
-        // 1. Cancel refresh loop.
+        // Cancelling polling still allows an admitted blocking Git fetch to
+        // finish. Aborting its outer task would detach that cache user.
+        rt.repo_cancel.cancel();
         if let Some(handle) = rt.refresh_handle.take() {
-            handle.abort();
+            let _ = handle.await;
             debug!(name = %name, "refresh loop cancelled");
         }
 
         // 2. Stop HEAD watcher.
         if let Some(handle) = rt.watcher_handle.take() {
             handle.abort();
+            let _ = handle.await;
             debug!(name = %name, "watcher stopped");
         }
 
@@ -1219,11 +1218,10 @@ impl DaemonService {
             None => Ok(()),
         };
 
-        // 4. Stop hydration workers.
-        for handle in rt.hydrator_handles.drain(..) {
-            handle.abort();
+        if let Some(hydration) = rt.hydration.take() {
+            hydration.shutdown().await;
         }
-        debug!(name = %name, "hydration workers stopped");
+        debug!(name = %name, "background hydration stopped");
 
         // 5. Close overlay (drop Arc).
         rt.overlay = None;
@@ -1242,8 +1240,6 @@ impl DaemonService {
         }
         rt.cache_lock = None;
 
-        // Cancel repo-level token.
-        rt.repo_cancel.cancel();
         mount_result
     }
 
@@ -1572,6 +1568,13 @@ impl DaemonService {
     }
 }
 
+#[cfg_attr(
+    not(feature = "nfs"),
+    expect(
+        clippy::unused_async,
+        reason = "shared backend API awaits NFS operations when enabled"
+    )
+)]
 async fn shutdown_mount_session(
     name: &str,
     session: RepoMountSession,
@@ -1802,8 +1805,17 @@ fn publishable_overlay_state(overlay: &OverlayStore) -> (i64, Vec<String>) {
 }
 
 /// Read persisted repo state and verify a live daemon-owned NFS control plane.
+#[cfg_attr(
+    not(feature = "nfs"),
+    expect(
+        clippy::unused_async,
+        reason = "shared backend API awaits NFS operations when enabled"
+    )
+)]
 pub async fn read_status(config: &RepoConfig, daemon_root: &Path) -> RepoStatus {
-    let mut status = read_persisted_status(config, daemon_root);
+    let status = read_persisted_status(config, daemon_root);
+    #[cfg(feature = "nfs")]
+    let mut status = status;
     #[cfg(feature = "nfs")]
     if config.backend == DaemonMountBackend::Nfs {
         let paths = config.computed_paths(daemon_root);
@@ -2029,8 +2041,7 @@ fn serialize_system_time_opt<S: serde::Serializer>(
 ) -> std::result::Result<S::Ok, S::Error> {
     match time {
         Some(t) => {
-            let ms = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-            let s = crab_types::time::from_epoch_millis(ms);
+            let s = crab_types::time::from_system_time(*t).map_err(serde::ser::Error::custom)?;
             serializer.serialize_some(&s)
         }
         None => serializer.serialize_none(),
@@ -2073,6 +2084,20 @@ fn lock_poisoned() -> CrabError {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
+    #[test]
+    fn timestamp_serialization_rejects_unrepresentable_dates() {
+        let epoch = std::time::SystemTime::UNIX_EPOCH;
+        for time in [
+            epoch - std::time::Duration::from_millis(1),
+            epoch + std::time::Duration::from_hours(70_389_528),
+        ] {
+            assert!(
+                super::serialize_system_time_opt(&Some(time), serde_json::value::Serializer,)
+                    .is_err()
+            );
+        }
+    }
+
     use super::*;
 
     fn temp_registry() -> (tempfile::TempDir, Registry) {
@@ -2094,6 +2119,56 @@ mod tests {
             read_only: false,
             backend: DaemonMountBackend::Fuse,
         }
+    }
+
+    #[tokio::test]
+    async fn teardown_joins_owned_background_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = DaemonService::new(dir.path().to_owned(), CancellationToken::new()).unwrap();
+        let ownership = Arc::new(());
+        let spawn = || {
+            let guard = Arc::clone(&ownership);
+            tokio::spawn(async move {
+                std::future::pending::<()>().await;
+                drop(guard);
+            })
+        };
+        let hydration = crate::pipeline::create_hydration(
+            Arc::clone(&service.cache),
+            Arc::new(VerifiedSet::default()),
+            CancellationToken::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        hydration.spawn_workers();
+        let hydration_observer = Arc::downgrade(&hydration);
+        let repo_cancel = CancellationToken::new();
+        let refresh_cancel = repo_cancel.clone();
+        let refresh_guard = Arc::clone(&ownership);
+        let refresh = tokio::spawn(async move {
+            refresh_cancel.cancelled().await;
+            drop(refresh_guard);
+        });
+        let mut runtime = RepoRuntime {
+            config: sample_config("teardown"),
+            state: RepoRuntimeState::Initializing,
+            head_oid: None,
+            snapshot: None,
+            overlay: None,
+            hydration: Some(hydration),
+            resolver: None,
+            mount_session: None,
+            watcher_handle: Some(spawn()),
+            refresh_handle: Some(refresh),
+            repo_cancel,
+            paths: None,
+            cache_lock: None,
+        };
+        service.teardown_runtime(&mut runtime).await.unwrap();
+        assert_eq!(Arc::strong_count(&ownership), 1);
+        assert!(hydration_observer.upgrade().is_none());
     }
 
     #[test]
@@ -2304,6 +2379,50 @@ mod tests {
         assert_eq!(status.refresh_interval_secs, 120);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn engine_setup_failure_does_not_start_daemon_hydration_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon =
+            DaemonService::new(dir.path().join("daemon"), CancellationToken::new()).unwrap();
+        let mut config = sample_config("setup-failure");
+        config.remote = dir.path().join("source").to_string_lossy().into_owned();
+        config.read_only = true;
+        let paths = config.computed_paths(&daemon.root);
+        std::fs::create_dir_all(&paths.git_dir).unwrap();
+        git(&paths.git_dir, ["init", "--bare", "-b", "main"]);
+        let tree = git_stdout(&paths.git_dir, ["mktree"]);
+        let commit = git_stdout(
+            &paths.git_dir,
+            [
+                "-c",
+                "user.name=VFS test",
+                "-c",
+                "user.email=vfs@example.invalid",
+                "commit-tree",
+                tree.trim(),
+                "-m",
+                "empty fixture",
+            ],
+        );
+        git(
+            &paths.git_dir,
+            ["update-ref", "refs/heads/main", commit.trim()],
+        );
+        std::fs::create_dir_all(paths.blob_cache_dir.parent().unwrap()).unwrap();
+        std::fs::write(&paths.blob_cache_dir, b"not a directory").unwrap();
+        let owners = Arc::strong_count(&daemon.cache);
+
+        let result = daemon
+            .execute_mount_pipeline(&config, &paths, &CancellationToken::new())
+            .await;
+        assert!(matches!(result, Err(CrabError::Io(_))));
+        assert_eq!(
+            Arc::strong_count(&daemon.cache),
+            owners,
+            "failed setup retained a worker-owned cache"
+        );
+    }
+
     #[tokio::test]
     async fn force_fetch_uses_daemon_repo_git_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -2461,10 +2580,10 @@ mod tests {
         assert_eq!(failure.backoff, MountFailure::INITIAL_BACKOFF);
 
         failure.record_failure();
-        assert_eq!(failure.backoff, Duration::from_secs(60));
+        assert_eq!(failure.backoff, Duration::from_mins(1));
 
         failure.record_failure();
-        assert_eq!(failure.backoff, Duration::from_secs(120));
+        assert_eq!(failure.backoff, Duration::from_mins(2));
     }
 
     #[test]
@@ -2481,7 +2600,7 @@ mod tests {
         let mut failure = MountFailure::new();
         // Set backoff to zero for testing.
         failure.backoff = Duration::from_secs(0);
-        failure.last_attempt = Instant::now() - Duration::from_secs(1);
+        failure.last_attempt = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
         assert!(failure.can_retry());
     }
 
@@ -2604,7 +2723,7 @@ mod tests {
     fn git<const N: usize>(repo: &Path, args: [&str; N]) {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -2629,7 +2748,7 @@ mod tests {
     {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new("git")
             .args(args)
             .current_dir(cwd)
@@ -2649,7 +2768,7 @@ mod tests {
     fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> String {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -2678,8 +2797,8 @@ mod tests {
         std::fs::create_dir_all(&paths.repo_dir).unwrap();
         let ov = OverlayStore::open(&paths.overlay_db_path, &paths.overlay_dir).unwrap();
         use crate::engine::OverlayWriter;
-        ov.create_file("dirty.txt", 0o100644).unwrap();
-        ov.create_file("._dirty.txt", 0o100644).unwrap();
+        ov.create_file("dirty.txt", 0o100_644).unwrap();
+        ov.create_file("._dirty.txt", 0o100_644).unwrap();
         drop(ov);
 
         let status = read_persisted_status(&config, dir.path());

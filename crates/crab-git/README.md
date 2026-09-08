@@ -26,6 +26,16 @@ product layers independent of a particular Git command flow.
        validated Git-domain values
 ```
 
+Worktree consumers should request `git worktree list --porcelain -z` and pass
+`true` to `worktree::parse_worktree_list_porcelain`. NUL-delimited fields retain
+whitespace, including carriage returns in paths. Line mode accepts CRLF; returned
+string fields still use lossy UTF-8 conversion. See Git's
+[porcelain format](https://git-scm.com/docs/git-worktree#_porcelain_format).
+
+Discovery honors a nonempty `GIT_DIR` as a native OS path, without requiring
+Unicode or checking that the directory exists. An absent or empty override
+uses upward discovery. Linked-worktree `commondir` parsing remains separate.
+
 The main surfaces are:
 
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository
@@ -56,19 +66,21 @@ targets in the product's push path.
 ## Usage
 
 ```rust
-use crab_git::{classify, PointerKind, RepositoryUrl};
+use crab_git::{PointerKind, RepositoryUrl, classify};
 
-let repository = RepositoryUrl::parse("s3://models/team/repository")?;
-assert_eq!(repository.bucket, "models");
-assert_eq!(repository.repo_prefix, "team/repository");
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let repository = RepositoryUrl::parse("s3://models/team/repository")?;
+    assert_eq!(repository.bucket, "models");
+    assert_eq!(repository.repo_prefix, "team/repository");
 
-let blob_bytes = b"ordinary Git content";
-match classify(blob_bytes) {
-    PointerKind::Crab(pointer) => println!("Crab file: {} bytes", pointer.size),
-    PointerKind::Lfs(pointer) => println!("LFS object: {} bytes", pointer.size),
-    PointerKind::NotAPointer => println!("ordinary Git blob"),
+    let blob_bytes = b"ordinary Git content";
+    match classify(blob_bytes) {
+        PointerKind::Crab(pointer) => println!("Crab file: {} bytes", pointer.size),
+        PointerKind::Lfs(pointer) => println!("LFS object: {} bytes", pointer.size),
+        PointerKind::NotAPointer => println!("ordinary Git blob"),
+    }
+    Ok(())
 }
-# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 For a local repository, use `discover_git_dir_from` and the ref helpers before
@@ -125,6 +137,11 @@ pack corruption, and unsupported fetch conditions so higher layers can make a
 user-facing decision without re-parsing error strings.
 
 ## Incoming pack boundary
+
+`delta::validate` and `delta::apply` share one instruction decoder, so metadata
+inspection and reconstruction enforce the same copy ranges and output sizes.
+Validation does not allocate the reconstructed object; application also checks
+the supplied base length and reserves output fallibly.
 
 `incoming_pack::quarantine` accepts a reader, an existing temporary directory,
 explicit resource bounds, a cancellation probe and a thin-base lookup. Invoke it

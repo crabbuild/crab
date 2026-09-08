@@ -1771,7 +1771,10 @@ mod tests {
             CrabError::AuthExpired {
                 path: "xorb".to_owned(),
             },
-            CrabError::Throttled { retry_after: None },
+            CrabError::Throttled {
+                retry_after: None,
+                source: None,
+            },
             CrabError::Io(std::io::Error::from(std::io::ErrorKind::TimedOut)),
             CrabError::Cancelled,
         ] {
@@ -2092,6 +2095,26 @@ mod tests {
         let repairer = StoreRepairer::new(store, prefix);
         let result = repairer.repair_push_lock("nonexistent/lock").await.unwrap();
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn multipart_checker_preserves_invalid_clock_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            crab_staging::MultipartRegistry::open(&dir.path().join("multipart-uploads.sqlite3"))
+                .unwrap();
+        let (store, prefix) = test_store();
+        let checker = StoreChecker::new(store, prefix)
+            .with_multipart_journal(Some(Arc::new(MultipartJournal::new(registry))));
+        let error = checker
+            .check_multipart_uploads(UNIX_EPOCH - Duration::from_secs(1), Duration::ZERO)
+            .await
+            .expect_err("invalid time must survive the blocking journal adapter");
+        let CrabError::Io(source) = error else {
+            panic!("unexpected error: {error}")
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(source.get_ref().unwrap().is::<std::time::SystemTimeError>());
     }
 
     #[tokio::test]

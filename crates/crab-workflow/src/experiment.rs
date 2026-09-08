@@ -8,10 +8,9 @@
 //! ref and object-store paths that are derived here, never ad-hoc at
 //! the call site.
 //!
-//! This module is deliberately I/O-free. Every function here is a pure
-//! string builder. Downstream tasks (4.2 metadata ref CAS, 4.5 GC live-
-//! set walker, 4.8 e2e push/fetch) consume these helpers; they are the
-//! single source of truth for the format of:
+//! Naming helpers define the shared layout below. Metadata encoding and
+//! validation use the same contracts; the asynchronous reader obtains bytes
+//! through caller-supplied storage operations.
 //!
 //! - `refs/crab/exp/<uuid>` — experiment commit refs
 //! - `refs/crab/exp-meta/<uuid>` — experiment metadata blob refs
@@ -97,7 +96,7 @@ pub fn stage_ref(stage_hash: &StageHash) -> String {
 ///
 /// Returns a relative object-store key with no leading slash — callers
 /// prepend the per-repo `{repo_prefix}` when they talk to the
-/// [`object_store::ObjectStore`](::object_store::ObjectStore).
+/// [`object_store::ObjectStore`].
 pub fn stage_entry_object_path(stage_hash: &StageHash) -> String {
     let hex = stage_hash.as_hex();
     // `StageHash::as_hex` yields exactly 64 hex characters, so the
@@ -254,6 +253,60 @@ impl ExperimentMetadata {
         })
     }
 
+    /// Verify the requested experiment ID and canonical metadata hash.
+    ///
+    /// Returns [`CrabError::CorruptObject`] when either identity differs. The
+    /// hash covers canonical metadata, so JSON whitespace does not affect it.
+    pub fn verify_identity(&self, id: &ExperimentId, expected_hash: &str) -> Result<()> {
+        self.verify_id(id)?;
+        let actual_hash = self.content_hash()?;
+        if expected_hash != actual_hash {
+            return Err(CrabError::CorruptObject {
+                path: exp_meta_ref(id),
+                reason: format!(
+                    "metadata ref points at {expected_hash}, but object hashes to {actual_hash}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn verify_id(&self, id: &ExperimentId) -> Result<()> {
+        if self.exp_id != *id {
+            return Err(CrabError::CorruptObject {
+                path: exp_meta_object_path(id),
+                reason: format!(
+                    "metadata id {} does not match requested experiment {id}",
+                    self.exp_id
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Decode supported metadata and verify its requested experiment ID.
+    ///
+    /// Unsupported versions fail before full deserialization. Malformed JSON
+    /// retains its source in [`CrabError::ExperimentMetadataMalformed`]. This
+    /// checks schema and ID; remote readers must also verify the ref hash.
+    pub fn from_json(bytes: &[u8], id: &ExperimentId) -> Result<Self> {
+        let malformed = |source| CrabError::ExperimentMetadataMalformed {
+            id: id.to_string(),
+            source,
+        };
+        let probe: SchemaProbe = serde_json::from_slice(bytes).map_err(malformed)?;
+        if probe.schema_version != EXPERIMENT_METADATA_SCHEMA_VERSION {
+            return Err(CrabError::WorkflowExperimentMetadataSchemaNewer {
+                id: id.to_string(),
+                found: probe.schema_version,
+                supported: EXPERIMENT_METADATA_MAX_SUPPORTED_SCHEMA,
+            });
+        }
+        let metadata: Self = serde_json::from_slice(bytes).map_err(malformed)?;
+        metadata.verify_id(id)?;
+        Ok(metadata)
+    }
+
     /// Content-address hash of the canonical JSON bytes.
     ///
     /// The meta-ref CAS (`refs/crab/exp-meta/<uuid>`) points at
@@ -376,11 +429,7 @@ pub fn build_exp_meta_ref_cas(
 
 /// Minimal read surface for fetching experiment metadata.
 ///
-/// Abstracted as a trait so tests can exercise
-/// [`read_experiment_metadata`] with an in-memory double, mirroring
-/// how [`crate::coordination::pipelined_commit::CasStore`] is used
-/// for the write side. Production callers back this with the crate's
-/// [`crate::storage::Store`] via a thin adapter.
+/// Callers supply ref and object reads for [`read_experiment_metadata`].
 ///
 /// Implementations must be infallible for "not found" — the
 /// absence of a ref or object is a normal state, not an error. All
@@ -423,12 +472,10 @@ pub trait ExperimentMetaRead: Send + Sync {
 /// simply doesn't exist for this reader. Schema mismatches surface
 /// as [`CrabError::WorkflowExperimentMetadataSchemaNewer`] (blob
 /// from a newer binary) or
-/// [`CrabError::MetricsSchemaMismatch`]-style corruption errors
-/// wrapped through `CrabError::Internal` for malformed JSON.
+/// [`CrabError::ExperimentMetadataMalformed`] for invalid JSON or field shapes.
 ///
-/// The `_content_hash` returned by the ref is currently only used
-/// for logging; once a verification pass is added (follow-up spec),
-/// it'll gate whether the deserialized bytes are trusted.
+/// The decoded experiment ID and canonical content hash must match the lookup
+/// and ref target; mismatches return [`CrabError::CorruptObject`].
 pub async fn read_experiment_metadata<S>(
     store: &S,
     id: &ExperimentId,
@@ -438,7 +485,7 @@ where
 {
     let ref_name = exp_meta_ref(id);
 
-    let Some(_content_hash) = store.read_ref(&ref_name).await? else {
+    let Some(content_hash) = store.read_ref(&ref_name).await? else {
         return Ok(None);
     };
 
@@ -459,23 +506,8 @@ where
         return Ok(None);
     };
 
-    // Parse the version first so non-v1 bytes are never interpreted as current.
-    let probe: SchemaProbe = serde_json::from_slice(&bytes).map_err(|e| {
-        CrabError::Internal(format!("experiment metadata malformed JSON for {id}: {e}"))
-    })?;
-
-    if probe.schema_version != EXPERIMENT_METADATA_SCHEMA_VERSION {
-        return Err(CrabError::WorkflowExperimentMetadataSchemaNewer {
-            id: id.to_string(),
-            found: probe.schema_version,
-            supported: EXPERIMENT_METADATA_MAX_SUPPORTED_SCHEMA,
-        });
-    }
-
-    let metadata: ExperimentMetadata = serde_json::from_slice(&bytes).map_err(|e| {
-        CrabError::Internal(format!("experiment metadata shape mismatch for {id}: {e}"))
-    })?;
-
+    let metadata = ExperimentMetadata::from_json(&bytes, id)?;
+    metadata.verify_identity(id, &content_hash)?;
     Ok(Some(metadata))
 }
 
@@ -881,6 +913,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_experiment_metadata_rejects_identity_mismatches() {
+        let id = pinned_id();
+        for wrong_id in [false, true] {
+            let mut meta = sample_metadata(id);
+            if wrong_id {
+                meta.exp_id = ExperimentId::new_v7();
+            }
+            let hash = if wrong_id {
+                meta.content_hash().unwrap()
+            } else {
+                "00".repeat(32)
+            };
+            let mut store = MockMetaStore::default();
+            store.refs.insert(exp_meta_ref(&id), hash);
+            store
+                .objects
+                .insert(exp_meta_object_path(&id), meta.canonical_json().unwrap());
+            let result = read_experiment_metadata(&store, &id).await;
+            assert!(
+                matches!(result, Err(CrabError::CorruptObject { .. })),
+                "wrong_id={wrong_id}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_experiment_metadata_accepts_noncanonical_json() {
+        let id = pinned_id();
+        let meta = sample_metadata(id);
+        let mut store = MockMetaStore::default();
+        store
+            .refs
+            .insert(exp_meta_ref(&id), meta.content_hash().unwrap());
+        store.objects.insert(
+            exp_meta_object_path(&id),
+            serde_json::to_vec_pretty(&meta).unwrap(),
+        );
+        assert_eq!(
+            read_experiment_metadata(&store, &id).await.unwrap(),
+            Some(meta)
+        );
+    }
+
+    #[tokio::test]
     async fn read_experiment_metadata_missing_ref_returns_none() {
         let id = pinned_id();
         let store = MockMetaStore::default();
@@ -948,11 +1024,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_experiment_metadata_surfaces_malformed_json_as_internal() {
-        // Missing `schema_version` key — not "newer than supported",
-        // just broken JSON. The helper surfaces this as
-        // `CrabError::Internal` so the caller can distinguish
-        // "future binary" from "garbage on disk".
+    async fn read_experiment_metadata_preserves_malformed_json_source() {
         let id = pinned_id();
         let mut store = MockMetaStore::default();
         store.refs.insert(exp_meta_ref(&id), "dummy".to_owned());
@@ -963,7 +1035,25 @@ mod tests {
         let err = read_experiment_metadata(&store, &id)
             .await
             .expect_err("malformed blob must error");
-        assert!(matches!(err, CrabError::Internal(_)), "got: {err}");
+        assert!(
+            std::error::Error::source(&err)
+                .and_then(|source| source.downcast_ref::<serde_json::Error>())
+                .is_some(),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn metadata_decoding_rejects_unsupported_versions() {
+        let id = pinned_id();
+        for version in [0, 2, u16::MAX] {
+            let mut meta = sample_metadata(id);
+            meta.schema_version = version;
+            let result = ExperimentMetadata::from_json(&meta.canonical_json().unwrap(), &id);
+            assert!(
+                matches!(result, Err(CrabError::WorkflowExperimentMetadataSchemaNewer { found, .. }) if found == version)
+            );
+        }
     }
 
     #[test]

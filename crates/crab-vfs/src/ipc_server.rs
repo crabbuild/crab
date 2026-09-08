@@ -642,6 +642,7 @@ async fn handle_mount(
     let crab_dir = cache_dir.join(".crab");
     if let Err(e) = std::fs::create_dir_all(&crab_dir) {
         cancel_token.cancel();
+        output.hydration.shutdown().await;
         release_mount_reservation(coordinator, reservation).await;
         return IpcResponse::err(format!("failed to create .crab dir: {e}"));
     }
@@ -665,6 +666,7 @@ async fn handle_mount(
         Ok(s) => s,
         Err(e) => {
             cancel_token.cancel();
+            output.hydration.shutdown().await;
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("FUSE mount failed: {e}"));
         }
@@ -675,19 +677,22 @@ async fn handle_mount(
         Ok(s) => s,
         Err(e) => {
             cancel_token.cancel();
+            output.hydration.shutdown().await;
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("FUSE background session failed: {e}"));
         }
     };
 
     // Spawn refresh loop if not read-only and not explicitly disabled.
-    if !read_only && !no_refresh {
+    let refresh_handle = if !read_only && !no_refresh {
         pipeline::spawn_refresh_loop(
             &output,
             &config_for_handle,
             std::time::Duration::from_secs(30),
-        );
-    }
+        )
+    } else {
+        None
+    };
 
     // Register with coordinator.
     let handle = MountHandle {
@@ -697,6 +702,7 @@ async fn handle_mount(
         pipeline_output: output,
         config: config_for_handle,
         fuse_session: Some(bg_session),
+        refresh_handle,
         invalidation_index: Some(invalidation_index),
         cancel_token,
         _cache_lock: Some(cache_lock),
@@ -710,7 +716,7 @@ async fn handle_mount(
         let error = failure.error.to_string();
         let failed_handle = failure.handle;
         failed_handle.cancel_token.cancel();
-        let cleanup = unmount_removed_mount(failed_handle, &mountpoint_buf);
+        let cleanup = unmount_removed_mount(failed_handle, &mountpoint_buf).await;
         let cleanup_suffix = cleanup
             .err()
             .map(|e| format!("; cleanup failed: {e}"))
@@ -742,7 +748,7 @@ async fn handle_unmount(coordinator: &Arc<Mutex<Coordinator>>, mountpoint: Strin
         }
     };
 
-    let unmount_result = unmount_removed_mount(handle, &mp);
+    let unmount_result = unmount_removed_mount(handle, &mp).await;
     coordinator.lock().await.finish_mount_removal();
 
     match unmount_result {
@@ -1034,6 +1040,10 @@ async fn handle_shutdown(coordinator: &Arc<Mutex<Coordinator>>) -> IpcResponse {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected protocol variants"
+)]
 mod tests {
     use super::*;
 

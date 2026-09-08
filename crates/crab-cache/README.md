@@ -1,280 +1,56 @@
 # crab-cache
 
-`crab-cache` provides the cache contracts and implementations shared by
-Crab's read paths. It supports hash-verified local disk caching, an optional
-HTTP cache-service client, path classification, service capabilities, dedup
-queries, prefetch profiles, and Xet-specific chunk hints.
+Shared cache identities, local disk caching, and optional HTTP cache clients.
+Use this crate for cache mechanics; use
+[`crab-cache-store`](../crab-cache-store/README.md) to compose cache reads with an
+origin store.
 
-## Why it exists
+## Choose a feature
 
-Crab reads immutable shards, xorbs, chunks, manifests, and workflow artifacts
-repeatedly. A cache must be safe to trust: content-addressed objects need
-integrity verification, manifests need freshness handling, and an unavailable
-remote cache must not become an availability dependency. Keeping those rules
-here lets `crab-read`, VFS, fetch, and workflow code use the same behavior.
+Default features are empty. Enable only the surface the caller needs:
 
-## Architecture
+| Feature | Surface |
+| --- | --- |
+| None | Cache keys, roots, path classification, service contracts |
+| `local-cache` | Verified object cache, catalog, health inspection, cleanup, shard hints |
+| `xet-chunk-cache` | Decoded-range cache and shared catalog/lifecycle support |
+| `active-probe` | HTTP service probes |
+| `remote-client` | HTTP cache client; includes `active-probe` |
 
-```text
-origin object store
-        │
-        ├── LocalCache       atomic files, hash checks, LRU limits
-        └── CacheClient      optional authenticated HTTP service
-                │
-                └── capabilities, immutable GET/HEAD/range, dedup query
+[Cargo.toml](Cargo.toml) defines feature dependencies;
+[src/lib.rs](src/lib.rs) shows their exported APIs.
+
+## Read path
+
+```mermaid
+flowchart TD
+    read[CacheKey + origin fetch closure] --> lookup[LocalCache::get_or_fetch]
+    lookup -->|verified hit| bytes[Return verified bytes]
+    lookup -->|miss or corrupt entry| fetch[Fetch and validate origin bytes]
+    fetch -->|fetch or validation failure| error[Return error]
+    fetch -->|valid| publish[Attempt local publication]
+    publish -->|stored or cache write failed| bytes
 ```
 
-`CacheKey` distinguishes chunks, shards, xorbs, manifests, and stage entries.
-`LocalCache::new` retains payloads without a disk cap. Optional budgets use
-`None` for unlimited and `Some(bytes)` for bounded retention, including zero.
-Unlimited catalog maintenance still reconciles accounting and stale owners,
-but does not evict for capacity. Per-object validation/allocation limits,
-explicit cleanup, and corrupt-entry repair are unchanged.
-`LocalCache::get_or_fetch` coalesces fills, verifies content-addressed data
-on read and write, and atomically renames completed files. Manifest entries
-use ETags rather than a content hash.
-
-Read-through fetches return validated origin bytes even if local reservation,
-creation, or publication fails. Fetch errors and size/hash/xorb validation
-failures still propagate; an optional cache write never causes a second fetch.
-Explicit `put` and `put_bytes` calls remain fallible. Logical stage/manifest
-content validation remains caller-owned, and separate manifest body/ETag
-publication is not an atomic pair.
-
-`clean_cache` is the shared explicit cleanup boundary. It streams recognized
-payload layouts through pinned private directories, retaining unknown subtrees,
-SQLite databases and side files, profiles, and unpublished temporaries. Active
-read descriptors and concurrent publishers are skipped using nonblocking locks.
-Reports count actual removals (or eligible files in a dry run) and separately
-count retained, busy, and unsafe entries. It does not create missing roots.
-Unix parent-directory locks coordinate payload publication and deletion.
-Object/range prune and verify, clean, targeted eviction, and read-side corrupt
-entry removal now share catalog row retirement. A healthy catalog's immediate
-writer transaction excludes lease/reservation changes through deletion and
-commit; declined or failed filesystem operations roll back the row deletion.
-Dry runs do not open SQLite. Busy catalogs stop removal rather than bypass
-owners. Missing/corrupt disposable indexes do not require repair before safe
-payload cleanup; unavailable accounting emits a warning. Commit failure can
-still leave an overcharged catalog and requires later reconciliation.
-Standalone private range directories remain usable without a private parent;
-only a captured private parent may supply a catalog. Windows support, crash
-recovery, side-file ownership, and complete byte accounting remain open.
-
-Object and decoded-range reads retain their original root and file descriptor
-through validation and repair. A failed read releases its own finished read lease, then
-compares the live descriptor's device/inode with the deletion candidate while
-holding the candidate's exclusive lease and parent lock. A replacement file is
-retained and its catalog row deletion rolls back. Other readers still exclude
-removal; a root replacement cannot redirect cleanup into the new tree. The
-reader duplicate shares only the seek cursor/lease, not a second independent
-read. No new body copy or unbounded read is added. Failed opens and request-bound
-rejections carry no file identity and authorize no deletion. A manifest-body
-failure cannot delete an unobserved ETag. Outer xorb decoder failures reverify
-the current file under the maintenance lock, retaining healthy refills. This
-does not close all stale-read races or qualify arbitrary in-place mutation.
-
-Decoded-range stats, prune, and verify now use pinned private directories and
-the same fixed range-layout ownership policy as cleanup. Unknown files,
-database files, live subtrees, and unpublished temporaries are retained.
-Prune previews and applied removals both skip active readers. Verification
-holds the parent mutation lock and an exclusive payload lease while streaming
-one descriptor, and removes only entries it successfully checked as corrupt.
-It checks CRC/offsets and also Blake3 identity for the `crab-chunk` namespace;
-xorb-range keys are not decoded-content hashes. Busy entries are not checked
-or reported as valid. Dropping an async scan cancels its blocking worker via a
-child token. This does not qualify catalog reservation protection, database
-ownership, complete physical accounting, or bounded-time LRU reconciliation.
-
-Decoded-range handles are canonicalized by cache directory within one process.
-Every live handle for that directory must use the same byte budget; a conflicting
-caller receives a typed configuration error and uses its existing verified-origin
-fallback instead of silently inheriting the first caller's limit. After the last
-handle closes, the same persisted directory may reopen with a new budget.
-
-Product stats and doctor use `health::inspect_cache`: one pinned root, one
-streaming filesystem walk, a read-only catalog transaction, and read-only
-validation of the shard-hint database schema, row shape, row bound, and SQLite
-`quick_check`. Shard-hint SQLite VM progress checks cancellation and a five-second
-query deadline. This cooperative limit cannot interrupt blocked filesystem calls
-and starts after database open; lock admission has a separate timeout.
-Every linked file is counted by family, including databases,
-side files, temporaries, hints, and retained/unknown state. Logical file lengths
-and allocated 512-byte blocks are separate; directory allocation has its own
-row. The walk retains at most 64 issue details, marks affected families
-incomplete, and continues independent subtrees. Strict maintenance uses the
-same walker but still aborts on an unsafe entry. Missing roots/catalogs/hint
-databases are not initialized and unsafe or corrupt paths are not repaired.
-Standalone object/range statistics retain their narrower contracts.
-
-Catalog stats reject negative or non-integer entry/reservation sizes before
-aggregation, and reject malformed maintenance timestamps instead of presenting
-them as missing. These checks do not validate the complete catalog schema or
-replace writer-side admission validation.
-
-The live filesystem walk is not atomic, an integrity check, or unique-volume
-allocation accounting (shared filesystem extents can be counted more than
-once). It excludes unlinked open files and reports reservations separately.
-An incomplete scan gives observed lower bounds and unknown over-budget status,
-unless observed allocation already exceeds the budget. Catalog or shard-hint
-validation failures do not invalidate independently measured file bytes. The
-report does not establish all-family eviction or inspect other database/index
-bodies.
-
-Object-cache stats, prune, targeted eviction, and verification use that same
-private boundary. The three eviction loops are consolidated, and stats/verify
-stream recognized objects instead of collecting an inventory first. Object
-stats include chunks, shards, xorbs, stages, and manifest counts; decoded
-ranges remain a separate report. Unknown filenames no longer become corrupt
-objects merely because they appear beneath a hash-prefix directory. Stages
-and manifests retain their logical-key semantics and are not hash-verified.
-
-Full-file xorb checks share one descriptor-owning worker implementation with
-maintenance. They validate aggregate identity, compressed chunks, and the
-footer's serialized-payload digest; metadata-only reads remain metadata-only.
-Operational read failures do not authorize maintenance deletion. Xorb index
-placement rows are no longer read, written, or cleaned up with payloads. The
-v1.0.1 schema object remains dormant until an explicit migration can remove it
-without discarding the live remote proof and parsed-index records beside it.
-Complete payload/database root correlation and cancellation authority are not
-established by connection pinning alone.
-
-Bounded object, manifest/stage body, and xorb readers now share the decoded-range
-reader's retained root/file identity through validation and conditional repair.
-A failed read cannot delete a later publication at the same path. Body repair
-does not delete a separately published manifest ETag. Cache-store decoding can
-outlive the local handle, so its error path freshly verifies the current xorb
-under the existing removal lock and retains healthy replacements. This reuses
-streaming maintenance verification, without an additional full-body buffer.
-Successful reads retain that same descriptor through their best-effort recency
-update; a later publication at the pathname cannot receive the old read's mtime.
-Object and decoded-range hits share this owner, without another open or body
-copy. Request-bound misses, existence/size probes, and manifest/ETag reads keep
-their existing no-touch behavior. This fixes recency identity, not all-family
-LRU policy or batched catalog access accounting. Atomic manifest body/ETag
-pairing and catalog-generation changes during a read remain separate work.
-
-Catalog eviction uses the same payload ownership and deletion boundary. Its
-final lease/reservation check and row removal share an immediate SQLite writer
-transaction. One pinned root covers the maintenance lock, metadata-only
-inventory, and payload deletion. Inventory does not open SQLite files and aborts
-reconciliation on unsafe entries. Dropping an owner does not create a missing
-catalog.
-
-Catalog reads, writes, and owner cleanup plus the remote xorb proof/index
-database now share a crate-private descriptor-bound SQLite owner on
-Linux/macOS. It checks the cache-owned chain and existing file metadata without
-extra database opens, rejects non-private files/links without permission
-repair, and creates new databases as `0600`. A connection-specific,
-non-default VFS retains the parent for main/journal/WAL/SHM/temp operations and
-unregisters only after close. Namespace changes use short directory locks;
-database/WAL coordination uses SQLite's standard byte ranges with
-open-file-description locks. Simultaneous in-process connections must all use
-this owner; native SQLite interoperability is tested across processes, not
-mixed owners on one inode in one process.
-
-Maintenance acquires its writer before reading owner rows, avoiding SQLite's
-non-waiting read-to-write upgrade race with reservation writers. Native macOS
-tests cover root swaps, WAL mappings, cross-process writers, and killed-writer
-recovery. Catalog maintenance, fill publication, and lease/reservation cleanup
-now retain the original root and open SQLite relative to it;
-maintenance scans and deletes through that same root. A replacement directory
-does not receive old owner-row removal or inventory writes.
-
-Reserved byte and file-backed fills use that captured root through temporary
-creation, publication, registration, and release. They retain a shared payload
-lease through the rename-to-registration interval; clean, object/range prune,
-verify, and targeted object eviction skip the active payload. Directory
-operations reopen independent descriptors so their namespace locks exclude
-each other; payload descriptor clones intentionally retain one shared lease.
-
-Private SQLite connections also retain the main descriptor and a shared lease
-on a `-owner` file recording its device/inode. Opens, namespace cleanup, page
-I/O, and new database/WAL locks reject a different main or owner inode. New
-connections reject a mismatched binding while an owner is alive or any
-journal/WAL/SHM exists. Only creating opens may bind quiescent state without
-recovery files; read-only inspection never initializes the binding or reports
-a missing binding as an empty catalog. Cleanup retains owner files.
-
-Catalog reservations and SQL leases now retain that main/owner binding after
-their creating connection closes. Temporary creation and publication validate
-it; registration and cleanup reopen only the captured generation. Separate
-connections still open independent descriptions for SQLite's byte-range locks.
-SQLite close explicitly releases those locks even while an owner retains the
-main descriptor. Accounting/eviction reuse the registration connection instead
-of selecting a new catalog after releasing the reservation. The existing
-catalog timeouts and WAL/NORMAL writer policy are unchanged.
-
-This is a main-inode replacement checkpoint, not complete database-generation
-qualification. Side-file-only replacement, identity reuse after all descriptors
-close, resource/crash qualification of retained owners, remaining index callers,
-complete temporary-byte accounting, bounded cancellation, and other
-native-platform qualification remain open. Native SQLite does not
-participate in Crab's generation lease; cross-process transaction locking is
-qualified, but arbitrary external replacement or repair is not authorized.
-
-Read-only catalog inspection now uses a read-only SQLite connection with
-exclusive pager locking, SQLite's heap WAL index, and checkpoint-on-close
-disabled. Existing WAL bytes are read, not bypassed; an absent WAL is represented
-as empty only while the actual main-file EXCLUSIVE lock proves its absence.
-The VFS rejects writes, truncation, deletion, temporary creation, and SHM
-initialization. Catalog totals share one read transaction. Busy catalogs report
-an error, and hot rollback journals require recovery by a writer, not inspection.
-
-The main OS descriptor uses `O_RDWR` because OFD exclusive byte locks require
-write permission; SQL and VFS data writes remain disabled. A filesystem that
-cannot grant that descriptor reports unavailable rather than weakening locking.
-Native macOS tests cover quiet and retained WAL state, contention, direct VFS
-write denial, native writer exclusion, and inspection after writer death. This
-is used by both stats spellings and doctor. Native Linux proof and bounds on
-heap WAL-index size, SQL aggregation, and total inspection time remain open.
-
-Shard hints now use `hints/shard-hints.sqlite` instead of the released global
-`shard-hints.json` read-modify-write file. The primary key combines a digest of
-the resolved provider/bucket/global-content prefix with the file hash, so two
-managed views in one physical bucket cannot consume each other's hints.
-SQLite transactions preserve unrelated concurrent updates. Missing, busy,
-corrupt, or stale hints remain advisory misses and hydration falls back to the
-authoritative file index. The old JSON cache is not migrated or read; cache
-inventory still recognizes it as disposable retained state.
-
-Admission includes the incoming file and other active reservations when making
-space, even below the current-usage high watermark. The final capacity check
-and reservation insertion share a writer transaction. Object, file-backed
-xorb, and decoded-range writers keep the reservation until the completed entry
-is registered; active owners are not eviction candidates. An entry that cannot
-fit is not cached. SQLite database/side-file access, complete accounting,
-bounded reconciliation, and command/background lifecycle still need hardening;
-this is not the complete budget/lifecycle contract.
-
-The remote client is intentionally optional. The service contracts describe
-auth modes, cache/dedup modes, limits, health, and known chunks without making
-every local consumer depend on `reqwest`.
-
-The persistence features also expose directory lifecycle guards. Mutable
-directory owners such as mirror reconciliation hold `CacheUseGuard`; shared
-`clean_cache` and CLI cleanup hold `CacheCleanGuard` during deletion. Ownership is
-exclusive across overlapping physical paths. Admission announces its lock
-before probing existing owners, so a concurrent cleaner and user cannot both
-proceed. Payload cleanup retains mirror repositories, unknown state, and
-coordination files, even when idle; admission does not authorize recursive
-deletion. Previews do not create coordination markers. These are cooperative
-local locks, not distributed leases or protection
-against uncooperative external deletion. Ordinary immutable cache fills do not
-hold directory ownership.
-
-Owners, cleaners and temporary admission probes explicitly unlock before
-closing their file handles. On Unix, a descriptor inherited by a concurrent
-fork must not prolong ownership until that unrelated child executes or exits.
-Callers still must join their own cache workers before dropping the guard;
-explicit unlock does not make a detached writer safe.
+- Chunks, shards, and xorbs use content identities. Manifests use names and
+  optional ETags; stage entries use logical keys.
+- Read-through publication failures do not discard validated origin bytes.
+  Fetch and validation failures still propagate. Explicit `put` calls are fallible.
+- `LocalCache::new` has no disk cap. Bounded retention uses `Some(bytes)`, including
+  zero; per-object validation limits still apply.
+- Manifest body/ETag publication is not an atomic pair. Logical manifest and
+  stage-content validation belongs to the caller.
 
 ## Usage
 
-Enable the local implementation and cache a verified chunk:
+Enable local caching in a consuming Crab workspace member. This crate is not
+published to the registry; the example below caches a verified chunk:
 
 ```toml
 [dependencies]
-crab-cache = { version = "1", features = ["local-cache"] }
+crab-cache = { workspace = true, features = ["local-cache"] }
+bytes = { workspace = true }
+crab-xet = { workspace = true }
 ```
 
 ```rust
@@ -282,24 +58,51 @@ use bytes::Bytes;
 use crab_cache::{CacheKey, LocalCache};
 use crab_xet::hash::compute_data_hash;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let cache = LocalCache::new(".cache/crab".into());
-let payload = Bytes::from_static(b"cached chunk");
-let hash = compute_data_hash(payload.as_ref());
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let cache = LocalCache::new(".cache/crab".into());
+    let payload = Bytes::from_static(b"cached chunk");
+    let hash = compute_data_hash(payload.as_ref());
 
-let result = cache
-    .get_or_fetch(&CacheKey::Chunk(hash), || async {
-        Ok::<_, crab_cache::CacheError>(payload.clone())
-    })
-    .await?;
-assert_eq!(result, payload);
-# Ok(())
-# }
+    let result = cache
+        .get_or_fetch(&CacheKey::Chunk(hash), || async {
+            Ok::<_, crab_cache::CacheError>(payload.clone())
+        })
+        .await?;
+    assert_eq!(result, payload);
+    Ok(())
+}
 ```
 
-For a cache service, enable `remote-client` and construct `CacheClient` with
-the deployment's PSK, bearer, or mTLS settings. Call `is_healthy` and
-`capabilities` before using service-specific features.
+## Navigate the implementation
+
+| Change | Start here | Follow through |
+| --- | --- | --- |
+| Key or route classification | [key.rs](src/key.rs), [path_class.rs](src/path_class.rs) | [cache-store adapter](../crab-cache-store/src/lib.rs) |
+| Object fill or repair | [local_cache.rs](src/local_cache.rs) | [read-through tests](src/local_cache/tests/read_through.rs), [repair tests](src/local_cache/tests/read_repair.rs) |
+| Budget and eviction | [catalog.rs](src/catalog.rs) | [removal.rs](src/catalog/removal.rs) |
+| Disk cleanup | [clean.rs](src/clean.rs), [lifecycle.rs](src/lifecycle.rs) | [private_fs.rs](src/private_fs.rs) |
+| Health reporting | [health.rs](src/health.rs) | [health tests](src/health/tests.rs) |
+| Remote client | [cache_client.rs](src/cache_client.rs) | [service.rs](src/service.rs) |
+
+## Persistence and service contracts
+
+The [reference](REFERENCE.md) covers file identity, read repair, SQLite ownership,
+capacity admission, advisory hints, and cleanup. It keeps platform and crash
+qualification limits beside the relevant contract.
+
+Directory guards coordinate cooperating local owners. Callers must join their
+workers before dropping a guard. Cache contents remain disposable; cleanup
+retains unknown state and does not authorize recursive deletion.
+
+For remote caches, enable `remote-client`, configure `CacheClient` authentication,
+and inspect health/capabilities before service-specific operations. Credential
+values are omitted from diagnostic `Debug` output.
+
+## Work on this crate
+
+[AGENTS.md](AGENTS.md) maps ownership, invariants, and focused verification.
+Local-cache and decoded-range features share filesystem/catalog code: changes
+there need evidence for both enabled paths and the affected platform.
 
 ## Boundaries
 

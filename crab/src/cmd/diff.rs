@@ -116,7 +116,7 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
                 files: Vec::new(),
                 summary: &DiffSummary::default(),
             };
-            emit_json("diff", "1.1", payload);
+            emit_json("diff", "1.1", payload)?;
         } else {
             println!("no crab-tracked files found");
         }
@@ -132,7 +132,7 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
                 files: Vec::new(),
                 summary: &DiffSummary::default(),
             };
-            emit_json("diff", "1.1", payload);
+            emit_json("diff", "1.1", payload)?;
         } else {
             let total_tracked = old_map.len().max(new_map.len());
             println!(
@@ -179,7 +179,7 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
             crate::storage::Store::from_storage(store.origin().clone()),
             prefix,
         );
-        let resolver = TermResolver::new(store, router, cache, config.download_concurrency);
+        let resolver = TermResolver::new(store, router, cache, config.download_concurrency)?;
         resolver
             .resolve_sequences_batch(
                 &hashes_to_resolve,
@@ -263,7 +263,7 @@ pub async fn run_diff(args: DiffArgs, config: Config, cancel: CancellationToken)
             files: sorted,
             summary: &summary,
         };
-        emit_json("diff", "1.1", payload);
+        emit_json("diff", "1.1", payload)?;
 
         info!(
             files_changed = summary.files_changed,

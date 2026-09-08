@@ -410,12 +410,16 @@ impl MultipartRegistry {
         )
     }
 
+    /// List expired uploads older than the grace period.
+    ///
+    /// Rejects times before the Unix epoch or outside SQLite's integer range;
+    /// an invalid clock must not classify active leases as cleanup candidates.
     pub fn find_abandoned(
         &self,
         now: SystemTime,
         grace_period: Duration,
     ) -> Result<Vec<AbandonedUpload>> {
-        let now = unix_seconds(now);
+        let now = unix_seconds(now)?;
         let cutoff = now.saturating_sub(duration_seconds(grace_period));
         let mut stmt = self
             .conn
@@ -593,11 +597,12 @@ fn duration_seconds(duration: Duration) -> i64 {
     i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
 }
 
-fn unix_seconds(time: SystemTime) -> i64 {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-        .unwrap_or(i64::MAX)
+fn unix_seconds(time: SystemTime) -> Result<i64> {
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidInput, source))?;
+    i64::try_from(duration.as_secs())
+        .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidInput, source).into())
 }
 
 fn to_sql_u64(value: u64, name: &str) -> Result<i64> {
@@ -742,6 +747,22 @@ mod tests {
         assert!(!registry.complete_owned(&claim.lease, 161).unwrap());
         let resumed = acquire(&mut registry, "owner", 161);
         assert!(registry.complete_owned(&resumed.lease, 161).unwrap());
+    }
+
+    #[test]
+    fn abandoned_scan_rejects_a_clock_before_epoch() {
+        let mut registry = open_in_memory();
+        let claim = acquire(&mut registry, "owner", 100);
+        let invalid_now = UNIX_EPOCH - Duration::from_secs(1);
+        let error = registry
+            .find_abandoned(invalid_now, Duration::ZERO)
+            .expect_err("invalid time must not turn an active lease into an abandoned upload");
+        let StagingError::Io(source) = error else {
+            panic!("unexpected error: {error}")
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(source.get_ref().unwrap().is::<std::time::SystemTimeError>());
+        assert!(registry.renew(&claim.lease, 101, LEASE).unwrap());
     }
 
     #[test]

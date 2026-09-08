@@ -722,12 +722,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "test assertions"
-)]
+#[expect(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use std::collections::BTreeSet;
     use std::net::SocketAddr;
@@ -1054,7 +1049,7 @@ rules:
                     "name": check.get("name")?.as_str()?,
                     "status": check.get("status")?.as_str()?,
                     "code": check.get("code")?.as_str()?,
-                    "has_remediation": check.get("remediation")?.as_str()?.is_empty() == false,
+                    "has_remediation": !check.get("remediation")?.as_str()?.is_empty(),
                 }))
             })
             .collect();

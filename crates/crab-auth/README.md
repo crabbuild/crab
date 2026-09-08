@@ -52,33 +52,53 @@ dynamic providers:
 
 ```rust
 use crab_auth::{
-    create_credential_provider, CredentialProvider, CredentialProviderConfig,
-    StaticAuthConfig,
+    CredentialProviderConfig, StaticAuthConfig, create_credential_provider,
 };
 use crab_types::storage::StorageProviderKind;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let provider = create_credential_provider(CredentialProviderConfig::Static(
-    StaticAuthConfig {
-        storage_provider: StorageProviderKind::S3,
-    },
-))?;
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let provider =
+        create_credential_provider(CredentialProviderConfig::Static(StaticAuthConfig {
+            storage_provider: StorageProviderKind::S3,
+        }))?;
 
-let resolution = provider.resolve("bucket", "repositories/team", "fetch").await?;
-assert!(resolution.storage_scope.is_none());
-# Ok(())
-# }
+    let resolution = provider
+        .resolve("bucket", "repositories/team", "fetch")
+        .await?;
+    assert!(resolution.storage_scope.is_none());
+    Ok(())
+}
 ```
 
-Enable only the provider clients required by the deployment:
+In a consuming Crab workspace member, enable only the provider clients needed
+by the deployment. This crate is not published to the registry:
 
 ```toml
 [dependencies]
-crab-auth = { version = "1", features = ["oidc-client", "aws-oidc-client"] }
+crab-auth = { workspace = true, features = ["oidc-client", "aws-oidc-client"] }
 ```
 
-Credential values and tokens are sensitive. Callers should pass resolutions
-directly to the storage adapter and avoid logging their debug representation.
+Credential and token types omit secrets from `Debug` output. Their string fields
+and serialized payloads still contain credentials: pass resolutions directly to
+the storage adapter and keep those fields out of logs.
+
+## Token-cache key handling
+
+| Source | Representation | Invalid input |
+| --- | --- | --- |
+| macOS Keychain | 64 ASCII hex characters | Returns a key-store error; initialization follows its existing key-file path |
+| Key file | Exactly 32 raw bytes | Returns a key-store error for an incorrect length |
+
+The Keychain loader creates without replacing an existing item. If insertion
+fails, it rereads the stored key so concurrent initializers converge on the
+winner. It never returns a candidate that was not successfully stored.
+
+Key files are prepared and synced in a sibling temporary file before publication.
+Publication never replaces an existing key, and a failed write cannot expose a
+short key at the final path. Unix key files retain private `0600` permissions.
+
+Decoder errors never include the supplied key. Token-cache tests use synthetic
+keys and temporary directories; they do not qualify live Keychain integration.
 
 ## Boundaries
 
@@ -89,3 +109,13 @@ directly to the storage adapter and avoid logging their debug representation.
 - Use [`crab-coordination`](../crab-coordination/README.md) for write
   serialization and commit authority; authentication does not decide ref
   ownership.
+
+## Token-cache reads
+
+`TokenCache::load` returns `None` for a missing token file and preserves lock,
+read, decryption, and decoding failures as errors. It reads under the cache lock;
+there is no separate existence probe that can race logout or hide I/O errors.
+
+The current lock implementation serializes Unix processes. Non-Unix locking is
+a no-op and still needs platform qualification; atomic file replacement alone
+does not provide a cross-process transaction around login or logout.

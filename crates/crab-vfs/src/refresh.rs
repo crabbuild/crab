@@ -641,7 +641,7 @@ impl RefreshService {
 
     /// Run the refresh loop until cancellation.
     ///
-    /// Spawns two polling loops:
+    /// Polls two timers in one task:
     /// - Remote ref polling at `remote_poll_interval` (with backoff on failure)
     /// - Local `.git/HEAD` polling at `local_poll_interval`
     ///
@@ -1307,7 +1307,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("abcd1234".to_owned()),
             pointer: None,
             size,
@@ -1328,7 +1328,7 @@ mod tests {
     {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -1353,7 +1353,7 @@ mod tests {
     {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = Command::new("git")
             .args(args)
             .current_dir(cwd)
@@ -1377,7 +1377,7 @@ mod tests {
     {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -1481,7 +1481,7 @@ mod tests {
 
         // Create an overlay entry for "a.txt".
         use crate::engine::OverlayWriter;
-        overlay.create_file("a.txt", 0o100644).unwrap();
+        overlay.create_file("a.txt", 0o100_644).unwrap();
 
         let mut changed = HashSet::new();
         changed.insert("a.txt".to_owned());
@@ -1500,7 +1500,7 @@ mod tests {
         let overlay = Arc::new(OverlayStore::open(&db_path, &upper_dir).unwrap());
 
         use crate::engine::OverlayWriter;
-        overlay.create_file("a.txt", 0o100644).unwrap();
+        overlay.create_file("a.txt", 0o100_644).unwrap();
         overlay.remove("a.txt").unwrap();
 
         let mut changed = HashSet::new();
@@ -1515,23 +1515,23 @@ mod tests {
     #[test]
     fn backoff_doubles_on_failure() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut backoff = BackoffState::new(base, max);
 
         assert_eq!(backoff.current_interval, base);
 
         backoff.on_failure("network error");
-        assert_eq!(backoff.current_interval, Duration::from_secs(60));
+        assert_eq!(backoff.current_interval, Duration::from_mins(1));
         assert_eq!(backoff.last_fetch_result.as_deref(), Some("network error"));
 
         backoff.on_failure("timeout");
-        assert_eq!(backoff.current_interval, Duration::from_secs(120));
+        assert_eq!(backoff.current_interval, Duration::from_mins(2));
     }
 
     #[test]
     fn backoff_caps_at_max() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut backoff = BackoffState::new(base, max);
 
         // Drive past the cap.
@@ -1544,7 +1544,7 @@ mod tests {
     #[test]
     fn backoff_resets_on_success() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut backoff = BackoffState::new(base, max);
 
         backoff.on_failure("err");
@@ -1559,17 +1559,17 @@ mod tests {
     #[test]
     fn backoff_independent_per_instance() {
         let base = Duration::from_secs(30);
-        let max = Duration::from_secs(600);
+        let max = Duration::from_mins(10);
         let mut a = BackoffState::new(base, max);
         let mut b = BackoffState::new(base, max);
 
         a.on_failure("err");
-        assert_eq!(a.current_interval, Duration::from_secs(60));
+        assert_eq!(a.current_interval, Duration::from_mins(1));
         assert_eq!(b.current_interval, base);
 
         b.on_success();
         assert_eq!(b.current_interval, base);
-        assert_eq!(a.current_interval, Duration::from_secs(60));
+        assert_eq!(a.current_interval, Duration::from_mins(1));
     }
 
     // --- redact_url tests ---

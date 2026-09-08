@@ -29,7 +29,33 @@ execution. Parsing and graph construction are sequential caller-owned steps.
 
 ## Invariants
 
+- Experiment metadata readers share `ExperimentMetadata::verify_identity` for
+  requested ID and canonical hash checks. Storage prefixes remain caller-owned;
+  `from_json` owns schema decoding and requested-ID checks. Listings own their
+  warning/skip policy; live-set collection must fail on unknown metadata roots.
+  Source: `crates/crab-workflow/src/experiment.rs` and `crab/src/cmd/exp.rs`.
+
+- Scheduler contention is fs4's `Ok(false)` outcome, not an I/O failure.
+  The guard owns the advisory lock; PID files are only diagnostics.
+  Await `SchedulerLock::acquire`; contention backoff yields through Tokio timers.
+  Dropping the acquisition future cancels its wait; filesystem attempts remain
+  synchronous. Inline and YAML
+  cache-only replay must hold the same guard as normal output publication.
+  YAML replay reads lockfile hashes under that guard; never resolve live inputs
+  or run stage commands/hooks on this path.
+  Cached artifact paths include stage wdir already. Product materialization
+  resolves them against the invocation repository root, never process cwd.
+  Source: `crates/crab-workflow/src/scheduler_lock.rs`.
+
+- Sidecar cleanup requires a valid run UUID and excludes active run IDs. An empty
+  active set is safe only when the caller has excluded other schedulers; the CLI
+  sweep helper requires a live scheduler guard in inline, YAML, and DAG paths.
+  Source: `crates/crab-workflow/src/resume.rs` and `crab/src/cmd/run.rs`.
+
 - Unknown schema keys must fail visibly; parse/expand before planning so typos cannot silently alter execution.
+  Source: `crates/crab-workflow/src/yaml.rs`.
+- Stage and default retry policies share range checks with semantic validation;
+  reject invalid values during parsing so execution cannot bypass the checks.
   Source: `crates/crab-workflow/src/yaml.rs`.
 - Reject duplicate output ownership and cycles before execution; preserve deterministic topological decisions.
   Source: `crates/crab-workflow/src/graph.rs`.

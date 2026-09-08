@@ -23,26 +23,54 @@ pub struct Pointer {
 }
 
 /// Parse failure for the Crab pointer wire format.
+/// UTF-8 and integer failures retain their underlying error through
+/// [`std::error::Error::source`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PointerParseError {
-    message: String,
+    kind: PointerParseErrorKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PointerParseErrorKind {
+    Format(String),
+    Utf8(std::str::Utf8Error),
+    Size {
+        value: String,
+        source: std::num::ParseIntError,
+    },
 }
 
 impl PointerParseError {
     fn new(message: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
+            kind: PointerParseErrorKind::Format(message.into()),
         }
     }
 }
 
 impl fmt::Display for PointerParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+        match &self.kind {
+            PointerParseErrorKind::Format(message) => f.write_str(message),
+            PointerParseErrorKind::Utf8(source) => {
+                write!(f, "pointer is not valid UTF-8: {source}")
+            }
+            PointerParseErrorKind::Size { value, source } => {
+                write!(f, "invalid size {value:?}: {source}")
+            }
+        }
     }
 }
 
-impl std::error::Error for PointerParseError {}
+impl std::error::Error for PointerParseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.kind {
+            PointerParseErrorKind::Format(_) => None,
+            PointerParseErrorKind::Utf8(source) => Some(source),
+            PointerParseErrorKind::Size { source, .. } => Some(source),
+        }
+    }
+}
 
 type Result<T> = std::result::Result<T, PointerParseError>;
 
@@ -57,8 +85,9 @@ impl Pointer {
             )));
         }
 
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| PointerParseError::new(format!("pointer is not valid UTF-8: {e}")))?;
+        let text = std::str::from_utf8(bytes).map_err(|source| PointerParseError {
+            kind: PointerParseErrorKind::Utf8(source),
+        })?;
 
         let mut lines = text.split('\n');
 
@@ -85,9 +114,12 @@ impl Pointer {
         let size_str = size_line
             .strip_prefix("size ")
             .ok_or_else(|| PointerParseError::new(format!("bad size line: {size_line:?}")))?;
-        let size: u64 = size_str
-            .parse()
-            .map_err(|e| PointerParseError::new(format!("invalid size {size_str:?}: {e}")))?;
+        let size: u64 = size_str.parse().map_err(|source| PointerParseError {
+            kind: PointerParseErrorKind::Size {
+                value: size_str.to_owned(),
+                source,
+            },
+        })?;
 
         let shard_hint = match lines.next() {
             Some(line) if !line.is_empty() => match line.strip_prefix("shard-hint ") {
@@ -239,6 +271,7 @@ pub fn hex_encode(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error;
 
     fn sample_hash() -> [u8; 32] {
         let mut h = [0u8; 32];
@@ -262,6 +295,50 @@ mod tests {
             size: 1_048_576,
             shard_hint: None,
         }
+    }
+
+    #[test]
+    fn invalid_utf8_retains_failure_position() {
+        let mut bytes = sample_pointer().serialize();
+        bytes[10] = 0xff;
+        let error = Pointer::parse(&bytes).unwrap_err();
+        let source = error
+            .source()
+            .and_then(|source| source.downcast_ref::<std::str::Utf8Error>())
+            .unwrap();
+
+        assert_eq!(source.valid_up_to(), 10);
+    }
+
+    #[test]
+    fn invalid_sizes_retain_integer_error_kind() {
+        use std::num::IntErrorKind;
+
+        for (size, expected) in [
+            ("", IntErrorKind::Empty),
+            ("no", IntErrorKind::InvalidDigit),
+            ("-42", IntErrorKind::InvalidDigit),
+            ("18446744073709551616", IntErrorKind::PosOverflow),
+        ] {
+            let raw = format!(
+                "{VERSION_LINE}\nfile-hash {}\nsize {size}\n",
+                "0".repeat(64)
+            );
+            let error = Pointer::parse(raw.as_bytes()).unwrap_err();
+            let source = error
+                .source()
+                .and_then(|source| source.downcast_ref::<std::num::ParseIntError>())
+                .unwrap();
+
+            assert_eq!(source.kind(), &expected, "size {size:?}");
+        }
+    }
+
+    #[test]
+    fn wire_format_failure_has_no_synthetic_source() {
+        let error = Pointer::parse(b"wrong version\n").unwrap_err();
+
+        assert!(error.source().is_none());
     }
 
     #[test]

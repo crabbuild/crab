@@ -405,12 +405,7 @@ fn glob_match(pattern: &str, value: &str) -> bool {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "test assertions"
-)]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
     use axum::http::HeaderValue;

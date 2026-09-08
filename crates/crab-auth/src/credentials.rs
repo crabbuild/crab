@@ -1,6 +1,6 @@
 //! Credential contracts resolved by auth providers.
 
-use std::time::SystemTime;
+use std::{fmt, time::SystemTime};
 
 use crab_types::storage::{StorageProviderKind, StorageScope};
 
@@ -9,7 +9,8 @@ use crab_types::storage::{StorageProviderKind, StorageScope};
 /// Each variant carries the provider-specific fields needed by the storage
 /// layer to configure an object-store builder. Auth owns credential resolution;
 /// storage owns how these credentials become a concrete store.
-#[derive(Debug, Clone)]
+/// Debug output includes only provider and lifetime metadata, never secret fields.
+#[derive(Clone)]
 pub enum CloudCredentials {
     /// S3-compatible credentials.
     ///
@@ -46,6 +47,26 @@ pub enum CloudCredentials {
     StaticEnv { provider: StorageProviderKind },
 }
 
+impl fmt::Debug for CloudCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, expires_at) = match self {
+            Self::Aws { expires_at, .. } => ("Aws", expires_at),
+            Self::Gcp { expires_at, .. } => ("Gcp", expires_at),
+            Self::Azure { expires_at, .. } => ("Azure", expires_at),
+            Self::AzureScoped { expires_at, .. } => ("AzureScoped", expires_at),
+            Self::StaticEnv { provider } => {
+                return f
+                    .debug_struct("StaticEnv")
+                    .field("provider", provider)
+                    .finish();
+            }
+        };
+        f.debug_struct(kind)
+            .field("expires_at", expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A credential resolution result, optionally scoped to auth-issued prefixes.
 #[derive(Debug, Clone)]
 pub struct CredentialResolution {
@@ -72,10 +93,20 @@ impl CredentialResolution {
 }
 
 /// Azure token type: either an OAuth2 bearer token or a SAS token.
-#[derive(Debug, Clone)]
+/// Debug output redacts the token value.
+#[derive(Clone)]
 pub enum AzureToken {
     Bearer(String),
     Sas(String),
+}
+
+impl fmt::Debug for AzureToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+            Self::Sas(_) => f.write_str("Sas(<redacted>)"),
+        }
+    }
 }
 
 /// A path-limited Azure read credential.

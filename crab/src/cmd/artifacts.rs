@@ -214,7 +214,7 @@ fn run_list(root: &Path, args: &ArtifactListArgs) -> Result<()> {
                 println!("  {name} ({}, {count} versions)", declaration.path);
             }
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -261,7 +261,7 @@ fn run_show(root: &Path, args: &ArtifactShowArgs) -> Result<()> {
                 println!("  {stage}: {version}");
             }
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -343,7 +343,7 @@ fn run_version_create(root: &Path, args: &ArtifactVersionCreateArgs) -> Result<(
             println!("Created {}", payload.manifest.version_id);
             println!("Ref: {}", payload.version_ref);
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -399,7 +399,7 @@ fn run_promote(root: &Path, args: &ArtifactPromoteArgs) -> Result<()> {
                 payload.name, payload.stage, payload.version_id
             );
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -463,7 +463,7 @@ fn run_get(root: &Path, args: &ArtifactGetArgs) -> Result<()> {
             |payload| {
                 println!("Wrote {} ({})", payload.output, payload.version_id);
             },
-        );
+        )?;
         return Ok(());
     }
     let source = version_payload_path(&registry_path, &manifest.version_id);
@@ -503,7 +503,7 @@ fn run_get(root: &Path, args: &ArtifactGetArgs) -> Result<()> {
         |payload| {
             println!("Wrote {} ({})", payload.output, payload.version_id);
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -537,7 +537,7 @@ fn run_history(root: &Path, args: &ArtifactHistoryArgs) -> Result<()> {
                 );
             }
         },
-    );
+    )?;
     Ok(())
 }
 
@@ -783,19 +783,26 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     }
 }
 
-fn emit_payload<T, F>(json: bool, jsonl: bool, schema: &'static str, payload: T, text: F)
+fn emit_payload<T, F>(
+    json: bool,
+    jsonl: bool,
+    schema: &'static str,
+    payload: T,
+    text: F,
+) -> Result<()>
 where
     T: Serialize,
     F: FnOnce(&T),
 {
     match OutputMode::from_flags(json, jsonl) {
         OutputMode::Text => text(&payload),
-        OutputMode::Json => emit_json(schema, "1.0", payload),
+        OutputMode::Json => emit_json(schema, "1.0", payload)?,
         OutputMode::Jsonl => {
             let mut stream = JsonlStream::new("artifacts.event", "1.0", std::io::stdout());
-            stream.emit_result(payload);
+            stream.emit_result(payload)?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

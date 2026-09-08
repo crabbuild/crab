@@ -1535,10 +1535,12 @@ mod storage {
     use object_store::path::Path as ObjectPath;
     use serde::{Deserialize, Serialize};
 
+    #[cfg(feature = "remote-index")]
+    use super::GitCatalogVisibilityIndex;
     use super::{
-        GIT_VISIBILITY_INDEX_VERSION, GitCatalogVisibilityIndex, GitVisibilityEdit,
-        GitVisibilityIndex, MAX_GIT_VISIBILITY_INDEX_BYTES, MAX_GIT_VISIBILITY_OBJECTS,
-        MAX_GIT_VISIBILITY_REFS, validate_hash, validate_oid,
+        GIT_VISIBILITY_INDEX_VERSION, GitVisibilityEdit, GitVisibilityIndex,
+        MAX_GIT_VISIBILITY_INDEX_BYTES, MAX_GIT_VISIBILITY_OBJECTS, MAX_GIT_VISIBILITY_REFS,
+        validate_hash, validate_oid,
     };
     use crate::error::Result;
     use crate::manifests::Manifest;
@@ -1563,6 +1565,7 @@ mod storage {
     }
 
     /// Lazy catalog-bound visibility proof and its storage format.
+    #[cfg(feature = "remote-index")]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct GitCatalogVisibilityRead {
         /// Ordinal proof that has not materialized the catalog OID dictionary.

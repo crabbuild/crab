@@ -194,7 +194,7 @@ impl BlobLruCache {
 /// resolver, wrapped in an LRU.
 ///
 /// Implements [`gix_object::Find`]. The blanket
-/// [`gix_object::FindExt`](gix_object::FindExt) impl is picked up for
+/// [`gix_object::FindExt`] impl is picked up for
 /// free, so callers can use `find_blob`, `find_tree`, etc.
 pub struct CrabOdb {
     git_odb: gix_odb::HandleArc,

@@ -1,8 +1,8 @@
 //! Write-side SlateDB helpers for Crab's remote metadata indexes.
 //!
-//! This Module owns the narrow remote-index Interface needed by server
-//! adapters: write file/chunk index batches using the canonical key/value
-//! codecs, and close every opened SlateDB handle before returning.
+//! Server adapters use canonical file/chunk codecs through this module.
+//! One-shot helpers close their own handles; long-lived writers transfer
+//! explicit close ownership to their caller.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -74,7 +74,8 @@ fn chunk_index_path(global_prefix: &str) -> String {
 ///
 /// Empty entry sets do not open their corresponding database. Any database
 /// opened by this function is closed before the result is returned; when both
-/// a write and close fail, the write error is returned.
+/// a write and close fail, the write error is returned. Await this future to
+/// completion; dropping it cannot perform asynchronous cleanup.
 pub async fn write_index_entries(
     store: Arc<dyn ObjectStore>,
     config: &RemoteIndexConfig,
@@ -99,7 +100,11 @@ pub async fn write_index_entries(
     close_result
 }
 
-/// Long-lived bounded writer for a sequence of remote index batches.
+/// Long-lived writer for caller-bounded remote index batches.
+///
+/// Writes buffer data without waiting for durability. Always await [`Self::close`]
+/// before reporting publication success, including after a batch error. This
+/// writer does not provide an atomic transaction across file and chunk indexes.
 pub struct RemoteIndexWriter {
     file_db: Option<slatedb::Db>,
     chunk_db: Option<slatedb::Db>,
@@ -139,7 +144,12 @@ impl RemoteIndexWriter {
         Ok(Self { file_db, chunk_db })
     }
 
-    /// Commit one bounded batch without closing the underlying databases.
+    /// Buffer one caller-bounded batch in the opened databases.
+    ///
+    /// Nonempty entries require their index to have been selected in [`Self::open`].
+    /// An unopened index returns [`MetadataError::Internal`] before either index
+    /// is written. Other errors may occur after file entries were buffered;
+    /// callers must still close the writer. Success is not a durability barrier.
     pub async fn write_entries(
         &self,
         file_entries: &[(MerkleHash, CommittedFileRecord)],
@@ -155,6 +165,9 @@ impl RemoteIndexWriter {
     }
 
     /// Flush and close every database opened by this writer.
+    ///
+    /// Both closes are attempted. If both fail, return the file-index error.
+    /// Await this future through completion; dropping it cannot finish cleanup.
     pub async fn close(self) -> Result<()> {
         close_opened_writers(self.file_db, self.chunk_db).await
     }
@@ -163,7 +176,11 @@ impl RemoteIndexWriter {
 /// Read one chunk-index entry from a remote index.
 ///
 /// This is intended for owner-crate tests and diagnostics; normal read paths
-/// resolve file reconstruction through the shared read orchestration Module.
+/// resolve file reconstruction through the shared read orchestration module.
+/// Returns the head candidate when present. Otherwise, scans validated history
+/// and selects the greatest (committed generation, placement ID), matching the
+/// writer's ordering within a batch. A candidate is not proof of current source
+/// visibility or object availability.
 pub async fn read_chunk_index_entry(
     store: Arc<dyn ObjectStore>,
     config: &RemoteIndexConfig,
@@ -201,7 +218,7 @@ pub async fn read_chunk_index_entry(
                     db: CHUNK_INDEX_DB_LABEL.to_owned(),
                     source,
                 })?;
-        let mut selected: Option<CommittedChunkReceipt> = None;
+        let mut selected: Option<([u8; 32], CommittedChunkReceipt)> = None;
         while let Some(row) = rows
             .next()
             .await
@@ -219,14 +236,15 @@ pub async fn read_chunk_index_entry(
             }
             let placement = decode_placement(chunk_hash, &row.value, Some(receipt_id))?;
             let receipt = resolve_receipt(&reader, placement).await?;
-            if selected
-                .as_ref()
-                .is_none_or(|prior| receipt.committed_generation > prior.committed_generation)
-            {
-                selected = Some(receipt);
+            // Use the writer's tie-break so removing a head does not change
+            // which placement wins among the same batch's immutable rows.
+            if selected.as_ref().is_none_or(|(prior_id, prior)| {
+                (receipt.committed_generation, receipt_id) > (prior.committed_generation, *prior_id)
+            }) {
+                selected = Some((receipt_id, receipt));
             }
         }
-        Ok(selected.map(|receipt| XorbRef {
+        Ok(selected.map(|(_, receipt)| XorbRef {
             xorb_hash: MerkleHash::from(receipt.xorb_hash),
             chunk_index: receipt.chunk_index,
             uncompressed_size: receipt.uncompressed_size,
@@ -252,6 +270,27 @@ async fn write_opened_entries(
     file_entries: &[(MerkleHash, CommittedFileRecord)],
     committed_chunk_entries: &[(MerkleHash, CommittedChunkReceipt)],
 ) -> Result<()> {
+    // Validate both selections before buffering anything: accepting half a batch
+    // would hide caller mistakes behind a successful batch result.
+    for (opened, has_entries, label) in [
+        (
+            file_db.is_some(),
+            !file_entries.is_empty(),
+            FILE_INDEX_DB_LABEL,
+        ),
+        (
+            chunk_db.is_some(),
+            !committed_chunk_entries.is_empty(),
+            CHUNK_INDEX_DB_LABEL,
+        ),
+    ] {
+        if has_entries && !opened {
+            return Err(MetadataError::Internal(format!(
+                "{label} was not opened for writing"
+            )));
+        }
+    }
+
     if let Some(db) = file_db
         && !file_entries.is_empty()
     {
@@ -517,6 +556,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unopened_index_rejects_entries_before_writing_either_index() {
+        let hash = hash_from_seed(1);
+        let files = [(
+            hash,
+            CommittedFileRecord {
+                recipe_hash: [1; 32],
+                shard_hash: hash,
+                committed_generation: 1,
+                shard_index_hash: hash,
+            },
+        )];
+        let chunks = [(
+            hash,
+            CommittedChunkReceipt {
+                schema_version: crate::receipts::RECEIPT_SCHEMA_VERSION,
+                chunk_hash: hash.into(),
+                xorb_hash: hash.into(),
+                chunk_index: 0,
+                uncompressed_size: 100,
+                origin: OriginReceipt::new(
+                    "origin".into(),
+                    "xorbs/object".into(),
+                    hash.into(),
+                    [9; 32],
+                    100,
+                    None,
+                    None,
+                ),
+                source_repo_prefix: "org/repo".into(),
+                source_shard_hash: hash.into(),
+                committed_generation: 1,
+                shard_index_hash: hash.into(),
+                gc_registry_generation: 1,
+            },
+        )];
+        for (write_files, write_chunks, missing) in [
+            (false, true, FILE_INDEX_DB_LABEL),
+            (true, false, CHUNK_INDEX_DB_LABEL),
+        ] {
+            let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+            let config = RemoteIndexConfig::for_repo("org/repo");
+            let writer = RemoteIndexWriter::open(store, &config, write_files, write_chunks)
+                .await
+                .unwrap();
+            let result = writer.write_entries(&files, &chunks).await;
+            let file_value = match &writer.file_db {
+                Some(db) => db.get(encode_committed_file_key(&hash, 1)).await.unwrap(),
+                None => None,
+            };
+            let chunk_value = match &writer.chunk_db {
+                Some(db) => db
+                    .get(encode_committed_chunk_head_key(&hash))
+                    .await
+                    .unwrap(),
+                None => None,
+            };
+            writer.close().await.unwrap();
+            assert!(
+                matches!(result, Err(MetadataError::Internal(message)) if message.contains(missing))
+            );
+            assert!(
+                file_value.is_none() && chunk_value.is_none(),
+                "rejected batch must not write either index"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn bounded_writer_defers_remote_flush_until_close() {
         let memory = Arc::new(InMemory::new());
         let store: Arc<dyn ObjectStore> = memory.clone();
@@ -550,18 +657,12 @@ mod tests {
         assert!(memory.list(None).count().await > objects_after_open);
     }
 
-    #[tokio::test]
-    async fn write_index_entries_reads_committed_entry() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let config = RemoteIndexConfig::for_repo_with_global_prefix("org/repo", ".crab");
-        let chunk_hash = hash_from_seed(1);
-        let xorb_ref = XorbRef {
-            xorb_hash: hash_from_seed(2),
-            chunk_index: 7,
-            uncompressed_size: 4096,
-        };
-
-        let receipt = CommittedChunkReceipt {
+    fn committed_receipt(
+        chunk_hash: MerkleHash,
+        xorb_ref: XorbRef,
+        generation: u64,
+    ) -> CommittedChunkReceipt {
+        CommittedChunkReceipt {
             schema_version: crate::receipts::RECEIPT_SCHEMA_VERSION,
             chunk_hash: chunk_hash.into(),
             xorb_hash: xorb_ref.xorb_hash.into(),
@@ -579,10 +680,86 @@ mod tests {
             ),
             source_repo_prefix: "org/repo".to_owned(),
             source_shard_hash: hash_from_seed(3).into(),
-            committed_generation: 1,
+            committed_generation: generation,
             shard_index_hash: hash_from_seed(4).into(),
             gc_registry_generation: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_scan_matches_batch_head_selection() {
+        let chunk_hash = hash_from_seed(1);
+        for generations in [[1, 1], [1, 2]] {
+            for reverse in [false, true] {
+                let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+                let config = RemoteIndexConfig::for_repo("org/repo");
+                let mut entries = generations.map(|generation| {
+                    (
+                        chunk_hash,
+                        committed_receipt(
+                            chunk_hash,
+                            XorbRef {
+                                xorb_hash: hash_from_seed(2),
+                                chunk_index: 0,
+                                uncompressed_size: 4096,
+                            },
+                            generation,
+                        ),
+                    )
+                });
+                entries[1].1.chunk_index = 1;
+                if reverse {
+                    entries.reverse();
+                }
+                write_index_entries(Arc::clone(&store), &config, &[], &entries)
+                    .await
+                    .expect("write competing placements");
+                let with_head = read_chunk_index_entry(Arc::clone(&store), &config, &chunk_hash)
+                    .await
+                    .expect("read head")
+                    .expect("head placement");
+
+                let db = open_writer(
+                    Arc::clone(&store),
+                    &config.chunk_index_path,
+                    CHUNK_INDEX_DB_LABEL,
+                )
+                .await
+                .expect("open head deletion writer");
+                db.delete_with_options(
+                    encode_committed_chunk_head_key(&chunk_hash),
+                    &slatedb::config::WriteOptions {
+                        await_durable: false,
+                        ..slatedb::config::WriteOptions::default()
+                    },
+                )
+                .await
+                .expect("buffer head deletion");
+                db.close().await.expect("persist head deletion");
+                let without_head = read_chunk_index_entry(store, &config, &chunk_hash)
+                    .await
+                    .expect("scan immutable placements");
+                assert_eq!(
+                    without_head,
+                    Some(with_head),
+                    "generations={generations:?}, reverse={reverse}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn write_index_entries_reads_committed_entry() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let config = RemoteIndexConfig::for_repo_with_global_prefix("org/repo", ".crab");
+        let chunk_hash = hash_from_seed(1);
+        let xorb_ref = XorbRef {
+            xorb_hash: hash_from_seed(2),
+            chunk_index: 7,
+            uncompressed_size: 4096,
         };
+
+        let receipt = committed_receipt(chunk_hash, xorb_ref, 1);
         write_index_entries(Arc::clone(&store), &config, &[], &[(chunk_hash, receipt)])
             .await
             .expect("write committed entry");

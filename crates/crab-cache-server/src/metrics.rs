@@ -899,6 +899,29 @@ fn append_escaped_label_value(body: &mut String, value: &str) {
     }
 }
 
+/// Log a per-request summary line with structured fields.
+///
+/// Middleware and handlers supply method, path, status, latency, cache outcome,
+/// and bytes served.
+pub fn log_request_summary(
+    method: &str,
+    path: &str,
+    status: u16,
+    latency_ms: f64,
+    cache_result: &str,
+    bytes_served: u64,
+) {
+    tracing::info!(
+        http.method = method,
+        http.path = path,
+        http.status = status,
+        latency_ms = latency_ms,
+        cache = cache_result,
+        bytes = bytes_served,
+        "request complete"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1441,28 +1464,4 @@ mod tests {
             })
             .sum()
     }
-}
-
-/// Log a per-request summary line with structured fields.
-///
-/// Called from middleware or handler wrappers to satisfy C9.3: every request
-/// gets a single summary line with method, path, status, latency, hit/miss,
-/// and bytes served.
-pub fn log_request_summary(
-    method: &str,
-    path: &str,
-    status: u16,
-    latency_ms: f64,
-    cache_result: &str,
-    bytes_served: u64,
-) {
-    tracing::info!(
-        http.method = method,
-        http.path = path,
-        http.status = status,
-        latency_ms = latency_ms,
-        cache = cache_result,
-        bytes = bytes_served,
-        "request complete"
-    );
 }

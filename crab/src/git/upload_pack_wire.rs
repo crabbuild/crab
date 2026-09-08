@@ -424,6 +424,7 @@ async fn acquire_read_admission_with_wait(
         if remaining.is_zero() {
             return Err(CrabError::Throttled {
                 retry_after: Some(READ_ADMISSION_RETRY_CAP),
+                source: None,
             });
         }
 
@@ -434,6 +435,7 @@ async fn acquire_read_admission_with_wait(
                 Ok(result) => result.map_err(CrabError::from),
                 Err(_) => Err(CrabError::Throttled {
                     retry_after: Some(READ_ADMISSION_RETRY_CAP),
+                    source: None,
                 }),
             },
         };
@@ -477,6 +479,7 @@ async fn acquire_read_admission_with_wait(
         if remaining.is_zero() {
             return Err(CrabError::Throttled {
                 retry_after: Some(READ_ADMISSION_RETRY_CAP),
+                source: None,
             });
         }
         let delay = read_admission_retry_delay(attempt, None).min(remaining);

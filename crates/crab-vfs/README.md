@@ -33,7 +33,8 @@ resolver (snapshot + overlay) → VFS engine → FUSE or NFS
 
 `MountPipelineBuilder::execute` runs the preparation pipeline: source clone or
 reuse, HEAD resolution, snapshot, overlay setup, reconciliation, index
-population, hydration workers, resolver creation, and engine wiring. Mounting
+population, hydration construction, resolver creation, and engine wiring. Only
+after those steps succeed does it start workers and return their owning service. Mounting
 and refresh are lifecycle operations performed outside the pipeline so a
 daemon, coordinator, or foreground CLI can own cancellation.
 
@@ -60,24 +61,96 @@ its failure isolation, per-read verification, private filesystem access, and
 budget/lifetime ownership remain Plan 017 work. Startup and in-memory-origin
 tests are not native mounted-filesystem or whole-process resource proof.
 
+## Protocol read leases
+
+NFS has no file-open/file-close lifecycle, so `ReadLeasePool` retains bounded
+leases between READ requests. A pin protects its cached entry from ordinary
+budget eviction while a request uses it. Refresh and mutations may explicitly
+invalidate entries; existing reads keep their owned lease until completion.
+Pins identify an entry lifetime as well as a file ID, so a late release cannot
+unpin a replacement inserted after invalidation.
+
+The macOS native smoke requests uncached sequential reads with `F_NOCACHE`
+and records `client_cache: disabled` in its benchmark artifact. This exercises
+server lease reuse even when kernel read-ahead could fetch the fixture at once.
+Its throughput is not directly comparable with older kernel-cached runs.
+
+## Task ownership
+
+| Task | Handle owner | Completion boundary |
+| --- | --- | --- |
+| Hydration queue workers and read-window prefetch | `HydrationService`, retained by the mount owner | Await `shutdown()` after backend teardown; queued work is discarded and admitted prefetch finishes |
+| Ref/snapshot refresh | Coordinator, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
+| NFS server and control | NFS mount runtime | Backend teardown controls these separately from hydration |
+
+The daemon starts hydration and refresh tasks only when installing them into a
+successfully mounted runtime. Engine or backend setup failure therefore starts
+no such workers. Native backend tasks have their own cleanup boundaries.
+
+Background admission and task registration share a lock. `shutdown()` closes
+admission, cancels queue workers, and awaits their shared task tracker. Repeated
+or concurrent shutdown calls observe the same completion boundary. Blocking
+hydration and cache writes can delay completion; shutdown does not abort them.
+
+The coordinator warns after ten seconds of hydration shutdown and continues
+waiting with mount/cache ownership intact. Refresh owners cancel polling and
+join the task; aborting it could detach a blocking Git fetch. Daemon teardown
+separately aborts and joins its watcher. Synchronous coordinator shutdown and
+Drop request cancellation but cannot await completion; use the async path.
+Foreground request ownership and native teardown still require backend proof.
+
+The locked `nfs3_server` listener also spawns connection handlers and a transaction
+cleaner without exposing join handles. Listener drop notifies the cleaner, but
+neither that notification nor joining the listener proves child-task completion.
+Native unmount and backend task cleanup need separate verification.
+
+## Control exchange ownership
+
+The FUSE coordinator client reuses its connection only after a complete, valid
+response, including an application error. One timeout covers request writes and
+the response read. During I/O the exchange owns the connection; cancellation,
+timeout, or a transport/parse failure closes it. Further sends return
+`NotConnected`. Reconnect explicitly and determine a mutation's outcome before
+deciding whether to retry it. Connection setup/spawning has a separate policy.
+
+Only a missing or refused connection triggers coordinator startup. Permission,
+invalid-path, and other connection errors return their original cause. Clients
+never unlink the socket path; stale cleanup belongs to the coordinator holding
+the daemon lock. The startup retry budget does not bound an individual connect.
+
+### NFS control deadlines
+
+Each control call owns a fresh socket. Its timeout covers connection setup,
+request writes, and the response read: ten seconds normally, thirty minutes for
+commit. TCP and Unix sockets share the same JSON exchange. Timeout or caller
+cancellation drops the socket; the client does not retry a mutation whose result
+is unknown. A timeout does not prove that the helper stopped an admitted commit.
+
+These are asynchronous I/O deadlines, not CPU preemption or a deadline for the
+native OS mount command. See `nfs_control::tests` for stalled-write and socket
+closure regressions.
+
 ## Usage
 
-Source detection is available with either `fuse` or `nfs`:
+Source detection requires `fuse` or `nfs`. This crate is not published to the
+registry; enable the backend in a consuming Crab workspace member:
 
 ```toml
 [dependencies]
-crab-vfs = { version = "1", features = ["fuse"] }
+crab-vfs = { workspace = true, features = ["fuse"] }
 ```
 
 ```rust
 use crab_vfs::source::MountSource;
 
-let source = MountSource::parse("crab://models/team/project")?;
-assert!(matches!(source, MountSource::Remote { .. }));
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let source = MountSource::parse("crab://models/team/project")?;
+    assert!(matches!(source, MountSource::Remote { .. }));
 
-let local = MountSource::parse("./working-copy")?;
-assert!(matches!(local, MountSource::Local { .. }));
-# Ok::<(), Box<dyn std::error::Error>>(())
+    let local = MountSource::parse("./working-copy")?;
+    assert!(matches!(local, MountSource::Local { .. }));
+    Ok(())
+}
 ```
 
 For a real mount, construct a `PipelineConfig`, run

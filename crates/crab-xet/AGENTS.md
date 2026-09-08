@@ -30,7 +30,11 @@ Use the ordered recipe tests when changing this chain.
 
 - Consume every ordered recipe occurrence, including duplicates; missing placements and count mismatches must remain errors.
   Source: `crates/crab-xet/src/reconstruction.rs`.
-- Term coverage counts are not complete payload integrity proof; retain parser digest/chunk checks and final read-side file verification.
+- Coverage validation uses checked term counts, not per-chunk bookkeeping. Counts are not complete payload integrity proof; retain parser digest/chunk checks and final read-side file verification.
+  Source: `crates/crab-xet/src/xorb/parser.rs`.
+- Borrowed and owned chunk decoding share length/hash verification. Parser metadata and detached range decoding must enforce the builder's `u32` decoded-total limit before assembling output offsets.
+  Source: `crates/crab-xet/src/xorb/parser.rs` and `crates/crab-xet/src/xorb/builder.rs`.
+- Bound emitted compressed-chunk bytes before accumulation. BG4 uses bounded LZ4 decoding followed by upstream regrouping; its upstream reader buffers before calling the writer. Preserve raw zero-copy reads and decompression error sources.
   Source: `crates/crab-xet/src/xorb/parser.rs`.
 - Check representable format sizes before changing builder state; do not silently truncate serialized chunk metadata.
   Source: `crates/crab-xet/src/xorb/builder.rs`.

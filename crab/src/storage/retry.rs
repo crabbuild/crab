@@ -63,12 +63,13 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
             class => class,
         },
         CrabError::NetworkTransient(_) => RetryClass::Transient,
-        CrabError::Throttled { retry_after } => RetryClass::Throttled {
+        CrabError::Throttled { retry_after, .. } => RetryClass::Throttled {
             retry_after: *retry_after,
         },
         CrabError::CasConflict { .. } => RetryClass::StateDependent,
         CrabError::CorruptObject { .. }
         | CrabError::GitPackCorrupt(_)
+        | CrabError::WorkflowMetadataCorrupt(_)
         | CrabError::PackIntegrity { .. } => RetryClass::FatalAfterOneRetry,
         CrabError::Io(_) => RetryClass::InspectErrno,
         CrabError::Storage(e) => classify_storage(e),
@@ -509,6 +510,15 @@ mod tests {
     }
 
     #[test]
+    fn metadata_decoding_corruption_uses_bounded_integrity_retry() {
+        let id = crab_workflow::ExperimentId::new_v7();
+        let error = CrabError::from(
+            crab_workflow::ExperimentMetadata::from_json(b"invalid", &id).unwrap_err(),
+        );
+        assert_eq!(retry_class(&error), RetryClass::FatalAfterOneRetry);
+    }
+
+    #[test]
     fn classifies_corrupt_object_as_fatal_after_one_retry() {
         let err = CrabError::CorruptObject {
             path: "repo/objects/x".into(),
@@ -532,6 +542,7 @@ mod tests {
     fn classifies_throttled_and_carries_retry_after() {
         let err = CrabError::Throttled {
             retry_after: Some(Duration::from_millis(250)),
+            source: None,
         };
         assert_eq!(
             retry_class(&err),
@@ -661,6 +672,7 @@ mod tests {
                 if n == 0 {
                     Err(CrabError::Throttled {
                         retry_after: Some(retry_after),
+                        source: None,
                     })
                 } else {
                     Ok(7)

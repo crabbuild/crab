@@ -23,7 +23,8 @@ pub struct PushRefUpdate {
 }
 
 /// Response returned when Crab Auth prepares a protected push.
-#[derive(Debug, Clone, Deserialize)]
+/// Debug output omits the provider-specific credential payload.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushPrepareResponse {
     pub provider: String,
@@ -32,6 +33,18 @@ pub struct PushPrepareResponse {
     pub permissions: Vec<String>,
     pub push_id: String,
     pub upload_prefix: String,
+}
+
+impl std::fmt::Debug for PushPrepareResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PushPrepareResponse")
+            .field("provider", &self.provider)
+            .field("expires_at", &self.expires_at)
+            .field("permissions", &self.permissions)
+            .field("push_id", &self.push_id)
+            .field("upload_prefix", &self.upload_prefix)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PushPrepareResponse {

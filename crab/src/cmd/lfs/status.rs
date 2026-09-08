@@ -13,7 +13,7 @@ pub fn run_lfs_status(mode: OutputMode, porcelain: bool) -> Result<()> {
     let statuses = lfs_status(&repo_root)?;
 
     if mode == OutputMode::Json {
-        emit_json("lfs.status", "1.1", &statuses);
+        emit_json("lfs.status", "1.1", &statuses)?;
         return Ok(());
     } else if porcelain {
         print_porcelain(&statuses);

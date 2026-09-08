@@ -613,7 +613,7 @@ fn spawn_shard_parse(
 struct SharedFileIndexLookupInner {
     store: crab_storage::Store,
     repo_prefix: String,
-    session: tokio::sync::RwLock<Option<FileIndexLookupSession>>,
+    session: tokio::sync::RwLock<tokio::sync::OnceCell<FileIndexLookupSession>>,
     closed: AtomicBool,
     use_acceleration: bool,
 }
@@ -648,7 +648,7 @@ impl SharedFileIndexLookup {
             inner: Arc::new(SharedFileIndexLookupInner {
                 store,
                 repo_prefix: repo_prefix.into(),
-                session: tokio::sync::RwLock::new(None),
+                session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
                 closed: AtomicBool::new(false),
                 use_acceleration,
             }),
@@ -657,42 +657,7 @@ impl SharedFileIndexLookup {
 
     /// Look up one file hash, opening the shared reader on first use.
     pub async fn lookup(&self, file_hash: &MerkleHash) -> Result<Option<MerkleHash>> {
-        if self.inner.closed.load(Ordering::Acquire) {
-            return Err(MetadataError::Internal(
-                "file-index lookup used after close".to_owned(),
-            ));
-        }
-
-        {
-            let guard = self.inner.session.read().await;
-            if let Some(session) = guard.as_ref() {
-                return session.lookup(file_hash).await;
-            }
-        }
-
-        let mut guard = self.inner.session.write().await;
-        if self.inner.closed.load(Ordering::Acquire) {
-            return Err(MetadataError::Internal(
-                "file-index lookup used after close".to_owned(),
-            ));
-        }
-        if guard.is_none() {
-            *guard = Some(
-                FileIndexLookupSession::open_with_mode(
-                    self.inner.store.clone(),
-                    &self.inner.repo_prefix,
-                    self.inner.use_acceleration,
-                )
-                .await?,
-            );
-        }
-
-        let Some(session) = guard.as_ref() else {
-            return Err(MetadataError::Internal(
-                "file-index lookup session was not initialized".to_owned(),
-            ));
-        };
-        session.lookup(file_hash).await
+        self.session().await?.lookup(file_hash).await
     }
 
     /// Look up file hashes through the shared reader.
@@ -705,49 +670,48 @@ impl SharedFileIndexLookup {
         if file_hashes.is_empty() {
             return Ok(Vec::new());
         }
+        self.session().await?.lookup_batch(file_hashes).await
+    }
 
+    async fn session(&self) -> Result<tokio::sync::RwLockReadGuard<'_, FileIndexLookupSession>> {
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(MetadataError::Internal(
                 "file-index lookup used after close".to_owned(),
             ));
         }
-
-        {
-            let guard = self.inner.session.read().await;
-            if let Some(session) = guard.as_ref() {
-                return session.lookup_batch(file_hashes).await;
-            }
-        }
-
-        let mut guard = self.inner.session.write().await;
+        let guard = self.inner.session.read().await;
         if self.inner.closed.load(Ordering::Acquire) {
             return Err(MetadataError::Internal(
                 "file-index lookup used after close".to_owned(),
             ));
         }
-        if guard.is_none() {
-            *guard = Some(
+        // Initialization serializes only opening the reader, not its first I/O.
+        // Keep read access through lookup so close cannot take an active session.
+        guard
+            .get_or_try_init(|| {
                 FileIndexLookupSession::open_with_mode(
                     self.inner.store.clone(),
                     &self.inner.repo_prefix,
                     self.inner.use_acceleration,
                 )
-                .await?,
-            );
-        }
-
-        let Some(session) = guard.as_ref() else {
-            return Err(MetadataError::Internal(
-                "file-index lookup session was not initialized".to_owned(),
-            ));
-        };
-        session.lookup_batch(file_hashes).await
+            })
+            .await?;
+        tokio::sync::RwLockReadGuard::try_map(guard, tokio::sync::OnceCell::get).map_err(|_| {
+            MetadataError::Internal("file-index lookup session was not initialized".to_owned())
+        })
     }
 
-    /// Close the shared reader if it was opened.
+    /// Reject new nonempty lookups and close the reader after active reads finish.
+    ///
+    /// Other handle clones need not be dropped. Concurrent close calls wait for
+    /// reader cleanup. Await this future through completion; dropping it does not
+    /// perform asynchronous cleanup.
     pub async fn close(self) -> Result<()> {
         self.inner.closed.store(true, Ordering::Release);
-        let Some(session) = self.inner.session.write().await.take() else {
+        // Retain exclusive ownership through cleanup: another close must not
+        // mistake an empty slot for a reader whose checkpoint is already gone.
+        let mut guard = self.inner.session.write().await;
+        let Some(session) = guard.take() else {
             return Ok(());
         };
         session.close().await
@@ -772,6 +736,8 @@ pub async fn resolve_file_hash_to_shard(
     result
 }
 
+#[cfg(test)]
+mod shared_tests;
 #[cfg(test)]
 mod snapshot_tests;
 

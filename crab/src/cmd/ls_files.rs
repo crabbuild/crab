@@ -48,7 +48,7 @@ pub fn run_ls_files_in(root: &Path, args: &LsFilesArgs) -> Result<()> {
         let payload = LsFilesPayload {
             files: entries.iter().map(LsFileEntry::from).collect(),
         };
-        emit_json("ls-files", "1.1", payload);
+        emit_json("ls-files", "1.1", payload)?;
     } else {
         if !args.name_only && !args.debug && !entries.is_empty() {
             print_header(args);

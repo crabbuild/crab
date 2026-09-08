@@ -441,7 +441,100 @@ async fn batch_get_reconstruction_empty_is_empty() {
 }
 
 #[tokio::test]
-async fn batch_get_reconstruction_returns_hits_and_omits_misses() {
+async fn abandoned_term_batches_remove_managed_reader_checkpoints() {
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    for (mode, during_cleanup) in [
+        ("terms", false),
+        ("terms", true),
+        ("sequences", false),
+        ("sequences", true),
+        ("strict", false),
+        ("strict", true),
+    ] {
+        let (client, _tmp) = test_client();
+        let file_hash = hash_from_seed(42);
+        seed_file_index(&client, &[(file_hash, hash_from_seed(43))]).await;
+        let inner = Arc::clone(client.store.origin().inner());
+        let admin = slatedb::admin::Admin::builder(
+            format!("{}/file_index_db/", client.router.repo_prefix()),
+            Arc::clone(&inner),
+        )
+        .build();
+        assert!(admin.list_checkpoints(None).await.unwrap().is_empty());
+        // Keep origin reads pending long enough to observe reader ownership,
+        // without changing the caller's cancellation token or the stored index.
+        let throttled = Arc::new(ThrottledStore::new(
+            inner,
+            ThrottleConfig {
+                wait_get_per_call: Duration::from_millis(20),
+                ..ThrottleConfig::default()
+            },
+        ));
+        let origin = Store::new(throttled.clone());
+        let cache = Arc::clone(client.store.local_cache());
+        let store = CachingStore::new_with_local_cache(
+            origin.clone(),
+            CacheConfig::default(),
+            Arc::clone(&cache),
+        )
+        .unwrap();
+        let layout = StoreLayout::new(origin, client.router.repo_prefix().to_owned());
+        let resolver = crate::TermResolver::new(store, layout, cache, 1).unwrap();
+        let cache_owners = Arc::strong_count(client.store.local_cache());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut batch = Box::pin(async {
+            let terms = [(file_hash, None)];
+            let files = [(file_hash, None, 16)];
+            let source = crab_diff::types::ChunkSequenceSourceKind::Committed;
+            match mode {
+                "terms" => resolver.resolve_batch(&terms, &cancel).await.map(|_| ()),
+                "sequences" => resolver
+                    .resolve_sequences_batch(&files, source, &cancel)
+                    .await
+                    .map(|_| ()),
+                _ => resolver
+                    .resolve_sequences_batch_strict(&files, source, &cancel)
+                    .await
+                    .map(|_| ()),
+            }
+        });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    result = &mut batch => panic!("batch ended before checkpoint observation: {result:?}"),
+                    checkpoints = admin.list_checkpoints(None) => {
+                        let workers_released = Arc::strong_count(client.store.local_cache()) == cache_owners;
+                        if !checkpoints.unwrap().is_empty() && (!during_cleanup || workers_released) {
+                            break;
+                        }
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reader reached the requested abandonment phase");
+        drop(batch);
+        throttled.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
+        timeout(Duration::from_secs(2), async {
+            while !admin.list_checkpoints(None).await.unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{mode} abandoned its managed reader checkpoint (during_cleanup={during_cleanup})"
+            )
+        });
+    }
+}
+
+#[tokio::test]
+async fn file_index_resolution_agrees_between_term_and_reconstruction_batches() {
     let (client, _tmp) = test_client();
     let file_hash = hash_from_seed(42);
     let missing_hash = hash_from_seed(43);
@@ -481,6 +574,53 @@ async fn batch_get_reconstruction_returns_hits_and_omits_misses() {
         .await
         .expect("upload shard");
     seed_file_index(&client, &[(file_hash, shard_hash)]).await;
+
+    let resolver = crate::TermResolver::new(
+        client.store.clone(),
+        client.router.clone(),
+        Arc::clone(client.store.local_cache()),
+        2,
+    )
+    .unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let resolved = resolver
+        .resolve_batch(&[(file_hash, None), (missing_hash, None)], &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved,
+        [(
+            file_hash,
+            vec![FileDataSequenceEntry::new(xorb_hash, 2048, 2, 6)]
+        )]
+        .into_iter()
+        .collect()
+    );
+    for strict in [false, true] {
+        let files = [(file_hash, None, 2048)];
+        let source = crab_diff::types::ChunkSequenceSourceKind::Committed;
+        let sequences = if strict {
+            resolver
+                .resolve_sequences_batch_strict(&files, source, &cancel)
+                .await
+        } else {
+            resolver
+                .resolve_sequences_batch(&files, source, &cancel)
+                .await
+        }
+        .unwrap();
+        let chunks = sequences[&file_hash]
+            .spans
+            .iter()
+            .map(|span| (span.chunk_hash, span.offset, span.len))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            chunks,
+            (0..4)
+                .map(|index| (hash_from_seed(102 + index), index * 512, 512))
+                .collect::<Vec<_>>()
+        );
+    }
 
     let response = client
         .batch_get_reconstruction(&[file_hash, missing_hash])

@@ -30,12 +30,41 @@ mount/control owners consume the pipeline output separately.
 
 ## Invariants
 
+- Start queue workers only after fallible preparation succeeds and the hydration
+  service can pass directly to the owner. Daemon task startup belongs inside runtime
+  installation, after backend setup. Inspect both pipeline and daemon paths.
 - Separate pipeline preparation from backend mount/control lifetime; a built engine does not prove a mounted, usable filesystem.
   Source: `crates/crab-vfs/src/pipeline.rs`.
 - Cached read windows retain integrity checks; corruption must not be served merely because the byte length matches.
   Source: `crates/crab-vfs/src/hydration.rs`.
+- Chunk waiters subscribe before checking stored completion; a notification alone
+  cannot represent a fetch that finished before subscription.
+  Source: `crates/crab-vfs/src/hydration.rs` (`InflightEntry::wait`).
+- Hydration task admission must serialize with shutdown. Await the service's
+  `shutdown` after backend teardown and before releasing cache ownership; its
+  tracker includes queue workers and read-window prefetch. A timed-out wait does
+  not complete background work. Synchronous cleanup can only request shutdown.
+  Source: `crates/crab-vfs/src/hydration.rs` and `crates/crab-vfs/src/coordinator.rs`.
+- Retain refresh task handles and await them after cancellation. Refresh can
+  await blocking Git/snapshot work; aborting the outer task does not finish it.
+  Inspect coordinator, daemon, and interactive NFS owners together.
+  Sources: `crates/crab-vfs/src/coordinator.rs`, `crates/crab-vfs/src/daemon.rs`,
+  `crates/crab-vfs/src/nfs_mount.rs`.
+- Read-pool pins belong to an entry lifetime, not just a reusable protocol file
+  ID. Invalidation may retire active pins; their drops must not unpin a replacement.
+  Source: `crates/crab-vfs/src/read_lease_pool.rs`.
 - Review cancellation, hydration worker shutdown, leases, and control resources in both FUSE and NFS owners before changing teardown.
   Source: `crates/crab-vfs/src/nfs_mount.rs`.
+- NFS control deadlines cover connect/write/read on a request-owned socket.
+  Timeout closes that socket; it does not roll back a helper mutation. Do not
+  retry an uncertain commit. Source: `crates/crab-vfs/src/nfs_control.rs`.
+- FUSE IPC exchanges temporarily own their connection. Restore it only after a
+  valid response; cancellation or errors must close it so a late response cannot
+  satisfy a later request. Source: `crates/crab-vfs/src/ipc_client.rs`.
+- IPC clients must not unlink coordinator socket paths. The daemon lock holder
+  owns stale cleanup; only missing/refused connections permit spawn or retry.
+  Sources: `crates/crab-vfs/src/ipc_client.rs` and
+  `crates/crab-vfs/src/coordinator.rs`.
 
 ## Features and platform
 

@@ -34,6 +34,9 @@ Trace one path: `crab/src/git/push.rs` → `commit_edits` in
   Source: `crates/crab-write/src/journal.rs`.
 - A marker storage error can leave an uncertain commit. Await the commit future and resolve outcome rather than treating every error as rejection.
   Source: `crates/crab-write/src/journal.rs`.
+- Maintenance combines operation and cleanup errors through `finish_after_cleanup`
+  in `crates/crab-write/src/lib.rs`. Namespace publication preserves a known
+  committed result even after lease failure; keep that distinct outcome policy.
 - Journal publication does not make the catalog readable. Trace maintain_catalog and make_readable, including explicit writer close, before acknowledging broader readiness.
   Source: `crates/crab-write/src/generation.rs`.
 - Namespace changes need a fresh final-ref-set check under the namespace lease; individual ref locks do not prevent parent/child name conflicts.

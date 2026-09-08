@@ -55,6 +55,40 @@ do not publish any local placement metadata. Hydration's
 `get_xorb_chunks_without_install` reads a bounded complete body and installs
 no duplicate full xorb; decoded-range caching belongs to `crab-read`'s runtime.
 
+### Choose the metadata contract
+
+| API/request | Metadata authority |
+| --- | --- |
+| `CachingStore::head` | Always origin; retains its ETag, version, and modification time. |
+| `object_store()` with mutable paths | Always origin, including HEAD. |
+| `object_store()` with conditions or a version | Entire request goes to origin, including HEAD and ranges. |
+| Unconditional immutable adapter reads | May use caches; synthesized results have no ETag/version and use the response construction time. |
+| Unconditional immutable adapter HEAD | May use cache-service HEAD without fetching the body; otherwise asks origin for size and synthesizes the result. |
+
+Use origin metadata for CAS and freshness decisions. Do not interpret a
+synthesized modification time as the object's creation or update time.
+Explicit cache-service HEAD/range methods query that service without origin
+fallback; they are separate from the read-through adapter.
+
+### Local range reads
+
+A warm local xorb or shard can satisfy every `GetRange` form without an
+origin HEAD request:
+
+| Request | Returned interval for an object of size `n` |
+| --- | --- |
+| `Bounded(start..end)` | `start..min(end, n)`; start must precede EOF. |
+| `Offset(start)` | `start..n`; start must precede EOF. |
+| `Suffix(count)` | `n.saturating_sub(count)..n`, including an empty suffix. |
+
+Bounded ranges must have `end > start` and meet `object_store`'s size limit.
+The adapter uses `object_store`'s range resolver. Xorb resolution and reads
+use the same opened file; shard resolution uses the verified cached body.
+Invalid requests do not evict valid entries. The lower-level exact-range
+xorb API used by hydration still rejects ranges extending beyond the file.
+
+### Process-local result retention
+
 The process-local xorb result cache retains at most 4,096 entries and charges
 up to 64 MiB for owned result buffers, offsets, both range-key copies, and entry
 structures. It copies retained slices so a few requested bytes cannot pin an
@@ -68,6 +102,23 @@ results, transient decode buffers, and queued work need their own admission.
 client-authentication material. The `remote-client` feature is required when a
 remote service URL is configured; local caching remains available without it.
 
+## Construction and startup
+
+| Constructor | Remote service behavior | Failure result |
+| --- | --- | --- |
+| `new` | Build the configured client without probing health. | Configuration/client construction error. |
+| `new_with_local_cache` | Same client setup, using the caller's existing local cache. | Configuration/client construction error. |
+| `try_build_healthy` | Probe health and the route/capability contract before enabling remote access. | `None` on construction error; otherwise keep a local-only wrapper when the probe fails. |
+
+`new` configures its local cache from `CacheConfig::max_bytes`.
+`new_with_local_cache` retains the supplied cache's own limits; it does not
+reconfigure that shared instance. These retention limits do not bound aggregate
+read memory, decode buffers, or caller-held results.
+
+A configured service URL without `remote-client` is a construction error.
+The optional-return helper converts that error to `None`; callers then decide
+whether and how to use the origin directly.
+
 ## Usage
 
 Compose an origin store and wrap it once at the read boundary:
@@ -79,20 +130,20 @@ use crab_cache_store::{CacheConfig, CachingStore};
 use crab_types::storage::StorageProviderKind;
 use object_store::path::Path;
 
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let origin = build_store_from_credentials(
-    "bucket",
-    CloudCredentials::StaticEnv {
-        provider: StorageProviderKind::S3,
-    },
-)?;
-let cached = CachingStore::new(origin, CacheConfig::default())?;
-let (bytes, _etag) = cached
-    .get_with_etag(&Path::from("repositories/team/manifest"))
-    .await?;
-# let _ = bytes;
-# Ok(())
-# }
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let origin = build_store_from_credentials(
+        "bucket",
+        CloudCredentials::StaticEnv {
+            provider: StorageProviderKind::S3,
+        },
+    )?;
+    let cached = CachingStore::new(origin, CacheConfig::default())?;
+    let (bytes, _etag) = cached
+        .get_with_etag(&Path::from("repositories/team/manifest"))
+        .await?;
+    println!("read {} bytes", bytes.len());
+    Ok(())
+}
 ```
 
 For an optional service, enable `remote-client` and set

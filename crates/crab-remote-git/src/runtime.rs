@@ -415,7 +415,11 @@ impl RemoteGitRuntime {
         }
     }
 
-    /// Cancel and join every runtime-owned single-flight task.
+    /// Cancel runtime work and wait for tracked tasks and operation contexts.
+    ///
+    /// Stop admitting new operations first. Owners must finish or drop active
+    /// contexts so their tracker tokens and locator cleanup can drain. Do not
+    /// await shutdown in a task that still holds a context it has yet to finish.
     pub async fn shutdown(&self) {
         self.shutdown.cancel();
         self.tasks.close();

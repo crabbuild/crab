@@ -165,12 +165,13 @@ fn emit_pruned_entries(
         if let Some(stream) = jsonl_stream
             && let Ok(mut s) = stream.lock()
         {
-            s.emit_file_done(FileDonePayload {
+            let output = s.emit_file_done(FileDonePayload {
                 path: entry.path.display().to_string(),
                 bytes: entry.bytes,
                 duration_ms: 0,
                 status: status.to_owned(),
             });
+            crate::core::output::report_progress_output(output);
         }
     }
 }

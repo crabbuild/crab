@@ -30,12 +30,46 @@ Trace one path: `crates/crab-cache-server/src/bin/crab_cache.rs` → `run_server
 
 ## Invariants
 
+- Construct policy and origin dependencies before cache recovery, eviction, or
+  background task startup. Await `PreparedServer::shutdown` after preparation
+  succeeds; dropping an evictor handle does not stop its task.
+  Sources: `crates/crab-cache-server/src/server.rs`, `crates/crab-cache-server/src/evictor.rs`.
+- Handle fallible Tokio runtime creation at the binary boundary for serve,
+  check, and onboarding probe; resource exhaustion is a startup error, not an
+  `expect` panic. Source: `crates/crab-cache-server/src/bin/crab_cache.rs`.
+- Register shutdown signals before preparing runtime dependencies. TLS signal
+  waiting stays inside the serving future; listener failure must not detach it.
+  Preserve the separate HTTP and TLS drain policies.
+  Source: `crates/crab-cache-server/src/server.rs`.
+- Command success includes output completion. Propagate JSON serialization,
+  text/newline writes, and flush errors; keep stdout and evidence-file JSON on
+  one writer. Output failures return normal errors instead of printing panics.
+  Source: `crates/crab-cache-server/src/bin/crab_cache.rs`.
+- Validate ASCII before byte-indexed hex decoding. Malformed PSK config and cache hashes must return errors rather than panic on UTF-8 boundaries.
+  Sources: `crates/crab-cache-server/src/config.rs`, `crates/crab-cache-server/src/cache_store.rs`.
+
 - Separate public health/metrics routes from authenticated object/admin routes; inspect router composition before moving middleware.
   Source: `crates/crab-cache-server/src/state.rs`.
 - Path parsing and immutable admission precede cache/origin operations; reject invalid paths rather than normalizing them into a different object.
   Source: `crates/crab-cache-server/src/handlers.rs`.
 - Payload integrity and persistent accounting must agree after put/eviction; inspect cache-store and evictor paths together.
   Source: `crates/crab-cache-server/src/cache_store.rs`.
+- Failed payload removal must retain metadata, byte accounting, and eviction
+  counters. Indexed eviction and invalid-object cleanup share `remove_cache_file`;
+  preserve its typed I/O cause. Source: `crates/crab-cache-server/src/cache_store.rs`.
+- Use removal's `EvictStats` for both count and bytes. Zero bytes can mean an
+  empty object; a stale candidate contributes no eviction. Source:
+  `crates/crab-cache-server/src/cache_store.rs`.
+- Administrative eviction and staged publication use `CacheStore::run_mutation`.
+  Keep the admission
+  permit and drain token with its result until consumption or cleanup, and
+  serialize tracker closure with spawning;
+  cancelled requests must not detach mutations from `PreparedServer::shutdown`.
+  Move staged-file ownership and budget/commit work together. Origin fallback
+  retains the commit recovery handle; shard-index ingestion stays with its caller.
+- Periodic eviction runs blocking work off the async executor. Shutdown signals
+  the loop and joins the admitted batch; do not abort its outer task and detach
+  a mutation. Source: `crates/crab-cache-server/src/evictor.rs`.
 
 ## Features and platform
 
@@ -43,6 +77,7 @@ No declared Cargo features. Binary `crab-cache-server` is declared at src/bin/cr
 
 ## Verification
 
+The Unix TLS startup fixture requires `openssl` to generate temporary certificates.
 Inline state/handlers tests exercise routes and range errors; cache_store tests cover hash mismatch and persistence. Full service qualification is defined in `.github/workflows/cache-service.yml`.
 
 Run from repository root. The target below is the example for worktree `089c`;

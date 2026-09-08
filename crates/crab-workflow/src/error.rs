@@ -8,6 +8,9 @@ pub type Result<T> = std::result::Result<T, WorkflowError>;
 /// Errors returned by workflow contract and planning modules.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkflowError {
+    /// The clock cannot produce a valid persisted timestamp.
+    #[error("invalid timestamp: {0}")]
+    Timestamp(#[from] crab_types::time::TimestampError),
     /// A transient object-store failure exhausted its retry budget.
     #[error("network transient error: {0}")]
     NetworkTransient(#[source] object_store::Error),
@@ -19,6 +22,25 @@ pub enum WorkflowError {
         path: String,
         /// ETag the caller expected, when known.
         expected_etag: Option<String>,
+    },
+
+    /// Experiment metadata is not valid JSON for the supported schema.
+    #[error("malformed experiment metadata for {id}: {source}")]
+    ExperimentMetadataMalformed {
+        /// Requested experiment ID.
+        id: String,
+        /// Original JSON decoding failure.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// A persisted workflow object does not match its declared identity.
+    #[error("corrupt object at {path}: {reason}")]
+    CorruptObject {
+        /// Object or ref path that failed verification.
+        path: String,
+        /// Identity mismatch details.
+        reason: String,
     },
 
     /// A requested workflow object or ref was not found.

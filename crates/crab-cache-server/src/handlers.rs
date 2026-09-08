@@ -34,7 +34,7 @@ use crab_xet::xorb::parser::{
 
 use super::cache_store::{
     CacheRangeRead, CacheStats, CacheStore, EvictFilter, ObjectType, ServerObjectKey,
-    TempPathCommitRecovery, parse_hash_hex,
+    TempPathCommitError, TempPathCommitRecovery, parse_hash_hex,
 };
 use super::chunk_index::{ChunkLocation, DedupResult};
 use super::config::{DedupScope, MutablePathMode};
@@ -532,31 +532,16 @@ async fn write_file_backed_object(
         return e.into_response();
     }
 
-    match state
-        .cache_store
-        .would_exceed_budget_after_put(&cache_key, staged.size)
-    {
-        Ok(true) => {
-            debug!(hash = %cache_key.hash, "cache over budget before streamed push-warm commit, attempting emergency eviction");
-            if let Err(e) = state.cache_store.emergency_evict() {
-                warn!(hash = %cache_key.hash, error = %e, "emergency eviction failed before streamed push-warm commit");
-            }
-        }
-        Ok(false) => {}
-        Err(e) => {
-            warn!(hash = %cache_key.hash, error = %e, "failed to estimate streamed push-warm cache growth");
-        }
-    }
-
-    match state
-        .cache_store
-        .put_unverified_temp_path(&cache_key, staged.temp_path, staged.size)
-    {
+    let size = staged.size;
+    let commit = commit_staged_object(state, &cache_key, staged)
+        .await
+        .and_then(|commit| commit.map_err(TempPathCommitError::into_error));
+    match commit {
         Ok(()) => {
             if cache_key.object_type == ObjectType::Shard {
                 ingest_committed_shard(state, &cache_key).await;
             }
-            record_push_warming_success(state, &cache_key, staged.size);
+            record_push_warming_success(state, &cache_key, size);
             StatusCode::CREATED.into_response()
         }
         Err(CacheServiceError::DiskFull { .. }) => {
@@ -565,6 +550,31 @@ async fn write_file_backed_object(
         }
         Err(e) => e.into_response(),
     }
+}
+
+// Worker admission errors cannot be recovered as cache commits. A completed
+// worker returns the commit's original recovery handle for origin fallback.
+async fn commit_staged_object(
+    state: &AppState,
+    key: &ServerObjectKey,
+    staged: FileBackedBody,
+) -> crate::error::Result<std::result::Result<(), TempPathCommitError>> {
+    let key = key.clone();
+    state.cache_store.run_mutation(move |store| {
+        match store.would_exceed_budget_after_put(&key, staged.size) {
+            Ok(true) => {
+                debug!(hash = %key.hash, "cache over budget before staged commit, attempting emergency eviction");
+                if let Err(error) = store.emergency_evict() {
+                    warn!(hash = %key.hash, %error, "emergency eviction failed before staged commit");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => warn!(hash = %key.hash, %error, "failed to estimate staged cache growth"),
+        }
+        // The commit checks the budget under its mutation lock. An extra
+        // precheck would race other writers and cannot authorize publication.
+        Ok(store.put_unverified_temp_path_recoverable(&key, staged.temp_path, staged.size))
+    }).await
 }
 
 fn record_push_warming_success(state: &AppState, cache_key: &ServerObjectKey, bytes: u64) {
@@ -1154,7 +1164,11 @@ pub async fn admin_evict(
             object_type,
             hash,
         };
-        return match state.cache_store.evict_key(&key) {
+        return match state
+            .cache_store
+            .run_mutation(move |store| store.evict_key(&key))
+            .await
+        {
             Ok(stats) => axum::Json(stats).into_response(),
             Err(e) => e.into_response(),
         };
@@ -1175,7 +1189,11 @@ pub async fn admin_evict(
 
     let filter = EvictFilter { object_type };
 
-    match state.cache_store.evict_by_filter(&filter) {
+    match state
+        .cache_store
+        .run_mutation(move |store| store.evict_by_filter(&filter))
+        .await
+    {
         Ok(stats) => axum::Json(stats).into_response(),
         Err(e) => e.into_response(),
     }
@@ -1664,41 +1682,11 @@ async fn commit_origin_fill_or_read_temp(
     staged: FileBackedBody,
     expected_hash: &str,
 ) -> std::result::Result<CachedFetchBody, Response> {
-    match state
-        .cache_store
-        .would_exceed_budget_after_put(key, staged.size)
-    {
-        Ok(true) => {
-            debug!(hash = %expected_hash, "cache over budget before origin fill commit, attempting emergency eviction");
-            if let Err(e) = state.cache_store.emergency_evict() {
-                warn!(hash = %expected_hash, error = %e, "emergency eviction failed before origin fill commit");
-            }
-        }
-        Ok(false) => {}
-        Err(e) => {
-            warn!(hash = %expected_hash, error = %e, "failed to estimate origin fill cache growth")
-        }
-    }
-
-    match state
-        .cache_store
-        .would_exceed_budget_after_put(key, staged.size)
-    {
-        Ok(true) => {
-            warn!(hash = %expected_hash, "skipping origin fill cache write — cache remains full");
-            return read_staged_temp_body(staged.temp_path).await;
-        }
-        Ok(false) => {}
-        Err(e) => {
-            warn!(hash = %expected_hash, error = %e, "failed to recheck origin fill cache growth")
-        }
-    }
-
     let size = staged.size;
-    match state
-        .cache_store
-        .put_unverified_temp_path_recoverable(key, staged.temp_path, size)
-    {
+    let commit = commit_staged_object(state, key, staged)
+        .await
+        .map_err(IntoResponse::into_response)?;
+    match commit {
         Ok(()) => {
             if key.object_type == ObjectType::Shard {
                 ingest_committed_shard(state, key).await;
@@ -2787,6 +2775,82 @@ mod tests {
         assert_eq!(slice, body.slice(5..body.len()));
         assert_eq!(returned_range, 5..body.len() as u64);
         assert_eq!(total_size, body.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn cancelled_staged_commit_removes_its_queued_temp_file() {
+        let TestDedupState { state, _tempdir } = test_dedup_state();
+        let store = Arc::clone(&state.cache_store);
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let occupied = tokio::spawn(async move {
+            store
+                .run_mutation(move |_| {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(3)).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        entering.await.unwrap();
+        let key = ServerObjectKey {
+            bucket: String::new(),
+            repo_path: "org/repo".into(),
+            object_type: ObjectType::Pack,
+            hash: "queued-pack".into(),
+        };
+        let temp_path = state.cache_store.create_temp_object_path(&key).unwrap();
+        let path = temp_path.to_path_buf();
+        std::fs::write(&path, b"queued bytes").unwrap();
+        let staged = FileBackedBody {
+            temp_path,
+            size: 12,
+            data_hash: None,
+        };
+        let mut commit = Box::pin(commit_staged_object(&state, &key, staged));
+        assert!(futures_util::poll!(&mut commit).is_pending());
+        drop(commit);
+        release.send(()).unwrap();
+        occupied.await.unwrap().unwrap();
+        state.cache_store.shutdown_mutations().await;
+        assert!(
+            !path.exists(),
+            "cancelled queued commit leaked its staged file"
+        );
+        assert!(state.cache_store.get(&key).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn oversized_origin_commit_serves_staged_bytes_without_publication() {
+        let TestDedupState {
+            mut state,
+            _tempdir,
+        } = test_dedup_state();
+        let root = state.config.cache_root.clone();
+        let db = CacheDb::open_or_create(&root.join(CACHE_DB_FILE)).unwrap();
+        state.cache_store = Arc::new(CacheStore::open(root, 3, db.connect().unwrap()).unwrap());
+        let key = ServerObjectKey {
+            bucket: String::new(),
+            repo_path: "org/repo".into(),
+            object_type: ObjectType::Pack,
+            hash: "oversized-pack".into(),
+        };
+        let temp_path = state.cache_store.create_temp_object_path(&key).unwrap();
+        let path = temp_path.to_path_buf();
+        std::fs::write(&path, b"payload").unwrap();
+        let staged = FileBackedBody {
+            temp_path,
+            size: 7,
+            data_hash: None,
+        };
+        let body = match commit_origin_fill_or_read_temp(&state, &key, staged, &key.hash).await {
+            Ok(CachedFetchBody::Bytes(body)) => body,
+            _ => panic!("oversized origin fill must preserve the staged response"),
+        };
+        assert_eq!(body.as_ref(), b"payload");
+        assert!(!path.exists());
+        assert_eq!(state.cache_store.current_bytes(), 0);
+        assert!(state.cache_store.get(&key).unwrap().is_none());
     }
 
     #[tokio::test]

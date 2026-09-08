@@ -256,7 +256,7 @@ async fn run_verify(args: &ReleaseVerifyArgs, mode: OutputMode) -> Result<()> {
         verify_manifest_payload(&manifest, args.deep, repo_root.as_deref(), verifier).await?;
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(RELEASE_VERIFY_SCHEMA, RELEASE_SCHEMA_VERSION, &payload);
+            emit_json(RELEASE_VERIFY_SCHEMA, RELEASE_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             let state = if payload.verified {
@@ -312,7 +312,7 @@ async fn run_export(args: &ReleaseExportArgs, mode: OutputMode) -> Result<()> {
     let payload = export_manifest_payload(&manifest, output_path)?;
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(RELEASE_EXPORT_SCHEMA, RELEASE_SCHEMA_VERSION, &payload);
+            emit_json(RELEASE_EXPORT_SCHEMA, RELEASE_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             println!(
@@ -345,7 +345,7 @@ async fn run_list(args: &ReleaseListArgs, mode: OutputMode) -> Result<()> {
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(RELEASE_LIST_SCHEMA, RELEASE_SCHEMA_VERSION, &payload);
+            emit_json(RELEASE_LIST_SCHEMA, RELEASE_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             if payload.releases.is_empty() {
@@ -465,7 +465,7 @@ async fn run_create(args: &ReleaseCreateArgs, mode: OutputMode) -> Result<()> {
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(RELEASE_CREATE_SCHEMA, RELEASE_SCHEMA_VERSION, &payload);
+            emit_json(RELEASE_CREATE_SCHEMA, RELEASE_SCHEMA_VERSION, &payload)?;
         }
         OutputMode::Text => {
             println!(

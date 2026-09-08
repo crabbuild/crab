@@ -48,7 +48,7 @@ pub fn run_track_list_in(root: &Path, mode: OutputMode) -> Result<()> {
 
     if mode == OutputMode::Json {
         let payload = TrackPayload { patterns };
-        emit_json("track", "1.0", payload);
+        emit_json("track", "1.0", payload)?;
         return Ok(());
     }
 

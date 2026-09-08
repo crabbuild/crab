@@ -264,7 +264,7 @@ pub async fn run_export(args: &ExportArgs, cancel: &CancellationToken) -> Result
     };
 
     let summary = build_summary(args, repo, &snapshot, results, bytes_planned, start);
-    emit_summary(args, &summary, jsonl.as_mut());
+    emit_summary(args, &summary, jsonl.as_mut())?;
     Ok(summary)
 }
 
@@ -547,7 +547,7 @@ fn emit_plan_event(
     jsonl: Option<&mut JsonlStream<std::io::Stdout>>,
 ) {
     if let Some(stream) = jsonl {
-        stream.emit_schema_event(
+        let output = stream.emit_schema_event(
             "export.plan",
             "event",
             ExportPlanEvent {
@@ -561,12 +561,14 @@ fn emit_plan_event(
                 force: args.force,
             },
         );
+        crate::core::output::report_progress_output(output);
     }
 }
 
 fn emit_file_event(result: &ExportFileResult, jsonl: Option<&mut JsonlStream<std::io::Stdout>>) {
     if let Some(stream) = jsonl {
-        stream.emit_schema_event(EXPORT_EVENT_SCHEMA, "event", result);
+        let output = stream.emit_schema_event(EXPORT_EVENT_SCHEMA, "event", result);
+        crate::core::output::report_progress_output(output);
     }
 }
 
@@ -574,7 +576,7 @@ fn emit_summary(
     args: &ExportArgs,
     summary: &ExportSummary,
     jsonl: Option<&mut JsonlStream<std::io::Stdout>>,
-) {
+) -> Result<()> {
     match args.output_mode() {
         OutputMode::Text => {
             for file in &summary.files {
@@ -587,13 +589,14 @@ fn emit_summary(
                 );
             }
         }
-        OutputMode::Json => emit_json(EXPORT_SCHEMA, EXPORT_VERSION, summary),
+        OutputMode::Json => emit_json(EXPORT_SCHEMA, EXPORT_VERSION, summary)?,
         OutputMode::Jsonl => {
             if let Some(stream) = jsonl {
-                stream.emit_schema_event(EXPORT_SCHEMA, "result", summary);
+                stream.emit_schema_event(EXPORT_SCHEMA, "result", summary)?;
             }
         }
     }
+    Ok(())
 }
 
 struct MultipartUploadController {

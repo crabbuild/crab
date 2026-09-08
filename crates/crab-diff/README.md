@@ -35,10 +35,18 @@ The main entry points are:
 - `compare_terms` — compare reconstruction terms when only Xorb ranges are
   available.
 
-For small term lists, `compare_terms` uses LCS to preserve moved-segment
-matches. Above its bounded ceiling it uses set-based classification to keep
-memory linear. Reports include unchanged/added/removed bytes, dedup ratio,
-changed ranges, and optional segment details.
+`compare_terms` uses exact LCS for up to 8,192 combined terms. Larger inputs
+use ordered greedy matching with linear memory. Each occurrence can match
+only once, and unchanged pairs retain their order; this approximation may
+report more changes than an exact LCS.
+
+Reports include unchanged/added/removed bytes, dedup ratio, changed ranges,
+and optional segment details. `compare_sequences` uses the same ordered
+greedy matcher when its exact matching work exceeds its own budget.
+
+Report and chunk-metric equality compare ratio bit patterns. Identical NaN
+payloads compare equal; signed zeroes and distinct NaN payloads differ. This
+keeps the public `Eq` contract valid even for caller-constructed reports.
 
 ## Usage
 

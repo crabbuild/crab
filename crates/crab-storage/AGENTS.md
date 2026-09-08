@@ -30,6 +30,19 @@ dependency source before asserting provider behavior.
 
 ## Invariants
 
+- Validate response ranges before exposing a stream and drain through EOF to
+  prove its declared length. File downloads share bounded validation and remove
+  partial destinations on returned errors (best-effort). Callers own cancellation
+  cleanup; transport errors retain their source.
+  Source: `crates/crab-storage/src/store.rs` (`get_stream`, `download_to_path_bounded`).
+
+- Non-resumable multipart completion uses `crab_storage::multipart::complete_upload`: abort on failure, preserve the completion error, and await cleanup before retry. Durable journal sessions retain their separate recovery protocol.
+  Source: `crates/crab-storage/src/multipart.rs`.
+
+- Preserve throttling's optional provider source through product conversions;
+  local admission errors use no source. Retry classification uses the hint,
+  while read diagnostics retain the original chain rather than cloning errors.
+  Sources: `crates/crab-storage/src/error_map.rs`, `crab/src/core/error.rs`.
 - Keep CAS conditional create/update and conflict handling distinct from transport retry. The mutation callback may be evaluated more than once.
   Source: `crates/crab-storage/src/cas.rs`.
 - Check both loaded and newly serialized CAS object sizes; a successful write must remain within the same read ceiling.

@@ -449,7 +449,7 @@ pub fn exec_diff(args: DiffArgs) -> Result<()> {
 pub fn run_show_in(args: &ShowArgs, repo_root: &Path) -> Result<()> {
     let map = params::read_at_ref(repo_root, &args.git_ref, &args.paths)?;
     let mode = OutputMode::from_flags(args.json, false);
-    render_show(args, &map, mode);
+    render_show(args, &map, mode)?;
     Ok(())
 }
 
@@ -469,7 +469,7 @@ pub fn run_diff_in(args: &DiffArgs, repo_root: &Path) -> Result<()> {
 // Rendering
 // ---------------------------------------------------------------------------
 
-fn render_show(args: &ShowArgs, map: &ScalarMap, mode: OutputMode) {
+fn render_show(args: &ShowArgs, map: &ScalarMap, mode: OutputMode) -> Result<()> {
     // Envelope path: `--json` takes precedence over `--format`.
     if mode == OutputMode::Json {
         let payload = ParamsShow {
@@ -477,8 +477,8 @@ fn render_show(args: &ShowArgs, map: &ScalarMap, mode: OutputMode) {
             paths: args.paths.clone(),
             entries: map_to_json(map),
         };
-        emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload);
-        return;
+        emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
 
     match args.format {
@@ -501,7 +501,7 @@ fn render_show(args: &ShowArgs, map: &ScalarMap, mode: OutputMode) {
                 paths: args.paths.clone(),
                 entries: map_to_json(map),
             };
-            emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload);
+            emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload)?;
         }
         Format::Md => {
             let diff = ScalarDiff {
@@ -525,6 +525,7 @@ fn render_show(args: &ShowArgs, map: &ScalarMap, mode: OutputMode) {
             );
         }
     }
+    Ok(())
 }
 
 fn render_diff(
@@ -536,7 +537,7 @@ fn render_diff(
 ) -> Result<()> {
     let format = args.effective_format()?;
     if mode == OutputMode::Json {
-        emit_diff_envelope(args, ref_a, ref_b, diff);
+        emit_diff_envelope(args, ref_a, ref_b, diff)?;
         return Ok(());
     }
 
@@ -546,14 +547,14 @@ fn render_diff(
     };
     match format {
         Format::Table => print!("{}", render_param_table(diff, ref_a, ref_b, opts)),
-        Format::Json => emit_diff_envelope(args, ref_a, ref_b, diff),
+        Format::Json => emit_diff_envelope(args, ref_a, ref_b, diff)?,
         Format::Md => print!("{}", render_param_markdown(diff, ref_a, ref_b, opts)),
         Format::PrComment => print!("{}", render_param_pr_comment(diff, ref_a, ref_b, opts)),
     }
     Ok(())
 }
 
-fn emit_diff_envelope(args: &DiffArgs, ref_a: &str, ref_b: &str, diff: &ParamDiff) {
+fn emit_diff_envelope(args: &DiffArgs, ref_a: &str, ref_b: &str, diff: &ParamDiff) -> Result<()> {
     let payload = ParamsDiff {
         ref_a: ref_a.to_owned(),
         ref_b: ref_b.to_owned(),
@@ -566,7 +567,8 @@ fn emit_diff_envelope(args: &DiffArgs, ref_a: &str, ref_b: &str, diff: &ParamDif
             BTreeMap::new()
         },
     };
-    emit_json(SCHEMA_DIFF, SCHEMA_VERSION, payload);
+    emit_json(SCHEMA_DIFF, SCHEMA_VERSION, payload)?;
+    Ok(())
 }
 
 fn render_param_table(

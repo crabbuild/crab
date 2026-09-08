@@ -1957,6 +1957,15 @@ impl Config {
     }
 
     fn validate_resolved(&self) -> super::error::Result<()> {
+        if !(1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&self.download_concurrency) {
+            return Err(super::error::CrabError::Configuration {
+                key: format!(
+                    "download_concurrency must be in 1..={}",
+                    tokio::sync::Semaphore::MAX_PERMITS
+                ),
+                origin: "root".into(),
+            });
+        }
         self.staging.validate()?;
         self.validate_push()?;
         self.validate_cache()?;
@@ -2965,6 +2974,32 @@ mod tests {
             .current_dir(cwd)
             .output()
             .ok()
+    }
+
+    #[test]
+    fn download_concurrency_rejects_nonfunctional_permit_counts() {
+        for concurrency in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+            let config = Config {
+                download_concurrency: concurrency,
+                ..Config::default()
+            };
+            assert!(
+                matches!(config.validate_resolved(), Err(super::super::error::CrabError::Configuration { key, .. }) if key.contains("download_concurrency"))
+            );
+            let remote =
+                serde_json::to_vec(&serde_json::json!({ "download_concurrency": concurrency }))
+                    .unwrap();
+            assert!(
+                matches!(Config::default().resolve_remote(&remote), Err(super::super::error::CrabError::Configuration { key, .. }) if key.contains("download_concurrency"))
+            );
+        }
+        for concurrency in [1, tokio::sync::Semaphore::MAX_PERMITS] {
+            let config = Config {
+                download_concurrency: concurrency,
+                ..Config::default()
+            };
+            assert!(config.validate_resolved().is_ok());
+        }
     }
 
     #[test]

@@ -201,7 +201,7 @@ pub fn run(args: &DagArgs, repo_root: &Path, mode: OutputMode) -> Result<()> {
 
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_DAG_SCHEMA, "1.0", payload);
+            emit_json(WORKFLOW_DAG_SCHEMA, "1.0", payload)?;
         }
         OutputMode::Text => match effective_format(args) {
             DagFormat::Ascii => {

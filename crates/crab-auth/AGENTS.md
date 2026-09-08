@@ -30,6 +30,21 @@ Store consumers compose those results in `crates/crab-auth-store/src/lib.rs`.
 
 ## Invariants
 
+- Prepare and sync complete key-file bytes before publishing the final name.
+  Use non-overwriting publication so a failed write or a competing initializer
+  cannot replace the authoritative key. Preserve private Unix permissions.
+  Source: `crates/crab-auth/src/token_cache.rs`.
+
+- Keychain initialization must not update an existing encryption key after a
+  failed lookup. Use create-only insertion and read the stored winner after a
+  failed insertion. Never return an unstored candidate.
+  Source: `crates/crab-auth/src/token_cache.rs`.
+
+- Classify missing tokens from the read result under the cache lock. Never use
+  an existence probe to turn filesystem errors into an unauthenticated state.
+  The current lock is Unix-only; non-Unix serialization remains unimplemented.
+  Source: `crates/crab-auth/src/token_cache.rs`.
+
 - Preserve scopes alongside resolved credentials; translating provider variants must not drop path restrictions.
   Source: `crates/crab-auth/src/credentials.rs`.
 - Keep token-cache encryption and file locking together when changing store/load/delete paths; do not expose token material in diagnostics or fixtures.
@@ -39,8 +54,8 @@ Store consumers compose those results in `crates/crab-auth-store/src/lib.rs`.
 
 ## Features and platform
 
-Empty default. Optional features are `oidc-client`, `aws-oidc-client`, `azure-entra-client`, `crab-auth-client`, and `gcp-workload-identity-client`; provider clients enable oidc-client. Token locking has platform-specific code. `CachedTokens` contains token strings;
-do not log the struct or assume Debug redacts it. TokenCache construction may
+Empty default. Optional features are `oidc-client`, `aws-oidc-client`, `azure-entra-client`, `crab-auth-client`, and `gcp-workload-identity-client`; provider clients enable oidc-client. Token locking has platform-specific code. Credential and token Debug output omits secrets;
+raw fields and serialized payloads remain sensitive. TokenCache construction may
 use the OS keychain or a fallback key file; inspect fixture setup before running
 token persistence tests. Mock OIDC tests do not qualify real identity providers; inspect their contract before changing exchanges.
 

@@ -1374,11 +1374,10 @@ async fn test_restricted_dedup_scope_authorizes_matching_repo() {
     assert!(result.unknown.is_empty());
 
     let stats = admin_stats(server.addr).await;
-    assert_eq!(
+    assert!(
         stats["dedup_index"]["requires_repo_context"]
             .as_bool()
-            .unwrap(),
-        true
+            .unwrap()
     );
 
     let _ = server.shutdown.send(());
@@ -1458,7 +1457,7 @@ async fn test_bad_shard_push_warming_rejects_and_does_not_index() {
 
     let fixture = build_real_shard();
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let shard_path = global_path("shards", &wrong_hash);
+    let shard_path = global_path("shards", wrong_hash);
 
     let err = client
         .put(&shard_path, fixture.shard_bytes.clone())
@@ -1484,7 +1483,7 @@ async fn test_bad_xorb_push_warming_rejects() {
 
     let fixture = build_real_shard();
     let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-    let xorb_path = global_path("xorbs", &wrong_hash);
+    let xorb_path = global_path("xorbs", wrong_hash);
 
     let err = client
         .put(&xorb_path, fixture.xorb_bytes.clone())
@@ -1523,7 +1522,7 @@ async fn test_bad_origin_shard_read_miss_rejects_and_does_not_index() {
 
     let fixture = build_real_shard();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let shard_path = global_path("shards", &wrong_hash);
+    let shard_path = global_path("shards", wrong_hash);
     server
         .origin
         .put(
@@ -1611,7 +1610,7 @@ async fn test_bad_origin_xorb_read_miss_rejects() {
 
     let fixture = build_real_shard();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let xorb_path = global_path("xorbs", &wrong_hash);
+    let xorb_path = global_path("xorbs", wrong_hash);
     server
         .origin
         .put(
@@ -1772,6 +1771,131 @@ async fn test_pack_put_get_and_admin_evict_removes_canonical_file() {
     );
     assert!(!pack_file.exists());
 
+    let _ = server.shutdown.send(());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_health_remains_responsive_during_admin_sqlite_contention() {
+    let server = start_test_server().await;
+    let path = "org/repo/packs/contended.pack";
+    test_client(server.addr)
+        .put(path, Bytes::from_static(b"payload"))
+        .await
+        .unwrap();
+    let hash = pack_storage_hex("contended");
+    let payload_path = server.cache_root.join("packs").join(&hash[..2]).join(&hash);
+    let db_path = server.cache_root.join(CACHE_DB_FILE);
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (removed, removal) = tokio::sync::oneshot::channel();
+    let (heartbeat, heartbeat_rx) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        locked.send(()).unwrap();
+        // Payload removal precedes the blocked metadata DELETE. Observe it
+        // without borrowing an async worker or relying on a scheduling sleep.
+        let started = std::time::Instant::now();
+        while payload_path.exists() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let did_remove = !payload_path.exists();
+        let _ = removed.send(did_remove);
+        let responsive = heartbeat_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+        conn.execute_batch("ROLLBACK").unwrap();
+        responsive
+    });
+    ready.await.unwrap();
+    let addr = server.addr;
+    let eviction = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(format!("http://{addr}/v1/admin/evict"))
+            .header("x-cache-psk", TEST_PSK)
+            .json(&serde_json::json!({ "path": path }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let did_remove = removal.await.unwrap();
+    let health = reqwest::Client::new()
+        .get(format!("http://{}/health/live", server.addr))
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await;
+    let _ = heartbeat.send(());
+    let responsive = blocker.join().unwrap();
+    let response = eviction.await.unwrap();
+    let _ = server.shutdown.send(());
+    assert!(
+        did_remove,
+        "eviction never reached the contended metadata write"
+    );
+    assert!(responsive, "metadata contention blocked the HTTP executor");
+    assert_eq!(health.unwrap().status().as_u16(), 200);
+    assert_eq!(response.status().as_u16(), 200);
+    let stats = response.json::<Value>().await.unwrap();
+    assert_eq!(stats["evicted_count"], 1);
+    assert_eq!(stats["evicted_bytes"], 7);
+}
+
+#[tokio::test]
+async fn test_admin_evict_failure_preserves_accounting() {
+    let server = start_test_server().await;
+    let client = test_client(server.addr);
+    let pack_path = "org/repo/packs/pack-blocked.pack";
+    let data = Bytes::from_static(b"retained pack bytes");
+    client.put(pack_path, data.clone()).await.unwrap();
+    let storage_hex = pack_storage_hex("pack-blocked");
+    let path = server
+        .cache_root
+        .join("packs")
+        .join(&storage_hex[..2])
+        .join(storage_hex);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let marker = path.join("retained");
+    std::fs::write(&marker, "do not delete").unwrap();
+
+    for request in [
+        serde_json::json!({ "object_type": "pack" }),
+        serde_json::json!({ "path": pack_path }),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/v1/admin/evict", server.addr))
+            .header("x-cache-psk", TEST_PSK)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 500);
+        let stats = admin_stats(server.addr).await;
+        assert_eq!(stats["pack_count"].as_u64().unwrap(), 1);
+        assert_eq!(stats["total_bytes"].as_u64().unwrap(), data.len() as u64);
+        assert!(marker.exists());
+    }
+    let _ = server.shutdown.send(());
+}
+
+#[tokio::test]
+async fn test_admin_evict_counts_empty_object_once() {
+    let server = start_test_server().await;
+    let client = test_client(server.addr);
+    let path = "org/repo/packs/pack-empty.pack";
+    client.put(path, Bytes::new()).await.unwrap();
+    let http = reqwest::Client::new();
+
+    for expected_count in [1, 0] {
+        let response = http
+            .post(format!("http://{}/v1/admin/evict", server.addr))
+            .header("x-cache-psk", TEST_PSK)
+            .json(&serde_json::json!({ "path": path }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let stats = response.json::<Value>().await.unwrap();
+        assert_eq!(stats["evicted_count"].as_u64().unwrap(), expected_count);
+        assert_eq!(stats["evicted_bytes"].as_u64().unwrap(), 0);
+    }
     let _ = server.shutdown.send(());
 }
 

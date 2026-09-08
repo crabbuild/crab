@@ -279,7 +279,7 @@ pub async fn run_organization(
                     "Created organization {} (revision {})",
                     created.value.slug, created.value.revision
                 )
-            });
+            })?;
         }
         OrganizationCommand::List(page) => {
             let cursor = page_cursor(page.cursor)?;
@@ -299,7 +299,7 @@ pub async fn run_organization(
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-            });
+            })?;
         }
         OrganizationCommand::Info { organization } => {
             let found = client
@@ -311,7 +311,7 @@ pub async fn run_organization(
                     "{}\t{:?}\trevision {}",
                     found.value.slug, found.value.state, found.value.revision
                 )
-            });
+            })?;
         }
         OrganizationCommand::Rename {
             organization,
@@ -332,7 +332,7 @@ pub async fn run_organization(
                     "Renamed organization to {} (revision {})",
                     updated.value.slug, updated.value.revision
                 )
-            });
+            })?;
         }
         OrganizationCommand::Delete {
             organization,
@@ -349,7 +349,7 @@ pub async fn run_organization(
             let deleted = MutationResult::new("organization.delete", organization);
             emit(mode, "managed.mutation", &deleted, || {
                 "Organization deleted".to_owned()
-            });
+            })?;
         }
     }
     Ok(())
@@ -372,7 +372,7 @@ pub async fn run_repository(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.repository", &created.value, || {
                 format!("Created {}", created.value.canonical_url)
-            });
+            })?;
         }
         RepositoryCommand::List { organization, page } => {
             let cursor = page_cursor(page.cursor)?;
@@ -392,7 +392,7 @@ pub async fn run_repository(
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-            });
+            })?;
         }
         RepositoryCommand::Info { repository } => {
             let (organization, repository) = repository_name(&repository)?;
@@ -405,7 +405,7 @@ pub async fn run_repository(
                     "{}\t{:?}\trevision {}",
                     found.value.canonical_url, found.value.state, found.value.revision
                 )
-            });
+            })?;
         }
         RepositoryCommand::Rename {
             repository,
@@ -425,7 +425,7 @@ pub async fn run_repository(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.repository", &updated.value, || {
                 format!("Renamed repository to {}", updated.value.canonical_url)
-            });
+            })?;
         }
         RepositoryCommand::Archive {
             repository,
@@ -443,7 +443,7 @@ pub async fn run_repository(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.repository", &updated.value, || {
                 format!("Archived {}", updated.value.canonical_url)
-            });
+            })?;
         }
         RepositoryCommand::Delete {
             repository,
@@ -461,7 +461,7 @@ pub async fn run_repository(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.repository", &updated.value, || {
                 format!("Deleted {}", updated.value.canonical_url)
-            });
+            })?;
         }
         RepositoryCommand::Restore {
             repository,
@@ -479,7 +479,7 @@ pub async fn run_repository(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.repository", &updated.value, || {
                 format!("Restored {}", updated.value.canonical_url)
-            });
+            })?;
         }
     }
     Ok(())
@@ -512,7 +512,7 @@ pub async fn run_member(
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-            });
+            })?;
         }
         MemberCommand::Add {
             organization,
@@ -530,7 +530,7 @@ pub async fn run_member(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.member", &added.value, || {
                 format!("Added member {}", added.value.principal_id)
-            });
+            })?;
         }
         MemberCommand::Update {
             organization,
@@ -550,7 +550,7 @@ pub async fn run_member(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.member", &updated.value, || {
                 format!("Updated member {}", updated.value.principal_id)
-            });
+            })?;
         }
         MemberCommand::Remove {
             organization,
@@ -569,7 +569,7 @@ pub async fn run_member(
             let removed = MutationResult::new("member.remove", principal_id);
             emit(mode, "managed.mutation", &removed, || {
                 "Member removed".to_owned()
-            });
+            })?;
         }
     }
     Ok(())
@@ -601,7 +601,7 @@ pub async fn run_service_account(
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
-            });
+            })?;
         }
         ServiceAccountCommand::CreateWorkload {
             organization,
@@ -616,7 +616,7 @@ pub async fn run_service_account(
                 .map_err(|error| api_error(&connection, error))?;
             emit(mode, "managed.service_account", &created.value, || {
                 format!("Created workload service account {}", created.value.id)
-            });
+            })?;
         }
         ServiceAccountCommand::CreateToken {
             organization,
@@ -628,7 +628,7 @@ pub async fn run_service_account(
                 .create_opaque_service_account(&organization, &name, &role, expires_in_seconds)
                 .await
                 .map_err(|error| api_error(&connection, error))?;
-            emit_issued(mode, &issued.value, "Created opaque service account");
+            emit_issued(mode, &issued.value, "Created opaque service account")?;
         }
         ServiceAccountCommand::Rotate {
             organization,
@@ -647,7 +647,7 @@ pub async fn run_service_account(
                 )
                 .await
                 .map_err(|error| api_error(&connection, error))?;
-            emit_issued(mode, &issued.value, "Rotated service-account token");
+            emit_issued(mode, &issued.value, "Rotated service-account token")?;
         }
         ServiceAccountCommand::Revoke {
             organization,
@@ -661,7 +661,7 @@ pub async fn run_service_account(
             let revoked = MutationResult::new("service_account.revoke", account_id);
             emit(mode, "managed.mutation", &revoked, || {
                 "Service account revoked".to_owned()
-            });
+            })?;
         }
     }
     Ok(())
@@ -718,26 +718,28 @@ fn repository_name(value: &str) -> Result<(&str, &str)> {
     Ok((organization, repository))
 }
 
-fn emit<T, F>(mode: OutputMode, schema: &'static str, value: &T, text: F)
+fn emit<T, F>(mode: OutputMode, schema: &'static str, value: &T, text: F) -> Result<()>
 where
     T: Serialize,
     F: FnOnce() -> String,
 {
     match mode {
         OutputMode::Text => println!("{}", text()),
-        OutputMode::Json => emit_json(schema, "1.0", value),
+        OutputMode::Json => emit_json(schema, "1.0", value)?,
         OutputMode::Jsonl => unreachable!("managed administration commands do not accept JSONL"),
     }
+    Ok(())
 }
 
-fn emit_issued(mode: OutputMode, issued: &IssuedServiceToken, message: &str) {
+fn emit_issued(mode: OutputMode, issued: &IssuedServiceToken, message: &str) -> Result<()> {
     emit(mode, "managed.service_account.credential", issued, || {
         format!(
             "{message} {}\nToken: {}\nStore this token now; it will not be shown again.",
             issued.account.id,
             issued.token.expose_secret()
         )
-    });
+    })?;
+    Ok(())
 }
 
 #[derive(Serialize)]

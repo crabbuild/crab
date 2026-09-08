@@ -192,7 +192,7 @@ pub fn run_plan(
 ) -> Result<OptimizePayload> {
     validate_inputs(args, config)?;
     let payload = build_payload(args, config, OptimizeWorkflowMode::Plan);
-    render_payload(&payload, mode, OPTIMIZE_PLAN_SCHEMA);
+    render_payload(&payload, mode, OPTIMIZE_PLAN_SCHEMA)?;
     Ok(payload)
 }
 
@@ -259,8 +259,8 @@ fn validate_inputs(args: &OptimizePlanArgs, config: &Config) -> Result<()> {
 }
 
 /// Render the final apply payload.
-pub fn render_apply(payload: &OptimizePayload, mode: OutputMode) {
-    render_payload(payload, mode, OPTIMIZE_APPLY_SCHEMA);
+pub fn render_apply(payload: &OptimizePayload, mode: OutputMode) -> Result<()> {
+    render_payload(payload, mode, OPTIMIZE_APPLY_SCHEMA)
 }
 
 /// Hold a repository-wide optimizer lock for the full apply workflow.
@@ -784,10 +784,10 @@ fn summarize(steps: &[OptimizeStep]) -> OptimizeSummary {
     summary
 }
 
-fn render_payload(payload: &OptimizePayload, mode: OutputMode, schema: &'static str) {
+fn render_payload(payload: &OptimizePayload, mode: OutputMode, schema: &'static str) -> Result<()> {
     if mode == OutputMode::Json {
-        emit_json(schema, OPTIMIZE_SCHEMA_VERSION, payload);
-        return;
+        emit_json(schema, OPTIMIZE_SCHEMA_VERSION, payload)?;
+        return Ok(());
     }
 
     let heading = match payload.mode {
@@ -815,6 +815,7 @@ fn render_payload(payload: &OptimizePayload, mode: OutputMode, schema: &'static 
         payload.summary.failed,
         payload.summary.mutating_steps
     );
+    Ok(())
 }
 
 fn status_label(status: OptimizeStepStatus) -> &'static str {

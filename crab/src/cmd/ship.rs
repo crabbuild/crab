@@ -295,7 +295,7 @@ pub async fn run_ship(args: &ShipArgs, cancel: &CancellationToken) -> Result<()>
                 push: push_summary,
                 timings: ShipTimingPayload::from(&timings),
             };
-            emit_json(SHIP_SCHEMA, SHIP_VERSION, payload);
+            emit_json(SHIP_SCHEMA, SHIP_VERSION, payload)?;
         }
     }
 
@@ -389,7 +389,7 @@ async fn run_ship_dry_run(
                     total_ms: 0,
                 },
             },
-        );
+        )?;
         return Ok(());
     }
 

@@ -1215,6 +1215,14 @@ impl VfsEngine {
         });
     }
 
+    /// Finish owned background hydration after backend requests have stopped.
+    ///
+    /// Foreground requests remain owned by the backend. This waits for queued
+    /// workers and admitted prefetch, including their in-progress cache writes.
+    pub async fn shutdown_background(&self) {
+        self.hydration.shutdown().await;
+    }
+
     /// Snapshot hydration read counters for mount diagnostics.
     pub fn hydration_read_stats_snapshot(&self) -> HydrationReadStatsSnapshot {
         self.hydration.read_stats_snapshot()
@@ -2457,6 +2465,10 @@ fn ensure_readable_file(node_type: NodeType, path: &str) -> Result<()> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected result variants"
+)]
 mod tests {
     use super::*;
     use crate::data_plane::{FileIndexResolver, ReconstructionTerm, ShardLoader, XorbFetcher};
@@ -2628,7 +2640,7 @@ mod tests {
         test_engine_with_nodes(vec![BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -2755,7 +2767,7 @@ mod tests {
             BaseNode {
                 path: "dir".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -2763,7 +2775,7 @@ mod tests {
             BaseNode {
                 path: "dir/file.txt".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -2815,7 +2827,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("pointer-blob-oid".to_owned()),
             pointer: Some(pointer.clone()),
             size: pointer.size,
@@ -2846,7 +2858,7 @@ mod tests {
         let mut fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some(oid),
             pointer: None,
             size: 0,
@@ -2898,7 +2910,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "small.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("0123456789abcdef".to_owned()),
             pointer: None,
             size: 0,
@@ -3072,7 +3084,7 @@ mod tests {
             BaseNode {
                 path: "changed.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3080,7 +3092,7 @@ mod tests {
             BaseNode {
                 path: "unchanged.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3109,7 +3121,7 @@ mod tests {
             BaseNode {
                 path: "models".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3117,7 +3129,7 @@ mod tests {
             BaseNode {
                 path: "models/model.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3125,7 +3137,7 @@ mod tests {
             BaseNode {
                 path: "sibling.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3178,7 +3190,7 @@ mod tests {
             BaseNode {
                 path: "dir".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3186,7 +3198,7 @@ mod tests {
             BaseNode {
                 path: "dir/a.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3194,7 +3206,7 @@ mod tests {
             BaseNode {
                 path: "other.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3253,9 +3265,8 @@ mod tests {
 
         fixture.engine.open_read("empty.txt").unwrap();
         fixture.engine.resolver.set_generation(2);
-        let err = match fixture.engine.open_read("empty.txt") {
-            Ok(_) => panic!("stale generation unexpectedly opened a cached read lease"),
-            Err(error) => error,
+        let Err(err) = fixture.engine.open_read("empty.txt") else {
+            panic!("stale generation unexpectedly opened a cached read lease");
         };
 
         assert!(matches!(err, CrabError::NotFound { .. }));
@@ -3432,7 +3443,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("pointer-blob-oid".to_owned()),
             pointer: Some(crab_types::pointer::Pointer {
                 file_hash: [42; 32],
@@ -3467,7 +3478,7 @@ mod tests {
         let fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: None,
             pointer: Some(crab_types::pointer::Pointer {
                 file_hash: [7; 32],
@@ -3494,7 +3505,7 @@ mod tests {
             BaseNode {
                 path: "models".to_owned(),
                 node_type: NodeType::Dir,
-                mode: 0o040755,
+                mode: 0o040_755,
                 object_oid: None,
                 pointer: None,
                 size: 0,
@@ -3502,7 +3513,7 @@ mod tests {
             BaseNode {
                 path: "models/model.bin".to_owned(),
                 node_type: NodeType::File,
-                mode: 0o100644,
+                mode: 0o100_644,
                 object_oid: None,
                 pointer: None,
                 size: 1024,

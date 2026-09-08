@@ -59,16 +59,18 @@ Cancellation/drop stops pending write attempts. This is not a persistence
 promise when caching is unavailable, over budget, or concurrently evicted,
 nor an aggregate filesystem-latency bound.
 
-`ReadError::Reconstruction` retains the typed failure returned by Xet. Its
-source wrapper exposes the nested client/writer errors that Xet 1.6 keeps
-behind `Arc` without `Error::source` annotations. The store adapter passes
-typed errors into Xet instead of formatting them; consumers can walk the
-standard source chain to distinguish origin integrity, availability hooks,
-and writer I/O. Caller-token and source-reported cancellation return
-`ReadError::Cancelled`. Runtime initialization errors also retain their source.
-An intermittent protocol CI failure still loses the availability source through
-actual reconstruction. The typed-source contract is not fully qualified; see
-Plan 017's direct read-through checkpoint for the failing job and investigation.
+`ReadError::Reconstruction` retains Xet's failure and the operation's first
+terminal read and writer failures. Crab records typed adapter errors before
+passing them to Xet, preserving their sources even when Xet reports a secondary
+channel error. Recovered hint/cache failures do not become the operation's cause.
+Consumers can walk the standard source chain to distinguish origin integrity,
+availability hooks, and writer I/O.
+
+A completed writer failure takes precedence over read failure or cancellation.
+Otherwise, caller-token and source-reported cancellation return
+`ReadError::Cancelled`. The output owner closes the writer before taking the
+failure snapshot, preventing late writes from changing it. Runtime initialization
+errors also retain their source.
 
 CLI/server adapters own user-facing classification. They must preserve this
 chain; converting only its display text loses recovery information. The CLI
@@ -87,20 +89,20 @@ use crab_cache_store::{CacheConfig, CachingStore};
 use crab_read::{ReadRuntimeBuilder, ReadStoreLayout};
 use crab_types::storage::StorageProviderKind;
 
-# async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-let origin = build_store_from_credentials(
-    "bucket",
-    CloudCredentials::StaticEnv {
-        provider: StorageProviderKind::S3,
-    },
-)?;
-let cached = CachingStore::new(origin.clone(), CacheConfig::default())?;
-let layout = ReadStoreLayout::new(origin, "repositories/team/project".to_owned());
-let hydrator = ReadRuntimeBuilder::new(cached, layout, 16).build()?;
-let bytes = hydrator.reconstruct_from_pointer(pointer_bytes).await?;
-# let _ = bytes;
-# Ok(())
-# }
+async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let origin = build_store_from_credentials(
+        "bucket",
+        CloudCredentials::StaticEnv {
+            provider: StorageProviderKind::S3,
+        },
+    )?;
+    let cached = CachingStore::new(origin.clone(), CacheConfig::default())?;
+    let layout = ReadStoreLayout::new(origin, "repositories/team/project".to_owned());
+    let hydrator = ReadRuntimeBuilder::new(cached, layout, 16).build()?;
+    let bytes = hydrator.reconstruct_from_pointer(pointer_bytes).await?;
+    println!("read {} bytes", bytes.len());
+    Ok(())
+}
 ```
 
 Use `reconstruct_range_from_pointer` for partial reads and
@@ -118,6 +120,43 @@ of all background work or a latency guarantee for an arbitrary blocking writer.
 Size violations are integrity errors; other source failures are preserved
 rather than relabeled as short output. Partial-range success checks the exact
 clamped length and underlying xorb/chunk integrity, not the whole-file hash.
+
+## Diff term resolution
+
+`TermResolver` serves diff callers that need reconstruction terms or ordered
+chunk sequences rather than file output. `TermResolver::new` returns a
+configuration error for zero concurrency or values above Tokio's maximum permit
+count. One semaphore limits admitted metadata work across this resolver's
+concurrent batches. Each batch also retains at most that many worker tasks,
+reaping whichever finishes first before scheduling another input. Input and
+result collections still scale with batch size; this is not total memory admission.
+
+| API | Per-file resolution failure |
+| --- | --- |
+| `resolve_batch` | Log and omit the unresolved file. |
+| `resolve_sequences_batch` | Log and omit the unresolved file. |
+| `resolve_sequences_batch_strict` | Return the first worker error after draining the batch. |
+
+Term batches reuse metadata's `SharedFileIndexLookup`, the same session
+owner used by hydration. Each batch binds the handle to its origin and
+repository prefix, retaining scoped read behavior. Close works even if unused
+clones remain.
+
+Cancellation stops admission and drains workers before closing the shared
+file-index lookup session. Workers waiting for a concurrency permit observe the
+cancellation token; already admitted metadata reads finish before cleanup.
+Dropping the batch cancels its own admission waiters without cancelling the
+caller's token or sibling batches. A per-batch cleanup task waits for admission
+to end and tracked workers to release their state, then closes the session.
+Normal completion awaits that same task. Dropping the batch during cleanup
+does not interrupt it, but shutting down the runtime can: await the batch
+through cancellation before stopping Tokio. Admitted origin reads still need
+their own transport deadlines.
+
+Strict batches retain worker join failures as `ReadError::ResolutionTask`.
+Its error source is Tokio's `JoinError`, so diagnostic consumers can distinguish
+worker panic from task cancellation without parsing log text. The CLI preserves
+that source while retaining its internal-error diagnostic classification.
 
 ## Boundaries
 

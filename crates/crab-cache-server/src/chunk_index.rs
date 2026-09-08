@@ -318,12 +318,7 @@ fn decode_value(val: &[u8]) -> Option<ChunkLocation> {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    reason = "test assertions"
-)]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
     use std::sync::Arc;

@@ -10,7 +10,7 @@ use std::time::Duration;
 #[cfg(any(not(unix), test))]
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -27,8 +27,8 @@ use crate::nfs::{
 use crate::pipeline::{PipelineConfig, PipelineOutput};
 use crate::read_lease_pool::{ReadLeasePool, ReadLeasePoolSnapshot};
 
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-const COMMIT_RESPONSE_TIMEOUT: Duration = Duration::from_mins(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const COMMIT_REQUEST_TIMEOUT: Duration = Duration::from_mins(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONTROL_ENDPOINT_ENV: &str = "CRAB_NFS_CONTROL_ENDPOINT";
 #[cfg(any(not(unix), test))]
@@ -1326,7 +1326,7 @@ pub async fn commit(
             message: message.to_owned(),
             push,
         },
-        COMMIT_RESPONSE_TIMEOUT,
+        COMMIT_REQUEST_TIMEOUT,
     )
     .await?;
     if !response.ok {
@@ -1356,93 +1356,55 @@ fn control_update_from_response(
 }
 
 async fn request(endpoint: &str, request: &NfsControlRequest) -> Result<NfsControlResponse> {
-    request_with_timeout(endpoint, request, RESPONSE_TIMEOUT).await
+    request_with_timeout(endpoint, request, REQUEST_TIMEOUT).await
 }
 
 async fn request_with_timeout(
     endpoint: &str,
     request: &NfsControlRequest,
-    response_timeout: Duration,
+    request_timeout: Duration,
 ) -> Result<NfsControlResponse> {
-    if endpoint.starts_with("tcp:") {
-        return send_tcp_request(endpoint, request, response_timeout).await;
-    }
+    // A stalled helper can stop reading before a response is possible. Bound the
+    // entire exchange; dropping it closes this request's socket without a retry.
+    tokio::time::timeout(request_timeout, async {
+        if endpoint.starts_with("tcp:") {
+            let endpoint = tcp_endpoint_from_endpoint(endpoint)?;
+            let stream = tokio::net::TcpStream::connect(endpoint.addr).await?;
+            let request = NfsTcpControlRequest {
+                token: endpoint.token,
+                request: request.clone(),
+            };
+            return exchange_request(stream, &request).await;
+        }
 
-    if endpoint.starts_with("unix:") {
         #[cfg(unix)]
-        {
+        if endpoint.starts_with("unix:") {
             let path = unix_path_from_endpoint(endpoint)?;
             let stream = tokio::net::UnixStream::connect(path).await?;
-            return send_unix_request(stream, request, response_timeout).await;
+            return exchange_request(stream, request).await;
         }
-        #[cfg(not(unix))]
-        {
-            return Err(CrabError::Configuration {
-                key: format!(
-                    "unsupported NFS control endpoint: {}",
-                    display_control_endpoint(endpoint)
-                ),
-                origin: "crab mount --backend=nfs".into(),
-            });
-        }
-    }
 
-    Err(CrabError::Configuration {
-        key: format!(
-            "unsupported NFS control endpoint: {}",
-            display_control_endpoint(endpoint)
-        ),
-        origin: "crab mount --backend=nfs".into(),
+        Err(unsupported_control_endpoint(endpoint))
     })
+    .await
+    .map_err(|_| CrabError::Internal("timed out waiting for NFS control exchange".into()))?
 }
 
-#[cfg(unix)]
-async fn send_unix_request(
-    stream: tokio::net::UnixStream,
-    request: &NfsControlRequest,
-    response_timeout: Duration,
+async fn exchange_request(
+    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    request: &impl Serialize,
 ) -> Result<NfsControlResponse> {
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
     let mut json = serde_json::to_string(request).map_err(|error| {
         CrabError::Internal(format!("failed to serialize NFS control request: {error}"))
     })?;
     json.push('\n');
-    writer.write_all(json.as_bytes()).await?;
-    writer.flush().await?;
+    stream.write_all(json.as_bytes()).await?;
+    stream.flush().await?;
 
-    let line = tokio::time::timeout(response_timeout, lines.next_line())
-        .await
-        .map_err(|_| CrabError::Internal("timed out waiting for NFS control response".into()))??
-        .ok_or_else(|| CrabError::Internal("NFS control server closed connection".into()))?;
-    serde_json::from_str(&line).map_err(|error| {
-        CrabError::Internal(format!("failed to parse NFS control response: {error}"))
-    })
-}
-
-async fn send_tcp_request(
-    endpoint: &str,
-    request: &NfsControlRequest,
-    response_timeout: Duration,
-) -> Result<NfsControlResponse> {
-    let endpoint = tcp_endpoint_from_endpoint(endpoint)?;
-    let stream = tokio::net::TcpStream::connect(endpoint.addr).await?;
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-    let request = NfsTcpControlRequest {
-        token: endpoint.token,
-        request: request.clone(),
-    };
-    let mut json = serde_json::to_string(&request).map_err(|error| {
-        CrabError::Internal(format!("failed to serialize NFS control request: {error}"))
-    })?;
-    json.push('\n');
-    writer.write_all(json.as_bytes()).await?;
-    writer.flush().await?;
-
-    let line = tokio::time::timeout(response_timeout, lines.next_line())
-        .await
-        .map_err(|_| CrabError::Internal("timed out waiting for NFS control response".into()))??
+    let line = BufReader::new(stream)
+        .lines()
+        .next_line()
+        .await?
         .ok_or_else(|| CrabError::Internal("NFS control server closed connection".into()))?;
     serde_json::from_str(&line).map_err(|error| {
         CrabError::Internal(format!("failed to parse NFS control response: {error}"))
@@ -1512,6 +1474,10 @@ fn unix_path_from_endpoint(endpoint: &str) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
     use crate::engine::{ReadSourceKey, VfsReadLease};
@@ -1741,7 +1707,7 @@ mod tests {
         let mountpoint = tmp.path().join("view");
         let socket_dir = tmp.path().join("control");
         let socket_path = socket_dir.join("nfs-control.sock");
-        let endpoint = Some(format!("unix:{}", socket_path.display()));
+        let endpoint = format!("unix:{}", socket_path.display());
         let cancel = CancellationToken::new();
         let state = NfsControlState {
             mountpoint: mountpoint.clone(),
@@ -1758,8 +1724,7 @@ mod tests {
                 startup_ms: 8,
             },
         };
-        let handle = spawn_server(endpoint.clone(), state, cancel.clone()).unwrap();
-        let endpoint = endpoint.unwrap();
+        let handle = spawn_server(Some(endpoint.clone()), state, cancel.clone()).unwrap();
 
         let status = wait_for_status(&endpoint).await;
 
@@ -1846,5 +1811,68 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         status(endpoint).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn tcp_control_deadline_includes_stalled_writes() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint = format!("tcp:{}?token=test-token", listener.local_addr().unwrap());
+        assert_stalled_write_times_out(&endpoint).await;
+    }
+
+    #[tokio::test]
+    async fn control_response_timeout_closes_connection() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let endpoint = format!("tcp:{}?token=test-token", listener.local_addr().unwrap());
+        let (response, received) = tokio::join!(
+            request_with_timeout(
+                &endpoint,
+                &NfsControlRequest::Ping,
+                Duration::from_millis(100),
+            ),
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).await.unwrap();
+                serde_json::from_slice::<NfsTcpControlRequest>(&bytes).unwrap()
+            }),
+        );
+        assert!(
+            matches!(response, Err(CrabError::Internal(message)) if message.contains("timed out"))
+        );
+        assert_eq!(received.unwrap().request, NfsControlRequest::Ping);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_control_deadline_includes_stalled_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+        assert_stalled_write_times_out(&format!("unix:{}", path.display())).await;
+    }
+
+    async fn assert_stalled_write_times_out(endpoint: &str) {
+        // Exceed the socket buffers while the listener deliberately never reads.
+        // A response-only timeout cannot interrupt the pending request write.
+        let request = NfsControlRequest::Commit {
+            message: "x".repeat(8 * 1024 * 1024),
+            push: false,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            request_with_timeout(endpoint, &request, Duration::from_millis(100)),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(CrabError::Internal(message)) if message.contains("timed out"))
+        );
     }
 }

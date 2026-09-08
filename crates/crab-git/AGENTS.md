@@ -24,7 +24,7 @@ Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate`
 | Task | Start here | Also inspect |
 | --- | --- | --- |
 | Native receive validation | `crates/crab-git/src/receive_plan.rs` | `crates/crab-http-server/src/receive/validate.rs` |
-| Pack decoding | `crates/crab-git/src/incoming_pack.rs` | `crates/crab-remote-git/src/reader.rs` |
+| Pack decoding | `crates/crab-git/src/incoming_pack.rs`, `crates/crab-git/src/delta.rs` | `crates/crab-remote-git/src/reader.rs` |
 | Pointer classification | `crates/crab-git/src/pointer_detect.rs` | `crates/crab-types/src/pointer.rs` |
 
 ## Invariants
@@ -33,8 +33,15 @@ Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate`
   Source: `crates/crab-git/src/refname.rs`.
 - A receive plan is not publication authority: callers supply policy, verify pointer dependencies, and recheck the captured base under writer leases.
   Source: `crates/crab-git/src/receive_plan.rs`.
+- Read `GIT_DIR` with `var_os`; an explicit OS path must not disappear because
+  it is non-Unicode. Check the feature-gated CLI config resolver sibling too.
+  Sources: `crates/crab-git/src/discover.rs`, `crab/src/core/config_resolver.rs`.
 - Keep common-directory discovery distinct from the current working tree; discovery has an explicit .git result outside repositories.
   Source: `crates/crab-git/src/discover.rs`.
+
+- Worktree porcelain framing must not trim NUL-delimited field contents. Line
+  mode and NUL mode have different delimiter contracts; native Git path coverage
+  lives in `worktree::tests`.
 
 ## Features and platform
 
@@ -43,6 +50,11 @@ Only `facade` is declared; there is no declared default feature. It enables the 
 ## Verification
 
 Read inline discovery/ref tests and `crates/crab-git/src/receive_plan/tests.rs`; pack quarantine regressions live in `crates/crab-git/src/incoming_pack/tests.rs`.
+
+Delta instruction validation and reconstruction share a private walker. Run
+`cargo test -p crab-git --locked --lib delta::tests` with the external target
+directory configured; include incoming-pack and remote-reader consumer tests
+when changing instruction semantics.
 
 Run from repository root. The target below is the example for worktree `089c`;
 replace it with a unique directory for your checkout. Before compilation, verify

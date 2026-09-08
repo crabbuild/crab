@@ -315,6 +315,10 @@ fn redirect_fds(log_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
+#[expect(
+    clippy::panic,
+    reason = "test assertions reject unexpected protocol variants"
+)]
 mod tests {
     use super::*;
 
@@ -369,7 +373,7 @@ mod tests {
         // Parent reads the byte.
         let mut buf = [0u8; 1];
         // SAFETY: reading from a valid pipe fd in a test.
-        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast::<libc::c_void>(), 1) };
         unsafe { libc::close(read_fd) };
 
         assert_eq!(n, 1);
@@ -388,7 +392,7 @@ mod tests {
         // Parent reads the byte.
         let mut buf = [0u8; 1];
         // SAFETY: reading from a valid pipe fd in a test.
-        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast::<libc::c_void>(), 1) };
         unsafe { libc::close(read_fd) };
 
         assert_eq!(n, 1);
@@ -405,7 +409,7 @@ mod tests {
         let buf = [READY_BYTE];
         // SAFETY: writing to a valid pipe fd in a test.
         unsafe {
-            libc::write(write_fd, buf.as_ptr() as *const libc::c_void, 1);
+            libc::write(write_fd, buf.as_ptr().cast::<libc::c_void>(), 1);
             libc::close(write_fd);
         }
 
@@ -424,7 +428,7 @@ mod tests {
         let buf = [FAILED_BYTE];
         // SAFETY: writing to a valid pipe fd in a test.
         unsafe {
-            libc::write(write_fd, buf.as_ptr() as *const libc::c_void, 1);
+            libc::write(write_fd, buf.as_ptr().cast::<libc::c_void>(), 1);
             libc::close(write_fd);
         }
 

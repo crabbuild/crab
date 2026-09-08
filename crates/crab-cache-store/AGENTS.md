@@ -28,8 +28,13 @@ Trace one path: `StoreClient` in `crates/crab-read/src/store_client.rs` →
 
 ## Invariants
 
-- Mutable paths and HEAD operations must retain origin authority; inspect bypass tests before extending cache admission.
+- Construction errors make `try_build_healthy` return None; probe failure keeps a local-only wrapper. `new` does not probe health, and explicit local-cache instances retain their own limits.
   Source: `crates/crab-cache-store/src/lib.rs`.
+
+- Mutable, conditional, and versioned adapter reads bypass caches. `CachingStore::head` always uses origin; `object_store().head` may use cache-service metadata for immutable paths. That synthetic metadata has no origin ETag/version and must not be used for CAS. Inspect both APIs before extending cache admission.
+  Source: `crates/crab-cache-store/src/lib.rs`.
+- Local adapter ranges use `GetRange::as_range` for EOF, offset, and suffix semantics. Resolve xorb ranges against the opened file, not a separate size probe. Lower-level hydration range reads remain exact.
+  Source: `crates/crab-cache-store/src/lib.rs` and `crates/crab-cache/src/local_cache.rs`.
 - One xorb attempt uses one source; retrying cached corruption must not combine cache metadata with origin payload bytes.
   Source: `crates/crab-cache-store/src/xorb_read.rs`.
 - Origin corruption is a typed integrity failure with its source retained; optional cache eviction failure must not prevent trying origin.

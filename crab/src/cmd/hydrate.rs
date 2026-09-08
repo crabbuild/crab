@@ -2337,7 +2337,7 @@ async fn run_selected_hydration(
             mark_pending_worktree_hydration_applied(root, &pending.policy)?;
         }
         if let Some(mode) = mode {
-            emit_empty_hydrate_summary(mode);
+            emit_empty_hydrate_summary(mode)?;
         }
         return Ok(HydrateSummary::default());
     }
@@ -2459,7 +2459,7 @@ async fn run_selected_hydration(
             } else {
                 0.0
             };
-            s.emit_progress(ProgressPayload {
+            let output = s.emit_progress(ProgressPayload {
                 operation: "hydrating".to_owned(),
                 current: summary.hydrated + summary.skipped + summary.failed,
                 total: total_files,
@@ -2468,6 +2468,7 @@ async fn run_selected_hydration(
                 rate_bytes_per_sec: rate,
                 xorbs_produced: None,
             });
+            crate::core::output::report_progress_output(output);
         }
     }
 
@@ -2529,7 +2530,7 @@ async fn run_selected_hydration(
             }
         }
         Some(OutputMode::Json) => {
-            emit_json("hydrate", "1.0", &payload);
+            emit_json("hydrate", "1.0", &payload)?;
         }
         Some(OutputMode::Jsonl) => {
             if let Some(stream) = &jsonl_stream {
@@ -2546,10 +2547,10 @@ async fn run_selected_hydration(
                         duration_ms: elapsed.as_millis() as u64,
                     };
                     if let Ok(mut s) = stream.lock() {
-                        s.emit_result(&summary_row);
+                        s.emit_result(&summary_row)?;
                     }
                 } else if let Ok(mut s) = stream.lock() {
-                    s.emit_result(&payload);
+                    s.emit_result(&payload)?;
                 }
             }
         }
@@ -2586,7 +2587,7 @@ fn emit_hydrate_file_result<W: Write>(
             row: ManifestHydrateFileRow,
             status: &'static str,
         }
-        stream.emit_file_done(Completion {
+        let output = stream.emit_file_done(Completion {
             row: ManifestHydrateFileRow {
                 path,
                 strategy: "shard_batch".to_owned(),
@@ -2595,13 +2596,15 @@ fn emit_hydrate_file_result<W: Write>(
             },
             status,
         });
+        crate::core::output::report_progress_output(output);
     } else {
-        stream.emit_file_done(FileDonePayload {
+        let output = stream.emit_file_done(FileDonePayload {
             path,
             bytes: result.bytes,
             duration_ms,
             status: status.to_owned(),
         });
+        crate::core::output::report_progress_output(output);
     }
 }
 
@@ -2739,7 +2742,7 @@ pub fn resolve_all_ref_pointer_prefetch_candidates(
     Ok(candidates)
 }
 
-fn emit_empty_hydrate_summary(mode: OutputMode) {
+fn emit_empty_hydrate_summary(mode: OutputMode) -> Result<()> {
     let summary = HydrateSummary::default();
     let payload = HydrateSummaryPayload::from_summary(&summary, Duration::default());
     match mode {
@@ -2747,13 +2750,14 @@ fn emit_empty_hydrate_summary(mode: OutputMode) {
             println!("No pointer files match the given patterns.");
         }
         OutputMode::Json => {
-            emit_json("hydrate", "1.0", &payload);
+            emit_json("hydrate", "1.0", &payload)?;
         }
         OutputMode::Jsonl => {
             let mut stream = JsonlStream::new("hydrate.event", "1.0", std::io::stdout());
-            stream.emit_result(&payload);
+            stream.emit_result(&payload)?;
         }
     }
+    Ok(())
 }
 
 fn pending_worktree_hydration(

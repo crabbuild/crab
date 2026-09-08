@@ -328,7 +328,7 @@ const SIDECAR_MARKER: &str = ".crab.tmp.";
 /// consulted — the hasher is a local read. This mirrors how DVC and
 /// Make traditionally treat directory dependencies.
 ///
-/// Returns [`CrabError::StageDepMalformed`] / [`StageOutMalformed`]
+/// Returns [`CrabError::StageDepMalformed`] / [`CrabError::StageOutMalformed`]
 /// on non-regular, non-directory entries is the *caller's*
 /// responsibility — this function returns [`CrabError::Io`] with a
 /// `InvalidInput` kind for those so the caller can convert it to the

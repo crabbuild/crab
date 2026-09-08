@@ -270,6 +270,10 @@ fn resolve_ref(git_dir: &Path, ref_name: &str) -> Result<String> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
     use crate::engine::OverlayWriter;
@@ -279,7 +283,7 @@ mod tests {
     fn git<const N: usize>(repo: &Path, args: [&str; N]) {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -295,7 +299,7 @@ mod tests {
     fn git_in<const N: usize>(dir: &Path, args: [&str; N]) {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -311,7 +315,7 @@ mod tests {
     fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> String {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -328,7 +332,7 @@ mod tests {
     fn git_dir_stdout<const N: usize>(git_dir: &Path, args: [&str; N]) -> String {
         let _git_env = crate::test_support::GIT_DIR_MUTEX
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let output = std::process::Command::new("git")
             .arg("--git-dir")
             .arg(git_dir)
@@ -439,7 +443,7 @@ mod tests {
             ("first.txt", b"first".as_slice(), "first mounted commit"),
             ("second.txt", b"second".as_slice(), "second mounted commit"),
         ] {
-            overlay.create_file(path, 0o100644).unwrap();
+            overlay.create_file(path, 0o100_644).unwrap();
             overlay.write_file(path, 0, content).unwrap();
             let engine = std::sync::Arc::clone(&output.engine);
             let _reset = engine.begin_overlay_reset().await;

@@ -468,7 +468,7 @@ pub async fn run_add(args: &AddArgs, cancel: &CancellationToken, json: bool) -> 
                 path: created_path.to_string_lossy().into_owned(),
                 worktree: list_entry_for_path(&created_path)?,
             },
-        );
+        )?;
     }
 
     Ok(())
@@ -975,7 +975,7 @@ fn json_u64(value: &serde_json::Value, key: &str) -> Result<u64> {
 pub fn run_list(args: &ListArgs, force_json: bool) -> Result<()> {
     if args.json || force_json {
         let payload = list_json_payload(args.with_crab_state)?;
-        emit_json(WORKTREE_LIST_SCHEMA, "1.0", payload);
+        emit_json(WORKTREE_LIST_SCHEMA, "1.0", payload)?;
         return Ok(());
     }
 
@@ -1009,7 +1009,7 @@ pub fn run_lock(args: &LockArgs, json: bool) -> Result<()> {
                 path: path.to_string_lossy().into_owned(),
                 worktree: list_entry_for_path(&path)?,
             },
-        );
+        )?;
     }
     Ok(())
 }
@@ -1033,7 +1033,7 @@ pub fn run_move(args: &MoveArgs, json: bool) -> Result<()> {
                 new_path: new_path.to_string_lossy().into_owned(),
                 worktree: list_entry_for_path(&new_path)?,
             },
-        );
+        )?;
     }
     Ok(())
 }
@@ -1069,7 +1069,7 @@ pub fn run_prune(args: &PruneArgs, json: bool) -> Result<()> {
                 dry_run: args.dry_run,
                 pruned_lines: command_output_lines(&output),
             },
-        );
+        )?;
     }
     Ok(())
 }
@@ -1095,7 +1095,7 @@ pub fn run_remove(args: &RemoveArgs, json: bool) -> Result<()> {
                 path: path.to_string_lossy().into_owned(),
                 worktree: None,
             },
-        );
+        )?;
     }
     Ok(())
 }
@@ -1132,7 +1132,7 @@ pub fn run_repair(args: &RepairArgs, json: bool) -> Result<()> {
                     .map(|path| path.to_string_lossy().into_owned())
                     .collect(),
             },
-        );
+        )?;
     }
     Ok(())
 }
@@ -1153,7 +1153,7 @@ pub fn run_unlock(args: &UnlockArgs, json: bool) -> Result<()> {
                 path: path.to_string_lossy().into_owned(),
                 worktree: list_entry_for_path(&path)?,
             },
-        );
+        )?;
     }
     Ok(())
 }

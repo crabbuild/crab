@@ -35,8 +35,12 @@ pub enum LfsLockError {
     IdMismatch { path: String },
 
     /// A stored lock record could not be decoded safely.
-    #[error("invalid LFS lock record at {path}: {reason}")]
-    Corrupt { path: String, reason: String },
+    #[error("invalid LFS lock record at {path}: {source}")]
+    Corrupt {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
 
     /// Object-store operation failed.
     #[error(transparent)]
@@ -66,10 +70,10 @@ pub struct LockRecord {
     pub released_at: Option<u64>,
 }
 
-/// Object-store implementation for Crab-native and CLI LFS locking.
+/// Object-store implementation of LFS and native file-lock records.
 ///
-/// The namespace is normally `lfs/locks`; native Crab locks use `locks/files`
-/// through the same implementation.
+/// The constructors select `lfs/locks` or `locks/files`. The CLI currently uses
+/// its own lock manager with these namespaces.
 pub struct LfsLockManager {
     store: Store,
     prefix: String,
@@ -206,8 +210,10 @@ impl LfsLockManager {
         Ok(released)
     }
 
-    /// Releases a lock regardless of its owner. Missing and already released
-    /// locks are treated as successful idempotent deletes.
+    /// Releases a lock regardless of its owner, returning its tombstone record.
+    ///
+    /// Already released records succeed unchanged. An absent record returns
+    /// [`LfsLockError::NotFound`].
     pub async fn force_unlock(&self, path: &str) -> LockResult<LockRecord> {
         self.force_unlock_with_id_inner(path, None).await
     }
@@ -479,9 +485,9 @@ fn insert_page_record(records: &mut Vec<LockRecord>, record: LockRecord, limit: 
 }
 
 fn decode_record(path: &Path, body: &[u8]) -> LockResult<LockRecord> {
-    serde_json::from_slice(body).map_err(|error| LfsLockError::Corrupt {
+    serde_json::from_slice(body).map_err(|source| LfsLockError::Corrupt {
         path: path.to_string(),
-        reason: error.to_string(),
+        source,
     })
 }
 
@@ -530,6 +536,37 @@ mod tests {
 
     fn manager() -> LfsLockManager {
         LfsLockManager::lfs(Store::new(Arc::new(InMemory::new())), "repo")
+    }
+
+    #[tokio::test]
+    async fn malformed_lock_retains_json_source_for_point_and_page_reads() {
+        use std::error::Error;
+
+        let manager = manager();
+        let path = Path::from(manager.lock_path("model.bin"));
+        manager
+            .store
+            .put(&path, Bytes::from_static(b"{\n"))
+            .await
+            .unwrap();
+        for result in [
+            manager
+                .find_by_path("model.bin")
+                .await
+                .map(|record| vec![record]),
+            manager.list_page(None, None, None, 10).await,
+        ] {
+            let error = result.unwrap_err();
+            assert!(
+                matches!(&error, LfsLockError::Corrupt { path: stored, .. } if stored == path.as_ref())
+            );
+            let source = error
+                .source()
+                .and_then(|source| source.downcast_ref::<serde_json::Error>())
+                .unwrap();
+            assert_eq!(source.classify(), serde_json::error::Category::Eof);
+            assert_eq!(source.line(), 2);
+        }
     }
 
     #[tokio::test]

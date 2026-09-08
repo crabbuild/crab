@@ -470,7 +470,7 @@ pub fn run_plot_templates_in(args: &PlotTemplatesArgs, repo_root: &Path) -> Resu
     if let Some(template) = args.template.as_deref() {
         let spec = plot_template_spec(repo_root, template)?;
         if mode == OutputMode::Json {
-            emit_json(SCHEMA_PLOT_TEMPLATES, SCHEMA_VERSION, &spec);
+            emit_json(SCHEMA_PLOT_TEMPLATES, SCHEMA_VERSION, &spec)?;
         } else {
             let json =
                 serde_json::to_string_pretty(&spec.spec).map_err(|e| CrabError::Configuration {
@@ -482,7 +482,7 @@ pub fn run_plot_templates_in(args: &PlotTemplatesArgs, repo_root: &Path) -> Resu
     } else {
         let payload = list_plot_templates(repo_root)?;
         if mode == OutputMode::Json {
-            emit_json(SCHEMA_PLOT_TEMPLATES, SCHEMA_VERSION, &payload);
+            emit_json(SCHEMA_PLOT_TEMPLATES, SCHEMA_VERSION, &payload)?;
         } else {
             render_plot_template_list(&payload);
         }
@@ -514,7 +514,7 @@ fn run_plot_in_with_opener(
     if plot_configs.is_empty() {
         if mode == OutputMode::Json {
             let payload: Vec<serde_json::Value> = Vec::new();
-            emit_json("metrics.plot", "1.0", payload);
+            emit_json("metrics.plot", "1.0", payload)?;
         } else {
             println!("No plot configurations found in crab.yaml.");
         }
@@ -526,7 +526,7 @@ fn run_plot_in_with_opener(
             .iter()
             .map(|pc| plot_config_to_json(pc, repo_root))
             .collect();
-        emit_json("metrics.plot", "1.0", payload);
+        emit_json("metrics.plot", "1.0", payload)?;
         return Ok(());
     }
 
@@ -586,7 +586,7 @@ fn run_plot_diff_in_with_opener(
     if plot_configs.is_empty() {
         if mode == OutputMode::Json {
             let payload: Vec<serde_json::Value> = Vec::new();
-            emit_json("metrics.plot", "1.0", payload);
+            emit_json("metrics.plot", "1.0", payload)?;
         } else {
             println!("No plot configurations found in crab.yaml.");
         }
@@ -598,7 +598,7 @@ fn run_plot_diff_in_with_opener(
             .iter()
             .map(|pc| plot_config_to_json(pc, repo_root))
             .collect();
-        emit_json("metrics.plot", "1.0", payload);
+        emit_json("metrics.plot", "1.0", payload)?;
         return Ok(());
     }
 
@@ -3631,7 +3631,7 @@ fn render_show(
             targets: paths.to_vec(),
             revisions: metric_snapshots_to_json(snapshots),
         };
-        emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload);
+        emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload)?;
         return Ok(());
     }
 
@@ -3643,7 +3643,7 @@ fn render_show(
                 targets: paths.to_vec(),
                 revisions: metric_snapshots_to_json(snapshots),
             };
-            emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload);
+            emit_json(SCHEMA_SHOW, SCHEMA_VERSION, payload)?;
         }
         Format::Md => print!(
             "{}",
@@ -3775,7 +3775,7 @@ fn render_diff(
 ) -> Result<()> {
     let format = args.effective_format()?;
     if mode == OutputMode::Json {
-        emit_diff_envelope(args, ref_a, ref_b, diff);
+        emit_diff_envelope(args, ref_a, ref_b, diff)?;
         return Ok(());
     }
     let opts = MetricRenderOptions {
@@ -3789,7 +3789,7 @@ fn render_diff(
             // `--format=json` emits the same envelope as `--json`
             // so callers asking for JSON explicitly get the stable
             // shape.
-            emit_diff_envelope(args, ref_a, ref_b, diff);
+            emit_diff_envelope(args, ref_a, ref_b, diff)?;
         }
         Format::Md => print!("{}", render_metric_markdown(diff, ref_a, ref_b, opts)),
         Format::PrComment => print!(
@@ -3800,7 +3800,7 @@ fn render_diff(
     Ok(())
 }
 
-fn emit_diff_envelope(args: &DiffArgs, ref_a: &str, ref_b: &str, diff: &MetricDiff) {
+fn emit_diff_envelope(args: &DiffArgs, ref_a: &str, ref_b: &str, diff: &MetricDiff) -> Result<()> {
     let payload = MetricsDiff {
         ref_a: ref_a.to_owned(),
         ref_b: ref_b.to_owned(),
@@ -3813,7 +3813,8 @@ fn emit_diff_envelope(args: &DiffArgs, ref_a: &str, ref_b: &str, diff: &MetricDi
             BTreeMap::new()
         },
     };
-    emit_json(SCHEMA_DIFF, SCHEMA_VERSION, payload);
+    emit_json(SCHEMA_DIFF, SCHEMA_VERSION, payload)?;
+    Ok(())
 }
 
 fn render_metric_table(

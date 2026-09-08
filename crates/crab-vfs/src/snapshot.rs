@@ -939,6 +939,10 @@ fn deserialize_base_node(data: &[u8]) -> Result<BaseNode> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail on unexpected errors"
+)]
 mod tests {
     use super::*;
 
@@ -958,7 +962,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("abcd1234".to_owned()),
             pointer: None,
             size,
@@ -969,7 +973,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::Dir,
-            mode: 0o040000,
+            mode: 0o040_000,
             object_oid: None,
             pointer: None,
             size: 0,
@@ -982,7 +986,7 @@ mod tests {
         BaseNode {
             path: path.to_owned(),
             node_type: NodeType::File,
-            mode: 0o100644,
+            mode: 0o100_644,
             object_oid: Some("deadbeef".to_owned()),
             pointer: Some(ptr),
             size,
@@ -1019,7 +1023,7 @@ mod tests {
         let node = BaseNode {
             path: "link".to_owned(),
             node_type: NodeType::Symlink,
-            mode: 0o120000,
+            mode: 0o120_000,
             object_oid: Some("cafe0000".to_owned()),
             pointer: None,
             size: 10,
@@ -1190,7 +1194,7 @@ mod tests {
         let (_dir, store) = temp_store();
         let node = make_pointer_node("model.bin");
         store
-            .publish_generation("oid1", "refs/heads/main", &[node.clone()])
+            .publish_generation("oid1", "refs/heads/main", std::slice::from_ref(&node))
             .unwrap();
 
         let retrieved = store.get_node(1, "model.bin").unwrap().unwrap();
@@ -1219,7 +1223,7 @@ mod tests {
         assert_eq!(after.size, 1234);
         // Other fields unchanged.
         assert_eq!(after.node_type, NodeType::File);
-        assert_eq!(after.mode, 0o100644);
+        assert_eq!(after.mode, 0o100_644);
         assert_eq!(after.object_oid.as_deref(), Some("abcd1234"));
     }
 

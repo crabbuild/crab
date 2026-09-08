@@ -936,8 +936,10 @@ impl Store {
     /// Opens an object or one bounded range as a backpressured byte stream.
     ///
     /// Provider errors that occur after the response starts remain classified
-    /// as [`StorageError`] values in the stream. Dropping the stream cancels the
-    /// provider read.
+    /// as [`StorageError`] values in the stream. Response ranges must match the
+    /// request (clamped at EOF). Truncation and excess bytes produce
+    /// [`StorageError::CorruptObject`]; consume through EOF to establish complete
+    /// framing. Dropping the stream cancels the provider read.
     pub async fn get_stream(
         &self,
         path: &Path,
@@ -962,23 +964,56 @@ impl Store {
         })
         .await?;
         let meta = got.meta.clone();
+        let expected_range = range
+            .map(|range| GetRange::Bounded(range).as_range(meta.size))
+            .transpose()
+            .map_err(|error| StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!("provider accepted an invalid stream range: {error}"),
+            })?
+            .unwrap_or(0..meta.size);
         let result_range = got.range.clone();
-        let path = path.to_string();
+        if result_range != expected_range {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "response range {result_range:?} does not match requested {expected_range:?}"
+                ),
+            });
+        }
+        let remaining = result_range.end - result_range.start;
         let observer = self.read_byte_observer.clone();
-        let stream = got
-            .into_stream()
-            .map(move |result| match result {
-                Ok(bytes) => {
-                    if let Some(observer) = &observer
-                        && !bytes.is_empty()
-                    {
-                        observer(bytes.len() as u64);
-                    }
-                    Ok(bytes)
+        // EOF is successful only after the declared range is consumed. Keep the
+        // counter with the stream so partial reads never require whole-body buffering.
+        let stream = futures_util::stream::try_unfold(
+            (got.into_stream(), remaining, path.clone(), observer),
+            |(mut stream, remaining, path, observer)| async move {
+                let Some(chunk) = stream.next().await else {
+                    return if remaining == 0 {
+                        Ok(None)
+                    } else {
+                        Err(StorageError::CorruptObject {
+                            path: path.to_string(),
+                            reason: format!("response stream ended with {remaining} bytes missing"),
+                        })
+                    };
+                };
+                let bytes = chunk.map_err(|error| map_object_store_error(error, path.as_ref()))?;
+                if let Some(observer) = &observer
+                    && !bytes.is_empty()
+                {
+                    observer(bytes.len() as u64);
                 }
-                Err(error) => Err(map_object_store_error(error, &path)),
-            })
-            .boxed();
+                let remaining = remaining.checked_sub(bytes.len() as u64).ok_or_else(|| {
+                    StorageError::CorruptObject {
+                        path: path.to_string(),
+                        reason: "response stream exceeds declared range length".to_owned(),
+                    }
+                })?;
+                Ok(Some((bytes, (stream, remaining, path, observer))))
+            },
+        )
+        .boxed();
         Ok((meta, result_range, stream))
     }
 
@@ -989,34 +1024,7 @@ impl Store {
     /// such as git packs that are immediately handed to a file-based
     /// verifier/indexer.
     pub async fn download_to_path(&self, path: &Path, dest: &std::path::Path) -> Result<u64> {
-        retry(&self.retry, || {
-            let path = path.clone();
-            let dest = dest.to_owned();
-            async move {
-                use futures_util::StreamExt;
-                use tokio::io::AsyncWriteExt;
-
-                let _ = tokio::fs::remove_file(&dest).await;
-                let read_inner = self.read_inner_for(&path);
-                let got = read_inner
-                    .get(&path)
-                    .await
-                    .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-                let mut stream = got.into_stream();
-                let mut file = tokio::fs::File::create(&dest).await?;
-                let mut written = 0u64;
-
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|e| map_object_store_error(e, path.as_ref()))?;
-                    file.write_all(&chunk).await?;
-                    written = written.saturating_add(chunk.len() as u64);
-                }
-                file.flush().await?;
-                self.record_read_bytes(written);
-                Ok(written)
-            }
-        })
-        .await
+        self.download_to_path_bounded(path, dest, u64::MAX).await
     }
 
     /// Stream `path` to a local file while enforcing a maximum body size.
@@ -1024,7 +1032,8 @@ impl Store {
     /// The provider's advertised size is checked before creating the
     /// destination, and the streamed body is checked again so a changed or
     /// malformed response cannot fill the workspace beyond the caller's
-    /// bound. Partial files are removed before the error is returned.
+    /// bound. Returned errors attempt to remove the partial file. Dropping this
+    /// future bypasses that cleanup; the caller owns cancellation cleanup.
     pub async fn download_to_path_bounded(
         &self,
         path: &Path,
@@ -1054,6 +1063,12 @@ impl Store {
                             ),
                         });
                     }
+                    if got.range != (0..got.meta.size) {
+                        return Err(StorageError::CorruptObject {
+                            path: path.to_string(),
+                            reason: "incomplete response range for full-object download".to_owned(),
+                        });
+                    }
                     let expected_size = got.meta.size;
                     let mut stream = got.into_stream();
                     let mut file = tokio::fs::File::create(&dest).await?;
@@ -1073,6 +1088,12 @@ impl Store {
                                 reason: format!(
                                     "streamed body exceeds bounded download limit of {max_bytes} bytes"
                                 ),
+                            });
+                        }
+                        if next > expected_size {
+                            return Err(StorageError::CorruptObject {
+                                path: path.to_string(),
+                                reason: "response body exceeds declared object size".to_owned(),
                             });
                         }
                         file.write_all(&chunk).await?;
@@ -1479,8 +1500,8 @@ impl Store {
     ///
     /// `on_part_done` is invoked with the byte count of each part that
     /// uploads successfully, so callers can drive a byte-granular progress
-    /// bar while a single large object is in flight. Pass `None` to use the
-    /// simpler sequential `WriteMultipart` path.
+    /// bar while a single large object is in flight. Both callback modes use
+    /// the same bounded part queue and abort-before-retry boundary.
     ///
     /// # Errors
     ///
@@ -2191,10 +2212,8 @@ impl Store {
         .await
     }
 
-    /// One full multipart-upload attempt: create, write parts with bounded
-    /// in-flight concurrency (progress-aware) or via `WriteMultipart`
-    /// (sequential), then complete. Any error aborts the upload so S3 does
-    /// not retain orphaned parts.
+    // One queue owns part ordering and cleanup in both callback modes; choosing
+    // progress reporting must not change the remote upload's failure lifecycle.
     async fn put_multipart_once(
         inner: &Arc<dyn ObjectStore>,
         path: &Path,
@@ -2207,16 +2226,6 @@ impl Store {
 
         const IN_FLIGHT_PARTS: usize = 4;
 
-        // No progress callback? Use the high-level helper that manages part
-        // parallelism internally — identical behaviour to the prior fallback
-        // path, including cancellation handling.
-        let Some(cb) = on_part_done else {
-            return Self::put_multipart_writer(inner, path, data, part_size, cancel).await;
-        };
-
-        // Progress-aware path: drive MultipartUpload directly so we can
-        // report bytes as each part completes. Bounded concurrency keeps
-        // the pipeline full without unbounded memory or socket pressure.
         let mut upload = inner
             .put_multipart(path)
             .await
@@ -2243,7 +2252,11 @@ impl Store {
             }
             if pending.len() >= IN_FLIGHT_PARTS {
                 match pending.next().await {
-                    Some((Ok(()), bytes)) => cb(bytes),
+                    Some((Ok(()), bytes)) => {
+                        if let Some(cb) = on_part_done {
+                            cb(bytes);
+                        }
+                    }
                     Some((Err(e), _)) => {
                         abort_on(upload).await;
                         return Err(map_object_store_error(e, path.as_ref()));
@@ -2263,7 +2276,11 @@ impl Store {
 
         while let Some((res, bytes)) = pending.next().await {
             match res {
-                Ok(()) => cb(bytes),
+                Ok(()) => {
+                    if let Some(cb) = on_part_done {
+                        cb(bytes);
+                    }
+                }
                 Err(e) => {
                     abort_on(upload).await;
                     return Err(map_object_store_error(e, path.as_ref()));
@@ -2276,12 +2293,7 @@ impl Store {
             return Err(StorageError::Cancelled);
         }
 
-        upload
-            .complete()
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        Ok(())
+        crate::multipart::complete_upload(&mut *upload, path).await
     }
 
     async fn put_multipart_file_once(
@@ -2424,66 +2436,7 @@ impl Store {
             return Err(StorageError::Cancelled);
         }
 
-        upload
-            .complete()
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        Ok(())
-    }
-
-    /// Sequential multipart path using `WriteMultipart` (no per-part
-    /// progress callback). Preserves abort-on-cancel semantics so dropped
-    /// uploads don't leak parts.
-    async fn put_multipart_writer(
-        inner: &Arc<dyn ObjectStore>,
-        path: &Path,
-        data: &[u8],
-        part_size: usize,
-        cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<()> {
-        use object_store::WriteMultipart;
-
-        let upload = inner
-            .put_multipart(path)
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        let mut writer = WriteMultipart::new(upload);
-        let mut cancelled_during_write = false;
-        for chunk in data.chunks(part_size) {
-            // Observe cancellation between parts. Racing the write itself
-            // via tokio::select! is not practical — WriteMultipart::write
-            // is synchronous — but chunk boundaries are frequent enough
-            // (8–16 MiB apart) to give timely response.
-            if cancel.is_cancelled() {
-                cancelled_during_write = true;
-                break;
-            }
-            writer.write(chunk);
-        }
-
-        // If cancelled at any point, abort the upload to release any parts
-        // already uploaded; without this, `WriteMultipart::drop` would leave
-        // orphaned parts consuming storage until a lifecycle rule or
-        // `fsck --repair` cleans them up.
-        if cancelled_during_write || cancel.is_cancelled() {
-            if let Err(e) = writer.abort().await {
-                tracing::warn!(
-                    path = %path,
-                    error = %e,
-                    "failed to abort multipart upload after cancellation",
-                );
-            }
-            return Err(StorageError::Cancelled);
-        }
-
-        writer
-            .finish()
-            .await
-            .map_err(|e| map_object_store_error(e, path.as_ref()))?;
-
-        Ok(())
+        crate::multipart::complete_upload(&mut *upload, path).await
     }
 
     /// Generate a presigned HTTPS URL for a GET of `path`, valid for
@@ -2928,19 +2881,27 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct FailFirstBodyGetStore {
-        inner: Arc<InMemory>,
-        remaining_failures: AtomicU64,
+    enum ReadFault {
+        Transient(AtomicU64),
+        Body(Vec<Bytes>),
+        BodyError,
+        Range(Range<u64>),
     }
 
-    impl fmt::Display for FailFirstBodyGetStore {
+    #[derive(Debug)]
+    struct ReadFaultStore {
+        inner: Arc<InMemory>,
+        fault: ReadFault,
+    }
+
+    impl fmt::Display for ReadFaultStore {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("fail-first-body-get")
+            formatter.write_str("read-fault-store")
         }
     }
 
     #[async_trait::async_trait]
-    impl ObjectStore for FailFirstBodyGetStore {
+    impl ObjectStore for ReadFaultStore {
         async fn put_opts(
             &self,
             location: &Path,
@@ -2964,8 +2925,8 @@ mod tests {
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
             if !options.head
-                && self
-                    .remaining_failures
+                && let ReadFault::Transient(remaining_failures) = &self.fault
+                && remaining_failures
                     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                         remaining.checked_sub(1)
                     })
@@ -2976,7 +2937,35 @@ mod tests {
                     source: "transient body read".into(),
                 });
             }
-            self.inner.get_opts(location, options).await
+            let head = options.head;
+            let mut response = self.inner.get_opts(location, options).await?;
+            if !head {
+                match &self.fault {
+                    ReadFault::Body(chunks) => {
+                        response.payload = object_store::GetResultPayload::Stream(
+                            futures_util::stream::iter(chunks.clone().into_iter().map(Ok)).boxed(),
+                        );
+                    }
+                    ReadFault::BodyError => {
+                        response.payload = object_store::GetResultPayload::Stream(
+                            futures_util::stream::iter([
+                                Ok(Bytes::from_static(b"012")),
+                                Err(object_store::Error::Generic {
+                                    store: "test",
+                                    source: Box::new(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionReset,
+                                        "body interrupted",
+                                    )),
+                                }),
+                            ])
+                            .boxed(),
+                        );
+                    }
+                    ReadFault::Range(range) => response.range = range.clone(),
+                    ReadFault::Transient(_) => {}
+                }
+            }
+            Ok(response)
         }
 
         fn delete_stream(
@@ -3698,9 +3687,9 @@ mod tests {
         let body = Bytes::from_static(b"already durable");
         let path = Path::from("blobs/existing-after-transient-read");
         inner.put(&path, body.clone().into()).await.unwrap();
-        let read_store: Arc<dyn ObjectStore> = Arc::new(FailFirstBodyGetStore {
+        let read_store: Arc<dyn ObjectStore> = Arc::new(ReadFaultStore {
             inner: Arc::clone(&inner),
-            remaining_failures: AtomicU64::new(1),
+            fault: ReadFault::Transient(AtomicU64::new(1)),
         });
         let multipart: Arc<dyn MultipartStore> = inner;
         let identity = BucketIdentity::new(StorageProviderKind::S3, "s3.example.test", "bucket");
@@ -4420,6 +4409,145 @@ mod tests {
         assert_eq!(range, 2..7);
         assert_eq!(body, b"23456");
         assert_eq!(bytes_read.load(Ordering::Relaxed), 5);
+    }
+
+    #[tokio::test]
+    async fn streamed_reads_accept_complete_chunked_and_empty_bodies() {
+        for (body, requested, returned, chunks, expected) in [
+            (
+                "0123456789",
+                None,
+                0..10,
+                vec!["01", "", "23456789"],
+                "0123456789",
+            ),
+            (
+                "0123456789",
+                Some(2..99),
+                2..10,
+                vec!["234", "56789"],
+                "23456789",
+            ),
+            ("", None, 0..0, vec![""], ""),
+        ] {
+            let inner = Arc::new(InMemory::new());
+            let path = Path::from("framing");
+            inner
+                .put(&path, Bytes::from_static(body.as_bytes()).into())
+                .await
+                .unwrap();
+            let store = Store::new(Arc::new(ReadFaultStore {
+                inner,
+                fault: ReadFault::Body(
+                    chunks
+                        .into_iter()
+                        .map(|chunk| Bytes::from_static(chunk.as_bytes()))
+                        .collect(),
+                ),
+            }));
+            let (meta, range, stream) = store.get_stream(&path, requested).await.unwrap();
+            let bytes = stream
+                .try_fold(Vec::new(), |mut body, chunk| async move {
+                    body.extend_from_slice(&chunk);
+                    Ok(body)
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                (meta.size, range, bytes),
+                (body.len() as u64, returned, expected.as_bytes().to_vec())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn streamed_reads_preserve_transport_error_after_partial_body() {
+        let inner = Arc::new(InMemory::new());
+        let path = Path::from("framing");
+        inner
+            .put(&path, Bytes::from_static(b"0123456789").into())
+            .await
+            .unwrap();
+        let store = Store::new(Arc::new(ReadFaultStore {
+            inner,
+            fault: ReadFault::BodyError,
+        }));
+        let (_, _, mut stream) = store.get_stream(&path, None).await.unwrap();
+        assert_eq!(stream.next().await.unwrap().unwrap(), b"012"[..]);
+        let error = stream.next().await.unwrap().unwrap_err();
+        let StorageError::NetworkTransient {
+            source: object_store::Error::Generic { source, .. },
+        } = error
+        else {
+            panic!("original transport error expected");
+        };
+        assert_eq!(
+            source.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::ConnectionReset
+        );
+    }
+
+    #[tokio::test]
+    async fn streamed_reads_reject_invalid_framing() {
+        let mut failures = Vec::new();
+        for (label, range, fault) in [
+            (
+                "truncated full body",
+                None,
+                ReadFault::Body(vec![Bytes::from_static(b"012")]),
+            ),
+            (
+                "oversized full body",
+                None,
+                ReadFault::Body(vec![Bytes::from_static(b"01234567890")]),
+            ),
+            (
+                "truncated range",
+                Some(2..7),
+                ReadFault::Body(vec![Bytes::from_static(b"23")]),
+            ),
+            (
+                "oversized range",
+                Some(2..7),
+                ReadFault::Body(vec![Bytes::from_static(b"234567")]),
+            ),
+            ("wrong full range", None, ReadFault::Range(1..10)),
+            ("wrong requested range", Some(2..7), ReadFault::Range(3..8)),
+        ] {
+            let inner = Arc::new(InMemory::new());
+            let path = Path::from("framing");
+            inner
+                .put(&path, Bytes::from_static(b"0123456789").into())
+                .await
+                .unwrap();
+            let store = Store::new(Arc::new(ReadFaultStore { inner, fault }));
+            let directory = tempfile::tempdir().unwrap();
+            let destination = directory.path().join("download");
+            for surface in ["stream", "download", "bounded"] {
+                let result = match surface {
+                    "stream" => match store.get_stream(&path, range.clone()).await {
+                        Ok((_, _, stream)) => stream.try_collect::<Vec<_>>().await.map(|_| ()),
+                        Err(error) => Err(error),
+                    },
+                    "download" => store
+                        .download_to_path(&path, &destination)
+                        .await
+                        .map(|_| ()),
+                    "bounded" => store
+                        .download_to_path_bounded(&path, &destination, 100)
+                        .await
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                };
+                if !matches!(result, Err(StorageError::CorruptObject { .. })) {
+                    failures.push(format!("{surface}/{label}: {result:?}"));
+                }
+                if surface != "stream" && destination.exists() {
+                    failures.push(format!("{surface}/{label}: partial file remains"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[tokio::test]

@@ -9,7 +9,8 @@ use crate::credentials::{AzureReadScope, AzureToken, CloudCredentials};
 use crate::error::{AuthError, Result};
 
 /// Parsed and locally validated `/v1/credentials` response from Crab Auth.
-#[derive(Debug, Clone)]
+/// Debug output omits the provider-specific credential payload.
+#[derive(Clone)]
 pub struct CrabAuthCredentialResponse {
     /// Cloud provider selected by the auth server.
     pub provider: String,
@@ -23,6 +24,17 @@ pub struct CrabAuthCredentialResponse {
     pub storage_scope: Option<StorageScope>,
 }
 
+impl std::fmt::Debug for CrabAuthCredentialResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CrabAuthCredentialResponse")
+            .field("provider", &self.provider)
+            .field("expires_at", &self.expires_at)
+            .field("permissions", &self.permissions)
+            .field("storage_scope", &self.storage_scope)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CrabAuthCredentialResponse {
     /// Constructs cloud credentials with a caller-parsed expiration time.
     pub fn cloud_credentials(&self, expires_at: SystemTime) -> Result<CloudCredentials> {
@@ -30,7 +42,7 @@ impl CrabAuthCredentialResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct RawCredentialResponse {
     provider: String,
     credentials: serde_json::Value,

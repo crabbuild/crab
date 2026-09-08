@@ -36,6 +36,24 @@ checks to avoid re-reading the object body. A configured primary fallback can
 serve reads when a selected replica is stale or unavailable; receipts are
 written to the source that passed verification.
 
+Streamed uploads admit at most four part futures, including the final partial
+part. Read/assembly buffers and provider allocations sit outside that queue
+bound. Uploads verify size and SHA-256 before completion. Read, part, hash,
+and completion failures attempt multipart abort; a cleanup failure preserves
+the original upload error. Await the operation to finish cleanup: dropping its
+future or terminating the process cannot guarantee remote part reclamation.
+
+Verified HTTP/range streams require a strong ETag or object version. The
+response must match the version that passed verification; a same-size
+replacement is rejected before its stream is returned. Without such a validator,
+use `download_to_file`, which hashes the bytes from one read before succeeding.
+
+Receipts use verifier `crab-lfs/2`. Older receipts trigger fresh hashing because
+the previous writer could attach an unrelated HEAD response to an upload's
+verified bytes. New uploads no longer write HEAD-based receipts: the first
+receipt-aware verifier hashes the stored body and records that response's
+metadata. This adds one full verification read before later receipt hits.
+
 `verify_origin(oid, expected_size)` performs a fresh SHA-256 and exact-size check
 without reading/writing verification receipts or using the configured fallback.
 Supply an origin-only store and bound the expected size and request deadline at
@@ -45,8 +63,16 @@ runs on blocking workers that retain admission after caller cancellation. The
 ordinary receipt-aware path uses the same body verifier when a receipt misses.
 
 `LfsLockManager` provides the shared CAS-backed LFS lock record format at
-`{prefix}/lfs/locks/{blake3(path)}`. Crab's CLI uses this namespace so locks
-remain visible across local clients and worktrees.
+`{prefix}/lfs/locks/{blake3(path)}`. The CLI uses the same namespace through a
+separate lock manager; the shared manager has no production caller today, and
+HTTP locking is unavailable. Changes here do not automatically reach those
+product surfaces.
+
+Malformed shared lock records retain their object key and typed
+`serde_json::Error` source, including its category and location. Shared
+`force_unlock` returns an existing tombstone unchanged but reports `NotFound`
+when the record is absent; the CLI's separate force-unlock treats absence as
+success.
 
 ## Usage
 
@@ -56,20 +82,26 @@ use crab_lfs::LfsObjectStore;
 use crab_storage::{StorageProviderKind, build_static_env_store};
 use sha2::{Digest, Sha256};
 
-let store = build_static_env_store("models", StorageProviderKind::S3)?;
-let lfs = LfsObjectStore::new(store, "team/repository");
-let data = Bytes::from_static(b"large-object-content");
-let oid: [u8; 32] = Sha256::digest(&data).into();
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let store = build_static_env_store("models", StorageProviderKind::S3)?;
+    let lfs = LfsObjectStore::new(store, "team/repository");
+    let data = Bytes::from_static(b"large-object-content");
+    let oid: [u8; 32] = Sha256::digest(&data).into();
 
-lfs.put(&oid, data.clone()).await?;
-assert_eq!(lfs.verify(&oid).await?, data);
-# Ok::<(), Box<dyn std::error::Error>>(())
+    lfs.put(&oid, data.clone()).await?;
+    assert_eq!(lfs.verify(&oid).await?, data);
+    Ok(())
+}
 ```
 
 For large local files, use `put_stream(&oid, path)` so the upload uses bounded
 multipart buffers and aborts an incomplete upload on hash failure. Use
 `object_path_for` when a higher-level Crab read path needs the canonical object
 key.
+
+Local upload failures retain the filename, I/O error kind, and original OS
+error through `std::error::Error::source()`. Callers can report file context
+and inspect the underlying cause without parsing the message.
 
 ## Boundaries
 

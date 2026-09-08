@@ -249,7 +249,7 @@ pub async fn run_async(args: &StatusArgs, repo_root: &Path, mode: OutputMode) ->
         return Ok(());
     };
     let remote = attach_remote_status(&mut entries, args, repo_root, &config).await?;
-    emit_status(&entries, mode, Some(remote));
+    emit_status(&entries, mode, Some(remote))?;
     Ok(())
 }
 
@@ -258,7 +258,7 @@ fn run_local(args: &StatusArgs, repo_root: &Path, mode: OutputMode) -> Result<()
     let Some(entries) = status_entries(args, repo_root, &config, mode)? else {
         return Ok(());
     };
-    emit_status(&entries, mode, None);
+    emit_status(&entries, mode, None)?;
     Ok(())
 }
 
@@ -328,7 +328,7 @@ fn status_entries(
             repo_root,
             &remote_aliases,
         )?;
-        emit_why(&payload, mode);
+        emit_why(&payload, mode)?;
         return Ok(None);
     }
 
@@ -1337,7 +1337,7 @@ fn emit_status(
     entries: &[StageStatusEntry],
     mode: OutputMode,
     remote: Option<RemoteStatusSummary>,
-) {
+) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
             emit_json(
@@ -1347,12 +1347,12 @@ fn emit_status(
                     stages: entries.to_vec(),
                     remote,
                 },
-            );
+            )?;
         }
         OutputMode::Text => {
             if entries.is_empty() {
                 println!("Crab workflow status: no stages declared in crab.yaml");
-                return;
+                return Ok(());
             }
             println!("Crab workflow status:");
             for e in entries {
@@ -1400,12 +1400,13 @@ fn emit_status(
             }
         }
     }
+    Ok(())
 }
 
-fn emit_why(payload: &WhyPayload, mode: OutputMode) {
+fn emit_why(payload: &WhyPayload, mode: OutputMode) -> Result<()> {
     match mode {
         OutputMode::Json | OutputMode::Jsonl => {
-            emit_json(WORKFLOW_STATUS_SCHEMA, "1.0", payload);
+            emit_json(WORKFLOW_STATUS_SCHEMA, "1.0", payload)?;
         }
         OutputMode::Text => {
             info!(
@@ -1426,6 +1427,7 @@ fn emit_why(payload: &WhyPayload, mode: OutputMode) {
             }
         }
     }
+    Ok(())
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────

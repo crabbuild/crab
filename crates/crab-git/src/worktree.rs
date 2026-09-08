@@ -326,15 +326,27 @@ pub fn installed_git_version() -> Result<Option<GitVersion>> {
     Ok(GitVersion::parse(&stdout))
 }
 
+/// Parse Git worktree porcelain records using the requested field delimiter.
+///
+/// NUL-delimited fields retain whitespace. Line-delimited input accepts CRLF;
+/// non-UTF-8 bytes are represented lossily in the returned string fields.
+/// Returns a protocol error when an attribute precedes its worktree path.
 pub fn parse_worktree_list_porcelain(
     input: &[u8],
     nul_terminated: bool,
 ) -> Result<Vec<GitWorktreeRecord>> {
-    let fields = split_porcelain_fields(input, nul_terminated);
+    let delimiter = if nul_terminated { b'\0' } else { b'\n' };
     let mut records = Vec::new();
     let mut current: Option<GitWorktreeRecord> = None;
 
-    for field in fields {
+    for field in input.split(|byte| *byte == delimiter) {
+        // Only newline framing permits CRLF normalization. With -z, a trailing
+        // carriage return belongs to the path or attribute value.
+        let field = if nul_terminated {
+            field
+        } else {
+            field.strip_suffix(b"\r").unwrap_or(field)
+        };
         if field.is_empty() {
             if let Some(record) = current.take() {
                 records.push(record);
@@ -400,18 +412,6 @@ pub fn worktree_identity_for_path(path: &Path) -> Result<Option<String>> {
     Ok(git_dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned()))
-}
-
-fn split_porcelain_fields(input: &[u8], nul_terminated: bool) -> Vec<&[u8]> {
-    let delimiter = if nul_terminated { b'\0' } else { b'\n' };
-    input
-        .split(|byte| *byte == delimiter)
-        .map(trim_trailing_cr)
-        .collect()
-}
-
-fn trim_trailing_cr(field: &[u8]) -> &[u8] {
-    field.strip_suffix(b"\r").unwrap_or(field)
 }
 
 fn apply_porcelain_field(record: &mut GitWorktreeRecord, line: &str) {
@@ -584,6 +584,66 @@ mod tests {
         assert_eq!(records[0].path, "/repo");
         assert_eq!(records[1].path, "/linked");
         assert!(records[1].detached);
+    }
+
+    #[test]
+    fn nul_porcelain_preserves_field_whitespace() {
+        let input = b"worktree /repo\r\0locked reason\r\0future value\r\0\0";
+        let records = parse_worktree_list_porcelain(input, true).unwrap();
+        assert_eq!(records[0].path, "/repo\r");
+        assert_eq!(records[0].lock_reason.as_deref(), Some("reason\r"));
+        assert_eq!(records[0].extra[0].value.as_deref(), Some("value\r"));
+    }
+
+    #[test]
+    fn line_porcelain_accepts_crlf_record_boundaries() {
+        let records = parse_worktree_list_porcelain(
+            b"worktree /repo\r\nbare\r\n\r\nworktree /linked\r\ndetached\r\n\r\n",
+            false,
+        )
+        .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].path, "/repo");
+        assert!(records[0].bare);
+        assert!(records[1].detached);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_git_nul_porcelain_preserves_carriage_return_in_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo\r");
+        let git = || {
+            let mut command = Command::new("git");
+            for (name, _) in std::env::vars_os() {
+                if name.to_string_lossy().starts_with("GIT_") {
+                    command.env_remove(name);
+                }
+            }
+            command
+        };
+        let init = git()
+            .args(["init", "--bare", "--quiet"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let output = git()
+            .current_dir(&repo)
+            .args(["worktree", "list", "--porcelain", "-z"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let records = parse_worktree_list_porcelain(&output.stdout, true).unwrap();
+        assert_eq!(Path::new(&records[0].path), repo.canonicalize().unwrap());
     }
 
     #[test]

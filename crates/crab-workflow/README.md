@@ -43,15 +43,33 @@ Feature gates keep optional integrations narrow: `watch` adds filesystem
 watching, `gix-facade` adds the Git facade, `testing` exposes test helpers, and
 `crash-injection` enables failure testing.
 
+## URL dependency digests
+
+Pinned URL dependencies use `b3:` followed by 64 ASCII hexadecimal characters:
+
+```yaml
+deps:
+  - url:
+      url: https://example.com/data.bin
+      digest: b3:abababababababababababababababababababababababababababababababab
+```
+
+- Invalid pinned digests return a configuration error before network access.
+- Unpinned dependencies read and hash content unless a validated external hash
+  index entry has a matching strong validator, size, and credential scope.
+- Digest parsing accepts upper- and lowercase hex; non-ASCII text in the
+  hex field is rejected without byte-boundary panics.
+
 ## Usage
 
 Parse a workflow and inspect its execution order:
 
 ```rust
-use crab_workflow::{parse_yaml, Graph};
+use crab_workflow::{Graph, parse_yaml};
 
-let workflow = parse_yaml(
-    r#"
+fn example() -> Result<(), Box<dyn std::error::Error>> {
+    let workflow = parse_yaml(
+        r#"
 stages:
   prepare:
     cmd: "python prepare.py"
@@ -61,16 +79,67 @@ stages:
     deps: ["data/prepared.txt"]
     outs: ["model.bin"]
 "#,
-)?;
+    )?;
 
-let graph = Graph::build(&workflow.stages)?;
-assert_eq!(graph.toposort().len(), 2);
-# Ok::<(), Box<dyn std::error::Error>>(())
+    let graph = Graph::build(&workflow.stages)?;
+    assert_eq!(graph.toposort().len(), 2);
+    Ok(())
+}
 ```
 
 Use `crab-workflow` for parsing, planning, hashing, and state contracts. The
 product command owns user-facing repository discovery and chooses when to
 invoke the executor, scheduler, or status renderer.
+
+Cached artifact paths are repository-relative and already include stage `wdir`.
+The product materializer resolves them against the invocation repository, so
+experiment worktrees do not publish cache hits into the caller’s directory.
+
+## Retry policy
+
+Retry policy counts the initial execution in `max_attempts`. Configure both
+delay fields when retries should wait: their defaults are zero, and
+`max_backoff` caps even the first delay.
+Parsing rejects zero attempt budgets and negative or non-finite multipliers
+in both stage policies and defaults, before execution can schedule a retry.
+
+```yaml
+stages:
+  download:
+    cmd: "python download.py"
+    retry:
+      max_attempts: 4
+      initial_backoff: "500ms"
+      max_backoff: "2s"
+      backoff_multiplier: 2
+      on_exit_codes: [1]
+```
+
+Four consecutive failures with exit code 1 produce three retry delays:
+`500ms → 1s → 2s`. `retry::should_retry` only decides eligibility and delay;
+the product retry loop owns waiting, output cleanup, and journal transitions.
+
+## Scheduler ownership
+
+Await `SchedulerLock::acquire` inside a Tokio runtime. Contention backoff yields
+to other futures, and dropping the acquisition future cancels waiting. Individual
+filesystem attempts and PID writes remain synchronous; `try_acquire` makes one
+attempt and reports contention without a timer.
+The caller chooses the timeout and retains the guard for the protected work.
+Execution and `--cache-only` replay both acquire it: replay can publish
+outputs even though it does not execute a command or create a journal.
+
+| Resource | Contract |
+| --- | --- |
+| Advisory lock | Establishes exclusive scheduler ownership. |
+| `.lock` file | Retained after release so waiters use the same inode. |
+| PID diagnostic | Best-effort holder information, not ownership proof. |
+| Windows `.lock.pid` | Readable sidecar, removed before releasing the lock. |
+
+Orphan cleanup recognizes only `.crab.tmp.<UUID>` sidecars. Callers must supply
+active run IDs or hold scheduler ownership before sweeping with an empty list.
+An inline run that cannot acquire the lock must leave the holder's sidecars
+untouched; malformed sidecar-like names remain ordinary user files.
 
 ## Boundaries
 
@@ -80,3 +149,22 @@ invoke the executor, scheduler, or status renderer.
   workflow cache uses it but does not redefine storage semantics.
 - [`crab-git`](../crab-git/README.md) supplies Git object/ref mechanics; this
   crate owns stage dependency semantics and execution state.
+
+## Experiment metadata identity
+
+Remote metadata has two identities: the experiment ID selects the object, and
+its metadata ref records the canonical JSON hash. `read_experiment_metadata`
+checks both before returning a value. Readers that already decoded metadata can
+call `ExperimentMetadata::verify_identity` with the requested ID and ref hash.
+
+An ID or hash mismatch returns `WorkflowError::CorruptObject`. Whitespace and
+JSON object ordering do not change the canonical hash.
+
+Use `ExperimentMetadata::from_json` to check the supported schema and requested
+ID while preserving JSON decoding errors. Remote reads additionally call
+`verify_identity` to check the ref hash. These checks do not make two storage
+reads atomic.
+
+`collect_local_workflow_live_set` fails if metadata enumeration, reading, or
+validation fails. A caller must handle that error before making deletion
+choices; an incomplete set is never returned as a successful result.

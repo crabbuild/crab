@@ -137,7 +137,7 @@ pub async fn run_unadopt(args: &UnadoptArgs, cancel: &CancellationToken) -> Resu
                 })
                 .collect(),
         };
-        emit_json(UNADOPT_SCHEMA, "1.0", &payload);
+        emit_json(UNADOPT_SCHEMA, "1.0", &payload)?;
     } else {
         if !restored.is_empty() {
             let total_bytes: u64 = restored.iter().map(|(_, s)| *s).sum();
