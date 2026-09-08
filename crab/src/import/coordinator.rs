@@ -2942,6 +2942,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_import_inner_local_dry_run_reaches_plan() {
+        // Keep parallel tests' Git overrides out of fixture initialization and
+        // local identity setup, or they can configure a different repository.
+        let _git_env = GitDirOverride::locked_without_env();
         let tmp = TempDir::new().unwrap();
         let source = tmp.path().join("source");
         let target = tmp.path().join("target");
