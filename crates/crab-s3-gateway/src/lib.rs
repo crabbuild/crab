@@ -3,6 +3,7 @@
 mod attributes;
 mod auth;
 mod config;
+mod content;
 mod gateway;
 mod multipart;
 mod mutation;

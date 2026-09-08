@@ -144,10 +144,10 @@ Supported operations:
 | `ListBuckets`, `HeadBucket` | Authorized logical repositories only; deterministic order |
 | `GetObject`, `HeadObject` | metadata, response overrides, RFC dates, ETag/date conditions, one byte range including open and suffix forms |
 | `ListObjects`, `ListObjectsV2` | prefix, delimiter `/`, marker/start-after, max keys, reusable keys, common prefixes |
-| `PutObject` | body up to 256 MiB, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, metadata and standard content headers |
+| `PutObject` | body up to 5 GiB, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, metadata and standard content headers |
 | `DeleteObject`, `DeleteObjects` | S3 missing-key success, per-key authorization/results, quiet mode, and at most 1000 XML entries |
 | `CopyObject` | pinned source, source conditions/range where defined, `COPY`/`REPLACE`, separately authorized destination |
-| Multipart create/upload/copy/list/abort/complete | durable opaque sessions, part replacement, ordered selection, 10,000-part and 256 MiB completed-object limits, restart and multi-instance retry |
+| Multipart create/upload/copy/list/abort/complete | durable opaque sessions, part replacement, ordered selection, 10,000 parts, 5 GiB per part, 50 TB completed objects, restart and multi-instance retry |
 
 Modeled unsupported request headers and query parameters are rejected rather
 than ignored. Multi-range GET returns `InvalidRange`. `versionId` returns
@@ -204,11 +204,10 @@ persists the terminal state, then synchronously removes part objects. Completion
 persists its terminal outcome before best-effort part cleanup; a cleanup failure
 does not erase the completed outcome.
 
-Limits: 10,000 parts per upload, 256 MiB per logical object read, single PUT,
-part, and final multipart object, and 1000 results per multipart listing page.
-Unknown-length streams are counted as they arrive. Larger objects require later
-streaming reader and content-writer implementations; the gateway returns
-`EntityTooLarge` instead of risking unbounded memory or a non-durable upload.
+Limits follow the S3 general-purpose bucket contract: 5 GiB per single PUT or
+multipart part, 10,000 parts per upload, 50 TB per completed multipart object,
+and 1000 results per multipart listing page. Unknown-length streams are counted
+as they arrive. Requests beyond an operation's S3 limit return `EntityTooLarge`.
 
 ## Error and response contract
 
@@ -232,10 +231,13 @@ boundary without credentials or request bodies.
 | Admission capacity limit | `SlowDown` |
 | Corrupt/unavailable committed data | `InternalError` |
 
-The initial implementation materializes each bounded object before starting a
-response, so backend failures still return an S3 error rather than truncating a
-successful response stream. Successful writes are returned only after their
-committed outcome is durable and read-ready.
+Request bodies and multipart completion are streamed through bounded memory to
+temporary storage while checksums are computed. Objects above the inline Git
+threshold are stored through Crab's verified LFS content path; the committed Git
+blob is the canonical LFS pointer and the S3 attribute record retains the logical
+size and ETag. GET streams LFS content directly and reconstructs Crab pointers to
+temporary storage before opening the response. Successful writes are returned
+only after their committed outcome is durable and read-ready.
 
 ## Repository extension API
 

@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
+    pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crab_cache_store::{CacheConfig, CachingStore};
 use crab_git::pointer_detect::PointerKind;
 use crab_remote_git::{
@@ -13,13 +14,12 @@ use crab_remote_git::{
     RepositoryIdentity, RepositoryOptions, Revision,
 };
 use crab_storage::{StorageProviderKind, Store, StoreLayout, build_static_env_store};
+use futures_util::StreamExt as _;
 use s3s::{S3, S3Request, S3Response, S3Result, dto::*, s3_error};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{Config, RepositoryAccess, RepositoryConfig, auth::GatewayAuth, mutation, namespace};
-
-const MAX_SINGLE_OBJECT_BYTES: usize = 256 * 1024 * 1024;
 
 pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
@@ -74,11 +74,113 @@ pub(crate) struct Gateway {
 }
 
 struct ReadObject {
-    bytes: Bytes,
+    content: ReadContent,
     size: u64,
     etag: String,
     modified: Timestamp,
     attributes: Option<crate::attributes::ObjectAttributes>,
+}
+
+#[derive(Clone)]
+enum ReadContent {
+    Ordinary(Bytes),
+    CrabPointer(Bytes),
+    LfsPointer(crab_git::LfsPointer),
+}
+
+type ContentStream =
+    Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, s3s::StdError>> + Send + 'static>>;
+
+impl ReadContent {
+    async fn stream(
+        self,
+        repository: &Repository,
+        range: std::ops::Range<u64>,
+    ) -> S3Result<ContentStream> {
+        use futures_util::{StreamExt as _, TryStreamExt as _};
+        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+
+        match self {
+            Self::Ordinary(bytes) => {
+                let start = usize::try_from(range.start).map_err(|_| s3_error!(InvalidRange))?;
+                let end = usize::try_from(range.end).map_err(|_| s3_error!(InvalidRange))?;
+                Ok(Box::pin(futures_util::stream::once(async move {
+                    Ok(bytes.slice(start..end))
+                })))
+            }
+            Self::LfsPointer(pointer) => {
+                let (_, actual, stream) = repository
+                    .lfs
+                    .get_stream(&pointer.oid, pointer.size, Some(range.clone()))
+                    .await
+                    .map_err(|error| gateway_error(error.into()))?;
+                if actual != range {
+                    return Err(s3_error!(InvalidObjectState));
+                }
+                Ok(Box::pin(
+                    stream.map_err(|error| Box::new(error) as s3s::StdError),
+                ))
+            }
+            Self::CrabPointer(pointer_bytes) => {
+                let PointerKind::Crab(pointer) = crab_git::classify(&pointer_bytes) else {
+                    return Err(s3_error!(InvalidObjectState));
+                };
+                let directory = tempfile::tempdir().map_err(|error| gateway_error(error.into()))?;
+                let path = directory.path().join("content");
+                repository
+                    .hydrator
+                    .reconstruct_to_path(&pointer, &path)
+                    .await
+                    .map_err(|error| gateway_error(error.into()))?;
+                let mut file = tokio::fs::File::open(path)
+                    .await
+                    .map_err(|error| gateway_error(error.into()))?;
+                file.seek(std::io::SeekFrom::Start(range.start))
+                    .await
+                    .map_err(|error| gateway_error(error.into()))?;
+                let reader = tokio_util::io::ReaderStream::new(file.take(range.end - range.start));
+                let stream = futures_util::stream::try_unfold(
+                    (reader, directory),
+                    |(mut reader, directory)| async move {
+                        match reader.next().await {
+                            Some(Ok(bytes)) => Ok(Some((bytes, (reader, directory)))),
+                            Some(Err(error)) => Err(error),
+                            None => Ok(None),
+                        }
+                    },
+                )
+                .map_err(|error| Box::new(error) as s3s::StdError);
+                Ok(Box::pin(stream))
+            }
+        }
+    }
+
+    async fn spool(
+        self,
+        repository: &Repository,
+        range: std::ops::Range<u64>,
+        max_bytes: u64,
+    ) -> S3Result<crate::content::Spool> {
+        use futures_util::StreamExt as _;
+
+        let mut stream = self.stream(repository, range).await?;
+        let mut writer = crate::content::SpoolWriter::new()
+            .await
+            .map_err(content_error)?;
+        while let Some(chunk) = stream.next().await {
+            writer
+                .write(
+                    &chunk.map_err(|error| {
+                        tracing::warn!(%error, "S3 source object stream failed");
+                        s3_error!(InternalError)
+                    })?,
+                    max_bytes,
+                )
+                .await
+                .map_err(content_error)?;
+        }
+        writer.finish().await.map_err(content_error)
+    }
 }
 
 impl Gateway {
@@ -227,14 +329,19 @@ impl Gateway {
                 .and_then(|value| i64::try_from(value.modified_seconds).ok())
                 .unwrap_or(commit.committer.seconds);
             let modified = timestamp(modified_seconds)?;
-            let bytes = materialize_blob(repository, blob).await?;
-            let size = u64::try_from(bytes.len()).map_err(|_| s3_error!(InternalError))?;
-            let etag = attributes
-                .as_ref()
-                .map(|value| value.etag.clone())
-                .unwrap_or_else(|| md5_hex(&bytes));
+            let (content, size) = classify_blob(blob)?;
+            let etag = match attributes.as_ref() {
+                Some(value) => value.etag.clone(),
+                None => match &content {
+                    ReadContent::Ordinary(bytes) => md5_hex(bytes),
+                    ReadContent::CrabPointer(_) | ReadContent::LfsPointer(_) => {
+                        let spool = content.clone().spool(repository, 0..size, u64::MAX).await?;
+                        crate::content::md5_hex(&spool.digests.md5)
+                    }
+                },
+            };
             Ok(ReadObject {
-                bytes,
+                content,
                 size,
                 etag,
                 modified,
@@ -278,36 +385,26 @@ fn build_store(entry: &RepositoryConfig) -> crate::Result<Store> {
     Ok(build_static_env_store(&entry.bucket, entry.provider)?)
 }
 
-async fn materialize_blob(repository: &Repository, blob: crab_remote_git::Blob) -> S3Result<Bytes> {
+fn classify_blob(blob: crab_remote_git::Blob) -> S3Result<(ReadContent, u64)> {
     let physical_size = u64::try_from(blob.bytes.len()).map_err(|_| s3_error!(EntityTooLarge))?;
     let logical_size = blob.metadata.logical_size.unwrap_or(physical_size);
-    if logical_size > MAX_SINGLE_OBJECT_BYTES as u64 {
+    if logical_size > crate::content::MAX_MULTIPART_OBJECT_BYTES {
         return Err(s3_error!(EntityTooLarge));
     }
-    match blob.metadata.classification {
-        ContentClassification::OrdinaryGit => Ok(blob.bytes),
-        ContentClassification::CrabPointer => Ok(Bytes::from(
-            repository
-                .hydrator
-                .reconstruct_from_pointer(&blob.bytes)
-                .await
-                .map_err(|error| gateway_error(error.into()))?,
-        )),
+    let content = match blob.metadata.classification {
+        ContentClassification::OrdinaryGit => ReadContent::Ordinary(blob.bytes),
+        ContentClassification::CrabPointer => ReadContent::CrabPointer(blob.bytes),
         ContentClassification::LfsPointer => {
             let PointerKind::Lfs(pointer) = crab_git::classify(&blob.bytes) else {
                 return Err(s3_error!(InvalidObjectState));
             };
-            let bytes = repository
-                .lfs
-                .verify(&pointer.oid)
-                .await
-                .map_err(|error| gateway_error(error.into()))?;
-            if bytes.len() as u64 != pointer.size {
+            if pointer.size != logical_size {
                 return Err(s3_error!(InvalidObjectState));
             }
-            Ok(bytes)
+            ReadContent::LfsPointer(pointer)
         }
-    }
+    };
+    Ok((content, logical_size))
 }
 
 fn provider_name(provider: StorageProviderKind) -> &'static str {
@@ -317,6 +414,36 @@ fn provider_name(provider: StorageProviderKind) -> &'static str {
         StorageProviderKind::Azure => "azure",
         StorageProviderKind::Local => "local",
     }
+}
+
+async fn mutation_bytes(repository: &Repository, spool: &crate::content::Spool) -> S3Result<Bytes> {
+    mutation_bytes_with_inline_limit(repository, spool, crate::content::INLINE_GIT_BLOB_BYTES).await
+}
+
+async fn mutation_bytes_with_inline_limit(
+    repository: &Repository,
+    spool: &crate::content::Spool,
+    inline_limit: u64,
+) -> S3Result<Bytes> {
+    if spool.size <= inline_limit {
+        return spool.bytes().await.map_err(content_error);
+    }
+    // The LFS object is content-addressed and uploaded before its pointer commit.
+    // Crab's GC grace period protects this brief publication window and cleans an
+    // orphan if the later ref mutation fails.
+    repository
+        .lfs
+        .put_stream_with_size(&spool.digests.sha256, Some(spool.size), spool.path())
+        .await
+        .map_err(|error| gateway_error(error.into()))?;
+    Ok(Bytes::from(
+        crab_git::LfsPointer {
+            oid: spool.digests.sha256,
+            size: spool.size,
+            extensions: Vec::new(),
+        }
+        .serialize(),
+    ))
 }
 
 #[async_trait::async_trait]
@@ -421,26 +548,21 @@ impl S3 for Gateway {
             .as_ref()
             .map(|range| range.check(object.size))
             .transpose()?;
-        let (bytes, content_range) = match checked {
+        let (range, content_range) = match checked {
             Some(range) => {
-                let start = usize::try_from(range.start).map_err(|_| s3_error!(InvalidRange))?;
-                let end = usize::try_from(range.end).map_err(|_| s3_error!(InvalidRange))?;
-                (
-                    object.bytes.slice(start..end),
-                    Some(format!(
-                        "bytes {}-{}/{}",
-                        range.start,
-                        range.end - 1,
-                        object.size
-                    )),
-                )
+                let header = format!("bytes {}-{}/{}", range.start, range.end - 1, object.size);
+                (range.start..range.end, Some(header))
             }
-            None => (object.bytes, None),
+            None => (0..object.size, None),
         };
-        let content_length = i64::try_from(bytes.len()).map_err(|_| s3_error!(InternalError))?;
+        let content_length =
+            i64::try_from(range.end - range.start).map_err(|_| s3_error!(InternalError))?;
+        let body = object.content.stream(repository, range).await?;
+        let body =
+            http_body_util::StreamBody::new(body.map(|result| result.map(http_body::Frame::data)));
         let output = GetObjectOutput {
             accept_ranges: Some("bytes".to_owned()),
-            body: Some(StreamingBlob::from(s3s::Body::from(bytes))),
+            body: Some(StreamingBlob::from(s3s::Body::http_body_unsync(body))),
             content_length: Some(content_length),
             content_range,
             content_type: req
@@ -585,10 +707,18 @@ impl S3 for Gateway {
         let content_md5 = req.input.content_md5.clone();
         let mut checksums = RequestChecksums::from(&req.input);
         let trailing_headers = req.trailing_headers.clone();
-        let body = read_body(req.input.body, content_length).await?;
+        let spool = crate::content::spool_body(
+            req.input.body,
+            content_length,
+            crate::content::MAX_PUT_OBJECT_BYTES,
+        )
+        .await
+        .map_err(content_error)?;
         checksums.merge_trailers(trailing_headers.as_ref())?;
-        verify_content_md5(&body, content_md5.as_deref())?;
-        checksums.verify(&body)?;
+        verify_content_md5(&spool.digests.md5, content_md5.as_deref())?;
+        checksums.verify(&spool.digests)?;
+        let etag = crate::content::md5_hex(&spool.digests.md5);
+        let bytes = mutation_bytes(repository, &spool).await?;
         let outcome = mutation::apply(
             repository,
             Arc::clone(&self.runtime),
@@ -599,10 +729,11 @@ impl S3 for Gateway {
                 .ok_or_else(|| s3_error!(MethodNotAllowed))?,
             &address.path,
             mutation::Change::Put {
-                bytes: body,
+                bytes,
                 attributes: Box::new(crate::attributes::PutAttributes {
-                    etag_override: None,
+                    etag_override: Some(etag),
                     completion_upload_id: None,
+                    logical_size: Some(spool.size),
                     cache_control: req.input.cache_control,
                     content_disposition: req.input.content_disposition,
                     content_encoding: req.input.content_encoding,
@@ -788,9 +919,21 @@ impl S3 for Gateway {
             &source_object.etag,
             &source_object.modified,
         )?;
+        let source_size = source_object.size;
+        if source_size > crate::content::MAX_PUT_OBJECT_BYTES {
+            return Err(s3_error!(EntityTooLarge));
+        }
+        let spool = source_object
+            .content
+            .spool(
+                source_repository,
+                0..source_size,
+                crate::content::MAX_PUT_OBJECT_BYTES,
+            )
+            .await?;
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
-        let attributes = if req
+        let mut attributes = if req
             .input
             .metadata_directive
             .as_ref()
@@ -799,6 +942,7 @@ impl S3 for Gateway {
             crate::attributes::PutAttributes {
                 etag_override: None,
                 completion_upload_id: None,
+                logical_size: None,
                 cache_control: req.input.cache_control,
                 content_disposition: req.input.content_disposition,
                 content_encoding: req.input.content_encoding,
@@ -814,6 +958,9 @@ impl S3 for Gateway {
                 .map(stored_to_pending)
                 .unwrap_or_default()
         };
+        attributes.etag_override = Some(crate::content::md5_hex(&spool.digests.md5));
+        attributes.logical_size = Some(spool.size);
+        let bytes = mutation_bytes(repository, &spool).await?;
         let outcome = mutation::apply(
             repository,
             Arc::clone(&self.runtime),
@@ -824,7 +971,7 @@ impl S3 for Gateway {
                 .ok_or_else(|| s3_error!(MethodNotAllowed))?,
             &address.path,
             mutation::Change::Put {
-                bytes: source_object.bytes,
+                bytes,
                 attributes: Box::new(attributes),
             },
             &principal,
@@ -877,6 +1024,7 @@ impl S3 for Gateway {
             crate::attributes::PutAttributes {
                 etag_override: None,
                 completion_upload_id: None,
+                logical_size: None,
                 cache_control: req.input.cache_control,
                 content_disposition: req.input.content_disposition,
                 content_encoding: req.input.content_encoding,
@@ -920,16 +1068,23 @@ impl S3 for Gateway {
         .map_err(multipart_error)?;
         let content_length = req.input.content_length;
         let content_md5 = req.input.content_md5.clone();
-        let body = read_body(req.input.body, content_length).await?;
-        verify_content_md5(&body, content_md5.as_deref())?;
-        let etag = md5_hex(&body);
+        let spool = crate::content::spool_body(
+            req.input.body,
+            content_length,
+            crate::content::MAX_MULTIPART_PART_BYTES,
+        )
+        .await
+        .map_err(content_error)?;
+        verify_content_md5(&spool.digests.md5, content_md5.as_deref())?;
+        let etag = crate::content::md5_hex(&spool.digests.md5);
         crate::multipart::register_part(
             repository,
             loaded,
             req.input.part_number,
-            body,
+            &spool,
             etag.clone(),
             now_seconds()?,
+            &self.cancellation,
         )
         .await
         .map_err(multipart_error)?;
@@ -970,16 +1125,25 @@ impl S3 for Gateway {
             &source.etag,
             &source.modified,
         )?;
-        let bytes = match req.input.copy_source_range.as_deref() {
+        let range = match req.input.copy_source_range.as_deref() {
             Some(value) => {
                 let range = Range::parse(value).map_err(|_| s3_error!(InvalidArgument))?;
                 let range = range.check(source.size)?;
-                let start = usize::try_from(range.start).map_err(|_| s3_error!(InvalidRange))?;
-                let end = usize::try_from(range.end).map_err(|_| s3_error!(InvalidRange))?;
-                source.bytes.slice(start..end)
+                range.start..range.end
             }
-            None => source.bytes,
+            None => 0..source.size,
         };
+        if range.end - range.start > crate::content::MAX_MULTIPART_PART_BYTES {
+            return Err(s3_error!(EntityTooLarge));
+        }
+        let spool = source
+            .content
+            .spool(
+                source_repository,
+                range,
+                crate::content::MAX_MULTIPART_PART_BYTES,
+            )
+            .await?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?.to_owned();
         let loaded = crate::multipart::load(repository, &req.input.upload_id)
@@ -992,14 +1156,15 @@ impl S3 for Gateway {
             &principal,
         )
         .map_err(multipart_error)?;
-        let etag = md5_hex(&bytes);
+        let etag = crate::content::md5_hex(&spool.digests.md5);
         crate::multipart::register_part(
             repository,
             loaded,
             req.input.part_number,
-            bytes,
+            &spool,
             etag.clone(),
             now_seconds()?,
+            &self.cancellation,
         )
         .await
         .map_err(multipart_error)?;
@@ -1065,22 +1230,50 @@ impl S3 for Gateway {
             repository,
             loaded,
             &selected,
-            MAX_SINGLE_OBJECT_BYTES as u64,
+            crate::content::MAX_MULTIPART_OBJECT_BYTES,
         )
         .await
         .map_err(multipart_error)?;
-        let mut body = BytesMut::new();
+        let mut writer = crate::content::SpoolWriter::new()
+            .await
+            .map_err(content_error)?;
         for part in &parts {
-            let bytes = crate::multipart::part_bytes(repository, part)
+            use md5::Digest as _;
+
+            let mut stream = crate::multipart::part_stream(repository, part)
                 .await
                 .map_err(multipart_error)?;
-            body.extend_from_slice(&bytes);
+            let mut digest = md5::Md5::new();
+            let mut size = 0_u64;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk
+                    .map_err(|error| multipart_error(crate::multipart::Error::Storage(error)))?;
+                size = size
+                    .checked_add(chunk.len() as u64)
+                    .ok_or_else(|| s3_error!(EntityTooLarge))?;
+                digest.update(&chunk);
+                writer
+                    .write(&chunk, crate::content::MAX_MULTIPART_OBJECT_BYTES)
+                    .await
+                    .map_err(content_error)?;
+            }
+            let actual = digest
+                .finalize()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            if size != part.size || actual != part.etag {
+                return Err(s3_error!(InvalidPart));
+            }
         }
+        let spool = writer.finish().await.map_err(content_error)?;
         let etag = multipart_etag(&parts)?;
         let mut attributes = session.attributes.clone();
         attributes.etag_override = Some(etag.clone());
         attributes.completion_upload_id = Some(session.id.clone());
+        attributes.logical_size = Some(spool.size);
         let address = namespace::object_address(&session.key).map_err(namespace_error)?;
+        let bytes = mutation_bytes(repository, &spool).await?;
         mutation::apply(
             repository,
             Arc::clone(&self.runtime),
@@ -1088,7 +1281,7 @@ impl S3 for Gateway {
             &session.branch,
             &address.path,
             mutation::Change::Put {
-                bytes: body.freeze(),
+                bytes,
                 attributes: Box::new(attributes),
             },
             &principal,
@@ -1436,7 +1629,6 @@ impl S3 for Gateway {
                     .read_blob(&entry.path, &operation)
                     .await
                     .map_err(remote_error)?;
-                let logical_size = blob.metadata.logical_size;
                 let attributes = attribute_manifest.object(path, entry.oid);
                 let modified = match attributes {
                     Some(attributes) => timestamp(
@@ -1445,11 +1637,15 @@ impl S3 for Gateway {
                     )?,
                     None => commit_modified.clone(),
                 };
+                let (content, logical_size) = classify_blob(blob)?;
                 let etag = match attributes {
                     Some(attributes) => attributes.etag.clone(),
-                    None => md5_hex(&materialize_blob(repository, blob).await?),
+                    None => {
+                        let spool = content.spool(repository, 0..logical_size, u64::MAX).await?;
+                        crate::content::md5_hex(&spool.digests.md5)
+                    }
                 };
-                keys.push((key, etag, logical_size, modified));
+                keys.push((key, etag, Some(logical_size), modified));
             }
             keys.sort_by(|left, right| left.0.cmp(&right.0));
             let max_keys = req.input.max_keys.unwrap_or(1000);
@@ -1552,49 +1748,14 @@ impl S3 for Gateway {
     }
 }
 
-async fn read_body(body: Option<StreamingBlob>, declared: Option<i64>) -> S3Result<Bytes> {
-    use futures_util::StreamExt as _;
-
-    let declared = declared
-        .map(|length| usize::try_from(length).map_err(|_| s3_error!(InvalidRequest)))
-        .transpose()?;
-    if declared.is_some_and(|length| length > MAX_SINGLE_OBJECT_BYTES) {
-        return Err(s3_error!(EntityTooLarge));
-    }
-    let mut bytes = BytesMut::with_capacity(declared.unwrap_or(0).min(MAX_SINGLE_OBJECT_BYTES));
-    let Some(mut body) = body else {
-        if declared.unwrap_or(0) != 0 {
-            return Err(s3_error!(IncompleteBody));
-        }
-        return Ok(bytes.freeze());
-    };
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|error| {
-            tracing::warn!(%error, "S3 request body failed");
-            s3_error!(IncompleteBody)
-        })?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_SINGLE_OBJECT_BYTES {
-            return Err(s3_error!(EntityTooLarge));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    if declared.is_some_and(|length| length != bytes.len()) {
-        return Err(s3_error!(IncompleteBody));
-    }
-    Ok(bytes.freeze())
-}
-
-fn verify_content_md5(bytes: &[u8], expected: Option<&str>) -> S3Result<()> {
-    use md5::Digest as _;
-
+fn verify_content_md5(actual: &[u8; 16], expected: Option<&str>) -> S3Result<()> {
     let Some(expected) = expected else {
         return Ok(());
     };
-    let actual = md5::Md5::digest(bytes);
     let expected = base64::engine::general_purpose::STANDARD
         .decode(expected)
         .map_err(|_| s3_error!(InvalidDigest))?;
-    if expected.as_slice() != actual.as_slice() {
+    if expected.as_slice() != actual {
         return Err(s3_error!(BadDigest));
     }
     Ok(())
@@ -1666,33 +1827,12 @@ impl RequestChecksums {
         Ok(())
     }
 
-    fn verify(&self, bytes: &[u8]) -> S3Result<()> {
-        use sha1::Digest as _;
-
-        verify_base64_checksum(
-            self.crc32.as_deref(),
-            &u32::try_from(crc_fast::checksum(
-                crc_fast::CrcAlgorithm::Crc32IsoHdlc,
-                bytes,
-            ))
-            .map_err(|_| s3_error!(InternalError))?
-            .to_be_bytes(),
-        )?;
-        verify_base64_checksum(
-            self.crc32c.as_deref(),
-            &u32::try_from(crc_fast::checksum(
-                crc_fast::CrcAlgorithm::Crc32Iscsi,
-                bytes,
-            ))
-            .map_err(|_| s3_error!(InternalError))?
-            .to_be_bytes(),
-        )?;
-        verify_base64_checksum(
-            self.crc64nvme.as_deref(),
-            &crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, bytes).to_be_bytes(),
-        )?;
-        verify_base64_checksum(self.sha1.as_deref(), &sha1::Sha1::digest(bytes))?;
-        verify_base64_checksum(self.sha256.as_deref(), &sha2::Sha256::digest(bytes))?;
+    fn verify(&self, digests: &crate::content::Digests) -> S3Result<()> {
+        verify_base64_checksum(self.crc32.as_deref(), &digests.crc32.to_be_bytes())?;
+        verify_base64_checksum(self.crc32c.as_deref(), &digests.crc32c.to_be_bytes())?;
+        verify_base64_checksum(self.crc64nvme.as_deref(), &digests.crc64nvme.to_be_bytes())?;
+        verify_base64_checksum(self.sha1.as_deref(), &digests.sha1)?;
+        verify_base64_checksum(self.sha256.as_deref(), &digests.sha256)?;
         if let Some(algorithm) = &self.algorithm {
             let supplied = match algorithm.as_str() {
                 ChecksumAlgorithm::CRC32 => self.crc32.is_some(),
@@ -1915,6 +2055,7 @@ fn stored_to_pending(
     crate::attributes::PutAttributes {
         etag_override: None,
         completion_upload_id: None,
+        logical_size: Some(value.size),
         cache_control: value.cache_control.clone(),
         content_disposition: value.content_disposition.clone(),
         content_encoding: value.content_encoding.clone(),
@@ -2138,6 +2279,20 @@ fn gateway_error(error: crate::Error) -> s3s::S3Error {
     s3_error!(InternalError)
 }
 
+fn content_error(error: crate::content::Error) -> s3s::S3Error {
+    match error {
+        crate::content::Error::TooLarge => s3_error!(EntityTooLarge),
+        crate::content::Error::Incomplete | crate::content::Error::Body(_) => {
+            tracing::warn!(%error, "S3 request body failed");
+            s3_error!(IncompleteBody)
+        }
+        crate::content::Error::Io(_) => {
+            tracing::error!(error = ?error, "S3 content spool failed");
+            s3_error!(InternalError)
+        }
+    }
+}
+
 pub(crate) fn md5_hex(bytes: &[u8]) -> String {
     use md5::Digest as _;
 
@@ -2211,8 +2366,53 @@ mod tests {
         assert!(encoded.contains("%28"));
     }
 
-    #[test]
-    fn put_checksums_accept_all_supported_algorithms_and_reject_mismatch() {
+    #[tokio::test]
+    async fn content_above_inline_threshold_is_stored_as_streamable_lfs() {
+        use futures_util::TryStreamExt as _;
+
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let repository = Repository::new(
+            RepositoryConfig {
+                name: "repo".to_owned(),
+                provider: StorageProviderKind::Local,
+                bucket: "memory".to_owned(),
+                prefix: "large-content-test".to_owned(),
+                default_branch: "main".to_owned(),
+                members: Vec::new(),
+                protected_branches: Vec::new(),
+            },
+            store,
+        )
+        .unwrap();
+        let content = b"content larger than the test inline limit";
+        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        writer.write(content, u64::MAX).await.unwrap();
+        let spool = writer.finish().await.unwrap();
+
+        let pointer_bytes = mutation_bytes_with_inline_limit(&repository, &spool, 8)
+            .await
+            .unwrap();
+        let PointerKind::Lfs(pointer) = crab_git::classify(&pointer_bytes) else {
+            panic!("expected an LFS pointer");
+        };
+        let (_, _, stream) = repository
+            .lfs
+            .get_stream(&pointer.oid, pointer.size, None)
+            .await
+            .unwrap();
+        let actual = stream
+            .try_fold(Vec::new(), |mut bytes, chunk| async move {
+                bytes.extend_from_slice(&chunk);
+                Ok(bytes)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(actual, content);
+    }
+
+    #[tokio::test]
+    async fn put_checksums_accept_all_supported_algorithms_and_reject_mismatch() {
         use sha1::Digest as _;
 
         let body = b"123456789";
@@ -2238,11 +2438,14 @@ mod tests {
             sha1: Some(encode(&sha1::Sha1::digest(body))),
             sha256: Some(encode(&sha2::Sha256::digest(body))),
         };
-        checksums.verify(body).unwrap();
+        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        writer.write(body, u64::MAX).await.unwrap();
+        let spool = writer.finish().await.unwrap();
+        checksums.verify(&spool.digests).unwrap();
 
         let mut invalid = checksums;
         invalid.sha256 = Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned());
-        let error = invalid.verify(body).unwrap_err();
+        let error = invalid.verify(&spool.digests).unwrap_err();
         assert_eq!(error.code().as_str(), "BadDigest");
     }
 }

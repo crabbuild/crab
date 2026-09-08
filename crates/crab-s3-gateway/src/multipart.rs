@@ -28,7 +28,7 @@ pub(crate) enum Error {
     InvalidPartOrder,
     #[error("a non-final multipart part is smaller than 5 MiB")]
     EntityTooSmall,
-    #[error("the completed multipart object exceeds the gateway object limit")]
+    #[error("the completed multipart object exceeds the S3 object limit")]
     EntityTooLarge,
     #[error("multipart state changed concurrently")]
     Conflict,
@@ -151,9 +151,10 @@ pub(crate) async fn register_part(
     repository: &Repository,
     mut loaded: Loaded,
     number: i32,
-    bytes: Bytes,
+    spool: &crate::content::Spool,
     etag: String,
     now: u64,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Part> {
     if !(1..=10_000).contains(&number) {
         return Err(Error::PartNumber);
@@ -164,12 +165,20 @@ pub(crate) async fn register_part(
     let path = format!("s3/multipart/parts/{}/{number}/{etag}", loaded.session.id);
     repository
         .store
-        .put_exact(&repository.layout.repo_path(&path), bytes.clone())
+        .put_multipart_file_retry(
+            &repository.layout.repo_path(&path),
+            spool.path(),
+            spool.size,
+            spool.digests.blake3,
+            8 * 1024 * 1024,
+            cancel,
+            None,
+        )
         .await?;
     let part = Part {
         number,
         etag,
-        size: bytes.len() as u64,
+        size: spool.size,
         modified_seconds: now,
         path,
     };
@@ -180,6 +189,24 @@ pub(crate) async fn register_part(
     loaded.session.revision = loaded.session.revision.saturating_add(1);
     save(repository, &loaded).await?;
     Ok(part)
+}
+
+pub(crate) async fn part_stream(
+    repository: &Repository,
+    part: &Part,
+) -> Result<
+    impl futures_util::Stream<Item = std::result::Result<Bytes, crab_storage::StorageError>>
+    + Send
+    + 'static,
+> {
+    let (metadata, range, stream) = repository
+        .store
+        .get_stream(&repository.layout.repo_path(&part.path), None)
+        .await?;
+    if metadata.size != part.size || range != (0..part.size) {
+        return Err(Error::InvalidPart);
+    }
+    Ok(stream)
 }
 
 pub(crate) async fn freeze(
@@ -241,6 +268,7 @@ pub(crate) async fn freeze(
     Ok((loaded.session, parts))
 }
 
+#[cfg(test)]
 pub(crate) async fn part_bytes(repository: &Repository, part: &Part) -> Result<Bytes> {
     let (bytes, _) = repository
         .store
@@ -388,6 +416,12 @@ mod tests {
         .unwrap()
     }
 
+    async fn spool(bytes: &[u8]) -> crate::content::Spool {
+        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        writer.write(bytes, u64::MAX).await.unwrap();
+        writer.finish().await.unwrap()
+    }
+
     #[tokio::test]
     async fn parts_and_abort_survive_fresh_catalog_reads() {
         let repository = fixture().await;
@@ -406,9 +440,18 @@ mod tests {
         let loaded = load(&repository, &session.id).await.unwrap();
         let body = Bytes::from_static(b"part bytes");
         let etag = crate::gateway::md5_hex(&body);
-        register_part(&repository, loaded, 1, body.clone(), etag.clone(), 11)
-            .await
-            .unwrap();
+        let spool = spool(&body).await;
+        register_part(
+            &repository,
+            loaded,
+            1,
+            &spool,
+            etag.clone(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
 
         let reloaded = load(&repository, &session.id).await.unwrap();
         assert_eq!(reloaded.session.parts[&1].etag, etag);
@@ -444,9 +487,18 @@ mod tests {
         let body = Bytes::from_static(b"final part");
         let etag = crate::gateway::md5_hex(&body);
         let loaded = load(&repository, &session.id).await.unwrap();
-        register_part(&repository, loaded, 1, body, etag.clone(), 11)
-            .await
-            .unwrap();
+        let spool = spool(&body).await;
+        register_part(
+            &repository,
+            loaded,
+            1,
+            &spool,
+            etag.clone(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         let selected = vec![(1, etag)];
         let loaded = load(&repository, &session.id).await.unwrap();
         freeze(&repository, loaded, &selected, 1024).await.unwrap();

@@ -14,10 +14,11 @@ The initial client-compatible surface includes bucket listing/head, object
 GET/HEAD/PUT/DELETE/COPY, V1/V2 object listing, multi-delete, and durable
 multipart create/upload/copy/list/abort/complete. GET/HEAD support conditions
 and a single byte range; PUT validates Content-MD5 and the standard S3 checksum
-headers. Path-style addressing is required. Object and completed multipart
-payloads are limited to 256 MiB while the canonical streaming writer remains
-future work. The complete frozen surface and deliberate exclusions are in the
-protocol contract linked below.
+headers. Path-style addressing is required. Single PUTs and multipart parts
+support up to 5 GiB, and multipart completion supports S3's 50 TB object limit.
+Large payloads use bounded-memory spooling and Crab's verified LFS content path.
+The complete frozen surface and deliberate exclusions are in the protocol
+contract linked below.
 
 ## Build and run
 

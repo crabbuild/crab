@@ -382,6 +382,7 @@ async fn build_commit(
         Change::Put { bytes, attributes } => {
             let oid = object_id(Kind::Blob, &bytes)?;
             let digest = md5::Md5::digest(&bytes);
+            let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
             let etag = attributes
                 .etag_override
                 .clone()
@@ -390,7 +391,7 @@ async fn build_commit(
                 && old.is_some_and(|(old_oid, mode)| old_oid == oid && mode == EntryMode::Regular)
                 && attribute_manifest
                     .object(path_string, oid)
-                    .is_some_and(|stored| stored.matches_pending(&attributes, &etag, bytes.len()))
+                    .is_some_and(|stored| stored.matches_pending(&attributes, &etag, logical_size))
             {
                 return Ok(Build::Noop(Outcome { etag: Some(etag) }));
             }
@@ -399,11 +400,7 @@ async fn build_commit(
                 .filter(|(old_oid, _)| *old_oid == oid)
                 .map(|_| None)
                 .unwrap_or_else(|| Some(bytes.to_vec()));
-            (
-                Some(etag),
-                changed,
-                Some((oid, attributes, bytes.len() as u64)),
-            )
+            (Some(etag), changed, Some((oid, attributes, logical_size)))
         }
         Change::Delete => {
             if old.is_none() {

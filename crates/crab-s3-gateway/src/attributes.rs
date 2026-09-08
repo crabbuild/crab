@@ -16,6 +16,8 @@ pub(crate) struct PutAttributes {
     pub(crate) etag_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completion_upload_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) logical_size: Option<u64>,
     pub(crate) cache_control: Option<String>,
     pub(crate) content_disposition: Option<String>,
     pub(crate) content_encoding: Option<String>,
@@ -74,9 +76,9 @@ impl ObjectAttributes {
         }
     }
 
-    pub(crate) fn matches_pending(&self, pending: &PutAttributes, etag: &str, size: usize) -> bool {
+    pub(crate) fn matches_pending(&self, pending: &PutAttributes, etag: &str, size: u64) -> bool {
         self.etag == etag
-            && usize::try_from(self.size).ok() == Some(size)
+            && self.size == size
             && self.completion_upload_id == pending.completion_upload_id
             && self.cache_control == pending.cache_control
             && self.content_disposition == pending.content_disposition

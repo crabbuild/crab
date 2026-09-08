@@ -2428,6 +2428,8 @@ dependencies = [
  "gix-hash",
  "gix-object",
  "http 1.4.1",
+ "http-body 1.0.1",
+ "http-body-util",
  "hyper-util",
  "md-5",
  "object_store",

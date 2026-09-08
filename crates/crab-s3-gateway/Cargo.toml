@@ -27,6 +27,8 @@ futures-util = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }
 http = "1"
+http-body = "1"
+http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "http1", "http2", "tokio"] }
 md-5 = { workspace = true }
 object_store = { workspace = true }
@@ -39,8 +41,8 @@ sha2 = "0.10"
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
