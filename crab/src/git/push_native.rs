@@ -34,6 +34,15 @@ use crab_staging::StagingAreaReadOnly;
 pub(crate) const MIRROR_GIT_ONLY_ENV: &str = "CRAB_INTERNAL_MIRROR_GIT_ONLY";
 pub(crate) const MIRROR_PLAN_ID_ENV: &str = crab_remote::local::PUBLICATION_PLAN_ID_ENV;
 
+/// Destination for structured native-push progress.
+#[derive(Debug, Clone)]
+pub enum NativePushProgressStream {
+    /// Direct CLI output, where stdout carries the JSONL event stream.
+    Stdout(std::sync::Arc<std::sync::Mutex<crate::core::output::JsonlStream<std::io::Stdout>>>),
+    /// Remote-helper output, where stderr is separate from Git's protocol stdout.
+    Stderr(std::sync::Arc<std::sync::Mutex<crate::core::output::JsonlStream<std::io::Stderr>>>),
+}
+
 /// Configuration for the native push pipeline.
 #[derive(Debug, Clone)]
 pub struct NativePushConfig {
@@ -49,15 +58,11 @@ pub struct NativePushConfig {
     pub color: bool,
     /// Whether to show per-file and per-xorb detail.
     pub verbose: bool,
-    /// Output mode for structured progress. When `Jsonl` with a stderr
-    /// stream, progress events go to stderr (remote helper context where
-    /// git owns stdout).
+    /// Output mode for structured progress.
     pub output_mode: Option<crate::core::output::OutputMode>,
-    /// Shared JSONL stream writing to stderr. Set by the remote helper
-    /// when `CRAB_PROGRESS_FORMAT=jsonl` — JSONL events MUST go to
-    /// stderr because git owns stdout in the remote helper context.
-    pub jsonl_stderr_stream:
-        Option<std::sync::Arc<std::sync::Mutex<crate::core::output::JsonlStream<std::io::Stderr>>>>,
+    /// Shared JSONL destination. The CLI uses stdout; the remote helper uses
+    /// stderr because Git owns helper stdout.
+    pub jsonl_progress_stream: Option<NativePushProgressStream>,
     /// When `true`, `run_native_push` augments the explicit spec
     /// list with extra `PushSpec` entries for annotated tags whose
     /// targets are in the pushed commit set. Mirrors git's
@@ -175,7 +180,7 @@ impl NativePushConfig {
             color: true,
             verbose: false,
             output_mode: None,
-            jsonl_stderr_stream: None,
+            jsonl_progress_stream: None,
             followtags: false,
             mirror_git_only: false,
         }
@@ -304,23 +309,29 @@ async fn run_native_push_inner(
     let pipeline_start = Instant::now();
 
     // Create the progress tracker, shared across all pipeline stages.
-    // When the remote helper sets `CRAB_PROGRESS_FORMAT=jsonl`, progress
-    // events go to stderr via JsonlStream<Stderr> because git owns stdout.
-    let progress =
-        if let (Some(mode), Some(stream)) = (config.output_mode, &config.jsonl_stderr_stream) {
+    let progress = match (config.output_mode, config.jsonl_progress_stream.as_ref()) {
+        (Some(mode), Some(NativePushProgressStream::Stdout(stream))) => {
+            Arc::new(NativePushProgress::with_mode(
+                config.color,
+                config.verbose,
+                mode,
+                Some(Arc::clone(stream)),
+            ))
+        }
+        (Some(mode), Some(NativePushProgressStream::Stderr(stream))) => {
             Arc::new(NativePushProgress::with_mode_stderr(
                 config.color,
                 config.verbose,
                 mode,
                 Some(Arc::clone(stream)),
             ))
-        } else {
-            Arc::new(NativePushProgress::new(
-                config.progress,
-                config.color,
-                config.verbose,
-            ))
-        };
+        }
+        _ => Arc::new(NativePushProgress::new(
+            config.progress,
+            config.color,
+            config.verbose,
+        )),
+    };
 
     info!(
         specs = specs.len(),
@@ -338,7 +349,7 @@ async fn run_native_push_inner(
         delegated_push.git_dir = Some(git_dirs.per_worktree.clone());
     }
     if delegated_push.perf_phase_sink.is_none()
-        && let Some(stream) = &config.jsonl_stderr_stream
+        && let Some(NativePushProgressStream::Stderr(stream)) = &config.jsonl_progress_stream
     {
         delegated_push.perf_phase_sink = Some(PerfPhaseSink::Stderr(Arc::clone(stream)));
     }
@@ -394,6 +405,8 @@ async fn run_native_push_inner(
             }
         }
     }
+    progress.begin_discovery();
+    let discovery_ticker = progress.start_ticker();
     let discovery = if config.mirror_git_only {
         phase_discover_git_only(specs, &git_dirs)
     } else {
@@ -406,8 +419,14 @@ async fn run_native_push_inner(
             &git_dirs,
         )
     };
-    let (mut pointers, mut commit_entries, mut sha_map) =
-        release_native_locks_on_error(discovery, &mut pre_acquired_locks).await?;
+    let discovery = release_native_locks_on_error(discovery, &mut pre_acquired_locks).await;
+    let (mut pointers, mut commit_entries, mut sha_map) = match discovery {
+        Ok(discovery) => discovery,
+        Err(error) => {
+            NativePushProgress::finish_ticker(discovery_ticker).await;
+            return Err(error);
+        }
+    };
 
     // If the incremental walk found no pointers but staging has live
     // files, the push state is stale — a prior push recorded the tip
@@ -435,14 +454,22 @@ async fn run_native_push_inner(
                 false,
                 &git_dirs,
             );
-            let (full_pointers, full_entries, full_sha_map) =
-                release_native_locks_on_error(full_discovery, &mut pre_acquired_locks).await?;
+            let full_discovery =
+                release_native_locks_on_error(full_discovery, &mut pre_acquired_locks).await;
+            let (full_pointers, full_entries, full_sha_map) = match full_discovery {
+                Ok(discovery) => discovery,
+                Err(error) => {
+                    NativePushProgress::finish_ticker(discovery_ticker).await;
+                    return Err(error);
+                }
+            };
             pointers = full_pointers;
             commit_entries = full_entries;
             sha_map = full_sha_map;
         }
     }
 
+    NativePushProgress::finish_ticker(discovery_ticker).await;
     progress.report_discover(
         pointers.len() as u64,
         commit_entries.len() as u64,
@@ -537,6 +564,8 @@ async fn run_native_push_inner(
     // them on all exit paths — success, failure, and cancellation.
     release_native_locks_on_error(check_cancelled(&cancel), &mut pre_acquired_locks).await?;
 
+    progress.begin_push_preparation();
+    let pipeline_ticker = progress.start_ticker();
     let result = if config.push.protected_push.is_some() {
         debug!("native push: protected push skips client-owned push lock");
         let prepopulated = PrePopulatedWalk {
@@ -616,6 +645,7 @@ async fn run_native_push_inner(
             }
         }
     };
+    NativePushProgress::finish_ticker(pipeline_ticker).await;
 
     // ── Update push state on success ───────────────────────────────
     if result.all_ok() {

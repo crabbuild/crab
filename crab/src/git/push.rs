@@ -11914,12 +11914,13 @@ impl PushPipeline {
     ) -> Result<XorbUploadStreamSummary> {
         use futures_util::StreamExt;
 
-        if let Some(progress) = &self.progress {
-            progress.set_phase(NativePushProgress::PHASE_STREAMING);
+        if let Some(progress) = &self.progress
+            && progress.phase() != NativePushProgress::PHASE_STREAMING
+        {
+            progress.begin_push_preparation();
         }
         let mut summary = XorbUploadStreamSummary::default();
         let mut first_error = None;
-        let mut progress_ticker = None;
         let payload_bound = XORB_UPLOAD_IN_FLIGHT_PAYLOAD_LIMIT
             .div_ceil(XORB_MULTIPART_PART_SIZE.saturating_mul(4))
             .max(1);
@@ -11983,9 +11984,6 @@ impl PushPipeline {
                             summary.planned_xorbs,
                             summary.planned_bytes,
                         );
-                        if progress_ticker.is_none() && !batch.is_empty() {
-                            progress_ticker = progress.start_ticker();
-                        }
                     }
 
                     if first_error.is_some() {
@@ -12025,10 +12023,6 @@ impl PushPipeline {
         if let Some(progress) = &self.progress {
             progress.set_upload_totals(summary.planned_xorbs, summary.planned_bytes);
             progress.mark_upload_totals_final();
-        }
-        if let Some((handle, cancel)) = progress_ticker {
-            cancel.cancel();
-            let _ = handle.await;
         }
         if let Some(error) = first_error {
             self.uploaded_xorbs.lock().await.clear();
@@ -12902,6 +12896,9 @@ impl PushPipeline {
             pack_count = packed_files.len(),
             "step 10: bounded push pack set generated"
         );
+        if let Some(progress) = &self.progress {
+            progress.set_git_upload_totals(packed_files.len() as u64, object_count, pack_bytes);
+        }
 
         if let Some(store) = &self.store {
             let multipart_journal = self.multipart_journal().await?;
@@ -12922,6 +12919,14 @@ impl PushPipeline {
                 .map(|journal| journal as &dyn crab_storage::multipart::MultipartJournal);
             let mut jobs = packed_files.iter().enumerate().map(|(index, packed)| async move {
                 check_cancelled(&self.cancel)?;
+                let credited_bytes = std::sync::atomic::AtomicU64::new(0);
+                let on_part_done = |bytes: u64| {
+                    let previous = credited_bytes.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                    let accepted = bytes.min(packed.pack_size.saturating_sub(previous));
+                    if let Some(progress) = &self.progress {
+                        progress.add_git_upload_bytes(accepted);
+                    }
+                };
                 let pack_sha = packed.pack_blake3_hex.clone();
                 let pack_path = self.router.pack_path(&pack_sha);
                 let installed = pack::install_pack_file_locally_with_timeout(
@@ -12938,7 +12943,10 @@ impl PushPipeline {
                     } => CrabError::PushMalformedObject { oid, kind, detail },
                     error => error,
                 })?;
-                if !upload_push_pack_file_body(
+                if let Some(progress) = &self.progress {
+                    progress.begin_git_upload();
+                }
+                let uploaded = upload_push_pack_file_body(
                     store,
                     &pack_path,
                     packed.pack_path.as_ref(),
@@ -12947,9 +12955,13 @@ impl PushPipeline {
                     &self.cancel,
                     multipart_journal,
                     self.metrics.as_deref(),
+                    Some(&on_part_done),
                 )
-                .await?
-                {
+                .await?;
+                if let Some(progress) = &self.progress {
+                    progress.finish_git_pack_body();
+                }
+                if !uploaded {
                     debug!(pack_id = %pack_sha, "step 10: pack already exists remotely, skipping body upload");
                 }
                 let mut locations = crab_git::pack_locator::PackLocationIter::open(
@@ -13087,6 +13099,13 @@ impl PushPipeline {
                     git_sha1 = %installed.git_sha1,
                     "step 10: bounded pack and immutable locator evidence uploaded"
                 );
+                if let Some(progress) = &self.progress {
+                    let credited = credited_bytes
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .min(packed.pack_size);
+                    progress.add_git_upload_bytes(packed.pack_size.saturating_sub(credited));
+                    progress.inc_git_pack();
+                }
                 Ok::<_, CrabError>((index, UploadedGitPack {
                     entry,
                     idx_path: installed.idx_path,
@@ -13132,6 +13151,19 @@ impl PushPipeline {
 
         debug!("step 10: pack upload complete");
         Ok(())
+    }
+
+    async fn upload_packs_with_progress(&self) -> Result<()> {
+        if let Some(progress) = &self.progress {
+            progress.begin_git_pack();
+        }
+        let result = self.upload_packs().await;
+        if result.is_ok()
+            && let Some(progress) = &self.progress
+        {
+            progress.finish_git_objects();
+        }
+        result
     }
 
     /// Compute the remote reachability boundary for incremental packs.
@@ -14157,7 +14189,7 @@ impl PushPipeline {
         self.git_object_candidates.lock().await.clear();
         self.connectivity_frontier_tips.lock().await.clear();
         self.prepare_git_pack().await?;
-        self.upload_packs().await
+        self.upload_packs_with_progress().await
     }
 
     async fn read_remote_shard_for_proof(
@@ -16216,9 +16248,9 @@ impl PushPipeline {
         // Cancellation check after every DAG member is joined.
         check_cancelled(&self.cancel)?;
 
-        // Steps 8–10: metadata/Git uploads (immutable data must be durable before ref moves)
-        // Progress is reported inline (no background ticker) to avoid
-        // cursor-control conflicts with tracing output on stderr.
+        // Steps 8–10: metadata/Git uploads (immutable data must be durable before ref moves).
+        // Metadata reports its bounded summary inline; the native orchestrator's
+        // pipeline ticker follows Git packing, verification, transfer, and publication.
         //
         // Cancellation is checked between each upload step so Ctrl-C during
         // a long upload phase responds within one step boundary rather than
@@ -16241,7 +16273,10 @@ impl PushPipeline {
         self.emit_perf_phase(shard_upload_phase.finish(0, shard_upload_bytes, shard_upload_count));
         check_cancelled(&self.cancel)?;
         let pack_upload_phase = PhaseTimer::start("push", "pack_upload");
-        self.at_stage(PushFailureStage::GitPackUpload, self.upload_packs().await)?;
+        self.at_stage(
+            PushFailureStage::GitPackUpload,
+            self.upload_packs_with_progress().await,
+        )?;
         let (pack_upload_bytes, pack_upload_count) = {
             let packs = self.uploaded_packs.lock().await;
             (
@@ -18143,6 +18178,7 @@ async fn upload_push_pack_file_body(
     cancel: &CancellationToken,
     journal: Option<&dyn crab_storage::multipart::MultipartJournal>,
     metrics: Option<&Metrics>,
+    on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
 ) -> Result<bool> {
     if store.staging_write_prefix().is_some() {
         let pack_bytes = tokio::fs::read(pack_file).await?;
@@ -18151,6 +18187,9 @@ async fn upload_push_pack_file_body(
         store
             .verify_written_size_and_hash(pack_path, pack_size, &pack_blake3)
             .await?;
+        if let Some(on_part_done) = on_part_done {
+            on_part_done(pack_size);
+        }
         return Ok(true);
     }
 
@@ -18186,7 +18225,7 @@ async fn upload_push_pack_file_body(
                 &pack_blake3,
                 PACK_MULTIPART_THRESHOLD_BYTES as usize,
                 cancel,
-                None,
+                on_part_done,
                 journal,
             )
             .await?;
@@ -18211,6 +18250,9 @@ async fn upload_push_pack_file_body(
         store
             .verify_written_size_and_hash(pack_path, pack_size, &pack_blake3)
             .await?;
+        if let Some(on_part_done) = on_part_done {
+            on_part_done(pack_size);
+        }
     }
     Ok(true)
 }
@@ -20984,6 +21026,7 @@ mod tests {
             &CancellationToken::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -21024,6 +21067,7 @@ mod tests {
             &CancellationToken::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -21034,6 +21078,7 @@ mod tests {
             body.len() as u64,
             *pack_hash.as_bytes(),
             &CancellationToken::new(),
+            None,
             None,
             None,
         )
@@ -21072,6 +21117,7 @@ mod tests {
             &CancellationToken::new(),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -21102,6 +21148,7 @@ mod tests {
             body.len() as u64,
             [7; 32],
             &CancellationToken::new(),
+            None,
             None,
             None,
         )

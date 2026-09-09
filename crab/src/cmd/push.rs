@@ -28,7 +28,9 @@ use crate::git::push::{
     acquire_push_lock_leases, configure_active_active_push_coordinator, record_push_audit_event,
     release_push_lock_leases,
 };
-use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
+use crate::git::push_native::{
+    NativePushConfig, NativePushInputs, NativePushProgressStream, run_native_push,
+};
 use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::{AGENT_REBASE_FETCH_REF_FILTERING_ENV, PushSpec};
@@ -844,6 +846,11 @@ async fn run_push_once(
     native_config.verbose = args.verbose;
     native_config.progress = mode == OutputMode::Text;
     native_config.followtags = args.follow_tags;
+    if let Some(stream) = &jsonl_stream {
+        native_config.output_mode = Some(OutputMode::Jsonl);
+        native_config.jsonl_progress_stream =
+            Some(NativePushProgressStream::Stdout(Arc::clone(stream)));
+    }
 
     let native_result = run_native_push(
         &native_config,
