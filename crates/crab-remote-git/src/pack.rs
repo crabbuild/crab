@@ -26,7 +26,7 @@ use crate::{BudgetDimension, Error, OperationKind, RemoteGitObject, RemoteGitRep
 // the total selection and each coalesced range bounds transient range memory.
 const OBJECT_BATCH_SIZE: usize = 50_000;
 const SIDEBAND_PAYLOAD: usize = 65_515;
-pub const GENERATED_PACK_CACHE_VERSION: u32 = 3;
+pub const GENERATED_PACK_CACHE_VERSION: u32 = 4;
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 const GENERATED_PACK_UPLOAD_PART_BYTES: usize = 8 * 1024 * 1024;
 // Generated response packs can require a large catalog lookup plus pack
@@ -307,6 +307,21 @@ pub struct GeneratedPack {
     object_count: u32,
 }
 
+/// A temporary exact canonical pack inventory ready for local Git installation.
+#[derive(Debug)]
+pub struct DownloadedPackInventory {
+    _workspace: tempfile::TempDir,
+    packs: Vec<crab_git::repack::RepackSource>,
+}
+
+impl DownloadedPackInventory {
+    /// Return the verified pack bodies and committed Git index sidecars.
+    #[must_use]
+    pub fn packs(&self) -> &[crab_git::repack::RepackSource] {
+        &self.packs
+    }
+}
+
 impl std::fmt::Debug for GeneratedPack {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -385,6 +400,68 @@ impl GeneratedPack {
 }
 
 impl RemoteGitRepository {
+    /// Download the canonical pack inventory when it exactly covers a large selection.
+    ///
+    /// The selected IDs must already have passed generation-pinned authorization.
+    /// `None` means the inventory is not a complete large-repository clone candidate.
+    pub async fn download_complete_pack_inventory(
+        &self,
+        object_ids: &[ObjectId],
+        workspace_parent: &Path,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<DownloadedPackInventory>> {
+        let inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
+        let inventory_objects = inventory
+            .iter()
+            .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+        let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
+        if object_ids.len() < COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS
+            || inventory.is_empty()
+            || inventory_objects < u64::try_from(object_ids.len()).unwrap_or(u64::MAX)
+            || source_artifact_bytes > self.state.options.operation_limits().max_fetched_bytes
+        {
+            return Ok(None);
+        }
+
+        let operation = self
+            .operation(OperationKind::UploadPack, cancellation)
+            .await?;
+        let result = async {
+            // Keep the temporary inventory on the clone destination's
+            // filesystem so installation can hard-link multi-gigabyte packs.
+            let workspace = tempfile::tempdir_in(workspace_parent).map_err(io_error)?;
+            let download_dir = workspace.path().join("source-packs");
+            std::fs::create_dir_all(&download_dir).map_err(io_error)?;
+            let packs =
+                download_repack_sources(&operation, inventory, &download_dir, cancellation).await?;
+            let check_packs = packs.clone();
+            let selected_oids = object_ids.to_vec();
+            let covers = tokio::task::spawn_blocking(move || {
+                crab_git::repack::source_pack_inventory_covers_object_ids(
+                    &check_packs,
+                    &selected_oids,
+                )
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+            .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            if !covers {
+                return Err(Error::Corrupt {
+                    stage: crate::CorruptionStage::Inventory,
+                });
+            }
+            operation
+                .charge(BudgetDimension::LogicalObjects, inventory_objects)
+                .await?;
+            Ok(Some(DownloadedPackInventory {
+                _workspace: workspace,
+                packs,
+            }))
+        }
+        .await;
+        operation.finish(result).await
+    }
+
     /// Bind an exact object selection to this pinned repository and authorization state.
     ///
     /// Request policy is intentionally excluded after planning: shallow boundaries and
@@ -722,9 +799,25 @@ impl RemoteGitRepository {
         let sources =
             download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
         let source_download_ms = source_download_started.elapsed().as_millis() as u64;
-        let mut source_inventory_check_ms = 0_u64;
-
-        let (repacked, strategy) = if exact_candidate {
+        let inventory_check_started = Instant::now();
+        let check_sources = sources.clone();
+        let selected_oids = object_ids.to_vec();
+        let source_inventory_matches = tokio::task::spawn_blocking(move || {
+            crab_git::repack::source_pack_inventory_matches_object_ids(
+                &check_sources,
+                &selected_oids,
+            )
+        })
+        .await
+        .map_err(|source| Error::DecodeTask { source })?
+        .map_err(|source| Error::ResponsePackConsolidation { source })?;
+        let source_inventory_check_ms = inventory_check_started.elapsed().as_millis() as u64;
+        tracing::debug!(
+            source_inventory_matches,
+            source_inventory_check_ms,
+            "checked staged pack indexes against the exact response object set"
+        );
+        if source_inventory_matches {
             let concat_sources = sources.clone();
             let concatenated = tokio::task::spawn_blocking(move || {
                 crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
@@ -732,78 +825,60 @@ impl RemoteGitRepository {
             .await
             .map_err(|source| Error::DecodeTask { source })?;
             match concatenated {
-                Ok(repacked) => (repacked, "complete_pack_concatenation"),
+                Ok(concatenated) => {
+                    let pack =
+                        adopt_concatenated_pack(operation, concatenated, cancellation).await?;
+                    drop(workspace);
+                    tracing::info!(
+                        target: "crab_remote_git::telemetry",
+                        telemetry_event = "pack_generation",
+                        strategy = "complete_pack_concatenation",
+                        source_pack_count,
+                        object_count = pack.object_count,
+                        inventory_objects,
+                        selected_objects = object_ids.len(),
+                        source_download_ms,
+                        source_inventory_check_ms,
+                        response_bytes = pack.size,
+                        pack_generation_ms = started.elapsed().as_millis() as u64,
+                        "remote Git response pack produced from staged pack inventory"
+                    );
+                    return Ok(Some(pack));
+                }
                 Err(error) => {
                     tracing::debug!(
                         error = %error,
                         error_debug = ?error,
                         "complete pack concatenation was not usable; falling back to Git consolidation"
                     );
-                    let repack_sources = sources.clone();
-                    let repacked = tokio::task::spawn_blocking(move || {
-                        crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
-                    })
-                    .await
-                    .map_err(|source| Error::DecodeTask { source })?
-                    .map_err(|source| Error::ResponsePackConsolidation { source })?;
-                    (repacked, "complete_pack_consolidation")
                 }
             }
-        } else {
-            let inventory_check_started = Instant::now();
-            let check_sources = sources.clone();
+        }
+
+        let (repacked, strategy) = if near_candidate && !source_inventory_matches {
             let selected_oids = object_ids.to_vec();
-            let source_inventory_matches = tokio::task::spawn_blocking(move || {
-                crab_git::repack::source_pack_inventory_matches_object_ids(
-                    &check_sources,
-                    &selected_oids,
-                )
+            let repack_sources = sources.clone();
+            let repacked = tokio::task::spawn_blocking(move || {
+                crab_git::repack::repack_selected_objects(&repack_sources, &selected_oids)
             })
             .await
             .map_err(|source| Error::DecodeTask { source })?
             .map_err(|source| Error::ResponsePackConsolidation { source })?;
-            source_inventory_check_ms = inventory_check_started.elapsed().as_millis() as u64;
-            tracing::debug!(
-                source_inventory_matches,
-                source_inventory_check_ms,
-                "checked staged pack indexes against the exact response object set"
-            );
-            if source_inventory_matches {
-                let concat_sources = sources.clone();
-                let concatenated = tokio::task::spawn_blocking(move || {
-                    crab_git::repack::concatenate_complete_pack_inventory(&concat_sources)
-                })
-                .await
-                .map_err(|source| Error::DecodeTask { source })?;
-                match concatenated {
-                    Ok(repacked) => (repacked, "complete_pack_concatenation"),
-                    Err(error) => {
-                        tracing::debug!(
-                            error = %error,
-                            error_debug = ?error,
-                            "near-complete pack concatenation was not usable; falling back to Git consolidation"
-                        );
-                        let repack_sources = sources.clone();
-                        let repacked = tokio::task::spawn_blocking(move || {
-                            crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
-                        })
-                        .await
-                        .map_err(|source| Error::DecodeTask { source })?
-                        .map_err(|source| Error::ResponsePackConsolidation { source })?;
-                        (repacked, "near_complete_pack_consolidation")
-                    }
-                }
+            (repacked, "selected_object_repack")
+        } else {
+            let repack_sources = sources.clone();
+            let repacked = tokio::task::spawn_blocking(move || {
+                crab_git::repack::consolidate_pack_suffix_for_response(&repack_sources)
+            })
+            .await
+            .map_err(|source| Error::DecodeTask { source })?
+            .map_err(|source| Error::ResponsePackConsolidation { source })?;
+            let strategy = if exact_candidate {
+                "complete_pack_consolidation"
             } else {
-                let selected_oids = object_ids.to_vec();
-                let repack_sources = sources.clone();
-                let repacked = tokio::task::spawn_blocking(move || {
-                    crab_git::repack::repack_selected_objects(&repack_sources, &selected_oids)
-                })
-                .await
-                .map_err(|source| Error::DecodeTask { source })?
-                .map_err(|source| Error::ResponsePackConsolidation { source })?;
-                (repacked, "selected_object_repack")
-            }
+                "near_complete_pack_consolidation"
+            };
+            (repacked, strategy)
         };
         let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
             invariant: "complete pack consolidation produced no pack",
@@ -1068,44 +1143,83 @@ async fn adopt_repacked_pack(
     repacked: crab_git::repack::GeometricRepackedRepository,
     cancellation: &CancellationToken,
 ) -> Result<GeneratedPack> {
-    if cancellation.is_cancelled() {
-        return Err(Error::Cancelled);
-    }
     let generated = repacked.packs().first().ok_or(Error::InternalInvariant {
         invariant: "Git repack produced no pack",
     })?;
-    let object_count = generated.object_count;
+    let pack = adopt_pack_path(
+        operation,
+        generated.pack_path(),
+        generated.pack_size,
+        &generated.git_sha1,
+        generated.pack_hash,
+        generated.object_count,
+        cancellation,
+    )
+    .await?;
+    drop(repacked);
+    Ok(pack)
+}
+
+async fn adopt_concatenated_pack(
+    operation: &crate::OperationContext,
+    concatenated: crab_git::repack::ConcatenatedPack,
+    cancellation: &CancellationToken,
+) -> Result<GeneratedPack> {
+    let pack = adopt_pack_path(
+        operation,
+        concatenated.pack_path(),
+        concatenated.pack_size,
+        &concatenated.git_sha1,
+        concatenated.pack_hash,
+        concatenated.object_count,
+        cancellation,
+    )
+    .await?;
+    drop(concatenated);
+    Ok(pack)
+}
+
+async fn adopt_pack_path(
+    operation: &crate::OperationContext,
+    pack_path: &Path,
+    pack_size: u64,
+    git_sha1: &str,
+    content_hash: [u8; 32],
+    object_count: u64,
+    cancellation: &CancellationToken,
+) -> Result<GeneratedPack> {
+    if cancellation.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     operation
         .charge(BudgetDimension::LogicalObjects, object_count)
         .await?;
     operation
-        .charge(BudgetDimension::ResponseBytes, generated.pack_size)
+        .charge(BudgetDimension::ResponseBytes, pack_size)
         .await?;
-    let checksum = decode_hex::<20>(&generated.git_sha1).ok_or(Error::Corrupt {
+    let checksum = decode_hex::<20>(git_sha1).ok_or(Error::Corrupt {
         stage: crate::CorruptionStage::PackEntry,
     })?;
     let destination = NamedTempFile::new().map_err(io_error)?;
     let destination_path = destination.path().to_owned();
     let destination = destination.into_temp_path();
     std::fs::remove_file(&destination_path).map_err(io_error)?;
-    std::fs::rename(generated.pack_path(), &destination_path).map_err(io_error)?;
+    std::fs::rename(pack_path, &destination_path).map_err(io_error)?;
     let file = std::fs::File::open(&destination_path).map_err(io_error)?;
     let file = NamedTempFile::from_parts(file, destination);
     let pack = GeneratedPack {
         file: Arc::new(file),
-        size: generated.pack_size,
+        size: pack_size,
         checksum,
-        content_hash: generated.pack_hash,
+        content_hash,
         object_count: u32::try_from(object_count).map_err(|_| Error::LimitExceeded {
             limit: "pack object count",
             actual: object_count,
             maximum: u32::MAX as u64,
         })?,
     };
-    drop(repacked);
-    // `verified_generated_pack` already validated these bytes and computed both
-    // digests before ownership transfer. Rehashing here would scan the response
-    // pack a second time before it can be published or streamed.
+    // The producer validated and hashed these bytes before ownership transfer.
+    // Rehashing here would scan the response pack before publication and streaming.
     Ok(pack)
 }
 

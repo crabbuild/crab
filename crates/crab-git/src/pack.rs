@@ -388,7 +388,11 @@ pub fn install_pack_files_from_paths(
     )
 }
 
-pub(crate) fn install_pack_files_from_paths_with_identity(
+/// Install an indexed pack whose body identity was verified while downloading.
+///
+/// The supplied identity avoids a second full scan, while the committed index
+/// and reverse index are still checked against the pack trailer and object count.
+pub fn install_pack_files_from_paths_with_identity(
     pack_dir: &Path,
     pack_tmp_path: &Path,
     index_tmp_path: &Path,

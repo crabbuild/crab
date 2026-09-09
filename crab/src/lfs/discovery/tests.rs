@@ -272,8 +272,7 @@ fn range_scan_excludes_all_base_manifest_ref_tips() {
 #[test]
 fn cat_file_batch_stdout_handles_large_object_lists() {
     let dir = tempfile::tempdir().unwrap();
-    let status = Command::new("git")
-        .current_dir(dir.path())
+    let status = git_command_in(dir.path(), GitObjectAccess::LocalOnly)
         .args(["init", "--quiet"])
         .status()
         .unwrap();
@@ -291,23 +290,19 @@ fn cat_file_batch_stdout_handles_large_object_lists() {
         paths.push('\n');
     }
 
-    let mut child = Command::new("git")
-        .current_dir(dir.path())
-        .args(["hash-object", "-w", "--stdin-paths"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(paths.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success());
-
-    let object_ids = String::from_utf8(output.stdout).unwrap();
+    let mut command = git_command_in(dir.path(), GitObjectAccess::LocalOnly);
+    command.args(["hash-object", "-w", "--stdin-paths"]);
+    let output = process::run(
+        command,
+        &CancellationToken::new(),
+        Some(|mut stdin: ChildStdin| {
+            stdin.write_all(paths.as_bytes())?;
+            Ok(())
+        }),
+        |stdout| Ok(process::capture_output(stdout, MAX_CAPTURE_BYTES)?),
+    )
+    .unwrap();
+    let object_ids = String::from_utf8(successful_git("hash-object", output).unwrap()).unwrap();
     let mut cat_file_input = object_ids.trim_end().to_owned();
     cat_file_input.push('\n');
     assert!(cat_file_input.len() > 64 * 1024);

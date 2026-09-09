@@ -1085,6 +1085,17 @@ pub(crate) async fn open_repository_with_catalog_visibility(
     prefix: &str,
     cancellation: &CancellationToken,
 ) -> Result<(RemoteGitRepository, GitCatalogVisibilityIndex)> {
+    let (repository, proof) =
+        open_repository_with_optional_catalog_visibility(store, prefix, cancellation).await?;
+    let proof = proof.ok_or_else(|| remote_error(RemoteGitError::EmptyRepository))?;
+    Ok((repository, proof))
+}
+
+pub(crate) async fn open_repository_with_optional_catalog_visibility(
+    store: &crab_storage::Store,
+    prefix: &str,
+    cancellation: &CancellationToken,
+) -> Result<(RemoteGitRepository, Option<GitCatalogVisibilityIndex>)> {
     let (repository, proof) = open_repository_with_visibility_requirement(
         store,
         prefix,
@@ -1092,8 +1103,10 @@ pub(crate) async fn open_repository_with_catalog_visibility(
         VisibilityRequirement::Catalog,
     )
     .await?;
-    let proof = proof.ok_or_else(|| remote_error(RemoteGitError::EmptyRepository))?;
-    Ok((repository, proof.into_catalog()?))
+    let proof = proof
+        .map(UploadPackVisibilityProof::into_catalog)
+        .transpose()?;
+    Ok((repository, proof))
 }
 
 #[cfg(test)]
