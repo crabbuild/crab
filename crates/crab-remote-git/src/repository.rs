@@ -292,6 +292,35 @@ impl OperationContext {
     pub async fn from_snapshot(
         layout: StoreLayout<Store>,
         snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        RemoteGitRepository::from_snapshot(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            cancellation,
+        )
+        .await?
+        .operation(OperationKind::Repository, cancellation)
+        .await
+    }
+}
+
+impl RemoteGitRepository {
+    /// Open an immutable repository view from a validated metadata snapshot.
+    ///
+    /// This path consumes committed ref-journal transactions directly and does
+    /// not require locator publication or journal compaction. The caller must
+    /// retain the referenced immutable objects and revalidate freshness before
+    /// using this view for a write decision.
+    pub async fn from_snapshot(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
         mut identity: RepositoryIdentity,
         runtime: Arc<RemoteGitRuntime>,
         options: RepositoryOptions,
@@ -318,7 +347,7 @@ impl OperationContext {
         let manifest = snapshot.materialized_manifest();
         let refs = RepositoryRefs::try_from(&manifest)?;
         let inventory = parse_inventory(&snapshot.journal.packs)?;
-        let reader = RemoteGitReader::from_pinned(
+        let reader = Arc::new(RemoteGitReader::from_pinned(
             layout.store().clone(),
             layout.repo_prefix(),
             inventory.values().copied(),
@@ -326,28 +355,28 @@ impl OperationContext {
             Arc::clone(&runtime),
             identity.clone(),
             manifest.generation,
-        )?;
-        let state = RepositoryState {
-            store: layout.store().clone(),
-            layout,
-            runtime,
-            identity,
-            options,
-            generation: manifest.generation,
-            git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
-            manifest_etag: snapshot.manifest_etag.clone(),
-            coverage: None,
-            inventory,
-            refs,
-            reader: Some(Arc::new(reader)),
-            commit_graph: None,
-            shallow_closure: None,
-        };
-        Self::open(Arc::new(state), OperationKind::Repository, cancellation).await
+        )?);
+        Ok(Self {
+            state: Arc::new(RepositoryState {
+                store: layout.store().clone(),
+                layout,
+                runtime,
+                identity,
+                options,
+                generation: manifest.generation,
+                git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
+                manifest_etag: snapshot.manifest_etag.clone(),
+                coverage: None,
+                inventory,
+                refs,
+                reader: Some(reader),
+                commit_graph: None,
+                shallow_closure: None,
+            }),
+            generated_pack_lease_provider: None,
+        })
     }
-}
 
-impl RemoteGitRepository {
     /// Open one consistent repository generation from an authenticated store.
     ///
     /// The supplied cancellation token is checked around metadata I/O. Empty
@@ -1019,10 +1048,22 @@ impl RemoteGitRepository {
     ) -> Result<RemoteGitSnapshot> {
         let resolved = self.resolve(revision, operation).await?;
         let commit = operation.read_commit(resolved.commit).await?;
-        let coverage = self.state.coverage.ok_or(Error::EmptyRepository)?;
+        let pack_index_hash = match self.state.coverage {
+            Some(coverage) => coverage.pack_index_hash,
+            None if self.state.reader.is_some() => self
+                .state
+                .identity
+                .snapshot_digest
+                .as_deref()
+                .ok_or(Error::InternalInvariant {
+                    invariant: "journal-backed repository view has no snapshot identity",
+                })
+                .and_then(parse_merkle_hash)?,
+            None => return Err(Error::EmptyRepository),
+        };
         Ok(RemoteGitSnapshot {
             generation: self.state.generation,
-            pack_index_hash: coverage.pack_index_hash,
+            pack_index_hash,
             commit_oid: commit.oid,
             root_tree_oid: commit.tree,
             repository: Arc::clone(&self.state),

@@ -31,8 +31,8 @@ pub enum Error {
     Remote(#[from] crab_remote_git::Error),
     #[error("repository read publication failed")]
     Write(#[from] crab_write::WriteError),
-    #[error("repository did not become readable before the publication deadline")]
-    ReadinessTimeout,
+    #[error("repository metadata failed")]
+    Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("repository cache setup failed")]
     Cache(#[from] crab_cache_store::CacheStoreError),
     #[error("repository hydration failed")]

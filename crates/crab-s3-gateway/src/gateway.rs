@@ -10,8 +10,8 @@ use bytes::Bytes;
 use crab_cache_store::{CacheConfig, CachingStore};
 use crab_git::pointer_detect::PointerKind;
 use crab_remote_git::{
-    ContentClassification, EntryKind, OperationKind, RemoteGitRepository, RemoteGitRuntime,
-    RepositoryIdentity, RepositoryOptions, Revision,
+    ContentClassification, EntryKind, OperationKind, RemoteGitRuntime, RepositoryIdentity,
+    RepositoryOptions,
 };
 use crab_storage::{StorageProviderKind, Store, StoreLayout, build_static_env_store};
 use futures_util::StreamExt as _;
@@ -26,6 +26,8 @@ pub(crate) struct Repository {
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
     pub(crate) identity: RepositoryIdentity,
+    pub(crate) read_views: crate::repository::ReadViewCache,
+    pub(crate) maintenance: Arc<crate::repository::WriteMaintenance>,
     hydrator: crab_read::ShardHydrator,
     lfs: crab_lfs::LfsObjectStore,
 }
@@ -47,6 +49,8 @@ impl Repository {
                 config.prefix.clone(),
                 1,
             )?,
+            read_views: crate::repository::ReadViewCache::new(),
+            maintenance: Arc::new(crate::repository::WriteMaintenance::new()),
             config,
             store,
             layout,
@@ -67,6 +71,7 @@ pub(crate) struct Gateway {
     repositories: Arc<BTreeMap<String, Repository>>,
     runtime: Arc<RemoteGitRuntime>,
     options: RepositoryOptions,
+    mutations: Arc<mutation::Coordinator>,
     auth: GatewayAuth,
     region: Arc<str>,
     admission: Arc<Semaphore>,
@@ -74,8 +79,15 @@ pub(crate) struct Gateway {
 }
 
 struct ReadObject {
-    blob_oid: gix_hash::ObjectId,
     content: ReadContent,
+    size: u64,
+    etag: String,
+    modified: Timestamp,
+    attributes: Option<crate::attributes::ObjectAttributes>,
+}
+
+struct ReadObjectMetadata {
+    blob_oid: gix_hash::ObjectId,
     size: u64,
     etag: String,
     modified: Timestamp,
@@ -210,10 +222,13 @@ impl Gateway {
             let repository = Repository::new(entry.clone(), store)?;
             repositories.insert(entry.name.clone(), repository);
         }
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let options = RepositoryOptions::default();
         Ok(Self {
             repositories: Arc::new(repositories),
-            runtime: Arc::new(RemoteGitRuntime::default()),
-            options: RepositoryOptions::default(),
+            mutations: Arc::new(mutation::Coordinator::new(Arc::clone(&runtime), options)),
+            runtime,
+            options,
             auth,
             region,
             admission: Arc::new(Semaphore::new(32)),
@@ -292,32 +307,32 @@ impl Gateway {
         }
     }
 
-    async fn open(&self, repository: &Repository) -> S3Result<RemoteGitRepository> {
-        crate::repository::open_current(
-            repository,
-            Arc::clone(&self.runtime),
-            self.options,
-            &self.cancellation,
-        )
-        .await
-        .map_err(gateway_error)
+    async fn open(&self, repository: &Repository) -> S3Result<Arc<crate::repository::ReadView>> {
+        repository
+            .read_views
+            .current(
+                repository,
+                Arc::clone(&self.runtime),
+                self.options,
+                &self.cancellation,
+            )
+            .await
+            .map_err(gateway_error)
     }
 
     async fn read_object(&self, repository: &Repository, key: &str) -> S3Result<ReadObject> {
         let address = namespace::object_address(key).map_err(namespace_error)?;
         let repo = self.open(repository).await?;
         let operation = repo
+            .remote()
             .operation(OperationKind::Repository, &self.cancellation)
             .await
             .map_err(remote_error)?;
         let result = async {
             let snapshot = repo
-                .snapshot(
-                    &Revision::parse(&address.reference).map_err(remote_error)?,
-                    &operation,
-                )
+                .snapshot(&address.reference, &operation)
                 .await
-                .map_err(remote_error)?;
+                .map_err(gateway_error)?;
             let commit = snapshot.commit(&operation).await.map_err(remote_error)?;
             let blob = snapshot
                 .read_blob(&address.path, &operation)
@@ -326,7 +341,8 @@ impl Gateway {
             if blob.metadata.kind != EntryKind::Blob {
                 return Err(s3_error!(InvalidObjectState));
             }
-            let manifest = crate::attributes::load(repository, snapshot.commit_oid())
+            let manifest = repo
+                .attributes(repository, snapshot.commit_oid())
                 .await
                 .map_err(gateway_error)?;
             let path = std::str::from_utf8(address.path.as_bytes())
@@ -337,7 +353,6 @@ impl Gateway {
                 .and_then(|value| i64::try_from(value.modified_seconds).ok())
                 .unwrap_or(commit.committer.seconds);
             let modified = timestamp(modified_seconds)?;
-            let blob_oid = blob.metadata.oid;
             let (content, size) = classify_blob(blob)?;
             let etag = match attributes.as_ref() {
                 Some(value) => value.etag.clone(),
@@ -350,12 +365,80 @@ impl Gateway {
                 },
             };
             Ok(ReadObject {
-                blob_oid,
                 content,
                 size,
                 etag,
                 modified,
                 attributes,
+            })
+        }
+        .await;
+        finish(operation, result).await
+    }
+
+    async fn read_object_metadata(
+        &self,
+        repository: &Repository,
+        key: &str,
+    ) -> S3Result<ReadObjectMetadata> {
+        let address = namespace::object_address(key).map_err(namespace_error)?;
+        let view = self.open(repository).await?;
+        let operation = view
+            .remote()
+            .operation(OperationKind::Repository, &self.cancellation)
+            .await
+            .map_err(remote_error)?;
+        let result = async {
+            let snapshot = view
+                .snapshot(&address.reference, &operation)
+                .await
+                .map_err(gateway_error)?;
+            let entry = snapshot
+                .entry(&address.path, &operation)
+                .await
+                .map_err(remote_error)?
+                .ok_or_else(|| s3_error!(NoSuchKey))?;
+            if entry.kind != EntryKind::Blob {
+                return Err(s3_error!(InvalidObjectState));
+            }
+            let path = std::str::from_utf8(address.path.as_bytes())
+                .map_err(|_| s3_error!(InvalidObjectState))?;
+            let attributes = view
+                .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                .await
+                .map_err(gateway_error)?;
+            if let Some(attributes) = attributes {
+                return Ok(ReadObjectMetadata {
+                    blob_oid: entry.oid,
+                    size: attributes.size,
+                    etag: attributes.etag.clone(),
+                    modified: timestamp(
+                        i64::try_from(attributes.modified_seconds)
+                            .map_err(|_| s3_error!(InternalError))?,
+                    )?,
+                    attributes: Some(attributes),
+                });
+            }
+            let commit = snapshot.commit(&operation).await.map_err(remote_error)?;
+            let blob = snapshot
+                .read_blob(&address.path, &operation)
+                .await
+                .map_err(remote_error)?;
+            let blob_oid = blob.metadata.oid;
+            let (content, size) = classify_blob(blob)?;
+            let etag = match &content {
+                ReadContent::Ordinary(bytes) => md5_hex(bytes),
+                ReadContent::CrabPointer(_) | ReadContent::LfsPointer(_) => {
+                    let spool = content.spool(repository, 0..size, u64::MAX).await?;
+                    crate::content::md5_hex(&spool.digests.md5)
+                }
+            };
+            Ok(ReadObjectMetadata {
+                blob_oid,
+                size,
+                etag,
+                modified: timestamp(commit.committer.seconds)?,
+                attributes: None,
             })
         }
         .await;
@@ -416,7 +499,7 @@ impl Gateway {
             return Err(s3_error!(InvalidRequest, "Conflicting write preconditions"));
         }
         if let Some(condition) = if_match {
-            let object = match self.read_object(repository, key).await {
+            let object = match self.read_object_metadata(repository, key).await {
                 Ok(object) => object,
                 Err(error) if error.code().as_str() == "NoSuchKey" => {
                     return Err(s3_error!(PreconditionFailed));
@@ -727,7 +810,9 @@ impl S3 for Gateway {
             .map_err(|_| s3_error!(SlowDown))?;
         reject_head_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
-        let object = self.read_object(repository, &req.input.key).await?;
+        let object = self
+            .read_object_metadata(repository, &req.input.key)
+            .await?;
         let tag_count = tag_count(object.attributes.as_ref())?;
         evaluate_conditions(
             req.input.if_match.as_ref(),
@@ -834,39 +919,39 @@ impl S3 for Gateway {
         let stored_checksums = checksums.stored(&spool.digests);
         let etag = crate::content::md5_hex(&spool.digests.md5);
         let bytes = mutation_bytes(repository, &spool).await?;
-        let outcome = mutation::apply(
-            repository,
-            Arc::clone(&self.runtime),
-            self.options,
-            address
-                .branch
-                .as_deref()
-                .ok_or_else(|| s3_error!(MethodNotAllowed))?,
-            &address.path,
-            mutation::Change::Put {
-                bytes,
-                attributes: Box::new(crate::attributes::PutAttributes {
-                    etag_override: Some(etag),
-                    completion_upload_id: None,
-                    logical_size: Some(spool.size),
-                    checksums: stored_checksums.clone(),
-                    tags: parse_tagging_header(req.input.tagging.as_deref())?,
-                    parts: Vec::new(),
-                    cache_control: req.input.cache_control,
-                    content_disposition: req.input.content_disposition,
-                    content_encoding: req.input.content_encoding,
-                    content_language: req.input.content_language,
-                    content_type: req.input.content_type,
-                    expires: req.input.expires,
-                    metadata: req.input.metadata.unwrap_or_default().into_iter().collect(),
-                }),
-                condition,
-            },
-            &principal,
-            &self.cancellation,
-        )
-        .await
-        .map_err(mutation_error)?;
+        let outcome = self
+            .mutations
+            .apply(
+                repository,
+                address
+                    .branch
+                    .as_deref()
+                    .ok_or_else(|| s3_error!(MethodNotAllowed))?,
+                &address.path,
+                mutation::Change::Put {
+                    bytes,
+                    attributes: Box::new(crate::attributes::PutAttributes {
+                        etag_override: Some(etag),
+                        completion_upload_id: None,
+                        logical_size: Some(spool.size),
+                        checksums: stored_checksums.clone(),
+                        tags: parse_tagging_header(req.input.tagging.as_deref())?,
+                        parts: Vec::new(),
+                        cache_control: req.input.cache_control,
+                        content_disposition: req.input.content_disposition,
+                        content_encoding: req.input.content_encoding,
+                        content_language: req.input.content_language,
+                        content_type: req.input.content_type,
+                        expires: req.input.expires,
+                        metadata: req.input.metadata.unwrap_or_default().into_iter().collect(),
+                    }),
+                    condition,
+                },
+                &principal,
+                &self.cancellation,
+            )
+            .await
+            .map_err(mutation_error)?;
         Ok(S3Response::new(PutObjectOutput {
             e_tag: outcome.etag.map(ETag::Strong),
             checksum_crc32: stored_checksums.crc32,
@@ -905,7 +990,9 @@ impl S3 for Gateway {
             return Err(s3_error!(InvalidArgument));
         }
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
-        let object = self.read_object(repository, &req.input.key).await?;
+        let object = self
+            .read_object_metadata(repository, &req.input.key)
+            .await?;
         let requested = object_attribute_names(&req.input.object_attributes);
         if requested.iter().any(|value| {
             !matches!(
@@ -965,7 +1052,9 @@ impl S3 for Gateway {
             return Err(s3_error!(NotImplemented));
         }
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
-        let object = self.read_object(repository, &req.input.key).await?;
+        let object = self
+            .read_object_metadata(repository, &req.input.key)
+            .await?;
         let tags = object
             .attributes
             .map(|value| value.tags)
@@ -1011,7 +1100,9 @@ impl S3 for Gateway {
                 })
                 .collect::<S3Result<Vec<_>>>()?,
         )?;
-        let object = self.read_object(repository, &req.input.key).await?;
+        let object = self
+            .read_object_metadata(repository, &req.input.key)
+            .await?;
         let mut attributes = object
             .attributes
             .as_ref()
@@ -1020,24 +1111,23 @@ impl S3 for Gateway {
         attributes.etag_override = Some(object.etag);
         attributes.logical_size = Some(object.size);
         attributes.tags = tags;
-        mutation::apply(
-            repository,
-            Arc::clone(&self.runtime),
-            self.options,
-            address
-                .branch
-                .as_deref()
-                .ok_or_else(|| s3_error!(MethodNotAllowed))?,
-            &address.path,
-            mutation::Change::Attributes {
-                expected: object.blob_oid,
-                attributes: Box::new(attributes),
-            },
-            &principal,
-            &self.cancellation,
-        )
-        .await
-        .map_err(mutation_error)?;
+        self.mutations
+            .apply(
+                repository,
+                address
+                    .branch
+                    .as_deref()
+                    .ok_or_else(|| s3_error!(MethodNotAllowed))?,
+                &address.path,
+                mutation::Change::Attributes {
+                    expected: object.blob_oid,
+                    attributes: Box::new(attributes),
+                },
+                &principal,
+                &self.cancellation,
+            )
+            .await
+            .map_err(mutation_error)?;
         Ok(S3Response::new(PutObjectTaggingOutput::default()))
     }
 
@@ -1054,7 +1144,9 @@ impl S3 for Gateway {
         }
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
-        let object = self.read_object(repository, &req.input.key).await?;
+        let object = self
+            .read_object_metadata(repository, &req.input.key)
+            .await?;
         let mut attributes = object
             .attributes
             .as_ref()
@@ -1063,24 +1155,23 @@ impl S3 for Gateway {
         attributes.etag_override = Some(object.etag);
         attributes.logical_size = Some(object.size);
         attributes.tags.clear();
-        mutation::apply(
-            repository,
-            Arc::clone(&self.runtime),
-            self.options,
-            address
-                .branch
-                .as_deref()
-                .ok_or_else(|| s3_error!(MethodNotAllowed))?,
-            &address.path,
-            mutation::Change::Attributes {
-                expected: object.blob_oid,
-                attributes: Box::new(attributes),
-            },
-            &principal,
-            &self.cancellation,
-        )
-        .await
-        .map_err(mutation_error)?;
+        self.mutations
+            .apply(
+                repository,
+                address
+                    .branch
+                    .as_deref()
+                    .ok_or_else(|| s3_error!(MethodNotAllowed))?,
+                &address.path,
+                mutation::Change::Attributes {
+                    expected: object.blob_oid,
+                    attributes: Box::new(attributes),
+                },
+                &principal,
+                &self.cancellation,
+            )
+            .await
+            .map_err(mutation_error)?;
         Ok(S3Response::new(DeleteObjectTaggingOutput::default()))
     }
 
@@ -1095,21 +1186,20 @@ impl S3 for Gateway {
         reject_delete_extensions(&req.input)?;
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
-        mutation::apply(
-            repository,
-            Arc::clone(&self.runtime),
-            self.options,
-            address
-                .branch
-                .as_deref()
-                .ok_or_else(|| s3_error!(MethodNotAllowed))?,
-            &address.path,
-            mutation::Change::Delete,
-            &principal,
-            &self.cancellation,
-        )
-        .await
-        .map_err(mutation_error)?;
+        self.mutations
+            .apply(
+                repository,
+                address
+                    .branch
+                    .as_deref()
+                    .ok_or_else(|| s3_error!(MethodNotAllowed))?,
+                &address.path,
+                mutation::Change::Delete,
+                &principal,
+                &self.cancellation,
+            )
+            .await
+            .map_err(mutation_error)?;
         Ok(S3Response::new(DeleteObjectOutput::default()))
     }
 
@@ -1159,18 +1249,17 @@ impl S3 for Gateway {
             let result = async {
                 let address = namespace::object_address(&key).map_err(namespace_error)?;
                 let branch = writable_branch(repository, &address)?;
-                mutation::apply(
-                    repository,
-                    Arc::clone(&self.runtime),
-                    self.options,
-                    branch,
-                    &address.path,
-                    mutation::Change::Delete,
-                    &principal,
-                    &self.cancellation,
-                )
-                .await
-                .map_err(mutation_error)
+                self.mutations
+                    .apply(
+                        repository,
+                        branch,
+                        &address.path,
+                        mutation::Change::Delete,
+                        &principal,
+                        &self.cancellation,
+                    )
+                    .await
+                    .map_err(mutation_error)
             }
             .await;
             match result {
@@ -1317,25 +1406,25 @@ impl S3 for Gateway {
         };
         let response_checksums = attributes.checksums.clone();
         let bytes = mutation_bytes(repository, &spool).await?;
-        let outcome = mutation::apply(
-            repository,
-            Arc::clone(&self.runtime),
-            self.options,
-            address
-                .branch
-                .as_deref()
-                .ok_or_else(|| s3_error!(MethodNotAllowed))?,
-            &address.path,
-            mutation::Change::Put {
-                bytes,
-                attributes: Box::new(attributes),
-                condition: mutation::PutCondition::None,
-            },
-            &principal,
-            &self.cancellation,
-        )
-        .await
-        .map_err(mutation_error)?;
+        let outcome = self
+            .mutations
+            .apply(
+                repository,
+                address
+                    .branch
+                    .as_deref()
+                    .ok_or_else(|| s3_error!(MethodNotAllowed))?,
+                &address.path,
+                mutation::Change::Put {
+                    bytes,
+                    attributes: Box::new(attributes),
+                    condition: mutation::PutCondition::None,
+                },
+                &principal,
+                &self.cancellation,
+            )
+            .await
+            .map_err(mutation_error)?;
         Ok(S3Response::new(CopyObjectOutput {
             copy_object_result: Some(CopyObjectResult {
                 e_tag: outcome.etag.map(ETag::Strong),
@@ -1772,22 +1861,21 @@ impl S3 for Gateway {
             .collect();
         let address = namespace::object_address(&session.key).map_err(namespace_error)?;
         let bytes = mutation_bytes(repository, &spool).await?;
-        mutation::apply(
-            repository,
-            Arc::clone(&self.runtime),
-            self.options,
-            &session.branch,
-            &address.path,
-            mutation::Change::Put {
-                bytes,
-                attributes: Box::new(attributes),
-                condition,
-            },
-            &principal,
-            &self.cancellation,
-        )
-        .await
-        .map_err(mutation_error)?;
+        self.mutations
+            .apply(
+                repository,
+                &session.branch,
+                &address.path,
+                mutation::Change::Put {
+                    bytes,
+                    attributes: Box::new(attributes),
+                    condition,
+                },
+                &principal,
+                &self.cancellation,
+            )
+            .await
+            .map_err(mutation_error)?;
         let loaded = crate::multipart::load(repository, &session.id)
             .await
             .map_err(multipart_error)?;
@@ -2111,20 +2199,19 @@ impl S3 for Gateway {
         };
         let repo = self.open(repository).await?;
         let operation = repo
+            .remote()
             .operation(OperationKind::Repository, &self.cancellation)
             .await
             .map_err(remote_error)?;
         let result = async {
             let snapshot = repo
-                .snapshot(
-                    &Revision::parse(&reference).map_err(remote_error)?,
-                    &operation,
-                )
+                .snapshot(&reference, &operation)
                 .await
-                .map_err(remote_error)?;
+                .map_err(gateway_error)?;
             let commit = snapshot.commit(&operation).await.map_err(remote_error)?;
             let commit_modified = timestamp(commit.committer.seconds)?;
-            let attribute_manifest = crate::attributes::load(repository, snapshot.commit_oid())
+            let attribute_manifest = repo
+                .attributes(repository, snapshot.commit_oid())
                 .await
                 .map_err(gateway_error)?;
             let encoded_ref = prefix
@@ -2146,10 +2233,6 @@ impl S3 for Gateway {
                 if !key.starts_with(prefix) {
                     continue;
                 }
-                let blob = snapshot
-                    .read_blob(&entry.path, &operation)
-                    .await
-                    .map_err(remote_error)?;
                 let attributes = attribute_manifest.object(path, entry.oid);
                 let modified = match attributes {
                     Some(attributes) => timestamp(
@@ -2158,12 +2241,16 @@ impl S3 for Gateway {
                     )?,
                     None => commit_modified.clone(),
                 };
-                let (content, logical_size) = classify_blob(blob)?;
-                let etag = match attributes {
-                    Some(attributes) => attributes.etag.clone(),
+                let (etag, logical_size) = match attributes {
+                    Some(attributes) => (attributes.etag.clone(), attributes.size),
                     None => {
+                        let blob = snapshot
+                            .read_blob(&entry.path, &operation)
+                            .await
+                            .map_err(remote_error)?;
+                        let (content, logical_size) = classify_blob(blob)?;
                         let spool = content.spool(repository, 0..logical_size, u64::MAX).await?;
-                        crate::content::md5_hex(&spool.digests.md5)
+                        (crate::content::md5_hex(&spool.digests.md5), logical_size)
                     }
                 };
                 keys.push((key, etag, Some(logical_size), modified));
@@ -3088,6 +3175,7 @@ impl Gateway {
         let url_encode = list_url_encoding(req.input.encoding_type.as_ref())?;
         let repo = self.open(repository).await?;
         let mut keys = repo
+            .remote()
             .refs()
             .entries
             .iter()
@@ -3266,6 +3354,9 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
             s3_error!(InvalidObjectState)
         }
         mutation::Error::Cancelled => s3_error!(RequestTimeout),
+        mutation::Error::Overloaded | mutation::Error::AdmissionTimeout => {
+            s3_error!(SlowDown)
+        }
         mutation::Error::PreconditionFailed => s3_error!(PreconditionFailed),
         mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => {
             s3_error!(

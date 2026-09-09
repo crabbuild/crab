@@ -25,6 +25,24 @@ Large payloads use bounded-memory spooling and Crab's verified LFS content path.
 The complete frozen surface and deliberate exclusions are in the protocol
 contract linked below.
 
+## Read and write performance model
+
+Requests share immutable repository read views keyed by the compacted generation
+and committed journal state. Ref snapshots, parsed Git trees, and S3 attributes
+are singleflight-cached inside that view. HEAD and attributed LIST requests use
+the committed size and ETag without opening blob payloads.
+
+Each mutation rewrites only the target path's ancestor trees and persists one
+path-local attribute delta. Immutable pack, index, visibility, and attribute
+artifacts are prepared and uploaded before the destination ref lease; the lease
+contains only branch revalidation and journal publication. Same-ref requests are
+admitted through a bounded FIFO queue, while different refs may prepare in
+parallel. Successful journal publication is immediately readable by the gateway;
+catalog compaction and commit-graph maintenance continue in the background.
+Maintenance is coalesced until the repository's local write burst is idle so a
+later journal wave never advances from a generation whose visibility proof is
+still being finalized.
+
 ## Build and run
 
 ```sh

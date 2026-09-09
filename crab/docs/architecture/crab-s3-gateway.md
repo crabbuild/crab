@@ -551,6 +551,15 @@ verified data; authorization and mutable ref resolution are not permanently
 cached along with it. Missing path visibility follows the selected permission
 contract, including distinctions between access denial and absence.
 
+The implemented repository read view is keyed by both compacted generation and
+the validated committed-journal digest. Concurrent refreshes and branch-tip
+snapshot resolution use singleflight cells; Git trees reuse the generation-bound
+remote-read cache, and attributes are cached per immutable commit. The gateway
+invalidates its mutable-ref view after publication. HEAD and attributed LIST
+resolve size and ETag from committed attributes without opening blob payloads.
+Committed journal packs remain readable through this path before locator/catalog
+publication completes.
+
 GET uses logical content opening for Git, Crab and LFS content. Raw `read_blob`
 is not a substitute. Read symlinks/submodules only according to phase 0; never
 follow paths into the gateway host filesystem. Version-specific AWS parameters
@@ -689,6 +698,18 @@ Shared admission must retire an old token before any replacement can execute.
 Re-preparation is bounded and allowed only for a proven pre-publication conflict;
 recheck object conditions on the new destination view. Never resolve contention
 with a blind forced branch update or replacement of an entire stale tree.
+
+The implemented mutation owner admits same-ref requests through a bounded FIFO
+queue. It resolves only the target's ancestor trees, writes one path-local
+attribute delta, prepares the pack, and uploads the pack sidecars, visibility
+evidence, and attribute delta concurrently before acquiring the ref lease. Under
+the lease it captures a new repository snapshot, revalidates the parent, and
+either publishes the journal edit or releases and reprepares. Journal success is
+the acknowledgement point; catalog compaction and commit-graph maintenance run
+asynchronously because the repository read view consumes committed journal
+transactions directly. The gateway coalesces that maintenance until its local
+repository write burst is idle, preventing overlapping compaction waves from
+advancing ahead of visibility proof publication.
 
 ### 4.2 PUT and DELETE execution rules
 

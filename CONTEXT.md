@@ -51,3 +51,7 @@ _Avoid_: Empty clone, broken worktree
 **Per-worktree state**:
 Crab-local metadata scoped to one worktree identity rather than the whole repository.
 _Avoid_: Shared state
+
+**Repository read view**:
+An immutable repository generation plus its validated committed-journal overlay, used to resolve refs, trees, objects, and version-bound attributes consistently for one request.
+_Avoid_: Mutable repository handle, when referring to a pinned view

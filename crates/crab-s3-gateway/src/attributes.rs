@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, str::FromStr as _};
 
 use bytes::Bytes;
 use gix_hash::ObjectId;
@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::gateway::Repository;
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+const LEGACY_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_DELTA_DEPTH: usize = 1_000_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -144,20 +146,25 @@ impl Checksums {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Manifest {
+    objects: BTreeMap<String, ObjectAttributes>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyManifest {
     version: u32,
     objects: BTreeMap<String, ObjectAttributes>,
 }
 
-impl Default for Manifest {
-    fn default() -> Self {
-        Self {
-            version: VERSION,
-            objects: BTreeMap::new(),
-        }
-    }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Delta {
+    version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
+    changes: BTreeMap<String, Option<ObjectAttributes>>,
 }
 
 impl Manifest {
@@ -167,16 +174,112 @@ impl Manifest {
             .filter(|attributes| attributes.blob_oid == oid.to_string())
     }
 
-    pub(crate) fn put(&mut self, path: String, attributes: ObjectAttributes) {
-        self.objects.insert(path, attributes);
-    }
-
-    pub(crate) fn remove(&mut self, path: &str) {
-        self.objects.remove(path);
+    fn apply(&mut self, changes: BTreeMap<String, Option<ObjectAttributes>>) {
+        for (path, attributes) in changes {
+            match attributes {
+                Some(attributes) => {
+                    self.objects.insert(path, attributes);
+                }
+                None => {
+                    self.objects.remove(&path);
+                }
+            }
+        }
     }
 }
 
 pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Result<Manifest> {
+    let mut current = Some(commit);
+    let mut deltas = Vec::new();
+    let mut manifest = Manifest::default();
+    while let Some(commit) = current {
+        if deltas.len() >= MAX_DELTA_DEPTH {
+            return Err(crate::Error::Config("S3 attribute delta chain is too deep"));
+        }
+        match load_stored(repository, commit).await? {
+            None => break,
+            Some(Stored::Legacy(legacy)) => {
+                manifest.objects = legacy.objects;
+                break;
+            }
+            Some(Stored::Delta(delta)) => {
+                current = parse_parent(delta.parent.as_deref())?;
+                deltas.push(delta.changes);
+            }
+        }
+    }
+    for changes in deltas.into_iter().rev() {
+        manifest.apply(changes);
+    }
+    Ok(manifest)
+}
+
+pub(crate) async fn load_object(
+    repository: &Repository,
+    commit: ObjectId,
+    path: &str,
+    oid: ObjectId,
+) -> crate::Result<Option<ObjectAttributes>> {
+    let mut current = Some(commit);
+    for _ in 0..MAX_DELTA_DEPTH {
+        let Some(commit) = current else {
+            return Ok(None);
+        };
+        match load_stored(repository, commit).await? {
+            None => return Ok(None),
+            Some(Stored::Legacy(legacy)) => {
+                return Ok(legacy
+                    .objects
+                    .get(path)
+                    .filter(|attributes| attributes.blob_oid == oid.to_string())
+                    .cloned());
+            }
+            Some(Stored::Delta(delta)) => {
+                if let Some(attributes) = delta.changes.get(path) {
+                    return Ok(attributes
+                        .as_ref()
+                        .filter(|attributes| attributes.blob_oid == oid.to_string())
+                        .cloned());
+                }
+                current = parse_parent(delta.parent.as_deref())?;
+            }
+        }
+    }
+    Err(crate::Error::Config("S3 attribute delta chain is too deep"))
+}
+
+pub(crate) async fn save_delta(
+    repository: &Repository,
+    commit: ObjectId,
+    parent: Option<ObjectId>,
+    path: String,
+    attributes: Option<ObjectAttributes>,
+) -> crate::Result<()> {
+    let target = repository
+        .layout
+        .repo_path(&format!("s3/attributes/{commit}.json"));
+    let bytes = serde_json::to_vec(&Delta {
+        version: VERSION,
+        parent: parent.map(|oid| oid.to_string()),
+        changes: BTreeMap::from([(path, attributes)]),
+    })
+    .map_err(|source| crate::Error::Attributes { source })?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(crate::Error::Config("S3 attribute delta exceeds 32 MiB"));
+    }
+    repository
+        .store
+        .put_exact(&target, Bytes::from(bytes))
+        .await?;
+    Ok(())
+}
+
+enum Stored {
+    Legacy(LegacyManifest),
+    Delta(Delta),
+}
+
+async fn load_stored(repository: &Repository, commit: ObjectId) -> crate::Result<Option<Stored>> {
     let path = repository
         .layout
         .repo_path(&format!("s3/attributes/{commit}.json"));
@@ -186,35 +289,40 @@ pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Re
         .await
     {
         Ok((bytes, _)) => bytes,
-        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(Manifest::default()),
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let manifest: Manifest =
-        serde_json::from_slice(&bytes).map_err(|source| crate::Error::Attributes { source })?;
-    if manifest.version != VERSION {
-        return Err(crate::Error::Config(
+    let version = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|source| crate::Error::Attributes { source })?
+        .get("version")
+        .and_then(serde_json::Value::as_u64);
+    match version {
+        Some(value) if value == u64::from(VERSION) => serde_json::from_slice(&bytes)
+            .map(Stored::Delta)
+            .map_err(|source| crate::Error::Attributes { source }),
+        // Version 1 is a persisted migration seam from the first gateway
+        // release. New commits always write path-local version 2 deltas.
+        Some(value) if value == u64::from(LEGACY_VERSION) => serde_json::from_slice(&bytes)
+            .map(Stored::Legacy)
+            .map_err(|source| crate::Error::Attributes { source }),
+        _ => Err(crate::Error::Config(
             "unsupported S3 attribute manifest version",
-        ));
+        )),
     }
-    Ok(manifest)
+    .and_then(|stored| match &stored {
+        Stored::Legacy(value) if value.version != LEGACY_VERSION => Err(crate::Error::Config(
+            "unsupported S3 attribute manifest version",
+        )),
+        Stored::Delta(value) if value.version != VERSION => Err(crate::Error::Config(
+            "unsupported S3 attribute manifest version",
+        )),
+        Stored::Legacy(_) | Stored::Delta(_) => Ok(Some(stored)),
+    })
 }
 
-pub(crate) async fn save(
-    repository: &Repository,
-    commit: ObjectId,
-    manifest: &Manifest,
-) -> crate::Result<()> {
-    let path = repository
-        .layout
-        .repo_path(&format!("s3/attributes/{commit}.json"));
-    let bytes =
-        serde_json::to_vec(manifest).map_err(|source| crate::Error::Attributes { source })?;
-    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
-        return Err(crate::Error::Config("S3 attribute manifest exceeds 32 MiB"));
-    }
-    repository
-        .store
-        .put_exact(&path, Bytes::from(bytes))
-        .await?;
-    Ok(())
+fn parse_parent(value: Option<&str>) -> crate::Result<Option<ObjectId>> {
+    value
+        .map(ObjectId::from_str)
+        .transpose()
+        .map_err(|_| crate::Error::Config("S3 attribute delta parent is corrupt"))
 }

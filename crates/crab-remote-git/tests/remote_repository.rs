@@ -1054,7 +1054,7 @@ async fn canonical_snapshot_reads_deltas_without_catalog_or_remote_mutation() {
         }
         let runtime = Arc::new(RemoteGitRuntime::default());
         fixture.backend.mutations.store(0, Ordering::SeqCst);
-        let operation = crab_remote_git::OperationContext::from_snapshot(
+        let repository = RemoteGitRepository::from_snapshot(
             fixture.layout.clone(),
             &snapshot,
             fixture.repository.identity().clone(),
@@ -1064,6 +1064,17 @@ async fn canonical_snapshot_reads_deltas_without_catalog_or_remote_mutation() {
         )
         .await
         .expect("open without catalog");
+        let operation = repository
+            .operation(OperationKind::Repository, &CancellationToken::new())
+            .await
+            .expect("journal-backed operation");
+        repository
+            .snapshot(
+                &Revision::parse("refs/heads/main").expect("main revision"),
+                &operation,
+            )
+            .await
+            .expect("journal-backed branch snapshot");
         let result = operation.read_object(fixture.target).await;
         let object = operation
             .finish(result)
