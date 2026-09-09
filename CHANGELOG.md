@@ -5,6 +5,22 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.2.1 - 2026-09-09
+
+### SDK And S3
+
+- Delivered the complete Rust SDK for local and remote repository workflows,
+  including clone, fetch, push, recovery, and qualification coverage.
+- Added the S3 gateway service with streaming and multipart object operations.
+- Expanded S3-compatible read and write paths with selective range handling and
+  foreground-write scheduling.
+
+### Git And Performance
+
+- Accelerated large-repository clones and kept incremental push latency bounded.
+- Improved first-time push guidance when a repository has no initialized
+  remote.
+
 ## 1.2.0 - 2026-09-08
 
 ### Git And Large Files

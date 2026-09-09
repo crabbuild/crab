@@ -20,6 +20,7 @@ PRODUCT_MANIFESTS=(
     "$WORKSPACE_DIR/crates/crab-auth-server/Cargo.toml"
     "$WORKSPACE_DIR/crates/crab-cache-server/Cargo.toml"
 )
+WORKSPACE_MANIFEST="$WORKSPACE_DIR/Cargo.toml"
 
 if [[ ! -f "$CARGO_LOCK" ]]; then
     echo "error: workspace lockfile is missing" >&2
@@ -86,6 +87,7 @@ for i in "${!PRODUCT_MANIFESTS[@]}"; do
     cp "${PRODUCT_MANIFESTS[$i]}" "$backup_dir/manifest-$i"
 done
 cp "$CARGO_LOCK" "$backup_dir/Cargo.lock"
+cp "$WORKSPACE_MANIFEST" "$backup_dir/Cargo.toml"
 restore_on_error() {
     status=$?
     trap - EXIT
@@ -94,6 +96,7 @@ restore_on_error() {
             cp "$backup_dir/manifest-$i" "${PRODUCT_MANIFESTS[$i]}"
         done
         cp "$backup_dir/Cargo.lock" "$CARGO_LOCK"
+        cp "$backup_dir/Cargo.toml" "$WORKSPACE_MANIFEST"
     fi
     rm -r "$backup_dir"
     exit "$status"
@@ -107,6 +110,17 @@ for manifest in "${PRODUCT_MANIFESTS[@]}"; do
         sed -i "s/^version = \"$CURRENT\"/version = \"$NEW_VERSION\"/" "$manifest"
     fi
 done
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' \
+        -e "s/crab-auth-server = { version = \"=$CURRENT\"/crab-auth-server = { version = \"=$NEW_VERSION\"/" \
+        -e "s/crab-cache-server = { version = \"=$CURRENT\"/crab-cache-server = { version = \"=$NEW_VERSION\"/" \
+        "$WORKSPACE_MANIFEST"
+else
+    sed -i \
+        -e "s/crab-auth-server = { version = \"=$CURRENT\"/crab-auth-server = { version = \"=$NEW_VERSION\"/" \
+        -e "s/crab-cache-server = { version = \"=$CURRENT\"/crab-cache-server = { version = \"=$NEW_VERSION\"/" \
+        "$WORKSPACE_MANIFEST"
+fi
 (cd "$WORKSPACE_DIR" && cargo metadata --format-version 1 >/dev/null)
 trap - EXIT
 rm -r "$backup_dir"
