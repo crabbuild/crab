@@ -54,6 +54,7 @@ pub struct StoreClient {
     metrics: Option<Arc<dyn ReadMetrics>>,
     availability: Option<Arc<dyn XorbAvailability>>,
     failures: Option<Arc<crate::error::OperationFailures>>,
+    selective_xorb_reads: bool,
 }
 
 impl StoreClient {
@@ -72,6 +73,7 @@ impl StoreClient {
             metrics: None,
             availability: None,
             failures: None,
+            selective_xorb_reads: false,
         }
     }
 
@@ -110,6 +112,13 @@ impl StoreClient {
 
     pub(crate) fn with_failures(mut self, failures: Arc<crate::error::OperationFailures>) -> Self {
         self.failures = Some(failures);
+        self
+    }
+
+    pub(crate) fn with_selective_xorb_reads(mut self) -> Self {
+        // Whole-file hydration avoids storing a second complete xorb beside its
+        // output. Range hydration opts in so cold reads fetch only needed payload.
+        self.selective_xorb_reads = true;
         self
     }
 
@@ -324,55 +333,11 @@ fn parse_xorb_url(url: &str) -> ClientResult<(MerkleHash, Vec<ChunkRange>)> {
     Ok((hash, ranges))
 }
 
-fn build_response_v2(
-    file_info: &MDBFileInfo,
-    byte_range: Option<FileRange>,
-) -> Option<QueryReconstructionResponseV2> {
-    let mut cumulative: u64 = 0;
-    let mut spans: Vec<(u64, u64)> = Vec::with_capacity(file_info.segments.len());
-    for seg in &file_info.segments {
-        let size = u64::from(seg.unpacked_segment_bytes);
-        spans.push((cumulative, cumulative + size));
-        cumulative += size;
-    }
-    let file_size = cumulative;
-
-    let (first_idx, last_idx, offset_into_first_range) = match byte_range {
-        Some(range) => {
-            if range.start >= file_size {
-                return None;
-            }
-
-            let first = spans.iter().position(|(_, end)| *end > range.start)?;
-            let last = spans
-                .iter()
-                .rposition(|(start, _)| *start < range.end.min(file_size))
-                .unwrap_or(first);
-            let offset = range.start.saturating_sub(spans[first].0);
-            (first, last, offset)
-        }
-        None => {
-            if file_info.segments.is_empty() {
-                (0, 0, 0)
-            } else {
-                (0, file_info.segments.len() - 1, 0)
-            }
-        }
-    };
-
-    if file_info.segments.is_empty() {
-        return Some(QueryReconstructionResponseV2 {
-            offset_into_first_range: 0,
-            terms: Vec::new(),
-            xorbs: HashMap::new(),
-        });
-    }
-
-    let selected = &file_info.segments[first_idx..=last_idx];
-    let mut terms = Vec::with_capacity(selected.len());
+fn build_response_v2(file_info: &MDBFileInfo) -> QueryReconstructionResponseV2 {
+    let mut terms = Vec::with_capacity(file_info.segments.len());
     let mut xorbs: HashMap<HexMerkleHash, Vec<XorbMultiRangeFetch>> = HashMap::new();
 
-    for seg in selected {
+    for seg in &file_info.segments {
         let chunks = ChunkRange::new(seg.chunk_index_start, seg.chunk_index_end);
         terms.push(XorbReconstructionTerm {
             hash: HexMerkleHash::from(seg.xorb_hash),
@@ -393,11 +358,158 @@ fn build_response_v2(
             .push(fetch);
     }
 
-    Some(QueryReconstructionResponseV2 {
-        offset_into_first_range,
+    QueryReconstructionResponseV2 {
+        offset_into_first_range: 0,
         terms,
         xorbs,
-    })
+    }
+}
+
+fn build_range_response_v2(
+    file_info: &MDBFileInfo,
+    shard: &ShardReader,
+    requested: FileRange,
+) -> ClientResult<Option<QueryReconstructionResponseV2>> {
+    if requested.end < requested.start {
+        return Err(ClientError::InvalidRange);
+    }
+    let file_size = file_info
+        .segments
+        .iter()
+        .try_fold(0_u64, |total, segment| {
+            total.checked_add(u64::from(segment.unpacked_segment_bytes))
+        })
+        .ok_or_else(|| ClientError::Other("reconstruction file size overflow".to_owned()))?;
+    if requested.start >= file_size {
+        return Ok(None);
+    }
+    let requested = FileRange::new(requested.start, requested.end.min(file_size));
+    let mut terms = Vec::new();
+    let mut xorbs: HashMap<HexMerkleHash, Vec<XorbMultiRangeFetch>> = HashMap::new();
+    let mut segment_start = 0_u64;
+    let mut offset_into_first_range = None;
+
+    for segment in &file_info.segments {
+        let segment_end = segment_start
+            .checked_add(u64::from(segment.unpacked_segment_bytes))
+            .ok_or_else(|| ClientError::Other("reconstruction segment overflow".to_owned()))?;
+        if segment_end <= requested.start {
+            segment_start = segment_end;
+            continue;
+        }
+        if segment_start >= requested.end {
+            break;
+        }
+
+        let xorb = shard
+            .get_xorb_info(&segment.xorb_hash)
+            .map_err(ClientError::internal)?
+            .ok_or_else(|| {
+                ClientError::Other(format!(
+                    "reconstruction shard lacks xorb metadata for {}",
+                    segment.xorb_hash.hex()
+                ))
+            })?;
+        let chunk_start = usize::try_from(segment.chunk_index_start)
+            .map_err(|_| ClientError::Other("xorb chunk index overflow".to_owned()))?;
+        let chunk_end = usize::try_from(segment.chunk_index_end)
+            .map_err(|_| ClientError::Other("xorb chunk index overflow".to_owned()))?;
+        let chunks = xorb.chunks.get(chunk_start..chunk_end).ok_or_else(|| {
+            ClientError::Other(format!(
+                "reconstruction chunk range {}..{} exceeds xorb {} metadata",
+                segment.chunk_index_start,
+                segment.chunk_index_end,
+                segment.xorb_hash.hex()
+            ))
+        })?;
+        let declared_size = chunks.iter().try_fold(0_u64, |total, chunk| {
+            total.checked_add(u64::from(chunk.unpacked_segment_bytes))
+        });
+        if declared_size != Some(u64::from(segment.unpacked_segment_bytes)) {
+            return Err(ClientError::Other(format!(
+                "reconstruction segment size does not match xorb {} chunk metadata",
+                segment.xorb_hash.hex()
+            )));
+        }
+
+        let mut selected_start = 0_usize;
+        let mut selected_chunk_file_start = segment_start;
+        while selected_start < chunks.len() {
+            let next = selected_chunk_file_start
+                .checked_add(u64::from(chunks[selected_start].unpacked_segment_bytes))
+                .ok_or_else(|| ClientError::Other("reconstruction chunk overflow".to_owned()))?;
+            if next > requested.start {
+                break;
+            }
+            selected_chunk_file_start = next;
+            selected_start += 1;
+        }
+
+        let mut selected_end = selected_start;
+        let mut selected_size = 0_u64;
+        let mut selected_chunk_file_end = selected_chunk_file_start;
+        while selected_end < chunks.len() && selected_chunk_file_end < requested.end {
+            let size = u64::from(chunks[selected_end].unpacked_segment_bytes);
+            selected_size = selected_size
+                .checked_add(size)
+                .ok_or_else(|| ClientError::Other("reconstruction chunk overflow".to_owned()))?;
+            selected_chunk_file_end = selected_chunk_file_end
+                .checked_add(size)
+                .ok_or_else(|| ClientError::Other("reconstruction chunk overflow".to_owned()))?;
+            selected_end += 1;
+        }
+        if selected_start == selected_end {
+            segment_start = segment_end;
+            continue;
+        }
+
+        if offset_into_first_range.is_none() {
+            offset_into_first_range = Some(requested.start - selected_chunk_file_start);
+        }
+        let selected_start = segment
+            .chunk_index_start
+            .checked_add(
+                u32::try_from(selected_start).map_err(|_| {
+                    ClientError::Other("selected xorb chunk index overflow".to_owned())
+                })?,
+            )
+            .ok_or_else(|| ClientError::Other("selected xorb chunk index overflow".to_owned()))?;
+        let selected_end = segment
+            .chunk_index_start
+            .checked_add(
+                u32::try_from(selected_end).map_err(|_| {
+                    ClientError::Other("selected xorb chunk index overflow".to_owned())
+                })?,
+            )
+            .ok_or_else(|| ClientError::Other("selected xorb chunk index overflow".to_owned()))?;
+        let chunks = ChunkRange::new(selected_start, selected_end);
+        let unpacked_length = u32::try_from(selected_size)
+            .map_err(|_| ClientError::Other("selected xorb range exceeds u32".to_owned()))?;
+        terms.push(XorbReconstructionTerm {
+            hash: HexMerkleHash::from(segment.xorb_hash),
+            unpacked_length,
+            range: chunks,
+        });
+        xorbs
+            .entry(HexMerkleHash::from(segment.xorb_hash))
+            .or_default()
+            .push(XorbMultiRangeFetch {
+                url: xorb_url(&segment.xorb_hash, std::slice::from_ref(&chunks)),
+                ranges: vec![XorbRangeDescriptor {
+                    chunks,
+                    // This adapter encodes chunk addressing in its private URL;
+                    // Xet still requires a well-formed inclusive HTTP range.
+                    bytes: HttpRange::new(0, selected_size - 1),
+                }],
+            });
+        segment_start = segment_end;
+    }
+
+    Ok(Some(QueryReconstructionResponseV2 {
+        offset_into_first_range: offset_into_first_range.unwrap_or(0),
+        terms,
+        xorbs,
+    }))
 }
 
 #[cfg_attr(not(target_family = "wasm"), async_trait::async_trait)]
@@ -448,7 +560,10 @@ impl Client for StoreClient {
             ))));
         };
 
-        Ok(build_response_v2(&file_info, bytes_range))
+        match bytes_range {
+            Some(range) => build_range_response_v2(&file_info, &shard, range),
+            None => Ok(Some(build_response_v2(&file_info))),
+        }
     }
 
     async fn batch_get_reconstruction(
@@ -492,9 +607,7 @@ impl Client for StoreClient {
                     );
                     continue;
                 };
-                let Some(response) = build_response_v2(&file_info, None) else {
-                    continue;
-                };
+                let response = build_response_v2(&file_info);
                 files.insert(HexMerkleHash::from(file_id), response.terms);
                 for (xorb_hash, fetches) in response.xorbs {
                     let entries = fetch_info.entry(xorb_hash).or_default();
@@ -546,9 +659,16 @@ impl Client for StoreClient {
             .iter()
             .map(|range| (range.start, range.end))
             .collect::<Vec<_>>();
-        self.store
-            .get_xorb_chunks_without_install(&xorb_path, &xorb_hash, &ranges)
-            .await
+        let result = if self.selective_xorb_reads {
+            self.store
+                .get_xorb_chunks(&xorb_path, &xorb_hash, &ranges)
+                .await
+        } else {
+            self.store
+                .get_xorb_chunks_without_install(&xorb_path, &xorb_hash, &ranges)
+                .await
+        };
+        result
             .map_err(ReadError::from)
             .map_err(|error| self.map_read_error(error))
     }

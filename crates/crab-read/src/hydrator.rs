@@ -156,6 +156,57 @@ impl ShardHydrator {
         self.reconstruct_to_writer(ptr, file).await
     }
 
+    /// Reconstruct `[start, end)` into `dest` without buffering the selected range.
+    ///
+    /// The range is clamped to the pointer's declared size. Partial reconstruction
+    /// verifies the selected Xet chunks and exact output length, but cannot verify
+    /// the pointer's whole-file hash because unread bytes are not reconstructed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed ranges, unavailable or corrupt Xet data,
+    /// output-length mismatches, or destination I/O failures.
+    pub async fn reconstruct_range_to_path(
+        &self,
+        ptr: &Pointer,
+        start: u64,
+        end: u64,
+        dest: &std::path::Path,
+    ) -> Result<u64> {
+        let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_to_path")?;
+        let file = std::fs::File::create(dest)?;
+        if start >= end {
+            return Ok(0);
+        }
+
+        let file_hash = MerkleHash::from(ptr.file_hash);
+        let client = self
+            .store_client_for_pointer(ptr, None)
+            .with_selective_xorb_reads();
+        let cancel = CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let (_, bytes_written) = self
+            .reconstruct_bounded_to_writer(
+                client,
+                file_hash,
+                file,
+                Some(FileRange::new(start, end)),
+                end - start,
+                &cancel,
+            )
+            .await?;
+        if bytes_written != end - start {
+            return Err(ReadError::CorruptObject {
+                path: file_hash.hex(),
+                reason: format!(
+                    "reconstruction size mismatch: expected {}, got {bytes_written}",
+                    end - start
+                ),
+            });
+        }
+        Ok(bytes_written)
+    }
+
     /// Reconstruct a pointer into a blocking writer and verify its hash.
     pub async fn reconstruct_to_writer<W>(&self, ptr: &Pointer, writer: W) -> Result<u64>
     where
@@ -183,53 +234,9 @@ impl ShardHydrator {
         let client = self.store_client_for_pointer(ptr, file_index_lookup);
         self.preflight_shard_coverage(&client, ptr).await?;
 
-        let tap_state = Arc::new(std::sync::Mutex::new(GenericHasherTapState {
-            writer: Some(writer),
-            hasher: blake3::Hasher::new(),
-            bytes_written: 0,
-            expected_size: ptr.size,
-            exceeded: false,
-        }));
-        let _writer_owner = GenericHasherTapOwner(Arc::clone(&tap_state));
-        let writer = GenericHasherTap {
-            shared: Arc::clone(&tap_state),
-        };
-
-        let operation_cancel = cancel.child_token();
-        let _cancel_on_drop = operation_cancel.clone().drop_guard();
-        let outcome = self
-            .reconstruct_to_writer_unverified(client, file_hash, writer, None, &operation_cancel)
-            .await;
-
-        let (actual_hash, bytes_written) = {
-            let mut guard = tap_state
-                .lock()
-                .map_err(|_| ReadError::internal("hasher tap poisoned"))?;
-            let mut writer = guard.writer.take();
-            if guard.exceeded {
-                return Err(ReadError::CorruptObject {
-                    path: file_hash.hex(),
-                    reason: format!(
-                        "reconstruction exceeds declared output size of {} bytes",
-                        ptr.size
-                    ),
-                });
-            }
-            outcome?;
-            if let Some(writer) = writer.as_mut() {
-                // A final-flush failure follows written output, just like an
-                // Xet writer failure; retain the same source and replay policy.
-                writer.flush().map_err(|error| ReadError::Reconstruction {
-                    file_hash: file_hash.hex(),
-                    source: crate::error::ReconstructionError::from(
-                        xet_data::file_reconstruction::FileReconstructionError::from(error),
-                    ),
-                })?;
-            }
-            drop(writer);
-            let hash: [u8; 32] = guard.hasher.finalize().into();
-            (hash, guard.bytes_written)
-        };
+        let (actual_hash, bytes_written) = self
+            .reconstruct_bounded_to_writer(client, file_hash, writer, None, ptr.size, cancel)
+            .await?;
 
         if actual_hash != ptr.file_hash {
             return Err(ReadError::HashMismatch {
@@ -241,12 +248,11 @@ impl ShardHydrator {
             return Err(ReadError::CorruptObject {
                 path: file_hash.hex(),
                 reason: format!(
-                    "reconstruction size mismatch: expected {}, got {}",
-                    ptr.size, bytes_written
+                    "reconstruction size mismatch: expected {}, got {bytes_written}",
+                    ptr.size
                 ),
             });
         }
-
         Ok(bytes_written)
     }
 
@@ -258,16 +264,11 @@ impl ShardHydrator {
         end: u64,
     ) -> Result<Vec<u8>> {
         let ptr = Pointer::parse(pointer_bytes)?;
+        // VFS windows retain decoded Xet ranges and expect one non-installing
+        // whole-xorb source read. The path API opts into selective origin reads.
         let client = self.store_client_for_pointer(&ptr, None);
 
-        if end < start {
-            return Err(ReadError::internal(format!(
-                "reconstruct_range_from_pointer: end ({end}) < start ({start})"
-            )));
-        }
-
-        let end = end.min(ptr.size);
-        let start = start.min(ptr.size);
+        let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_from_pointer")?;
         if start >= end {
             return Ok(Vec::new());
         }
@@ -382,6 +383,64 @@ impl ShardHydrator {
         Ok(())
     }
 
+    async fn reconstruct_bounded_to_writer<W>(
+        &self,
+        client: StoreClient,
+        file_hash: MerkleHash,
+        writer: W,
+        range: Option<FileRange>,
+        expected_size: u64,
+        cancel: &CancellationToken,
+    ) -> Result<([u8; 32], u64)>
+    where
+        W: Write + Send + 'static,
+    {
+        let tap_state = Arc::new(std::sync::Mutex::new(GenericHasherTapState {
+            writer: Some(writer),
+            hasher: blake3::Hasher::new(),
+            bytes_written: 0,
+            expected_size,
+            exceeded: false,
+        }));
+        let _writer_owner = GenericHasherTapOwner(Arc::clone(&tap_state));
+        let writer = GenericHasherTap {
+            shared: Arc::clone(&tap_state),
+        };
+
+        let operation_cancel = cancel.child_token();
+        let _cancel_on_drop = operation_cancel.clone().drop_guard();
+        let outcome = self
+            .reconstruct_to_writer_unverified(client, file_hash, writer, range, &operation_cancel)
+            .await;
+
+        let mut guard = tap_state
+            .lock()
+            .map_err(|_| ReadError::internal("hasher tap poisoned"))?;
+        let mut writer = guard.writer.take();
+        if guard.exceeded {
+            return Err(ReadError::CorruptObject {
+                path: file_hash.hex(),
+                reason: format!(
+                    "reconstruction exceeds declared output size of {expected_size} bytes"
+                ),
+            });
+        }
+        outcome?;
+        if let Some(writer) = writer.as_mut() {
+            // A final-flush failure follows written output, just like an
+            // Xet writer failure; retain the same source and replay policy.
+            writer.flush().map_err(|error| ReadError::Reconstruction {
+                file_hash: file_hash.hex(),
+                source: crate::error::ReconstructionError::from(
+                    xet_data::file_reconstruction::FileReconstructionError::from(error),
+                ),
+            })?;
+        }
+        drop(writer);
+        let hash: [u8; 32] = guard.hasher.finalize().into();
+        Ok((hash, guard.bytes_written))
+    }
+
     async fn preflight_shard_coverage(&self, client: &StoreClient, ptr: &Pointer) -> Result<()> {
         use xet_client::cas_client::Client;
         let file_hash = MerkleHash::from(ptr.file_hash);
@@ -415,6 +474,15 @@ impl ShardHydrator {
             example_chunk_index: example.0,
         })
     }
+}
+
+fn checked_range(size: u64, start: u64, end: u64, operation: &str) -> Result<(u64, u64)> {
+    if end < start {
+        return Err(ReadError::internal(format!(
+            "{operation}: end ({end}) < start ({start})"
+        )));
+    }
+    Ok((start.min(size), end.min(size)))
 }
 
 fn fixed_hydrate_concurrency(concurrency: usize) -> Result<Arc<AdaptiveConcurrencyController>> {
@@ -536,9 +604,100 @@ mod tests {
 
     use super::{GenericHasherTap, GenericHasherTapState};
 
+    #[derive(Debug)]
+    struct RejectFullXorbReads {
+        inner: Arc<dyn object_store::ObjectStore>,
+    }
+
+    impl std::fmt::Display for RejectFullXorbReads {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("RejectFullXorbReads")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for RejectFullXorbReads {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            options: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if !options.head && options.range.is_none() && location.as_ref().contains("/xorbs/") {
+                return Err(object_store::Error::Generic {
+                    store: "RejectFullXorbReads",
+                    source: Box::new(std::io::Error::other(
+                        "test forbids complete xorb body reads",
+                    )),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
     pub(super) async fn reconstruction_fixture(
         root: &std::path::Path,
         corrupt_origin: bool,
+    ) -> (super::ShardHydrator, crab_types::pointer::Pointer, Vec<u8>) {
+        let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        reconstruction_fixture_with_origin(root, corrupt_origin, origin).await
+    }
+
+    async fn reconstruction_fixture_with_origin(
+        root: &std::path::Path,
+        corrupt_origin: bool,
+        origin: crab_storage::Store,
     ) -> (super::ShardHydrator, crab_types::pointer::Pointer, Vec<u8>) {
         use crab_xet::shard::{
             FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
@@ -546,21 +705,36 @@ mod tests {
         };
         use crab_xet::xorb::builder::{RunId, XorbBuilder};
 
-        let data = vec![42; 128 * 1024];
-        let chunk = crab_xet::xorb::format::Chunk::new(bytes::Bytes::from(data.clone()));
+        let payloads = (0_u8..4)
+            .map(|value| vec![42 + value; 32 * 1024])
+            .collect::<Vec<_>>();
+        let data = payloads.concat();
+        let chunks = payloads
+            .into_iter()
+            .map(|payload| crab_xet::xorb::format::Chunk::new(bytes::Bytes::from(payload)))
+            .collect::<Vec<_>>();
         let mut builder = XorbBuilder::new();
-        builder.push(&chunk, RunId(0)).unwrap();
+        for chunk in &chunks {
+            builder.push(chunk, RunId(0)).unwrap();
+        }
         let xorb = builder.finalize().unwrap().remove(0);
         let file_hash = *blake3::hash(&data).as_bytes();
         let mut shard = ShardWriter::new();
         shard
             .add_xorb(Arc::new(MDBXorbInfo {
-                metadata: XorbChunkSequenceHeader::new(xorb.hash, 1, data.len()),
-                chunks: vec![XorbChunkSequenceEntry::new(
-                    chunk.hash,
-                    data.len() as u32,
-                    0,
-                )],
+                metadata: XorbChunkSequenceHeader::new(xorb.hash, chunks.len() as u32, data.len()),
+                chunks: chunks
+                    .iter()
+                    .scan(0_u32, |offset, chunk| {
+                        let entry = XorbChunkSequenceEntry::new(
+                            chunk.hash,
+                            chunk.data.len() as u32,
+                            *offset,
+                        );
+                        *offset += chunk.data.len() as u32;
+                        Some(entry)
+                    })
+                    .collect(),
             }))
             .unwrap();
         shard
@@ -570,14 +744,14 @@ mod tests {
                     xorb.hash,
                     data.len() as u32,
                     0,
-                    1,
+                    chunks.len() as u32,
                 )],
                 verification: vec![],
                 metadata_ext: None,
             })
             .unwrap();
         let (shard_bytes, shard_hash) = shard.finalize().unwrap();
-        let hydrator = runtime(root, 1024 * 1024);
+        let hydrator = runtime_with_origin(root, 1024 * 1024, origin);
         hydrator
             .store
             .origin()
@@ -913,6 +1087,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn range_to_path_returns_exact_bytes_without_full_xorb_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let guarded = Arc::new(RejectFullXorbReads {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+        });
+        let origin = crab_storage::Store::new(guarded);
+        let (hydrator, pointer, original) =
+            reconstruction_fixture_with_origin(&directory.path().join("cache"), false, origin)
+                .await;
+        let dest = directory.path().join("selected");
+
+        let written = hydrator
+            .reconstruct_range_to_path(&pointer, 1024, 8192, &dest)
+            .await
+            .unwrap();
+
+        assert_eq!(written, 8192 - 1024);
+        assert_eq!(std::fs::read(dest).unwrap(), original[1024..8192]);
+    }
+
+    #[tokio::test]
+    async fn invalid_range_does_not_truncate_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, pointer, _) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let dest = directory.path().join("selected");
+        std::fs::write(&dest, b"keep").unwrap();
+
+        assert!(
+            hydrator
+                .reconstruct_range_to_path(&pointer, 9, 8, &dest)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(dest).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
     async fn incomplete_range_output_is_not_success() {
         let directory = tempfile::tempdir().unwrap();
         let (hydrator, mut pointer, _) =
@@ -977,6 +1189,14 @@ mod tests {
 
     fn runtime(root: &std::path::Path, max_bytes: u64) -> super::ShardHydrator {
         let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        runtime_with_origin(root, max_bytes, origin)
+    }
+
+    fn runtime_with_origin(
+        root: &std::path::Path,
+        max_bytes: u64,
+        origin: crab_storage::Store,
+    ) -> super::ShardHydrator {
         let local = Arc::new(crab_cache::LocalCache::with_limits(
             root.to_owned(),
             max_bytes,

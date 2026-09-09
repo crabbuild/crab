@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     io::Write as _,
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -11,16 +11,21 @@ use std::{
 use bytes::Bytes;
 use crab_coordination::{GcFenceHeartbeat, GcFenceLease, PushLock};
 use crab_metadata::{git_visibility, manifests::PackManifestEntry, ref_journal::RefJournalEdit};
-use crab_remote_git::{EntryMode, OperationKind, RemoteGitRepository, Revision};
+use crab_remote_git::{EntryKind, EntryMode, OperationKind, RemoteGitRepository, Revision};
 use gix_hash::ObjectId;
 use gix_object::{Kind, WriteTo as _, bstr::BString, tree};
 use md5::Digest as _;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::{attributes, gateway::Repository};
 
 const LOCK_TTL: Duration = Duration::from_secs(300);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_QUEUED_WRITES_PER_REF: usize = 64;
+const WRITE_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_REPREPARE_ATTEMPTS: usize = 8;
+const TREE_PAGE_SIZE: usize = 4_096;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -30,8 +35,16 @@ pub(crate) enum Error {
     NotDirectory,
     #[error("object path names a directory")]
     IsDirectory,
+    #[error("object write precondition failed")]
+    PreconditionFailed,
     #[error("repository mutation was cancelled")]
     Cancelled,
+    #[error("repository write queue is full")]
+    Overloaded,
+    #[error("repository write queue wait timed out")]
+    AdmissionTimeout,
+    #[error("repository write admission state is unavailable")]
+    AdmissionState,
     #[error("system clock is before the Unix epoch")]
     Clock(#[from] std::time::SystemTimeError),
     #[error("repository read failed")]
@@ -62,7 +75,12 @@ pub(crate) enum Error {
 
 impl From<crate::Error> for Error {
     fn from(error: crate::Error) -> Self {
-        Self::Attributes(Box::new(error))
+        match error {
+            crate::Error::Remote(source) => Self::Remote(source),
+            crate::Error::Metadata(source) => Self::Metadata(source),
+            crate::Error::Write(source) => Self::Write(source),
+            error => Self::Attributes(Box::new(error)),
+        }
     }
 }
 
@@ -71,13 +89,175 @@ pub(crate) enum Change {
     Put {
         bytes: Bytes,
         attributes: Box<attributes::PutAttributes>,
+        condition: PutCondition,
+    },
+    Attributes {
+        expected: ObjectId,
+        attributes: Box<attributes::PutAttributes>,
     },
     Delete,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) enum PutCondition {
+    #[default]
+    None,
+    IfNoneMatchAny,
+    IfMatch(ObjectId),
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Outcome {
     pub(crate) etag: Option<String>,
+}
+
+pub(crate) struct Coordinator {
+    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    options: crab_remote_git::RepositoryOptions,
+    admission: WriteAdmission,
+}
+
+impl Coordinator {
+    pub(crate) fn new(
+        runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+        options: crab_remote_git::RepositoryOptions,
+    ) -> Self {
+        Self {
+            runtime,
+            options,
+            admission: WriteAdmission::default(),
+        }
+    }
+
+    pub(crate) async fn apply(
+        &self,
+        repository: &Repository,
+        branch: &str,
+        path: &crab_remote_git::GitPath,
+        change: Change,
+        principal: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Outcome> {
+        repository.maintenance.begin();
+        let result = async {
+            let _admitted = self
+                .admission
+                .acquire(&repository.config.name, branch, cancel)
+                .await?;
+            apply_admitted(
+                repository,
+                Arc::clone(&self.runtime),
+                self.options,
+                branch,
+                path,
+                change,
+                principal,
+                cancel,
+            )
+            .await
+        }
+        .await;
+        if let Some((epoch, maintenance_cancel)) = repository.maintenance.finish(cancel) {
+            crate::repository::schedule_readability(
+                repository,
+                Arc::clone(&self.runtime),
+                self.options,
+                maintenance_cancel,
+                epoch,
+            );
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+async fn apply(
+    repository: &Repository,
+    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    options: crab_remote_git::RepositoryOptions,
+    branch: &str,
+    path: &crab_remote_git::GitPath,
+    change: Change,
+    principal: &str,
+    cancel: &CancellationToken,
+) -> Result<Outcome> {
+    Coordinator::new(runtime, options)
+        .apply(repository, branch, path, change, principal, cancel)
+        .await
+}
+
+#[derive(Default)]
+struct WriteAdmission {
+    refs: std::sync::Mutex<HashMap<String, Weak<RefQueue>>>,
+}
+
+struct RefQueue {
+    gate: Arc<Semaphore>,
+    admitted: AtomicUsize,
+}
+
+struct WritePermit {
+    queue: Arc<RefQueue>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for WritePermit {
+    fn drop(&mut self) {
+        self.queue.admitted.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl WriteAdmission {
+    async fn acquire(
+        &self,
+        repository: &str,
+        branch: &str,
+        cancel: &CancellationToken,
+    ) -> Result<WritePermit> {
+        check_cancelled(cancel)?;
+        let key = format!("{repository}\0{branch}");
+        let queue = {
+            let mut refs = self.refs.lock().map_err(|_| Error::AdmissionState)?;
+            refs.retain(|_, queue| queue.strong_count() > 0);
+            match refs.get(&key).and_then(Weak::upgrade) {
+                Some(queue) => queue,
+                None => {
+                    let queue = Arc::new(RefQueue {
+                        gate: Arc::new(Semaphore::new(1)),
+                        admitted: AtomicUsize::new(0),
+                    });
+                    refs.insert(key, Arc::downgrade(&queue));
+                    queue
+                }
+            }
+        };
+        queue
+            .admitted
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                (value < MAX_QUEUED_WRITES_PER_REF).then_some(value + 1)
+            })
+            .map_err(|_| Error::Overloaded)?;
+        let acquired = tokio::select! {
+            () = cancel.cancelled() => Err(Error::Cancelled),
+            result = tokio::time::timeout(WRITE_QUEUE_TIMEOUT, Arc::clone(&queue.gate).acquire_owned()) => {
+                match result {
+                    Ok(Ok(permit)) => Ok(permit),
+                    Ok(Err(_)) => Err(Error::AdmissionState),
+                    Err(_) => Err(Error::AdmissionTimeout),
+                }
+            }
+        };
+        match acquired {
+            Ok(permit) => Ok(WritePermit {
+                queue,
+                _permit: permit,
+            }),
+            Err(error) => {
+                queue.admitted.fetch_sub(1, Ordering::AcqRel);
+                Err(error)
+            }
+        }
+    }
 }
 
 struct RefLease {
@@ -93,13 +273,36 @@ impl RefLease {
         cancel: &CancellationToken,
     ) -> Result<Self> {
         check_cancelled(cancel)?;
-        let mut lock = PushLock::acquire_ref(
-            repository.store.inner(),
-            repository.layout.repo_prefix(),
-            branch,
-            LOCK_TTL,
-        )
-        .await?;
+        let deadline = tokio::time::Instant::now() + WRITE_QUEUE_TIMEOUT;
+        let mut attempt = 0u32;
+        let mut lock = loop {
+            match PushLock::acquire_ref(
+                repository.store.inner(),
+                repository.layout.repo_prefix(),
+                branch,
+                LOCK_TTL,
+            )
+            .await
+            {
+                Ok(lock) => break lock,
+                Err(crab_coordination::CoordinationError::PushLockHeld { .. })
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    let delay = Duration::from_millis(
+                        25u64.saturating_mul(1u64.checked_shl(attempt.min(4)).unwrap_or(16)),
+                    );
+                    attempt = attempt.saturating_add(1);
+                    tokio::select! {
+                        () = cancel.cancelled() => return Err(Error::Cancelled),
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                }
+                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                    return Err(Error::AdmissionTimeout);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         let holder = lock.holder().to_owned();
         let stop = CancellationToken::new();
         let stopped = stop.clone();
@@ -127,7 +330,7 @@ impl RefLease {
     }
 }
 
-pub(crate) async fn apply(
+async fn apply_admitted(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
@@ -137,8 +340,6 @@ pub(crate) async fn apply(
     principal: &str,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
-    let lease = RefLease::acquire(repository, branch, cancel).await?;
-    let maintenance_runtime = Arc::clone(&runtime);
     let mut fences = Vec::new();
     let result = async {
         for domain in [
@@ -151,15 +352,14 @@ pub(crate) async fn apply(
             let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), LOCK_TTL / 3);
             fences.push((fence, heartbeat));
         }
-        Box::pin(apply_locked(
+        Box::pin(apply_with_fences(
             repository,
-            runtime,
+            Arc::clone(&runtime),
             options,
             branch,
             path,
             change,
             principal,
-            &lease.holder,
             cancel,
         ))
         .await
@@ -171,16 +371,13 @@ pub(crate) async fn apply(
             tracing::warn!(%error, "S3 GC fence cleanup failed");
         }
     }
-    lease.release().await;
     if result.is_ok() {
-        crate::repository::ensure_readable(repository, maintenance_runtime, options, cancel)
-            .await?;
+        repository.read_views.invalidate().await;
     }
     result
 }
 
-#[expect(clippy::too_many_arguments)]
-async fn apply_locked(
+async fn apply_with_fences(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
@@ -188,100 +385,150 @@ async fn apply_locked(
     path: &crab_remote_git::GitPath,
     change: Change,
     principal: &str,
-    holder: &str,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
-    check_cancelled(cancel)?;
-    let remote = crate::repository::open_current(repository, runtime, options, cancel).await?;
-    let old = remote
-        .refs()
-        .entries
-        .iter()
-        .find(|reference| reference.name == branch)
-        .map(|reference| reference.target);
-    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-        &repository.store,
-        &repository.layout,
-    )
-    .await?;
-    if snapshot.manifest.generation != remote.generation()
-        || snapshot.journal.refs.get(branch).map(String::as_str)
-            != old.as_ref().map(ToString::to_string).as_deref()
-    {
-        return Err(crab_write::WriteError::RefChanged {
-            ref_name: branch.to_owned(),
-            path: repository.layout.repo_prefix().to_owned(),
+    for _ in 0..MAX_REPREPARE_ATTEMPTS {
+        check_cancelled(cancel)?;
+        let prepared = prepare_and_upload(
+            repository,
+            Arc::clone(&runtime),
+            options,
+            branch,
+            path,
+            change.clone(),
+            principal,
+            cancel,
+        )
+        .await?;
+        let prepared = match prepared {
+            Prepared::Noop(outcome) => return Ok(outcome),
+            Prepared::Commit(prepared) => prepared,
+        };
+        let lease = RefLease::acquire(repository, branch, cancel).await?;
+        let published =
+            publish_prepared(repository, branch, &lease.holder, &prepared, cancel).await;
+        lease.release().await;
+        match published? {
+            Publish::Committed => {
+                return Ok(Outcome {
+                    etag: prepared.etag,
+                });
+            }
+            Publish::Reprepare => repository.read_views.invalidate().await,
         }
-        .into());
     }
-    let mut attribute_manifest = match old {
-        Some(old) => attributes::load(repository, old)
-            .await
-            .map_err(|error| Error::Attributes(Box::new(error)))?,
-        None => attributes::Manifest::default(),
-    };
-    let operation = remote.operation(OperationKind::Repository, cancel).await?;
-    let built = build_commit(
-        &remote,
-        &operation,
-        old,
-        path,
-        change,
-        principal,
-        &attribute_manifest,
-    )
+    Err(crab_write::WriteError::RefChanged {
+        ref_name: branch.to_owned(),
+        path: repository.layout.repo_prefix().to_owned(),
+    }
+    .into())
+}
+
+struct UploadedMutation {
+    parent: Option<ObjectId>,
+    commit: ObjectId,
+    etag: Option<String>,
+    pack: PackManifestEntry,
+    evidence_hash: String,
+}
+
+enum Prepared {
+    Noop(Outcome),
+    Commit(UploadedMutation),
+}
+
+enum Publish {
+    Committed,
+    Reprepare,
+}
+
+async fn prepare_and_upload(
+    repository: &Repository,
+    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    options: crab_remote_git::RepositoryOptions,
+    branch: &str,
+    path: &crab_remote_git::GitPath,
+    change: Change,
+    principal: &str,
+    cancel: &CancellationToken,
+) -> Result<Prepared> {
+    let view = repository
+        .read_views
+        .current(repository, runtime, options, cancel)
+        .await?;
+    let parent = view
+        .remote()
+        .refs()
+        .find(branch)
+        .map(|reference| reference.target);
+    let operation = view
+        .remote()
+        .operation(OperationKind::Repository, cancel)
+        .await?;
+    let built = async {
+        let snapshot = match parent {
+            Some(parent) => Some(view.snapshot(&parent.to_string(), &operation).await?),
+            None => None,
+        };
+        let path_string = std::str::from_utf8(path.as_bytes())
+            .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
+        let current_attributes = match &snapshot {
+            Some(snapshot) => match snapshot.entry(path, &operation).await? {
+                Some(entry) if entry.kind == EntryKind::Blob => {
+                    view.object_attributes(
+                        repository,
+                        snapshot.commit_oid(),
+                        path_string,
+                        entry.oid,
+                    )
+                    .await?
+                }
+                Some(_) | None => None,
+            },
+            None => None,
+        };
+        build_commit(
+            view.remote(),
+            &operation,
+            parent,
+            path,
+            change,
+            principal,
+            current_attributes.as_ref(),
+        )
+        .await
+    }
     .await;
     let built = match operation.finish(Ok(())).await {
         Ok(()) => built?,
         Err(error) => return Err(error.into()),
     };
     let built = match built {
-        Build::Noop(outcome) => return Ok(outcome),
+        Build::Noop(outcome) => return Ok(Prepared::Noop(outcome)),
         Build::Commit(built) => *built,
     };
+    upload_built(repository, parent, built, cancel)
+        .await
+        .map(Prepared::Commit)
+}
+
+async fn upload_built(
+    repository: &Repository,
+    parent: Option<ObjectId>,
+    built: BuiltCommit,
+    cancel: &CancellationToken,
+) -> Result<UploadedMutation> {
     let (pack_owner, pack) = prepare_pack(built.objects.clone(), cancel).await?;
     check_cancelled(cancel)?;
     let pack_id = pack.content_hash().to_hex().to_string();
-    repository
-        .store
-        .put_multipart_file_retry(
-            &repository.layout.pack_path(&pack_id),
-            pack.pack_path(),
-            pack.size(),
-            *pack.content_hash().as_bytes(),
-            8 * 1024 * 1024,
-            cancel,
-            None,
-        )
-        .await?;
-    for (source, target) in [
-        (
-            pack.index_path(),
-            repository.layout.pack_index_path(&pack_id),
-        ),
-        (
-            pack.reverse_path(),
-            repository.layout.pack_reverse_index_path(&pack_id),
-        ),
-        (
-            pack.kinds_path(),
-            repository.layout.pack_kind_metadata_path(&pack_id),
-        ),
-    ] {
-        check_cancelled(cancel)?;
-        repository
-            .store
-            .put_exact(&target, tokio::fs::read(source).await?.into())
-            .await?;
-    }
     let visible_objects = built
         .objects
         .iter()
         .map(|(kind, bytes)| object_id(*kind, bytes).map(|oid| oid.to_string()))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let evidence = match old {
-        Some(old) => git_visibility::GitVisibilityEdit::from_delta_objects(
-            Some(old.to_string()),
+    let evidence = match parent {
+        Some(parent) => git_visibility::GitVisibilityEdit::from_delta_objects(
+            Some(parent.to_string()),
             built.commit.to_string(),
             visible_objects,
             vec![],
@@ -292,43 +539,126 @@ async fn apply_locked(
             visible_objects,
         ),
     };
-    let evidence_hash =
-        git_visibility::upload_edit(&repository.store, &repository.layout, &evidence).await?;
-    match built.attributes.clone() {
-        Some(attributes) => attribute_manifest.put(built.path.clone(), attributes),
-        None => attribute_manifest.remove(&built.path),
-    }
-    attributes::save(repository, built.commit, &attribute_manifest)
+    let pack_upload = async {
+        repository
+            .store
+            .put_multipart_file_retry(
+                &repository.layout.pack_path(&pack_id),
+                pack.pack_path(),
+                pack.size(),
+                *pack.content_hash().as_bytes(),
+                8 * 1024 * 1024,
+                cancel,
+                None,
+            )
+            .await?;
+        Ok::<(), Error>(())
+    };
+    let sidecar_upload = |source: &std::path::Path, target| {
+        let source = source.to_owned();
+        async move {
+            check_cancelled(cancel)?;
+            repository
+                .store
+                .put_exact(&target, tokio::fs::read(source).await?.into())
+                .await?;
+            Ok::<(), Error>(())
+        }
+    };
+    let evidence_upload = async {
+        git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
+            .await
+            .map_err(Error::from)
+    };
+    let attributes_upload = async {
+        attributes::save_delta(
+            repository,
+            built.commit,
+            parent,
+            built.path.clone(),
+            built.attributes.clone(),
+        )
         .await
-        .map_err(|error| Error::Attributes(Box::new(error)))?;
+        .map_err(Error::from)
+    };
+    let (_, _, _, _, evidence_hash, _) = tokio::try_join!(
+        pack_upload,
+        sidecar_upload(
+            pack.index_path(),
+            repository.layout.pack_index_path(&pack_id)
+        ),
+        sidecar_upload(
+            pack.reverse_path(),
+            repository.layout.pack_reverse_index_path(&pack_id)
+        ),
+        sidecar_upload(
+            pack.kinds_path(),
+            repository.layout.pack_kind_metadata_path(&pack_id)
+        ),
+        evidence_upload,
+        attributes_upload,
+    )?;
     check_cancelled(cancel)?;
+    let uploaded = UploadedMutation {
+        parent,
+        commit: built.commit,
+        etag: built.etag,
+        pack: PackManifestEntry {
+            pack_id: pack_id.clone(),
+            content_hash: pack_id,
+            size: pack.size(),
+            object_count: pack.object_count().into(),
+            ref_tips: vec![built.commit.to_string()],
+        },
+        evidence_hash,
+    };
+    drop(pack);
+    drop(pack_owner);
+    Ok(uploaded)
+}
+
+async fn publish_prepared(
+    repository: &Repository,
+    branch: &str,
+    holder: &str,
+    prepared: &UploadedMutation,
+    cancel: &CancellationToken,
+) -> Result<Publish> {
+    check_cancelled(cancel)?;
+    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        &repository.store,
+        &repository.layout,
+    )
+    .await?;
+    let current = snapshot
+        .journal
+        .refs
+        .get(branch)
+        .map(|oid| oid.parse::<ObjectId>())
+        .transpose()
+        .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
+    if current != prepared.parent {
+        return Ok(Publish::Reprepare);
+    }
     crab_write::journal::commit_edits(
         &repository.store,
         &repository.layout,
         &snapshot,
         vec![RefJournalEdit {
             ref_name: branch.to_owned(),
-            old_oid: old.map(|oid| oid.to_string()),
-            new_oid: Some(built.commit.to_string()),
+            old_oid: prepared.parent.map(|oid| oid.to_string()),
+            new_oid: Some(prepared.commit.to_string()),
             peeled_oid: None,
             lock_holder: Some(holder.to_owned()),
-            visibility_evidence_hash: Some(evidence_hash),
+            visibility_evidence_hash: Some(prepared.evidence_hash.clone()),
         }],
-        old.is_none().then(|| branch.to_owned()),
-        vec![PackManifestEntry {
-            pack_id: pack_id.clone(),
-            content_hash: pack_id,
-            size: pack.size(),
-            object_count: pack.object_count().into(),
-            ref_tips: vec![built.commit.to_string()],
-        }],
+        prepared.parent.is_none().then(|| branch.to_owned()),
+        vec![prepared.pack.clone()],
         vec![],
         crab_write::journal::CommitOptions::new(LOCK_TTL, cancel),
     )
     .await?;
-    drop(pack);
-    drop(pack_owner);
-    Ok(Outcome { etag: built.etag })
+    Ok(Publish::Committed)
 }
 
 struct BuiltCommit {
@@ -344,16 +674,9 @@ enum Build {
     Commit(Box<BuiltCommit>),
 }
 
-#[derive(Default)]
-struct TreeNode {
+struct TreeFrame {
     old_oid: Option<ObjectId>,
-    files: BTreeMap<Vec<u8>, TreeLeaf>,
-    directories: BTreeMap<Vec<u8>, TreeNode>,
-}
-
-struct TreeLeaf {
-    oid: ObjectId,
-    mode: EntryMode,
+    entries: Vec<tree::Entry>,
 }
 
 async fn build_commit(
@@ -363,23 +686,75 @@ async fn build_commit(
     path: &crab_remote_git::GitPath,
     change: Change,
     principal: &str,
-    attribute_manifest: &attributes::Manifest,
+    current_attributes: Option<&attributes::ObjectAttributes>,
 ) -> Result<Build> {
-    let mut root = TreeNode::default();
-    if let Some(parent) = parent {
-        let snapshot = remote
-            .snapshot(&Revision::Commit(parent), operation)
-            .await?;
-        root.old_oid = Some(snapshot.root_tree_oid());
-        for entry in snapshot.list_tree_recursive(operation).await? {
-            insert_entry(&mut root, &entry)?;
+    let components = path.components().map(<[u8]>::to_vec).collect::<Vec<_>>();
+    let (name, directories) = components.split_last().ok_or(Error::IsDirectory)?;
+    let snapshot = match parent {
+        Some(parent) => Some(
+            remote
+                .snapshot(&Revision::Commit(parent), operation)
+                .await?,
+        ),
+        None => None,
+    };
+    let mut frames = Vec::with_capacity(directories.len() + 1);
+    let mut directory_path = crab_remote_git::GitPath::root();
+    let mut directory_oid = snapshot.as_ref().map(|value| value.root_tree_oid());
+    for depth in 0..=directories.len() {
+        let entries = match (&snapshot, directory_oid) {
+            (Some(snapshot), Some(_)) => {
+                load_directory(snapshot, &directory_path, operation).await?
+            }
+            (None, None) | (Some(_), None) => Vec::new(),
+            (None, Some(_)) => {
+                return Err(std::io::Error::other("empty repository has a root tree").into());
+            }
+        };
+        frames.push(TreeFrame {
+            old_oid: directory_oid,
+            entries,
+        });
+        if depth == directories.len() {
+            break;
         }
+        let component = &directories[depth];
+        directory_oid = match find_entry(&frames[depth].entries, component) {
+            Some(entry) if entry.mode == tree::EntryKind::Tree.into() => Some(entry.oid),
+            Some(_) => return Err(Error::NotDirectory),
+            None => None,
+        };
+        directory_path = push_component(&directory_path, component)?;
     }
-    let old = root.file(path)?.map(|leaf| (leaf.oid, leaf.mode));
+    let leaf_entries = &mut frames
+        .last_mut()
+        .ok_or_else(|| std::io::Error::other("object path has no parent tree"))?
+        .entries;
+    let old = match find_entry(leaf_entries, name) {
+        Some(entry) if entry.mode == tree::EntryKind::Tree.into() => {
+            return Err(Error::IsDirectory);
+        }
+        Some(entry) => Some((entry.oid, entry_mode(entry.mode)?)),
+        None => None,
+    };
     let path_string = std::str::from_utf8(path.as_bytes())
         .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
     let (etag, changed, pending_attributes) = match change {
-        Change::Put { bytes, attributes } => {
+        Change::Put {
+            bytes,
+            attributes,
+            condition,
+        } => {
+            match condition {
+                PutCondition::None => {}
+                PutCondition::IfNoneMatchAny if old.is_some() => {
+                    return Err(Error::PreconditionFailed);
+                }
+                PutCondition::IfMatch(expected) if old.is_none_or(|(oid, _)| oid != expected) => {
+                    return Err(Error::PreconditionFailed);
+                }
+                PutCondition::IfNoneMatchAny | PutCondition::IfMatch(_) => {}
+            }
             let oid = object_id(Kind::Blob, &bytes)?;
             let digest = md5::Md5::digest(&bytes);
             let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
@@ -389,24 +764,53 @@ async fn build_commit(
                 .unwrap_or_else(|| digest.iter().map(|byte| format!("{byte:02x}")).collect());
             if attributes.completion_upload_id.is_some()
                 && old.is_some_and(|(old_oid, mode)| old_oid == oid && mode == EntryMode::Regular)
-                && attribute_manifest
-                    .object(path_string, oid)
+                && current_attributes
                     .is_some_and(|stored| stored.matches_pending(&attributes, &etag, logical_size))
             {
                 return Ok(Build::Noop(Outcome { etag: Some(etag) }));
             }
-            root.put(path, oid)?;
+            replace_entry(
+                leaf_entries,
+                name,
+                Some(tree::Entry {
+                    mode: tree::EntryKind::Blob.into(),
+                    filename: BString::from(name.clone()),
+                    oid,
+                }),
+            );
             let changed = old
                 .filter(|(old_oid, _)| *old_oid == oid)
                 .map(|_| None)
                 .unwrap_or_else(|| Some(bytes.to_vec()));
             (Some(etag), changed, Some((oid, attributes, logical_size)))
         }
+        Change::Attributes {
+            expected,
+            attributes,
+        } => {
+            if old.is_none_or(|(oid, mode)| {
+                oid != expected || !matches!(mode, EntryMode::Regular | EntryMode::Executable)
+            }) {
+                return Err(Error::PreconditionFailed);
+            }
+            let logical_size = attributes.logical_size.ok_or_else(|| {
+                std::io::Error::other("attribute-only mutation is missing object size")
+            })?;
+            let etag = attributes.etag_override.clone().ok_or_else(|| {
+                std::io::Error::other("attribute-only mutation is missing object ETag")
+            })?;
+            if current_attributes
+                .is_some_and(|stored| stored.matches_pending(&attributes, &etag, logical_size))
+            {
+                return Ok(Build::Noop(Outcome { etag: Some(etag) }));
+            }
+            (Some(etag), None, Some((expected, attributes, logical_size)))
+        }
         Change::Delete => {
             if old.is_none() {
                 return Ok(Build::Noop(Outcome { etag: None }));
             }
-            root.delete(path)?;
+            replace_entry(leaf_entries, name, None);
             (None, None, None)
         }
     };
@@ -414,7 +818,32 @@ async fn build_commit(
     if let Some(bytes) = changed {
         objects.push((Kind::Blob, bytes));
     }
-    let tree = encode_node(&root, &mut objects)?;
+    let mut tree_oid = None;
+    for depth in (0..frames.len()).rev() {
+        let frame = &mut frames[depth];
+        let empty = frame.entries.is_empty();
+        let oid = if depth > 0 && empty {
+            None
+        } else {
+            Some(encode_tree(
+                frame.old_oid,
+                std::mem::take(&mut frame.entries),
+                &mut objects,
+            )?)
+        };
+        if depth == 0 {
+            tree_oid = oid;
+            break;
+        }
+        let directory_name = &directories[depth - 1];
+        let entry = oid.map(|oid| tree::Entry {
+            mode: tree::EntryKind::Tree.into(),
+            filename: BString::from(directory_name.clone()),
+            oid,
+        });
+        replace_entry(&mut frames[depth - 1].entries, directory_name, entry);
+    }
+    let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
     let seconds = now_seconds()?;
     let object_attributes = pending_attributes.map(|(oid, pending, size)| {
         attributes::ObjectAttributes::new(
@@ -425,7 +854,14 @@ async fn build_commit(
             *pending,
         )
     });
-    let commit_bytes = commit_bytes(tree, parent, principal, seconds);
+    let attribute_identity = serde_json::to_vec(&(
+        path_string,
+        parent.map(|oid| oid.to_string()),
+        &object_attributes,
+    ))
+    .map_err(|source| Error::Attributes(Box::new(crate::Error::Attributes { source })))?;
+    let attribute_digest = blake3::hash(&attribute_identity).to_hex();
+    let commit_bytes = commit_bytes(tree, parent, principal, seconds, attribute_digest.as_str());
     let commit = object_id(Kind::Commit, &commit_bytes)?;
     objects.push((Kind::Commit, commit_bytes));
     Ok(Build::Commit(Box::new(BuiltCommit {
@@ -437,127 +873,100 @@ async fn build_commit(
     })))
 }
 
-fn insert_entry(root: &mut TreeNode, entry: &crab_remote_git::TreeEntry) -> Result<()> {
-    let components = entry.path.components().collect::<Vec<_>>();
-    let (name, parents) = components.split_last().ok_or(Error::NotDirectory)?;
-    let mut node = root;
-    for component in parents {
-        node = node.directories.entry((*component).to_vec()).or_default();
-    }
-    if entry.mode == EntryMode::Tree {
-        node.directories
-            .entry((*name).to_vec())
-            .or_default()
-            .old_oid = Some(entry.oid);
-    } else {
-        node.files.insert(
-            (*name).to_vec(),
-            TreeLeaf {
-                oid: entry.oid,
-                mode: entry.mode,
-            },
-        );
-    }
-    Ok(())
-}
-
-impl TreeNode {
-    fn file(&self, path: &crab_remote_git::GitPath) -> Result<Option<&TreeLeaf>> {
-        let components = path.components().collect::<Vec<_>>();
-        let (name, parents) = components.split_last().ok_or(Error::IsDirectory)?;
-        let mut node = self;
-        for component in parents {
-            if node.files.contains_key(*component) {
-                return Err(Error::NotDirectory);
-            }
-            let Some(next) = node.directories.get(*component) else {
-                return Ok(None);
-            };
-            node = next;
-        }
-        if node.directories.contains_key(*name) {
-            return Err(Error::IsDirectory);
-        }
-        Ok(node.files.get(*name))
-    }
-
-    fn put(&mut self, path: &crab_remote_git::GitPath, oid: ObjectId) -> Result<()> {
-        let components = path.components().collect::<Vec<_>>();
-        let (name, parents) = components.split_last().ok_or(Error::IsDirectory)?;
-        let mut node = self;
-        for component in parents {
-            if node.files.contains_key(*component) {
-                return Err(Error::NotDirectory);
-            }
-            node = node.directories.entry((*component).to_vec()).or_default();
-        }
-        if node.directories.contains_key(*name) {
-            return Err(Error::IsDirectory);
-        }
-        node.files.insert(
-            (*name).to_vec(),
-            TreeLeaf {
-                oid,
-                mode: EntryMode::Regular,
-            },
-        );
-        Ok(())
-    }
-
-    fn delete(&mut self, path: &crab_remote_git::GitPath) -> Result<()> {
-        let components = path.components().collect::<Vec<_>>();
-        let (name, parents) = components.split_last().ok_or(Error::IsDirectory)?;
-        delete_from(self, parents, name)
-    }
-}
-
-fn delete_from(node: &mut TreeNode, parents: &[&[u8]], name: &[u8]) -> Result<()> {
-    let Some((component, rest)) = parents.split_first() else {
-        node.files.remove(name);
-        return Ok(());
-    };
-    if node.files.contains_key(*component) {
-        return Err(Error::NotDirectory);
-    }
-    let Some(child) = node.directories.get_mut(*component) else {
-        return Ok(());
-    };
-    delete_from(child, rest, name)?;
-    if child.files.is_empty() && child.directories.is_empty() {
-        node.directories.remove(*component);
-    }
-    Ok(())
-}
-
-fn encode_node(node: &TreeNode, objects: &mut Vec<(Kind, Vec<u8>)>) -> Result<ObjectId> {
-    let mut entries = Vec::with_capacity(node.files.len() + node.directories.len());
-    for (name, child) in &node.directories {
-        let oid = encode_node(child, objects)?;
-        entries.push(tree::Entry {
-            mode: tree::EntryKind::Tree.into(),
-            filename: BString::from(name.clone()),
-            oid,
-        });
-    }
-    for (name, leaf) in &node.files {
-        let mode = match leaf.mode {
-            EntryMode::Regular => tree::EntryKind::Blob,
-            EntryMode::Executable => tree::EntryKind::BlobExecutable,
-            EntryMode::Symlink => tree::EntryKind::Link,
-            EntryMode::Submodule => tree::EntryKind::Commit,
-            EntryMode::Tree => return Err(Error::IsDirectory),
+async fn load_directory(
+    snapshot: &crab_remote_git::RemoteGitSnapshot,
+    path: &crab_remote_git::GitPath,
+    operation: &crab_remote_git::OperationContext,
+) -> Result<Vec<tree::Entry>> {
+    let mut cursor = None;
+    let mut entries = Vec::new();
+    loop {
+        let page = snapshot
+            .list_directory(
+                path,
+                &crab_remote_git::PageRequest::new(TREE_PAGE_SIZE, cursor)?,
+                operation,
+            )
+            .await?;
+        entries.extend(page.items.into_iter().map(tree_entry));
+        let Some(next) = page.next else {
+            break;
         };
-        entries.push(tree::Entry {
-            mode: mode.into(),
-            filename: BString::from(name.clone()),
-            oid: leaf.oid,
-        });
+        cursor = Some(next);
     }
+    Ok(entries)
+}
+
+fn tree_entry(entry: crab_remote_git::TreeEntry) -> tree::Entry {
+    let name = entry
+        .path
+        .components()
+        .last()
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    tree::Entry {
+        mode: git_entry_mode(entry.mode),
+        filename: BString::from(name),
+        oid: entry.oid,
+    }
+}
+
+fn entry_mode(mode: gix_object::tree::EntryMode) -> Result<EntryMode> {
+    Ok(match mode.kind() {
+        tree::EntryKind::Tree => EntryMode::Tree,
+        tree::EntryKind::Blob => EntryMode::Regular,
+        tree::EntryKind::BlobExecutable => EntryMode::Executable,
+        tree::EntryKind::Link => EntryMode::Symlink,
+        tree::EntryKind::Commit => EntryMode::Submodule,
+    })
+}
+
+fn git_entry_mode(mode: EntryMode) -> gix_object::tree::EntryMode {
+    match mode {
+        EntryMode::Tree => tree::EntryKind::Tree,
+        EntryMode::Regular => tree::EntryKind::Blob,
+        EntryMode::Executable => tree::EntryKind::BlobExecutable,
+        EntryMode::Symlink => tree::EntryKind::Link,
+        EntryMode::Submodule => tree::EntryKind::Commit,
+    }
+    .into()
+}
+
+fn find_entry<'a>(entries: &'a [tree::Entry], name: &[u8]) -> Option<&'a tree::Entry> {
+    entries
+        .iter()
+        .find(|entry| <BString as AsRef<[u8]>>::as_ref(&entry.filename) == name)
+}
+
+fn replace_entry(entries: &mut Vec<tree::Entry>, name: &[u8], replacement: Option<tree::Entry>) {
+    entries.retain(|entry| <BString as AsRef<[u8]>>::as_ref(&entry.filename) != name);
+    if let Some(replacement) = replacement {
+        entries.push(replacement);
+    }
+}
+
+fn push_component(
+    parent: &crab_remote_git::GitPath,
+    component: &[u8],
+) -> Result<crab_remote_git::GitPath> {
+    let mut path = parent.as_bytes().to_vec();
+    if !path.is_empty() {
+        path.push(b'/');
+    }
+    path.extend_from_slice(component);
+    crab_remote_git::GitPath::new(path).map_err(Error::Remote)
+}
+
+fn encode_tree(
+    old_oid: Option<ObjectId>,
+    mut entries: Vec<tree::Entry>,
+    objects: &mut Vec<(Kind, Vec<u8>)>,
+) -> Result<ObjectId> {
     entries.sort();
     let mut bytes = Vec::new();
     gix_object::Tree { entries }.write_to(&mut bytes)?;
     let oid = object_id(Kind::Tree, &bytes)?;
-    if node.old_oid != Some(oid) {
+    if old_oid != Some(oid) {
         objects.push((Kind::Tree, bytes));
     }
     Ok(oid)
@@ -568,6 +977,7 @@ fn commit_bytes(
     parent: Option<ObjectId>,
     principal: &str,
     seconds: u64,
+    attribute_digest: &str,
 ) -> Vec<u8> {
     let name: String = principal
         .chars()
@@ -584,7 +994,7 @@ fn commit_bytes(
         .map(|oid| format!("parent {oid}\n"))
         .unwrap_or_default();
     format!(
-        "tree {tree}\n{parent}author {name} <{email}@users.crab.invalid> {seconds} +0000\ncommitter {name} <{email}@users.crab.invalid> {seconds} +0000\n\nUpdate object through Crab S3 gateway\n"
+        "tree {tree}\n{parent}author {name} <{email}@users.crab.invalid> {seconds} +0000\ncommitter {name} <{email}@users.crab.invalid> {seconds} +0000\n\nUpdate object through Crab S3 gateway\n\nCrab-S3-Attributes: {attribute_digest}\n"
     )
     .into_bytes()
 }
@@ -684,6 +1094,7 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
+    use std::collections::BTreeMap;
 
     async fn fixture() -> (
         Repository,
@@ -724,24 +1135,22 @@ mod tests {
         cancel: &CancellationToken,
         path: &str,
     ) -> Bytes {
-        let remote = RemoteGitRepository::open(
-            repository.store.clone(),
-            repository.layout.clone(),
-            repository.identity.clone(),
-            runtime,
-            crab_remote_git::RepositoryOptions::default(),
-            cancel,
-        )
-        .await
-        .unwrap();
-        let operation = remote
+        let view = repository
+            .read_views
+            .current(
+                repository,
+                runtime,
+                crab_remote_git::RepositoryOptions::default(),
+                cancel,
+            )
+            .await
+            .unwrap();
+        let operation = view
+            .remote()
             .operation(OperationKind::Repository, cancel)
             .await
             .unwrap();
-        let snapshot = remote
-            .snapshot(&Revision::parse("refs/heads/main").unwrap(), &operation)
-            .await
-            .unwrap();
+        let snapshot = view.snapshot("refs/heads/main", &operation).await.unwrap();
         let blob = snapshot
             .read_blob(
                 &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
@@ -758,22 +1167,23 @@ mod tests {
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
         cancel: &CancellationToken,
     ) -> ObjectId {
-        RemoteGitRepository::open(
-            repository.store.clone(),
-            repository.layout.clone(),
-            repository.identity.clone(),
-            runtime,
-            crab_remote_git::RepositoryOptions::default(),
-            cancel,
-        )
-        .await
-        .unwrap()
-        .refs()
-        .entries
-        .iter()
-        .find(|reference| reference.name == "refs/heads/main")
-        .unwrap()
-        .target
+        repository
+            .read_views
+            .current(
+                repository,
+                runtime,
+                crab_remote_git::RepositoryOptions::default(),
+                cancel,
+            )
+            .await
+            .unwrap()
+            .remote()
+            .refs()
+            .entries
+            .iter()
+            .find(|reference| reference.name == "refs/heads/main")
+            .unwrap()
+            .target
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -789,6 +1199,7 @@ mod tests {
                 Change::Put {
                     bytes: Bytes::copy_from_slice(body.as_bytes()),
                     attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
                 },
                 "user",
                 &cancel,
@@ -834,6 +1245,7 @@ mod tests {
                 completion_upload_id: Some("upload-id".to_owned()),
                 ..Default::default()
             }),
+            condition: PutCondition::None,
         };
         apply(
             &repository,
@@ -862,6 +1274,255 @@ mod tests {
         .unwrap();
         let second = tip(&repository, Arc::clone(&runtime), &cancel).await;
         assert_eq!(first, second);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attribute_only_mutation_preserves_object_bytes() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap();
+        let bytes = Bytes::from_static(b"stable content");
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: bytes.clone(),
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let oid = object_id(Kind::Blob, &bytes).unwrap();
+        let mut tags = BTreeMap::new();
+        tags.insert("project".to_owned(), "crab".to_owned());
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Attributes {
+                expected: oid,
+                attributes: Box::new(attributes::PutAttributes {
+                    etag_override: Some(crate::gateway::md5_hex(&bytes)),
+                    logical_size: Some(bytes.len() as u64),
+                    tags,
+                    ..Default::default()
+                }),
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "object.bin").await,
+            bytes
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn if_match_rejects_a_stale_object_identity() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        let put = |bytes, condition| {
+            apply(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                "refs/heads/main",
+                &path,
+                Change::Put {
+                    bytes,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition,
+                },
+                "user",
+                &cancel,
+            )
+        };
+        put(Bytes::from_static(b"first"), PutCondition::None)
+            .await
+            .unwrap();
+        let first_oid = object_id(Kind::Blob, b"first").unwrap();
+        put(
+            Bytes::from_static(b"second"),
+            PutCondition::IfMatch(first_oid),
+        )
+        .await
+        .unwrap();
+        let stale = put(
+            Bytes::from_static(b"third"),
+            PutCondition::IfMatch(first_oid),
+        )
+        .await;
+
+        assert!(matches!(stale, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
+            "second"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn if_none_match_wildcard_preserves_an_existing_object() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        let put = |bytes, condition| {
+            apply(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                "refs/heads/main",
+                &path,
+                Change::Put {
+                    bytes,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition,
+                },
+                "user",
+                &cancel,
+            )
+        };
+        put(Bytes::from_static(b"first"), PutCondition::IfNoneMatchAny)
+            .await
+            .unwrap();
+        let result = put(
+            Bytes::from_static(b"replacement"),
+            PutCondition::IfNoneMatchAny,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
+            "first"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_ref_writes_queue_and_all_commit() {
+        let (repository, runtime, cancel) = fixture().await;
+        let repository = Arc::new(repository);
+        let coordinator = Arc::new(Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+        ));
+        let mut writes = tokio::task::JoinSet::new();
+        for index in 0..8 {
+            let repository = Arc::clone(&repository);
+            let coordinator = Arc::clone(&coordinator);
+            let cancel = cancel.clone();
+            writes.spawn(async move {
+                let path = format!("queued/{index}.txt");
+                coordinator
+                    .apply(
+                        &repository,
+                        "refs/heads/main",
+                        &crab_remote_git::GitPath::new(path.into_bytes()).unwrap(),
+                        Change::Put {
+                            bytes: Bytes::from(format!("value-{index}")),
+                            attributes: Box::new(attributes::PutAttributes::default()),
+                            condition: PutCondition::None,
+                        },
+                        "user",
+                        &cancel,
+                    )
+                    .await
+            });
+        }
+        while let Some(result) = writes.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let mut canonical = None;
+        for _ in 0..100 {
+            let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+                &repository.store,
+                &repository.layout,
+            )
+            .await
+            .unwrap();
+            if snapshot.journal.transactions.is_empty() {
+                canonical = RemoteGitRepository::open(
+                    repository.store.clone(),
+                    repository.layout.clone(),
+                    repository.identity.clone(),
+                    Arc::clone(&runtime),
+                    crab_remote_git::RepositoryOptions::default(),
+                    &cancel,
+                )
+                .await
+                .ok();
+                if canonical.is_some() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let canonical = canonical.expect("background maintenance should publish a readable view");
+        assert!(canonical.refs().find("refs/heads/main").is_some());
+        for index in 0..8 {
+            assert_eq!(
+                read(
+                    &repository,
+                    Arc::clone(&runtime),
+                    &cancel,
+                    &format!("queued/{index}.txt"),
+                )
+                .await,
+                format!("value-{index}")
+            );
+        }
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_commit_persists_only_its_path_attribute_delta() {
+        let (repository, runtime, cancel) = fixture().await;
+        for path in ["first.txt", "second.txt"] {
+            apply(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+                Change::Put {
+                    bytes: Bytes::from(path.to_owned()),
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
+                },
+                "user",
+                &cancel,
+            )
+            .await
+            .unwrap();
+        }
+        let commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        let path = repository
+            .layout
+            .repo_path(&format!("s3/attributes/{commit}.json"));
+        let (bytes, _) = repository.store.get_with_etag(&path).await.unwrap();
+        let stored: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(stored["version"], 2);
+        assert!(stored.get("objects").is_none());
+        assert_eq!(stored["changes"].as_object().unwrap().len(), 1);
+        assert!(stored["changes"].get("second.txt").is_some());
+
+        let manifest = attributes::load(&repository, commit).await.unwrap();
+        for path in ["first.txt", "second.txt"] {
+            let oid = object_id(Kind::Blob, path.as_bytes()).unwrap();
+            assert!(manifest.object(path, oid).is_some());
+        }
         runtime.shutdown().await;
     }
 }

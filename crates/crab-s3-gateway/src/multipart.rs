@@ -54,6 +54,11 @@ pub(crate) struct Part {
     pub(crate) etag: String,
     pub(crate) size: u64,
     pub(crate) modified_seconds: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::attributes::Checksums::is_empty"
+    )]
+    pub(crate) checksums: crate::attributes::Checksums,
     path: String,
 }
 
@@ -71,9 +76,15 @@ pub(crate) struct Session {
     revision: u64,
     state: State,
     pub(crate) attributes: PutAttributes,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checksum_algorithm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checksum_type: Option<String>,
     pub(crate) parts: BTreeMap<i32, Part>,
     selected_parts: Option<Vec<(i32, String)>>,
     completion_etag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) completion_checksums: Option<crate::attributes::Checksums>,
 }
 
 pub(crate) struct Loaded {
@@ -81,33 +92,39 @@ pub(crate) struct Loaded {
     etag: ETag,
 }
 
-pub(crate) async fn create(
-    repository: &Repository,
-    bucket: &str,
-    key: &str,
-    branch: &str,
-    path: &str,
-    principal: &str,
-    attributes: PutAttributes,
-    now: u64,
-) -> Result<Session> {
+pub(crate) struct Initiation<'a> {
+    pub(crate) bucket: &'a str,
+    pub(crate) key: &'a str,
+    pub(crate) branch: &'a str,
+    pub(crate) path: &'a str,
+    pub(crate) principal: &'a str,
+    pub(crate) attributes: PutAttributes,
+    pub(crate) checksum_algorithm: Option<String>,
+    pub(crate) checksum_type: Option<String>,
+    pub(crate) now: u64,
+}
+
+pub(crate) async fn create(repository: &Repository, initiation: Initiation<'_>) -> Result<Session> {
     for _ in 0..8 {
         let id = ulid::Ulid::new().to_string();
         let session = Session {
             version: VERSION,
             id: id.clone(),
-            bucket: bucket.to_owned(),
-            key: key.to_owned(),
-            branch: branch.to_owned(),
-            path: path.to_owned(),
-            principal: principal.to_owned(),
-            created_seconds: now,
+            bucket: initiation.bucket.to_owned(),
+            key: initiation.key.to_owned(),
+            branch: initiation.branch.to_owned(),
+            path: initiation.path.to_owned(),
+            principal: initiation.principal.to_owned(),
+            created_seconds: initiation.now,
             revision: 0,
             state: State::Open,
-            attributes: attributes.clone(),
+            attributes: initiation.attributes.clone(),
+            checksum_algorithm: initiation.checksum_algorithm.clone(),
+            checksum_type: initiation.checksum_type.clone(),
             parts: BTreeMap::new(),
             selected_parts: None,
             completion_etag: None,
+            completion_checksums: None,
         };
         let bytes = serde_json::to_vec(&session)?;
         match repository
@@ -153,6 +170,7 @@ pub(crate) async fn register_part(
     number: i32,
     spool: &crate::content::Spool,
     etag: String,
+    checksums: crate::attributes::Checksums,
     now: u64,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Part> {
@@ -180,6 +198,7 @@ pub(crate) async fn register_part(
         etag,
         size: spool.size,
         modified_seconds: now,
+        checksums,
         path,
     };
     loaded.session.parts.insert(number, part.clone());
@@ -284,6 +303,7 @@ pub(crate) async fn complete(
     repository: &Repository,
     mut loaded: Loaded,
     etag: String,
+    checksums: crate::attributes::Checksums,
 ) -> Result<()> {
     if matches!(loaded.session.state, State::Completed)
         && loaded.session.completion_etag.as_deref() == Some(&etag)
@@ -295,6 +315,7 @@ pub(crate) async fn complete(
     }
     loaded.session.state = State::Completed;
     loaded.session.completion_etag = Some(etag);
+    loaded.session.completion_checksums = Some(checksums);
     loaded.session.revision = loaded.session.revision.saturating_add(1);
     save(repository, &loaded).await?;
     if let Err(error) = cleanup_parts(repository, &loaded.session.id).await {
@@ -427,13 +448,17 @@ mod tests {
         let repository = fixture().await;
         let session = create(
             &repository,
-            "repo",
-            "main/file.bin",
-            "refs/heads/main",
-            "file.bin",
-            "user",
-            PutAttributes::default(),
-            10,
+            Initiation {
+                bucket: "repo",
+                key: "main/file.bin",
+                branch: "refs/heads/main",
+                path: "file.bin",
+                principal: "user",
+                attributes: PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 10,
+            },
         )
         .await
         .unwrap();
@@ -447,6 +472,7 @@ mod tests {
             1,
             &spool,
             etag.clone(),
+            crate::attributes::Checksums::default(),
             11,
             &tokio_util::sync::CancellationToken::new(),
         )
@@ -474,13 +500,17 @@ mod tests {
         let repository = fixture().await;
         let session = create(
             &repository,
-            "repo",
-            "main/file.bin",
-            "refs/heads/main",
-            "file.bin",
-            "user",
-            PutAttributes::default(),
-            10,
+            Initiation {
+                bucket: "repo",
+                key: "main/file.bin",
+                branch: "refs/heads/main",
+                path: "file.bin",
+                principal: "user",
+                attributes: PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 10,
+            },
         )
         .await
         .unwrap();
@@ -494,6 +524,7 @@ mod tests {
             1,
             &spool,
             etag.clone(),
+            crate::attributes::Checksums::default(),
             11,
             &tokio_util::sync::CancellationToken::new(),
         )
@@ -505,9 +536,14 @@ mod tests {
         let loaded = load(&repository, &session.id).await.unwrap();
         freeze(&repository, loaded, &selected, 1024).await.unwrap();
         let loaded = load(&repository, &session.id).await.unwrap();
-        complete(&repository, loaded, "result-etag".to_owned())
-            .await
-            .unwrap();
+        complete(
+            &repository,
+            loaded,
+            "result-etag".to_owned(),
+            crate::attributes::Checksums::default(),
+        )
+        .await
+        .unwrap();
 
         let loaded = load(&repository, &session.id).await.unwrap();
         assert_eq!(

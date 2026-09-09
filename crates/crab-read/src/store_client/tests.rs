@@ -205,7 +205,7 @@ fn build_response_v2_covers_every_segment() {
         metadata_ext: None,
     };
 
-    let response = build_response_v2(&info, None).expect("full-file reconstruction should be Some");
+    let response = build_response_v2(&info);
     assert_eq!(response.terms.len(), 2);
     assert_eq!(response.terms[0].range, ChunkRange::new(0, 4));
     assert_eq!(response.terms[0].unpacked_length, 1024);
@@ -230,7 +230,7 @@ fn build_response_v2_represents_zero_byte_file() {
         metadata_ext: None,
     };
 
-    let response = build_response_v2(&info, None).expect("zero-byte file should reconstruct");
+    let response = build_response_v2(&info);
     assert!(response.terms.is_empty());
     assert!(response.xorbs.is_empty());
     assert_eq!(response.offset_into_first_range, 0);
@@ -238,37 +238,66 @@ fn build_response_v2_represents_zero_byte_file() {
 
 #[test]
 fn reconstruction_ranges_preserve_segment_offsets_and_eof() {
+    let xorb_a = hash_from_seed(2);
+    let xorb_b = hash_from_seed(3);
     let info = MDBFileInfo {
         metadata: FileDataSequenceHeader::new(hash_from_seed(1), 2, false, false),
         segments: vec![
-            FileDataSequenceEntry::new(hash_from_seed(2), 1024, 0, 4),
-            FileDataSequenceEntry::new(hash_from_seed(3), 2048, 5, 13),
+            FileDataSequenceEntry::new(xorb_a, 1024, 0, 4),
+            FileDataSequenceEntry::new(xorb_b, 2048, 5, 13),
         ],
         verification: vec![],
         metadata_ext: None,
     };
+    let xorb_info = |hash: MerkleHash, count: u32| {
+        Arc::new(MDBXorbInfo {
+            metadata: XorbChunkSequenceHeader::new(hash, count, count * 256),
+            chunks: (0..count)
+                .map(|index| {
+                    XorbChunkSequenceEntry::new(
+                        hash_from_seed(100 + u64::from(index)),
+                        256,
+                        index * 256,
+                    )
+                })
+                .collect(),
+        })
+    };
+    let mut writer = ShardWriter::new();
+    writer.add_xorb(xorb_info(xorb_a, 4)).unwrap();
+    writer.add_xorb(xorb_info(xorb_b, 13)).unwrap();
+    writer.add_file(info.clone()).unwrap();
+    let (bytes, hash) = writer.finalize().unwrap();
+    let shard = ShardReader::from_bytes(Bytes::from(bytes), hash);
     for (start, end, expected) in [
         (
             512,
             2048,
-            Some((512, vec![ChunkRange::new(0, 4), ChunkRange::new(5, 13)])),
+            Some((0, vec![ChunkRange::new(2, 4), ChunkRange::new(5, 9)])),
         ),
         (1024, 3072, Some((0, vec![ChunkRange::new(5, 13)]))),
-        (1536, 4096, Some((512, vec![ChunkRange::new(5, 13)]))),
+        (1536, 4096, Some((0, vec![ChunkRange::new(7, 13)]))),
+        (600, 700, Some((88, vec![ChunkRange::new(2, 3)]))),
         (3072, 4096, None),
     ] {
-        let actual = build_response_v2(&info, Some(FileRange::new(start, end))).map(|response| {
-            (
-                response.offset_into_first_range,
-                response
-                    .terms
-                    .into_iter()
-                    .map(|term| term.range)
-                    .collect::<Vec<_>>(),
-            )
-        });
+        let actual = build_range_response_v2(&info, &shard, FileRange::new(start, end))
+            .unwrap()
+            .map(|response| {
+                (
+                    response.offset_into_first_range,
+                    response
+                        .terms
+                        .into_iter()
+                        .map(|term| term.range)
+                        .collect::<Vec<_>>(),
+                )
+            });
         assert_eq!(actual, expected, "byte range {start}..{end}");
     }
+    assert!(matches!(
+        build_range_response_v2(&info, &shard, FileRange::new(2, 1)),
+        Err(ClientError::InvalidRange)
+    ));
 }
 
 #[tokio::test]

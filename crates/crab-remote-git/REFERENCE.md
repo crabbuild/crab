@@ -31,6 +31,8 @@ The supported entry points are:
 - `RemoteGitRuntime`: process-wide bounded caches, origin/decode admission, and
   metrics;
 - `RemoteGitRepository::open`: generation-consistent repository open;
+- `RemoteGitRepository::from_snapshot`: immutable committed-journal repository
+  view without locator publication, for callers that own retention and freshness;
 - `RemoteGitRepository::is_current`: metadata-only manifest identity check for
   safely reusing a pinned immutable handle;
 - `RemoteGitRepository::operation`: one typed operation kind,
@@ -120,9 +122,11 @@ Archive traversal produces one entry at a time; its pending tree work is bounded
 by the verified tree-object limit.
 
 Services may keep a bounded cache of cloned immutable repository handles.
-`is_current` detects manifest changes only; observing uncompacted journal commits
-requires reopening after the freshness interval. A changed manifest always
-requires a new complete open handshake; cached state is never refreshed in place.
+`is_current` detects manifest changes only. Services that must observe
+uncompacted commits capture a validated repository snapshot and open it through
+`from_snapshot`; its snapshot digest isolates journal-specific cache entries. A
+changed snapshot requires a new immutable handle; cached state is never refreshed
+in place.
 
 ### Generated response packs
 

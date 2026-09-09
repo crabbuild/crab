@@ -14,6 +14,8 @@ use crate::{Error, Result};
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
+    /// Base domain used to accept both path-style and virtual-hosted requests.
+    pub endpoint_domain: Option<String>,
     #[serde(default = "default_region")]
     pub region: String,
     pub credentials: Vec<CredentialConfig>,
@@ -85,6 +87,9 @@ impl Config {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
             return Err(Error::Config("region must be a non-empty AWS region name"));
+        }
+        if let Some(domain) = self.endpoint_domain.as_deref() {
+            s3s::host::SingleDomain::new(domain)?;
         }
         let mut access_keys = HashSet::new();
         let mut configured_principals = HashSet::new();

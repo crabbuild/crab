@@ -10,15 +10,44 @@ each access key to a Crab principal and authorizes that principal against the
 logical repository catalog. Gateway credentials are independent of the cloud
 credentials used for the backing object store.
 
-The initial client-compatible surface includes bucket listing/head, object
-GET/HEAD/PUT/DELETE/COPY, V1/V2 object listing, multi-delete, and durable
-multipart create/upload/copy/list/abort/complete. GET/HEAD support conditions
-and a single byte range; PUT validates Content-MD5 and the standard S3 checksum
-headers. Path-style addressing is required. Single PUTs and multipart parts
-support up to 5 GiB, and multipart completion supports S3's 50 TB object limit.
+The client-compatible surface includes bucket listing/head/location/versioning
+discovery, object GET/HEAD/PUT/DELETE/COPY/attributes/tagging, V1/V2 object
+listing, multi-delete, and durable multipart create/upload/copy/list/abort/complete.
+GET/HEAD support conditions, checksum mode, and a single byte range. PUT and
+multipart completion support atomic `If-Match` and `If-None-Match: *` writes.
+Content-MD5 and modeled S3 checksum headers are validated and persisted;
+multipart full-object and composite checksum profiles are returned by object
+and part inspection APIs. Path-style addressing is always available. Set
+`endpoint_domain` to also accept virtual-hosted requests. Single PUTs and
+multipart parts support up to 5 GiB, and multipart completion supports S3's
+50 TB object limit.
 Large payloads use bounded-memory spooling and Crab's verified LFS content path.
+Objects already stored as Crab/Xet pointers retain Xet deduplication: partial
+GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
+stream the selected bytes through bounded temporary storage. Low-coverage cold
+reads fetch bounded xorb ranges; the cache may fetch a complete verified xorb
+for high-coverage reads. Complete GETs retain whole-file verification.
 The complete frozen surface and deliberate exclusions are in the protocol
 contract linked below.
+
+## Read and write performance model
+
+Requests share immutable repository read views keyed by the compacted generation
+and committed journal state. Ref snapshots, parsed Git trees, and S3 attributes
+are singleflight-cached inside that view. HEAD and attributed LIST requests use
+the committed size and ETag without opening blob payloads.
+
+Each mutation rewrites only the target path's ancestor trees and persists one
+path-local attribute delta. Immutable pack, index, visibility, and attribute
+artifacts are prepared and uploaded before the destination ref lease; the lease
+contains only branch revalidation and journal publication. Same-ref requests are
+admitted through a bounded FIFO queue, while different refs may prepare in
+parallel. A new write cancels in-flight derived maintenance so foreground traffic
+does not wait behind catalog or commit-graph work. Successful journal publication
+is immediately readable by the gateway; catalog compaction and commit-graph
+maintenance continue after the write burst becomes idle. Maintenance is
+coalesced so a later journal wave never advances from a generation whose
+visibility proof is still being finalized.
 
 ## Build and run
 
@@ -36,6 +65,11 @@ The backing provider uses Crab's existing environment credential chain. Set
 the usual AWS, GCP, or Azure credentials for the selected provider. For an
 S3-compatible endpoint, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, and
 `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` are supported by the shared storage layer.
+
+`endpoint_domain` is the gateway's public host name, without a scheme. When it
+is set, both `https://endpoint.example/repository/key` and
+`https://repository.endpoint.example/key` address the same logical bucket.
+The deployment's DNS and TLS certificate must cover the wildcard host.
 
 See `s3-gateway.example.toml` for configuration and
 `crab/docs/architecture/s3-gateway-contract.md` for the protocol contract.

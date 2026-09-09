@@ -1,89 +1,361 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex as StdMutex, MutexGuard,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
-use crab_remote_git::{RemoteGitRepository, RemoteGitRuntime, RepositoryOptions};
+use crab_remote_git::{
+    OperationContext, RemoteGitRepository, RemoteGitRuntime, RemoteGitSnapshot, RepositoryOptions,
+    Revision,
+};
+use gix_hash::ObjectId;
+use tokio::sync::{Mutex, OnceCell, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use crate::gateway::Repository;
 
 const MAINTENANCE_TTL: Duration = Duration::from_secs(60);
 
-pub(crate) async fn open_current(
-    repository: &Repository,
-    runtime: Arc<RemoteGitRuntime>,
-    options: RepositoryOptions,
-    cancel: &CancellationToken,
-) -> crate::Result<RemoteGitRepository> {
-    let open = || {
-        RemoteGitRepository::open(
-            repository.store.clone(),
-            repository.layout.clone(),
-            repository.identity.clone(),
-            Arc::clone(&runtime),
-            options,
-            cancel,
-        )
-    };
-    match open().await {
-        Ok(remote) if remote.refs().is_empty() || remote.commit_graph_available() => {
-            return Ok(remote);
-        }
-        Ok(_) | Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
-        Err(error) => return Err(error.into()),
-    }
-    ensure_readable(repository, Arc::clone(&runtime), options, cancel).await?;
-    open().await.map_err(Into::into)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadViewKey {
+    generation: u64,
+    snapshot_digest: String,
 }
 
-pub(crate) async fn ensure_readable(
+struct CachedReadView {
+    observed_at: tokio::time::Instant,
+    view: Arc<ReadView>,
+}
+
+type ObjectAttributeKey = (ObjectId, String, ObjectId);
+type ObjectAttributeCell = Arc<OnceCell<Option<crate::attributes::ObjectAttributes>>>;
+
+/// Generation- and journal-keyed immutable repository state shared by requests.
+pub(crate) struct ReadView {
+    key: ReadViewKey,
+    remote: RemoteGitRepository,
+    snapshots: Mutex<HashMap<String, Arc<OnceCell<RemoteGitSnapshot>>>>,
+    manifests: Mutex<HashMap<ObjectId, Arc<OnceCell<Arc<crate::attributes::Manifest>>>>>,
+    objects: Mutex<HashMap<ObjectAttributeKey, ObjectAttributeCell>>,
+}
+
+impl ReadView {
+    pub(crate) fn remote(&self) -> &RemoteGitRepository {
+        &self.remote
+    }
+
+    pub(crate) async fn snapshot(
+        &self,
+        revision: &str,
+        operation: &OperationContext,
+    ) -> crate::Result<RemoteGitSnapshot> {
+        let cell = {
+            let mut snapshots = self.snapshots.lock().await;
+            Arc::clone(
+                snapshots
+                    .entry(revision.to_owned())
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        cell.get_or_try_init(|| async {
+            self.remote
+                .snapshot(&Revision::parse(revision)?, operation)
+                .await
+                .map_err(Into::into)
+        })
+        .await
+        .cloned()
+    }
+
+    pub(crate) async fn attributes(
+        &self,
+        repository: &Repository,
+        commit: ObjectId,
+    ) -> crate::Result<Arc<crate::attributes::Manifest>> {
+        let cell = {
+            let mut manifests = self.manifests.lock().await;
+            Arc::clone(
+                manifests
+                    .entry(commit)
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        cell.get_or_try_init(|| async {
+            crate::attributes::load(repository, commit)
+                .await
+                .map(Arc::new)
+        })
+        .await
+        .cloned()
+    }
+
+    pub(crate) async fn object_attributes(
+        &self,
+        repository: &Repository,
+        commit: ObjectId,
+        path: &str,
+        oid: ObjectId,
+    ) -> crate::Result<Option<crate::attributes::ObjectAttributes>> {
+        let key = (commit, path.to_owned(), oid);
+        let cell = {
+            let mut objects = self.objects.lock().await;
+            Arc::clone(
+                objects
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        cell.get_or_try_init(|| crate::attributes::load_object(repository, commit, path, oid))
+            .await
+            .cloned()
+    }
+}
+
+/// Singleflight refresh and immutable generation reuse for one repository.
+pub(crate) struct ReadViewCache {
+    cached: RwLock<Option<CachedReadView>>,
+    refresh: Mutex<()>,
+}
+
+/// Coalesces repository maintenance until the local write burst is idle.
+pub(crate) struct WriteMaintenance {
+    epoch: AtomicU64,
+    active: AtomicUsize,
+    cancellation: StdMutex<CancellationToken>,
+}
+
+impl WriteMaintenance {
+    pub(crate) fn new() -> Self {
+        Self {
+            epoch: AtomicU64::new(0),
+            active: AtomicUsize::new(0),
+            cancellation: StdMutex::new(CancellationToken::new()),
+        }
+    }
+
+    pub(crate) fn begin(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.active.fetch_add(1, Ordering::AcqRel);
+        self.cancellation().cancel();
+    }
+
+    pub(crate) fn finish(&self, parent: &CancellationToken) -> Option<(u64, CancellationToken)> {
+        if self.active.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return None;
+        }
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let mut cancellation = self.cancellation();
+        if !self.is_idle_at(epoch) {
+            return None;
+        }
+        let token = parent.child_token();
+        *cancellation = token.clone();
+        Some((epoch, token))
+    }
+
+    fn is_idle_at(&self, epoch: u64) -> bool {
+        self.active.load(Ordering::Acquire) == 0 && self.epoch.load(Ordering::Acquire) == epoch
+    }
+
+    fn cancellation(&self) -> MutexGuard<'_, CancellationToken> {
+        match self.cancellation.lock() {
+            Ok(cancellation) => cancellation,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+impl ReadViewCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            cached: RwLock::new(None),
+            refresh: Mutex::new(()),
+        }
+    }
+
+    pub(crate) async fn current(
+        &self,
+        repository: &Repository,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancel: &CancellationToken,
+    ) -> crate::Result<Arc<ReadView>> {
+        let requested_at = tokio::time::Instant::now();
+        let _refresh = self.refresh.lock().await;
+        if let Some(view) = self.observed_since(requested_at).await {
+            return Ok(view);
+        }
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await?;
+        let observed_at = tokio::time::Instant::now();
+        let key = ReadViewKey {
+            generation: snapshot.manifest.generation,
+            snapshot_digest: snapshot.digest()?,
+        };
+        let existing = self
+            .cached
+            .read()
+            .await
+            .as_ref()
+            .filter(|cached| cached.view.key == key)
+            .map(|cached| Arc::clone(&cached.view));
+        let view = match existing {
+            Some(view) => view,
+            None => Arc::new(ReadView {
+                key,
+                remote: RemoteGitRepository::from_snapshot(
+                    repository.layout.clone(),
+                    &snapshot,
+                    repository.identity.clone(),
+                    runtime,
+                    options,
+                    cancel,
+                )
+                .await?,
+                snapshots: Mutex::new(HashMap::new()),
+                manifests: Mutex::new(HashMap::new()),
+                objects: Mutex::new(HashMap::new()),
+            }),
+        };
+        *self.cached.write().await = Some(CachedReadView {
+            observed_at,
+            view: Arc::clone(&view),
+        });
+        Ok(view)
+    }
+
+    pub(crate) async fn invalidate(&self) {
+        *self.cached.write().await = None;
+    }
+
+    async fn observed_since(&self, requested_at: tokio::time::Instant) -> Option<Arc<ReadView>> {
+        self.cached
+            .read()
+            .await
+            .as_ref()
+            .filter(|cached| cached.observed_at >= requested_at)
+            .map(|cached| Arc::clone(&cached.view))
+    }
+}
+
+pub(crate) fn schedule_readability(
     repository: &Repository,
     runtime: Arc<RemoteGitRuntime>,
     options: RepositoryOptions,
-    cancel: &CancellationToken,
-) -> crate::Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let store = repository.store.clone();
-        let layout = repository.layout.clone();
-        let identity = repository.identity.clone();
-        let publication_runtime = Arc::clone(&runtime);
-        let publication_cancel = cancel.clone();
-        // The publication future is deeply nested. A task boundary prevents its
-        // poll stack from accumulating with the request handler's read retry.
-        tokio::spawn(async move {
-            crab_write::generation::ensure_readable(
-                &store,
-                &layout,
-                &identity,
-                publication_runtime,
-                options,
-                MAINTENANCE_TTL,
-                &publication_cancel,
-            )
-            .await
-        })
-        .await??;
-        let opened = RemoteGitRepository::open(
-            repository.store.clone(),
-            repository.layout.clone(),
-            repository.identity.clone(),
-            Arc::clone(&runtime),
-            options,
-            cancel,
-        )
-        .await;
-        match opened {
-            Ok(remote) if remote.refs().is_empty() || remote.commit_graph_available() => {
-                return Ok(());
-            }
-            Ok(_) | Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(crate::Error::ReadinessTimeout);
-        }
+    cancel: CancellationToken,
+    epoch: u64,
+) {
+    let store = repository.store.clone();
+    let layout = repository.layout.clone();
+    let identity = repository.identity.clone();
+    let maintenance = Arc::clone(&repository.maintenance);
+    tokio::spawn(async move {
+        // Let a short write burst accumulate in the journal so one owner can
+        // compact it, instead of racing every acknowledgement with maintenance.
         tokio::select! {
-            () = cancel.cancelled() => return Err(crab_remote_git::Error::Cancelled.into()),
+            () = cancel.cancelled() => return,
             () = tokio::time::sleep(Duration::from_millis(100)) => {}
         }
+        if !maintenance.is_idle_at(epoch) {
+            return;
+        }
+        if let Err(error) = crab_write::generation::ensure_readable(
+            &store,
+            &layout,
+            &identity,
+            runtime,
+            options,
+            MAINTENANCE_TTL,
+            &cancel,
+        )
+        .await
+        {
+            tracing::warn!(%error, "S3 repository background read maintenance failed");
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RepositoryAccess, RepositoryConfig};
+
+    #[test]
+    fn foreground_write_cancels_scheduled_maintenance() {
+        let parent = CancellationToken::new();
+        let maintenance = WriteMaintenance::new();
+        maintenance.begin();
+        let (_, first) = maintenance
+            .finish(&parent)
+            .expect("idle repository schedules maintenance");
+
+        maintenance.begin();
+        assert!(first.is_cancelled());
+        let (_, second) = maintenance
+            .finish(&parent)
+            .expect("new idle epoch schedules replacement maintenance");
+        assert!(!second.is_cancelled());
+
+        parent.cancel();
+        assert!(second.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_refreshes_share_one_generation_view() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(store.clone(), "read-view-test".to_owned());
+        crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+            .await
+            .unwrap();
+        let repository = Arc::new(
+            Repository::new(
+                RepositoryConfig {
+                    name: "repo".to_owned(),
+                    provider: crab_storage::StorageProviderKind::Local,
+                    bucket: "memory".to_owned(),
+                    prefix: "read-view-test".to_owned(),
+                    default_branch: "main".to_owned(),
+                    members: vec![crate::RepositoryMember {
+                        principal: "user".to_owned(),
+                        access: RepositoryAccess::Read,
+                    }],
+                    protected_branches: Vec::new(),
+                },
+                store,
+            )
+            .unwrap(),
+        );
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut reads = tokio::task::JoinSet::new();
+        for _ in 0..16 {
+            let repository = Arc::clone(&repository);
+            let runtime = Arc::clone(&runtime);
+            let barrier = Arc::clone(&barrier);
+            reads.spawn(async move {
+                barrier.wait().await;
+                repository
+                    .read_views
+                    .current(
+                        &repository,
+                        runtime,
+                        RepositoryOptions::default(),
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap()
+            });
+        }
+        let first = reads.join_next().await.unwrap().unwrap();
+        while let Some(result) = reads.join_next().await {
+            assert!(Arc::ptr_eq(&first, &result.unwrap()));
+        }
+        runtime.shutdown().await;
     }
 }

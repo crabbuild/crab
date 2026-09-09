@@ -1,6 +1,8 @@
 # Crab S3 gateway: executable design and phased implementation plan
 
-Status: initial gateway implemented in `crates/crab-s3-gateway`; broader
+Status: gateway implemented in `crates/crab-s3-gateway`, including object
+attributes/tagging, conditional writes, persisted checksums, and optional
+virtual-host routing; broader
 cross-client, cross-provider, failure-injection, and deployment qualification
 remains a release gate. The frozen delivered surface and deliberate limits are
 recorded in `s3-gateway-contract.md`.
@@ -549,10 +551,29 @@ verified data; authorization and mutable ref resolution are not permanently
 cached along with it. Missing path visibility follows the selected permission
 contract, including distinctions between access denial and absence.
 
+The implemented repository read view is keyed by both compacted generation and
+the validated committed-journal digest. Concurrent refreshes and branch-tip
+snapshot resolution use singleflight cells; Git trees reuse the generation-bound
+remote-read cache, and attributes are cached per immutable commit. The gateway
+invalidates its mutable-ref view after publication. HEAD and attributed LIST
+resolve size and ETag from committed attributes without opening blob payloads.
+Committed journal packs remain readable through this path before locator/catalog
+publication completes.
+
 GET uses logical content opening for Git, Crab and LFS content. Raw `read_blob`
 is not a substitute. Read symlinks/submodules only according to phase 0; never
 follow paths into the gateway host filesystem. Version-specific AWS parameters
 remain unsupported unless full S3 versioning was selected and qualified.
+
+For Crab/Xet pointers, a partial GET or copy-source range uses the shared Xet
+range reconstructor and prunes the reconstruction recipe to chunks overlapping
+the selected logical byte interval. Cold, low-coverage reads fetch bounded xorb
+ranges; the cache may fetch and retain a complete verified xorb when the
+selected chunks cover most of it. The selected bytes are streamed from bounded
+temporary storage, so the gateway does not hydrate the complete logical file or
+retain the requested range in memory. A complete GET continues through
+whole-file reconstruction so the pointer hash and declared size are both
+verified.
 
 ### 3.2 Headers, conditions and ranges
 
@@ -687,6 +708,20 @@ Shared admission must retire an old token before any replacement can execute.
 Re-preparation is bounded and allowed only for a proven pre-publication conflict;
 recheck object conditions on the new destination view. Never resolve contention
 with a blind forced branch update or replacement of an entire stale tree.
+
+The implemented mutation owner admits same-ref requests through a bounded FIFO
+queue. It resolves only the target's ancestor trees, writes one path-local
+attribute delta, prepares the pack, and uploads the pack sidecars, visibility
+evidence, and attribute delta concurrently before acquiring the ref lease. Under
+the lease it captures a new repository snapshot, revalidates the parent, and
+either publishes the journal edit or releases and reprepares. Journal success is
+the acknowledgement point; catalog compaction and commit-graph maintenance run
+asynchronously because the repository read view consumes committed journal
+transactions directly. A new foreground write cancels an in-flight maintenance
+pass so derived catalog work releases its fences and yields to S3 mutation
+traffic. The gateway schedules maintenance again after the local write burst is
+idle and prevents overlapping compaction waves from advancing ahead of visibility
+proof publication.
 
 ### 4.2 PUT and DELETE execution rules
 
