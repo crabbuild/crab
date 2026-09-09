@@ -264,9 +264,9 @@ impl ShardHydrator {
         end: u64,
     ) -> Result<Vec<u8>> {
         let ptr = Pointer::parse(pointer_bytes)?;
-        let client = self
-            .store_client_for_pointer(&ptr, None)
-            .with_selective_xorb_reads();
+        // VFS windows retain decoded Xet ranges and expect one non-installing
+        // whole-xorb source read. The path API opts into selective origin reads.
+        let client = self.store_client_for_pointer(&ptr, None);
 
         let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_from_pointer")?;
         if start >= end {

@@ -108,8 +108,10 @@ async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>>
 Use `reconstruct_range_from_pointer` for bounded in-memory partial reads,
 `reconstruct_range_to_path` for large partial reads, and `reconstruct_to_path`
 for complete large files. Range reconstruction limits the recipe to the Xet
-chunks overlapping the selected byte interval. Cold, low-coverage reads fetch
-bounded xorb ranges; high-coverage reads may cache a complete verified xorb.
+chunks overlapping the selected byte interval. The path API makes cold,
+low-coverage reads with bounded xorb requests; high-coverage reads may cache a
+complete verified xorb. The in-memory API retains its non-installing whole-xorb
+source read so VFS windows preserve one-request fetch and decoded-range reuse.
 The pointer and metadata remain the source of truth; caches only change where
 immutable bytes are fetched from.
 Use `reconstruct_to_writer` with a sink for verification or cache warming that
