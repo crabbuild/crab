@@ -74,11 +74,19 @@ pub(crate) struct Gateway {
 }
 
 struct ReadObject {
+    blob_oid: gix_hash::ObjectId,
     content: ReadContent,
     size: u64,
     etag: String,
     modified: Timestamp,
     attributes: Option<crate::attributes::ObjectAttributes>,
+}
+
+struct ReadSelection {
+    range: std::ops::Range<u64>,
+    content_range: Option<String>,
+    parts_count: Option<i32>,
+    checksums: Option<crate::attributes::Checksums>,
 }
 
 #[derive(Clone)]
@@ -329,6 +337,7 @@ impl Gateway {
                 .and_then(|value| i64::try_from(value.modified_seconds).ok())
                 .unwrap_or(commit.committer.seconds);
             let modified = timestamp(modified_seconds)?;
+            let blob_oid = blob.metadata.oid;
             let (content, size) = classify_blob(blob)?;
             let etag = match attributes.as_ref() {
                 Some(value) => value.etag.clone(),
@@ -341,6 +350,7 @@ impl Gateway {
                 },
             };
             Ok(ReadObject {
+                blob_oid,
                 content,
                 size,
                 etag,
@@ -378,6 +388,56 @@ impl Gateway {
             ));
         }
         Ok((repository, address, principal))
+    }
+
+    async fn put_condition(
+        &self,
+        repository: &Repository,
+        key: &str,
+        input: &PutObjectInput,
+    ) -> S3Result<mutation::PutCondition> {
+        self.put_condition_values(
+            repository,
+            key,
+            input.if_match.clone(),
+            input.if_none_match.clone(),
+        )
+        .await
+    }
+
+    async fn put_condition_values(
+        &self,
+        repository: &Repository,
+        key: &str,
+        if_match: Option<ETagCondition>,
+        if_none_match: Option<ETagCondition>,
+    ) -> S3Result<mutation::PutCondition> {
+        if if_match.is_some() && if_none_match.is_some() {
+            return Err(s3_error!(InvalidRequest, "Conflicting write preconditions"));
+        }
+        if let Some(condition) = if_match {
+            let object = match self.read_object(repository, key).await {
+                Ok(object) => object,
+                Err(error) if error.code().as_str() == "NoSuchKey" => {
+                    return Err(s3_error!(PreconditionFailed));
+                }
+                Err(error) => return Err(error),
+            };
+            let actual = ETag::Strong(object.etag);
+            let matches = match condition {
+                ETagCondition::Any => true,
+                ETagCondition::ETag(expected) => actual.strong_cmp(&expected),
+            };
+            if !matches {
+                return Err(s3_error!(PreconditionFailed));
+            }
+            return Ok(mutation::PutCondition::IfMatch(object.blob_oid));
+        }
+        match if_none_match {
+            None => Ok(mutation::PutCondition::None),
+            Some(ETagCondition::Any) => Ok(mutation::PutCondition::IfNoneMatchAny),
+            Some(ETagCondition::ETag(_)) => Err(s3_error!(InvalidRequest)),
+        }
     }
 }
 
@@ -523,6 +583,41 @@ impl S3 for Gateway {
         Ok(response)
     }
 
+    async fn get_bucket_location(
+        &self,
+        req: S3Request<GetBucketLocationInput>,
+    ) -> S3Result<S3Response<GetBucketLocationOutput>> {
+        let _permit = self
+            .admission
+            .try_acquire()
+            .map_err(|_| s3_error!(SlowDown))?;
+        if req.input.expected_bucket_owner.is_some() {
+            return Err(s3_error!(NotImplemented));
+        }
+        self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
+        Ok(S3Response::new(GetBucketLocationOutput {
+            location_constraint: (self.region.as_ref() != "us-east-1")
+                .then(|| BucketLocationConstraint::from(self.region.to_string())),
+        }))
+    }
+
+    async fn get_bucket_versioning(
+        &self,
+        req: S3Request<GetBucketVersioningInput>,
+    ) -> S3Result<S3Response<GetBucketVersioningOutput>> {
+        let _permit = self
+            .admission
+            .try_acquire()
+            .map_err(|_| s3_error!(SlowDown))?;
+        if req.input.expected_bucket_owner.is_some() {
+            return Err(s3_error!(NotImplemented));
+        }
+        self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
+        // An empty response is S3's representation for a bucket that has never
+        // enabled versioning. Crab refs remain a separate namespace contract.
+        Ok(S3Response::new(GetBucketVersioningOutput::default()))
+    }
+
     async fn get_object(
         &self,
         req: S3Request<GetObjectInput>,
@@ -534,6 +629,7 @@ impl S3 for Gateway {
         reject_get_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let object = self.read_object(repository, &req.input.key).await?;
+        let tag_count = tag_count(object.attributes.as_ref())?;
         evaluate_conditions(
             req.input.if_match.as_ref(),
             req.input.if_none_match.as_ref(),
@@ -542,19 +638,17 @@ impl S3 for Gateway {
             &object.etag,
             &object.modified,
         )?;
-        let checked = req
-            .input
-            .range
-            .as_ref()
-            .map(|range| range.check(object.size))
-            .transpose()?;
-        let (range, content_range) = match checked {
-            Some(range) => {
-                let header = format!("bytes {}-{}/{}", range.start, range.end - 1, object.size);
-                (range.start..range.end, Some(header))
-            }
-            None => (0..object.size, None),
-        };
+        let selection = read_selection(
+            object.size,
+            object.attributes.as_ref(),
+            req.input.range.as_ref(),
+            req.input.part_number,
+        )?;
+        let response_checksums = response_checksums(
+            req.input.checksum_mode.as_ref(),
+            selection.checksums.as_ref(),
+        )?;
+        let range = selection.range;
         let content_length =
             i64::try_from(range.end - range.start).map_err(|_| s3_error!(InternalError))?;
         let body = object.content.stream(repository, range).await?;
@@ -564,7 +658,7 @@ impl S3 for Gateway {
             accept_ranges: Some("bytes".to_owned()),
             body: Some(StreamingBlob::from(s3s::Body::http_body_unsync(body))),
             content_length: Some(content_length),
-            content_range,
+            content_range: selection.content_range,
             content_type: req
                 .input
                 .response_content_type
@@ -606,7 +700,15 @@ impl S3 for Gateway {
                     .and_then(|value| value.expires.clone())
             }),
             e_tag: Some(ETag::Strong(object.etag)),
+            checksum_crc32: response_checksums.crc32,
+            checksum_crc32c: response_checksums.crc32c,
+            checksum_crc64nvme: response_checksums.crc64nvme,
+            checksum_sha1: response_checksums.sha1,
+            checksum_sha256: response_checksums.sha256,
+            checksum_type: response_checksums.checksum_type.map(ChecksumType::from),
             last_modified: Some(object.modified),
+            parts_count: selection.parts_count,
+            tag_count,
             metadata: object
                 .attributes
                 .map(|value| value.metadata.into_iter().collect()),
@@ -634,30 +736,23 @@ impl S3 for Gateway {
             &object.etag,
             &object.modified,
         )?;
-        let checked = req
-            .input
-            .range
-            .as_ref()
-            .map(|range| range.check(object.size))
-            .transpose()?;
-        let (content_length, content_range) = match checked {
-            Some(range) => (
-                range.end - range.start,
-                Some(format!(
-                    "bytes {}-{}/{}",
-                    range.start,
-                    range.end - 1,
-                    object.size
-                )),
-            ),
-            None => (object.size, None),
-        };
+        let selection = read_selection(
+            object.size,
+            object.attributes.as_ref(),
+            req.input.range.as_ref(),
+            req.input.part_number,
+        )?;
+        let response_checksums = response_checksums(
+            req.input.checksum_mode.as_ref(),
+            selection.checksums.as_ref(),
+        )?;
+        let content_length = selection.range.end - selection.range.start;
         Ok(S3Response::new(HeadObjectOutput {
             accept_ranges: Some("bytes".to_owned()),
             content_length: Some(
                 i64::try_from(content_length).map_err(|_| s3_error!(InternalError))?,
             ),
-            content_range,
+            content_range: selection.content_range,
             cache_control: object
                 .attributes
                 .as_ref()
@@ -680,11 +775,18 @@ impl S3 for Gateway {
                 .and_then(|value| value.content_type.clone())
                 .or_else(|| Some("application/octet-stream".to_owned())),
             e_tag: Some(ETag::Strong(object.etag)),
+            checksum_crc32: response_checksums.crc32,
+            checksum_crc32c: response_checksums.crc32c,
+            checksum_crc64nvme: response_checksums.crc64nvme,
+            checksum_sha1: response_checksums.sha1,
+            checksum_sha256: response_checksums.sha256,
+            checksum_type: response_checksums.checksum_type.map(ChecksumType::from),
             expires: object
                 .attributes
                 .as_ref()
                 .and_then(|value| value.expires.clone()),
             last_modified: Some(object.modified),
+            parts_count: selection.parts_count,
             metadata: object
                 .attributes
                 .map(|value| value.metadata.into_iter().collect()),
@@ -701,9 +803,11 @@ impl S3 for Gateway {
             .try_acquire()
             .map_err(|_| s3_error!(SlowDown))?;
         reject_put_extensions(&req.input)?;
-        let condition = put_condition(&req.input)?;
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
+        let condition = self
+            .put_condition(repository, &req.input.key, &req.input)
+            .await?;
         let content_length = req.input.content_length;
         let content_md5 = req.input.content_md5.clone();
         let mut checksums = RequestChecksums::from(&req.input);
@@ -718,6 +822,7 @@ impl S3 for Gateway {
         checksums.merge_trailers(trailing_headers.as_ref())?;
         verify_content_md5(&spool.digests.md5, content_md5.as_deref())?;
         checksums.verify(&spool.digests)?;
+        let stored_checksums = checksums.stored(&spool.digests);
         let etag = crate::content::md5_hex(&spool.digests.md5);
         let bytes = mutation_bytes(repository, &spool).await?;
         let outcome = mutation::apply(
@@ -735,6 +840,9 @@ impl S3 for Gateway {
                     etag_override: Some(etag),
                     completion_upload_id: None,
                     logical_size: Some(spool.size),
+                    checksums: stored_checksums.clone(),
+                    tags: parse_tagging_header(req.input.tagging.as_deref())?,
+                    parts: Vec::new(),
                     cache_control: req.input.cache_control,
                     content_disposition: req.input.content_disposition,
                     content_encoding: req.input.content_encoding,
@@ -752,17 +860,219 @@ impl S3 for Gateway {
         .map_err(mutation_error)?;
         Ok(S3Response::new(PutObjectOutput {
             e_tag: outcome.etag.map(ETag::Strong),
-            checksum_crc32: checksums.crc32,
-            checksum_crc32c: checksums.crc32c,
-            checksum_crc64nvme: checksums.crc64nvme,
-            checksum_sha1: checksums.sha1,
-            checksum_sha256: checksums.sha256,
-            checksum_type: checksums
-                .algorithm
-                .as_ref()
-                .map(|_| ChecksumType::from_static(ChecksumType::FULL_OBJECT)),
+            checksum_crc32: stored_checksums.crc32,
+            checksum_crc32c: stored_checksums.crc32c,
+            checksum_crc64nvme: stored_checksums.crc64nvme,
+            checksum_sha1: stored_checksums.sha1,
+            checksum_sha256: stored_checksums.sha256,
+            checksum_type: stored_checksums.checksum_type.map(ChecksumType::from),
             ..Default::default()
         }))
+    }
+
+    async fn get_object_attributes(
+        &self,
+        req: S3Request<GetObjectAttributesInput>,
+    ) -> S3Result<S3Response<GetObjectAttributesOutput>> {
+        let _permit = self
+            .admission
+            .try_acquire()
+            .map_err(|_| s3_error!(SlowDown))?;
+        if req.input.expected_bucket_owner.is_some()
+            || req.input.request_payer.is_some()
+            || req.input.sse_customer_algorithm.is_some()
+            || req.input.sse_customer_key.is_some()
+            || req.input.sse_customer_key_md5.is_some()
+            || req.input.version_id.is_some()
+        {
+            return Err(s3_error!(NotImplemented));
+        }
+        if req
+            .input
+            .max_parts
+            .is_some_and(|value| !(1..=1000).contains(&value))
+            || req.input.part_number_marker.is_some_and(|value| value < 0)
+        {
+            return Err(s3_error!(InvalidArgument));
+        }
+        let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
+        let object = self.read_object(repository, &req.input.key).await?;
+        let requested = object_attribute_names(&req.input.object_attributes);
+        if requested.iter().any(|value| {
+            !matches!(
+                *value,
+                ObjectAttributes::CHECKSUM
+                    | ObjectAttributes::ETAG
+                    | ObjectAttributes::OBJECT_PARTS
+                    | ObjectAttributes::OBJECT_SIZE
+                    | ObjectAttributes::STORAGE_CLASS
+            )
+        }) {
+            return Err(s3_error!(InvalidArgument));
+        }
+        let checksum = requested
+            .contains(ObjectAttributes::CHECKSUM)
+            .then(|| {
+                object
+                    .attributes
+                    .as_ref()
+                    .map(|value| checksum_dto(&value.checksums))
+            })
+            .flatten();
+        let object_parts = requested
+            .contains(ObjectAttributes::OBJECT_PARTS)
+            .then(|| object.attributes.as_ref().map(|value| &value.parts))
+            .flatten()
+            .filter(|parts| !parts.is_empty())
+            .map(|parts| object_parts(parts, req.input.part_number_marker, req.input.max_parts))
+            .transpose()?;
+        Ok(S3Response::new(GetObjectAttributesOutput {
+            checksum,
+            e_tag: requested
+                .contains(ObjectAttributes::ETAG)
+                .then_some(ETag::Strong(object.etag)),
+            last_modified: Some(object.modified),
+            object_parts,
+            object_size: requested
+                .contains(ObjectAttributes::OBJECT_SIZE)
+                .then(|| i64::try_from(object.size).map_err(|_| s3_error!(InternalError)))
+                .transpose()?,
+            ..Default::default()
+        }))
+    }
+
+    async fn get_object_tagging(
+        &self,
+        req: S3Request<GetObjectTaggingInput>,
+    ) -> S3Result<S3Response<GetObjectTaggingOutput>> {
+        let _permit = self
+            .admission
+            .try_acquire()
+            .map_err(|_| s3_error!(SlowDown))?;
+        if req.input.expected_bucket_owner.is_some()
+            || req.input.request_payer.is_some()
+            || req.input.version_id.is_some()
+        {
+            return Err(s3_error!(NotImplemented));
+        }
+        let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
+        let object = self.read_object(repository, &req.input.key).await?;
+        let tags = object
+            .attributes
+            .map(|value| value.tags)
+            .unwrap_or_default();
+        Ok(S3Response::new(GetObjectTaggingOutput {
+            tag_set: tags
+                .into_iter()
+                .map(|(key, value)| Tag {
+                    key: Some(key),
+                    value: Some(value),
+                })
+                .collect(),
+            ..Default::default()
+        }))
+    }
+
+    async fn put_object_tagging(
+        &self,
+        req: S3Request<PutObjectTaggingInput>,
+    ) -> S3Result<S3Response<PutObjectTaggingOutput>> {
+        let _permit = self
+            .admission
+            .try_acquire()
+            .map_err(|_| s3_error!(SlowDown))?;
+        if req.input.expected_bucket_owner.is_some()
+            || req.input.request_payer.is_some()
+            || req.input.version_id.is_some()
+        {
+            return Err(s3_error!(NotImplemented));
+        }
+        let (repository, address, principal) =
+            self.writable_address(&req, &req.input.bucket, &req.input.key)?;
+        let tags = validate_tags(
+            req.input
+                .tagging
+                .tag_set
+                .into_iter()
+                .map(|tag| {
+                    Ok((
+                        tag.key.ok_or_else(|| s3_error!(InvalidTag))?,
+                        tag.value.ok_or_else(|| s3_error!(InvalidTag))?,
+                    ))
+                })
+                .collect::<S3Result<Vec<_>>>()?,
+        )?;
+        let object = self.read_object(repository, &req.input.key).await?;
+        let mut attributes = object
+            .attributes
+            .as_ref()
+            .map(stored_to_pending)
+            .unwrap_or_default();
+        attributes.etag_override = Some(object.etag);
+        attributes.logical_size = Some(object.size);
+        attributes.tags = tags;
+        mutation::apply(
+            repository,
+            Arc::clone(&self.runtime),
+            self.options,
+            address
+                .branch
+                .as_deref()
+                .ok_or_else(|| s3_error!(MethodNotAllowed))?,
+            &address.path,
+            mutation::Change::Attributes {
+                expected: object.blob_oid,
+                attributes: Box::new(attributes),
+            },
+            &principal,
+            &self.cancellation,
+        )
+        .await
+        .map_err(mutation_error)?;
+        Ok(S3Response::new(PutObjectTaggingOutput::default()))
+    }
+
+    async fn delete_object_tagging(
+        &self,
+        req: S3Request<DeleteObjectTaggingInput>,
+    ) -> S3Result<S3Response<DeleteObjectTaggingOutput>> {
+        let _permit = self
+            .admission
+            .try_acquire()
+            .map_err(|_| s3_error!(SlowDown))?;
+        if req.input.expected_bucket_owner.is_some() || req.input.version_id.is_some() {
+            return Err(s3_error!(NotImplemented));
+        }
+        let (repository, address, principal) =
+            self.writable_address(&req, &req.input.bucket, &req.input.key)?;
+        let object = self.read_object(repository, &req.input.key).await?;
+        let mut attributes = object
+            .attributes
+            .as_ref()
+            .map(stored_to_pending)
+            .unwrap_or_default();
+        attributes.etag_override = Some(object.etag);
+        attributes.logical_size = Some(object.size);
+        attributes.tags.clear();
+        mutation::apply(
+            repository,
+            Arc::clone(&self.runtime),
+            self.options,
+            address
+                .branch
+                .as_deref()
+                .ok_or_else(|| s3_error!(MethodNotAllowed))?,
+            &address.path,
+            mutation::Change::Attributes {
+                expected: object.blob_oid,
+                attributes: Box::new(attributes),
+            },
+            &principal,
+            &self.cancellation,
+        )
+        .await
+        .map_err(mutation_error)?;
+        Ok(S3Response::new(DeleteObjectTaggingOutput::default()))
     }
 
     async fn delete_object(
@@ -945,6 +1255,9 @@ impl S3 for Gateway {
                 etag_override: None,
                 completion_upload_id: None,
                 logical_size: None,
+                checksums: crate::attributes::Checksums::default(),
+                tags: BTreeMap::new(),
+                parts: Vec::new(),
                 cache_control: req.input.cache_control,
                 content_disposition: req.input.content_disposition,
                 content_encoding: req.input.content_encoding,
@@ -960,8 +1273,40 @@ impl S3 for Gateway {
                 .map(stored_to_pending)
                 .unwrap_or_default()
         };
+        // A copy creates a new S3 object version even when the source came
+        // from multipart upload; completion identity and part layout remain
+        // properties of the source object only.
+        attributes.completion_upload_id = None;
+        attributes.parts.clear();
+        let replace_tags = req
+            .input
+            .tagging_directive
+            .as_ref()
+            .is_some_and(|value| value.as_str() == TaggingDirective::REPLACE);
+        if req.input.tagging.is_some() && !replace_tags {
+            return Err(s3_error!(InvalidRequest));
+        }
+        attributes.tags = if replace_tags {
+            parse_tagging_header(req.input.tagging.as_deref())?
+        } else {
+            source_object
+                .attributes
+                .as_ref()
+                .map(|value| value.tags.clone())
+                .unwrap_or_default()
+        };
         attributes.etag_override = Some(crate::content::md5_hex(&spool.digests.md5));
         attributes.logical_size = Some(spool.size);
+        attributes.checksums = match req.input.checksum_algorithm.as_ref() {
+            Some(algorithm) => calculated_checksums(&spool.digests, algorithm.as_str())?,
+            None => source_object
+                .attributes
+                .as_ref()
+                .map(|value| value.checksums.clone())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| default_checksums(&spool.digests)),
+        };
+        let response_checksums = attributes.checksums.clone();
         let bytes = mutation_bytes(repository, &spool).await?;
         let outcome = mutation::apply(
             repository,
@@ -985,6 +1330,12 @@ impl S3 for Gateway {
         Ok(S3Response::new(CopyObjectOutput {
             copy_object_result: Some(CopyObjectResult {
                 e_tag: outcome.etag.map(ETag::Strong),
+                checksum_crc32: response_checksums.crc32,
+                checksum_crc32c: response_checksums.crc32c,
+                checksum_crc64nvme: response_checksums.crc64nvme,
+                checksum_sha1: response_checksums.sha1,
+                checksum_sha256: response_checksums.sha256,
+                checksum_type: response_checksums.checksum_type.map(ChecksumType::from),
                 last_modified: Some(timestamp(
                     i64::try_from(
                         std::time::SystemTime::now()
@@ -994,7 +1345,6 @@ impl S3 for Gateway {
                     )
                     .map_err(|_| s3_error!(InternalError))?,
                 )?),
-                ..Default::default()
             }),
             ..Default::default()
         }))
@@ -1009,6 +1359,10 @@ impl S3 for Gateway {
             .try_acquire()
             .map_err(|_| s3_error!(SlowDown))?;
         reject_create_multipart_extensions(&req.input)?;
+        let (checksum_algorithm, checksum_type) = multipart_checksum_profile(
+            req.input.checksum_algorithm.as_ref(),
+            req.input.checksum_type.as_ref(),
+        )?;
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
         let branch = address
@@ -1019,30 +1373,42 @@ impl S3 for Gateway {
             std::str::from_utf8(address.path.as_bytes()).map_err(|_| s3_error!(InvalidArgument))?;
         let session = crate::multipart::create(
             repository,
-            &req.input.bucket,
-            &req.input.key,
-            branch,
-            path,
-            &principal,
-            crate::attributes::PutAttributes {
-                etag_override: None,
-                completion_upload_id: None,
-                logical_size: None,
-                cache_control: req.input.cache_control,
-                content_disposition: req.input.content_disposition,
-                content_encoding: req.input.content_encoding,
-                content_language: req.input.content_language,
-                content_type: req.input.content_type,
-                expires: req.input.expires,
-                metadata: req.input.metadata.unwrap_or_default().into_iter().collect(),
+            crate::multipart::Initiation {
+                bucket: &req.input.bucket,
+                key: &req.input.key,
+                branch,
+                path,
+                principal: &principal,
+                attributes: crate::attributes::PutAttributes {
+                    etag_override: None,
+                    completion_upload_id: None,
+                    logical_size: None,
+                    checksums: crate::attributes::Checksums::default(),
+                    tags: parse_tagging_header(req.input.tagging.as_deref())?,
+                    parts: Vec::new(),
+                    cache_control: req.input.cache_control,
+                    content_disposition: req.input.content_disposition,
+                    content_encoding: req.input.content_encoding,
+                    content_language: req.input.content_language,
+                    content_type: req.input.content_type,
+                    expires: req.input.expires,
+                    metadata: req.input.metadata.unwrap_or_default().into_iter().collect(),
+                },
+                checksum_algorithm,
+                checksum_type,
+                now: now_seconds()?,
             },
-            now_seconds()?,
         )
         .await
         .map_err(multipart_error)?;
         Ok(S3Response::new(CreateMultipartUploadOutput {
             bucket: Some(req.input.bucket),
             key: Some(req.input.key),
+            checksum_algorithm: session
+                .checksum_algorithm
+                .clone()
+                .map(ChecksumAlgorithm::from),
+            checksum_type: session.checksum_type.clone().map(ChecksumType::from),
             upload_id: Some(session.id),
             ..Default::default()
         }))
@@ -1071,6 +1437,8 @@ impl S3 for Gateway {
         .map_err(multipart_error)?;
         let content_length = req.input.content_length;
         let content_md5 = req.input.content_md5.clone();
+        let mut checksums = RequestChecksums::from_upload_part(&req.input);
+        let trailing_headers = req.trailing_headers.clone();
         let spool = crate::content::spool_body(
             req.input.body,
             content_length,
@@ -1078,7 +1446,26 @@ impl S3 for Gateway {
         )
         .await
         .map_err(content_error)?;
+        checksums.merge_trailers(trailing_headers.as_ref())?;
+        checksums.ensure_single_value()?;
+        if let Some(algorithm) = loaded.session.checksum_algorithm.as_deref()
+            && (checksums
+                .algorithm
+                .as_ref()
+                .is_some_and(|requested| requested.as_str() != algorithm)
+                || (!checksums.values_empty() && !checksums.has_algorithm(algorithm))
+                || (loaded.session.checksum_type.as_deref() == Some(ChecksumType::COMPOSITE)
+                    && checksums.values_empty()))
+        {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Multipart checksum algorithm mismatch"
+            ));
+        }
         verify_content_md5(&spool.digests.md5, content_md5.as_deref())?;
+        checksums.verify_values(&spool.digests)?;
+        let stored_checksums = checksums
+            .stored_for_algorithm(&spool.digests, loaded.session.checksum_algorithm.as_deref())?;
         let etag = crate::content::md5_hex(&spool.digests.md5);
         crate::multipart::register_part(
             repository,
@@ -1086,6 +1473,7 @@ impl S3 for Gateway {
             req.input.part_number,
             &spool,
             etag.clone(),
+            stored_checksums.clone(),
             now_seconds()?,
             &self.cancellation,
         )
@@ -1093,6 +1481,11 @@ impl S3 for Gateway {
         .map_err(multipart_error)?;
         Ok(S3Response::new(UploadPartOutput {
             e_tag: Some(ETag::Strong(etag)),
+            checksum_crc32: stored_checksums.crc32,
+            checksum_crc32c: stored_checksums.crc32c,
+            checksum_crc64nvme: stored_checksums.crc64nvme,
+            checksum_sha1: stored_checksums.sha1,
+            checksum_sha256: stored_checksums.sha256,
             ..Default::default()
         }))
     }
@@ -1159,6 +1552,13 @@ impl S3 for Gateway {
             &principal,
         )
         .map_err(multipart_error)?;
+        let part_checksums = loaded
+            .session
+            .checksum_algorithm
+            .as_deref()
+            .map(|algorithm| calculated_checksums(&spool.digests, algorithm))
+            .transpose()?
+            .unwrap_or_else(|| default_checksums(&spool.digests));
         let etag = crate::content::md5_hex(&spool.digests.md5);
         crate::multipart::register_part(
             repository,
@@ -1166,6 +1566,7 @@ impl S3 for Gateway {
             req.input.part_number,
             &spool,
             etag.clone(),
+            part_checksums.clone(),
             now_seconds()?,
             &self.cancellation,
         )
@@ -1174,10 +1575,14 @@ impl S3 for Gateway {
         Ok(S3Response::new(UploadPartCopyOutput {
             copy_part_result: Some(CopyPartResult {
                 e_tag: Some(ETag::Strong(etag)),
+                checksum_crc32: part_checksums.crc32,
+                checksum_crc32c: part_checksums.crc32c,
+                checksum_crc64nvme: part_checksums.crc64nvme,
+                checksum_sha1: part_checksums.sha1,
+                checksum_sha256: part_checksums.sha256,
                 last_modified: Some(timestamp(
                     i64::try_from(now_seconds()?).map_err(|_| s3_error!(InternalError))?,
                 )?),
-                ..Default::default()
             }),
             ..Default::default()
         }))
@@ -1192,6 +1597,12 @@ impl S3 for Gateway {
             .try_acquire()
             .map_err(|_| s3_error!(SlowDown))?;
         reject_complete_multipart_extensions(&req.input)?;
+        let if_match = req.input.if_match.clone();
+        let if_none_match = req.input.if_none_match.clone();
+        let completion_checksums = RequestChecksums::from_complete(&req.input);
+        completion_checksums.ensure_single_value()?;
+        let requested_checksum_type = req.input.checksum_type.clone();
+        let expected_size = req.input.mpu_object_size;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?.to_owned();
         let loaded = crate::multipart::load(repository, &req.input.upload_id)
@@ -1204,6 +1615,22 @@ impl S3 for Gateway {
             &principal,
         )
         .map_err(multipart_error)?;
+        if requested_checksum_type.as_ref().map(ChecksumType::as_str)
+            != loaded.session.checksum_type.as_deref()
+            && requested_checksum_type.is_some()
+        {
+            return Err(s3_error!(BadDigest));
+        }
+        if let Some(algorithm) = loaded.session.checksum_algorithm.as_deref()
+            && !completion_checksums.values_empty()
+            && !completion_checksums.has_algorithm(algorithm)
+        {
+            return Err(s3_error!(BadDigest));
+        }
+        let composite_algorithm = (loaded.session.checksum_type.as_deref()
+            == Some(ChecksumType::COMPOSITE))
+        .then(|| loaded.session.checksum_algorithm.clone())
+        .flatten();
         let selected = req
             .input
             .multipart_upload
@@ -1212,23 +1639,57 @@ impl S3 for Gateway {
             .into_iter()
             .map(|part| {
                 let number = part.part_number.ok_or_else(|| s3_error!(InvalidPart))?;
-                let etag = match part.e_tag.ok_or_else(|| s3_error!(InvalidPart))? {
-                    ETag::Strong(value) => value,
+                let etag = match part.e_tag.as_ref().ok_or_else(|| s3_error!(InvalidPart))? {
+                    ETag::Strong(value) => value.clone(),
                     ETag::Weak(_) => return Err(s3_error!(InvalidPart)),
                 };
+                let stored = loaded
+                    .session
+                    .parts
+                    .get(&number)
+                    .ok_or_else(|| s3_error!(InvalidPart))?;
+                completed_part_checksums_match(&part, &stored.checksums)?;
+                if let Some(algorithm) = composite_algorithm.as_deref()
+                    && completed_part_checksum_value(&part, algorithm)
+                        != checksum_value(&stored.checksums, algorithm)
+                {
+                    return Err(s3_error!(InvalidPart));
+                }
                 Ok((number, etag))
             })
             .collect::<S3Result<Vec<_>>>()?;
+        if composite_algorithm.is_some()
+            && selected
+                .iter()
+                .zip(1_i32..)
+                .any(|((number, _), expected)| *number != expected)
+        {
+            return Err(s3_error!(InvalidPartOrder));
+        }
         if let Some(etag) =
             crate::multipart::completed_etag(&loaded.session, &selected).map_err(multipart_error)?
         {
+            let checksums = loaded
+                .session
+                .completion_checksums
+                .clone()
+                .unwrap_or_default();
             return Ok(S3Response::new(CompleteMultipartUploadOutput {
                 bucket: Some(req.input.bucket),
                 key: Some(req.input.key),
                 e_tag: Some(ETag::Strong(etag.to_owned())),
+                checksum_crc32: checksums.crc32,
+                checksum_crc32c: checksums.crc32c,
+                checksum_crc64nvme: checksums.crc64nvme,
+                checksum_sha1: checksums.sha1,
+                checksum_sha256: checksums.sha256,
+                checksum_type: checksums.checksum_type.map(ChecksumType::from),
                 ..Default::default()
             }));
         }
+        let condition = self
+            .put_condition_values(repository, &req.input.key, if_match, if_none_match)
+            .await?;
         let (session, parts) = crate::multipart::freeze(
             repository,
             loaded,
@@ -1270,11 +1731,36 @@ impl S3 for Gateway {
             }
         }
         let spool = writer.finish().await.map_err(content_error)?;
+        let actual_size = i64::try_from(spool.size).map_err(|_| s3_error!(EntityTooLarge))?;
+        if expected_size.is_some_and(|expected| expected != actual_size) {
+            return Err(s3_error!(InvalidRequest, "Multipart object size mismatch"));
+        }
+        let stored_checksums = if let Some(algorithm) = composite_algorithm.as_deref() {
+            let calculated =
+                composite_checksums(parts.iter().map(|part| &part.checksums), algorithm)?;
+            if !request_checksums_match(&completion_checksums, &calculated) {
+                return Err(s3_error!(BadDigest));
+            }
+            calculated
+        } else {
+            completion_checksums.verify_values(&spool.digests)?;
+            completion_checksums
+                .stored_for_algorithm(&spool.digests, session.checksum_algorithm.as_deref())?
+        };
         let etag = multipart_etag(&parts)?;
         let mut attributes = session.attributes.clone();
         attributes.etag_override = Some(etag.clone());
         attributes.completion_upload_id = Some(session.id.clone());
         attributes.logical_size = Some(spool.size);
+        attributes.checksums = stored_checksums.clone();
+        attributes.parts = parts
+            .iter()
+            .map(|part| crate::attributes::PartAttributes {
+                number: part.number,
+                size: part.size,
+                checksums: part.checksums.clone(),
+            })
+            .collect();
         let address = namespace::object_address(&session.key).map_err(namespace_error)?;
         let bytes = mutation_bytes(repository, &spool).await?;
         mutation::apply(
@@ -1286,7 +1772,7 @@ impl S3 for Gateway {
             mutation::Change::Put {
                 bytes,
                 attributes: Box::new(attributes),
-                condition: mutation::PutCondition::None,
+                condition,
             },
             &principal,
             &self.cancellation,
@@ -1296,13 +1782,19 @@ impl S3 for Gateway {
         let loaded = crate::multipart::load(repository, &session.id)
             .await
             .map_err(multipart_error)?;
-        crate::multipart::complete(repository, loaded, etag.clone())
+        crate::multipart::complete(repository, loaded, etag.clone(), stored_checksums.clone())
             .await
             .map_err(multipart_error)?;
         Ok(S3Response::new(CompleteMultipartUploadOutput {
             bucket: Some(req.input.bucket),
             key: Some(req.input.key),
             e_tag: Some(ETag::Strong(etag)),
+            checksum_crc32: stored_checksums.crc32,
+            checksum_crc32c: stored_checksums.crc32c,
+            checksum_crc64nvme: stored_checksums.crc64nvme,
+            checksum_sha1: stored_checksums.sha1,
+            checksum_sha256: stored_checksums.sha256,
+            checksum_type: stored_checksums.checksum_type.map(ChecksumType::from),
             ..Default::default()
         }))
     }
@@ -1384,6 +1876,12 @@ impl S3 for Gateway {
         let next = truncated
             .then(|| parts.last().map(|part| part.number))
             .flatten();
+        let checksum_algorithm = loaded
+            .session
+            .checksum_algorithm
+            .clone()
+            .map(ChecksumAlgorithm::from);
+        let checksum_type = loaded.session.checksum_type.clone().map(ChecksumType::from);
         Ok(S3Response::new(ListPartsOutput {
             bucket: Some(req.input.bucket),
             key: Some(req.input.key),
@@ -1392,12 +1890,19 @@ impl S3 for Gateway {
             part_number_marker: Some(marker),
             next_part_number_marker: next,
             is_truncated: Some(truncated),
+            checksum_algorithm,
+            checksum_type,
             parts: Some(
                 parts
                     .into_iter()
                     .map(|part| {
                         Ok(Part {
                             e_tag: Some(ETag::Strong(part.etag)),
+                            checksum_crc32: part.checksums.crc32,
+                            checksum_crc32c: part.checksums.crc32c,
+                            checksum_crc64nvme: part.checksums.crc64nvme,
+                            checksum_sha1: part.checksums.sha1,
+                            checksum_sha256: part.checksums.sha256,
                             last_modified: Some(timestamp(
                                 i64::try_from(part.modified_seconds)
                                     .map_err(|_| s3_error!(InternalError))?,
@@ -1406,7 +1911,6 @@ impl S3 for Gateway {
                             size: Some(
                                 i64::try_from(part.size).map_err(|_| s3_error!(InternalError))?,
                             ),
-                            ..Default::default()
                         })
                     })
                     .collect::<S3Result<Vec<_>>>()?,
@@ -1528,6 +2032,10 @@ impl S3 for Gateway {
                         Ok(MultipartUpload {
                             key: Some(session.key),
                             upload_id: Some(session.id),
+                            checksum_algorithm: session
+                                .checksum_algorithm
+                                .map(ChecksumAlgorithm::from),
+                            checksum_type: session.checksum_type.map(ChecksumType::from),
                             initiated: Some(timestamp(
                                 i64::try_from(session.created_seconds)
                                     .map_err(|_| s3_error!(InternalError))?,
@@ -1773,7 +2281,6 @@ fn reject_put_extensions(input: &PutObjectInput) -> S3Result<()> {
         || input.grant_read.is_some()
         || input.grant_read_acp.is_some()
         || input.grant_write_acp.is_some()
-        || input.if_match.is_some()
         || input.object_lock_legal_hold_status.is_some()
         || input.object_lock_mode.is_some()
         || input.object_lock_retain_until_date.is_some()
@@ -1785,7 +2292,6 @@ fn reject_put_extensions(input: &PutObjectInput) -> S3Result<()> {
         || input.ssekms_encryption_context.is_some()
         || input.ssekms_key_id.is_some()
         || input.storage_class.is_some()
-        || input.tagging.is_some()
         || input.website_redirect_location.is_some()
         || input.write_offset_bytes.is_some()
     {
@@ -1794,15 +2300,7 @@ fn reject_put_extensions(input: &PutObjectInput) -> S3Result<()> {
     Ok(())
 }
 
-fn put_condition(input: &PutObjectInput) -> S3Result<mutation::PutCondition> {
-    match input.if_none_match.as_ref() {
-        None => Ok(mutation::PutCondition::None),
-        Some(ETagCondition::Any) => Ok(mutation::PutCondition::IfNoneMatchAny),
-        Some(ETagCondition::ETag(_)) => Err(s3_error!(NotImplemented)),
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct RequestChecksums {
     algorithm: Option<ChecksumAlgorithm>,
     crc32: Option<String>,
@@ -1826,6 +2324,28 @@ impl From<&PutObjectInput> for RequestChecksums {
 }
 
 impl RequestChecksums {
+    fn from_upload_part(input: &UploadPartInput) -> Self {
+        Self {
+            algorithm: input.checksum_algorithm.clone(),
+            crc32: input.checksum_crc32.clone(),
+            crc32c: input.checksum_crc32c.clone(),
+            crc64nvme: input.checksum_crc64nvme.clone(),
+            sha1: input.checksum_sha1.clone(),
+            sha256: input.checksum_sha256.clone(),
+        }
+    }
+
+    fn from_complete(input: &CompleteMultipartUploadInput) -> Self {
+        Self {
+            algorithm: None,
+            crc32: input.checksum_crc32.clone(),
+            crc32c: input.checksum_crc32c.clone(),
+            crc64nvme: input.checksum_crc64nvme.clone(),
+            sha1: input.checksum_sha1.clone(),
+            sha256: input.checksum_sha256.clone(),
+        }
+    }
+
     fn merge_trailers(&mut self, trailers: Option<&s3s::TrailingHeaders>) -> S3Result<()> {
         let Some(headers) = trailers.and_then(s3s::TrailingHeaders::take) else {
             return Ok(());
@@ -1839,11 +2359,8 @@ impl RequestChecksums {
     }
 
     fn verify(&self, digests: &crate::content::Digests) -> S3Result<()> {
-        verify_base64_checksum(self.crc32.as_deref(), &digests.crc32.to_be_bytes())?;
-        verify_base64_checksum(self.crc32c.as_deref(), &digests.crc32c.to_be_bytes())?;
-        verify_base64_checksum(self.crc64nvme.as_deref(), &digests.crc64nvme.to_be_bytes())?;
-        verify_base64_checksum(self.sha1.as_deref(), &digests.sha1)?;
-        verify_base64_checksum(self.sha256.as_deref(), &digests.sha256)?;
+        self.ensure_single_value()?;
+        self.verify_values(digests)?;
         if let Some(algorithm) = &self.algorithm {
             let supplied = match algorithm.as_str() {
                 ChecksumAlgorithm::CRC32 => self.crc32.is_some(),
@@ -1859,6 +2376,500 @@ impl RequestChecksums {
         }
         Ok(())
     }
+
+    fn verify_values(&self, digests: &crate::content::Digests) -> S3Result<()> {
+        verify_base64_checksum(self.crc32.as_deref(), &digests.crc32.to_be_bytes())?;
+        verify_base64_checksum(self.crc32c.as_deref(), &digests.crc32c.to_be_bytes())?;
+        verify_base64_checksum(self.crc64nvme.as_deref(), &digests.crc64nvme.to_be_bytes())?;
+        verify_base64_checksum(self.sha1.as_deref(), &digests.sha1)?;
+        verify_base64_checksum(self.sha256.as_deref(), &digests.sha256)?;
+        Ok(())
+    }
+
+    fn stored(&self, digests: &crate::content::Digests) -> crate::attributes::Checksums {
+        let mut stored = crate::attributes::Checksums {
+            crc32: self.crc32.clone(),
+            crc32c: self.crc32c.clone(),
+            crc64nvme: self.crc64nvme.clone(),
+            sha1: self.sha1.clone(),
+            sha256: self.sha256.clone(),
+            checksum_type: Some(ChecksumType::FULL_OBJECT.to_owned()),
+        };
+        if stored.is_empty() {
+            stored = default_checksums(digests);
+        }
+        stored
+    }
+
+    fn stored_for_algorithm(
+        &self,
+        digests: &crate::content::Digests,
+        algorithm: Option<&str>,
+    ) -> S3Result<crate::attributes::Checksums> {
+        let stored = self.stored(digests);
+        if !self.values_empty() {
+            return Ok(stored);
+        }
+        algorithm
+            .map(|algorithm| calculated_checksums(digests, algorithm))
+            .transpose()
+            .map(|value| value.unwrap_or(stored))
+    }
+
+    fn values_empty(&self) -> bool {
+        self.crc32.is_none()
+            && self.crc32c.is_none()
+            && self.crc64nvme.is_none()
+            && self.sha1.is_none()
+            && self.sha256.is_none()
+    }
+
+    fn ensure_single_value(&self) -> S3Result<()> {
+        let count = [
+            self.crc32.is_some(),
+            self.crc32c.is_some(),
+            self.crc64nvme.is_some(),
+            self.sha1.is_some(),
+            self.sha256.is_some(),
+        ]
+        .into_iter()
+        .filter(|present| *present)
+        .count();
+        if count > 1 {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Only one object checksum algorithm can be supplied"
+            ));
+        }
+        Ok(())
+    }
+
+    fn has_algorithm(&self, algorithm: &str) -> bool {
+        match algorithm {
+            ChecksumAlgorithm::CRC32 => self.crc32.is_some(),
+            ChecksumAlgorithm::CRC32C => self.crc32c.is_some(),
+            ChecksumAlgorithm::CRC64NVME => self.crc64nvme.is_some(),
+            ChecksumAlgorithm::SHA1 => self.sha1.is_some(),
+            ChecksumAlgorithm::SHA256 => self.sha256.is_some(),
+            _ => false,
+        }
+    }
+}
+
+fn multipart_checksum_profile(
+    algorithm: Option<&ChecksumAlgorithm>,
+    checksum_type: Option<&ChecksumType>,
+) -> S3Result<(Option<String>, Option<String>)> {
+    let Some(algorithm) = algorithm else {
+        if checksum_type.is_some() {
+            return Err(s3_error!(InvalidRequest));
+        }
+        return Ok((None, None));
+    };
+    let checksum_type = checksum_type.map(ChecksumType::as_str).unwrap_or_else(|| {
+        if algorithm.as_str() == ChecksumAlgorithm::CRC64NVME {
+            ChecksumType::FULL_OBJECT
+        } else {
+            ChecksumType::COMPOSITE
+        }
+    });
+    let supported = matches!(
+        (algorithm.as_str(), checksum_type),
+        (
+            ChecksumAlgorithm::CRC32 | ChecksumAlgorithm::CRC32C | ChecksumAlgorithm::CRC64NVME,
+            ChecksumType::FULL_OBJECT
+        ) | (
+            ChecksumAlgorithm::CRC32
+                | ChecksumAlgorithm::CRC32C
+                | ChecksumAlgorithm::SHA1
+                | ChecksumAlgorithm::SHA256,
+            ChecksumType::COMPOSITE
+        )
+    );
+    if !supported {
+        return Err(s3_error!(
+            InvalidRequest,
+            "Invalid multipart checksum profile"
+        ));
+    }
+    Ok((
+        Some(algorithm.as_str().to_owned()),
+        Some(checksum_type.to_owned()),
+    ))
+}
+
+fn default_checksums(digests: &crate::content::Digests) -> crate::attributes::Checksums {
+    crate::attributes::Checksums {
+        crc64nvme: Some(
+            base64::engine::general_purpose::STANDARD.encode(digests.crc64nvme.to_be_bytes()),
+        ),
+        checksum_type: Some(ChecksumType::FULL_OBJECT.to_owned()),
+        ..Default::default()
+    }
+}
+
+fn calculated_checksums(
+    digests: &crate::content::Digests,
+    algorithm: &str,
+) -> S3Result<crate::attributes::Checksums> {
+    let encode = |value: &[u8]| base64::engine::general_purpose::STANDARD.encode(value);
+    let mut checksums = crate::attributes::Checksums {
+        checksum_type: Some(ChecksumType::FULL_OBJECT.to_owned()),
+        ..Default::default()
+    };
+    match algorithm {
+        ChecksumAlgorithm::CRC32 => checksums.crc32 = Some(encode(&digests.crc32.to_be_bytes())),
+        ChecksumAlgorithm::CRC32C => {
+            checksums.crc32c = Some(encode(&digests.crc32c.to_be_bytes()));
+        }
+        ChecksumAlgorithm::CRC64NVME => {
+            checksums.crc64nvme = Some(encode(&digests.crc64nvme.to_be_bytes()));
+        }
+        ChecksumAlgorithm::SHA1 => checksums.sha1 = Some(encode(&digests.sha1)),
+        ChecksumAlgorithm::SHA256 => checksums.sha256 = Some(encode(&digests.sha256)),
+        _ => return Err(s3_error!(InvalidRequest, "Unsupported checksum algorithm")),
+    }
+    Ok(checksums)
+}
+
+fn composite_checksums<'a>(
+    parts: impl IntoIterator<Item = &'a crate::attributes::Checksums>,
+    algorithm: &str,
+) -> S3Result<crate::attributes::Checksums> {
+    let mut concatenated = Vec::new();
+    let mut part_count = 0_usize;
+    for checksums in parts {
+        let encoded = checksum_value(checksums, algorithm).ok_or_else(|| s3_error!(InvalidPart))?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| s3_error!(InvalidPart))?;
+        concatenated.extend_from_slice(&decoded);
+        part_count = part_count
+            .checked_add(1)
+            .ok_or_else(|| s3_error!(InternalError))?;
+    }
+    let encode = |value: &[u8]| {
+        format!(
+            "{}-{part_count}",
+            base64::engine::general_purpose::STANDARD.encode(value)
+        )
+    };
+    let mut checksums = crate::attributes::Checksums {
+        checksum_type: Some(ChecksumType::COMPOSITE.to_owned()),
+        ..Default::default()
+    };
+    match algorithm {
+        ChecksumAlgorithm::CRC32 => {
+            let value = u32::try_from(crc_fast::checksum(
+                crc_fast::CrcAlgorithm::Crc32IsoHdlc,
+                &concatenated,
+            ))
+            .map_err(|_| s3_error!(InternalError))?;
+            checksums.crc32 = Some(encode(&value.to_be_bytes()));
+        }
+        ChecksumAlgorithm::CRC32C => {
+            let value = u32::try_from(crc_fast::checksum(
+                crc_fast::CrcAlgorithm::Crc32Iscsi,
+                &concatenated,
+            ))
+            .map_err(|_| s3_error!(InternalError))?;
+            checksums.crc32c = Some(encode(&value.to_be_bytes()));
+        }
+        ChecksumAlgorithm::SHA1 => {
+            use sha1::Digest as _;
+            checksums.sha1 = Some(encode(&sha1::Sha1::digest(&concatenated)));
+        }
+        ChecksumAlgorithm::SHA256 => {
+            use sha2::Digest as _;
+            checksums.sha256 = Some(encode(&sha2::Sha256::digest(&concatenated)));
+        }
+        _ => {
+            return Err(s3_error!(
+                InvalidRequest,
+                "Invalid composite checksum algorithm"
+            ));
+        }
+    }
+    Ok(checksums)
+}
+
+fn checksum_value<'a>(
+    checksums: &'a crate::attributes::Checksums,
+    algorithm: &str,
+) -> Option<&'a str> {
+    match algorithm {
+        ChecksumAlgorithm::CRC32 => checksums.crc32.as_deref(),
+        ChecksumAlgorithm::CRC32C => checksums.crc32c.as_deref(),
+        ChecksumAlgorithm::CRC64NVME => checksums.crc64nvme.as_deref(),
+        ChecksumAlgorithm::SHA1 => checksums.sha1.as_deref(),
+        ChecksumAlgorithm::SHA256 => checksums.sha256.as_deref(),
+        _ => None,
+    }
+}
+
+fn request_checksums_match(
+    requested: &RequestChecksums,
+    calculated: &crate::attributes::Checksums,
+) -> bool {
+    [
+        (requested.crc32.as_ref(), calculated.crc32.as_ref()),
+        (requested.crc32c.as_ref(), calculated.crc32c.as_ref()),
+        (requested.crc64nvme.as_ref(), calculated.crc64nvme.as_ref()),
+        (requested.sha1.as_ref(), calculated.sha1.as_ref()),
+        (requested.sha256.as_ref(), calculated.sha256.as_ref()),
+    ]
+    .into_iter()
+    .all(|(requested, actual)| {
+        requested.is_none_or(|requested| {
+            actual.is_some_and(|actual| {
+                actual == requested
+                    || actual.rsplit_once('-').is_some_and(|(digest, count)| {
+                        digest == requested && count.parse::<u32>().is_ok()
+                    })
+            })
+        })
+    })
+}
+
+fn completed_part_checksums_match(
+    part: &CompletedPart,
+    stored: &crate::attributes::Checksums,
+) -> S3Result<()> {
+    let matches = [
+        (part.checksum_crc32.as_ref(), stored.crc32.as_ref()),
+        (part.checksum_crc32c.as_ref(), stored.crc32c.as_ref()),
+        (part.checksum_crc64nvme.as_ref(), stored.crc64nvme.as_ref()),
+        (part.checksum_sha1.as_ref(), stored.sha1.as_ref()),
+        (part.checksum_sha256.as_ref(), stored.sha256.as_ref()),
+    ]
+    .into_iter()
+    .all(|(requested, actual)| requested.is_none_or(|requested| actual == Some(requested)));
+    if matches {
+        Ok(())
+    } else {
+        Err(s3_error!(InvalidPart))
+    }
+}
+
+fn completed_part_checksum_value<'a>(part: &'a CompletedPart, algorithm: &str) -> Option<&'a str> {
+    match algorithm {
+        ChecksumAlgorithm::CRC32 => part.checksum_crc32.as_deref(),
+        ChecksumAlgorithm::CRC32C => part.checksum_crc32c.as_deref(),
+        ChecksumAlgorithm::CRC64NVME => part.checksum_crc64nvme.as_deref(),
+        ChecksumAlgorithm::SHA1 => part.checksum_sha1.as_deref(),
+        ChecksumAlgorithm::SHA256 => part.checksum_sha256.as_deref(),
+        _ => None,
+    }
+}
+
+fn response_checksums(
+    mode: Option<&ChecksumMode>,
+    checksums: Option<&crate::attributes::Checksums>,
+) -> S3Result<crate::attributes::Checksums> {
+    match mode {
+        None => Ok(crate::attributes::Checksums::default()),
+        Some(value) if value.as_str() == ChecksumMode::ENABLED => {
+            Ok(checksums.cloned().unwrap_or_default())
+        }
+        Some(_) => Err(s3_error!(InvalidArgument)),
+    }
+}
+
+fn read_selection(
+    size: u64,
+    attributes: Option<&crate::attributes::ObjectAttributes>,
+    requested_range: Option<&Range>,
+    part_number: Option<i32>,
+) -> S3Result<ReadSelection> {
+    if requested_range.is_some() && part_number.is_some() {
+        return Err(s3_error!(InvalidRequest));
+    }
+    let object_checksums = attributes.map(|value| value.checksums.clone());
+    let parts = attributes
+        .map(|value| value.parts.as_slice())
+        .unwrap_or_default();
+    if let Some(part_number) = part_number {
+        if !(1..=10_000).contains(&part_number) {
+            return Err(s3_error!(InvalidArgument));
+        }
+        if parts.is_empty() {
+            if part_number != 1 {
+                return Err(s3_error!(InvalidRange));
+            }
+            return Ok(ReadSelection {
+                range: 0..size,
+                content_range: None,
+                parts_count: None,
+                checksums: object_checksums,
+            });
+        }
+        let mut offset = 0_u64;
+        let mut selected = None;
+        for part in parts {
+            let end = offset
+                .checked_add(part.size)
+                .ok_or_else(|| s3_error!(InternalError))?;
+            if part.number == part_number {
+                selected = Some((offset..end, part.checksums.clone()));
+            }
+            offset = end;
+        }
+        if offset != size {
+            return Err(s3_error!(InternalError));
+        }
+        let (range, checksums) = selected.ok_or_else(|| s3_error!(InvalidRange))?;
+        return Ok(ReadSelection {
+            content_range: content_range(&range, size),
+            range,
+            parts_count: Some(i32::try_from(parts.len()).map_err(|_| s3_error!(InternalError))?),
+            checksums: Some(checksums),
+        });
+    }
+    let Some(requested_range) = requested_range else {
+        return Ok(ReadSelection {
+            range: 0..size,
+            content_range: None,
+            parts_count: None,
+            checksums: object_checksums,
+        });
+    };
+    let checked = requested_range.check(size)?;
+    let range = checked.start..checked.end;
+    let checksums = if range.start == 0 && range.end == size {
+        object_checksums
+    } else {
+        part_checksums_for_range(parts, &range)
+    };
+    Ok(ReadSelection {
+        content_range: content_range(&range, size),
+        range,
+        parts_count: None,
+        checksums,
+    })
+}
+
+fn part_checksums_for_range(
+    parts: &[crate::attributes::PartAttributes],
+    requested: &std::ops::Range<u64>,
+) -> Option<crate::attributes::Checksums> {
+    let mut offset = 0_u64;
+    for part in parts {
+        let end = offset.checked_add(part.size)?;
+        if requested.start == offset && requested.end == end {
+            return Some(part.checksums.clone());
+        }
+        offset = end;
+    }
+    None
+}
+
+fn content_range(range: &std::ops::Range<u64>, size: u64) -> Option<String> {
+    (range.start < range.end).then(|| format!("bytes {}-{}/{}", range.start, range.end - 1, size))
+}
+
+fn tag_count(attributes: Option<&crate::attributes::ObjectAttributes>) -> S3Result<Option<i32>> {
+    attributes
+        .filter(|value| !value.tags.is_empty())
+        .map(|value| i32::try_from(value.tags.len()).map_err(|_| s3_error!(InternalError)))
+        .transpose()
+}
+
+fn checksum_dto(checksums: &crate::attributes::Checksums) -> Checksum {
+    Checksum {
+        checksum_crc32: checksums.crc32.clone(),
+        checksum_crc32c: checksums.crc32c.clone(),
+        checksum_crc64nvme: checksums.crc64nvme.clone(),
+        checksum_sha1: checksums.sha1.clone(),
+        checksum_sha256: checksums.sha256.clone(),
+        checksum_type: checksums.checksum_type.clone().map(ChecksumType::from),
+    }
+}
+
+fn object_attribute_names(values: &[ObjectAttributes]) -> std::collections::BTreeSet<&str> {
+    // s3s 0.14 yields one DTO item per header line, while AWS SDKs encode this
+    // Smithy list as one comma-delimited header value.
+    values
+        .iter()
+        .flat_map(|value| value.as_str().split(','))
+        .map(str::trim)
+        .collect()
+}
+
+fn object_parts(
+    parts: &[crate::attributes::PartAttributes],
+    marker: Option<i32>,
+    max: Option<i32>,
+) -> S3Result<GetObjectAttributesParts> {
+    let marker = marker.unwrap_or(0);
+    let max = max.unwrap_or(1000);
+    let max_usize = usize::try_from(max).map_err(|_| s3_error!(InvalidArgument))?;
+    let mut selected = parts
+        .iter()
+        .filter(|part| part.number > marker)
+        .collect::<Vec<_>>();
+    let truncated = selected.len() > max_usize;
+    selected.truncate(max_usize);
+    let next = truncated
+        .then(|| selected.last().map(|part| part.number))
+        .flatten();
+    Ok(GetObjectAttributesParts {
+        is_truncated: Some(truncated),
+        max_parts: Some(max),
+        next_part_number_marker: next,
+        part_number_marker: Some(marker),
+        parts: Some(
+            selected
+                .into_iter()
+                .map(|part| {
+                    Ok(ObjectPart {
+                        checksum_crc32: part.checksums.crc32.clone(),
+                        checksum_crc32c: part.checksums.crc32c.clone(),
+                        checksum_crc64nvme: part.checksums.crc64nvme.clone(),
+                        checksum_sha1: part.checksums.sha1.clone(),
+                        checksum_sha256: part.checksums.sha256.clone(),
+                        part_number: Some(part.number),
+                        size: Some(i64::try_from(part.size).map_err(|_| s3_error!(InternalError))?),
+                    })
+                })
+                .collect::<S3Result<Vec<_>>>()?,
+        ),
+        total_parts_count: Some(i32::try_from(parts.len()).map_err(|_| s3_error!(InternalError))?),
+    })
+}
+
+fn parse_tagging_header(value: Option<&str>) -> S3Result<BTreeMap<String, String>> {
+    let tags = value
+        .map(|value| url::form_urlencoded::parse(value.as_bytes()).into_owned())
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    validate_tags(tags)
+}
+
+fn validate_tags(
+    tags: impl IntoIterator<Item = (String, String)>,
+) -> S3Result<BTreeMap<String, String>> {
+    let mut validated = BTreeMap::new();
+    for (key, value) in tags {
+        if key.is_empty()
+            || key.chars().count() > 128
+            || value.chars().count() > 256
+            || key.to_ascii_lowercase().starts_with("aws:")
+            || !key.chars().all(valid_tag_character)
+            || !value.chars().all(valid_tag_character)
+            || validated.insert(key, value).is_some()
+            || validated.len() > 10
+        {
+            return Err(s3_error!(InvalidTag));
+        }
+    }
+    Ok(validated)
+}
+
+fn valid_tag_character(value: char) -> bool {
+    value.is_alphanumeric()
+        || (value.is_whitespace() && !value.is_control())
+        || matches!(value, '+' | '-' | '=' | '.' | '_' | ':' | '/' | '@')
 }
 
 fn merge_checksum_header(
@@ -1918,7 +2929,6 @@ fn reject_copy_extensions(input: &CopyObjectInput) -> S3Result<()> {
     if !directive_supported
         || input.acl.is_some()
         || input.bucket_key_enabled.is_some()
-        || input.checksum_algorithm.is_some()
         || input.copy_source_sse_customer_algorithm.is_some()
         || input.copy_source_sse_customer_key.is_some()
         || input.copy_source_sse_customer_key_md5.is_some()
@@ -1939,8 +2949,6 @@ fn reject_copy_extensions(input: &CopyObjectInput) -> S3Result<()> {
         || input.ssekms_encryption_context.is_some()
         || input.ssekms_key_id.is_some()
         || input.storage_class.is_some()
-        || input.tagging.is_some()
-        || input.tagging_directive.is_some()
         || input.website_redirect_location.is_some()
     {
         return Err(s3_error!(NotImplemented));
@@ -1951,8 +2959,6 @@ fn reject_copy_extensions(input: &CopyObjectInput) -> S3Result<()> {
 fn reject_create_multipart_extensions(input: &CreateMultipartUploadInput) -> S3Result<()> {
     if input.acl.is_some()
         || input.bucket_key_enabled.is_some()
-        || input.checksum_algorithm.is_some()
-        || input.checksum_type.is_some()
         || input.expected_bucket_owner.is_some()
         || input.grant_full_control.is_some()
         || input.grant_read.is_some()
@@ -1969,7 +2975,6 @@ fn reject_create_multipart_extensions(input: &CreateMultipartUploadInput) -> S3R
         || input.ssekms_encryption_context.is_some()
         || input.ssekms_key_id.is_some()
         || input.storage_class.is_some()
-        || input.tagging.is_some()
         || input.website_redirect_location.is_some()
     {
         return Err(s3_error!(NotImplemented));
@@ -1978,13 +2983,7 @@ fn reject_create_multipart_extensions(input: &CreateMultipartUploadInput) -> S3R
 }
 
 fn reject_upload_part_extensions(input: &UploadPartInput) -> S3Result<()> {
-    if input.checksum_algorithm.is_some()
-        || input.checksum_crc32.is_some()
-        || input.checksum_crc32c.is_some()
-        || input.checksum_crc64nvme.is_some()
-        || input.checksum_sha1.is_some()
-        || input.checksum_sha256.is_some()
-        || input.expected_bucket_owner.is_some()
+    if input.expected_bucket_owner.is_some()
         || input.request_payer.is_some()
         || input.sse_customer_algorithm.is_some()
         || input.sse_customer_key.is_some()
@@ -1996,16 +2995,7 @@ fn reject_upload_part_extensions(input: &UploadPartInput) -> S3Result<()> {
 }
 
 fn reject_complete_multipart_extensions(input: &CompleteMultipartUploadInput) -> S3Result<()> {
-    if input.checksum_crc32.is_some()
-        || input.checksum_crc32c.is_some()
-        || input.checksum_crc64nvme.is_some()
-        || input.checksum_sha1.is_some()
-        || input.checksum_sha256.is_some()
-        || input.checksum_type.is_some()
-        || input.expected_bucket_owner.is_some()
-        || input.if_match.is_some()
-        || input.if_none_match.is_some()
-        || input.mpu_object_size.is_some()
+    if input.expected_bucket_owner.is_some()
         || input.request_payer.is_some()
         || input.sse_customer_algorithm.is_some()
         || input.sse_customer_key.is_some()
@@ -2065,8 +3055,11 @@ fn stored_to_pending(
 ) -> crate::attributes::PutAttributes {
     crate::attributes::PutAttributes {
         etag_override: None,
-        completion_upload_id: None,
+        completion_upload_id: value.completion_upload_id.clone(),
         logical_size: Some(value.size),
+        checksums: value.checksums.clone(),
+        tags: value.tags.clone(),
+        parts: value.parts.clone(),
         cache_control: value.cache_control.clone(),
         content_disposition: value.content_disposition.clone(),
         content_encoding: value.content_encoding.clone(),
@@ -2144,7 +3137,6 @@ impl Gateway {
 
 fn reject_get_extensions(input: &GetObjectInput) -> S3Result<()> {
     if input.version_id.is_some()
-        || input.part_number.is_some()
         || input.request_payer.is_some()
         || input.sse_customer_algorithm.is_some()
         || input.sse_customer_key.is_some()
@@ -2157,7 +3149,6 @@ fn reject_get_extensions(input: &GetObjectInput) -> S3Result<()> {
 
 fn reject_head_extensions(input: &HeadObjectInput) -> S3Result<()> {
     if input.version_id.is_some()
-        || input.part_number.is_some()
         || input.request_payer.is_some()
         || input.sse_customer_algorithm.is_some()
         || input.sse_customer_key.is_some()
@@ -2378,6 +3369,173 @@ mod tests {
         assert!(encoded.contains("%28"));
     }
 
+    #[test]
+    fn object_tags_decode_form_encoding_and_reject_duplicate_keys() {
+        let tags = parse_tagging_header(Some("project=crab+gateway&path=main%2Ftable")).unwrap();
+        assert_eq!(
+            tags.get("project").map(String::as_str),
+            Some("crab gateway")
+        );
+        assert_eq!(tags.get("path").map(String::as_str), Some("main/table"));
+        assert!(parse_tagging_header(Some("duplicate=one&duplicate=two")).is_err());
+        assert!(parse_tagging_header(Some("aws%3Areserved=value")).is_err());
+        assert!(parse_tagging_header(Some("invalid=%26")).is_err());
+    }
+
+    #[test]
+    fn metadata_only_conversion_preserves_multipart_identity() {
+        let attributes = crate::attributes::ObjectAttributes {
+            blob_oid: "0123456789012345678901234567890123456789".to_owned(),
+            etag: "multipart-etag".to_owned(),
+            size: 7,
+            modified_seconds: 1,
+            completion_upload_id: Some("upload-id".to_owned()),
+            checksums: crate::attributes::Checksums::default(),
+            tags: BTreeMap::new(),
+            parts: vec![crate::attributes::PartAttributes {
+                number: 1,
+                size: 7,
+                checksums: crate::attributes::Checksums::default(),
+            }],
+            cache_control: None,
+            content_disposition: None,
+            content_encoding: None,
+            content_language: None,
+            content_type: None,
+            expires: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let pending = stored_to_pending(&attributes);
+
+        assert_eq!(pending.completion_upload_id.as_deref(), Some("upload-id"));
+        assert_eq!(pending.parts, attributes.parts);
+    }
+
+    #[test]
+    fn part_number_and_aligned_range_select_part_checksums() {
+        let first = crate::attributes::PartAttributes {
+            number: 1,
+            size: 5,
+            checksums: crate::attributes::Checksums {
+                sha256: Some("first".to_owned()),
+                ..Default::default()
+            },
+        };
+        let second = crate::attributes::PartAttributes {
+            number: 2,
+            size: 3,
+            checksums: crate::attributes::Checksums {
+                sha256: Some("second".to_owned()),
+                ..Default::default()
+            },
+        };
+        let attributes = crate::attributes::ObjectAttributes {
+            blob_oid: "0123456789012345678901234567890123456789".to_owned(),
+            etag: "multipart-etag".to_owned(),
+            size: 8,
+            modified_seconds: 1,
+            completion_upload_id: Some("upload-id".to_owned()),
+            checksums: crate::attributes::Checksums::default(),
+            tags: BTreeMap::new(),
+            parts: vec![first, second],
+            cache_control: None,
+            content_disposition: None,
+            content_encoding: None,
+            content_language: None,
+            content_type: None,
+            expires: None,
+            metadata: BTreeMap::new(),
+        };
+
+        let selected = read_selection(8, Some(&attributes), None, Some(2)).unwrap();
+        let aligned = read_selection(
+            8,
+            Some(&attributes),
+            Some(&Range::parse("bytes=5-7").unwrap()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            (
+                selected.range,
+                selected.parts_count,
+                selected.checksums.and_then(|value| value.sha256),
+                aligned.checksums.and_then(|value| value.sha256),
+            ),
+            (
+                5..8,
+                Some(2),
+                Some("second".to_owned()),
+                Some("second".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn object_attribute_header_expands_the_aws_comma_delimited_list() {
+        let values = vec![ObjectAttributes::from(
+            "ETag,Checksum,ObjectSize,ObjectParts".to_owned(),
+        )];
+        assert_eq!(
+            object_attribute_names(&values),
+            std::collections::BTreeSet::from([
+                ObjectAttributes::CHECKSUM,
+                ObjectAttributes::ETAG,
+                ObjectAttributes::OBJECT_PARTS,
+                ObjectAttributes::OBJECT_SIZE,
+            ])
+        );
+    }
+
+    #[test]
+    fn multipart_checksum_profile_accepts_only_validated_full_object_algorithms() {
+        let algorithm = ChecksumAlgorithm::from_static(ChecksumAlgorithm::CRC64NVME);
+        let full = ChecksumType::from_static(ChecksumType::FULL_OBJECT);
+        assert_eq!(
+            multipart_checksum_profile(Some(&algorithm), Some(&full)).unwrap(),
+            (
+                Some(ChecksumAlgorithm::CRC64NVME.to_owned()),
+                Some(ChecksumType::FULL_OBJECT.to_owned())
+            )
+        );
+        let composite = ChecksumType::from_static(ChecksumType::COMPOSITE);
+        assert!(multipart_checksum_profile(Some(&algorithm), Some(&composite)).is_err());
+        let sha256 = ChecksumAlgorithm::from_static(ChecksumAlgorithm::SHA256);
+        assert!(multipart_checksum_profile(Some(&sha256), Some(&composite)).is_ok());
+    }
+
+    #[test]
+    fn composite_sha256_hashes_ordered_binary_part_checksums() {
+        use sha2::Digest as _;
+
+        let encode = |value: &[u8]| base64::engine::general_purpose::STANDARD.encode(value);
+        let first = sha2::Sha256::digest(b"first");
+        let second = sha2::Sha256::digest(b"second");
+        let parts = [
+            crate::attributes::Checksums {
+                sha256: Some(encode(&first)),
+                ..Default::default()
+            },
+            crate::attributes::Checksums {
+                sha256: Some(encode(&second)),
+                ..Default::default()
+            },
+        ];
+        let expected = sha2::Sha256::digest([first.as_slice(), second.as_slice()].concat());
+        let actual = composite_checksums(parts.iter(), ChecksumAlgorithm::SHA256).unwrap();
+
+        assert_eq!(
+            actual.sha256.as_deref(),
+            Some(format!("{}-2", encode(&expected)).as_str())
+        );
+        assert_eq!(
+            actual.checksum_type.as_deref(),
+            Some(ChecksumType::COMPOSITE)
+        );
+    }
+
     #[tokio::test]
     async fn content_above_inline_threshold_is_stored_as_streamable_lfs() {
         use futures_util::TryStreamExt as _;
@@ -2429,35 +3587,46 @@ mod tests {
 
         let body = b"123456789";
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-        let checksums = RequestChecksums {
-            algorithm: Some(ChecksumAlgorithm::from_static(ChecksumAlgorithm::CRC32)),
-            crc32: Some(encode(
-                &u32::try_from(crc_fast::checksum(
-                    crc_fast::CrcAlgorithm::Crc32IsoHdlc,
-                    body,
-                ))
-                .unwrap()
-                .to_be_bytes(),
-            )),
-            crc32c: Some(encode(
-                &u32::try_from(crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, body))
-                    .unwrap()
-                    .to_be_bytes(),
-            )),
-            crc64nvme: Some(encode(
-                &crc_fast::checksum(crc_fast::CrcAlgorithm::Crc64Nvme, body).to_be_bytes(),
-            )),
-            sha1: Some(encode(&sha1::Sha1::digest(body))),
-            sha256: Some(encode(&sha2::Sha256::digest(body))),
-        };
         let mut writer = crate::content::SpoolWriter::new().await.unwrap();
         writer.write(body, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
-        checksums.verify(&spool.digests).unwrap();
+        for algorithm in [
+            ChecksumAlgorithm::CRC32,
+            ChecksumAlgorithm::CRC32C,
+            ChecksumAlgorithm::CRC64NVME,
+            ChecksumAlgorithm::SHA1,
+            ChecksumAlgorithm::SHA256,
+        ] {
+            let calculated = calculated_checksums(&spool.digests, algorithm).unwrap();
+            RequestChecksums {
+                algorithm: Some(ChecksumAlgorithm::from_static(algorithm)),
+                crc32: calculated.crc32,
+                crc32c: calculated.crc32c,
+                crc64nvme: calculated.crc64nvme,
+                sha1: calculated.sha1,
+                sha256: calculated.sha256,
+            }
+            .verify(&spool.digests)
+            .unwrap();
+        }
 
-        let mut invalid = checksums;
-        invalid.sha256 = Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned());
+        let invalid = RequestChecksums {
+            algorithm: Some(ChecksumAlgorithm::from_static(ChecksumAlgorithm::SHA256)),
+            sha256: Some(encode(&sha2::Sha256::digest(b"different"))),
+            ..Default::default()
+        };
         let error = invalid.verify(&spool.digests).unwrap_err();
         assert_eq!(error.code().as_str(), "BadDigest");
+    }
+
+    #[test]
+    fn object_checksums_reject_multiple_algorithms() {
+        let checksums = RequestChecksums {
+            crc32: Some("AAAAAA==".to_owned()),
+            sha256: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned()),
+            ..Default::default()
+        };
+
+        assert!(checksums.ensure_single_value().is_err());
     }
 }

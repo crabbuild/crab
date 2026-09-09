@@ -2,7 +2,7 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::{conn::auto::Builder as ConnectionBuilder, graceful::GracefulShutdown},
 };
-use s3s::service::S3ServiceBuilder;
+use s3s::{host::SingleDomain, service::S3ServiceBuilder};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -11,11 +11,15 @@ use crate::{Config, Result, gateway::Gateway};
 /// Serve the configured gateway until SIGINT or SIGTERM.
 pub async fn serve(config: Config) -> Result<()> {
     config.validate()?;
+    let endpoint_domain = config.endpoint_domain.clone();
     let listener = TcpListener::bind(config.listen).await?;
     let cancellation = CancellationToken::new();
     let gateway = Gateway::new(config, cancellation.clone())?;
     let mut builder = S3ServiceBuilder::new(gateway.clone());
     builder.set_auth(gateway.auth());
+    if let Some(domain) = endpoint_domain {
+        builder.set_host(SingleDomain::new(&domain)?);
+    }
     let service = builder.build();
     let connections = ConnectionBuilder::new(TokioExecutor::new());
     let graceful = GracefulShutdown::new();

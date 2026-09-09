@@ -12,15 +12,17 @@ upload publishes one commit immediately to the addressed branch. `DeleteObjects`
 performs ordered, individually reported mutations and is not atomic across keys.
 A delete of a missing key succeeds without advancing the branch.
 
-Repository history is the only version model. The initial release does not
+Repository history is the only version model. The gateway does not
 implement AWS bucket versioning, delete markers, or version-ID parameters. A
 branch names a mutable view; a tag or full commit ID names an immutable read-only
 view. Every request resolves and pins one commit before reading. Writes recheck
 authorization, branch protection, and the branch tip under the canonical per-ref
 publication lock. A conflicting branch update returns `OperationAborted` and is
-safe for the S3 client to retry. `PutObject` supports `If-None-Match: *` for
-atomic creation. Other conditional PUT and DELETE headers are not part of the
-initial surface and return `NotImplemented` before reading the body.
+safe for the S3 client to retry. `PutObject` and `CompleteMultipartUpload`
+support `If-None-Match: *` and strong `If-Match` atomically. The ETag is checked
+before receiving or assembling content, and the observed blob identity is
+checked again under the publication lock. Conditional DELETE headers are not
+part of the surface and return `NotImplemented` before mutation.
 
 ## Bucket and key namespace
 
@@ -130,10 +132,11 @@ Content and attributes are never read from different commits.
 
 ## Protocol surface
 
-The initial release supports path-style addressing. Virtual-hosted addressing
-is not configured by the gateway. HTTPS is mandatory beyond loopback and is
+Path-style addressing is always supported. Setting `endpoint_domain` enables
+virtual-hosted addressing under that base domain; DNS and TLS wildcard coverage
+remain deployment responsibilities. HTTPS is mandatory beyond loopback and is
 terminated by the deployment ingress. Browser POST, bucket create/delete, ACLs, policies, IAM,
-versioning, tagging, Select, object lock, retention, torrent, website, inventory,
+version mutation/listing, Select, object lock, retention, torrent, website, inventory,
 replication, acceleration, notification, storage-class selection, and all SSE
 request headers return `NotImplemented` or the operation-specific documented S3
 error before mutation.
@@ -142,25 +145,32 @@ Supported operations:
 
 | Operation | Supported contract |
 | --- | --- |
-| `ListBuckets`, `HeadBucket` | Authorized logical repositories only; deterministic order |
-| `GetObject`, `HeadObject` | metadata, response overrides, RFC dates, ETag/date conditions, one byte range including open and suffix forms |
+| `ListBuckets`, `HeadBucket`, `GetBucketLocation`, `GetBucketVersioning` | Authorized logical repositories only; deterministic order; configured region; honest unversioned response |
+| `GetObject`, `HeadObject`, `GetObjectAttributes` | metadata, response overrides, RFC dates, ETag/date conditions, checksum mode, object size, ETag, part-number reads, and paginated multipart-part attributes; one byte range including open and suffix forms |
 | `ListObjects`, `ListObjectsV2` | prefix, delimiter `/`, marker/start-after, max keys, reusable keys, common prefixes |
-| `PutObject` | body up to 5 GiB, atomic create with `If-None-Match: *`, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, metadata and standard content headers |
+| `PutObject` | body up to 5 GiB, atomic `If-Match` and `If-None-Match: *`, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, tags, metadata and standard content headers |
+| `GetObjectTagging`, `PutObjectTagging`, `DeleteObjectTagging` | Up to ten current-object tags; tag changes publish metadata-only commits without changing object bytes or ETag |
 | `DeleteObject`, `DeleteObjects` | S3 missing-key success, per-key authorization/results, quiet mode, and at most 1000 XML entries |
-| `CopyObject` | pinned source, source conditions/range where defined, `COPY`/`REPLACE`, separately authorized destination |
-| Multipart create/upload/copy/list/abort/complete | durable opaque sessions, part replacement, ordered selection, 10,000 parts, 5 GiB per part, 50 TB completed objects, restart and multi-instance retry |
+| `CopyObject` | pinned source, source conditions/range where defined, metadata/tag `COPY`/`REPLACE`, checksum selection, separately authorized destination |
+| Multipart create/upload/copy/list/abort/complete | durable opaque sessions, conditional completion, validated full-object CRC and composite CRC/SHA checksums, part replacement, ordered selection, 10,000 parts, 5 GiB per part, 50 TB completed objects, restart and multi-instance retry |
 
 Modeled unsupported request headers and query parameters are rejected rather
 than ignored. Multi-range GET returns `InvalidRange`. `versionId` returns
-`NotImplemented`. Checksums are validated before publication. A response never
-attaches a full-object checksum to a partial range unless the protocol defines
-the matching checksum mode.
+`NotImplemented`; `GetBucketVersioning` returns the S3 empty/unversioned state.
+Checksums are validated before publication and stored in the commit attribute
+manifest. Objects uploaded without a checksum receive S3's default full-object
+CRC64NVME checksum. A response never attaches a full-object checksum to a
+partial range. A part-number request or a byte range exactly aligned to one
+persisted multipart part returns that part's checksum.
+Composite object checksum responses carry S3's `-PART_COUNT` suffix; individual
+part checksums and a precomputed completion checksum use the raw Base64 digest.
 
 Conditional reads use S3 precedence: match conditions are evaluated before
 unmodified conditions, then modified conditions; a failed read condition returns
 `NotModified` or `PreconditionFailed` as defined by that header. Conditional
-DELETE, multipart completion, and destination COPY are not in the initial
-surface. PUT conditions other than `If-None-Match: *` are unsupported.
+DELETE and destination COPY conditions are outside this surface. `PutObject`
+and `CompleteMultipartUpload` support atomic strong `If-Match` and
+`If-None-Match: *`; weak or multi-value write validators are rejected.
 
 ## Listings and continuation
 

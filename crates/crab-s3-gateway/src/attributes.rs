@@ -9,6 +9,32 @@ use crate::gateway::Repository;
 const VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Checksums {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) crc32: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) crc32c: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) crc64nvme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sha1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) checksum_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PartAttributes {
+    pub(crate) number: i32,
+    pub(crate) size: u64,
+    #[serde(default, skip_serializing_if = "Checksums::is_empty")]
+    pub(crate) checksums: Checksums,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PutAttributes {
@@ -18,6 +44,12 @@ pub(crate) struct PutAttributes {
     pub(crate) completion_upload_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) logical_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Checksums::is_empty")]
+    pub(crate) checksums: Checksums,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) tags: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) parts: Vec<PartAttributes>,
     pub(crate) cache_control: Option<String>,
     pub(crate) content_disposition: Option<String>,
     pub(crate) content_encoding: Option<String>,
@@ -36,6 +68,12 @@ pub(crate) struct ObjectAttributes {
     pub(crate) modified_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completion_upload_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Checksums::is_empty")]
+    pub(crate) checksums: Checksums,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) tags: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) parts: Vec<PartAttributes>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) cache_control: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +104,9 @@ impl ObjectAttributes {
             size,
             modified_seconds,
             completion_upload_id: pending.completion_upload_id,
+            checksums: pending.checksums,
+            tags: pending.tags,
+            parts: pending.parts,
             cache_control: pending.cache_control,
             content_disposition: pending.content_disposition,
             content_encoding: pending.content_encoding,
@@ -80,6 +121,9 @@ impl ObjectAttributes {
         self.etag == etag
             && self.size == size
             && self.completion_upload_id == pending.completion_upload_id
+            && self.checksums == pending.checksums
+            && self.tags == pending.tags
+            && self.parts == pending.parts
             && self.cache_control == pending.cache_control
             && self.content_disposition == pending.content_disposition
             && self.content_encoding == pending.content_encoding
@@ -87,6 +131,16 @@ impl ObjectAttributes {
             && self.content_type == pending.content_type
             && self.expires == pending.expires
             && self.metadata == pending.metadata
+    }
+}
+
+impl Checksums {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.crc32.is_none()
+            && self.crc32c.is_none()
+            && self.crc64nvme.is_none()
+            && self.sha1.is_none()
+            && self.sha256.is_none()
     }
 }
 

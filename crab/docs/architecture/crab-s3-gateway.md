@@ -1,6 +1,8 @@
 # Crab S3 gateway: executable design and phased implementation plan
 
-Status: initial gateway implemented in `crates/crab-s3-gateway`; broader
+Status: gateway implemented in `crates/crab-s3-gateway`, including object
+attributes/tagging, conditional writes, persisted checksums, and optional
+virtual-host routing; broader
 cross-client, cross-provider, failure-injection, and deployment qualification
 remains a release gate. The frozen delivered surface and deliberate limits are
 recorded in `s3-gateway-contract.md`.

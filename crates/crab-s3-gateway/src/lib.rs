@@ -23,6 +23,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid gateway TOML configuration")]
     Toml(#[from] toml::de::Error),
+    #[error("invalid S3 endpoint domain")]
+    Host(#[from] s3s::host::DomainError),
     #[error("object storage configuration failed")]
     Storage(#[from] crab_storage::StorageError),
     #[error("repository reader configuration failed")]

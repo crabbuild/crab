@@ -75,6 +75,10 @@ pub(crate) enum Change {
         attributes: Box<attributes::PutAttributes>,
         condition: PutCondition,
     },
+    Attributes {
+        expected: ObjectId,
+        attributes: Box<attributes::PutAttributes>,
+    },
     Delete,
 }
 
@@ -83,6 +87,7 @@ pub(crate) enum PutCondition {
     #[default]
     None,
     IfNoneMatchAny,
+    IfMatch(ObjectId),
 }
 
 #[derive(Clone, Debug)]
@@ -394,8 +399,15 @@ async fn build_commit(
             attributes,
             condition,
         } => {
-            if matches!(condition, PutCondition::IfNoneMatchAny) && old.is_some() {
-                return Err(Error::PreconditionFailed);
+            match condition {
+                PutCondition::None => {}
+                PutCondition::IfNoneMatchAny if old.is_some() => {
+                    return Err(Error::PreconditionFailed);
+                }
+                PutCondition::IfMatch(expected) if old.is_none_or(|(oid, _)| oid != expected) => {
+                    return Err(Error::PreconditionFailed);
+                }
+                PutCondition::IfNoneMatchAny | PutCondition::IfMatch(_) => {}
             }
             let oid = object_id(Kind::Blob, &bytes)?;
             let digest = md5::Md5::digest(&bytes);
@@ -418,6 +430,29 @@ async fn build_commit(
                 .map(|_| None)
                 .unwrap_or_else(|| Some(bytes.to_vec()));
             (Some(etag), changed, Some((oid, attributes, logical_size)))
+        }
+        Change::Attributes {
+            expected,
+            attributes,
+        } => {
+            if old.is_none_or(|(oid, mode)| {
+                oid != expected || !matches!(mode, EntryMode::Regular | EntryMode::Executable)
+            }) {
+                return Err(Error::PreconditionFailed);
+            }
+            let logical_size = attributes.logical_size.ok_or_else(|| {
+                std::io::Error::other("attribute-only mutation is missing object size")
+            })?;
+            let etag = attributes.etag_override.clone().ok_or_else(|| {
+                std::io::Error::other("attribute-only mutation is missing object ETag")
+            })?;
+            if attribute_manifest
+                .object(path_string, expected)
+                .is_some_and(|stored| stored.matches_pending(&attributes, &etag, logical_size))
+            {
+                return Ok(Build::Noop(Outcome { etag: Some(etag) }));
+            }
+            (Some(etag), None, Some((expected, attributes, logical_size)))
         }
         Change::Delete => {
             if old.is_none() {
@@ -881,6 +916,102 @@ mod tests {
         .unwrap();
         let second = tip(&repository, Arc::clone(&runtime), &cancel).await;
         assert_eq!(first, second);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attribute_only_mutation_preserves_object_bytes() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap();
+        let bytes = Bytes::from_static(b"stable content");
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: bytes.clone(),
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let oid = object_id(Kind::Blob, &bytes).unwrap();
+        let mut tags = BTreeMap::new();
+        tags.insert("project".to_owned(), "crab".to_owned());
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Attributes {
+                expected: oid,
+                attributes: Box::new(attributes::PutAttributes {
+                    etag_override: Some(crate::gateway::md5_hex(&bytes)),
+                    logical_size: Some(bytes.len() as u64),
+                    tags,
+                    ..Default::default()
+                }),
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "object.bin").await,
+            bytes
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn if_match_rejects_a_stale_object_identity() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        let put = |bytes, condition| {
+            apply(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                "refs/heads/main",
+                &path,
+                Change::Put {
+                    bytes,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition,
+                },
+                "user",
+                &cancel,
+            )
+        };
+        put(Bytes::from_static(b"first"), PutCondition::None)
+            .await
+            .unwrap();
+        let first_oid = object_id(Kind::Blob, b"first").unwrap();
+        put(
+            Bytes::from_static(b"second"),
+            PutCondition::IfMatch(first_oid),
+        )
+        .await
+        .unwrap();
+        let stale = put(
+            Bytes::from_static(b"third"),
+            PutCondition::IfMatch(first_oid),
+        )
+        .await;
+
+        assert!(matches!(stale, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
+            "second"
+        );
         runtime.shutdown().await;
     }
 
