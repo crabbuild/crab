@@ -37,11 +37,12 @@ path-local attribute delta. Immutable pack, index, visibility, and attribute
 artifacts are prepared and uploaded before the destination ref lease; the lease
 contains only branch revalidation and journal publication. Same-ref requests are
 admitted through a bounded FIFO queue, while different refs may prepare in
-parallel. Successful journal publication is immediately readable by the gateway;
-catalog compaction and commit-graph maintenance continue in the background.
-Maintenance is coalesced until the repository's local write burst is idle so a
-later journal wave never advances from a generation whose visibility proof is
-still being finalized.
+parallel. A new write cancels in-flight derived maintenance so foreground traffic
+does not wait behind catalog or commit-graph work. Successful journal publication
+is immediately readable by the gateway; catalog compaction and commit-graph
+maintenance continue after the write burst becomes idle. Maintenance is
+coalesced so a later journal wave never advances from a generation whose
+visibility proof is still being finalized.
 
 ## Build and run
 

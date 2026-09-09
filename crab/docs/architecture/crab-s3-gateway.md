@@ -707,9 +707,11 @@ the lease it captures a new repository snapshot, revalidates the parent, and
 either publishes the journal edit or releases and reprepares. Journal success is
 the acknowledgement point; catalog compaction and commit-graph maintenance run
 asynchronously because the repository read view consumes committed journal
-transactions directly. The gateway coalesces that maintenance until its local
-repository write burst is idle, preventing overlapping compaction waves from
-advancing ahead of visibility proof publication.
+transactions directly. A new foreground write cancels an in-flight maintenance
+pass so derived catalog work releases its fences and yields to S3 mutation
+traffic. The gateway schedules maintenance again after the local write burst is
+idle and prevents overlapping compaction waves from advancing ahead of visibility
+proof publication.
 
 ### 4.2 PUT and DELETE execution rules
 

@@ -157,12 +157,12 @@ impl Coordinator {
             .await
         }
         .await;
-        if let Some(epoch) = repository.maintenance.finish() {
+        if let Some((epoch, maintenance_cancel)) = repository.maintenance.finish(cancel) {
             crate::repository::schedule_readability(
                 repository,
                 Arc::clone(&self.runtime),
                 self.options,
-                cancel.clone(),
+                maintenance_cancel,
                 epoch,
             );
         }

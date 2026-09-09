@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex, MutexGuard,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -124,6 +124,7 @@ pub(crate) struct ReadViewCache {
 pub(crate) struct WriteMaintenance {
     epoch: AtomicU64,
     active: AtomicUsize,
+    cancellation: StdMutex<CancellationToken>,
 }
 
 impl WriteMaintenance {
@@ -131,21 +132,39 @@ impl WriteMaintenance {
         Self {
             epoch: AtomicU64::new(0),
             active: AtomicUsize::new(0),
+            cancellation: StdMutex::new(CancellationToken::new()),
         }
     }
 
     pub(crate) fn begin(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.active.fetch_add(1, Ordering::AcqRel);
+        self.cancellation().cancel();
     }
 
-    pub(crate) fn finish(&self) -> Option<u64> {
-        (self.active.fetch_sub(1, Ordering::AcqRel) == 1)
-            .then(|| self.epoch.load(Ordering::Acquire))
+    pub(crate) fn finish(&self, parent: &CancellationToken) -> Option<(u64, CancellationToken)> {
+        if self.active.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return None;
+        }
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let mut cancellation = self.cancellation();
+        if !self.is_idle_at(epoch) {
+            return None;
+        }
+        let token = parent.child_token();
+        *cancellation = token.clone();
+        Some((epoch, token))
     }
 
     fn is_idle_at(&self, epoch: u64) -> bool {
         self.active.load(Ordering::Acquire) == 0 && self.epoch.load(Ordering::Acquire) == epoch
+    }
+
+    fn cancellation(&self) -> MutexGuard<'_, CancellationToken> {
+        match self.cancellation.lock() {
+            Ok(cancellation) => cancellation,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -266,6 +285,26 @@ pub(crate) fn schedule_readability(
 mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
+
+    #[test]
+    fn foreground_write_cancels_scheduled_maintenance() {
+        let parent = CancellationToken::new();
+        let maintenance = WriteMaintenance::new();
+        maintenance.begin();
+        let (_, first) = maintenance
+            .finish(&parent)
+            .expect("idle repository schedules maintenance");
+
+        maintenance.begin();
+        assert!(first.is_cancelled());
+        let (_, second) = maintenance
+            .finish(&parent)
+            .expect("new idle epoch schedules replacement maintenance");
+        assert!(!second.is_cancelled());
+
+        parent.cancel();
+        assert!(second.is_cancelled());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_refreshes_share_one_generation_view() {
