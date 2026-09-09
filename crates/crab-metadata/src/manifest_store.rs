@@ -20,6 +20,7 @@ use crate::segmented::{self, SegmentKind, ShardSegmentEntry};
 use crate::segmented_store;
 
 const DEFAULT_HISTORY_READ_CONCURRENCY: usize = 32;
+const REPOSITORY_SNAPSHOT_CAPTURE_ATTEMPTS: usize = 3;
 
 /// One validated immutable historical manifest root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,46 +369,67 @@ pub async fn read_repository_snapshot(
     store: &Store,
     router: &StoreLayout<Store>,
 ) -> Result<RepositorySnapshot> {
-    // Markers are captured first so compaction may safely remove them after
-    // publishing a newer manifest without stranding an old-manifest reader.
-    let active_transactions = list_active_transactions(store, router).await?;
-    let (manifest, manifest_etag) = read_manifest(store, router).await?;
-    // Preserve the absent-manifest contract for uninitialized metadata readers,
-    // but never return repository state without its authoritative layout.
-    let layout = read_canonical_layout(store, router).await?;
-    let packs = if manifest.pack_index_hash.is_empty() {
-        Vec::new()
-    } else {
-        read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?
-    };
-    let shards = if manifest.shard_index_hash.is_empty() {
-        Vec::new()
-    } else {
-        read_bulk_shard_list(store, router, &manifest.shard_index_hash).await?
-    };
-    let journal = materialize_ref_journal(
-        store,
-        router,
-        &manifest,
-        &packs,
-        &shards,
-        &active_transactions,
-    )
-    .await?;
-    // Repository-open validation may predate this capture. Recheck its boundary
-    // so an invalid current descriptor cannot authorize the returned snapshot.
-    if read_canonical_layout(store, router).await? != layout {
-        return Err(MetadataError::CorruptObject {
-            path: router.layout_descriptor_path().to_string(),
-            reason: "repository layout changed during snapshot capture".to_owned(),
+    for attempt in 1..=REPOSITORY_SNAPSHOT_CAPTURE_ATTEMPTS {
+        // Markers are captured first so compaction may safely remove them after
+        // publishing a newer manifest without stranding an old-manifest reader.
+        let active_transactions = list_active_transactions(store, router).await?;
+        let (manifest, manifest_etag) = read_manifest(store, router).await?;
+        // Preserve the absent-manifest contract for uninitialized metadata readers,
+        // but never return repository state without its authoritative layout.
+        let layout = read_canonical_layout(store, router).await?;
+        let packs = if manifest.pack_index_hash.is_empty() {
+            Vec::new()
+        } else {
+            read_bulk_pack_list(store, router, &manifest.pack_index_hash).await?
+        };
+        let shards = if manifest.shard_index_hash.is_empty() {
+            Vec::new()
+        } else {
+            read_bulk_shard_list(store, router, &manifest.shard_index_hash).await?
+        };
+        let journal = match materialize_ref_journal(
+            store,
+            router,
+            &manifest,
+            &packs,
+            &shards,
+            &active_transactions,
+        )
+        .await
+        {
+            Ok(journal) => journal,
+            Err(error) if attempt < REPOSITORY_SNAPSHOT_CAPTURE_ATTEMPTS => {
+                let current_transactions = list_active_transactions(store, router).await?;
+                let (_, current_etag) = read_manifest(store, router).await?;
+                if current_etag == manifest_etag && current_transactions == active_transactions {
+                    return Err(error);
+                }
+                tracing::debug!(
+                    attempt,
+                    "repository snapshot crossed a manifest or journal compaction boundary; retrying capture"
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        // Repository-open validation may predate this capture. Recheck its boundary
+        // so an invalid current descriptor cannot authorize the returned snapshot.
+        if read_canonical_layout(store, router).await? != layout {
+            return Err(MetadataError::CorruptObject {
+                path: router.layout_descriptor_path().to_string(),
+                reason: "repository layout changed during snapshot capture".to_owned(),
+            });
+        }
+        return Ok(RepositorySnapshot {
+            layout,
+            manifest,
+            manifest_etag,
+            journal,
         });
     }
-    Ok(RepositorySnapshot {
-        layout,
-        manifest,
-        manifest_etag,
-        journal,
-    })
+    Err(MetadataError::Internal(
+        "repository snapshot capture exhausted its retry budget".to_owned(),
+    ))
 }
 
 /// Fold committed journal transactions into one bounded manifest snapshot.
@@ -836,14 +858,14 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fmt;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use futures_util::stream::BoxStream;
     use object_store::memory::InMemory;
     use object_store::{
         CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-        PutMultipartOptions, PutOptions, PutPayload, PutResult,
+        ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
 
     use crate::manifests::{compact_pack_index, compact_shard_index};
@@ -981,6 +1003,174 @@ mod tests {
             assert!(read_repository_snapshot(&store, &router).await.is_err());
             assert_eq!(read_manifest(&store, &router).await.unwrap().0, manifest);
         }
+    }
+
+    struct ManifestTransitionStore {
+        inner: Arc<InMemory>,
+        manifest_path: object_store::path::Path,
+        active_marker_path: object_store::path::Path,
+        replacement_manifest: Bytes,
+        transitioned: AtomicBool,
+    }
+
+    impl ManifestTransitionStore {
+        fn new(
+            inner: Arc<InMemory>,
+            manifest_path: object_store::path::Path,
+            active_marker_path: object_store::path::Path,
+            replacement_manifest: Bytes,
+        ) -> Self {
+            Self {
+                inner,
+                manifest_path,
+                active_marker_path,
+                replacement_manifest,
+                transitioned: AtomicBool::new(false),
+            }
+        }
+
+        fn transitioned(&self) -> bool {
+            self.transitioned.load(Ordering::Acquire)
+        }
+    }
+
+    impl fmt::Debug for ManifestTransitionStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("ManifestTransitionStore")
+        }
+    }
+
+    impl fmt::Display for ManifestTransitionStore {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("ManifestTransitionStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for ManifestTransitionStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: PutPayload,
+            options: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            if location == &self.manifest_path && !self.transitioned.swap(true, Ordering::AcqRel) {
+                self.inner
+                    .put(
+                        &self.manifest_path,
+                        self.replacement_manifest.clone().into(),
+                    )
+                    .await?;
+                self.inner.delete(&self.active_marker_path).await?;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<object_store::path::Path>>,
+        ) -> BoxStream<'static, object_store::Result<object_store::path::Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_retries_when_compaction_crosses_capture_boundary() {
+        let inner = Arc::new(InMemory::new());
+        let setup_store = Store::new(inner.clone());
+        let setup_router = test_layout(setup_store.clone());
+        crate::layout_descriptor::ensure_canonical_layout(&setup_store, &setup_router)
+            .await
+            .unwrap();
+        let mut base = Manifest::default_for_repo("refs/heads/main");
+        base.refs
+            .insert("refs/heads/main".to_owned(), "a".repeat(40));
+        base.seal_git_validation();
+        create_manifest(&setup_store, &setup_router, &base)
+            .await
+            .unwrap();
+        let head = read_ref_head(&setup_store, &setup_router, "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: Some("a".repeat(40)),
+                new_oid: Some("b".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let committed =
+            commit_ref_transaction(&setup_store, &setup_router, &transaction, &[head], || false)
+                .await
+                .unwrap();
+
+        let mut compacted = next_manifest(&base);
+        compacted
+            .refs
+            .insert("refs/heads/main".to_owned(), "b".repeat(40));
+        compacted.seal_git_validation();
+        let transition = Arc::new(ManifestTransitionStore::new(
+            inner,
+            setup_router.manifest_path(),
+            setup_router.ref_journal_active_path(&committed.transaction_id),
+            Bytes::from(serialize_manifest(&compacted).unwrap()),
+        ));
+        let store = Store::new(transition.clone());
+        let router = test_layout(store.clone());
+
+        let snapshot = read_repository_snapshot(&store, &router).await.unwrap();
+
+        assert!(transition.transitioned());
+        assert_eq!(snapshot.manifest, compacted);
+        assert_eq!(snapshot.journal.refs["refs/heads/main"], "b".repeat(40));
+        assert!(snapshot.journal.transactions.is_empty());
     }
 
     struct DelayedGetStore {

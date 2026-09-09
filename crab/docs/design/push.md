@@ -770,9 +770,12 @@ remote.
    PUT {prefix}/packs/pack-{blake3_hash}.kinds
        body = checksummed one-byte-per-object kind table in pack-offset order
 
-4. Install every pack locally and derive exact locators:
-   Copy each pack + idx into .git/objects/pack/ so the NEXT push can
-   compute an incremental remote-object set without a round-trip.
+4. Strictly index every pack and derive exact locators:
+   Keep the generated pack and its `.idx`/`.rev` evidence in a temporary
+   directory under `.git/objects/`, outside `.git/objects/pack/`. This gives
+   `git index-pack` the source repository context without permanently adding
+   one local pack per push. The next push uses the committed ref-tip frontier
+   or generation-bound locator rather than a Crab-generated source-ODB copy.
    Index construction, checksum binding, and canonical `.idx` upload are
    pre-commit requirements. The `.kinds` sidecar is bound to the verified
    Git pack checksum, index object count, and its BLAKE3 checksum, so the
