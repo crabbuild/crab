@@ -1,13 +1,11 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use crab_remote::objects::{self, encode_tree, object_id, read_tree};
 use futures_util::future::BoxFuture;
 use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
 
-use crate::{
-    auth::Identity,
-    git_objects::{self, commit_bytes, encode_tree, object_id, read_tree},
-};
+use crate::{auth::Identity, git_objects::commit_bytes};
 
 const MAX_ANCESTRY_COMMITS: usize = 100_000;
 const MAX_MERGE_BLOB_BYTES: usize = 8 * 1024 * 1024;
@@ -24,7 +22,7 @@ pub(super) enum Error {
     #[error("the pull request changes conflict")]
     Conflict,
     #[error(transparent)]
-    Object(#[from] git_objects::Error),
+    Object(#[from] objects::Error),
 }
 
 pub(super) async fn build(
@@ -40,17 +38,17 @@ pub(super) async fn build(
     let ancestor_tree = repository
         .snapshot(&crab_remote_git::Revision::Commit(ancestor), operation)
         .await
-        .map_err(git_objects::Error::from)?
+        .map_err(objects::Error::from)?
         .root_tree_oid();
     let current_tree = repository
         .snapshot(&crab_remote_git::Revision::Commit(current), operation)
         .await
-        .map_err(git_objects::Error::from)?
+        .map_err(objects::Error::from)?
         .root_tree_oid();
     let other_tree = repository
         .snapshot(&crab_remote_git::Revision::Commit(other), operation)
         .await
-        .map_err(git_objects::Error::from)?
+        .map_err(objects::Error::from)?
         .root_tree_oid();
     let mut objects = Vec::new();
     let tree = merge_tree(
@@ -61,8 +59,8 @@ pub(super) async fn build(
         &mut objects,
     )
     .await?;
-    let commit = commit_bytes(tree, &[current, other], actor, message, seconds);
-    let oid = object_id(Kind::Commit, &commit).map_err(git_objects::Error::from)?;
+    let commit = commit_bytes(tree, &[current, other], actor, message, seconds)?;
+    let oid = object_id(Kind::Commit, &commit).map_err(objects::Error::from)?;
     objects.push((Kind::Commit, commit));
     Ok(Plan { oid, objects })
 }
@@ -125,12 +123,12 @@ async fn read_parents(
     let object = operation
         .read_object(oid)
         .await
-        .map_err(git_objects::Error::from)?;
+        .map_err(objects::Error::from)?;
     if object.kind != Kind::Commit {
         return Err(Error::History);
     }
     let commit = gix_object::CommitRef::from_bytes(&object.data, gix_hash::Kind::Sha1)
-        .map_err(git_objects::Error::from)?;
+        .map_err(objects::Error::from)?;
     Ok(commit.parents().collect())
 }
 
@@ -273,7 +271,7 @@ async fn merge_blob(
     if resolution == gix_merge::blob::Resolution::Conflict {
         return Err(Error::Conflict);
     }
-    let oid = object_id(Kind::Blob, &merged).map_err(git_objects::Error::from)?;
+    let oid = object_id(Kind::Blob, &merged).map_err(objects::Error::from)?;
     objects.push((Kind::Blob, merged));
     Ok(tree::Entry {
         mode,
@@ -289,7 +287,7 @@ async fn read_blob(
     let object = operation
         .read_object(oid)
         .await
-        .map_err(git_objects::Error::from)?;
+        .map_err(objects::Error::from)?;
     if object.kind != Kind::Blob
         || object.data.len() > MAX_MERGE_BLOB_BYTES
         || object.data.contains(&0)

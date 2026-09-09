@@ -30,10 +30,102 @@ pub use xet_core_structures::metadata_shard::xorb_structs::{
 };
 
 use crate::error::{Result, XetError};
+use crate::reconstruction::{ChunkPlacementMap, build_file_terms};
 use crate::shard_bloom::ShardBloom;
+use crate::xorb::format::ChunkPlacement;
+
+fn shard_u32(field: &str, value: usize) -> Result<u32> {
+    u32::try_from(value).map_err(|_| XetError::ShardFormat {
+        field: field.to_owned(),
+        value: value.to_string(),
+    })
+}
+
+/// Build canonical shard metadata for one complete xorb placement sequence.
+///
+/// Placements may arrive in any order, but must cover dense zero-based chunk
+/// indices and all identify the requested xorb.
+pub fn xorb_info_from_placements(
+    xorb_hash: MerkleHash,
+    placements: &[ChunkPlacement],
+) -> Result<MDBXorbInfo> {
+    let mut placements = placements.iter().collect::<Vec<_>>();
+    placements.sort_unstable_by_key(|placement| placement.chunk_index);
+    let mut total_uncompressed = 0u32;
+    let mut entries = Vec::with_capacity(placements.len());
+    for (index, placement) in placements.into_iter().enumerate() {
+        let expected = shard_u32("xorb placement chunk index", index)?;
+        if placement.xorb_hash != xorb_hash || placement.chunk_index != expected {
+            return Err(XetError::Internal(format!(
+                "xorb {} requires dense zero-based chunk indices with matching placement identity; expected index {}, got {} in {}",
+                xorb_hash.hex(),
+                expected,
+                placement.chunk_index,
+                placement.xorb_hash.hex()
+            )));
+        }
+        entries.push(XorbChunkSequenceEntry::new(
+            placement.chunk_hash,
+            placement.uncompressed_size,
+            total_uncompressed,
+        ));
+        total_uncompressed = total_uncompressed
+            .checked_add(placement.uncompressed_size)
+            .ok_or_else(|| XetError::ShardFormat {
+                field: "xorb uncompressed bytes".to_owned(),
+                value: u64::from(total_uncompressed)
+                    .saturating_add(u64::from(placement.uncompressed_size))
+                    .to_string(),
+            })?;
+    }
+    Ok(MDBXorbInfo {
+        metadata: XorbChunkSequenceHeader::new(
+            xorb_hash,
+            shard_u32("xorb chunk count", entries.len())?,
+            total_uncompressed,
+        ),
+        chunks: entries,
+    })
+}
+
+/// Build canonical file reconstruction metadata from an ordered recipe.
+///
+/// Every recipe occurrence must have a placement. Missing or excess coverage
+/// is rejected before the metadata can enter a shard.
+pub fn file_info_from_placements(
+    file_hash: MerkleHash,
+    chunk_hashes: &[MerkleHash],
+    placements: &ChunkPlacementMap,
+) -> Result<MDBFileInfo> {
+    let terms = build_file_terms(&file_hash, chunk_hashes, placements)?;
+    let segments = terms
+        .into_iter()
+        .map(|term| {
+            FileDataSequenceEntry::new(
+                term.xorb_hash,
+                term.unpacked_bytes,
+                term.chunk_start,
+                term.chunk_end,
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(
+            file_hash,
+            shard_u32("file reconstruction entry count", segments.len())?,
+            false,
+            false,
+        ),
+        segments,
+        verification: vec![],
+        metadata_ext: None,
+    })
+}
 
 /// 100 MiB soft cap for shard splitting.
 const SHARD_SIZE_CAP: u64 = 100 * 1024 * 1024;
+/// Maximum serialized shard size produced by one push publication session.
+pub const MAX_PUSH_SHARD_SIZE_BYTES: u64 = SHARD_SIZE_CAP;
 
 /// Magic bytes identifying the canonical v1 bloom trailer.
 const SHARD_V1_MAGIC: &[u8; 4] = b"SH01";
@@ -228,6 +320,15 @@ fn validate_file_terms<'a>(
         }
     }
     Ok(())
+}
+
+/// Validate one file entry against the exact xorb metadata bundled with it.
+pub fn validate_file_bundle(file_info: &MDBFileInfo, dependencies: &[MDBXorbInfo]) -> Result<()> {
+    let by_hash = dependencies
+        .iter()
+        .map(|dependency| (dependency.metadata.xorb_hash, dependency))
+        .collect::<HashMap<_, _>>();
+    validate_file_terms(file_info, |hash| by_hash.get(hash).copied())
 }
 
 /// Lazy-loading shard reader backed by raw bytes.
@@ -727,6 +828,66 @@ mod tests {
         let w = ShardWriter::new();
         assert!(w.is_empty());
         assert!(!w.should_split());
+    }
+
+    #[test]
+    fn placement_builders_preserve_order_and_repeated_file_occurrences() {
+        let xorb_hash = MerkleHash::from([7u8; 32]);
+        let first = MerkleHash::from([1u8; 32]);
+        let second = MerkleHash::from([2u8; 32]);
+        let placements = vec![
+            ChunkPlacement {
+                chunk_hash: second,
+                xorb_hash,
+                chunk_index: 1,
+                uncompressed_size: 5,
+            },
+            ChunkPlacement {
+                chunk_hash: first,
+                xorb_hash,
+                chunk_index: 0,
+                uncompressed_size: 3,
+            },
+        ];
+        let xorb = xorb_info_from_placements(xorb_hash, &placements).unwrap();
+        let placement_map = placements
+            .into_iter()
+            .map(|placement| (placement.chunk_hash, placement))
+            .collect();
+
+        let file = file_info_from_placements(
+            MerkleHash::from([9u8; 32]),
+            &[first, second, first],
+            &placement_map,
+        )
+        .unwrap();
+
+        assert_eq!(xorb.chunks[0].chunk_hash, first);
+        assert_eq!(xorb.chunks[1].chunk_hash, second);
+        assert_eq!(file.segments.len(), 2);
+        validate_file_bundle(&file, &[xorb]).unwrap();
+    }
+
+    #[test]
+    fn placement_builders_reject_sparse_and_incomplete_inputs() {
+        let xorb_hash = MerkleHash::from([7u8; 32]);
+        let chunk_hash = MerkleHash::from([1u8; 32]);
+        let sparse = ChunkPlacement {
+            chunk_hash,
+            xorb_hash,
+            chunk_index: 1,
+            uncompressed_size: 3,
+        };
+
+        assert!(xorb_info_from_placements(xorb_hash, &[sparse]).is_err());
+        assert!(
+            file_info_from_placements(
+                MerkleHash::from([9u8; 32]),
+                &[chunk_hash],
+                &ChunkPlacementMap::new(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

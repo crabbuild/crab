@@ -150,8 +150,35 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     .await;
     std::fs::write(path.join("README.md"), "first content\n").unwrap();
     success(path, &["add", "README.md"]).await;
+    success(path, &["update-index", "--chmod=+x", "README.md"]).await;
     success(path, &["commit", "-m", "first commit"]).await;
     let first = success(path, &["rev-parse", "HEAD"]).await;
+    // A valid Git graph with absent LFS content must fail before artifact upload.
+    std::fs::write(
+        path.join("missing-lfs"),
+        format!(
+            "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 3\n",
+            "0".repeat(64)
+        ),
+    )
+    .unwrap();
+    success(path, &["add", "missing-lfs"]).await;
+    success(path, &["commit", "-m", "missing content dependency"]).await;
+    let rejected = git(path, &["push", &url, branch]).await;
+    assert!(!rejected.status.success());
+    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let before = crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
+        .await
+        .unwrap();
+    assert!(before.journal.refs.is_empty());
+    assert!(
+        repo.store
+            .list_prefix(&repo.layout.repo_path("packs"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    success(path, &["reset", "--hard", &first]).await;
     success(path, &["tag", "-a", "v1", "-m", "first tag"]).await;
     success(path, &["push", &url, "refs/tags/v1"]).await;
     let response = reqwest::get(format!("http://127.0.0.1:{port}/api/repos/team/repo/refs"))
@@ -734,6 +761,51 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         assert_eq!(actual.data.as_ref(), expected);
     }
     operation.finish(Ok(())).await.unwrap();
+    let reference = format!("refs/heads/{branch}");
+    let base = remote
+        .refs()
+        .entries
+        .iter()
+        .find(|entry| entry.name == reference)
+        .unwrap()
+        .target;
+    let response = reqwest::get(format!(
+        "http://127.0.0.1:{port}/api/repos/team/repo/file?rev={base}&path_hex=524541444d452e6d64"
+    ))
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let file: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let response = reqwest::Client::new()
+        .patch(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(
+            serde_json::json!({
+                "branch": reference,
+                "expected_head": base.to_string(),
+                "expected_blob": file["oid"],
+                "new_branch": "mode-proof",
+                "path_hex": "524541444d452e6d64",
+                "content": "executable after browser editing\n",
+                "message": "Preserve executable mode"
+            })
+            .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mode_reader = tempfile::tempdir().unwrap();
+    success(mode_reader.path(), &["init", "--bare", "."]).await;
+    success(mode_reader.path(), &["fetch", &url, "mode-proof"]).await;
+    let mode = success(mode_reader.path(), &["ls-tree", "FETCH_HEAD", "README.md"]).await;
+    assert!(mode.starts_with("100755 blob "), "{mode}");
+    assert_eq!(
+        success(mode_reader.path(), &["show", "FETCH_HEAD:README.md"]).await,
+        "executable after browser editing"
+    );
     server.cancellation.cancel();
     stop.cancel();
     http.await.unwrap();

@@ -73,6 +73,20 @@ impl Generation {
         let main = directory.open_component(name, libc::O_RDWR, &path)?;
         let main_metadata = main.metadata()?;
         validate_metadata(&main_metadata, &path, false)?;
+        let probe = directory.open_component(name, libc::O_RDWR, &path)?;
+        let probe_metadata = probe.metadata()?;
+        if main_metadata.dev() != probe_metadata.dev()
+            || main_metadata.ino() != probe_metadata.ino()
+        {
+            return Err(unsafe_path(
+                &path,
+                "database changed during lock validation",
+            ));
+        }
+        super::locking::verify_exclusion(&main, &probe).map_err(|_| {
+            unsafe_path(&path, "filesystem does not enforce database lock exclusion")
+        })?;
+        drop(probe);
         let mut expected = [0; 24];
         expected[..8].copy_from_slice(b"CRABDB01");
         expected[8..16].copy_from_slice(&main_metadata.dev().to_le_bytes());

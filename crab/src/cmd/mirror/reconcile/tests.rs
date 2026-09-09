@@ -2,6 +2,28 @@ use super::super::{ProcessCommand, ProcessOutput, ProcessStatus, SystemCommandRu
 use super::*;
 use std::collections::VecDeque;
 
+// Hold the nonce fixed so payload-binding tests cannot pass solely because
+// each preparation received a different operation identity.
+fn test_plan(
+    check: &MirrorCheckSummary,
+    allow_delete_refs: bool,
+) -> Result<MirrorReconciliationPlan> {
+    build_plan(
+        check,
+        allow_delete_refs,
+        "01991ba4-6200-7000-8000-000000000001",
+    )
+}
+
+#[test]
+fn fresh_plan_nonces_separate_identical_requests() {
+    let observed = check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]);
+    let first = build_plan(&observed, false, &uuid::Uuid::now_v7().to_string()).unwrap();
+    let second = build_plan(&observed, false, &uuid::Uuid::now_v7().to_string()).unwrap();
+    assert_ne!(first.plan_id, second.plan_id);
+    assert_eq!(first.plan_id, plan_digest(&first).unwrap());
+}
+
 struct AncestryRunner {
     statuses: VecDeque<i32>,
 }
@@ -110,7 +132,7 @@ fn memory_store() -> Store {
 #[test]
 fn plan_identity_binds_metadata_and_recipe_proofs_with_unchanged_refs() {
     let observed = check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]);
-    let original = build_plan(&observed, false).unwrap();
+    let original = test_plan(&observed, false).unwrap();
     let mut metadata_change = observed.clone();
     metadata_change.destination_snapshot = Some("e".repeat(64));
     let mut target_change = observed.clone();
@@ -119,9 +141,9 @@ fn plan_identity_binds_metadata_and_recipe_proofs_with_unchanged_refs() {
     recipe_change.pointers.recipe_digest = Some("f".repeat(64));
     let plans = [
         original,
-        build_plan(&metadata_change, false).unwrap(),
-        build_plan(&recipe_change, false).unwrap(),
-        build_plan(&target_change, false).unwrap(),
+        test_plan(&metadata_change, false).unwrap(),
+        test_plan(&recipe_change, false).unwrap(),
+        test_plan(&target_change, false).unwrap(),
     ];
     assert_eq!(
         plans
@@ -135,7 +157,7 @@ fn plan_identity_binds_metadata_and_recipe_proofs_with_unchanged_refs() {
 
 #[tokio::test]
 async fn receipt_for_a_different_ref_edit_cannot_satisfy_the_plan() {
-    let plan = build_plan(
+    let plan = test_plan(
         &check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]),
         false,
     )
@@ -182,7 +204,7 @@ async fn receipt_for_a_different_ref_edit_cannot_satisfy_the_plan() {
 
 #[tokio::test]
 async fn managed_receipt_binds_the_reviewed_base_and_result_snapshots() {
-    let plan = build_plan(
+    let plan = test_plan(
         &check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]),
         false,
     )
@@ -230,7 +252,7 @@ async fn managed_receipt_binds_the_reviewed_base_and_result_snapshots() {
 
 #[tokio::test]
 async fn managed_receipt_for_another_result_cannot_satisfy_the_plan() {
-    let plan = build_plan(
+    let plan = test_plan(
         &check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]),
         false,
     )
@@ -318,7 +340,7 @@ fn incomplete_snapshot_or_recipe_proof_blocks_a_plan() {
             1 => observed.destination_snapshot = None,
             _ => observed.pointers.recipe_digest = None,
         }
-        assert!(build_plan(&observed, false).unwrap().blocked);
+        assert!(test_plan(&observed, false).unwrap().blocked);
     }
 }
 
@@ -395,7 +417,7 @@ fn ancestry_failure_is_unverifiable() {
 fn plan_blocks_destination_only_ref_without_delete_approval() {
     let mut crab_only = status("refs/heads/recover", MirrorRefState::CrabAhead);
     crab_only.source_oid = None;
-    let plan = build_plan(&check(vec![crab_only]), false).unwrap();
+    let plan = test_plan(&check(vec![crab_only]), false).unwrap();
     assert!(plan.blocked);
     assert!(plan.actions.is_empty());
 }
@@ -404,15 +426,15 @@ fn plan_blocks_destination_only_ref_without_delete_approval() {
 fn delete_approval_is_bound_into_plan_digest() {
     let mut crab_only = status("refs/heads/recover", MirrorRefState::CrabAhead);
     crab_only.source_oid = None;
-    let without = build_plan(&check(vec![crab_only.clone()]), false).unwrap();
-    let with = build_plan(&check(vec![crab_only]), true).unwrap();
+    let without = test_plan(&check(vec![crab_only.clone()]), false).unwrap();
+    let with = test_plan(&check(vec![crab_only]), true).unwrap();
     assert_ne!(without.plan_id, with.plan_id);
     assert_eq!(with.actions[0].kind, MirrorPlanActionKind::DeleteCrabRef);
 }
 
 #[test]
 fn delete_approval_does_not_rewrite_crab_ahead_ref() {
-    let plan = build_plan(
+    let plan = test_plan(
         &check(vec![status(
             "refs/heads/recover",
             MirrorRefState::CrabAhead,
@@ -426,7 +448,7 @@ fn delete_approval_does_not_rewrite_crab_ahead_ref() {
 
 #[test]
 fn plan_digest_rejects_mutation() {
-    let plan = build_plan(
+    let plan = test_plan(
         &check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]),
         false,
     )
@@ -439,11 +461,11 @@ fn plan_digest_rejects_mutation() {
 #[test]
 fn canonical_plan_diff_rejects_recomputed_action_mutation() {
     let check = check(vec![status("refs/heads/main", MirrorRefState::SourceAhead)]);
-    let mut plan = build_plan(&check, false).unwrap();
+    let mut plan = test_plan(&check, false).unwrap();
     plan.actions[0].expected_source_oid = Some("c".repeat(40));
     plan.plan_id = plan_digest(&plan).unwrap();
 
-    let canonical = build_plan(&check, false).unwrap();
+    let canonical = test_plan(&check, false).unwrap();
     assert_ne!(canonical.plan_id, plan.plan_id);
 }
 
@@ -451,7 +473,7 @@ fn canonical_plan_diff_rejects_recomputed_action_mutation() {
 fn write_plan_refuses_to_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("plan.json");
-    let plan = build_plan(&check(Vec::new()), false).unwrap();
+    let plan = test_plan(&check(Vec::new()), false).unwrap();
     write_plan(&path, &plan).unwrap();
     assert!(write_plan(&path, &plan).is_err());
 }
@@ -482,7 +504,8 @@ async fn busy_cache_returns_unverifiable_and_blocks_plan_without_source_commands
     args.ci = true;
     args.write_plan = Some(dir.path().join("blocked.json"));
     let mut runner = AncestryRunner {
-        statuses: VecDeque::from([0]),
+        // Each invocation checks Git's version before trying the cache lock.
+        statuses: VecDeque::from([0, 0]),
     };
     let result = run_integrity_command(
         &args,
@@ -498,11 +521,22 @@ async fn busy_cache_returns_unverifiable_and_blocks_plan_without_source_commands
     };
     assert_eq!(check.state, MirrorDriftState::Unverifiable);
     assert!(!check.ci_passed);
-    assert!(
-        read_plan(args.write_plan.as_ref().unwrap())
-            .unwrap()
-            .blocked
-    );
+    let first = read_plan(args.write_plan.as_ref().unwrap()).unwrap();
+    assert!(first.blocked);
+    args.write_plan = Some(dir.path().join("blocked-second.json"));
+    run_integrity_command(
+        &args,
+        &CancellationToken::new(),
+        options(),
+        &mut runner,
+        Ok(memory_store()),
+    )
+    .await
+    .unwrap();
+    let second = read_plan(args.write_plan.as_ref().unwrap()).unwrap();
+    assert!(second.blocked);
+    assert_ne!(first.operation_nonce, second.operation_nonce);
+    assert!(runner.statuses.is_empty());
 }
 
 fn run_local_git(args: &[&str]) -> String {
@@ -895,7 +929,7 @@ async fn unavailable_source_never_reuses_cached_refs_or_applies_a_plan() {
         let mut healthy = check(Vec::new());
         healthy.source = args.source.clone();
         let plan_path = dir.path().join("plan.json");
-        write_plan(&plan_path, &build_plan(&healthy, false).unwrap()).unwrap();
+        write_plan(&plan_path, &test_plan(&healthy, false).unwrap()).unwrap();
         args.check = false;
         args.ci = false;
         args.apply_plan = Some(plan_path);
@@ -1046,7 +1080,7 @@ async fn run_delete_apply(
     observed.destination_identity = Some(identity);
     observed.pointers =
         verify_pointer_data(&store, "repo", &snapshot, &[], &CancellationToken::new()).await;
-    let plan = build_plan(&observed, true).unwrap();
+    let plan = test_plan(&observed, true).unwrap();
     write_plan(&plan_path, &plan).unwrap();
     let mut runner = ApplyOwnershipRunner {
         cache: path.clone(),

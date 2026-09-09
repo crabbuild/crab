@@ -30,11 +30,20 @@ verified bytes through crab-storage
 `LfsObjectStore` provides idempotent `put`, bounded-memory `put_stream`,
 `get`, `exists`, and `verify` operations. Its stream APIs let the direct Crab
 CLI transfer path verify immutable objects while keeping file-sized payloads
-out of memory. Successful streamed verification records a validator-bound
+out of memory. Uploads and explicit `verify_size` record a validator-bound
 receipt when the provider exposes an ETag or version, allowing later presence
-checks to avoid re-reading the object body. A configured primary fallback can
-serve reads when a selected replica is stale or unavailable; receipts are
-written to the source that passed verification.
+checks to avoid re-reading the object body. `get_stream` never writes receipts.
+A configured primary fallback can serve reads when a selected replica is stale
+or unavailable; selected replicas are verified before exposing their stream so
+corruption can trigger fallback without replaying emitted bytes.
+
+Full `get_stream` reads without a replica fallback use one body request and
+verify delivered SHA-256 and size. Range streams first establish whole-object
+proof, then require matching strong ETag/version metadata for delivery. A
+provider without a strong validator cannot serve a verified partial stream.
+All streams check exact response framing and withhold their final bytes until
+EOF verification succeeds, including for HTTP Content-Length consumers.
+Dropping a stream is cancellation, not evidence that verification succeeded.
 
 Streamed uploads admit at most four part futures, including the final partial
 part. Read/assembly buffers and provider allocations sit outside that queue
@@ -112,3 +121,10 @@ and inspect the underlying cause without parsing the message.
 
 The only content identity used here is the Git LFS SHA-256 OID. Crab-native
 file hashes, shards, and Xorbs are owned by [`crab-xet`](../crab-xet/README.md).
+
+Callers with explicit shutdown obligations use `get_stream_with_session` and an
+`LfsReadSession`. Drop outstanding read futures and streams before awaiting
+session close. Both receipt-miss preverification and full delivery register
+blocking SHA-256 jobs with this session; close drains started jobs after a
+cancelled join and rejects new verification work. The ordinary `get_stream`
+entry point retains its existing global verification admission contract.

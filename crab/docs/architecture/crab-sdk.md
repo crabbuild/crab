@@ -1,9 +1,14 @@
 # Crab Rust SDK: technical design and delivery plan
 
-Status: proposed implementation contract; no SDK implementation is claimed.
+Status: implementation complete on PR #160; release qualification in progress.
 Baseline: `ebd0e40d14ca862cefa5366c1f856847e2401660` (2026-09-06).
 Public package: `crab-sdk`; Rust import: `crab_sdk`.
 Implementation location: `crates/crab-sdk/`.
+
+Delivery evidence: [capability inventory](sdk-capabilities.md) and
+[qualification inputs and phase-0 record](sdk-qualification.md).
+Phases 0 through 8 are implemented. Backend support is declared only after the
+mandatory credentialed, platform, fault, package, and performance cells pass.
 
 ## 1. Outcome and scope
 
@@ -59,7 +64,11 @@ historical documentation describes a retired implementation.
 | --- | --- | --- |
 | Workspace | `Cargo.toml`; `crab/docs/architecture/multi-crate-transition.md` retirement notice | Add a new package; no existing SDK to extend |
 | Remote reads | `crates/crab-remote-git/src/repository.rs`, `snapshot.rs`; HTTP read handlers; `tests/remote_repository.rs` | Preserve generation pinning, byte paths, limits, and explicit operation cleanup |
+| Per-operation limits | `crates/crab-remote-git/src/operation.rs` reads aggregate limits from repository state for deadlines, budgets, accessors and batch admission | Move operation-specific limits through every consuming path; reopening a repository must not be required to tighten a snapshot read budget |
+| SDK path validation | `crates/crab-remote-git/src/path.rs` deliberately preserves dot-like components; HTTP callers use that raw Git contract | SDK-owned `GitPath` must enforce the stricter section-4 input contract without changing the raw reader's semantics |
 | File content | `crates/crab-read/src/lib.rs`; CLI hydration and protected receive | Share verified reconstruction; raw Git blobs and hydrated content are separate APIs |
+| Content ranges | `crates/crab-read/src/hydrator.rs`; VFS range readers and CLI hydration facade | Existing range helper buffers the requested range and creates its own cancellation token; add shared bounded streaming with caller-owned cancellation for SDK streams |
+| LFS streaming | `crates/crab-lfs/src/object_store.rs` `get_verified_stream_at`; HTTP LFS download | The current helper attempts a verification-receipt write, then opens another read; SDK reads need a read-only owner path and proof that delivered bytes match the verified object version |
 | Ref publication | `crates/crab-write/src/journal.rs`, `generation.rs`; CLI push and HTTP receive; `tests/journal.rs`, `tests/generation.rs`, `tests/catalog.rs` | Journal commit does not itself own all locks, validation, or read readiness |
 | Attribution | `crates/crab-metadata/src/plan_receipt.rs`; mirror publication and GC | Reuse durable intent/receipt mechanics; current ref equality is not historical commit proof |
 | Direct transfer | `crab/src/git/fetch.rs`, `push.rs`, `push_native.rs`, `upload_pack_wire.rs`; remote helper and import | Extract orchestration with callers in the same phase; wrapping CLI argument structs is insufficient |
@@ -120,8 +129,8 @@ Keep only argument/config projection and output mapping at CLI entry points.
 
 ## 4. Public API contract
 
-The names and semantics below are the implementation target. Code blocks are
-proposed API examples until phase 1 converts them into compiling examples.
+The names and semantics below define the implemented contract. The public guide
+and package examples compile against this surface.
 
 ```rust,ignore
 let client = Client::builder()
@@ -130,8 +139,8 @@ let client = Client::builder()
 
 let remote = client.open_remote(locator).await?;
 let snapshot = remote.snapshot(Revision::branch("main")?).await?;
-let raw = snapshot.read_blob(path.clone(), ReadOptions::default()).await?;
-let mut content = snapshot.open_file(path, ReadOptions::default()).await?;
+let raw = snapshot.read_blob(path.clone()).await?;
+let mut content = snapshot.open_file(path).await?;
 
 let local_client = Client::builder()
     .direct_store(store_options)
@@ -144,17 +153,26 @@ local.fetch(FetchOptions::default()).await?;
 local.pull(PullOptions::fast_forward_only()).await?;
 let push = local.prepare_push(PushOptions::current_branch()).await?;
 persist(push.recovery_token())?;
-let outcome = push.execute().await?;
+let outcome = push.execute(OperationOptions::default()).await?;
 ```
 
 | Public surface | Required methods and results |
 | --- | --- |
-| `Client` | `open_remote`, `configure_local`, `open_local`, `clone_repository`, `initialize_remote`, `managed_repositories`, `close` |
+| `Client` | `open_remote`, `configure_local`, `open_local`, `clone_repository`, `initialize_remote`, `managed_repositories`, `reconcile`, `close` |
 | `RemoteRepository` | `refs`, `snapshot`, `refresh` returning a new handle, `capabilities`, `prepare_commit`, `prepare_ref_update`, `reconcile` |
 | `Snapshot` | `commit`, paginated `tree`/`history`, `diff`, `blame`, `read_blob`, `open_file`, `archive` |
 | `LocalRepository` | `status`, `snapshot`, `fetch`, `stage`, `commit`, `checkout`, `pull`, `prepare_push`, `hydrate`, `dehydrate`, `prefetch_content`, `continue_integration`, `abort_integration` |
 | `ManagedRepositories` | paginated `list`, `create`, `rename`, `archive`, `restore`; all use the existing managed service |
 | `PreparedMutation` | stable `recovery_token`, `execute`; owns prepared data and operation lifetime |
+
+`RemoteRepository::capabilities` is a synchronous metadata query with no I/O.
+It reports implemented operation families through the non-exhaustive
+`RepositoryCapability` enum; it does not promise authorization or backend
+qualification. The current read SDK reports `ReadGit`, plus `ReadContent` when
+the `content` feature is enabled. `UpdateRefs` is implemented with `write` on
+conditional-write cloud stores; filesystem stores reject publication before
+lease admission. Other mutation families remain unadvertised until implemented.
+Cached capability metadata remains inspectable after client close.
 
 All modifying methods take an operation context. Read builders expose that
 context without requiring it for the default case. A prepared object is
@@ -163,8 +181,10 @@ and successful reconciliation. `prepare_push` defaults to the current branch's
 configured upstream; absent or ambiguous upstream returns an input error.
 An explicit destination ref overrides it. It never guesses a remote branch.
 
-`CloneOptions` defaults: full history, remote symbolic HEAD, lazy hydration,
-remote name `origin`. `FetchOptions` defaults: configured fetch refspecs,
+`CloneOptions` defaults: full history, remote symbolic HEAD, hydration from the
+selected revision's committed `crab.toml` with lazy fallback, remote name
+`origin`. Explicit lazy or eager mode overrides committed policy.
+`FetchOptions` defaults: configured fetch refspecs,
 no pruning, Git-style automatic following of reachable tags, no depth change.
 `CommitOptions` requires author, committer and message; signing is outside 1.0.
 `CheckoutOptions` defaults to preserving changes and lazy hydration.
@@ -215,6 +235,25 @@ Never silently replace a missing large file with its pointer text.
   filesystem store is permitted for development. Raw object-store handles remain
   internal; tests inject at owner seams rather than widening the public SDK API.
 
+Explicit S3 selection is implemented through
+`DirectStoreOptions::s3(S3Options::new(bucket, region, access_key, secret_key)?)`.
+`S3Options` accepts a session token and optional endpoint; the provider validates
+the endpoint at client build. Explicit HTTP endpoint selection permits HTTP for
+that store. Provider environment values cannot override these inputs. Debug
+output is redacted, and explicit credential scopes have separate SDK cache
+namespaces. Explicit GCS selection uses
+`DirectStoreOptions::gcs(GcsOptions::new(bucket, access_token)?)`; it bypasses
+application-default credentials, redacts debug output, and separates token cache
+scopes. Explicit Azure selection uses `DirectStoreOptions::azure` with
+`AzureOptions::bearer(account, container, token)?` or
+`AzureOptions::sas(account, container, query_string)?`. Azure options accept an
+optional endpoint with the same validation and explicit HTTP policy as S3.
+Bearer tokens reject invalid header characters before provider construction;
+SAS strings use the provider parser to avoid double encoding signatures. These
+explicit credential forms are static. Managed grant refresh follows
+the auth owner policy in phase 6; a new caller-defined refresh API is outside
+this plan. Full live GCS/Azure qualification remains outstanding.
+
 ### Resources, limits, and errors
 
 Operations carry `OperationOptions` with a cancellation handle, optional
@@ -233,9 +272,10 @@ cleanup after runtime or process termination.
 
 Streams own their read session. EOF and explicit `close().await` report integrity
 and close errors; dropping a stream schedules tracked cleanup. Consumers must
-observe EOF/close to claim full-file integrity. Partial range reads use the
-reconstruction owner's verified range contract and do not claim a whole-file
-hash was recomputed.
+observe successful EOF to claim full-file integrity. Explicit close reports
+unobserved finalization failures and drains cleanup; closing early does not verify
+unread content. Partial range reads use the reconstruction owner's verified range
+contract and do not claim a whole-file hash was recomputed.
 
 `Error` preserves sources and exposes a stable `ErrorKind`: invalid input,
 unsupported capability, authentication, authorization, not found, conflict,
@@ -271,8 +311,11 @@ never serialized. A resumed session must reauthorize and verify placement.
 The canonical execution order is:
 
 1. Authorize the operation; validate request shape and current capabilities.
-2. Acquire sorted per-ref leases, then global and repository GC writer fences;
-   renew all leases until cleanup. Capture the ref snapshot under those leases.
+2. For a direct plan, acquire its renewable operation lease before any ref
+   lease and check prior-attempt evidence under that lease; an unresolved
+   attempt blocks replay. Acquire sorted per-ref leases, then global and
+   repository GC writer fences; renew all leases until cleanup. Capture the
+   ref snapshot under those leases.
 3. Recheck expected OIDs and caller policy. Verify incoming Git connectivity,
    pointer dependencies, exact object IDs, and complete reconstruction terms.
 4. Flush staged xorbs; upload immutable content, shards, packs and visibility
@@ -320,7 +363,11 @@ payload cannot reuse a token. An unresolved prior attempt blocks replay.
 The request digest covers repository placement, ordered ref edits, expected
 OIDs, commit/object identities, content digests, and write policy. Encode it
 canonically with a versioned, domain-separated digest owned by `crab-metadata`.
-The public token is a recovery handle, not an authorization credential.
+The metadata encoding sorts JSON object keys recursively and preserves array
+order, with separate versioned Blake3 domains for the request and nonce-bound
+plan identity. Mirror plan files use format 2 with a retained operation nonce;
+persisted intent and receipt formats remain version 1. The public token is a
+recovery handle, not an authorization credential.
 
 `reconcile` validates the bound receipt or historical commit evidence through
 the owner crate. It may repair a missing receipt only with write authority.
@@ -328,6 +375,9 @@ Add a read-only receipt lookup beside the existing repairing resolver. Missing
 evidence, a compacted marker, moved refs, or equal current OIDs never proves
 rejection or historical success by itself. Return `Indeterminate` when proof is
 insufficient; never infer rejection from `Option::None` in today's resolver.
+`Client::reconcile` also accepts the saved token directly: restarted clients
+must not need a readable repository handle when `open_remote` returns `Indexing`.
+The repository method additionally verifies the handle's repository binding.
 Preserve intents, receipts, and their proof roots under the existing GC contract;
 phase 2 must prove retention across compaction, restart, and GC before writes ship.
 
@@ -549,6 +599,18 @@ progress and `close`. Implement all section 4 read methods; add `content` for
 Crab/LFS reconstruction. Create compiling examples `remote_read.rs` and
 `remote_archive.rs`. Add owner-default and feature-closure checks.
 
+Extend the read owners where their present interfaces cannot express the SDK
+contract: aggregate operation limits must govern deadlines, cache-hit charging,
+accessors and batch admission on the same pinned snapshot. Hydrated range
+streams must use a bounded writer and the caller's cancellation/deadline;
+buffering a caller-sized range or starting detached reconstruction is not a
+streaming implementation. Preserve existing raw Git path and VFS range
+semantics at their owner boundary, with SDK validation applied before I/O.
+LFS stream verification must not publish remote receipts from SDK reads. Keep
+receipt creation at authorized write/maintenance boundaries; bind any separate
+verification and delivery reads to the same object version, or verify delivered
+full-file bytes through EOF. Preserve bounded memory and range integrity.
+
 Acceptance:
 
 - `remote_read` reads exact Git bytes and hydrated bytes through a real RustFS
@@ -557,8 +619,14 @@ Acceptance:
   state. Opening a lagging catalog returns Indexing with zero storage writes.
 - Unix byte paths round-trip, pagination stays generation-bound, raw pointer
   reads differ from reconstructed reads, corruption and invalid ranges error.
+- Raw, Crab and LFS reads attempt zero remote writes. LFS replacement between
+  verification and delivery cannot return unverified bytes as a successful
+  full-file or range read; premature EOF and same-size corruption fail.
 - Stream EOF, early close, drop, timeout and Client close leave no owned sessions
   or tasks. Limits fail predictably on cold and warm caches.
+- Storage-request and fetched-byte limits charge Store retries, provider HTTP
+  retries, each listing page, and response-body chunks. Admission rejection
+  stops before the next physical request.
 - Default/remote/remote+content compile separately; no CLI/server/VFS normal
   dependency; remote without content excludes the hydration stack.
 
@@ -783,6 +851,7 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo test -p 
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo clippy -p crab-sdk -p crab-remote --locked --all-targets --all-features -- -D warnings
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-2485-sdk" cargo doc -p crab-sdk --locked --all-features --no-deps
 python3 crab/scripts/verify_sdk_capabilities.py
+python3 crab/scripts/check-sdk-features.py
 ```
 
 Feature CI additionally builds `managed` alone and with `remote`, `remote,content`

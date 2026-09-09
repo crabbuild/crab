@@ -118,3 +118,42 @@ async fn cancellation_and_drop_stop_pending_cache_publication() {
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn cache_fill_finishes_before_decoded_bytes_leave_admission() {
+    struct ObservedWriter(Arc<std::sync::atomic::AtomicUsize>);
+    impl std::io::Write for ObservedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .fetch_add(bytes.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let (mut hydrator, pointer, _) =
+        reconstruction_fixture(&directory.path().join("cache"), false).await;
+    let cache = Arc::new(ControlledCache::default());
+    hydrator.chunk_cache = Some(cache.clone());
+    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let writer = ObservedWriter(written.clone());
+    let read = tokio::spawn(async move {
+        hydrator
+            .reconstruct_to_writer_with_cancel(&pointer, writer, None, &CancellationToken::new())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), cache.entered.notified())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let bytes_before_fill = written.load(std::sync::atomic::Ordering::SeqCst);
+    cache.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(bytes_before_fill, 0);
+}

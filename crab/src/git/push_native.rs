@@ -32,7 +32,7 @@ use crate::storage::store::Store;
 use crab_staging::StagingAreaReadOnly;
 
 pub(crate) const MIRROR_GIT_ONLY_ENV: &str = "CRAB_INTERNAL_MIRROR_GIT_ONLY";
-pub(crate) const MIRROR_PLAN_ID_ENV: &str = "CRAB_INTERNAL_MIRROR_PLAN_ID";
+pub(crate) const MIRROR_PLAN_ID_ENV: &str = crab_remote::local::PUBLICATION_PLAN_ID_ENV;
 
 /// Configuration for the native push pipeline.
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ pub struct NativePushInputs<'a> {
     pub remote_url: &'a str,
     pub metrics: Option<Arc<Metrics>>,
     pub cancel: CancellationToken,
-    pub(crate) pre_acquired_locks: Option<Vec<PushLockLease>>,
+    pub(crate) pre_acquired_locks: Option<PushLockLease>,
 }
 
 impl<'a> NativePushInputs<'a> {
@@ -115,7 +115,7 @@ impl<'a> NativePushInputs<'a> {
 
     pub(crate) fn with_pre_acquired_locks(
         mut self,
-        pre_acquired_locks: Option<Vec<PushLockLease>>,
+        pre_acquired_locks: Option<PushLockLease>,
     ) -> Self {
         self.pre_acquired_locks = pre_acquired_locks;
         self
@@ -195,6 +195,76 @@ impl NativePushConfig {
 pub async fn run_native_push(
     config: &NativePushConfig,
     specs: &[PushSpec],
+    mut inputs: NativePushInputs<'_>,
+) -> Result<PushResult> {
+    // Inputs transfer lease ownership even when admission exits early.
+    release_native_locks_on_error(
+        validate_publication_plan_context(config),
+        &mut inputs.pre_acquired_locks,
+    )
+    .await?;
+    let early = if specs.is_empty() {
+        Some(PushResult::empty())
+    } else {
+        duplicate_destination_result(specs)
+    };
+    if let Some(result) = early {
+        if let Some(leases) = inputs.pre_acquired_locks.take() {
+            release_push_lock_leases(leases).await;
+        }
+        return Ok(result);
+    }
+    release_native_locks_on_error(
+        check_cancelled(&inputs.cancel),
+        &mut inputs.pre_acquired_locks,
+    )
+    .await?;
+    let Some(plan_id) = config
+        .push
+        .mirror_plan_id
+        .as_deref()
+        .filter(|_| config.push.protected_push.is_none())
+    else {
+        return run_native_push_inner(config, specs, inputs).await;
+    };
+    let Some(store) = inputs
+        .store
+        .as_ref()
+        .map(|store| store.as_storage().clone())
+    else {
+        return run_native_push_inner(config, specs, inputs).await;
+    };
+    if let Some(leases) = inputs.pre_acquired_locks.take() {
+        release_push_lock_leases(leases).await;
+        return Err(CrabError::Internal(
+            "plan operation admission must precede the ref lease handoff".to_owned(),
+        ));
+    }
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.clone(),
+        inputs.router.repo_prefix().to_owned(),
+        inputs.router.global_prefix().to_owned(),
+    );
+    let cancel = inputs.cancel.clone();
+    // The same durable plan must serialize before discovery acquires ref leases.
+    // Managed publication retains its server-owned finalize/idempotency boundary.
+    crab_remote::publication::with_plan(
+        &store,
+        &layout,
+        plan_id,
+        config.push.lock_ttl,
+        &cancel,
+        |cancel| async move {
+            inputs.cancel = cancel;
+            run_native_push_inner(config, specs, inputs).await
+        },
+    )
+    .await
+}
+
+async fn run_native_push_inner(
+    config: &NativePushConfig,
+    specs: &[PushSpec],
     inputs: NativePushInputs<'_>,
 ) -> Result<PushResult> {
     let NativePushInputs {
@@ -210,35 +280,6 @@ pub async fn run_native_push(
         mut pre_acquired_locks,
     } = inputs;
     let operation_metrics = metrics.clone();
-
-    // Inputs transfer lease ownership even if validation or an empty batch
-    // exits before discovery. Await cleanup before allowing a caller's retry.
-    release_native_locks_on_error(
-        validate_mirror_plan_context(config),
-        &mut pre_acquired_locks,
-    )
-    .await?;
-    if specs.is_empty() {
-        debug!("native push: empty spec list, nothing to do");
-        if let Some(leases) = pre_acquired_locks.take() {
-            release_push_lock_leases(leases).await;
-        }
-        return Ok(PushResult::empty());
-    }
-
-    if let Some(result) = duplicate_destination_result(specs) {
-        if let Some(leases) = pre_acquired_locks.take() {
-            release_push_lock_leases(leases).await;
-        }
-        return Ok(result);
-    }
-
-    if let Err(error) = check_cancelled(&cancel) {
-        if let Some(leases) = pre_acquired_locks.take() {
-            release_push_lock_leases(leases).await;
-        }
-        return Err(error);
-    }
 
     let Some(store) = store else {
         if let Some(leases) = pre_acquired_locks.take() {
@@ -302,8 +343,9 @@ pub async fn run_native_push(
         delegated_push.perf_phase_sink = Some(PerfPhaseSink::Stderr(Arc::clone(stream)));
     }
     if pre_acquired_locks.is_some() && (config.followtags || config.push.protected_push.is_some()) {
-        let leases = pre_acquired_locks.take().unwrap_or_default();
-        release_push_lock_leases(leases).await;
+        if let Some(leases) = pre_acquired_locks.take() {
+            release_push_lock_leases(leases).await;
+        }
         return Err(CrabError::Internal(
             "pre-acquired push locks cannot be combined with this native push mode".into(),
         ));
@@ -601,13 +643,8 @@ pub async fn run_native_push(
     Ok(result)
 }
 
-fn validate_mirror_plan_context(config: &NativePushConfig) -> Result<()> {
+fn validate_publication_plan_context(config: &NativePushConfig) -> Result<()> {
     if let Some(plan_id) = config.push.mirror_plan_id.as_deref() {
-        if !config.mirror_git_only {
-            return Err(CrabError::Protocol(
-                "mirror plan identity is only valid for mirror reconciliation".to_owned(),
-            ));
-        }
         if config.push.active_active_replication.is_some()
             || config
                 .push
@@ -647,7 +684,7 @@ async fn run_native_push_with_locks(
     metrics: Option<Arc<Metrics>>,
     cancel: CancellationToken,
     progress: Arc<NativePushProgress>,
-    leases: Vec<PushLockLease>,
+    leases: PushLockLease,
     pointers: Vec<PointerBlob>,
     commit_entries: Vec<crab_metadata::commit_graph::CommitEntry>,
     sha_map: HashMap<String, String>,
@@ -689,7 +726,7 @@ fn push_lock_rejection_result(specs: &[PushSpec], err: &CrabError) -> PushResult
 
 async fn release_native_locks_on_error<T>(
     result: Result<T>,
-    locks: &mut Option<Vec<PushLockLease>>,
+    locks: &mut Option<PushLockLease>,
 ) -> Result<T> {
     match result {
         Ok(value) => Ok(value),
@@ -1191,20 +1228,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mirror_plan_context_accepts_a_valid_direct_plan() {
+    fn publication_plan_context_accepts_a_valid_direct_plan() {
         let mut config = NativePushConfig::new(PushConfig::default());
-        config.mirror_git_only = true;
         config.push.mirror_plan_id = Some("a".repeat(64));
 
-        assert!(validate_mirror_plan_context(&config).is_ok());
-    }
-
-    #[test]
-    fn mirror_plan_context_rejects_identity_outside_mirror_mode() {
-        let mut non_mirror = NativePushConfig::new(PushConfig::default());
-        non_mirror.push.mirror_plan_id = Some("a".repeat(64));
-
-        assert!(validate_mirror_plan_context(&non_mirror).is_err());
+        assert!(validate_publication_plan_context(&config).is_ok());
     }
 
     #[test]
@@ -1213,7 +1241,7 @@ mod tests {
         uppercase.mirror_git_only = true;
         uppercase.push.mirror_plan_id = Some("A".repeat(64));
 
-        assert!(validate_mirror_plan_context(&uppercase).is_err());
+        assert!(validate_publication_plan_context(&uppercase).is_err());
     }
 
     #[derive(Debug)]
@@ -1635,14 +1663,19 @@ mod tests {
 
     #[tokio::test]
     async fn early_native_return_releases_pre_acquired_locks_before_returning() {
-        for case in ["invalid-plan", "non-mirror-plan", "empty-batch"] {
+        for case in [
+            "invalid-plan",
+            "non-mirror-plan",
+            "late-plan-admission",
+            "empty-batch",
+        ] {
             let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
             let router = StoreLayout::new(store.clone(), case.to_owned());
             let mut config = NativePushConfig::new(PushConfig::default());
             config.mirror_git_only = case != "non-mirror-plan";
             config.push.mirror_plan_id = match case {
                 "invalid-plan" => Some("invalid".to_owned()),
-                "non-mirror-plan" => Some("a".repeat(64)),
+                "non-mirror-plan" | "late-plan-admission" => Some("a".repeat(64)),
                 _ => None,
             };
             let specs = vec![main_push_spec()];
@@ -1838,6 +1871,93 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn unresolved_plan_blocks_replay_before_ref_admission() {
+        let fixture = TinyGitFixture::new();
+        fixture.commit_text("readme.txt", "uncertain publication");
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "unresolved-plan".to_owned());
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let plan_id = "e".repeat(64);
+        let intent = crab_metadata::plan_receipt::PlanIntent {
+            version: 1,
+            repo_prefix: router.repo_prefix().to_owned(),
+            plan_id: plan_id.clone(),
+            attempt: 1,
+            commit: crab_metadata::plan_receipt::PlanCommit::RefJournal {
+                transaction_id: "a".repeat(64),
+                dependency_digest: "b".repeat(64),
+            },
+        };
+        store
+            .as_storage()
+            .create_strict(
+                &layout.ref_journal_plan_intent_path(&plan_id, 1),
+                bytes::Bytes::from(serde_json::to_vec(&intent).unwrap()),
+            )
+            .await
+            .unwrap();
+        let mut config = NativePushConfig::new(PushConfig {
+            git_dir: Some(fixture.git_dir.clone()),
+            mirror_plan_id: Some(plan_id.clone()),
+            atomic: true,
+            ..PushConfig::default()
+        });
+        config.mirror_git_only = true;
+        let specs = [main_push_spec()];
+        let blocker = crab_coordination::PushLock::acquire_ref(
+            store.inner(),
+            router.repo_prefix(),
+            &specs[0].dst,
+            config.push.lock_ttl,
+        )
+        .await
+        .unwrap();
+        let mut state = PushState::default();
+        let result = run_native_push(
+            &config,
+            &specs,
+            NativePushInputs::new(
+                Some(store.clone()),
+                None,
+                PushStaging::Missing,
+                router.clone(),
+                &mut state,
+                "origin",
+                "crab://bucket/unresolved-plan",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await;
+        let error = result.expect_err("an unresolved attempt must refuse replay");
+        let CrabError::Io(source) = &error else {
+            panic!("replay refusal must preserve the typed metadata error: {error}");
+        };
+        assert!(matches!(
+            source.get_ref().and_then(|error| error.downcast_ref::<crab_metadata::error::MetadataError>()),
+            Some(crab_metadata::error::MetadataError::PlanAlreadyAttempted { plan_id: existing }) if existing == &plan_id
+        ));
+        assert!(matches!(
+            crate::git::push::PushRejectReason::from_error(&error),
+            crate::git::push::PushRejectReason::Internal(_)
+        ));
+        let resource = format!("publication-plan-{plan_id}");
+        let released = crab_coordination::PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            &resource,
+            config.push.lock_ttl,
+        )
+        .await
+        .expect("replay refusal must drain the plan lease");
+        released.release().await.unwrap();
+        blocker.release().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn initial_mirror_push_records_the_exact_multi_ref_transaction() {
         let fixture = TinyGitFixture::new();
         let tip = fixture.commit_text("readme.txt", "initial mirror content");
@@ -1870,6 +1990,45 @@ mod tests {
                 dst: "refs/tags/v1".to_owned(),
             },
         ];
+        let resource = format!("publication-plan-{plan_id}");
+        let blocker = crab_coordination::PushLock::acquire_internal(
+            store.inner(),
+            router.repo_prefix(),
+            &resource,
+            config.push.lock_ttl,
+        )
+        .await
+        .unwrap();
+        let mut blocked_state = PushState::default();
+        let blocked = run_native_push(
+            &config,
+            &specs,
+            NativePushInputs::new(
+                Some(store.clone()),
+                None,
+                PushStaging::Missing,
+                router.clone(),
+                &mut blocked_state,
+                "origin",
+                "crab://bucket/initial-mirror-plan",
+                None,
+                CancellationToken::new(),
+            ),
+        )
+        .await;
+        assert!(matches!(blocked, Err(CrabError::PushLockHeld { .. })));
+        for spec in &specs {
+            assert!(
+                !crab_coordination::PushLock::ref_lease_is_claimed(
+                    store.inner(),
+                    router.repo_prefix(),
+                    &spec.dst,
+                )
+                .await
+                .unwrap()
+            );
+        }
+        blocker.release().await.unwrap();
         let mut state = PushState::default();
         let result = run_native_push(
             &config,
@@ -1894,7 +2053,7 @@ mod tests {
                 .await
                 .unwrap()
                 .expect("successful mirror push must have a terminal receipt");
-        let crab_metadata::plan_receipt::MirrorPlanCommit::RefJournal { transaction_id, .. } =
+        let crab_metadata::plan_receipt::PlanCommit::RefJournal { transaction_id, .. } =
             receipt.commit
         else {
             panic!("direct mirror push must use journal authority");

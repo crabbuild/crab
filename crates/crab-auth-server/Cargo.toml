@@ -26,6 +26,7 @@ crab-git = { workspace = true }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "remote-index"] }
 crab-read = { workspace = true }
+crab-remote = { workspace = true, features = ["publication"] }
 crab-staging = { workspace = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use object_store::aws::{
     AmazonS3, AmazonS3Builder, AmazonS3ConfigKey, AwsCredentialProvider, S3CopyIfNotExists,
 };
-use object_store::azure::MicrosoftAzureBuilder;
+use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
 use object_store::gcp::{GcpCredential, GoogleCloudStorageBuilder, GoogleConfigKey};
 use object_store::path::Path;
 use object_store::{ObjectStore, StaticCredentialProvider};
@@ -13,8 +13,7 @@ use object_store::{ObjectStore, StaticCredentialProvider};
 use crate::error::{Result, StorageError};
 use crate::identity::{BucketIdentity, StorageProviderKind};
 use crate::provider_options::{
-    default_client_options, parse_sas_query_pairs, s3_endpoint_from_env,
-    s3_virtual_hosted_style_from_env,
+    default_client_options, s3_endpoint_from_env, s3_virtual_hosted_style_from_env,
 };
 use crate::store::Store;
 
@@ -320,7 +319,7 @@ pub fn build_object_store(
     bucket: &str,
     credentials: ObjectStoreCredentials,
 ) -> Result<BuiltObjectStore> {
-    build_object_store_inner(bucket, credentials, None, true)
+    build_object_store_inner(bucket, credentials, None, true, None)
 }
 
 /// Builds an S3 object store with a caller-supplied refreshable credential provider.
@@ -344,7 +343,7 @@ pub fn build_object_store_with_endpoint(
     credentials: ObjectStoreCredentials,
     endpoint: Option<&str>,
 ) -> Result<BuiltObjectStore> {
-    build_object_store_inner(bucket, credentials, endpoint, false)
+    build_object_store_inner(bucket, credentials, endpoint, false, None)
 }
 
 fn build_object_store_inner(
@@ -352,6 +351,7 @@ fn build_object_store_inner(
     credentials: ObjectStoreCredentials,
     endpoint: Option<&str>,
     allow_environment_overrides: bool,
+    client_options: Option<object_store::ClientOptions>,
 ) -> Result<BuiltObjectStore> {
     let provider = credentials.provider_kind();
     match credentials {
@@ -374,7 +374,7 @@ fn build_object_store_inner(
                 .with_access_key_id(&access_key_id)
                 .with_secret_access_key(&secret_access_key)
                 .with_region(&region)
-                .with_client_options(default_client_options());
+                .with_client_options(client_options.unwrap_or_else(default_client_options));
             build_s3_object_store(
                 bucket,
                 builder,
@@ -396,7 +396,10 @@ fn build_object_store_inner(
             let builder = GoogleCloudStorageBuilder::new()
                 .with_bucket_name(bucket)
                 .with_credentials(credential_provider)
-                .with_client_options(default_client_options());
+                .with_http_connector(
+                    crate::transport_read_admission::ReadAdmissionConnector::default(),
+                )
+                .with_client_options(client_options.unwrap_or_else(default_client_options));
             let (builder, target_identity) = target::gcs(builder, bucket)?;
             let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
             let gcs = builder
@@ -416,7 +419,10 @@ fn build_object_store_inner(
             let builder = MicrosoftAzureBuilder::new()
                 .with_account(account)
                 .with_container_name(bucket)
-                .with_client_options(default_client_options());
+                .with_http_connector(
+                    crate::transport_read_admission::ReadAdmissionConnector::default(),
+                )
+                .with_client_options(client_options.unwrap_or_else(default_client_options));
             let builder = match endpoint {
                 Some(value) => builder.with_endpoint(value.to_owned()),
                 None => builder,
@@ -424,7 +430,9 @@ fn build_object_store_inner(
             let builder = match token {
                 AzureAuthorization::Bearer(token) => builder.with_bearer_token_authorization(token),
                 AzureAuthorization::Sas(sas) => {
-                    builder.with_sas_authorization(parse_sas_query_pairs(&sas))
+                    // The builder decodes the SAS before encoding request query
+                    // pairs. Passing encoded pairs directly corrupts signatures.
+                    builder.with_config(AzureConfigKey::SasKey, sas)
                 }
             };
             let target_identity = target::azure(&builder, bucket)?;
@@ -447,6 +455,36 @@ fn build_object_store_inner(
 pub fn build_static_env_store(bucket: &str, provider: StorageProviderKind) -> Result<Store> {
     let built = build_object_store(bucket, ObjectStoreCredentials::StaticEnv { provider })?;
     let identity = BucketIdentity::new(built.provider, bucket, bucket);
+    Ok(store_from_built(identity, built))
+}
+
+/// Build a store from explicit credentials and transport policy without provider environment overrides.
+///
+/// Rejects default credential-chain selection; endpoint validation remains owned
+/// by the provider. Signing, multipart and transport identity remain attached.
+pub fn build_explicit_store(
+    bucket: &str,
+    credentials: ObjectStoreCredentials,
+    endpoint: Option<&str>,
+    allow_http: bool,
+) -> Result<Store> {
+    if matches!(credentials, ObjectStoreCredentials::StaticEnv { .. }) {
+        return Err(StorageError::InvalidStaticEnvTarget {
+            target: "explicit provider configuration".to_owned(),
+            reason: "explicit credentials are required".to_owned(),
+        });
+    }
+    let host = match &credentials {
+        ObjectStoreCredentials::Azure { account, .. } => account.as_str(),
+        _ => bucket,
+    };
+    let identity = BucketIdentity::new(credentials.provider_kind(), host, bucket);
+    let options = crate::provider_options::explicit_client_options(allow_http);
+    let built = build_object_store_inner(bucket, credentials, endpoint, false, Some(options))?;
+    Ok(store_from_built(identity, built))
+}
+
+fn store_from_built(identity: BucketIdentity, built: BuiltObjectStore) -> Store {
     let mut store = Store::new(built.inner)
         .with_bucket_identity(identity)
         .with_target_identity(built.target_identity);
@@ -457,7 +495,7 @@ pub fn build_static_env_store(bucket: &str, provider: StorageProviderKind) -> Re
     {
         store = store.with_multipart(multipart, multipart_identity);
     }
-    Ok(store)
+    store
 }
 
 /// Builds an Azure store for raw account/container URLs from the default environment chain.
@@ -469,6 +507,7 @@ pub fn build_static_env_azure_account_container_store(
     let builder = MicrosoftAzureBuilder::from_env()
         .with_account(account)
         .with_container_name(container)
+        .with_http_connector(crate::transport_read_admission::ReadAdmissionConnector::default())
         .with_client_options(default_client_options());
     let target_identity = target::azure(&builder, container)?;
     let azure = builder.build().map_err(|source| {
@@ -530,6 +569,9 @@ fn build_static_env_object_store(
         StorageProviderKind::Gcs => {
             let builder = GoogleCloudStorageBuilder::from_env()
                 .with_bucket_name(bucket)
+                .with_http_connector(
+                    crate::transport_read_admission::ReadAdmissionConnector::default(),
+                )
                 .with_client_options(default_client_options());
             let (builder, target_identity) = target::gcs(builder, bucket)?;
             let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
@@ -549,6 +591,9 @@ fn build_static_env_object_store(
         StorageProviderKind::Azure => {
             let builder = MicrosoftAzureBuilder::from_env()
                 .with_container_name(bucket)
+                .with_http_connector(
+                    crate::transport_read_admission::ReadAdmissionConnector::default(),
+                )
                 .with_client_options(default_client_options());
             let target_identity = target::azure(&builder, bucket)?;
             let azure = builder
@@ -589,6 +634,7 @@ fn build_s3_object_store(
     let target_identity = target::s3(&builder, bucket)?;
     let s3 = builder
         .with_copy_if_not_exists(S3CopyIfNotExists::Multipart)
+        .with_http_connector(crate::transport_read_admission::ReadAdmissionConnector::default())
         .build()
         .map_err(|source| provider_config_error(StorageProviderKind::S3, bucket, source))?;
     let s3: Arc<AmazonS3> = Arc::new(s3);
@@ -758,6 +804,39 @@ mod tests {
 
         assert_eq!(built.provider, StorageProviderKind::S3);
         assert!(built.signer.is_some());
+    }
+
+    #[test]
+    fn explicit_store_rejects_environment_credentials() {
+        assert!(matches!(
+            build_explicit_store(
+                "bucket",
+                ObjectStoreCredentials::StaticEnv {
+                    provider: StorageProviderKind::S3
+                },
+                None,
+                false
+            ),
+            Err(StorageError::InvalidStaticEnvTarget { .. })
+        ));
+    }
+
+    #[test]
+    fn explicit_azure_identity_preserves_account_and_container() {
+        let store = build_explicit_store(
+            "container",
+            ObjectStoreCredentials::Azure {
+                account: "account".to_owned(),
+                token: AzureAuthorization::Bearer("token".to_owned()),
+            },
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            store.bucket_identity(),
+            BucketIdentity::new(StorageProviderKind::Azure, "account", "container")
+        );
     }
 
     #[test]

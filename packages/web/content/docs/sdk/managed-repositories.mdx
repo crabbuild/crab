@@ -1,0 +1,28 @@
+# Managed repositories
+
+The `managed` feature resolves logical `crab://` repository URLs through the installed Crab profile and encrypted token cache. Read grants are scoped to reads. Local protected push obtains a separate server-authorized push session through the compatible Crab transport.
+
+```rust
+use crab_sdk::{Client, ManagedOptions, RepositoryLocator};
+
+let client = Client::builder()
+    .managed(ManagedOptions::new(token_cache_directory)?)
+    .build()?;
+let repository = client
+    .open_remote(RepositoryLocator::managed(
+        "api.crab.build",
+        "organization",
+        "repository",
+    )?)
+    .await?;
+```
+
+Grant refresh and revocation follow the managed authentication owner. Cache namespaces include the client credential scope, logical repository, and physical placement identity, so one principal or placement cannot reuse another's cached authorization.
+
+## Repository lifecycle
+
+`Client::managed_repositories()` validates service capabilities and returns the lifecycle client. It supports bounded cursor pagination plus create, rename, archive, and restore. Create requires a caller-persisted idempotency key. Rename, archive, and restore require the last observed repository revision.
+
+Lifecycle results use the service's returned canonical URL. Applications should replace stored locators after a rename instead of constructing a new URL themselves.
+
+An explicit in-memory bearer token can serve remote SDK operations, but it cannot be delegated to local Crab filter processes. Use the encrypted token cache for managed local workflows.

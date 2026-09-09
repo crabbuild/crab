@@ -80,7 +80,8 @@ pub fn retry_class(err: &StorageError) -> RetryClass {
         }
         StorageError::CorruptObject { .. } => RetryClass::FatalAfterOneRetry,
         StorageError::ObjectStore { source } => classify_object_store(source),
-        StorageError::NotFound { .. }
+        StorageError::ReadRejected { .. }
+        | StorageError::NotFound { .. }
         | StorageError::InvalidHash { .. }
         | StorageError::NotSupported { .. }
         | StorageError::UnsupportedProvider { .. }
@@ -100,8 +101,13 @@ pub fn retry_class(err: &StorageError) -> RetryClass {
 }
 
 fn classify_object_store(err: &object_store::Error) -> RetryClass {
+    if crate::read_rejection(err).is_some() {
+        return RetryClass::Fatal;
+    }
     match err {
-        object_store::Error::Generic { .. } => RetryClass::Transient,
+        object_store::Error::Generic { source, .. } => source
+            .downcast_ref::<StorageError>()
+            .map_or(RetryClass::Transient, retry_class),
         object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. } => {
             RetryClass::StateDependent
         }

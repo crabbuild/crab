@@ -8,7 +8,7 @@ pub type Result<T> = std::result::Result<T, XetError>;
 /// Errors raised while parsing or reconstructing Xet-backed Crab data.
 #[derive(thiserror::Error, Debug)]
 pub enum XetError {
-    /// A local streaming shard replay could not read or write its bounded spool.
+    /// A local data-plane operation could not read or write its bounded spool.
     #[error("shard replay I/O failed in {section}: {source}")]
     ShardReplayIo {
         section: &'static str,

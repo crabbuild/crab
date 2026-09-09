@@ -208,12 +208,14 @@ pub struct MirrorPlanAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-/// Immutable, content-identified mirror reconciliation contract.
+/// Immutable mirror request bound to one preparation.
 pub struct MirrorReconciliationPlan {
     /// Plan format version.
     pub format_version: u32,
-    /// Blake3 identity of the canonical plan body.
+    /// Blake3 identity binding the canonical request and operation nonce.
     pub plan_id: String,
+    /// Fresh preparation identity retained when validating or applying this plan.
+    pub operation_nonce: String,
     /// Resolved collaboration source.
     pub source: String,
     /// Crab destination URL.

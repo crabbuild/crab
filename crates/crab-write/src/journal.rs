@@ -19,6 +19,40 @@ const REF_JOURNAL_COMPACTION_LOCK_WAIT_TTL_MULTIPLIER: u32 = 2;
 // Yield the manifest lease after a bounded wave count, even under continuous writes.
 const MAX_REF_JOURNAL_COMPACTION_PASSES: usize = 5;
 
+/// Lease, cancellation and optional durable attribution for one journal commit.
+pub struct CommitOptions<'a> {
+    plan_id: Option<&'a str>,
+    lock_ttl: Duration,
+    cancel: &'a CancellationToken,
+}
+
+impl<'a> CommitOptions<'a> {
+    /// Return the cancellation scope shared by preparation and commitment.
+    #[must_use]
+    pub fn cancellation(&self) -> &'a CancellationToken {
+        self.cancel
+    }
+
+    #[must_use]
+    pub fn new(lock_ttl: Duration, cancel: &'a CancellationToken) -> Self {
+        Self {
+            plan_id: None,
+            lock_ttl,
+            cancel,
+        }
+    }
+
+    /// Bind this commit to a previously admitted durable publication plan.
+    ///
+    /// The caller must hold the operation lease and reject prior attempts before
+    /// preparing this commit. Attribution does not authorize replay.
+    #[must_use]
+    pub fn with_plan(mut self, plan_id: &'a str) -> Self {
+        self.plan_id = Some(plan_id);
+        self
+    }
+}
+
 /// Commit a validated batch against a snapshot captured while holding every edited ref lease.
 ///
 /// The caller owns authorization, ref/graph/dependency validation, GC fencing,
@@ -40,103 +74,11 @@ pub async fn commit_edits(
     shards: Vec<String>,
     options: CommitOptions<'_>,
 ) -> Result<RefJournalCommitResult> {
-    commit_edits_inner(
-        store,
-        router,
-        snapshot,
-        edits,
-        head,
-        packs,
-        shards,
-        CommitContext {
-            plan_id: None,
-            lock_ttl: options.lock_ttl,
-            cancel: options.cancel,
-        },
-    )
-    .await
-}
-
-/// Lease and cancellation policy for one journal commit.
-pub struct CommitOptions<'a> {
-    lock_ttl: Duration,
-    cancel: &'a CancellationToken,
-}
-
-impl<'a> CommitOptions<'a> {
-    #[must_use]
-    pub fn new(lock_ttl: Duration, cancel: &'a CancellationToken) -> Self {
-        Self { lock_ttl, cancel }
-    }
-}
-
-/// Mirror-plan attribution and cancellation for one journal commit.
-pub struct MirrorPlanContext<'a> {
-    plan_id: &'a str,
-    lock_ttl: Duration,
-    cancel: &'a CancellationToken,
-}
-
-impl<'a> MirrorPlanContext<'a> {
-    #[must_use]
-    pub fn new(plan_id: &'a str, lock_ttl: Duration, cancel: &'a CancellationToken) -> Self {
-        Self {
-            plan_id,
-            lock_ttl,
-            cancel,
-        }
-    }
-}
-
-/// Commit a validated batch and bind its terminal outcome to a mirror plan.
-pub async fn commit_edits_for_plan(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    snapshot: &RepositorySnapshot,
-    edits: Vec<RefJournalEdit>,
-    head: Option<String>,
-    packs: Vec<PackManifestEntry>,
-    shards: Vec<String>,
-    context: MirrorPlanContext<'_>,
-) -> Result<RefJournalCommitResult> {
-    commit_edits_inner(
-        store,
-        router,
-        snapshot,
-        edits,
-        head,
-        packs,
-        shards,
-        CommitContext {
-            plan_id: Some(context.plan_id),
-            lock_ttl: context.lock_ttl,
-            cancel: context.cancel,
-        },
-    )
-    .await
-}
-
-struct CommitContext<'a> {
-    plan_id: Option<&'a str>,
-    lock_ttl: Duration,
-    cancel: &'a CancellationToken,
-}
-
-async fn commit_edits_inner(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    snapshot: &RepositorySnapshot,
-    edits: Vec<RefJournalEdit>,
-    head: Option<String>,
-    packs: Vec<PackManifestEntry>,
-    shards: Vec<String>,
-    context: CommitContext<'_>,
-) -> Result<RefJournalCommitResult> {
-    let CommitContext {
+    let CommitOptions {
         plan_id,
         lock_ttl,
         cancel,
-    } = context;
+    } = options;
     check_cancelled(cancel)?;
     let parents = edits
         .iter()

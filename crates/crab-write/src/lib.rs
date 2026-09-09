@@ -12,6 +12,12 @@ pub enum WriteError {
     /// The clock cannot produce a valid persisted timestamp.
     #[error("invalid timestamp: {0}")]
     Timestamp(#[from] crab_types::time::TimestampError),
+    #[error("initial HEAD must be a valid refs/heads/ branch: {head}")]
+    InitialHead {
+        head: String,
+        #[source]
+        source: Option<crab_git::refname::RefNameError>,
+    },
     #[error(transparent)]
     Namespace(#[from] crab_git::refname::RefNamespaceError),
     #[error("generation {generation} has no verified Git visibility proof")]

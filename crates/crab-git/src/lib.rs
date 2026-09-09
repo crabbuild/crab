@@ -11,6 +11,7 @@ pub mod lfs_pointer;
 pub mod odb_adapter;
 pub mod pack;
 pub mod pack_locator;
+pub mod pack_writer;
 pub mod pointer_detect;
 pub mod pointer_ref;
 pub mod pre_push;

@@ -99,3 +99,73 @@ local fixture does not establish production cloud latency or full API coverage.
 - [Cargo.toml](Cargo.toml): internal workspace package; no declared Cargo features.
 - [Repository tests](tests/remote_repository.rs): real Git fixture behavior.
 - [Reference](REFERENCE.md): complete consistency, lifecycle, performance, and qualification details.
+
+## SDK read composition
+
+`archive_reader` exposes the same incremental traversal as `archive_stream`,
+with explicit `close().await` for consumers stopping before EOF. Closing does
+not read remaining entries or claim their integrity. EOF and traversal errors
+finalize the operation; drop retains the operation's tracked cleanup behavior.
+
+Callers whose own read policy fails after session acquisition pass
+`Error::Consumer` to `OperationContext::finish`. The boxed source remains typed;
+the canonical finalizer records failure and preserves a simultaneous locator
+close failure. Do not finalize such a read as successful and report policy
+failure afterward.
+
+`OperationContext::read_admission` shares cancellation and the aggregate budget
+with additional object-body owners such as hydration. Do not attach it around
+Git reads that already charge the context, which would double-count those
+requests. It admits storage requests and reserves fetched bytes before bodies
+are consumed; the storage hook documents its transport boundary.
+
+Repository opening uses a separate aggregate budget for metadata GET/HEAD,
+listing invocations and locator acquisition, including Store retries. Optional
+commit-graph and shallow-closure acceleration cannot suppress admission errors.
+The admitted store is temporary: returned handles retain the original store,
+and later operations allocate their own budgets. Git-reader charge sites and
+provider-internal pagination/retries still require complete transport accounting.
+
+Each semantic operation opens its locator through that operation's admission,
+covering checkpoint acquisition and subsequent catalog page reads. Catalog
+lookups no longer charge a synthetic storage request. Shallow-closure entry
+reads also use admission so Store retries consume the same aggregate budget.
+
+The opening scope also enforces the configured operation duration across the
+whole handshake, including pending listings. Caller cancellation, runtime
+shutdown and timeout cancel the handshake and await its completion; no separate
+timer task is left behind. Wrapped cancellation becomes the scope's terminal
+reason while real operation failures and typed close errors remain available.
+
+Repository handles retain their immutable shard-index root alongside the Git
+catalog identity. `shard_index_hash` exposes that captured root to content
+owners without loading shard metadata into metadata-only reads. Refresh
+captures a separate root; it does not mutate existing handles.
+
+Pack and sidecar downloads attach the operation admission policy to the Store
+stream. Response headers reserve actual advertised bytes, and facade retries
+consume new request admission. Pack inventory size is a preflight bound and an
+integrity check, not the byte-accounting authority. These stream paths retain
+backpressure and verification before returning the completed artifact.
+
+Operation-owned coalesced ranges and packed-entry metadata reads use the same
+admission boundary: failed headers charge a request but no advertised body,
+and each facade retry reserves its own request and response bytes. An early
+range-size check rejects work that already exceeds the remaining byte budget.
+
+Packed-entry, pack-index body and index-size producers share one immutable-read
+flight implementation with independent participant budgets. Request attempts and
+advertised responses are admitted for each participating operation; packed-entry
+allocations are additionally admitted before decode. Rejection reaches only the
+affected participant. Late
+joiners reserve prior work once per operation. When no participant can admit
+further work, the producer retires and fresh callers can start new work without
+inheriting a retired caller's budget failure. Successful callers still share
+one origin read and one decode; cancellation of one operation does not cancel
+another participant's work. Each waiter holds a lease on the producer. Releasing
+its last lease atomically closes admission and cancels a child runtime token;
+explicit cancellation joins producer cleanup before returning. Dropped waiters
+signal cancellation through the same lease, with runtime shutdown retaining the
+join obligation. Departed participants stop accumulating charges; rejoining the
+same operation reserves work performed while it was absent without charging
+previously admitted work twice.

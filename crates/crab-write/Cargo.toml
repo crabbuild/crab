@@ -1,9 +1,11 @@
 [package]
 name = "crab-write"
 version = "0.1.0"
-publish = false
+publish = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 description = "Shared Git publication and generation maintenance for Crab."
 
 [dependencies]
@@ -28,4 +30,5 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

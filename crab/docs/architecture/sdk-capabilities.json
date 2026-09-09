@@ -1,0 +1,552 @@
+{
+  "schema": "crab.sdk-capabilities",
+  "version": 1,
+  "activated_phase": 8,
+  "operations": {
+    "remote_read": "Remote snapshot / raw Git / hydrated file reads",
+    "remote_write": "Remote commit/file edits / atomic refs",
+    "local_edit": "Open local, stage, commit, status, checkout",
+    "clone": "Clone full / branch / lazy or hydrated",
+    "fetch": "Fetch refs / tags / prune",
+    "shallow": "Shallow clone, deepen, unshallow",
+    "pull": "Pull FF / merge / rebase, continue / abort",
+    "push": "Push branch/tag create/update/delete",
+    "atomic_push": "Atomic multi-ref push",
+    "force_with_lease": "Force-with-lease",
+    "dry_run": "Push dry-run",
+    "partial_clone": "Partial clone filters / lazy Git object fetching",
+    "advanced_worktrees": "Recursive submodules, sparse checkout, linked-worktree creation",
+    "linked_worktree": "Open existing linked worktree",
+    "sha256": "SHA-256 repository format",
+    "management": "Direct initialization / managed lifecycle"
+  },
+  "backends": [
+    "direct",
+    "managed",
+    "http"
+  ],
+  "cells": [
+    {
+      "operation": "remote_read",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 1,
+      "required_tests": [
+        "crates/crab-sdk/tests/remote_read.rs::snapshot_stays_pinned"
+      ]
+    },
+    {
+      "operation": "remote_read",
+      "backend": "managed",
+      "contract": "Required with grants",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_lifecycle_round_trip"
+      ]
+    },
+    {
+      "operation": "remote_read",
+      "backend": "http",
+      "contract": "Outside 1.0",
+      "status": "excluded",
+      "phase": null,
+      "required_tests": []
+    },
+    {
+      "operation": "remote_write",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 3,
+      "required_tests": [
+        "crates/crab-sdk/tests/remote_write.rs::remote_edit_round_trip_without_git"
+      ]
+    },
+    {
+      "operation": "remote_write",
+      "backend": "managed",
+      "contract": "Required through protected publish",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_lifecycle_round_trip"
+      ]
+    },
+    {
+      "operation": "remote_write",
+      "backend": "http",
+      "contract": "Outside 1.0",
+      "status": "excluded",
+      "phase": null,
+      "required_tests": []
+    },
+    {
+      "operation": "local_edit",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 5,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_edit.rs::stage_commit_push_round_trip"
+      ]
+    },
+    {
+      "operation": "local_edit",
+      "backend": "managed",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_lifecycle_round_trip"
+      ]
+    },
+    {
+      "operation": "local_edit",
+      "backend": "http",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::local_edit_http_contract"
+      ]
+    },
+    {
+      "operation": "clone",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 4,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_fetch.rs::clone_uses_explicit_tools_without_helper_path"
+      ]
+    },
+    {
+      "operation": "clone",
+      "backend": "managed",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_lifecycle_round_trip"
+      ]
+    },
+    {
+      "operation": "clone",
+      "backend": "http",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::native_http_round_trip"
+      ]
+    },
+    {
+      "operation": "fetch",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 4,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_fetch.rs::fetch_recovers_each_metadata_boundary"
+      ]
+    },
+    {
+      "operation": "fetch",
+      "backend": "managed",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "fetch",
+      "backend": "http",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::fetch_http_contract"
+      ]
+    },
+    {
+      "operation": "shallow",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 4,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_fetch.rs::shallow_deepen_unshallow_round_trip"
+      ]
+    },
+    {
+      "operation": "shallow",
+      "backend": "managed",
+      "contract": "Required when service advertises support",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "shallow",
+      "backend": "http",
+      "contract": "Required within server capabilities",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::shallow_http_contract"
+      ]
+    },
+    {
+      "operation": "pull",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 5,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_pull.rs::merge_and_rebase_resume_conflicts"
+      ]
+    },
+    {
+      "operation": "pull",
+      "backend": "managed",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "pull",
+      "backend": "http",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::pull_http_contract"
+      ]
+    },
+    {
+      "operation": "push",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 5,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_edit.rs::stage_commit_push_round_trip"
+      ]
+    },
+    {
+      "operation": "push",
+      "backend": "managed",
+      "contract": "Required under server policy",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "push",
+      "backend": "http",
+      "contract": "Required under server policy",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::native_http_round_trip"
+      ]
+    },
+    {
+      "operation": "atomic_push",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 5,
+      "required_tests": [
+        "crates/crab-sdk/tests/remote_write.rs::stale_ref_batch_changes_no_refs"
+      ]
+    },
+    {
+      "operation": "atomic_push",
+      "backend": "managed",
+      "contract": "Required if advertised; otherwise rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "atomic_push",
+      "backend": "http",
+      "contract": "Required if advertised; otherwise rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::atomic_push_http_contract"
+      ]
+    },
+    {
+      "operation": "force_with_lease",
+      "backend": "direct",
+      "contract": "Required for direct authorized writes",
+      "status": "implemented",
+      "phase": 5,
+      "required_tests": [
+        "crates/crab-sdk/tests/remote_write.rs::stale_ref_batch_changes_no_refs"
+      ]
+    },
+    {
+      "operation": "force_with_lease",
+      "backend": "managed",
+      "contract": "Required if allowed; otherwise rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "force_with_lease",
+      "backend": "http",
+      "contract": "Rejected by current Crab HTTP server",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::server_force_rejection_is_typed"
+      ]
+    },
+    {
+      "operation": "dry_run",
+      "backend": "direct",
+      "contract": "Validate plan; no remote writes/leases",
+      "status": "implemented",
+      "phase": 5,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_edit.rs::dry_run_creates_no_remote_objects"
+      ]
+    },
+    {
+      "operation": "dry_run",
+      "backend": "managed",
+      "contract": "Local validation only; report server validation unavailable",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "dry_run",
+      "backend": "http",
+      "contract": "Git/server advertised behavior; never claim admission reservation",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::dry_run_http_contract"
+      ]
+    },
+    {
+      "operation": "partial_clone",
+      "backend": "direct",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 4,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_fetch.rs::partial_clone_rejected_before_mutation"
+      ]
+    },
+    {
+      "operation": "partial_clone",
+      "backend": "managed",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "partial_clone",
+      "backend": "http",
+      "contract": "Rejected by SDK 1.0",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::unsupported_http_extensions_remain_disabled"
+      ]
+    },
+    {
+      "operation": "advanced_worktrees",
+      "backend": "direct",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 4,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_fetch.rs::unsupported_worktree_mutation_preserves_bytes"
+      ]
+    },
+    {
+      "operation": "advanced_worktrees",
+      "backend": "managed",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "advanced_worktrees",
+      "backend": "http",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::unsupported_http_extensions_remain_disabled"
+      ]
+    },
+    {
+      "operation": "linked_worktree",
+      "backend": "direct",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 4,
+      "required_tests": [
+        "crates/crab-sdk/tests/local_fetch.rs::linked_worktree_preserves_sibling"
+      ]
+    },
+    {
+      "operation": "linked_worktree",
+      "backend": "managed",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "linked_worktree",
+      "backend": "http",
+      "contract": "Required",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::linked_worktree_http_contract"
+      ]
+    },
+    {
+      "operation": "sha256",
+      "backend": "direct",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 1,
+      "required_tests": [
+        "crates/crab-sdk/tests/remote_read.rs::sha256_rejected_before_mutation"
+      ]
+    },
+    {
+      "operation": "sha256",
+      "backend": "managed",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_local_matrix_contract"
+      ]
+    },
+    {
+      "operation": "sha256",
+      "backend": "http",
+      "contract": "Rejected",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/http_git.rs::sha256_http_contract"
+      ]
+    },
+    {
+      "operation": "management",
+      "backend": "direct",
+      "contract": "Required initialization",
+      "status": "implemented",
+      "phase": 3,
+      "required_tests": [
+        "crates/crab-sdk/tests/remote_write.rs::initialization_preserves_foreign_content"
+      ]
+    },
+    {
+      "operation": "management",
+      "backend": "managed",
+      "contract": "Required list/create/rename/archive/restore",
+      "status": "implemented",
+      "phase": 6,
+      "required_tests": [
+        "crates/crab-sdk/tests/managed.rs::managed_lifecycle_round_trip"
+      ]
+    },
+    {
+      "operation": "management",
+      "backend": "http",
+      "contract": "Outside 1.0",
+      "status": "excluded",
+      "phase": null,
+      "required_tests": []
+    }
+  ],
+  "phase_tests": {
+    "1": [
+      "crates/crab-sdk/tests/remote_read.rs::snapshot_stays_pinned",
+      "crates/crab-sdk/tests/remote_read.rs::raw_and_hydrated_bytes_are_distinct",
+      "crates/crab-sdk/tests/remote_read.rs::read_only_open_never_repairs",
+      "crates/crab-sdk/tests/remote_read.rs::byte_paths_round_trip",
+      "crates/crab-sdk/tests/lifecycle.rs::close_drains_dropped_operations",
+      "crates/crab-sdk/tests/lifecycle.rs::stream_close_reports_integrity_failure",
+      "crates/crab-sdk/tests/lifecycle.rs::warm_cache_respects_limits"
+    ],
+    "2": [
+      "crates/crab-remote/tests/publication.rs::lost_marker_reply_preserves_outcome",
+      "crates/crab-remote/tests/publication.rs::concurrent_same_plan_commits_once",
+      "crates/crab-remote/tests/publication.rs::compaction_and_gc_preserve_receipt_proof",
+      "crates/crab-remote/tests/publication.rs::namespace_conflict_rejects_batch"
+    ],
+    "3": [
+      "crates/crab-sdk/tests/remote_write.rs::remote_edit_round_trip_without_git",
+      "crates/crab-sdk/tests/remote_write.rs::stale_ref_batch_changes_no_refs",
+      "crates/crab-sdk/tests/remote_write.rs::initialization_preserves_foreign_content"
+    ],
+    "4": [
+      "crates/crab-sdk/tests/local_fetch.rs::clone_uses_explicit_tools_without_helper_path",
+      "crates/crab-sdk/tests/local_fetch.rs::clone_preserves_existing_destination",
+      "crates/crab-sdk/tests/local_fetch.rs::fetch_recovers_each_metadata_boundary",
+      "crates/crab-sdk/tests/local_fetch.rs::shallow_deepen_unshallow_round_trip",
+      "crates/crab-sdk/tests/local_fetch.rs::linked_worktree_preserves_sibling"
+    ],
+    "5": [
+      "crates/crab-sdk/tests/local_edit.rs::stage_commit_push_round_trip",
+      "crates/crab-sdk/tests/local_edit.rs::cli_and_sdk_share_staging",
+      "crates/crab-sdk/tests/local_edit.rs::hydrated_status_is_clean",
+      "crates/crab-sdk/tests/local_edit.rs::dirty_checkout_preserves_bytes",
+      "crates/crab-sdk/tests/local_pull.rs::ff_only_preserves_diverged_head",
+      "crates/crab-sdk/tests/local_pull.rs::merge_and_rebase_resume_conflicts",
+      "crates/crab-sdk/tests/local_pull.rs::hydration_failure_reports_new_head",
+      "crates/crab-sdk/tests/local_pull.rs::abort_preserves_later_user_edits"
+    ],
+    "6": [
+      "crates/crab-sdk/tests/managed.rs::managed_lifecycle_round_trip",
+      "crates/crab-sdk/tests/managed.rs::revoked_push_never_commits",
+      "crates/crab-sdk/tests/managed.rs::lost_finalize_reuses_push_id",
+      "crates/crab-sdk/tests/managed.rs::placement_change_invalidates_cached_access",
+      "crates/crab-sdk/tests/http_git.rs::native_http_round_trip",
+      "crates/crab-sdk/tests/http_git.rs::server_force_rejection_is_typed",
+      "crates/crab-sdk/tests/http_git.rs::lost_acknowledgement_is_indeterminate"
+    ]
+  }
+}

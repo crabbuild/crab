@@ -195,6 +195,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn azure_sas_signature_is_encoded_once_on_the_wire() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let request = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                loop {
+                    let byte = stream.read_u8().await.unwrap();
+                    headers.push(byte);
+                    if headers.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(headers.len() < 16 * 1024);
+                }
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nETag: \"same\"\r\nLast-Modified: Wed, 02 Sep 2026 00:00:00 GMT\r\nConnection: close\r\n\r\nbytes").await.unwrap();
+                String::from_utf8(headers).unwrap()
+            }).await.unwrap()
+        });
+        let store = super::super::build_explicit_store(
+            "container",
+            super::super::ObjectStoreCredentials::Azure {
+                account: "account".to_owned(),
+                token: super::super::AzureAuthorization::Sas(
+                    "?sv=2025-01-05&sp=r&sig=abc%2Bdef%2Fghi%3D".to_owned(),
+                ),
+            },
+            Some(&endpoint),
+            true,
+        )
+        .unwrap();
+        store
+            .inner()
+            .get(&object_store::path::Path::from("object"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let request = request.await.unwrap();
+        let target = request
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap();
+        let url = url::Url::parse(&format!("http://localhost{target}")).unwrap();
+        let signature = url.query_pairs().find(|(key, _)| key == "sig").unwrap().1;
+        assert_eq!(signature, "abc+def/ghi=");
+    }
+
+    #[tokio::test]
     async fn independent_endpoints_with_identical_objects_have_different_targets() {
         let (first, first_task) = object_endpoint().await;
         let (second, second_task) = object_endpoint().await;

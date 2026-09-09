@@ -8,6 +8,7 @@ use axum::{
     routing::post,
 };
 use base64::Engine;
+use crab_remote::objects::{encode_tree, object_id, read_tree};
 use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use serde_json::json;
 use crate::{
     app,
     auth::{Identity, Principal},
-    git_objects::{commit_bytes, encode_tree, object_id, read_tree},
+    git_objects::commit_bytes,
     receive::{self, ReceiveError},
     server::Server,
 };
@@ -206,12 +207,8 @@ enum Error {
     NotDirectory,
     #[error("Repository read failed")]
     Remote(#[from] crab_remote_git::Error),
-    #[error("Git object decoding failed")]
-    Decode(#[from] gix_object::decode::Error),
-    #[error("Git object encoding failed")]
-    Io(#[from] std::io::Error),
-    #[error("Git object hashing failed")]
-    Hash(#[from] gix_hash::hasher::Error),
+    #[error("Git object construction failed")]
+    Build(#[source] Box<crab_remote::objects::Error>),
     #[error("Repository publication failed")]
     Receive(#[source] Box<ReceiveError>),
     #[error("Repository request failed")]
@@ -377,7 +374,7 @@ enum BuildOutcome {
     NotDirectory,
 }
 
-type BuildError = crate::git_objects::Error;
+type BuildError = crab_remote::objects::Error;
 
 async fn create(
     State(server): State<Arc<Server>>,
@@ -745,17 +742,9 @@ async fn finish_build(
                 invariant: "failed repository edit unexpectedly succeeded",
             })),
         },
-        Err(BuildError::Decode(error)) => {
+        Err(error) => {
             operation.finish(Ok(())).await?;
-            Err(Error::Decode(error))
-        }
-        Err(BuildError::Io(error)) => {
-            operation.finish(Ok(())).await?;
-            Err(Error::Io(error))
-        }
-        Err(BuildError::Hash(error)) => {
-            operation.finish(Ok(())).await?;
-            Err(Error::Hash(error))
+            Err(Error::Build(Box::new(error)))
         }
     }
 }
@@ -807,110 +796,33 @@ async fn build_commit(
             }
         }
     }
-    let mut levels = Vec::new();
-    let components = path.components().collect::<Vec<_>>();
-    let (file_name, directories) =
-        components
-            .split_last()
-            .ok_or(crab_remote_git::Error::InternalInvariant {
-                invariant: "validated file path had no component",
-            })?;
-    let mut current_tree = Some(snapshot.root_tree_oid());
-    for component in directories {
-        let entries = match current_tree {
-            Some(oid) => read_tree(operation, oid).await?,
-            None => Vec::new(),
-        };
-        current_tree = match entries
-            .iter()
-            .find(|entry| entry.filename.as_slice() == *component)
-        {
-            Some(entry) if entry.mode.is_tree() => Some(entry.oid),
-            Some(_) => return Ok(BuildOutcome::NotDirectory),
-            None => None,
-        };
-        levels.push((entries, (*component).to_vec()));
-    }
-    let mut entries = match current_tree {
-        Some(oid) => read_tree(operation, oid).await?,
-        None => Vec::new(),
-    };
     let mut objects = Vec::new();
-    let position = entries
-        .iter()
-        .position(|entry| entry.filename.as_slice() == *file_name);
-    match input {
-        ChangeInput::Create(input) => {
-            if position.is_some() {
-                return Ok(BuildOutcome::Exists);
-            }
-            let blob = input.content.as_bytes().to_vec();
-            let oid = object_id(Kind::Blob, &blob)?;
-            objects.push((Kind::Blob, blob));
-            entries.push(tree::Entry {
-                mode: tree::EntryKind::Blob.into(),
-                filename: BString::from((*file_name).to_vec()),
-                oid,
-            });
-        }
-        ChangeInput::Update(input) => {
-            let position = position.ok_or(crab_remote_git::Error::InternalInvariant {
-                invariant: "resolved browser edit disappeared from its parent tree",
-            })?;
-            let blob = input.content.as_bytes().to_vec();
-            let oid = object_id(Kind::Blob, &blob)?;
-            if entries[position].oid == oid {
+    let replacement = match input.content() {
+        Some(content) => {
+            let bytes = content.as_bytes().to_vec();
+            let oid = object_id(Kind::Blob, &bytes)?;
+            if existing.as_ref().is_some_and(|entry| entry.oid == oid) {
                 return Ok(BuildOutcome::Unchanged);
             }
-            objects.push((Kind::Blob, blob));
-            entries[position].oid = oid;
+            let mode = if existing
+                .as_ref()
+                .is_some_and(|entry| entry.mode == crab_remote_git::EntryMode::Executable)
+            {
+                tree::EntryKind::BlobExecutable
+            } else {
+                tree::EntryKind::Blob
+            };
+            objects.push((Kind::Blob, bytes));
+            Some((mode.into(), oid))
         }
-        ChangeInput::Delete(_) => {
-            let position = position.ok_or(crab_remote_git::Error::InternalInvariant {
-                invariant: "resolved browser deletion disappeared from its parent tree",
-            })?;
-            entries.remove(position);
-        }
-    }
-    let deleting = matches!(input, ChangeInput::Delete(_));
-    let mut tree_oid = if deleting && entries.is_empty() && !levels.is_empty() {
-        None
-    } else {
-        Some(encode_tree(entries, &mut objects)?)
+        None => None,
     };
-    let level_count = levels.len();
-    for (index, (mut entries, component)) in levels.into_iter().rev().enumerate() {
-        let position = entries
-            .iter()
-            .position(|entry| entry.filename.as_slice() == component);
-        match (position, tree_oid) {
-            (Some(position), Some(oid)) => entries[position].oid = oid,
-            (Some(position), None) => {
-                entries.remove(position);
-            }
-            (None, Some(oid)) => entries.push(tree::Entry {
-                mode: tree::EntryKind::Tree.into(),
-                filename: BString::from(component),
-                oid,
-            }),
-            (None, None) => {
-                return Err(crab_remote_git::Error::InternalInvariant {
-                    invariant: "deleted browser path had a missing parent tree entry",
-                }
-                .into());
-            }
-        }
-        let is_root = index + 1 == level_count;
-        tree_oid = if deleting && entries.is_empty() && !is_root {
-            None
-        } else {
-            Some(encode_tree(entries, &mut objects)?)
-        };
-    }
-    let tree_oid = tree_oid.ok_or(crab_remote_git::Error::InternalInvariant {
-        invariant: "browser mutation did not produce a root tree",
-    })?;
-    let commit = commit_bytes(tree_oid, &[parent], actor, input.message().trim(), seconds);
+    let mut edits = crab_remote::objects::TreeEdits::default();
+    edits.insert(path, replacement)?;
+    let tree_oid = edits
+        .apply(operation, snapshot.root_tree_oid(), &mut objects)
+        .await?;
+    let commit = commit_bytes(tree_oid, &[parent], actor, input.message().trim(), seconds)?;
     let oid = object_id(Kind::Commit, &commit)?;
     objects.push((Kind::Commit, commit));
     Ok(BuildOutcome::Committed(BuiltCommit { oid, objects }))
@@ -941,7 +853,7 @@ async fn build_upload_commit(
         UploadTreeOutcome::Exists => return Ok(BuildOutcome::Exists),
         UploadTreeOutcome::NotDirectory => return Ok(BuildOutcome::NotDirectory),
     };
-    let commit = commit_bytes(root, &[parent], actor, message, seconds);
+    let commit = commit_bytes(root, &[parent], actor, message, seconds)?;
     let oid = object_id(Kind::Commit, &commit)?;
     objects.push((Kind::Commit, commit));
     Ok(BuildOutcome::Committed(BuiltCommit { oid, objects }))

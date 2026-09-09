@@ -161,7 +161,7 @@ impl GitVisibilityEdit {
         }
         if !self.replaces
             && let Some(old_oid) = &self.old_oid
-            && !prior.is_some_and(|objects| objects.binary_search(old_oid).is_ok())
+            && prior.is_none_or(|objects| objects.binary_search(old_oid).is_err())
         {
             return Err(corrupt(
                 "visibility delta prior closure does not contain its old ref tip",

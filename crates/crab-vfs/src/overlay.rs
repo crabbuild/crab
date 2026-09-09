@@ -760,9 +760,29 @@ struct OverlayWriteGuard<'a> {
     _guard: std::sync::RwLockReadGuard<'a, ()>,
 }
 
+impl Drop for OverlayWriteGuard<'_> {
+    fn drop(&mut self) {
+        // A forked child can retain the open file description until exec.
+        // End the lease before releasing the in-process guard, even then.
+        if let Err(error) = LockFileExt::unlock(&self._lock_file) {
+            tracing::warn!(%error, "overlay write lease unlock failed");
+        }
+    }
+}
+
 pub struct OverlayFreezeGuard<'a> {
     _lock_file: File,
     _guard: std::sync::RwLockWriteGuard<'a, ()>,
+}
+
+impl Drop for OverlayFreezeGuard<'_> {
+    fn drop(&mut self) {
+        // Closing this descriptor alone does not release a flock inherited
+        // across fork. Unfreeze before admitting local mutations again.
+        if let Err(error) = LockFileExt::unlock(&self._lock_file) {
+            tracing::warn!(%error, "overlay freeze lease unlock failed");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1775,6 +1795,25 @@ mod tests {
         release_tx.send(()).unwrap();
         freezer.join().unwrap();
         store.begin_write().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropped_overlay_guards_unlock_even_with_a_duplicated_descriptor() {
+        let (_dir, store) = temp_store();
+        let freeze = store.freeze_writes().unwrap();
+        // fork can retain the same open file description until child exec.
+        // A duplicate reproduces that lifetime without timing a subprocess.
+        let inherited = freeze._lock_file.try_clone().unwrap();
+        drop(freeze);
+        let write = store.begin_write().unwrap();
+        drop(inherited);
+        let inherited = write._lock_file.try_clone().unwrap();
+        drop(write);
+        let independent = store.open_publish_lock().unwrap();
+        assert!(LockFileExt::try_lock_exclusive(&independent).unwrap());
+        LockFileExt::unlock(&independent).unwrap();
+        drop(inherited);
     }
 
     #[test]

@@ -6,6 +6,80 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{CoordinationError, PushLock};
 
+/// A renewing push lease whose owner explicitly drains release.
+///
+/// Dropping starts cleanup; await `release` to drain the renewal worker.
+#[must_use = "retain the lease until its operation drains, then await release"]
+pub struct RenewingPushLock {
+    holder: String,
+    stop: CancellationToken,
+    // Unwinding must not leave the detached worker renewing forever. Normal
+    // completion still awaits release; this guard can only initiate cleanup.
+    _stop_on_drop: tokio_util::sync::DropGuard,
+    worker: tokio::task::JoinHandle<Result<(), CoordinationError>>,
+}
+
+impl RenewingPushLock {
+    /// Start renewal, cancelling the supplied token if ownership is lost.
+    ///
+    /// Requires a running Tokio runtime; the caller must drain its operation
+    /// before releasing this owner, including after cancellation.
+    pub fn start(lock: PushLock, cancel: &CancellationToken) -> Self {
+        let interval = (lock.ttl() / 3).max(Duration::from_secs(1));
+        Self::start_with_interval(lock, cancel, interval)
+    }
+
+    /// Start renewal at an explicit interval, cancelling the token if ownership is lost.
+    ///
+    /// The interval is clamped to at least one second. This supports product
+    /// configuration while retaining the same owned cleanup contract as [`Self::start`].
+    pub fn start_with_interval(
+        mut lock: PushLock,
+        cancel: &CancellationToken,
+        interval: Duration,
+    ) -> Self {
+        let holder = lock.holder().to_owned();
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        let cancel = cancel.clone();
+        let worker = tokio::spawn(async move {
+            let result = while_renewing_at(
+                &mut lock,
+                Some(&cancel),
+                interval.max(Duration::from_secs(1)),
+                async {
+                    stopped.cancelled().await;
+                    Ok::<_, CoordinationError>(())
+                },
+            )
+            .await;
+            // Release must run even if renewal failed; the worker owns both.
+            result.and(lock.release().await)
+        });
+        Self {
+            holder,
+            _stop_on_drop: stop.clone().drop_guard(),
+            stop,
+            worker,
+        }
+    }
+
+    /// Return the identity used to bind publication to this lease.
+    #[must_use]
+    pub fn holder(&self) -> &str {
+        &self.holder
+    }
+
+    /// Stop renewal and await release, recording cleanup failures.
+    pub async fn release(self) {
+        self.stop.cancel();
+        match self.worker.await {
+            Ok(Ok(())) => {}
+            result => tracing::warn!(?result, "publication lease cleanup failed"),
+        }
+    }
+}
+
 /// Renews a lease while awaiting an operation, preserving its primary error.
 ///
 /// Renewal failure signals `failure_cancel`, then continues polling the operation
@@ -22,6 +96,18 @@ where
     E: From<CoordinationError>,
 {
     let renewal_interval = (lock.ttl() / 3).max(Duration::from_secs(1));
+    while_renewing_at(lock, failure_cancel, renewal_interval, operation).await
+}
+
+async fn while_renewing_at<T, E>(
+    lock: &mut PushLock,
+    failure_cancel: Option<&CancellationToken>,
+    renewal_interval: Duration,
+    operation: impl Future<Output = std::result::Result<T, E>>,
+) -> std::result::Result<T, E>
+where
+    E: From<CoordinationError>,
+{
     let mut ticker = tokio::time::interval(renewal_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await;

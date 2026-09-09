@@ -4188,7 +4188,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reachable_repo_objects_retain_mirror_plan_intent_and_receipt() {
+    async fn repo_gc_retains_plan_recovery_after_compaction_and_restart() {
         use std::collections::BTreeMap;
         use std::sync::Arc;
 
@@ -4201,6 +4201,20 @@ mod tests {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
 
+        const ROOT: &str = "CRAB_TEST_GC_RECEIPT_REOPEN_ROOT";
+        let plan_id = "b".repeat(64);
+        if let Some(root) = std::env::var_os(ROOT) {
+            let store = crab_storage::Store::new(Arc::new(
+                object_store::local::LocalFileSystem::new_with_prefix(root).unwrap(),
+            ));
+            let router = crab_storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+            let receipt = crab_metadata::plan_receipt::read_plan_receipt(&store, &router, &plan_id)
+                .await
+                .unwrap()
+                .unwrap();
+            println!("{}", serde_json::to_string(&receipt).unwrap());
+            return;
+        }
         let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
@@ -4233,7 +4247,6 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let plan_id = "b".repeat(64);
         commit_ref_journal_transaction_for_plan(&store, &router, &transaction, &[head], &plan_id)
             .await
             .unwrap();
@@ -4250,6 +4263,142 @@ mod tests {
             .iter()
             .all(|path| reachable.contains(path.as_ref()))
         );
+
+        let storage_router = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        store
+            .delete(&router.ref_journal_plan_receipt_path(&plan_id))
+            .await
+            .unwrap();
+        for generation in 1..=2 {
+            crab_metadata::manifest_store::compact_ref_journal(
+                store.as_storage(),
+                &storage_router,
+                format!("2026-09-07T00:00:0{generation}Z"),
+                Some("test".to_owned()),
+                "gc-recovery".to_owned(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            if generation == 1 {
+                let head = read_ref_journal_head(&store, &router, ref_name)
+                    .await
+                    .unwrap();
+                let successor = RefJournalTransaction::new(
+                    BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
+                    vec![RefJournalEdit {
+                        old_oid: Some("a".repeat(40)),
+                        new_oid: Some("c".repeat(40)),
+                        ..transaction.edits[0].clone()
+                    }],
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .unwrap();
+                crate::metadata::manifest::commit_ref_journal_transaction(
+                    &store,
+                    &router,
+                    &successor,
+                    &[head],
+                )
+                .await
+                .unwrap();
+            }
+        }
+        assert!(
+            !crab_metadata::ref_journal::transaction_is_active(
+                store.as_storage(),
+                &storage_router,
+                &transaction.id().unwrap(),
+            )
+            .await
+            .unwrap()
+        );
+        let (current, _) = crate::metadata::manifest::read_manifest(&store, &router)
+            .await
+            .unwrap();
+        assert_eq!(current.refs[ref_name], "c".repeat(40));
+        let garbage = router.repo_path("packs/pack-unreferenced.pack");
+        store
+            .put(&garbage, bytes::Bytes::from_static(b"unreferenced"))
+            .await
+            .unwrap();
+        let outcome = run_repo_remote_gc(
+            &GcArgs {
+                force: true,
+                yes: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.packs_deleted, 1);
+        assert!(matches!(
+            store.head(&garbage).await,
+            Err(CrabError::NotFound { .. })
+        ));
+
+        // Export recovery metadata after the conditional-store sweep. Local
+        // files cannot represent transient lock keys that are also prefixes;
+        // the new process needs neither those keys nor publication CAS support.
+        let directory = tempfile::tempdir().unwrap();
+        let persisted = crab_storage::Store::new(Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(directory.path()).unwrap(),
+        ));
+        for prefix in [
+            router.repo_path("refs/journal"),
+            router.repo_path("manifests"),
+            router.manifest_path(),
+        ] {
+            for object in store.list_prefix(&prefix).await.unwrap() {
+                let (bytes, _) = store.get_with_etag(&object.location).await.unwrap();
+                persisted.put_exact(&object.location, bytes).await.unwrap();
+            }
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "cmd::gc::tests::repo_gc_retains_plan_recovery_after_compaction_and_restart",
+                "--nocapture",
+            ])
+            .env(ROOT, directory.path());
+        let output = tokio::task::spawn_blocking(move || child.output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let receipt = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                serde_json::from_str::<crab_metadata::plan_receipt::PlanReceipt>(line).ok()
+            })
+            .unwrap();
+        assert!(matches!(receipt.commit,
+            crab_metadata::plan_receipt::PlanCommit::RefJournal { transaction_id, .. }
+            if transaction_id == transaction.id().unwrap()
+        ));
+        assert!(matches!(
+            persisted
+                .get_with_etag(&router.ref_journal_plan_receipt_path(&plan_id))
+                .await,
+            Err(crab_storage::StorageError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

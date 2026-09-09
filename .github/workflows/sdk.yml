@@ -1,0 +1,626 @@
+name: Rust SDK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/sdk.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/scripts/*sdk*"
+      - "crab/scripts/tests/test_*sdk*"
+      - "crab/docs/architecture/crab-sdk.md"
+      - "crab/docs/architecture/sdk-*"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/push.rs"
+      - "crab/src/git/push.rs"
+      - "crab/src/git/push_native.rs"
+      - "crates/crab-*/**"
+      - "packages/web/content/docs/sdk/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/sdk.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/Cargo.toml"
+      - "crab/scripts/*sdk*"
+      - "crab/scripts/tests/test_*sdk*"
+      - "crab/docs/architecture/crab-sdk.md"
+      - "crab/docs/architecture/sdk-*"
+      - "crab/src/cmd/gc/**"
+      - "crab/src/cmd/mirror/**"
+      - "crab/src/cmd/push.rs"
+      - "crab/src/git/push.rs"
+      - "crab/src/git/push_native.rs"
+      - "crates/crab-*/**"
+      - "packages/web/content/docs/sdk/**"
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      live_backends:
+        description: "Run credentialed GCS, Azure, and managed qualification"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_MIN_STACK: 8388608
+  SDK_MSRV: 1.91.1
+  SDK_RUSTDOC_NIGHTLY: nightly-2026-06-19
+  RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+
+jobs:
+  contracts:
+    name: SDK contracts, docs, and packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up SDK MSRV
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+          components: clippy,rustfmt
+
+      - name: Set up pinned rustdoc JSON toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_RUSTDOC_NIGHTLY }}
+
+      - name: Install system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check source and evidence contracts
+        run: |
+          cargo "+${SDK_MSRV}" fmt --all -- --check
+          python3 -m unittest discover -s crab/scripts/tests -p 'test_*sdk*.py'
+          python3 crab/scripts/verify_sdk_capabilities.py
+          python3 crab/scripts/check-sdk-features.py
+
+      - name: Test supported feature profiles
+        run: |
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features remote
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features remote,content,write
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features --features local,managed
+
+      - name: Deny SDK and publication lints
+        run: >-
+          cargo "+${SDK_MSRV}" clippy -p crab-sdk -p crab-remote
+          --locked --all-targets --all-features -- -D warnings
+
+      - name: Deny rustdoc warnings
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo "+${SDK_MSRV}" doc -p crab-sdk --locked --all-features --no-deps
+
+      - name: Verify public API snapshot
+        run: |
+          cargo "+${SDK_MSRV}" install cargo-public-api --version 0.52.0 --locked
+          cargo "+${SDK_RUSTDOC_NIGHTLY}" public-api -p crab-sdk --all-features -sss > "$RUNNER_TEMP/sdk-public-api.txt"
+          diff -u crab/docs/architecture/sdk-public-api.txt "$RUNNER_TEMP/sdk-public-api.txt"
+
+      - name: Detect published SDK semver baseline
+        id: semver-baseline
+        shell: bash
+        run: |
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/crab-sdk-crates-io.json" \
+            --user-agent 'crab-sdk-ci/0.1 (https://github.com/crabbuild/crab)' \
+            --write-out '%{http_code}' https://crates.io/api/v1/crates/crab-sdk)"
+          case "$status" in
+            200) echo "published=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::crates.io returned HTTP $status"; exit 1 ;;
+          esac
+
+      - name: Check public SDK semver
+        if: steps.semver-baseline.outputs.published == 'true'
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
+        with:
+          package: crab-sdk
+          feature-group: all-features
+
+      - name: Verify first-release semver state
+        if: steps.semver-baseline.outputs.published == 'false'
+        run: |
+          test "$(cargo metadata --no-deps --format-version 1 | \
+            jq -r '.packages[] | select(.name == "crab-sdk") | .version')" = "0.1.0"
+          echo "crab-sdk is unpublished; the checked public API snapshot is its first semver baseline"
+
+      - name: Package and compile external consumers
+        run: >-
+          python3 crab/scripts/package_sdk.py
+          --output "$RUNNER_TEMP/sdk-package"
+          --target-dir "$RUNNER_TEMP/sdk-package-target"
+          --toolchain "${SDK_MSRV}"
+
+      - name: Upload package proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-package/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  publication:
+    name: SDK shared publication and recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sdk-publication
+      - name: Set up repository frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/repository/package-lock.json
+      - name: Build embedded repository frontend
+        run: |
+          npm ci --prefix packages/repository
+          npm run build --prefix packages/repository
+      - name: Qualify shared publication owners
+        run: |
+          cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication
+          cargo "+${SDK_MSRV}" test -p crab-metadata --locked plan_receipt::tests
+          cargo "+${SDK_MSRV}" test -p crab-metadata --locked --test plan_receipt_recovery
+          cargo "+${SDK_MSRV}" test -p crab-write --locked --test journal --test generation --test catalog
+      - name: Qualify HTTP receive fault recovery
+        run: >-
+          cargo "+${SDK_MSRV}" test -p crab-http-server --locked --lib
+          server::receive_fault_tests::
+      - name: Qualify CLI publication callers
+        run: |
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push_native::tests::unresolved_plan_blocks_replay_before_ref_admission -- --exact
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push::tests::next_writer_repairs_publication_cancelled_at_active_marker -- --exact
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::push::tests::uncertain_commit_does_not_enter_automatic_transient_retry -- --exact
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::mirror::reconcile::tests::lost_success_response_recovers_the_plan_receipt_without_another_push -- --exact
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::gc::tests::repo_gc_retains_plan_recovery_after_compaction_and_restart -- --exact
+
+  current-rust:
+    name: SDK current stable
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p crab-sdk --locked --all-features
+
+  platform:
+    name: SDK ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sdk-${{ matrix.os }}
+      - name: Build compatible Crab for Windows local workflows
+        if: runner.os == 'Windows'
+        run: cargo +${{ env.SDK_MSRV }} build -p crab --locked --no-default-features
+      - name: Select compatible Crab for Windows local workflows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "CRAB_SDK_TEST_CRAB_BIN=$env:CARGO_TARGET_DIR\debug\crab.exe" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - run: cargo +${{ env.SDK_MSRV }} test -p crab-sdk --locked --all-features
+
+  rustfs:
+    name: SDK RustFS end-to-end
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: true
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: true
+      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: false
+      CRAB_SDK_TEST_S3_BUCKET: crab-sdk
+      CRAB_SDK_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - name: Set up repository frontend toolchain
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/repository/package-lock.json
+      - name: Build embedded repository frontend
+        run: |
+          npm ci --prefix packages/repository
+          npm run build --prefix packages/repository
+      - name: Start isolated RustFS
+        run: |
+          docker run -d --name sdk-rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/health/ready >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9000/health/ready >/dev/null
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3api create-bucket \
+            --bucket "$CRAB_SDK_TEST_S3_BUCKET"
+      - name: Build SDK examples, tests, and compatible Crab
+        run: |
+          cargo "+${SDK_MSRV}" build -p crab-sdk --locked --examples \
+            --no-default-features --features remote,content
+          cargo "+${SDK_MSRV}" build -p crab --locked --no-default-features \
+            --features simd-accel,tier,watch
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+            --features local --test local_round_trip --no-run --message-format=json \
+            > "$RUNNER_TEMP/local-round-trip-artifacts.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = Path(os.environ["RUNNER_TEMP"]) / "local-round-trip-artifacts.json"
+          executables = []
+          for line in manifest.read_text().splitlines():
+              message = json.loads(line)
+              target = message.get("target", {})
+              if (message.get("reason") == "compiler-artifact"
+                      and target.get("name") == "local_round_trip"
+                      and "test" in target.get("kind", [])
+                      and message.get("executable")):
+                  executables.append(message["executable"])
+          if len(executables) != 1 or not Path(executables[0]).is_file():
+              raise SystemExit(f"expected one local-round-trip test executable, got {executables}")
+          (Path(os.environ["RUNNER_TEMP"]) / "local-round-trip-bin").write_text(executables[0])
+          PY
+          mkdir -p "$RUNNER_TEMP/sdk-evidence"
+          {
+            echo "CRAB_SDK_TEST_EXAMPLES=$CARGO_TARGET_DIR/debug/examples"
+            echo "CRAB_SDK_TEST_CRAB_BIN=$CARGO_TARGET_DIR/debug/crab"
+            echo "CRAB_SDK_TEST_GIT_BIN=$(command -v git)"
+            echo "CRAB_SDK_TEST_READ_GUARD=$GITHUB_WORKSPACE/crab/scripts/verify-sdk-read-only.py"
+            echo "CRAB_SDK_TEST_READ_GUARD_REPORT=$RUNNER_TEMP/sdk-evidence/read-transport.json"
+            echo "CRAB_SDK_LOCAL_ROUND_TRIP_BIN=$(cat "$RUNNER_TEMP/local-round-trip-bin")"
+          } >> "$GITHUB_ENV"
+      - name: Qualify read-only transport
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-evidence/read.json"
+          --backend rustfs --features remote,content
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1
+          --transport-report "$CRAB_SDK_TEST_READ_GUARD_REPORT"
+          --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN"
+          --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
+          --features remote,content --test remote_blob
+          s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned
+          -- --exact --ignored --nocapture
+      - name: Qualify remote write and recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in remote_edit_round_trip_without_git stale_ref_batch_changes_no_refs initialization_preserves_foreign_content; do
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-evidence/${test}.json" \
+              --backend rustfs --features remote,content,write \
+              --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+              --expected-tests 1 --toolchain "$SDK_MSRV" \
+              --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
+              --timeout-seconds 1200 -- \
+              cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+              --features remote,content,write --test remote_write "$test" \
+              -- --exact --ignored --nocapture
+          done
+      - name: Qualify shared HTTP publication faults
+        env:
+          QUALIFICATION_BUCKET: ${{ env.CRAB_SDK_TEST_S3_BUCKET }}
+          QUALIFICATION_PREFIX: qualification/http-receive-${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-evidence/http-publication-faults.json"
+          --backend rustfs --features publication
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1 --toolchain "$SDK_MSRV"
+          --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-http-server --locked --lib
+          server::receive_fault_tests::receive_faults_rustfs
+          -- --exact --ignored --nocapture
+      - name: Qualify local round trip and memory
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-evidence/local-round-trip.json"
+          --backend rustfs --features local
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1 --require-rss-below 2147483648
+          --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN"
+          --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1800 --
+          "$CRAB_SDK_LOCAL_ROUND_TRIP_BIN" stage_commit_push_round_trip
+          --exact --ignored --nocapture
+      - name: Remove qualification fixtures and verify cleanup
+        run: |
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3 rm \
+            "s3://$CRAB_SDK_TEST_S3_BUCKET" --recursive
+          objects="$(aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-objects-v2 \
+            --bucket "$CRAB_SDK_TEST_S3_BUCKET" --query 'Contents[].Key' \
+            --output json)"
+          if [ "$objects" != "[]" ] && [ "$objects" != "null" ]; then
+            echo "qualification objects remain after cleanup: $objects" >&2
+            exit 1
+          fi
+      - name: Capture RustFS log
+        if: always()
+        run: |
+          docker logs sdk-rustfs > "$RUNNER_TEMP/sdk-evidence/rustfs.log" 2>&1 || true
+          docker rm -f sdk-rustfs >/dev/null 2>&1 || true
+      - name: Upload RustFS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  read-performance:
+    name: SDK 1 GiB read performance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: true
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
+      AWS_ALLOW_HTTP: true
+      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: false
+      CRAB_SDK_LARGE_BUCKET: crab-sdk-large
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+      - run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev pipx
+      - run: pipx install awscli && echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+      - name: Start RustFS and create fixture inputs
+        run: |
+          docker run -d --name sdk-performance-rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            "${RUSTFS_IMAGE}" server /data --address :9000
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9000/health/ready >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:9000/health/ready >/dev/null
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3api create-bucket --bucket "$CRAB_SDK_LARGE_BUCKET"
+          mkdir -p "$RUNNER_TEMP/sdk-large-inputs" "$RUNNER_TEMP/sdk-read-cache"
+          python3 crab/scripts/generate-sdk-fixtures.py "$RUNNER_TEMP/sdk-large-inputs"
+          echo "CRAB_SDK_LARGE_INPUTS=$RUNNER_TEMP/sdk-large-inputs" >> "$GITHUB_ENV"
+      - name: Publish deterministic 1 GiB fixture
+        run: |
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --release \
+            --no-default-features --features remote,content --test remote_blob \
+            large::publish_large_qualification_repository -- --exact --ignored --nocapture \
+            | tee "$RUNNER_TEMP/sdk-large-publish.log"
+          result="$(grep -oE 'commit=[0-9a-f]{40} crab_bytes=[0-9]+ crab_blake3=[0-9a-f]{64}' \
+            "$RUNNER_TEMP/sdk-large-publish.log" | tail -1)"
+          test -n "$result"
+          commit="${result#commit=}"
+          commit="${commit%% *}"
+          digest="${result##*crab_blake3=}"
+          digest="${digest%% *}"
+          echo "SDK_LARGE_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "SDK_LARGE_BLAKE3=$digest" >> "$GITHUB_ENV"
+      - name: Build optimized shared-core and SDK readers
+        run: >-
+          cargo "+${SDK_MSRV}" build -p crab-sdk --locked --release
+          --no-default-features --features remote,content
+          --example core_crab_read --example remote_read
+      - name: Run five cold and warm pairs
+        run: >-
+          python3 crab/scripts/qualify_sdk.py benchmark-read
+          --output "$RUNNER_TEMP/sdk-read-performance"
+          --cache-root "$RUNNER_TEMP/sdk-read-cache"
+          --core "$CARGO_TARGET_DIR/release/examples/core_crab_read"
+          --sdk "$CARGO_TARGET_DIR/release/examples/remote_read"
+          --upstream "$AWS_ENDPOINT_URL" --backend rustfs
+          --fixture-digest 9fd9c7f85fc053365cb38a217ddab35a1b22ea647a293c96f85c7bde0ef23b2a
+          --bucket "$CRAB_SDK_LARGE_BUCKET" --repository repository
+          --branch main --path crab --commit "$SDK_LARGE_COMMIT"
+          --bytes 1073741824 --blake3 "$SDK_LARGE_BLAKE3"
+          --toolchain "$SDK_MSRV"
+      - name: Capture service log and cleanup
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/sdk-read-performance"
+          cp "$RUNNER_TEMP/sdk-large-publish.log" "$RUNNER_TEMP/sdk-read-performance/" 2>/dev/null || true
+          docker logs sdk-performance-rustfs > "$RUNNER_TEMP/sdk-read-performance/rustfs.log" 2>&1 || true
+          docker rm -f sdk-performance-rustfs >/dev/null 2>&1 || true
+      - name: Upload performance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-read-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-read-performance/**
+          if-no-files-found: error
+          retention-days: 30
+
+  cloud:
+    name: SDK live GCS and Azure
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.live_backends)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CRAB_SDK_TEST_GCS_BUCKET: ${{ secrets.CRAB_SDK_TEST_GCS_BUCKET }}
+      CRAB_SDK_TEST_GCS_ACCESS_TOKEN: ${{ secrets.CRAB_SDK_TEST_GCS_ACCESS_TOKEN }}
+      CRAB_SDK_TEST_AZURE_ACCOUNT: ${{ secrets.CRAB_SDK_TEST_AZURE_ACCOUNT }}
+      CRAB_SDK_TEST_AZURE_CONTAINER: ${{ secrets.CRAB_SDK_TEST_AZURE_CONTAINER }}
+      CRAB_SDK_TEST_AZURE_BEARER_TOKEN: ${{ secrets.CRAB_SDK_TEST_AZURE_BEARER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Require explicit dedicated provider credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CRAB_SDK_TEST_GCS_BUCKET CRAB_SDK_TEST_GCS_ACCESS_TOKEN \
+            CRAB_SDK_TEST_AZURE_ACCOUNT CRAB_SDK_TEST_AZURE_CONTAINER \
+            CRAB_SDK_TEST_AZURE_BEARER_TOKEN; do
+            test -n "${!name:-}" || { echo "::error::$name is required"; exit 1; }
+          done
+          mkdir -p "$RUNNER_TEMP/sdk-cloud-evidence"
+      - name: Qualify GCS
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-cloud-evidence/gcs.json"
+          --backend gcs --features remote,write
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
+          --features remote,write --test gcs_read live_gcs_read_is_byte_exact_and_read_only
+          -- --exact --ignored --nocapture
+      - name: Qualify Azure
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-cloud-evidence/azure.json"
+          --backend azure --features remote,write
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
+          --features remote,write --test azure_read live_azure_read_is_byte_exact_and_read_only
+          -- --exact --ignored --nocapture
+      - name: Upload cloud evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-cloud-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-cloud-evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  managed:
+    name: SDK real managed service
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.live_backends)
+    runs-on: [self-hosted, linux, x64, sdk-managed]
+    timeout-minutes: 120
+    env:
+      CRAB_SDK_MANAGED_FIXTURE_CONTROL: ${{ vars.CRAB_SDK_MANAGED_FIXTURE_CONTROL }}
+      CRAB_SDK_MANAGED_TOKEN_CACHE: ${{ vars.CRAB_SDK_MANAGED_TOKEN_CACHE }}
+      CRAB_SDK_MANAGED_AUTHORITY: ${{ vars.CRAB_SDK_MANAGED_AUTHORITY }}
+      CRAB_SDK_MANAGED_ORGANIZATION: ${{ vars.CRAB_SDK_MANAGED_ORGANIZATION }}
+      CRAB_SDK_MANAGED_CRAB: ${{ github.workspace }}/target/debug/crab
+      CRAB_SDK_TEST_CRAB_BIN: ${{ github.workspace }}/target/debug/crab
+      CRAB_SDK_TEST_GIT_BIN: git
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+      - name: Require managed fixture controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in CRAB_SDK_MANAGED_FIXTURE_CONTROL CRAB_SDK_MANAGED_TOKEN_CACHE \
+            CRAB_SDK_MANAGED_AUTHORITY CRAB_SDK_MANAGED_ORGANIZATION; do
+            test -n "${!name:-}" || { echo "::error::$name is required"; exit 1; }
+          done
+          test -x "$CRAB_SDK_MANAGED_FIXTURE_CONTROL"
+          test -d "$CRAB_SDK_MANAGED_TOKEN_CACHE"
+          mkdir -p "$RUNNER_TEMP/sdk-managed-evidence"
+      - name: Build compatible Crab
+        run: >-
+          cargo "+${SDK_MSRV}" build -p crab --locked --no-default-features
+          --features simd-accel,tier,watch
+      - name: Qualify managed lifecycle and faults
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in managed_lifecycle_round_trip revoked_push_never_commits \
+            lost_finalize_reuses_push_id placement_change_invalidates_cached_access \
+            expired_grant_succeeds_on_a_new_operation \
+            denied_principal_cannot_reuse_another_clients_cache \
+            managed_local_matrix_contract; do
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-managed-evidence/${test}.json" \
+              --backend managed --features local,managed \
+              --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+              --expected-tests 1 --require-rss-below 2147483648 \
+              --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN" \
+              --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1800 -- \
+              cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+              --features local,managed --test managed "$test" \
+              -- --exact --ignored --nocapture
+          done
+      - name: Upload managed evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-managed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-managed-evidence/**
+          if-no-files-found: error
+          retention-days: 30

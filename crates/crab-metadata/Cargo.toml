@@ -1,9 +1,11 @@
 [package]
 name = "crab-metadata"
 version = "0.1.0"
-publish = false
+publish = true
 edition = "2024"
 license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
 description = "Metadata schema and graph contracts for Crab."
 
 [lib]
@@ -12,7 +14,7 @@ path = "src/lib.rs"
 
 [features]
 default = []
-file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio"]
+file-index-reader = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb", "dep:tokio", "dep:tokio-util"]
 local-index = ["dep:rusqlite"]
 remote-index = ["storage", "dep:futures-util", "dep:object_store", "dep:slatedb"]
 storage = ["dep:base64", "dep:crab-storage", "dep:futures-util", "dep:object_store"]
@@ -31,6 +33,7 @@ serde_json = { workspace = true }
 slatedb = { version = "=0.15.0", optional = true, features = ["wal_disable", "zstd"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"], optional = true }
+tokio-util = { workspace = true, features = ["rt"], optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

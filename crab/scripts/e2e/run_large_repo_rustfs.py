@@ -70,7 +70,7 @@ CRAB_DIR = SCRIPT_DIR.parents[1]
 REPO_ROOT = SCRIPT_DIR.parents[2]
 START_RUSTFS = CRAB_DIR / "scripts" / "start-rustfs.sh"
 QUALIFICATION_DEBUG_LOG = (
-    "crab=debug,crab_coordination=debug,crab_remote_git=info,"
+    "crab=debug,crab_coordination=debug,crab_remote_git=info,crab_remote_git::storage=debug,"
     "crab_read::upload_pack=debug,"
     "crab_metadata::git_object_locator::reader=debug"
 )
@@ -419,8 +419,8 @@ class LargeRepositoryQualification:
             elif cache_event == "miss":
                 telemetry["cache_misses"] += 1
             if fields.get("telemetry_event") == "operation_summary":
-                telemetry["storage_requests"] += int(fields.get("storage_requests", 0))
-                telemetry["storage_bytes"] += int(fields.get("fetched_bytes", 0))
+                # Shared producers charge each participant's budget. Summing
+                # those reservations duplicates transfer already observed above.
                 telemetry["logical_objects"] += int(fields.get("logical_objects", 0))
                 telemetry["inflated_bytes"] += int(fields.get("inflated_bytes", 0))
                 telemetry["response_bytes"] += int(fields.get("response_bytes", 0))

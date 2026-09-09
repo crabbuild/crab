@@ -1,0 +1,11 @@
+{
+  "title": "Rust SDK",
+  "pages": [
+    "getting-started",
+    "remote-repositories",
+    "local-workflows",
+    "recovery",
+    "managed-repositories",
+    "api-reference"
+  ]
+}

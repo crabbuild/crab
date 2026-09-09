@@ -226,7 +226,14 @@ impl ObjectStore for CountingStore {
         }
         if !options.head && location.as_ref().ends_with(".pack") {
             self.pack_gets.fetch_add(1, Ordering::SeqCst);
+            struct ActiveGet<'a>(&'a AtomicUsize);
+            impl Drop for ActiveGet<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
             let active = self.active_pack_gets.fetch_add(1, Ordering::SeqCst) + 1;
+            let _active = ActiveGet(&self.active_pack_gets);
             self.max_active_pack_gets
                 .fetch_max(active, Ordering::SeqCst);
             let range_start = options.range.as_ref().and_then(|range| match range {
@@ -254,9 +261,7 @@ impl ObjectStore for CountingStore {
             if self.slow_pack_gets.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            let result = self.inner.get_opts(location, options).await;
-            self.active_pack_gets.fetch_sub(1, Ordering::SeqCst);
-            return result;
+            return self.inner.get_opts(location, options).await;
         }
         self.inner.get_opts(location, options).await
     }
@@ -987,6 +992,13 @@ async fn read_target(fixture: &PublishedFixture) -> crab_remote_git::Result<Byte
         .repository
         .operation(OperationKind::Repository, &cancellation)
         .await?;
+    read_target_in_operation(fixture, operation).await
+}
+
+async fn read_target_in_operation(
+    fixture: &PublishedFixture,
+    operation: crab_remote_git::OperationContext,
+) -> crab_remote_git::Result<Bytes> {
     let result = async {
         let revision = Revision::Reference("refs/heads/main".to_owned());
         let snapshot = fixture.repository.snapshot(&revision, &operation).await?;
@@ -1162,14 +1174,26 @@ async fn canonical_snapshot_does_not_reuse_misses_from_another_inventory() {
 }
 
 fn contains_limit_exceeded(error: &Error, expected_limit: &str) -> bool {
-    match error {
-        Error::LimitExceeded { limit, .. } => *limit == expected_limit,
-        Error::SharedRead { source } => contains_limit_exceeded(source, expected_limit),
-        Error::CloseAfterFailure { operation, .. } => {
-            contains_limit_exceeded(operation, expected_limit)
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(error) = current {
+        if let Some(Error::SharedRead { source }) = error.downcast_ref::<Error>() {
+            current = Some(source.as_ref());
+            continue;
         }
-        _ => false,
+        if matches!(error.downcast_ref::<Error>(), Some(Error::LimitExceeded { limit, .. }) if *limit == expected_limit)
+        {
+            return true;
+        }
+        current = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|error| {
+                error
+                    .get_ref()
+                    .map(|source| source as &(dyn std::error::Error + 'static))
+            })
+            .or_else(|| error.source());
     }
+    false
 }
 
 fn contains_crc_mismatch(error: &Error, expected_oid: gix_hash::ObjectId) -> bool {
@@ -2895,6 +2919,80 @@ async fn concurrent_cold_blob_reads_are_single_flight_and_warm_reads_hit_cache()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn shared_blob_read_does_not_inherit_another_operations_budget_failure() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let setup = fixture
+        .repository
+        .operation(OperationKind::Repository, &CancellationToken::new())
+        .await
+        .unwrap();
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".into()), &setup)
+        .await
+        .unwrap();
+    snapshot.entry(&fixture.base_path, &setup).await.unwrap();
+    setup.finish(Ok(())).await.unwrap();
+    let tight = fixture
+        .repository
+        .operation_with_limits(
+            OperationKind::Repository,
+            &CancellationToken::new(),
+            OperationLimits {
+                max_inflated_bytes: 1,
+                ..OperationLimits::default()
+            },
+        )
+        .await
+        .unwrap();
+    let generous = fixture
+        .repository
+        .operation(OperationKind::Repository, &CancellationToken::new())
+        .await
+        .unwrap();
+    fixture.backend.reset_pack_gets();
+    fixture.backend.block_next_pack_get();
+    let first_snapshot = snapshot.clone();
+    let first_path = fixture.base_path.clone();
+    let first = tokio::spawn(async move {
+        let result = first_snapshot.read_blob(&first_path, &tight).await;
+        tight.finish(result).await
+    });
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        fixture.backend.wait_for_blocked_pack_get(),
+    )
+    .await
+    .unwrap();
+    let second_read = async {
+        let result = snapshot.read_blob(&fixture.base_path, &generous).await;
+        generous.finish(result).await
+    };
+    tokio::pin!(second_read);
+    // Keep the producer blocked while the second operation enters the read.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut second_read)
+            .await
+            .is_err()
+    );
+    fixture.backend.release_blocked_pack_get();
+    let first = first.await.unwrap().unwrap_err();
+    let second = tokio::time::timeout(Duration::from_secs(2), &mut second_read)
+        .await
+        .unwrap();
+    fixture.runtime.shutdown().await;
+    assert_eq!(fixture.backend.pack_gets(), 1);
+    assert!(contains_limit_exceeded(&first, "inflated bytes"));
+    assert_eq!(
+        second
+            .expect("independent budget permits the shared blob")
+            .bytes
+            .as_ref(),
+        fixture.base_expected
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn disabled_caches_preserve_canonical_read_results() {
     let runtime_options = RuntimeOptions {
         max_object_cache_entries: 0,
@@ -3172,6 +3270,39 @@ async fn slow_distinct_reads_never_exceed_origin_admission_bound() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cancelling_last_cold_waiter_drains_shared_origin_work() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .expect("operation");
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &operation)
+        .await
+        .expect("snapshot");
+    fixture.backend.block_next_pack_get();
+    let path = fixture.target_path.clone();
+    let read = tokio::spawn(async move {
+        let result = snapshot.read_blob(&path, &operation).await;
+        operation.finish(result).await
+    });
+    fixture.backend.wait_for_blocked_pack_get().await;
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), read)
+        .await
+        .expect("last caller drains pending origin")
+        .expect("reader joins");
+    let active = fixture.backend.active_pack_gets.load(Ordering::SeqCst);
+    let flights = fixture.runtime.snapshot().await.active_object_flights;
+    fixture.runtime.shutdown().await;
+    assert!(matches!(result, Err(Error::Cancelled)));
+    assert_eq!((active, flights), (0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cancelling_one_cold_waiter_does_not_cancel_shared_origin_work() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let setup_cancellation = CancellationToken::new();
@@ -3281,13 +3412,11 @@ async fn operation_deadline_cancels_work_and_reports_timeout() {
         max_duration: Duration::from_secs(1),
         ..OperationLimits::default()
     };
-    let options = RepositoryOptions::new(ObjectLimits::default(), operation_limits)
-        .expect("repository options");
-    let fixture = publish(DeltaKind::Ref, false, options).await;
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
     let operation = fixture
         .repository
-        .operation(OperationKind::Repository, &cancellation)
+        .operation_with_limits(OperationKind::Repository, &cancellation, operation_limits)
         .await
         .expect("operation opens before deadline");
     tokio::time::sleep(Duration::from_millis(1_100)).await;
@@ -3313,6 +3442,43 @@ async fn operation_deadline_cancels_work_and_reports_timeout() {
         }
     ));
     fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_snapshot_warm_reads_obey_independent_operation_limits() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Snapshot, &cancellation)
+        .await
+        .unwrap();
+    let result = fixture
+        .repository
+        .snapshot(
+            &Revision::Reference("refs/heads/main".to_owned()),
+            &operation,
+        )
+        .await;
+    let snapshot = operation.finish(result).await.unwrap();
+    read_target(&fixture).await.unwrap();
+
+    let limits = OperationLimits {
+        max_response_bytes: 1,
+        ..OperationLimits::default()
+    };
+    let operation = fixture
+        .repository
+        .operation_with_limits(OperationKind::Content, &cancellation, limits)
+        .await
+        .unwrap();
+    let result = snapshot.read_blob(&fixture.target_path, &operation).await;
+    let result = operation.finish(result).await;
+    fixture.runtime.shutdown().await;
+    assert!(contains_limit_exceeded(
+        &result.unwrap_err(),
+        "response bytes"
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3439,23 +3605,22 @@ async fn nested_path_stops_at_the_traversal_depth_budget() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn aggregate_fetch_budget_rejects_before_origin_range_read() {
-    let operation = OperationLimits {
+    let limits = OperationLimits {
         max_fetched_bytes: 1,
         ..OperationLimits::default()
     };
-    let options = RepositoryOptions::new(ObjectLimits::default(), operation).expect("options");
-    let fixture = publish(DeltaKind::Ref, false, options).await;
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     fixture.backend.reset_pack_gets();
-    let error = read_target(&fixture)
-        .await
-        .expect_err("aggregate fetched bytes must fail");
-    assert!(matches!(
-        error,
-        Error::LimitExceeded {
-            limit: "fetched bytes",
-            ..
-        }
-    ));
+    let result = async {
+        let operation = fixture
+            .repository
+            .operation_with_limits(OperationKind::Repository, &CancellationToken::new(), limits)
+            .await?;
+        read_target_in_operation(&fixture, operation).await
+    }
+    .await;
+    let error = result.expect_err("aggregate fetched bytes must fail");
+    assert!(contains_limit_exceeded(&error, "fetched bytes"));
     assert_eq!(fixture.backend.pack_gets(), 0);
 }
 
@@ -4426,6 +4591,84 @@ async fn archive_traversal_preserves_modes_links_submodules_and_raw_order() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn consumer_failure_finalizes_as_failure_and_preserves_its_source() {
+    #[derive(Default)]
+    struct Metrics(std::sync::Mutex<Vec<crab_remote_git::MetricOutcome>>);
+    impl crab_remote_git::RemoteGitMetrics for Metrics {
+        fn record(&self, observation: crab_remote_git::MetricObservation) {
+            if observation.kind == crab_remote_git::MetricKind::Operation {
+                self.0.lock().unwrap().push(observation.outcome.unwrap());
+            }
+        }
+    }
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let metrics = Arc::new(Metrics::default());
+    let runtime =
+        Arc::new(RemoteGitRuntime::new(RuntimeOptions::default(), metrics.clone()).unwrap());
+    let cancellation = CancellationToken::new();
+    let repository = RemoteGitRepository::open(
+        fixture.store.clone(),
+        fixture.layout.clone(),
+        crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+        runtime.clone(),
+        RepositoryOptions::default(),
+        &cancellation,
+    )
+    .await
+    .unwrap();
+    let operation = repository
+        .operation(OperationKind::Content, &cancellation)
+        .await
+        .unwrap();
+    let result = operation
+        .finish::<()>(Err(Error::Consumer {
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "consumer validation",
+            )),
+        }))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(result, Error::Consumer { source } if source.downcast_ref::<std::io::Error>().unwrap().kind() == std::io::ErrorKind::InvalidInput)
+    );
+    assert_eq!(
+        *metrics.0.lock().unwrap(),
+        [crab_remote_git::MetricOutcome::Error]
+    );
+    runtime.shutdown().await;
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn archive_reader_close_releases_session_without_fetching_remaining_entries() {
+    for advance in [false, true] {
+        let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+        let cancellation = CancellationToken::new();
+        let operation = fixture
+            .repository
+            .operation(OperationKind::Archive, &cancellation)
+            .await
+            .unwrap();
+        let snapshot = fixture
+            .repository
+            .snapshot(&Revision::Reference("main".to_owned()), &operation)
+            .await
+            .unwrap();
+        let mut reader = snapshot.archive_reader(operation).unwrap();
+        if advance {
+            assert!(reader.next().await.unwrap().is_some());
+        }
+        let reads = fixture.backend.pack_gets();
+        reader.close().await.unwrap();
+        assert_eq!(fixture.backend.pack_gets(), reads);
+        tokio::time::timeout(Duration::from_secs(2), fixture.runtime.shutdown())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn archive_stream_is_incremental_and_cancellation_terminates_with_cleanup() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
@@ -4805,4 +5048,174 @@ fn parse_oid(bytes: &[u8]) -> gix_hash::ObjectId {
             .as_bytes(),
     )
     .expect("parse object ID")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn content_admission_stops_pending_origin_on_cancellation_and_deadline() {
+    for deadline in [false, true] {
+        let fixture = publish(DeltaKind::Ofs, false, RepositoryOptions::default()).await;
+        let mut objects = fixture.backend.list(None);
+        let path = loop {
+            let object = objects
+                .next()
+                .await
+                .expect("fixture contains pack")
+                .unwrap();
+            if object.location.as_ref().ends_with(".pack") {
+                break object.location;
+            }
+        };
+        let cancellation = CancellationToken::new();
+        let limits = OperationLimits {
+            max_duration: if deadline {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_secs(30)
+            },
+            ..Default::default()
+        };
+        let operation = fixture
+            .repository
+            .operation_with_limits(OperationKind::Content, &cancellation, limits)
+            .await
+            .unwrap();
+        let store = fixture
+            .store
+            .clone()
+            .with_read_admission(operation.read_admission());
+        fixture.backend.block_next_pack_get();
+        let task = tokio::spawn(async move { store.get_with_etag(&path).await });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            fixture.backend.wait_for_blocked_pack_get(),
+        )
+        .await
+        .unwrap();
+        if !deadline {
+            cancellation.cancel();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(error, crab_storage::StorageError::ReadRejected { source }
+            if matches!(source.downcast_ref::<crab_storage::StorageError>(), Some(crab_storage::StorageError::Cancelled)))
+        );
+        let error = operation
+            .finish::<()>(Err(Error::Cancelled))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            (deadline, error),
+            (true, Error::Timeout { .. }) | (false, Error::Cancelled)
+        ));
+        fixture.runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn storage_telemetry_counts_shared_reads_once_and_excludes_warm_hits() {
+    use tracing_subscriber::prelude::*;
+
+    #[derive(Clone, Default)]
+    struct Reads(Arc<AtomicU64>);
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Reads {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() == "crab_remote_git::storage" {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    // Callsite interest is process-global. Concurrent tests can register these
+    // callsites without this thread's subscriber, so exercise the application's
+    // global-subscriber contract in a separate process with identical assertions.
+    const CHILD: &str = "CRAB_TEST_STORAGE_TELEMETRY_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = tokio::task::spawn_blocking(|| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "storage_telemetry_counts_shared_reads_once_and_excludes_warm_hits",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let reads = Reads::default();
+    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(reads.clone()))
+        .unwrap();
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let setup = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .unwrap();
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".into()), &setup)
+        .await
+        .unwrap();
+    snapshot.entry(&fixture.base_path, &setup).await.unwrap();
+    setup.finish(Ok(())).await.unwrap();
+
+    let mut operations = Vec::new();
+    for _ in 0..8 {
+        operations.push(
+            fixture
+                .repository
+                .operation(OperationKind::Repository, &cancellation)
+                .await
+                .unwrap(),
+        );
+    }
+    fixture.backend.reset_pack_gets();
+    reads.0.store(0, Ordering::SeqCst);
+    fixture.backend.block_next_pack_get();
+    let requests = operations
+        .into_iter()
+        .map(|operation| {
+            let snapshot = snapshot.clone();
+            let path = fixture.base_path.clone();
+            async move {
+                let result = snapshot.read_blob(&path, &operation).await;
+                operation.finish(result).await
+            }
+        })
+        .collect::<Vec<_>>();
+    let pending = tokio::spawn(async move { futures_util::future::join_all(requests).await });
+    fixture.backend.wait_for_blocked_pack_get().await;
+    fixture.backend.release_blocked_pack_get();
+    for result in pending.await.unwrap() {
+        assert_eq!(result.unwrap().bytes.as_ref(), fixture.base_expected);
+    }
+    let observed = reads.0.load(Ordering::SeqCst);
+    assert_eq!((fixture.backend.pack_gets(), observed), (1, 1));
+
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Repository, &cancellation)
+        .await
+        .unwrap();
+    let result = snapshot.read_blob(&fixture.base_path, &operation).await;
+    operation.finish(result).await.unwrap();
+    assert_eq!(reads.0.load(Ordering::SeqCst), observed);
+    fixture.runtime.shutdown().await;
 }

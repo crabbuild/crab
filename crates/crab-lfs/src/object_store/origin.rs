@@ -6,11 +6,33 @@ use super::*;
 
 static VERIFICATIONS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(4)));
 
+pub(super) async fn hash_delivery_chunk(
+    mut hasher: Sha256,
+    chunk: Bytes,
+    session: Option<&LfsReadSession>,
+) -> Result<(Sha256, Bytes)> {
+    let permit = Arc::clone(&VERIFICATIONS)
+        .acquire_owned()
+        .await
+        .map_err(std::io::Error::other)?;
+    // Delivery owns one chunk at a time. The blocking worker retains hashing
+    // admission even if its consumer disconnects while the job is running.
+    spawn_hash(session, move || {
+        let _permit = permit;
+        hasher.update(&chunk);
+        (hasher, chunk)
+    })?
+    .await
+    .map_err(std::io::Error::other)
+    .map_err(Into::into)
+}
+
 pub(super) async fn inspect(
     store: &Store,
     path: &Path,
     oid: &[u8; 32],
     expected_size: Option<u64>,
+    session: Option<&LfsReadSession>,
 ) -> Result<ExistingObject> {
     // Acquire before opening the body; each detached hash job shares ownership
     // so cancellation cannot admit replacement buffers before that job exits.
@@ -60,11 +82,11 @@ pub(super) async fn inspect(
         }
         actual_size = size;
         let permit = Arc::clone(&permit);
-        hasher = tokio::task::spawn_blocking(move || {
+        hasher = spawn_hash(session, move || {
             let _permit = permit;
             hasher.update(&chunk);
             hasher
-        })
+        })?
         .await
         .map_err(std::io::Error::other)?;
     }
@@ -82,6 +104,20 @@ pub(super) async fn inspect(
         Ok(ExistingObject::Valid(meta))
     } else {
         Ok(ExistingObject::Corrupt(etag))
+    }
+}
+
+fn spawn_hash<F, T>(
+    session: Option<&LfsReadSession>,
+    job: F,
+) -> std::io::Result<tokio::task::JoinHandle<T>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match session {
+        Some(session) => session.spawn_blocking(job),
+        None => Ok(tokio::task::spawn_blocking(job)),
     }
 }
 

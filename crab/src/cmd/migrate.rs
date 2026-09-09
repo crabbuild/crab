@@ -2245,7 +2245,7 @@ async fn verify_one_mapped_destination(
         directory: Some(clone_name.clone()),
         branch: Some(branch.to_owned()),
         depth: None,
-        lazy: false,
+        lazy: Some(false),
         include: Vec::new(),
         exclude: Vec::new(),
         sync_chunk_index: false,

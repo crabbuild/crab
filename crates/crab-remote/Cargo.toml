@@ -1,0 +1,47 @@
+[package]
+name = "crab-remote"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = true
+description = "Shared remote operation lifecycle for Crab clients and services."
+
+[features]
+default = []
+publication = ["dep:crab-auth", "dep:crab-write", "dep:crab-read", "dep:crab-git", "dep:crab-remote-git", "dep:crab-xet", "dep:bytes", "dep:blake3", "dep:futures-util", "dep:gix-hash", "dep:gix-object", "dep:object_store", "dep:rand", "dep:serde", "dep:serde_json", "dep:tokio", "crab-metadata/remote-index", "dep:crab-coordination", "dep:crab-metadata", "dep:crab-storage", "dep:thiserror", "dep:tokio-util", "dep:tracing"]
+local = ["dep:blake3", "dep:crab-git", "dep:crab-metadata", "dep:crab-storage", "dep:fs4", "dep:futures-util", "dep:serde", "dep:serde_json", "dep:tempfile", "dep:tokio", "dep:tokio-util", "dep:thiserror", "dep:toml", "dep:tracing"]
+
+[dependencies]
+crab-auth = { workspace = true, optional = true }
+crab-write = { workspace = true, optional = true }
+crab-read = { workspace = true, optional = true }
+crab-git = { workspace = true, optional = true }
+crab-remote-git = { workspace = true, optional = true }
+gix-hash = { workspace = true, optional = true }
+gix-object = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "fs", "io-util", "process"] }
+crab-coordination = { workspace = true, optional = true, features = ["object-store-lock"] }
+crab-metadata = { workspace = true, optional = true, features = ["storage"] }
+crab-storage = { workspace = true, optional = true }
+crab-xet = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true, features = ["rt"] }
+tracing = { workspace = true, optional = true }
+rand = { version = "0.9", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+fs4 = { version = "0.13", optional = true }
+futures-util = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+object_store = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

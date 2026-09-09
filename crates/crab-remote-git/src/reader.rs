@@ -328,7 +328,7 @@ impl RemoteGitReader {
         }
         if requested.len() < PACK_INDEX_LOOKUP_MIN_OBJECTS || self.inventory.is_empty() {
             return self
-                .lookup_batch_from_catalog(session, requested, budget, cancellation)
+                .lookup_batch_from_catalog(session, requested, cancellation)
                 .await;
         }
 
@@ -339,7 +339,7 @@ impl RemoteGitReader {
             // for current repositories; use indexes only for catalog misses
             // from a partially repaired publication.
             let mut lookups = self
-                .lookup_batch_from_catalog(session, requested, budget, cancellation)
+                .lookup_batch_from_catalog(session, requested, cancellation)
                 .await?;
             let missing = lookups
                 .iter()
@@ -378,7 +378,7 @@ impl RemoteGitReader {
 
         let missing_ids = missing.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
         let fallback = self
-            .lookup_batch_from_catalog(session, &missing_ids, budget, cancellation)
+            .lookup_batch_from_catalog(session, &missing_ids, cancellation)
             .await?;
         for ((index, _), lookup) in missing.into_iter().zip(fallback) {
             lookups[index] = lookup;
@@ -448,16 +448,9 @@ impl RemoteGitReader {
         &self,
         session: &GitObjectLocatorSession,
         requested: &[[u8; 20]],
-        budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObjectLookup>> {
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
-        tracing::debug!(
-            storage_request = "locator_lookup",
-            storage_bytes = 0u64,
-            object_count = requested.len(),
-            "remote Git object-store request"
-        );
+        tracing::debug!(object_count = requested.len(), "remote Git locator lookup");
         tokio::select! {
             biased;
             () = cancellation.cancelled() => Err(Error::Cancelled),
@@ -1030,13 +1023,22 @@ impl RemoteGitReader {
             stage: CorruptionStage::PackEntry,
         })?;
         let path = repo_pack_path(&self.repo_prefix, &range.pack_id);
-        charge_origin_range(budget, length).await?;
+        check_limit(
+            "fetched bytes",
+            length,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        let store = self
+            .store
+            .clone()
+            .with_read_admission(budget.read_admission(cancellation.clone()));
         let origin_permit = self.runtime.origin_permit(cancellation).await?;
         let bytes = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
-            bytes = self.store.range_get(&path, range.start..range.end) => bytes?,
+            bytes = store.range_get(&path, range.start..range.end) => bytes?,
         };
+        observe_storage_read("range_get", bytes.len() as u64);
         drop(origin_permit);
         check_cancelled(cancellation)?;
         if bytes.len() as u64 != length {
@@ -1109,7 +1111,11 @@ impl RemoteGitReader {
             locator.location.entry_len,
             self.limits.max_packed_entry_bytes,
         )?;
-        charge_origin_range(budget, locator.location.entry_len).await?;
+        check_limit(
+            "fetched bytes",
+            locator.location.entry_len,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
         let end = locator
             .location
             .pack_offset
@@ -1128,14 +1134,14 @@ impl RemoteGitReader {
         let pack_offset = locator.location.pack_offset;
         let entry_len = locator.location.entry_len;
         let crc32 = locator.location.crc32;
-        let flight_budget = budget.clone();
         let packed = runtime
             .read_packed_singleflight(
                 cache_key,
                 max_inflated,
                 max_object_bytes,
                 cancellation,
-                move |shared_cancellation| async move {
+                budget,
+                move |shared_cancellation, shared_budget| async move {
                     // An earlier flight can populate the cache while this caller
                     // waits for lookup/admission. Recheck before another origin read.
                     if let Some(object) = reader
@@ -1148,18 +1154,22 @@ impl RemoteGitReader {
                             gix_object::Kind::Blob => Header::Blob,
                             gix_object::Kind::Tag => Header::Tag,
                         };
+                        shared_budget
+                            .charge(BudgetDimension::InflatedBytes, object.data.len() as u64)
+                            .await?;
                         return Ok(PackedEntry {
                             header,
                             inflated: object.data.clone(),
-                            charged_budget: None,
                         });
                     }
+                    let store = store.with_read_admission(shared_budget.clone());
                     let origin_permit = work_runtime.origin_permit(&shared_cancellation).await?;
                     let bytes = tokio::select! {
                         biased;
                         () = shared_cancellation.cancelled() => return Err(Error::Cancelled),
                         bytes = store.range_get(&path, pack_offset..end) => bytes?,
                     };
+                    observe_storage_read("range_get", bytes.len() as u64);
                     drop(origin_permit);
                     check_cancelled(&shared_cancellation)?;
                     if bytes.len() as u64 != entry_len {
@@ -1177,7 +1187,7 @@ impl RemoteGitReader {
                         max_inflated,
                         max_object_bytes,
                     )?;
-                    flight_budget
+                    shared_budget
                         .charge(BudgetDimension::InflatedBytes, inflated_bytes)
                         .await?;
                     let decode_permit = work_runtime.decode_permit(&shared_cancellation).await?;
@@ -1212,20 +1222,13 @@ impl RemoteGitReader {
                     Ok(PackedEntry {
                         header: packed.header,
                         inflated: packed.inflated,
-                        charged_budget: Some(flight_budget.id()),
                     })
                 },
             )
             .await?;
-        if packed.charged_budget != Some(budget.id()) {
-            budget
-                .charge(BudgetDimension::InflatedBytes, packed.inflated.len() as u64)
-                .await?;
-        }
         Ok(PackedEntry {
             header: packed.header,
             inflated: packed.inflated.clone(),
-            charged_budget: packed.charged_budget,
         })
     }
 
@@ -1279,7 +1282,15 @@ impl RemoteGitReader {
             locator.location.entry_len,
             self.limits.max_packed_entry_bytes,
         )?;
-        charge_origin_range(budget, locator.location.entry_len).await?;
+        check_limit(
+            "fetched bytes",
+            locator.location.entry_len,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        let store = self
+            .store
+            .clone()
+            .with_read_admission(budget.read_admission(cancellation.clone()));
         let end = locator
             .location
             .pack_offset
@@ -1292,8 +1303,9 @@ impl RemoteGitReader {
         let bytes = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
-            bytes = self.store.range_get(&path, locator.location.pack_offset..end) => bytes?,
+            bytes = store.range_get(&path, locator.location.pack_offset..end) => bytes?,
         };
+        observe_storage_read("range_get", bytes.len() as u64);
         drop(origin_permit);
         check_cancelled(cancellation)?;
         if bytes.len() as u64 != locator.location.entry_len {
@@ -1353,7 +1365,6 @@ impl RemoteGitReader {
             // HEAD is immutable metadata, but it still consumes an origin
             // request. Coalesce concurrent misses before reading the index so
             // a fanout of delta-base lookups does not multiply HEAD traffic.
-            budget.charge(BudgetDimension::StorageRequests, 1).await?;
             let store = self.store.clone();
             let path = path.clone();
             let work_runtime = Arc::clone(&self.runtime);
@@ -1361,7 +1372,9 @@ impl RemoteGitReader {
                 .load_pack_index_size_singleflight(
                     cache_key.clone(),
                     cancellation,
-                    move |shared_cancellation| async move {
+                    budget,
+                    move |shared_cancellation, shared_budget| async move {
+                        let store = store.with_read_admission(shared_budget);
                         let origin_permit =
                             work_runtime.origin_permit(&shared_cancellation).await?;
                         let metadata = tokio::select! {
@@ -1390,7 +1403,11 @@ impl RemoteGitReader {
         {
             return Ok(index);
         }
-        charge_origin_range(budget, source_size).await?;
+        check_limit(
+            "fetched bytes",
+            source_size,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
         let store = self.store.clone();
         let size = source_size;
         let flight_runtime = Arc::clone(&self.runtime);
@@ -1400,13 +1417,16 @@ impl RemoteGitReader {
                 cache_key,
                 self.limits.max_pack_index_bytes,
                 cancellation,
-                move |shared_cancellation| async move {
+                budget,
+                move |shared_cancellation, shared_budget| async move {
+                    let store = store.with_read_admission(shared_budget);
                     let origin_permit = work_runtime.origin_permit(&shared_cancellation).await?;
                     let bytes = tokio::select! {
                         biased;
                         () = shared_cancellation.cancelled() => return Err(Error::Cancelled),
                         bytes = store.range_get(&path, 0..size) => bytes?,
                     };
+                    observe_storage_read("range_get", bytes.len() as u64);
                     drop(origin_permit);
                     check_cancelled(&shared_cancellation)?;
                     if bytes.len() as u64 != size {
@@ -1455,21 +1475,21 @@ impl RemoteGitReader {
     ) -> Result<VerifiedPackIdentity> {
         use tokio::io::AsyncWriteExt as _;
 
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
-        budget
-            .charge(BudgetDimension::FetchedBytes, expected_size)
-            .await?;
-        tracing::debug!(
-            storage_request = "pack_stream",
-            storage_bytes = expected_size,
-            "remote Git object-store request"
-        );
+        check_limit(
+            "fetched bytes",
+            expected_size,
+            budget.remaining(BudgetDimension::FetchedBytes).await,
+        )?;
+        let store = self
+            .store
+            .clone()
+            .with_read_admission(budget.read_admission(cancellation.clone()));
         let path = repo_pack_path(&self.repo_prefix, &pack_id);
         let origin_permit = self.runtime.origin_permit(cancellation).await?;
         let (metadata, range, mut stream) = tokio::select! {
             biased;
             () = cancellation.cancelled() => return Err(Error::Cancelled),
-            result = self.store.get_stream(&path, None) => result?,
+            result = store.get_stream(&path, None) => result?,
         };
         if metadata.size != expected_size || range != (0..expected_size) {
             return Err(Error::Corrupt {
@@ -1516,6 +1536,7 @@ impl RemoteGitReader {
                 stage: CorruptionStage::PackEntry,
             });
         }
+        observe_storage_read("pack_stream", written);
         let identity = verifier.finish()?;
         let actual_content_hash = blake3::Hash::from_bytes(identity.content_hash).to_hex();
         if actual_content_hash.as_str() != pack_id.to_string() {
@@ -1578,13 +1599,16 @@ impl RemoteGitReader {
     ) -> Result<()> {
         use tokio::io::AsyncWriteExt as _;
 
-        budget.charge(BudgetDimension::StorageRequests, 1).await?;
+        let store = self
+            .store
+            .clone()
+            .with_read_admission(budget.read_admission(cancellation.clone()));
         let origin_permit = self.runtime.origin_permit(cancellation).await?;
         let result = async {
             let (metadata, range, mut stream) = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
-                result = self.store.get_stream(&path, None) => result?,
+                result = store.get_stream(&path, None) => result?,
             };
             if range != (0..metadata.size) {
                 return Err(Error::Corrupt {
@@ -1592,14 +1616,6 @@ impl RemoteGitReader {
                 });
             }
             check_limit(limit, metadata.size, maximum_size)?;
-            budget
-                .charge(BudgetDimension::FetchedBytes, metadata.size)
-                .await?;
-            tracing::debug!(
-                storage_request,
-                storage_bytes = metadata.size,
-                "remote Git sidecar object-store request"
-            );
             let mut file = tokio::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
@@ -1641,6 +1657,7 @@ impl RemoteGitReader {
             file.flush().await.map_err(|source| {
                 Error::Metadata(crab_metadata::error::MetadataError::Io { source })
             })?;
+            observe_storage_read(storage_request, written);
             if written != metadata.size {
                 return Err(Error::Corrupt {
                     stage: CorruptionStage::PackIndex,
@@ -1655,6 +1672,17 @@ impl RemoteGitReader {
         }
         result
     }
+}
+
+// Observe completed facade reads inside shared producers, never per-waiter
+// budget replay. These bytes exclude hidden provider retries and protocol framing.
+fn observe_storage_read(storage_request: &'static str, storage_bytes: u64) {
+    tracing::debug!(
+        target: "crab_remote_git::storage",
+        storage_request,
+        storage_bytes,
+        "remote Git object-store read completed"
+    );
 }
 
 fn coalesce_ranges(
@@ -1946,21 +1974,9 @@ fn order_completed_objects(
     Ok(ordered)
 }
 
-async fn charge_origin_range(budget: &OperationBudget, bytes: u64) -> Result<()> {
-    budget.charge(BudgetDimension::StorageRequests, 1).await?;
-    budget.charge(BudgetDimension::FetchedBytes, bytes).await?;
-    tracing::debug!(
-        storage_request = "range_get",
-        storage_bytes = bytes,
-        "remote Git object-store request"
-    );
-    Ok(())
-}
-
 pub(crate) struct PackedEntry {
     pub(crate) header: Header,
     pub(crate) inflated: Bytes,
-    pub(crate) charged_budget: Option<u64>,
 }
 
 struct MetadataDelta {
@@ -2142,7 +2158,6 @@ fn inflate_entry(
     Ok(PackedEntry {
         header: entry.header,
         inflated: Bytes::from(inflated),
-        charged_budget: None,
     })
 }
 
@@ -2453,6 +2468,122 @@ mod tests {
         assert!(matches!(error, Error::ObjectIdMismatch { .. }));
     }
 
+    #[tokio::test]
+    async fn missing_pack_index_does_not_charge_unreceived_body_bytes() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).unwrap();
+        runtime
+            .insert_pack_index_source_size(
+                crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
+                64,
+            )
+            .await;
+        let reader = RemoteGitReader::from_pinned(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 100,
+            }],
+            ReaderLimits::default(),
+            runtime.clone(),
+            identity,
+            1,
+        )
+        .unwrap();
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime.clone());
+        let result = reader
+            .load_pack_index(pack_id, &budget, &CancellationToken::new())
+            .await;
+        runtime.shutdown().await;
+        assert!(result.is_err());
+        assert_eq!(
+            budget.usage().await.amount(BudgetDimension::FetchedBytes),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_coalesced_range_charges_request_without_response_bytes() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+        let reader = RemoteGitReader::from_pinned(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [],
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .unwrap();
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime);
+        let range = CoalescedRange {
+            pack_id: MerkleHash::from_hex(&"11".repeat(32)).unwrap(),
+            start: 0,
+            end: 64,
+            entries: Vec::new(),
+        };
+        assert!(
+            reader
+                .read_coalesced_range(&range, &budget, &CancellationToken::new())
+                .await
+                .is_err()
+        );
+        let usage = budget.usage().await;
+        assert_eq!(usage.amount(BudgetDimension::StorageRequests), 1);
+        assert_eq!(usage.amount(BudgetDimension::FetchedBytes), 0);
+    }
+
+    #[tokio::test]
+    async fn streamed_pack_charges_response_size_when_inventory_is_wrong() {
+        use object_store::ObjectStoreExt as _;
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).unwrap();
+        let pack_id = MerkleHash::from_hex(&"11".repeat(32)).unwrap();
+        let store = Arc::new(InMemory::new());
+        store
+            .put(
+                &repo_pack_path("repository", &pack_id),
+                Bytes::from(vec![0; 64]).into(),
+            )
+            .await
+            .unwrap();
+        let reader = RemoteGitReader::from_pinned(
+            Store::new(store),
+            "repository",
+            [],
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .unwrap();
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime);
+        let destination = tempfile::NamedTempFile::new().unwrap();
+        let result = reader
+            .download_pack_to_path(
+                pack_id,
+                32,
+                destination.path(),
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(Error::Corrupt {
+                stage: CorruptionStage::Inventory
+            })
+        ));
+        assert_eq!(
+            budget.usage().await.amount(BudgetDimension::FetchedBytes),
+            64
+        );
+    }
+
     #[test]
     fn streamed_pack_identity_matches_git_and_storage_hashes_across_chunks() {
         let mut content = b"PACK".to_vec();
@@ -2559,13 +2690,16 @@ mod tests {
                         1024,
                         1024,
                         &CancellationToken::new(),
-                        move |_| async move {
+                        &OperationBudget::new(
+                            crate::OperationLimits::default(),
+                            blocker_runtime.clone(),
+                        ),
+                        move |_, _| async move {
                             blocker_started.notify_one();
                             blocker_release.notified().await;
                             Ok(PackedEntry {
                                 header: Header::Tree,
                                 inflated: Bytes::new(),
-                                charged_budget: None,
                             })
                         },
                     )
@@ -2594,7 +2728,6 @@ mod tests {
                     ..Default::default()
                 },
                 Arc::clone(&runtime),
-                1,
             );
             let cancel = CancellationToken::new();
             let read = reader.read_packed_entry(
@@ -2858,7 +2991,7 @@ mod tests {
             1,
         )
         .expect("reader");
-        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime, 1);
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime);
         let lookups = reader
             .lookup_batch_from_pack_indexes(&[[1; 20]], &budget, &CancellationToken::new())
             .await
@@ -2962,7 +3095,7 @@ mod tests {
             pack.committed_generation,
         )
         .expect("reader");
-        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime, 1);
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime);
         let catalog_request = vec![catalog_oid; PACK_INDEX_LOOKUP_MIN_OBJECTS];
         let catalog_lookups = reader
             .lookup_batch_for_read(

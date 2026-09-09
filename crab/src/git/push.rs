@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crab_auth::{CrabAuthProvider, PushFinalizeResponse, PushRefUpdate};
 use crab_coordination::active_active::ActiveActiveReplicationConfig;
+use crab_remote::protected::ProtectedPushPlan;
 use crab_remote_git::{
     Error as RemoteGitError, ObjectLimits as RemoteGitObjectLimits,
     OperationContext as RemoteGitOperationContext, OperationKind as RemoteGitOperationKind,
@@ -42,7 +43,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use crate::audit::{AuditEvent, AuditOutcome, NewAuditEvent, append_event};
-use crate::coordination::heartbeat::LockHeartbeat;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::metrics::Metrics;
 use crate::core::perf_phase::{PerfPhaseSink, PhaseTimer};
@@ -58,7 +58,7 @@ use crate::metadata::manifest::{
 };
 use crate::replication::{ActiveActivePushPlan, ReplicationConfig};
 use crate::storage::StoreLayout;
-use crate::storage::store::{MultipartJournal, StagedWrite, Store};
+use crate::storage::store::{MultipartJournal, Store};
 use crab_coordination::write_coordinator::{
     CommitOutcome, CoordinatedRefUpdate, PushTransactionState, WriteCoordinator,
     commit_uploaded_push_refs,
@@ -1411,52 +1411,15 @@ fn build_xorb_info_from_placements(
     xorb_hash: MerkleHash,
     chunks: &mut [(&MerkleHash, &ChunkPlacement)],
 ) -> Result<MDBXorbInfo> {
-    chunks.sort_by_key(|(_, p)| p.chunk_index);
-
-    for (expected, (_, p)) in chunks.iter().enumerate() {
-        if p.xorb_hash != xorb_hash {
-            return Err(CrabError::Internal(format!(
-                "xorb info for {} received placement for {}",
-                xorb_hash.hex(),
-                p.xorb_hash.hex()
-            )));
-        }
-        let expected = usize_to_shard_u32("xorb placement chunk index", expected)?;
-        if p.chunk_index != expected {
-            return Err(CrabError::Internal(format!(
-                "xorb info for {} requires dense zero-based chunk indices; expected {}, got {}",
-                xorb_hash.hex(),
-                expected,
-                p.chunk_index
-            )));
-        }
-    }
-
-    let xorb_entry_count = usize_to_shard_u32("xorb chunk count", chunks.len())?;
-    let total_uncompressed = chunks.iter().try_fold(0u32, |acc, (_, p)| {
-        checked_shard_add("xorb uncompressed bytes", acc, p.uncompressed_size)
-    })?;
-    let header = XorbChunkSequenceHeader::new(xorb_hash, xorb_entry_count, total_uncompressed);
-
-    let mut byte_offset = 0u32;
-    let mut entries = Vec::with_capacity(chunks.len());
-    for (chunk_hash, p) in chunks.iter() {
-        entries.push(XorbChunkSequenceEntry::new(
-            **chunk_hash,
-            p.uncompressed_size,
-            byte_offset,
-        ));
-        byte_offset = checked_shard_add(
-            "xorb chunk byte range start",
-            byte_offset,
-            p.uncompressed_size,
-        )?;
-    }
-
-    Ok(MDBXorbInfo {
-        metadata: header,
-        chunks: entries,
-    })
+    let placements = chunks
+        .iter()
+        .map(|(hash, placement)| {
+            let mut placement = (*placement).clone();
+            placement.chunk_hash = **hash;
+            placement
+        })
+        .collect::<Vec<_>>();
+    crab_xet::shard::xorb_info_from_placements(xorb_hash, &placements).map_err(Into::into)
 }
 
 fn build_complete_xorb_info_map(
@@ -2747,9 +2710,6 @@ const PUSH_LOCK_WAIT_BACKOFF_BASE: Duration = Duration::from_millis(250);
 /// Cap for opt-in push-lock wait polling.
 const PUSH_LOCK_WAIT_BACKOFF_CAP: Duration = Duration::from_secs(2);
 
-/// Cap after a same-ref contender has published its successor signal.
-const PUSH_LOCK_SUCCESSOR_POLL_CAP: Duration = Duration::from_millis(250);
-
 // Five reusable objects bound every admission probe. Pushes reserve capacity
 // for xorb worker width and estimated xorb plus Git payload, so ordinary
 // pushes retain five-way concurrency while heavier clients consume more slots.
@@ -3018,22 +2978,6 @@ pub enum ProtectedPushBackend {
         push_id: uuid::Uuid,
         request: crab_auth::managed::PushFinalizeRequest,
     },
-}
-
-#[derive(Serialize)]
-struct ProtectedPushPlan {
-    schema_version: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mirror_plan_id: Option<String>,
-    repo_prefix: String,
-    push_id: String,
-    upload_prefix: String,
-    base_manifest_generation: Option<u64>,
-    base_manifest_etag: Option<String>,
-    ref_updates: Vec<PushRefUpdate>,
-    candidate_manifest: Manifest,
-    push_commit_receipt: crab_metadata::receipts::PushCommitReceipt,
-    staged_objects: Vec<StagedWrite>,
 }
 
 /// Default push lock TTL: 5 minutes.
@@ -3541,6 +3485,8 @@ pub enum PushRejectReason {
         /// Diagnostic output from the integration command.
         message: String,
     },
+    /// A publication may have committed; reconcile before any explicit retry.
+    CommitIndeterminate { commit_identity: String },
     /// Object-store transport failed after its bounded retry policy.
     NetworkTransient(String),
     /// Object-store throttling persisted after bounded retries.
@@ -3580,6 +3526,7 @@ impl PushRejectReason {
             Self::UnknownRefname { .. } => "unknown-refname",
             Self::MalformedObject { .. } => "malformed-object",
             Self::IntegrationFailed { .. } => "integration-failed",
+            Self::CommitIndeterminate { .. } => "indeterminate",
             Self::NetworkTransient(_) | Self::Throttled { .. } => "transient",
             Self::Internal(_) => "internal",
         }
@@ -3619,6 +3566,11 @@ impl PushRejectReason {
     /// diagnostic detail is not dropped.
     #[must_use]
     pub fn from_error(err: &CrabError) -> Self {
+        if let Some(commit_identity) = uncertain_commit_identity(err) {
+            return Self::CommitIndeterminate {
+                commit_identity: commit_identity.to_owned(),
+            };
+        }
         match err {
             CrabError::NonFastForward { have, want, .. } => Self::NonFastForward {
                 have: have.clone(),
@@ -3645,12 +3597,6 @@ impl PushRejectReason {
                 kind: kind.clone(),
                 detail: detail.clone(),
             },
-            error if is_uncertain_ref_journal_commit(error) => {
-                // The marker write may have reached storage, so replay must
-                // use the transaction identity and remote state rather than
-                // treating this as a permanent local I/O failure.
-                Self::NetworkTransient(error.to_string())
-            }
             CrabError::NetworkTransient(_) => Self::NetworkTransient(err.to_string()),
             CrabError::Throttled { retry_after, .. } => Self::Throttled {
                 retry_after_secs: retry_after.map(|delay| {
@@ -3668,19 +3614,20 @@ impl PushRejectReason {
     }
 }
 
-fn is_uncertain_ref_journal_commit(error: &CrabError) -> bool {
+fn uncertain_commit_identity(error: &CrabError) -> Option<&str> {
     let CrabError::Io(io_error) = error else {
-        return false;
+        return None;
     };
-    io_error
-        .get_ref()
-        .and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>())
-        .is_some_and(|metadata| {
-            matches!(
-                metadata,
-                crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
-            )
-        })
+    let source = io_error.get_ref()?;
+    match source.downcast_ref::<crab_metadata::error::MetadataError>()? {
+        crab_metadata::error::MetadataError::RefJournalCommitUncertain {
+            transaction_id, ..
+        } => Some(transaction_id),
+        crab_metadata::error::MetadataError::ManifestCommitUncertain {
+            candidate_digest, ..
+        } => Some(candidate_digest),
+        _ => None,
+    }
 }
 
 impl fmt::Display for PushRejectReason {
@@ -3743,6 +3690,10 @@ impl fmt::Display for PushRejectReason {
             Self::IntegrationFailed { command, message } => {
                 write!(f, "{command} failed: {message}")
             }
+            Self::CommitIndeterminate { commit_identity } => write!(
+                f,
+                "commit outcome indeterminate for {commit_identity}; reconcile durable evidence before retrying"
+            ),
             Self::NetworkTransient(message) => write!(f, "transient network failure: {message}"),
             Self::Throttled {
                 retry_after_secs: Some(delay),
@@ -4130,10 +4081,6 @@ pub struct PushPipeline {
     /// Push locks + heartbeats acquired in step 12, released in step 13/14.
     lock_state: tokio::sync::Mutex<Option<LockState>>,
     lock_acquired_at: tokio::sync::Mutex<Option<Instant>>,
-    /// Active-active pushes keep the GC writer fence from object upload
-    /// through coordinator commit. Protected pushes use the receive service's
-    /// equivalent fence and therefore do not populate this slot.
-    gc_writer: tokio::sync::Mutex<Option<crate::maintenance::GcWriterLeases>>,
     /// Shard payloads + hashes produced by step 8, consumed by step 9.
     /// `Bytes` keeps upload/cache readers zero-copy after shard construction.
     shard_results: tokio::sync::Mutex<Vec<(Bytes, MerkleHash)>>,
@@ -5523,15 +5470,11 @@ async fn read_uploaded_xorb_payload_for_cache_warm(
     Ok(bytes)
 }
 
-/// Active push lock and its optional heartbeat task.
-pub(crate) struct PushLockLease {
-    lock: PushLock,
-    heartbeat: Option<LockHeartbeat>,
-}
+pub(crate) type PushLockLease = crab_remote::publication::PublicationLeases;
 
 /// Active push locks and their optional heartbeat tasks.
 struct LockState {
-    leases: Vec<PushLockLease>,
+    leases: PushLockLease,
 }
 
 fn push_lock_refs(specs: &[PushSpec]) -> Vec<String> {
@@ -5544,192 +5487,27 @@ fn push_lock_refs(specs: &[PushSpec]) -> Vec<String> {
     refs.into_iter().collect()
 }
 
-async fn release_lock_committed_by_visible_transaction(
-    store: &Store,
-    prefix: &str,
-    ref_name: &str,
-    holder: &str,
-) -> Result<bool> {
-    let router = StoreLayout::new(store.clone(), prefix.to_owned());
-    let head = crate::metadata::manifest::read_ref_journal_head(store, &router, ref_name).await?;
-    let Some(transaction_id) = head.visible_transaction else {
-        return Ok(false);
-    };
-    let transaction =
-        crate::metadata::manifest::read_ref_journal_transaction(store, &router, &transaction_id)
-            .await?;
-    if !transaction
-        .edits
-        .iter()
-        .any(|edit| edit.ref_name == ref_name && edit.lock_holder.as_deref() == Some(holder))
-    {
-        return Ok(false);
-    }
-
-    PushLock::release_ref_if_holder(store.inner(), prefix, ref_name, holder)
-        .await
-        .map_err(CrabError::from)
-}
-
 pub(crate) async fn acquire_push_lock_leases(
     store: &Store,
     prefix: &str,
     specs: &[PushSpec],
     config: &PushConfig,
     cancel: &CancellationToken,
-) -> Result<Vec<PushLockLease>> {
-    let refs = push_lock_refs(specs);
-    let deadline = (!config.lock_wait.is_zero()).then(|| Instant::now() + config.lock_wait);
-    let mut wait_attempt = 0;
-    let mut checked_committed_holders = HashSet::new();
-    let mut announced_successor = false;
-    let mut acquire_context = PushLockAcquireContext::new(Arc::clone(store.inner()));
-
-    loop {
-        let mut leases = Vec::with_capacity(refs.len().max(1));
-        let mut retryable_lock_error = None;
-        let mut reclaimed_committed_lock = false;
-
-        for ref_name in refs.iter().map(Some).chain(refs.is_empty().then_some(None)) {
-            if let Err(e) = check_cancelled(cancel) {
-                release_push_lock_leases(leases).await;
-                return Err(e);
-            }
-
-            let (target, acquired) = match ref_name {
-                Some(ref_name) => (
-                    ref_name.as_str(),
-                    acquire_context
-                        .acquire_ref(prefix, ref_name, config.lock_ttl)
-                        .await,
-                ),
-                None => (
-                    crab_coordination::BATCH_RESOURCE,
-                    acquire_context
-                        .acquire_internal(
-                            prefix,
-                            crab_coordination::BATCH_RESOURCE,
-                            config.lock_ttl,
-                        )
-                        .await,
-                ),
-            };
-            let acquired = acquired.map_err(CrabError::from);
-            if let (Some(ref_name), Err(CrabError::PushLockHeld { holder, .. })) =
-                (ref_name, &acquired)
-            {
-                let holder_key = (ref_name.to_owned(), holder.to_owned());
-                if checked_committed_holders.insert(holder_key) {
-                    if !holder.is_empty() {
-                        match PushLock::announce_ref_successor(
-                            store.inner(),
-                            prefix,
-                            ref_name,
-                            holder,
-                        )
-                        .await
-                        {
-                            Ok(()) => announced_successor = true,
-                            Err(error) => {
-                                warn!(
-                                    %ref_name,
-                                    %holder,
-                                    %error,
-                                    "could not announce queued ref-lock successor"
-                                );
-                            }
-                        }
-                    }
-                    match release_lock_committed_by_visible_transaction(
-                        store, prefix, ref_name, holder,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            info!(%ref_name, %holder, "reclaimed ref lock after visible commit");
-                            reclaimed_committed_lock = true;
-                            break;
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            warn!(
-                                %ref_name,
-                                %holder,
-                                %error,
-                                "could not verify whether held ref lock already committed"
-                            );
-                        }
-                    }
-                }
-            }
-            let lock = match acquired {
-                Ok(lock) => lock,
-                Err(e @ CrabError::PushLockHeld { .. }) if deadline.is_some() => {
-                    retryable_lock_error = Some(e);
-                    break;
-                }
-                Err(e) => {
-                    release_push_lock_leases(leases).await;
-                    return Err(e);
-                }
-            };
-
-            let heartbeat = config.heartbeat_interval.map(|interval| {
-                LockHeartbeat::spawn(
-                    store.clone(),
-                    lock.path().to_owned(),
-                    lock.holder().to_owned(),
-                    lock.ttl(),
-                    interval,
-                    cancel.clone(),
-                )
-            });
-
-            debug!(
-                lock_target = %target,
-                lock_path = %lock.path(),
-                heartbeat_active = heartbeat.is_some(),
-                "push lock acquired"
-            );
-            leases.push(PushLockLease { lock, heartbeat });
-        }
-
-        if reclaimed_committed_lock {
-            release_push_lock_leases(leases).await;
-            continue;
-        }
-
-        let Some(err) = retryable_lock_error else {
-            return Ok(leases);
-        };
-
-        release_push_lock_leases(leases).await;
-        let Some(deadline) = deadline else {
-            return Err(err);
-        };
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(err);
-        }
-
-        let remaining = deadline.saturating_duration_since(now);
-        let delay = if announced_successor {
-            push_lock_wait_delay_with_cap(wait_attempt, remaining, PUSH_LOCK_SUCCESSOR_POLL_CAP)
-        } else {
-            push_lock_wait_delay(wait_attempt, remaining)
-        };
-        wait_attempt = wait_attempt.saturating_add(1);
-        debug!(
-            attempt = wait_attempt,
-            delay_ms = delay.as_millis(),
-            error = %err,
-            "push lock held, waiting before retry"
-        );
-        tokio::select! {
-            () = tokio::time::sleep(delay) => {}
-            () = cancel.cancelled() => return Err(CrabError::Cancelled),
-        }
-    }
+) -> Result<PushLockLease> {
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
+    crab_remote::publication::acquire_leases(
+        store.as_storage(),
+        &layout,
+        push_lock_refs(specs),
+        crab_remote::publication::LeaseOptions {
+            ttl: config.lock_ttl,
+            wait: config.lock_wait,
+            renewal_interval: config.heartbeat_interval,
+        },
+        cancel,
+    )
+    .await
+    .map_err(CrabError::from)
 }
 
 async fn acquire_push_admission_lock(
@@ -5843,16 +5621,8 @@ pub(crate) async fn compact_ref_journal_for_reader(
     .map_err(CrabError::from)
 }
 
-pub(crate) async fn release_push_lock_leases(mut leases: Vec<PushLockLease>) {
-    while let Some(PushLockLease { lock, heartbeat }) = leases.pop() {
-        if let Some(hb) = heartbeat {
-            hb.stop().await;
-            debug!(lock_path = %lock.path(), "heartbeat stopped");
-        }
-        if let Err(e) = lock.release().await {
-            warn!(error = %e, "failed to release push lock");
-        }
-    }
+pub(crate) async fn release_push_lock_leases(leases: PushLockLease) {
+    leases.release().await;
 }
 
 async fn while_admitted_until_commit<T>(
@@ -6731,7 +6501,6 @@ impl PushPipeline {
             commit_entries: tokio::sync::Mutex::new(Vec::new()),
             lock_state: tokio::sync::Mutex::new(None),
             lock_acquired_at: tokio::sync::Mutex::new(None),
-            gc_writer: tokio::sync::Mutex::new(None),
             shard_results: tokio::sync::Mutex::new(Vec::new()),
             file_shard_index: tokio::sync::Mutex::new(HashMap::new()),
             pending_file_index_plan: tokio::sync::Mutex::new(Vec::new()),
@@ -8612,39 +8381,19 @@ impl PushPipeline {
             self.router.repo_prefix().to_owned(),
             self.router.global_prefix().to_owned(),
         );
-        let namespace_layout = &layout;
-        let published = crab_write::with_ref_namespace(
+        let Some(new_etag) = crab_write::initialize::publish_initial_manifest(
             storage,
             &layout,
+            current,
+            manifest,
             self.config.lock_ttl,
             &self.cancel,
-            |cancel| async move {
-                check_cancelled(&cancel)?;
-                let fresh = crab_metadata::manifest_store::read_repository_snapshot(
-                    storage,
-                    namespace_layout,
-                )
-                .await?;
-                // Immutable uploads can overlap another first import or journal create.
-                // Recheck under the same namespace gate used by journal publication.
-                if fresh.manifest_etag != current.manifest_etag
-                    || !fresh.journal.refs.is_empty()
-                    || !fresh.journal.transactions.is_empty()
-                    || !fresh.journal.visible_heads.is_empty()
-                {
-                    return Ok::<_, CrabError>(false);
-                }
-                check_cancelled(&cancel)?;
-                let new_etag =
-                    write_manifest_cas(store, &self.router, manifest, &fresh.manifest_etag).await?;
-                *self.manifest_etag.lock().await = Some(new_etag);
-                Ok(true)
-            },
         )
-        .await?;
-        if !published {
+        .await?
+        else {
             return Ok(false);
-        }
+        };
+        *self.manifest_etag.lock().await = Some(new_etag);
         self.git_visibility_published
             .store(true, std::sync::atomic::Ordering::Relaxed);
         // The manifest and complete Git-visibility proof are authoritative.
@@ -8797,8 +8546,8 @@ impl PushPipeline {
                 .map(|state| {
                     state
                         .leases
-                        .iter()
-                        .map(|lease| (lease.lock.path().to_owned(), lease.lock.holder().to_owned()))
+                        .lock_identities()
+                        .map(|(path, holder)| (path.to_owned(), holder.to_owned()))
                         .collect::<HashMap<_, _>>()
                 })
                 .unwrap_or_default()
@@ -8895,36 +8644,26 @@ impl PushPipeline {
             self.router.repo_prefix().to_owned(),
             self.router.global_prefix().to_owned(),
         );
-        let committed = match self.config.mirror_plan_id.as_deref() {
-            Some(plan_id) => {
-                crab_write::journal::commit_edits_for_plan(
-                    storage,
-                    &layout,
-                    &current_snapshot,
-                    edits,
-                    head,
-                    packs,
-                    shards,
-                    crab_write::journal::MirrorPlanContext::new(
-                        plan_id,
-                        self.config.lock_ttl,
-                        &self.cancel,
-                    ),
-                )
-                .await?
-            }
-            None => {
-                crab_write::journal::commit_edits(
-                    storage,
-                    &layout,
-                    &current_snapshot,
-                    edits,
-                    head,
-                    packs,
-                    shards,
-                    crab_write::journal::CommitOptions::new(self.config.lock_ttl, &self.cancel),
-                )
-                .await?
+        let mut options =
+            crab_write::journal::CommitOptions::new(self.config.lock_ttl, &self.cancel);
+        if let Some(plan_id) = self.config.mirror_plan_id.as_deref() {
+            options = options.with_plan(plan_id);
+        }
+        let result = crab_write::journal::commit_edits(
+            storage,
+            &layout,
+            &current_snapshot,
+            edits,
+            head,
+            packs,
+            shards,
+            options,
+        )
+        .await;
+        let committed = match crab_remote::publication::journal_outcome(result)? {
+            crab_remote::publication::CommitOutcome::Committed(committed) => committed,
+            crab_remote::publication::CommitOutcome::Indeterminate { source, .. } => {
+                return Err((*source).into());
             }
         };
         info!(
@@ -9225,7 +8964,7 @@ impl PushPipeline {
             base_manifest_etag: base_etag,
             ref_updates: session.ref_updates.clone(),
             candidate_manifest: manifest,
-            push_commit_receipt,
+            push_commit_receipt: Some(push_commit_receipt),
             staged_objects,
         };
         let plan_bytes = serde_json::to_vec_pretty(&plan)
@@ -13682,10 +13421,7 @@ impl PushPipeline {
 
         debug!(
             lock_count = leases.len(),
-            heartbeat_count = leases
-                .iter()
-                .filter(|lease| lease.heartbeat.is_some())
-                .count(),
+            ref_heartbeat_count = leases.renewing_ref_count(),
             "push locks acquired before uploads, heartbeats spawned"
         );
 
@@ -13784,13 +13520,10 @@ impl PushPipeline {
     /// pipeline for the ref CAS and cleanup phases. Once installed,
     /// [`Self::acquire_push_lock`] is a no-op and the pipeline's normal
     /// success/failure paths release the lock and stop the heartbeat.
-    async fn install_locks(&self, leases: Vec<PushLockLease>) {
+    async fn install_locks(&self, leases: PushLockLease) {
         debug!(
             lock_count = leases.len(),
-            heartbeat_count = leases
-                .iter()
-                .filter(|lease| lease.heartbeat.is_some())
-                .count(),
+            ref_heartbeat_count = leases.renewing_ref_count(),
             "installing pre-acquired push locks into pipeline"
         );
         *self.lock_state.lock().await = Some(LockState { leases });
@@ -16046,7 +15779,6 @@ impl PushPipeline {
     /// after all uploads succeed. If any step fails, the early return
     /// leaves staging untouched.
     async fn on_failure(&self) {
-        self.release_active_active_gc_writer().await;
         self.stop_heartbeat_and_release_lock().await;
         self.clear_staging_push_inflight().await;
         debug!("step 14: failure path — staging/ChunkIndex unchanged");
@@ -16080,37 +15812,6 @@ impl PushPipeline {
         CrabError::PushPartialOutcome {
             outcomes: Box::new(PushResult::new(outcomes)),
             source: Box::new(source),
-        }
-    }
-
-    async fn acquire_active_active_gc_writer(&self) -> Result<()> {
-        if self.config.protected_push.is_some() || self.config.active_active_replication.is_none() {
-            return Ok(());
-        }
-        let Some(store) = &self.store else {
-            return Err(CrabError::Configuration {
-                key: "replication.gc_fence".to_owned(),
-                origin: "active-active push requires a write store for GC writer admission"
-                    .to_owned(),
-            });
-        };
-        let leases = crate::maintenance::GcWriterLeases::acquire(
-            store,
-            self.router.global_prefix(),
-            self.router.repo_prefix(),
-            &self.cancel,
-        )
-        .await?;
-        *self.gc_writer.lock().await = Some(leases);
-        Ok(())
-    }
-
-    async fn release_active_active_gc_writer(&self) {
-        let leases = self.gc_writer.lock().await.take();
-        if let Some(leases) = leases
-            && let Err(error) = leases.release().await
-        {
-            warn!(error = %error, "failed to release active-active GC writer fence");
         }
     }
 
@@ -16174,7 +15875,6 @@ impl PushPipeline {
                 // A pre-locked native push can return an all-rejected outcome
                 // before post-success cleanup. Release here as the final owner
                 // boundary; completed pushes have already cleared this state.
-                self.release_active_active_gc_writer().await;
                 self.stop_heartbeat_and_release_lock().await;
                 outcomes
             }
@@ -16315,10 +16015,6 @@ impl PushPipeline {
         let push_lock_result = self.acquire_push_lock().await;
         self.emit_perf_phase(push_lock_phase.finish(0, 0, 0));
         self.at_stage(PushFailureStage::Lock, push_lock_result)?;
-        self.at_stage(
-            PushFailureStage::Admission,
-            self.acquire_active_active_gc_writer().await,
-        )?;
         if let Some((sha_map, decisions)) = preflight.as_mut() {
             *decisions = self.at_stage(
                 PushFailureStage::Preflight,
@@ -16803,7 +16499,7 @@ pub(crate) async fn run_push_batch_with_locks(
     metrics: Option<Arc<Metrics>>,
     cancel: CancellationToken,
     progress: Option<Arc<NativePushProgress>>,
-    leases: Vec<PushLockLease>,
+    leases: PushLockLease,
     prepopulated: Option<PrePopulatedWalk>,
 ) -> PushResult {
     if specs.is_empty() {
@@ -20830,6 +20526,7 @@ mod tests {
         pipeline: &PushPipeline,
         store: &GatedPutStore,
         objects: &[ObjectMeta],
+        require_admission: bool,
     ) {
         let prefix = pipeline.router.repo_prefix();
         let ref_lock = crab_coordination::push_lock_path(prefix, "refs/heads/main").unwrap();
@@ -20844,9 +20541,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            locks.len() >= 2,
-            "fixture must exercise ref and admission leases"
+            locks
+                .iter()
+                .any(|object| object.location.as_ref() == ref_lock),
+            "fixture must exercise the ref lease"
         );
+        if require_admission {
+            assert!(
+                locks
+                    .iter()
+                    .any(|object| object.location.as_ref().starts_with(&slots)),
+                "fixture must exercise push admission"
+            );
+        }
         for object in locks {
             let bytes = store
                 .inner
@@ -21012,7 +20719,7 @@ mod tests {
                     "the admitted sibling must finish before push returns"
                 );
                 assert_eq!(result.failure_stage, Some(PushFailureStage::GitPackUpload));
-                assert_pack_pipeline_leases_released(&pipeline, &store, &objects).await;
+                assert_pack_pipeline_leases_released(&pipeline, &store, &objects, true).await;
             })
             .await;
     }
@@ -21097,8 +20804,8 @@ mod tests {
                     ).await.unwrap();
                     assert!(manifest.refs.is_empty());
                     let objects = store.inner.list(None).try_collect::<Vec<_>>().await.unwrap();
-                    assert_pack_pipeline_leases_released(&pipeline, &store, &objects).await;
-                    assert!(reached_admission && !result.all_ok() && !uploaded,
+                    assert_pack_pipeline_leases_released(&pipeline, &store, &objects, false).await;
+                    assert!(!reached_admission && !result.all_ok() && !uploaded,
                         "LFS publication escaped writer admission: global={global}, reached={reached_admission}, uploaded={uploaded}");
                 }
             })
@@ -21153,7 +20860,7 @@ mod tests {
                     2
                 );
                 assert_eq!(result.failure_stage, Some(PushFailureStage::GitPackUpload));
-                assert_pack_pipeline_leases_released(&pipeline, &store, &objects).await;
+                assert_pack_pipeline_leases_released(&pipeline, &store, &objects, true).await;
             })
             .await;
     }
@@ -22672,17 +22379,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn announced_successor_poll_stays_inside_handoff_window() {
-        let delay = push_lock_wait_delay_with_cap(
-            32,
-            Duration::from_secs(30),
-            PUSH_LOCK_SUCCESSOR_POLL_CAP,
-        );
-
-        assert!(delay <= PUSH_LOCK_SUCCESSOR_POLL_CAP);
-    }
-
     #[tokio::test]
     async fn prepopulated_walk_is_reusable_for_manifest_cas_replan() {
         let mut config = PushConfig::default();
@@ -22953,7 +22649,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(leases.len(), 1);
-        assert_eq!(leases[0].lock.path(), "repo/locks/internal/batch/lock");
+        assert_eq!(
+            leases.lock_identities().next().map(|(path, _)| path),
+            Some("repo/locks/internal/batch/lock")
+        );
         release_push_lock_leases(leases).await;
     }
 
@@ -23600,7 +23299,7 @@ mod tests {
         )
         .await
         .expect("acquire predecessor ref lock");
-        let predecessor_holder = leases[0].lock.holder().to_owned();
+        let predecessor_holder = leases.holders()["refs/heads/main"].clone();
         PushLock::announce_ref_successor(
             store.inner(),
             router.repo_prefix(),
@@ -24881,8 +24580,12 @@ mod tests {
         let state = pipeline.lock_state.lock().await;
         let leases = &state.as_ref().expect("lock state").leases;
         assert_eq!(leases.len(), 1);
-        assert!(leases[0].lock.path().contains("refs/heads/dev"));
-        assert!(!leases[0].lock.path().contains("refs/heads/main"));
+        let paths = leases
+            .lock_identities()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
+        assert!(paths[0].contains("refs/heads/dev"));
+        assert!(!paths[0].contains("refs/heads/main"));
         drop(state);
         pipeline.stop_heartbeat_and_release_lock().await;
     }
@@ -24950,7 +24653,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let holder = abandoned[0].lock.holder().to_owned();
+        let holder = abandoned.holders()["refs/heads/main"].clone();
         let head =
             crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
                 .await
@@ -25062,7 +24765,7 @@ mod tests {
                 store.inner(),
                 router.repo_prefix(),
                 "refs/heads/main",
-                held[0].lock.holder(),
+                &held.holders()["refs/heads/main"],
             )
             .await
             .unwrap()
@@ -37147,7 +36850,7 @@ mod tests {
     }
 
     #[test]
-    fn from_error_retries_uncertain_ref_journal_commit() {
+    fn from_error_preserves_uncertain_ref_journal_commit() {
         let metadata = crab_metadata::error::MetadataError::RefJournalCommitUncertain {
             transaction_id: "a".repeat(64),
             source: Box::new(crab_storage::StorageError::Throttled {
@@ -37159,7 +36862,7 @@ mod tests {
         let error = CrabError::Io(std::io::Error::other(metadata));
 
         let reason = PushRejectReason::from_error(&error);
-        assert_eq!(reason.protocol_tag(), "transient");
-        assert!(reason.is_retryable());
+        assert_eq!(reason.protocol_tag(), "indeterminate");
+        assert!(!reason.is_retryable());
     }
 }

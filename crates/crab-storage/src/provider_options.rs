@@ -63,18 +63,17 @@ pub fn s3_virtual_hosted_style_from_env() -> Option<bool> {
 /// continue to work after explicit client options are applied.
 #[must_use]
 pub fn default_client_options() -> ClientOptions {
-    let opts = ClientOptions::new()
-        .with_timeout(Duration::from_secs(300))
-        .with_connect_timeout(Duration::from_secs(10));
-
-    if std::env::var("AWS_ALLOW_HTTP")
+    let allow_http = std::env::var("AWS_ALLOW_HTTP")
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false)
-    {
-        opts.with_allow_http(true)
-    } else {
-        opts
-    }
+        .unwrap_or(false);
+    explicit_client_options(allow_http)
+}
+
+pub(crate) fn explicit_client_options(allow_http: bool) -> ClientOptions {
+    ClientOptions::new()
+        .with_timeout(Duration::from_secs(300))
+        .with_connect_timeout(Duration::from_secs(10))
+        .with_allow_http(allow_http)
 }
 
 /// Parses a SAS token query string into key-value pairs for Azure builders.

@@ -123,7 +123,8 @@ Cached results need no further shard visits.
 At most four shard scans overlap across all sessions in a process. A scan
 acquires capacity before origin I/O, then moves its permit into the blocking
 hash/recipe parser. Dropping or timing out the caller leaves that permit held
-until the worker exits; hashing and parsing stay off async workers.
+until the worker exits; hashing and parsing stay off async workers. Explicit
+session close drains these parsers before closing its reader or returning.
 
 Excluding transport retries, the read budget is:
 
@@ -137,7 +138,8 @@ origin with `crab-read::pointer_proof`, and hold GC fences and recheck the exact
 publication base before accepting a write. The composing request must still own
 an overall deadline and admission for the other receive stages. A timed-out
 lookup may finish its current bounded parser in the background, retaining its
-permit until completion. Pointer content proofs have their own four-operation
+permit until completion; the caller must await session close before releasing
+its operation resources. Pointer content proofs have their own four-operation
 process bound and include admission queue time in their deadline.
 
 ## Usage
@@ -196,3 +198,10 @@ nonempty repository. Read-side name and object validation remains mandatory.
 This extends the readable states of the existing serialized schema. Deploy the
 updated readers and publication services together: v1.0.1 and v1.1.0 reject this
 state. Existing manifests with resolved HEADs require no migration.
+
+`SharedFileIndexLookup::for_shard_index` lazily opens the canonical shard lookup
+from a caller-captured immutable root and generation. It never reads the latest
+manifest or opens SlateDB. The root cardinality is checked before segment
+fetches, and the normal verified segment reader is reused. Clones share lookup
+state until explicit close; scope and content retention remain the caller's
+responsibility.

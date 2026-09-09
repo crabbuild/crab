@@ -36,6 +36,13 @@ export const cliDocs = defineDocs({
   },
 })
 
+export const sdkDocs = defineDocs({
+  dir: "content/docs/sdk",
+  docs: {
+    schema: externalDocsSchema,
+  },
+})
+
 const guideSchema = pageSchema.extend({
   date: z.string().optional(),
   author: z.string().optional(),

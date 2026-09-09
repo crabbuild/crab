@@ -518,6 +518,8 @@ pub struct ArchiveEntry {
     pub mode: EntryMode,
     /// Semantic entry kind.
     pub kind: EntryKind,
+    /// Verified blob metadata; absent for directories and submodules.
+    pub metadata: Option<crate::BlobMetadata>,
     /// Verified Git representation bytes for blobs and symlinks.
     pub bytes: Option<Bytes>,
 }

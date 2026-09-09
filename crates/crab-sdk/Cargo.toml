@@ -1,0 +1,84 @@
+[package]
+name = "crab-sdk"
+version = "0.1.0"
+publish = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Rust client for Crab repositories."
+
+[features]
+default = []
+remote = ["dep:tokio", "dep:tokio-util", "dep:crab-remote-git", "dep:crab-storage", "dep:crab-metadata", "dep:object_store", "dep:blake3"]
+write = ["remote", "dep:crab-remote", "crab-remote/publication", "dep:crab-write", "dep:crab-coordination", "dep:crab-git", "dep:crab-read", "dep:crab-lfs", "dep:crab-staging", "dep:crab-xet", "crab-xet/chunker", "dep:crab-types", "dep:serde", "dep:serde_json", "dep:uuid", "dep:tempfile", "dep:gix-object"]
+local = ["write", "content", "crab-remote/local", "dep:dunce", "dep:toml"]
+managed = ["remote", "dep:crab-auth", "dep:crab-auth-store", "dep:crab-git", "dep:uuid"]
+
+content = ["remote", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-read", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types"]
+
+[dependencies]
+crab-remote = { workspace = true, optional = true }
+crab-write = { workspace = true, optional = true }
+crab-coordination = { workspace = true, optional = true, features = ["object-store-lock"] }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+bytes = { workspace = true }
+dunce = { workspace = true, optional = true }
+gix-hash = { workspace = true, features = ["sha1"] }
+gix-object = { workspace = true, optional = true }
+gix-validate = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, optional = true, features = ["fs", "io-util", "process", "rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true, optional = true, features = ["rt"] }
+crab-remote-git = { workspace = true, optional = true }
+crab-storage = { workspace = true, optional = true }
+crab-metadata = { workspace = true, optional = true, features = ["remote-index", "storage"] }
+object_store = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+crab-lfs = { workspace = true, optional = true }
+crab-git = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+crab-read = { workspace = true, optional = true }
+crab-cache = { workspace = true, optional = true }
+crab-cache-store = { workspace = true, optional = true }
+crab-types = { workspace = true, optional = true }
+crab-staging = { workspace = true, optional = true }
+crab-xet = { workspace = true, optional = true }
+crab-auth = { workspace = true, optional = true, features = ["oidc-client"] }
+crab-auth-store = { workspace = true, optional = true, features = ["managed-service"] }
+toml = { workspace = true, optional = true }
+
+[dev-dependencies]
+sha2 = "0.10"
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+tempfile = { workspace = true }
+crab-git = { workspace = true }
+crab-xet = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+serde_json = { workspace = true }
+
+[[example]]
+name = "remote_read"
+required-features = ["remote"]
+
+[[example]]
+name = "remote_archive"
+required-features = ["remote"]
+
+[[example]]
+name = "core_crab_read"
+required-features = ["content"]
+
+[[example]]
+name = "remote_edit"
+required-features = ["content", "write"]
+
+[[example]]
+name = "resolve_conflict"
+required-features = ["local"]

@@ -846,15 +846,16 @@ impl RemoteGitSnapshot {
                     .charge(BudgetDimension::Depth, entry_depth)
                     .await?;
                 operation.charge(BudgetDimension::ArchiveEntries, 1).await?;
-                let bytes = if matches!(entry.kind, EntryKind::Blob | EntryKind::Symlink) {
-                    let blob = parse_blob(operation.read_object(entry.oid).await?, entry.mode)?;
-                    operation
-                        .charge(BudgetDimension::ArchiveBytes, blob.bytes.len() as u64)
-                        .await?;
-                    Some(blob.bytes)
-                } else {
-                    None
-                };
+                let (bytes, metadata) =
+                    if matches!(entry.kind, EntryKind::Blob | EntryKind::Symlink) {
+                        let blob = parse_blob(operation.read_object(entry.oid).await?, entry.mode)?;
+                        operation
+                            .charge(BudgetDimension::ArchiveBytes, blob.bytes.len() as u64)
+                            .await?;
+                        (Some(blob.bytes), Some(blob.metadata))
+                    } else {
+                        (None, None)
+                    };
                 entries.try_reserve(1).map_err(|source| Error::Allocation {
                     requested: mem::size_of::<ArchiveEntry>(),
                     source,
@@ -868,6 +869,7 @@ impl RemoteGitSnapshot {
                     mode: entry.mode,
                     kind: entry.kind,
                     bytes,
+                    metadata,
                 });
             }
         }
@@ -953,41 +955,28 @@ impl RemoteGitSnapshot {
     /// operation's tracked cleanup fallback; normal completion reports locator
     /// close failures as the terminal stream error.
     pub fn archive_stream(&self, operation: OperationContext) -> Result<ArchiveStream> {
+        let reader = self.archive_reader(operation)?;
+        Ok(Box::pin(futures_util::stream::try_unfold(
+            reader,
+            |mut reader| async move { Ok(reader.next().await?.map(|entry| (entry, reader))) },
+        )))
+    }
+
+    /// Open a bounded archive reader with explicit asynchronous close.
+    ///
+    /// No descendants are fetched until the reader advances. Close releases the
+    /// read session without traversing remaining entries or claiming their integrity.
+    pub fn archive_reader(&self, operation: OperationContext) -> Result<ArchiveReader> {
         self.ensure_operation(&operation)?;
-        let state = ArchiveStreamState {
+        Ok(ArchiveReader {
             operation: Some(operation),
+            logical_sizes: false,
             pending: vec![ArchiveWork::Tree {
                 oid: self.root_tree_oid,
                 parent: GitPath::root(),
                 depth: 0,
             }],
-        };
-        Ok(Box::pin(futures_util::stream::try_unfold(
-            state,
-            |mut state| async move {
-                match state.next_entry().await {
-                    Ok(Some(entry)) => Ok(Some((entry, state))),
-                    Ok(None) => {
-                        let operation = state.operation.take().ok_or(Error::InternalInvariant {
-                            invariant: "archive stream completed without an operation",
-                        })?;
-                        operation.finish(Ok(())).await?;
-                        Ok(None)
-                    }
-                    Err(error) => {
-                        let operation = state.operation.take().ok_or(Error::InternalInvariant {
-                            invariant: "archive stream failed without an operation",
-                        })?;
-                        match operation.finish::<()>(Err(error)).await {
-                            Err(error) => Err(error),
-                            Ok(()) => Err(Error::InternalInvariant {
-                                invariant: "failed archive stream finalized successfully",
-                            }),
-                        }
-                    }
-                }
-            },
-        )))
+        })
     }
 
     /// Resolve one exact byte path without following symlinks.
@@ -1294,12 +1283,67 @@ enum ArchiveWork {
     },
 }
 
-struct ArchiveStreamState {
+/// Incremental archive traversal owning its operation and locator session.
+///
+/// Observe EOF or call `close` to receive finalization errors. Drop schedules
+/// tracked cleanup but cannot return its result to the consumer.
+pub struct ArchiveReader {
+    logical_sizes: bool,
     operation: Option<OperationContext>,
     pending: Vec<ArchiveWork>,
 }
 
-impl ArchiveStreamState {
+impl ArchiveReader {
+    /// Account declared logical payload sizes instead of Git representation sizes.
+    ///
+    /// Bytes remain the verified Git representation. The consumer must reconstruct
+    /// pointer content within this operation before advancing to the next entry.
+    #[must_use]
+    pub fn with_logical_content_sizes(mut self) -> Self {
+        self.logical_sizes = true;
+        self
+    }
+
+    /// Borrow the operation for reconstruction sharing this traversal's budget and session.
+    #[must_use]
+    pub fn operation(&self) -> Option<&OperationContext> {
+        self.operation.as_ref()
+    }
+
+    /// Finalize traversal while retaining a consumer's primary failure.
+    pub async fn finish<T>(mut self, result: Result<T>) -> Result<T> {
+        self.pending.clear();
+        match self.operation.take() {
+            Some(operation) => operation.finish(result).await,
+            None => result,
+        }
+    }
+
+    /// Read the next verified entry, finalizing on EOF or failure.
+    ///
+    /// After termination, further calls return EOF. Drive calls to completion to
+    /// observe finalization errors; dropping an in-flight call may leave only
+    /// tracked fallback cleanup, and traversal need not be resumable.
+    pub async fn next(&mut self) -> Result<Option<ArchiveEntry>> {
+        if self.operation.is_none() {
+            return Ok(None);
+        }
+        let result = self.next_entry().await;
+        if matches!(result, Ok(Some(_))) {
+            return result;
+        }
+        let operation = self.operation.take().ok_or(Error::InternalInvariant {
+            invariant: "archive reader finalized without an operation",
+        })?;
+        self.pending.clear();
+        operation.finish(result).await
+    }
+
+    /// Release the read session and report close errors without reading more entries.
+    pub async fn close(self) -> Result<()> {
+        self.finish(Ok(())).await
+    }
+
     async fn next_entry(&mut self) -> Result<Option<ArchiveEntry>> {
         loop {
             let Some(work) = self.pending.pop() else {
@@ -1330,15 +1374,24 @@ impl ArchiveStreamState {
                 ArchiveWork::Entry { entry, depth } => {
                     operation.charge(BudgetDimension::Depth, depth).await?;
                     operation.charge(BudgetDimension::ArchiveEntries, 1).await?;
-                    let bytes = if matches!(entry.kind, EntryKind::Blob | EntryKind::Symlink) {
-                        let blob = parse_blob(operation.read_object(entry.oid).await?, entry.mode)?;
-                        operation
-                            .charge(BudgetDimension::ArchiveBytes, blob.bytes.len() as u64)
-                            .await?;
-                        Some(blob.bytes)
-                    } else {
-                        None
-                    };
+                    let (bytes, metadata, content_size) =
+                        if matches!(entry.kind, EntryKind::Blob | EntryKind::Symlink) {
+                            let blob =
+                                parse_blob(operation.read_object(entry.oid).await?, entry.mode)?;
+                            let content_size = if self.logical_sizes {
+                                blob.metadata.logical_size.ok_or(Error::InternalInvariant {
+                                    invariant: "verified archive blob has no logical size",
+                                })?
+                            } else {
+                                blob.metadata.git_size
+                            };
+                            operation
+                                .charge(BudgetDimension::ArchiveBytes, content_size)
+                                .await?;
+                            (Some(blob.bytes), Some(blob.metadata), content_size)
+                        } else {
+                            (None, None, 0)
+                        };
                     if entry.kind == EntryKind::Tree {
                         self.pending.push(ArchiveWork::Tree {
                             oid: entry.oid,
@@ -1346,8 +1399,8 @@ impl ArchiveStreamState {
                             depth,
                         });
                     }
-                    let response_bytes = (entry.path.as_bytes().len() as u64)
-                        .saturating_add(bytes.as_ref().map_or(0, |bytes| bytes.len() as u64));
+                    let response_bytes =
+                        (entry.path.as_bytes().len() as u64).saturating_add(content_size);
                     operation
                         .charge(BudgetDimension::ResponseBytes, response_bytes)
                         .await?;
@@ -1357,6 +1410,7 @@ impl ArchiveStreamState {
                         mode: entry.mode,
                         kind: entry.kind,
                         bytes,
+                        metadata,
                     }));
                 }
             }

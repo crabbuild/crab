@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crab_metadata::git_object_locator::{
@@ -19,7 +18,7 @@ use crate::reader::{GitObject, RemoteGitObjectMetadata, RemoteGitPackedEntry};
 use crate::state::RepositoryState;
 use crate::{
     AnnotatedTag, Blame, BudgetDimension, Commit, CorruptionStage, Error, GitPath, MetricKind,
-    MetricObservation, MetricOutcome, Result, TreeEntry,
+    MetricObservation, MetricOutcome, OperationLimits, Result, TreeEntry,
 };
 
 /// Bounded semantic operation name used only for metrics and traces.
@@ -120,6 +119,14 @@ impl TrackedLocatorSession {
             .and_then(GitObjectLocatorSession::coverage)
     }
 
+    pub(crate) fn catalog_identity(
+        &self,
+    ) -> Option<crab_metadata::git_object_locator::GitObjectCatalogIdentity> {
+        self.session
+            .as_ref()
+            .and_then(GitObjectLocatorSession::catalog_identity)
+    }
+
     fn session(&self) -> Option<&GitObjectLocatorSession> {
         self.session.as_ref()
     }
@@ -161,6 +168,7 @@ impl Drop for TrackedLocatorSession {
 /// success or failure so the underlying metadata reader is closed explicitly.
 pub struct OperationContext {
     state: Arc<RepositoryState>,
+    limits: OperationLimits,
     cancellation: CancellationToken,
     deadline: tokio::time::Instant,
     deadline_stop: CancellationToken,
@@ -174,37 +182,46 @@ pub struct OperationContext {
     _task_token: TaskTrackerToken,
 }
 
-static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
-
 impl OperationContext {
     pub(crate) async fn open(
         state: Arc<RepositoryState>,
         kind: OperationKind,
         cancellation: &CancellationToken,
+        limits: OperationLimits,
     ) -> Result<Self> {
         let task_token = state.runtime.operation_token();
         let runtime_cancellation = state.runtime.background_cancellation();
         let started = Instant::now();
-        let max_duration = state.options.operation_limits().max_duration;
+        let max_duration = limits.max_duration;
         let deadline = tokio::time::Instant::now()
             .checked_add(max_duration)
             .ok_or(Error::InvalidLimit {
                 name: "operation duration",
             })?;
-        let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
+        let budget = OperationBudget::new(limits, Arc::clone(&state.runtime));
+        let operation_cancellation = cancellation.child_token();
+        let cancel_failed_open = operation_cancellation.clone().drop_guard();
+        let correlation_id = budget.id();
         let span = operation_span(correlation_id, kind);
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
-        let session = if let Some(required) = state.coverage {
+        let session = if let Some(catalog) = state.catalog_identity {
+            // Keep catalog acquisition and later page reads on the same budget.
+            // The pinned repository store remains reusable by other operations.
+            let store = state
+                .store
+                .clone()
+                .with_read_admission(budget.read_admission(operation_cancellation.clone()));
             let session = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
                 session = tokio::time::timeout_at(
                     deadline,
-                    GitObjectLocatorSession::open_for_operation(
-                        Arc::clone(state.store.inner()),
+                    GitObjectLocatorSession::open_for_catalog(
+                        Arc::clone(store.inner()),
                         state.layout.repo_prefix(),
+                        catalog,
                         max_duration,
                     ),
                 ) => session.map_err(|_| Error::Timeout {
@@ -212,14 +229,8 @@ impl OperationContext {
                 })??,
             };
             let session = TrackedLocatorSession::new(session, Arc::clone(&state.runtime));
-            if session.coverage() != Some(required) {
-                let observed = session.coverage().map(|coverage| coverage.generation);
-                session.close().await?;
-                return Err(Error::RepositoryIndexing {
-                    observed,
-                    required: required.generation,
-                });
-            }
+            // A handle pins the immutable catalog opened with its refs. Using
+            // the latest checkpoint here would invalidate it after a push.
             Some(session)
         } else if state.reader.is_some() {
             Some(TrackedLocatorSession::new(
@@ -243,7 +254,7 @@ impl OperationContext {
                 operation: "open locator",
             });
         }
-        let operation_cancellation = cancellation.child_token();
+        let operation_cancellation = cancel_failed_open.disarm();
         let deadline_stop = CancellationToken::new();
         let deadline_cancellation = operation_cancellation.clone();
         let deadline_finished = deadline_stop.clone();
@@ -257,12 +268,9 @@ impl OperationContext {
             }
         });
         Ok(Self {
-            budget: OperationBudget::new(
-                state.options.operation_limits(),
-                Arc::clone(&state.runtime),
-                correlation_id,
-            ),
+            budget,
             state,
+            limits,
             cancellation: operation_cancellation,
             deadline,
             deadline_stop,
@@ -312,9 +320,7 @@ impl OperationContext {
             Ok(_) if timed_out => Err(Error::Timeout {
                 operation: "repository operation",
             }),
-            Err(Error::Cancelled) if timed_out => Err(Error::Timeout {
-                operation: "repository operation",
-            }),
+            Err(error) if timed_out => Err(error.after_interruption(true)),
             result => result,
         };
         let close = match self.session.take() {
@@ -367,7 +373,7 @@ impl OperationContext {
     /// Return the maximum number of logical objects this operation may read.
     #[must_use]
     pub fn max_logical_objects(&self) -> u64 {
-        self.state.options.operation_limits().max_logical_objects
+        self.limits.max_logical_objects
     }
 
     /// Resolve the published object kinds without reading packed object bodies.
@@ -519,22 +525,21 @@ impl OperationContext {
             return Ok(None);
         };
         self.budget
-            .charge(BudgetDimension::StorageRequests, 1)
-            .await?;
-        self.budget
-            .charge(BudgetDimension::FetchedBytes, reference.bytes)
-            .await?;
-        self.budget
             .charge(
                 BudgetDimension::LogicalObjects,
                 u64::from(reference.object_count),
             )
             .await?;
+        let store = self
+            .state
+            .store
+            .clone()
+            .with_read_admission(self.read_admission());
         let entry = tokio::select! {
             biased;
             () = self.cancellation.cancelled() => return Err(Error::Cancelled),
             result = crab_metadata::shallow_closure::load_shallow_closure_entry(
-                &self.state.store,
+                &store,
                 &self.state.layout,
                 reference,
                 crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_ENTRY_BYTES,
@@ -557,13 +562,13 @@ impl OperationContext {
     /// Return the maximum complete pack response size for this operation.
     #[must_use]
     pub fn max_response_bytes(&self) -> u64 {
-        self.state.options.operation_limits().max_response_bytes
+        self.limits.max_response_bytes
     }
 
     /// Return the maximum source bytes this operation may fetch.
     #[must_use]
     pub fn max_fetched_bytes(&self) -> u64 {
-        self.state.options.operation_limits().max_fetched_bytes
+        self.limits.max_fetched_bytes
     }
 
     pub(crate) async fn single_pack_checksum_for_exact_objects(
@@ -894,7 +899,7 @@ impl OperationContext {
                 batch_concurrency(
                     self.state.runtime.options(),
                     self.state.options.object_limits(),
-                    self.state.options.operation_limits(),
+                    self.limits,
                 ),
                 &self.budget,
                 &self.cancellation,
@@ -926,7 +931,7 @@ impl OperationContext {
                 batch_concurrency(
                     self.state.runtime.options(),
                     self.state.options.object_limits(),
-                    self.state.options.operation_limits(),
+                    self.limits,
                 ),
                 &self.budget,
                 &self.cancellation,
@@ -957,7 +962,7 @@ impl OperationContext {
                 batch_concurrency(
                     self.state.runtime.options(),
                     self.state.options.object_limits(),
-                    self.state.options.operation_limits(),
+                    self.limits,
                 ),
                 &self.budget,
                 &self.cancellation,
@@ -1002,7 +1007,7 @@ impl OperationContext {
                 batch_concurrency(
                     self.state.runtime.options(),
                     self.state.options.object_limits(),
-                    self.state.options.operation_limits(),
+                    self.limits,
                 ),
                 &self.budget,
                 &self.cancellation,
@@ -1055,7 +1060,21 @@ impl OperationContext {
             .await
     }
 
-    pub(crate) async fn charge(&self, dimension: BudgetDimension, amount: u64) -> Result<()> {
+    /// Share this operation's budget with additional object-body read owners.
+    ///
+    /// Use only for reads not already charged by the Git reader. The admission
+    /// observes cancellation and reserves bytes before payload consumption.
+    /// Complete all admitted reads before finishing this context.
+    #[must_use]
+    pub fn read_admission(&self) -> Arc<dyn crab_storage::ReadAdmission> {
+        self.budget.read_admission(self.cancellation.clone())
+    }
+
+    /// Charge additional caller-owned work against this operation's aggregate limits.
+    ///
+    /// Reserve known work before starting it. Failed charges leave the operation
+    /// available for finalization; callers must still observe cancellation.
+    pub async fn charge(&self, dimension: BudgetDimension, amount: u64) -> Result<()> {
         self.budget.charge(dimension, amount).await
     }
 

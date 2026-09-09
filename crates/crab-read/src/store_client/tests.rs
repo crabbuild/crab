@@ -320,13 +320,13 @@ async fn get_reconstruction_errors_for_unknown_file() {
              cause a silent 0-byte reconstruction",
     );
     match err {
-        ClientError::Other(msg) => {
-            assert!(
-                msg.contains("shard not found"),
-                "expected shard error, got {msg}"
-            );
+        ClientError::InternalError(source) => {
+            assert!(matches!(
+                source.downcast_ref::<ReadError>(),
+                Some(ReadError::NotFound { .. })
+            ));
         }
-        other => panic!("expected Other, got {other:?}"),
+        other => panic!("expected typed missing-file error, got {other:?}"),
     }
 }
 

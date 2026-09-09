@@ -1,9 +1,11 @@
 [package]
 name = "crab-remote-git"
 version = "0.1.0"
-publish = false
+publish = true
 edition = "2024"
 license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
 description = "Bounded Git object reads from Crab object storage."
 
 [lib]
@@ -11,6 +13,7 @@ name = "crab_remote_git"
 path = "src/lib.rs"
 
 [dependencies]
+async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 crab-git = { workspace = true }
@@ -34,7 +37,6 @@ tempfile = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 crab-metadata = { workspace = true, features = ["remote-index", "storage"] }
 object_store = { workspace = true }
 proptest = "1"

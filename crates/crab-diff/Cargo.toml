@@ -1,9 +1,12 @@
 [package]
 name = "crab-diff"
 version = "0.1.0"
-publish = false
+publish = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Diff planning and large-file comparison for Crab repositories."
 
 [lib]
 name = "crab_diff"

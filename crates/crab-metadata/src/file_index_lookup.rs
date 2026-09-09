@@ -228,6 +228,7 @@ pub struct FileIndexLookupSession {
     anchor: Option<CommittedShardAnchor>,
     storage: crab_storage::Store,
     router: crab_storage::StoreLayout<crab_storage::Store>,
+    parsers: tokio_util::task::TaskTracker,
     manifest_fallback: tokio::sync::Mutex<ManifestFallbackCache>,
     limits: FileIndexLookupLimits,
 }
@@ -246,6 +247,7 @@ impl FileIndexLookupSession {
             anchor: CommittedShardAnchor::from_snapshot(snapshot)?,
             storage: router.store().clone(),
             router,
+            parsers: tokio_util::task::TaskTracker::new(),
             manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
         })
@@ -307,6 +309,66 @@ impl FileIndexLookupSession {
             anchor,
             storage: router.store().clone(),
             router: router.clone(),
+            parsers: tokio_util::task::TaskTracker::new(),
+            manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
+            limits,
+        })
+    }
+
+    async fn for_shard_index(
+        router: &crab_storage::StoreLayout<crab_storage::Store>,
+        hash: &str,
+        generation: u64,
+        limits: FileIndexLookupLimits,
+    ) -> Result<Self> {
+        let anchor = if hash.is_empty() {
+            None
+        } else {
+            let shard_index_hash = MerkleHash::from_hex(hash)
+                .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidData, source))?;
+            let index = crate::segmented_store::read_index(
+                router.store(),
+                router,
+                crate::segmented::SegmentKind::Shard,
+                hash,
+            )
+            .await?;
+            if index.total_records > limits.max_shard_visits as u64 {
+                return Err(MetadataError::FileLookupLimit {
+                    resource: "shard visits",
+                    maximum: limits.max_shard_visits,
+                });
+            }
+            let hashes: Vec<crate::segmented::ShardSegmentEntry> =
+                crate::segmented_store::read_records_from_index(
+                    router.store(),
+                    router,
+                    crate::segmented::SegmentKind::Shard,
+                    hash,
+                    index,
+                    limits.max_shard_visits as u64,
+                )
+                .await?;
+            let shards = hashes
+                .iter()
+                .map(|entry| {
+                    MerkleHash::from_hex(&entry.shard_hash).map_err(|source| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, source).into()
+                    })
+                })
+                .collect::<Result<HashSet<_>>>()?;
+            Some(CommittedShardAnchor {
+                generation,
+                shard_index_hash,
+                shards,
+            })
+        };
+        Ok(Self {
+            reader: None,
+            anchor,
+            storage: router.store().clone(),
+            router: router.clone(),
+            parsers: tokio_util::task::TaskTracker::new(),
             manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
             limits,
         })
@@ -331,6 +393,7 @@ impl FileIndexLookupSession {
             anchor,
             storage,
             router,
+            parsers: tokio_util::task::TaskTracker::new(),
             manifest_fallback: tokio::sync::Mutex::new(ManifestFallbackCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
         };
@@ -515,6 +578,7 @@ impl FileIndexLookupSession {
                         )
                         .await?;
                     spawn_shard_parse(
+                        &self.parsers,
                         body,
                         path,
                         shard_hash,
@@ -567,8 +631,12 @@ impl FileIndexLookupSession {
             .collect())
     }
 
-    /// Close the SlateDB reader opened by this session.
+    /// Drain shard parsers and close the SlateDB reader opened by this session.
     pub async fn close(self) -> Result<()> {
+        // Dropping a lookup future cannot stop blocking parsing. Keep its work
+        // inside the session lifetime before releasing the operation owner.
+        self.parsers.close();
+        self.parsers.wait().await;
         let Some(reader) = self.reader else {
             return Ok(());
         };
@@ -583,6 +651,7 @@ impl FileIndexLookupSession {
 }
 
 fn spawn_shard_parse(
+    parsers: &tokio_util::task::TaskTracker,
     body: bytes::Bytes,
     path: ObjectPath,
     shard_hash: MerkleHash,
@@ -590,7 +659,7 @@ fn spawn_shard_parse(
     max_recipe_entries: usize,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> tokio::task::JoinHandle<Result<Vec<(MerkleHash, MerkleHash)>>> {
-    tokio::task::spawn_blocking(move || {
+    parsers.spawn_blocking(move || {
         let _permit = permit;
         if crab_xet::hash::compute_data_hash(&body) != shard_hash {
             return Err(MetadataError::CorruptObject {
@@ -610,24 +679,87 @@ fn spawn_shard_parse(
     })
 }
 
+enum LookupSource {
+    Current {
+        store: crab_storage::Store,
+        repo_prefix: String,
+        use_acceleration: bool,
+    },
+    ShardIndex {
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        hash: String,
+        generation: u64,
+        limits: FileIndexLookupLimits,
+    },
+}
+
+impl LookupSource {
+    async fn open(&self) -> Result<FileIndexLookupSession> {
+        match self {
+            Self::Current {
+                store,
+                repo_prefix,
+                use_acceleration,
+            } => {
+                FileIndexLookupSession::open_with_mode(
+                    store.clone(),
+                    repo_prefix,
+                    *use_acceleration,
+                )
+                .await
+            }
+            Self::ShardIndex {
+                router,
+                hash,
+                generation,
+                limits,
+            } => FileIndexLookupSession::for_shard_index(router, hash, *generation, *limits).await,
+        }
+    }
+}
+
 struct SharedFileIndexLookupInner {
-    store: crab_storage::Store,
-    repo_prefix: String,
+    source: LookupSource,
     session: tokio::sync::RwLock<tokio::sync::OnceCell<FileIndexLookupSession>>,
     closed: AtomicBool,
-    use_acceleration: bool,
 }
 
 /// Cloneable, lazy file-index reader for one repo-scoped operation.
 ///
-/// The first lookup opens the repo's read-only `file_index_db`; later clones
-/// reuse that reader until the owner calls [`close`](Self::close).
+/// The first lookup initializes the selected source; later clones reuse that
+/// session until the owner calls [`close`](Self::close).
 #[derive(Clone)]
 pub struct SharedFileIndexLookup {
     inner: Arc<SharedFileIndexLookupInner>,
 }
 
 impl SharedFileIndexLookup {
+    /// Lazily resolve files from one captured immutable shard-index root without writes.
+    ///
+    /// The caller must bind the root and generation to this repository layout
+    /// and retain its content for the operation. No latest manifest or SlateDB
+    /// reader is opened; all searches remain within the supplied finite limits.
+    #[must_use]
+    pub fn for_shard_index(
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        hash: String,
+        generation: u64,
+        limits: FileIndexLookupLimits,
+    ) -> Self {
+        Self {
+            inner: Arc::new(SharedFileIndexLookupInner {
+                source: LookupSource::ShardIndex {
+                    router,
+                    hash,
+                    generation,
+                    limits,
+                },
+                session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
+                closed: AtomicBool::new(false),
+            }),
+        }
+    }
+
     /// Create a lazy lookup handle bound to one object store and repo.
     pub fn new(store: Arc<dyn ObjectStore>, repo_prefix: impl Into<String>) -> Self {
         Self::new_with_mode(crab_storage::Store::new(store), repo_prefix, true)
@@ -646,11 +778,13 @@ impl SharedFileIndexLookup {
     ) -> Self {
         Self {
             inner: Arc::new(SharedFileIndexLookupInner {
-                store,
-                repo_prefix: repo_prefix.into(),
+                source: LookupSource::Current {
+                    store,
+                    repo_prefix: repo_prefix.into(),
+                    use_acceleration,
+                },
                 session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
                 closed: AtomicBool::new(false),
-                use_acceleration,
             }),
         }
     }
@@ -687,15 +821,7 @@ impl SharedFileIndexLookup {
         }
         // Initialization serializes only opening the reader, not its first I/O.
         // Keep read access through lookup so close cannot take an active session.
-        guard
-            .get_or_try_init(|| {
-                FileIndexLookupSession::open_with_mode(
-                    self.inner.store.clone(),
-                    &self.inner.repo_prefix,
-                    self.inner.use_acceleration,
-                )
-            })
-            .await?;
+        guard.get_or_try_init(|| self.inner.source.open()).await?;
         tokio::sync::RwLockReadGuard::try_map(guard, tokio::sync::OnceCell::get).map_err(|_| {
             MetadataError::Internal("file-index lookup session was not initialized".to_owned())
         })
@@ -749,7 +875,7 @@ mod tests {
     use bytes::Bytes;
     use object_store::memory::InMemory;
 
-    fn lookup_limits() -> FileIndexLookupLimits {
+    pub(super) fn lookup_limits() -> FileIndexLookupLimits {
         FileIndexLookupLimits {
             max_files: 16,
             max_shard_visits: 16,
@@ -1254,6 +1380,8 @@ mod tests {
             .max_blocking_threads(1)
             .build()
             .unwrap();
+        let (router, snapshot, _, _) = runtime.block_on(bounded_lookup_fixture());
+        let session = FileIndexLookupSession::from_snapshot(router, &snapshot).unwrap();
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let blocker = runtime.spawn_blocking(move || {
@@ -1267,6 +1395,7 @@ mod tests {
             let file = hash_from_seed(1);
             let (body, hash) = shard_with_file(file);
             let job = spawn_shard_parse(
+                &session.parsers,
                 Bytes::from(body),
                 ObjectPath::from("shard"),
                 hash,
@@ -1278,12 +1407,23 @@ mod tests {
                 .await
                 .is_err();
             let retained = gate.available_permits() == 0;
+            let mut close = Box::pin(session.close());
+            let close_waited = tokio::time::timeout(Duration::from_millis(10), &mut close)
+                .await
+                .is_err();
             release_tx.send(()).unwrap();
             let released = tokio::time::timeout(Duration::from_secs(5), gate.acquire_owned())
                 .await
                 .is_ok();
+            tokio::time::timeout(Duration::from_secs(5), close)
+                .await
+                .unwrap()
+                .unwrap();
             blocker.await.unwrap();
-            assert_eq!((timed_out, retained, released), (true, true, true));
+            assert_eq!(
+                (timed_out, retained, close_waited, released),
+                (true, true, true, true)
+            );
         });
     }
 

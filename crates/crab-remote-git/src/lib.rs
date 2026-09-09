@@ -46,7 +46,7 @@ pub use repository::RemoteGitRepository;
 pub use repository::{ObjectLimits, OperationLimits, RepositoryIdentity, RepositoryOptions};
 pub use revision::{ResolvedRevision, Revision};
 pub use runtime::{RemoteGitRuntime, RuntimeOptions, RuntimeSnapshot};
-pub use snapshot::RemoteGitSnapshot;
+pub use snapshot::{ArchiveReader, RemoteGitSnapshot};
 pub use traversal::{
     ArchiveEntry, ArchiveStream, Blame, BlameRange, ChangeKind, Comparison, Diff,
     DiffClassification, DiffHunk, DirectoryMetadata, HistoryTraversal, Page, PageCursor,

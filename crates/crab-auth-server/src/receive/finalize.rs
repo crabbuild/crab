@@ -370,7 +370,7 @@ mod tests {
 
         assert!(matches!(
             receipt.commit,
-            crab_metadata::plan_receipt::MirrorPlanCommit::Manifest { generation: 1, .. }
+            crab_metadata::plan_receipt::PlanCommit::Manifest { generation: 1, .. }
         ));
         Ok(())
     }

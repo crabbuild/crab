@@ -449,12 +449,60 @@ pub enum Error {
         operation: Box<Error>,
         close: crab_metadata::error::MetadataError,
     },
+
+    /// Caller policy failed while this owner still held the read session.
+    #[error("read consumer failed")]
+    Consumer {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// Result type for remote Git object reads.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    pub(crate) fn after_interruption(self, timed_out: bool) -> Self {
+        if let Self::CloseAfterFailure { operation, close } = self {
+            return Self::CloseAfterFailure {
+                operation: Box::new(operation.after_interruption(timed_out)),
+                close,
+            };
+        }
+        // Transparent wrappers can omit a contained unit error from source().
+        // Preserve real failures; normalize only cancellation caused by this scope.
+        let mut cancelled = matches!(
+            &self,
+            Self::Storage(crab_storage::StorageError::Cancelled)
+                | Self::Metadata(crab_metadata::error::MetadataError::Storage {
+                    source: crab_storage::StorageError::Cancelled,
+                })
+        );
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&self);
+        while let Some(error) = current {
+            cancelled |= matches!(error.downcast_ref::<Self>(), Some(Self::Cancelled))
+                || matches!(
+                    error.downcast_ref::<crab_storage::StorageError>(),
+                    Some(crab_storage::StorageError::Cancelled)
+                );
+            current = error
+                .downcast_ref::<std::io::Error>()
+                .and_then(|error| {
+                    error
+                        .get_ref()
+                        .map(|source| source as &(dyn std::error::Error + 'static))
+                })
+                .or_else(|| error.source());
+        }
+        match (cancelled, timed_out) {
+            (true, true) => Self::Timeout {
+                operation: "repository operation",
+            },
+            (true, false) => Self::Cancelled,
+            _ => self,
+        }
+    }
+
     pub(crate) fn trace_category(&self) -> &'static str {
         match self {
             Self::InvalidRepositoryIdentity { .. }
@@ -516,6 +564,7 @@ impl Error {
             Self::GeneratedPackLease { .. } => "coordination",
             Self::ResponsePackConsolidation { .. } => "integrity",
             Self::CloseAfterFailure { .. } => "close",
+            Self::Consumer { .. } => "consumer",
             Self::Revision {
                 reason: RevisionError::TagDepth,
             } => "limit",
@@ -563,6 +612,56 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+
+    #[test]
+    fn interrupted_wrapped_cancellation_reports_the_scope_reason() {
+        for timed_out in [false, true] {
+            for error in [
+                Error::Cancelled,
+                Error::Storage(crab_storage::StorageError::Cancelled),
+                Error::Metadata(crab_metadata::error::MetadataError::Storage {
+                    source: crab_storage::StorageError::Cancelled,
+                }),
+                Error::Metadata(crab_metadata::error::MetadataError::Storage {
+                    source: crab_storage::StorageError::ReadRejected {
+                        source: Box::new(Error::Cancelled),
+                    },
+                }),
+                Error::Metadata(crab_metadata::error::MetadataError::Io {
+                    source: std::io::Error::other(crab_storage::StorageError::Cancelled),
+                }),
+            ] {
+                let error = error.after_interruption(timed_out);
+                assert!(matches!(
+                    (timed_out, error),
+                    (true, Error::Timeout { .. }) | (false, Error::Cancelled)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_normalization_retains_close_and_non_cancellation_failures() {
+        let error = Error::CloseAfterFailure {
+            operation: Box::new(Error::Cancelled),
+            close: crab_metadata::error::MetadataError::Io {
+                source: std::io::Error::other("close failed"),
+            },
+        }
+        .after_interruption(true);
+        let Error::CloseAfterFailure { operation, close } = error else {
+            panic!("close error lost")
+        };
+        assert!(matches!(*operation, Error::Timeout { .. }));
+        assert_eq!(close.source().unwrap().to_string(), "close failed");
+        let error = Error::LimitExceeded {
+            limit: "bytes",
+            actual: 2,
+            maximum: 1,
+        }
+        .after_interruption(true);
+        assert!(matches!(error, Error::LimitExceeded { .. }));
+    }
 
     fn oid() -> gix_hash::ObjectId {
         gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111")

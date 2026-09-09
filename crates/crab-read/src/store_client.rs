@@ -11,6 +11,7 @@ use crab_xet::hash::MerkleHash;
 use crab_xet::shard::{MDBFileInfo, ShardReader};
 use crab_xet::shard_parse::MAX_SHARD_SIZE_BYTES;
 use crab_xet::xorb::format::SerializedXorbObject;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use xet_client::cas_client::ShardUploadProgressCallback;
 use xet_client::cas_client::adaptive_concurrency::{
@@ -26,6 +27,8 @@ use xet_client::cas_types::{
 use xet_client::error::{ClientError, Result as ClientResult};
 
 use crate::{ReadError, Result};
+
+mod term_cache;
 
 type StoreLayout = crab_storage::StoreLayout<crab_storage::Store>;
 
@@ -54,6 +57,8 @@ pub struct StoreClient {
     metrics: Option<Arc<dyn ReadMetrics>>,
     availability: Option<Arc<dyn XorbAvailability>>,
     failures: Option<Arc<crate::error::OperationFailures>>,
+    cancellation: CancellationToken,
+    chunk_cache: Option<term_cache::TermCache>,
     selective_xorb_reads: bool,
 }
 
@@ -73,6 +78,8 @@ impl StoreClient {
             metrics: None,
             availability: None,
             failures: None,
+            cancellation: CancellationToken::new(),
+            chunk_cache: None,
             selective_xorb_reads: false,
         }
     }
@@ -110,8 +117,22 @@ impl StoreClient {
         self
     }
 
-    pub(crate) fn with_failures(mut self, failures: Arc<crate::error::OperationFailures>) -> Self {
+    pub(crate) fn with_operation(
+        mut self,
+        failures: Arc<crate::error::OperationFailures>,
+        cancellation: CancellationToken,
+    ) -> Self {
         self.failures = Some(failures);
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub(crate) fn with_chunk_cache(
+        mut self,
+        cache: Arc<dyn xet_client::chunk_cache::ChunkCache>,
+        prefix: String,
+    ) -> Self {
+        self.chunk_cache = Some(term_cache::TermCache::new(cache, prefix));
         self
     }
 
@@ -173,6 +194,11 @@ impl StoreClient {
                         "read store_client: shard-hint stale, falling back to file-index"
                     );
                 }
+                // Admission failure is terminal; trying the index would hide
+                // the rejected work behind an unrelated missing-index error.
+                Err(e) if crab_storage::read_rejection(&e).is_some() => {
+                    return Err(self.map_read_error(e));
+                }
                 Err(e) => {
                     debug!(
                         file_hash = %file_hash.hex(),
@@ -217,6 +243,9 @@ impl StoreClient {
                     return Ok(None);
                 }
                 Ok(_) => {}
+                Err(e) if crab_storage::read_rejection(&e).is_some() => {
+                    return Err(self.map_read_error(e.into()));
+                }
                 Err(e) => {
                     debug!(
                         shard_hash = %shard_hash.hex(),
@@ -543,21 +572,19 @@ impl Client for StoreClient {
         bytes_range: Option<FileRange>,
     ) -> ClientResult<Option<QueryReconstructionResponseV2>> {
         let Some((shard, shard_hash)) = self.load_shard_for_file(file_id).await? else {
-            return Err(self.record_error(ClientError::Other(format!(
-                "cannot reconstruct file {}: shard not found (file-index entry missing or shard body unreachable)",
-                file_id.hex(),
-            ))));
+            return Err(self.map_read_error(ReadError::NotFound {
+                path: format!("file_index:{}", file_id.hex()),
+            }));
         };
 
         let Some(file_info) = shard
             .get_file_info(file_id)
             .map_err(|e| self.map_read_error(e.into()))?
         else {
-            return Err(self.record_error(ClientError::Other(format!(
-                "cannot reconstruct file {}: shard {} does not contain an entry for the requested file",
-                file_id.hex(),
-                shard_hash.hex(),
-            ))));
+            return Err(self.map_read_error(ReadError::CorruptObject {
+                path: self.router.shard_path(&shard_hash).to_string(),
+                reason: format!("shard does not contain indexed file {}", file_id.hex()),
+            }));
         };
 
         match bytes_range {
@@ -628,10 +655,13 @@ impl Client for StoreClient {
     }
 
     async fn acquire_download_permit(&self) -> ClientResult<ConnectionPermit> {
-        self.concurrency
-            .acquire_connection_permit()
-            .await
-            .map_err(|error| self.record_error(error))
+        tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => Err(self.map_read_error(ReadError::Cancelled)),
+            result = self.concurrency.acquire_connection_permit() => {
+                result.map_err(|error| self.record_error(error))
+            }
+        }
     }
 
     async fn get_file_term_data(
@@ -641,6 +671,13 @@ impl Client for StoreClient {
         _progress_callback: Option<ProgressCallback>,
         _uncompressed_size_if_known: Option<usize>,
     ) -> ClientResult<(Bytes, Vec<u32>)> {
+        // Xet's final writer join waits for its source futures. Cancel the
+        // read at this adapter boundary so a pending source can release that
+        // join instead of retaining the destination after caller cancellation.
+        tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => Err(self.map_read_error(ReadError::Cancelled)),
+            result = async {
         let (url, _http_ranges) = url_info
             .retrieve_url()
             .await
@@ -648,6 +685,10 @@ impl Client for StoreClient {
         let (xorb_hash, chunk_ranges) =
             parse_xorb_url(&url).map_err(|error| self.record_error(error))?;
 
+        if let Some(cache) = &self.chunk_cache
+            && let Some(cached) = cache.read(xorb_hash, &chunk_ranges).await {
+            return Ok(cached);
+        }
         let xorb_path = self.router.xorb_path(&xorb_hash);
         if let Some(availability) = &self.availability {
             availability
@@ -659,7 +700,7 @@ impl Client for StoreClient {
             .iter()
             .map(|range| (range.start, range.end))
             .collect::<Vec<_>>();
-        let result = if self.selective_xorb_reads {
+        let decoded = if self.selective_xorb_reads {
             self.store
                 .get_xorb_chunks(&xorb_path, &xorb_hash, &ranges)
                 .await
@@ -667,10 +708,17 @@ impl Client for StoreClient {
             self.store
                 .get_xorb_chunks_without_install(&xorb_path, &xorb_hash, &ranges)
                 .await
-        };
-        result
+        }
             .map_err(ReadError::from)
-            .map_err(|error| self.map_read_error(error))
+            .map_err(|error| self.map_read_error(error))?;
+        // Keep cache publication within the download and decoded-buffer admission.
+        // Returning first would let a detached put retain bytes after permit release.
+        if let Some(cache) = &self.chunk_cache {
+            cache.write(xorb_hash, &chunk_ranges, &decoded.0, &decoded.1).await;
+        }
+        Ok(decoded)
+            } => result,
+        }
     }
 
     async fn query_for_global_dedup_shard(

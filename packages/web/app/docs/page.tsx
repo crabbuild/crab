@@ -6,6 +6,7 @@ import {
   FolderSync,
   Rocket,
   Terminal,
+  Braces,
   Workflow,
 } from "lucide-react"
 import Link from "next/link"
@@ -64,6 +65,27 @@ const cliCategories = [
   },
 ]
 
+const sdkCategories = [
+  {
+    icon: Rocket,
+    name: "SDK quickstart",
+    description: "Configure a client and read a pinned repository snapshot.",
+    href: "/docs/sdk/getting-started",
+  },
+  {
+    icon: FolderSync,
+    name: "Local workflows",
+    description: "Clone, edit, integrate, and publish from a working directory.",
+    href: "/docs/sdk/local-workflows",
+  },
+  {
+    icon: Workflow,
+    name: "Recovery",
+    description: "Persist mutation identities and reconcile uncertain outcomes.",
+    href: "/docs/sdk/recovery",
+  },
+]
+
 export default function DocsLandingPage() {
   return (
     <MarketingLayout>
@@ -89,6 +111,33 @@ export default function DocsLandingPage() {
             </div>
             <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
               {cliCategories.map((category) => (
+                <DocsCategoryCard
+                  key={category.name}
+                  icon={category.icon}
+                  name={category.name}
+                  description={category.description}
+                  href={category.href}
+                />
+              ))}
+            </div>
+          </div>
+        </Reveal>
+
+        <Reveal>
+          <div className="mb-16">
+            <div className="mb-6 flex items-center gap-3">
+              <Braces className="size-5 text-primary" />
+              <h2 className="text-2xl font-semibold text-foreground">Rust SDK</h2>
+              <Link
+                href="/docs/sdk/getting-started"
+                className="ml-auto flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-primary"
+              >
+                View all SDK docs
+                <ArrowRight className="size-3.5" />
+              </Link>
+            </div>
+            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+              {sdkCategories.map((category) => (
                 <DocsCategoryCard
                   key={category.name}
                   icon={category.icon}

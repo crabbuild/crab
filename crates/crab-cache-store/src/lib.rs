@@ -336,6 +336,13 @@ impl CachingStore {
         storage
     }
 
+    /// Scope origin-body admission while preserving shared cache state.
+    #[must_use]
+    pub fn with_read_admission(mut self, admission: Arc<dyn crab_storage::ReadAdmission>) -> Self {
+        self.origin = self.origin.with_read_admission(admission);
+        self
+    }
+
     /// Whether the cache leg is active for reads.
     fn cache_reads_enabled(&self) -> bool {
         #[cfg(feature = "remote-client")]

@@ -34,6 +34,7 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-write` — shared Git catalog publication/lifecycle and journal commit/compaction; consumers own authorization, ref leases, generation-service election and GC fencing.
 - `crab-read` — fetch admission, ref advertisement, selection, term resolution, and verified hydration across cache, metadata, storage, and Xet.
 - `crab-remote-git` — bounded filesystem-free Git object reads from immutable packs using the committed object locator and object-store ranges.
+- `crab-remote` — internal remote-operation orchestration under construction; publication ref leases and GC fences are shared with HTTP receive. Authorization stays in callers; follow the SDK plan for remaining lifecycle extraction and qualification.
 - `crab-vfs` — FUSE/NFS mounts, overlays, snapshots, hydration, daemon/control IPC, leases, and mount lifecycle.
 
 ### Authentication and Protected Services
@@ -45,6 +46,14 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 ### Workflow
 
 - `crab-workflow` — workflow documents, graph planning, stage execution, caching, experiments, queues, resume, lockfiles, templates, and DVC migration.
+
+### Public SDK
+
+- `crab-sdk` — unpublished public client under construction. Owns validated
+  application-facing values and outcomes; shared crates retain Git, storage,
+  reconstruction and publication mechanics. Follow the phased contract in
+  `crab/docs/architecture/crab-sdk.md`; an unqualified capability is not public
+  support.
 
 ## Dependency and Ownership Rules
 

@@ -1,9 +1,11 @@
 [package]
 name = "crab-staging"
 version = "0.1.0"
-publish = false
+publish = true
 edition = "2024"
 license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
 description = "Local staging area, prepared xorb plans, and recovery for Crab."
 
 [lib]

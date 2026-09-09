@@ -69,10 +69,17 @@ pub enum MetadataError {
     #[error("ref journal publication cancelled before commit")]
     RefJournalCancelled,
 
+    /// Durable attempt evidence prevents a new execution of this plan.
+    #[cfg(feature = "storage")]
+    #[error(
+        "publication plan {plan_id} was already attempted; reconcile its outcome before starting another operation"
+    )]
+    PlanAlreadyAttempted { plan_id: String },
+
     /// The commit marker write failed and its exact bytes could not be confirmed.
     #[cfg(feature = "storage")]
     #[error(
-        "ref journal transaction {transaction_id} may have committed; verify remote refs before retrying"
+        "ref journal transaction {transaction_id} may have committed; reconcile durable commit evidence before retrying; current refs alone cannot prove the outcome"
     )]
     RefJournalCommitUncertain {
         transaction_id: String,
@@ -144,6 +151,18 @@ pub enum MetadataError {
         operation: Box<MetadataError>,
         /// Typed close failure retained for diagnostics.
         close: slatedb::Error,
+    },
+
+    /// A manifest update was attempted but its response did not prove the outcome.
+    #[cfg(feature = "storage")]
+    #[error(
+        "manifest update {candidate_digest} at {path} may have committed; reconcile durable evidence before retrying"
+    )]
+    ManifestCommitUncertain {
+        path: String,
+        candidate_digest: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
     },
 
     /// Manifest pointer could not be updated because another writer won the CAS.

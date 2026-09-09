@@ -46,6 +46,15 @@ fn git(directory: &std::path::Path, args: &[&str], input: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn catalog_recovers_from_bad_evidence_without_a_local_repository() {
+    catalog_recovery(true).await;
+}
+
+#[tokio::test]
+async fn catalog_reads_metadata_without_kind_sidecars_or_a_local_repository() {
+    catalog_recovery(false).await;
+}
+
+async fn catalog_recovery(with_kind_sidecar: bool) {
     let fixture = tempfile::tempdir().unwrap();
     git(fixture.path(), &["init", "--bare", "--quiet"], b"");
     let blob = String::from_utf8(git(
@@ -99,16 +108,19 @@ async fn catalog_recovers_from_bad_evidence_without_a_local_repository() {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let layout = StoreLayout::new(store.clone(), "catalog".to_owned());
     let pack_id = prepared.content_hash().to_hex().to_string();
+    let kinds_path = layout.pack_kind_metadata_path(&pack_id);
+    let kinds = Bytes::from(std::fs::read(prepared.kinds_path()).unwrap());
+    if with_kind_sidecar {
+        store.put(&kinds_path, kinds.clone()).await.unwrap();
+    }
+    // Missing kind evidence remains optional during catalog publication.
+    // The remote reader must still verify and reconstruct every object.
     for (source, target) in [
         (prepared.pack_path(), layout.pack_path(&pack_id)),
         (prepared.index_path(), layout.pack_index_path(&pack_id)),
         (
             prepared.reverse_path(),
             layout.pack_reverse_index_path(&pack_id),
-        ),
-        (
-            prepared.kinds_path(),
-            layout.pack_kind_metadata_path(&pack_id),
         ),
     ] {
         store
@@ -252,6 +264,14 @@ async fn catalog_recovers_from_bad_evidence_without_a_local_repository() {
     let close = writer.close().await;
     close.unwrap();
     assert!(result.unwrap().0);
+    if with_kind_sidecar {
+        assert_eq!(store.get_with_etag(&kinds_path).await.unwrap().0, kinds);
+    } else {
+        assert!(matches!(
+            store.get_with_etag(&kinds_path).await,
+            Err(crab_storage::StorageError::NotFound { .. })
+        ));
+    }
     let visibility = GitVisibilityIndex::new(
         1,
         &manifest.pack_index_hash,
@@ -283,13 +303,29 @@ async fn catalog_recovers_from_bad_evidence_without_a_local_repository() {
         .unwrap();
     let result = async {
         let mut actual = Vec::new();
+        let mut metadata = Vec::new();
         for (oid, _) in &expected {
+            let entry = operation.read_object_metadata(*oid).await?;
+            metadata.push((entry.oid, entry.kind, entry.size));
             actual.push((*oid, operation.read_object(*oid).await?.data.to_vec()));
         }
-        Ok(actual)
+        Ok((actual, metadata))
     }
     .await;
     let actual = operation.finish(result).await;
     runtime.shutdown().await;
-    assert_eq!(actual.unwrap(), expected.to_vec());
+    let (actual, metadata) = actual.unwrap();
+    assert_eq!(actual, expected.to_vec());
+    assert_eq!(
+        metadata,
+        expected
+            .iter()
+            .zip([
+                gix_object::Kind::Blob,
+                gix_object::Kind::Tree,
+                gix_object::Kind::Commit,
+            ])
+            .map(|((oid, data), kind)| (*oid, kind, data.len() as u64))
+            .collect::<Vec<_>>()
+    );
 }

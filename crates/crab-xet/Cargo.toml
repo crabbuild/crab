@@ -1,9 +1,11 @@
 [package]
 name = "crab-xet"
 version = "0.1.0"
-publish = false
+publish = true
 edition = "2024"
 license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
 description = "Xet-backed data-plane helpers for Crab."
 
 [lib]
@@ -29,3 +31,4 @@ xet-runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = "1"
+tempfile = { workspace = true }

@@ -104,7 +104,7 @@ pub async fn resolve_mirror_plan_receipt(
     store: &Store,
     router: &StoreLayout,
     plan_id: &str,
-) -> Result<Option<crab_metadata::plan_receipt::MirrorPlanReceipt>> {
+) -> Result<Option<crab_metadata::plan_receipt::PlanReceipt>> {
     let router = storage_layout(store, router);
     crab_metadata::plan_receipt::resolve_plan_receipt(store.as_storage(), &router, plan_id)
         .await

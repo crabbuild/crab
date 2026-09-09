@@ -1,3 +1,4 @@
 self-hosted-runner:
   labels:
     - crab-large-repo
+    - sdk-managed

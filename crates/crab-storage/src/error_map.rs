@@ -9,6 +9,9 @@ use crate::error::StorageError;
 /// falling through to [`map_object_store_error`].
 #[must_use]
 pub fn classify_auth_error(err: &object_store::Error) -> Option<StorageError> {
+    if crate::read_rejection(err).is_some() {
+        return None;
+    }
     match err {
         object_store::Error::PermissionDenied { path, .. } => {
             Some(StorageError::AuthFailed { path: path.clone() })
@@ -39,6 +42,24 @@ pub fn classify_auth_error(err: &object_store::Error) -> Option<StorageError> {
 /// This mapping does not run [`classify_auth_error`].
 #[must_use]
 pub fn map_object_store_error(err: object_store::Error, path: &str) -> StorageError {
+    // Wrappers retain typed storage failures; admission rejection must never be
+    // mistaken for a transient provider error and retried.
+    let err = match err {
+        object_store::Error::Generic { store, source } => match source.downcast::<StorageError>() {
+            Ok(error) => return *error,
+            Err(source) => object_store::Error::Generic { store, source },
+        },
+        object_store::Error::NotSupported { source } => match source.downcast::<StorageError>() {
+            Ok(error) => return *error,
+            Err(source) => object_store::Error::NotSupported { source },
+        },
+        other => other,
+    };
+    if crate::read_rejection(&err).is_some() {
+        return StorageError::ReadRejected {
+            source: Box::new(err),
+        };
+    }
     match err {
         object_store::Error::Precondition { path: p, .. }
         | object_store::Error::AlreadyExists { path: p, .. } => {

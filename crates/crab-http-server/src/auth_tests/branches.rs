@@ -286,6 +286,34 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     assert_eq!(catalog["repositories"][0]["protection_version"], 3);
     crate::server::receive_tests::success(source.path(), &["checkout", "main"]).await;
 
+    for domain in [repo.layout.global_prefix(), repo.layout.repo_prefix()] {
+        let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+            repo.store.inner(),
+            domain,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        let blocked = set_default_branch(
+            &h,
+            &alice,
+            csrf,
+            json!({
+                "name":"feature/browser",
+                "expected_head":"refs/heads/main",
+                "expected_oid":commit
+            }),
+        )
+        .await;
+        assert!(!blocked.0.is_success(), "{domain}: {}", blocked.1);
+        let snapshot =
+            crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
+                .await
+                .unwrap();
+        assert_eq!(snapshot.journal.head, "refs/heads/main", "{domain}");
+        sweep.release().await.unwrap();
+    }
+
     let changed_default = set_default_branch(
         &h,
         &alice,

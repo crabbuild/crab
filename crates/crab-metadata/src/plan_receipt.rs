@@ -1,4 +1,4 @@
-//! Durable attribution of mirror plans to direct and managed ref commits.
+//! Durable attribution of publication plans to direct and managed ref commits.
 
 use std::collections::BTreeSet;
 
@@ -20,10 +20,34 @@ const MAX_PLAN_ATTEMPTS: u32 = 3;
 const MAX_PLAN_OBJECT_BYTES: u64 = 64 * 1024;
 const MAX_PLAN_ANCESTORS: usize = 1_000_000;
 
-/// Commit authority and immutable identity attributed to one mirror plan.
+/// Require a plan with no durable publication attempt before starting execution.
+///
+/// The caller must hold the plan's operation lease through publication. An
+/// existing intent blocks replay even when commitment cannot be proven; absence
+/// of a receipt does not prove that the previous attempt was rejected.
+pub async fn ensure_plan_unattempted(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    plan_id: &str,
+) -> Result<()> {
+    validate_content_hash(plan_id, "plan id", "publication admission")?;
+    let receipt_path = router.ref_journal_plan_receipt_path(plan_id);
+    if read_optional_bounded::<PlanReceipt>(store, &receipt_path)
+        .await?
+        .is_some()
+        || !read_plan_intents(store, router, plan_id).await?.is_empty()
+    {
+        return Err(MetadataError::PlanAlreadyAttempted {
+            plan_id: plan_id.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Commit authority and immutable identity attributed to one publication plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MirrorPlanCommit {
+pub enum PlanCommit {
     RefJournal {
         transaction_id: String,
         dependency_digest: String,
@@ -36,26 +60,26 @@ pub enum MirrorPlanCommit {
     },
 }
 
-/// Immutable pre-commit binding between a mirror plan and one commit.
+/// Immutable pre-commit binding between a publication plan and one commit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct MirrorPlanIntent {
+pub struct PlanIntent {
     pub version: u32,
     pub repo_prefix: String,
     pub plan_id: String,
     pub attempt: u32,
-    pub commit: MirrorPlanCommit,
+    pub commit: PlanCommit,
 }
 
-/// Immutable proof that one mirror plan crossed the ref visibility boundary.
+/// Immutable proof that one publication plan crossed the ref visibility boundary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct MirrorPlanReceipt {
+pub struct PlanReceipt {
     pub version: u32,
     pub repo_prefix: String,
     pub plan_id: String,
     pub attempt: u32,
-    pub commit: MirrorPlanCommit,
+    pub commit: PlanCommit,
 }
 
 pub(crate) async fn prepare_ref_journal_plan_intent(
@@ -63,12 +87,12 @@ pub(crate) async fn prepare_ref_journal_plan_intent(
     router: &StoreLayout<Store>,
     plan_id: &str,
     transaction: &RefJournalTransaction,
-) -> Result<MirrorPlanIntent> {
+) -> Result<PlanIntent> {
     prepare_plan_intent(
         store,
         router,
         plan_id,
-        MirrorPlanCommit::RefJournal {
+        PlanCommit::RefJournal {
             transaction_id: transaction.id()?,
             dependency_digest: dependency_digest(transaction)?,
         },
@@ -105,7 +129,7 @@ pub async fn commit_manifest_for_plan(
         store,
         router,
         plan_id,
-        MirrorPlanCommit::Manifest {
+        PlanCommit::Manifest {
             base_generation: base.generation,
             base_digest: manifest_digest(&base)?,
             generation,
@@ -128,8 +152,8 @@ async fn prepare_plan_intent(
     store: &Store,
     router: &StoreLayout<Store>,
     plan_id: &str,
-    commit: MirrorPlanCommit,
-) -> Result<MirrorPlanIntent> {
+    commit: PlanCommit,
+) -> Result<PlanIntent> {
     validate_content_hash(plan_id, "mirror plan id", "mirror plan intent")?;
     let existing = read_plan_intents(store, router, plan_id).await?;
     for intent in &existing {
@@ -150,7 +174,7 @@ async fn prepare_plan_intent(
         .ok_or_else(|| StorageError::StateConflict {
             path: router.ref_journal_plan_attempts_prefix(plan_id).to_string(),
         })?;
-    let intent = MirrorPlanIntent {
+    let intent = PlanIntent {
         version: PLAN_RECEIPT_VERSION,
         repo_prefix: router.repo_prefix().to_owned(),
         plan_id: plan_id.to_owned(),
@@ -165,7 +189,7 @@ async fn prepare_plan_intent(
     {
         Ok(()) => Ok(intent),
         Err(StorageError::StateConflict { .. }) => {
-            let persisted: MirrorPlanIntent = read_bounded(store, &path).await?;
+            let persisted: PlanIntent = read_bounded(store, &path).await?;
             validate_intent(router, &persisted)?;
             if persisted == intent {
                 Ok(persisted)
@@ -183,8 +207,8 @@ async fn prepare_plan_intent(
 pub(crate) async fn publish_plan_receipt(
     store: &Store,
     router: &StoreLayout<Store>,
-    intent: &MirrorPlanIntent,
-) -> Result<MirrorPlanReceipt> {
+    intent: &PlanIntent,
+) -> Result<PlanReceipt> {
     validate_intent(router, intent)?;
     if !intent_committed(store, router, intent).await? {
         return Err(corrupt(
@@ -197,17 +221,64 @@ pub(crate) async fn publish_plan_receipt(
     write_receipt(store, router, intent).await
 }
 
-/// Resolve a plan's historical commit without using ref equality as proof.
+/// Resolve a plan's historical commit, repairing a missing terminal receipt.
+///
+/// Requires write authority when committed intent evidence needs receipt repair.
+/// Missing proof returns None and does not establish rejection.
 pub async fn resolve_plan_receipt(
     store: &Store,
     router: &StoreLayout<Store>,
     plan_id: &str,
-) -> Result<Option<MirrorPlanReceipt>> {
+) -> Result<Option<PlanReceipt>> {
+    match lookup_plan_receipt(store, router, plan_id).await? {
+        Some(ReceiptEvidence::Persisted(receipt)) => Ok(Some(receipt)),
+        Some(ReceiptEvidence::Committed(intent)) => {
+            write_receipt(store, router, &intent).await.map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+/// Read proven historical commitment without creating or repairing a receipt.
+///
+/// Missing proof returns None, which does not establish rejection. Corrupt or
+/// mismatched proof returns an error; current ref equality is never evidence.
+pub async fn read_plan_receipt(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    plan_id: &str,
+) -> Result<Option<PlanReceipt>> {
+    Ok(lookup_plan_receipt(store, router, plan_id)
+        .await?
+        .map(|evidence| match evidence {
+            ReceiptEvidence::Persisted(receipt) => receipt,
+            ReceiptEvidence::Committed(intent) => receipt_from_intent(&intent),
+        }))
+}
+
+enum ReceiptEvidence {
+    Persisted(PlanReceipt),
+    Committed(PlanIntent),
+}
+
+async fn lookup_plan_receipt(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    plan_id: &str,
+) -> Result<Option<ReceiptEvidence>> {
     validate_content_hash(plan_id, "mirror plan id", "mirror plan receipt")?;
     let receipt_path = router.ref_journal_plan_receipt_path(plan_id);
-    if let Some(receipt) = read_optional_bounded(store, &receipt_path).await? {
+    if let Some(receipt) = read_optional_bounded::<PlanReceipt>(store, &receipt_path).await? {
+        // Valid history for another plan does not prove this request committed,
+        // even when both plans contain identical ref edits.
+        if receipt.plan_id != plan_id {
+            return Err(corrupt(
+                receipt_path.as_ref(),
+                "mirror plan receipt key does not match its body",
+            ));
+        }
         validate_receipt(store, router, &receipt).await?;
-        return Ok(Some(receipt));
+        return Ok(Some(ReceiptEvidence::Persisted(receipt)));
     }
 
     let intents = read_plan_intents(store, router, plan_id).await?;
@@ -220,17 +291,14 @@ pub async fn resolve_plan_receipt(
             ));
         }
     }
-    match committed {
-        Some(intent) => write_receipt(store, router, &intent).await.map(Some),
-        None => Ok(None),
-    }
+    Ok(committed.map(ReceiptEvidence::Committed))
 }
 
 async fn read_plan_intents(
     store: &Store,
     router: &StoreLayout<Store>,
     plan_id: &str,
-) -> Result<Vec<MirrorPlanIntent>> {
+) -> Result<Vec<PlanIntent>> {
     let prefix = router.ref_journal_plan_attempts_prefix(plan_id);
     let objects = store
         .list_prefix_bounded(&prefix, MAX_PLAN_ATTEMPTS as usize + 1)
@@ -243,7 +311,7 @@ async fn read_plan_intents(
         })?;
     let mut intents = Vec::with_capacity(objects.len());
     for object in objects {
-        let intent: MirrorPlanIntent = read_bounded(store, &object.location).await?;
+        let intent: PlanIntent = read_bounded(store, &object.location).await?;
         validate_intent(router, &intent)?;
         if intent.plan_id != plan_id
             || object.location != router.ref_journal_plan_intent_path(plan_id, intent.attempt)
@@ -259,18 +327,22 @@ async fn read_plan_intents(
     Ok(intents)
 }
 
-async fn write_receipt(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    intent: &MirrorPlanIntent,
-) -> Result<MirrorPlanReceipt> {
-    let receipt = MirrorPlanReceipt {
+fn receipt_from_intent(intent: &PlanIntent) -> PlanReceipt {
+    PlanReceipt {
         version: PLAN_RECEIPT_VERSION,
         repo_prefix: intent.repo_prefix.clone(),
         plan_id: intent.plan_id.clone(),
         attempt: intent.attempt,
         commit: intent.commit.clone(),
-    };
+    }
+}
+
+async fn write_receipt(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    intent: &PlanIntent,
+) -> Result<PlanReceipt> {
+    let receipt = receipt_from_intent(intent);
     let path = router.ref_journal_plan_receipt_path(&receipt.plan_id);
     match store
         .create_strict(&path, Bytes::from(serialize(&receipt)?))
@@ -278,7 +350,7 @@ async fn write_receipt(
     {
         Ok(()) => Ok(receipt),
         Err(StorageError::StateConflict { .. }) => {
-            let persisted: MirrorPlanReceipt = read_bounded(store, &path).await?;
+            let persisted: PlanReceipt = read_bounded(store, &path).await?;
             if persisted == receipt {
                 Ok(persisted)
             } else {
@@ -295,7 +367,7 @@ async fn write_receipt(
 async fn validate_receipt(
     store: &Store,
     router: &StoreLayout<Store>,
-    receipt: &MirrorPlanReceipt,
+    receipt: &PlanReceipt,
 ) -> Result<()> {
     validate_common(
         router,
@@ -306,7 +378,7 @@ async fn validate_receipt(
         "mirror plan receipt",
     )?;
     let intent_path = router.ref_journal_plan_intent_path(&receipt.plan_id, receipt.attempt);
-    let intent: MirrorPlanIntent = read_bounded(store, &intent_path).await?;
+    let intent: PlanIntent = read_bounded(store, &intent_path).await?;
     validate_intent(router, &intent)?;
     if receipt.repo_prefix != intent.repo_prefix
         || receipt.plan_id != intent.plan_id
@@ -326,16 +398,16 @@ async fn validate_receipt(
 async fn validate_receipt_commit(
     store: &Store,
     router: &StoreLayout<Store>,
-    intent: &MirrorPlanIntent,
+    intent: &PlanIntent,
 ) -> Result<()> {
     match &intent.commit {
-        MirrorPlanCommit::RefJournal {
+        PlanCommit::RefJournal {
             transaction_id,
             dependency_digest,
         } => read_bound_transaction(store, router, intent, transaction_id, dependency_digest)
             .await
             .map(|_| ()),
-        MirrorPlanCommit::Manifest {
+        PlanCommit::Manifest {
             base_generation,
             base_digest,
             generation,
@@ -364,7 +436,7 @@ async fn validate_receipt_commit(
     }
 }
 
-fn validate_intent(router: &StoreLayout<Store>, intent: &MirrorPlanIntent) -> Result<()> {
+fn validate_intent(router: &StoreLayout<Store>, intent: &PlanIntent) -> Result<()> {
     validate_common(
         router,
         intent.version,
@@ -374,7 +446,7 @@ fn validate_intent(router: &StoreLayout<Store>, intent: &MirrorPlanIntent) -> Re
         "mirror plan intent",
     )?;
     match &intent.commit {
-        MirrorPlanCommit::RefJournal {
+        PlanCommit::RefJournal {
             transaction_id,
             dependency_digest,
         } => {
@@ -385,7 +457,7 @@ fn validate_intent(router: &StoreLayout<Store>, intent: &MirrorPlanIntent) -> Re
             )?;
             validate_content_hash(dependency_digest, "dependency digest", "mirror plan intent")
         }
-        MirrorPlanCommit::Manifest {
+        PlanCommit::Manifest {
             base_generation,
             base_digest,
             generation,
@@ -429,14 +501,14 @@ fn validate_common(
 async fn intent_committed(
     store: &Store,
     router: &StoreLayout<Store>,
-    intent: &MirrorPlanIntent,
+    intent: &PlanIntent,
 ) -> Result<bool> {
     match &intent.commit {
-        MirrorPlanCommit::RefJournal {
+        PlanCommit::RefJournal {
             transaction_id,
             dependency_digest,
         } => transaction_committed(store, router, intent, transaction_id, dependency_digest).await,
-        MirrorPlanCommit::Manifest {
+        PlanCommit::Manifest {
             base_generation,
             base_digest,
             generation,
@@ -458,7 +530,7 @@ async fn intent_committed(
 async fn transaction_committed(
     store: &Store,
     router: &StoreLayout<Store>,
-    intent: &MirrorPlanIntent,
+    intent: &PlanIntent,
     transaction_id: &str,
     dependency_digest: &str,
 ) -> Result<bool> {
@@ -499,7 +571,7 @@ async fn transaction_committed(
 async fn read_bound_transaction(
     store: &Store,
     router: &StoreLayout<Store>,
-    intent: &MirrorPlanIntent,
+    intent: &PlanIntent,
     transaction_id: &str,
     expected_dependency_digest: &str,
 ) -> Result<RefJournalTransaction> {
@@ -689,10 +761,45 @@ mod tests {
         }
     }
 
-    fn receipt_transaction(receipt: &MirrorPlanReceipt) -> &str {
+    #[test]
+    fn version_one_plan_evidence_preserves_serialized_fields() {
+        for commit in [
+            serde_json::json!({
+                "kind": "ref_journal",
+                "transaction_id": "a".repeat(64),
+                "dependency_digest": "b".repeat(64),
+            }),
+            serde_json::json!({
+                "kind": "manifest",
+                "base_generation": 1,
+                "base_digest": "a".repeat(64),
+                "generation": 2,
+                "digest": "b".repeat(64),
+            }),
+        ] {
+            let body = serde_json::json!({
+                "version": 1,
+                "repo_prefix": "repository",
+                "plan_id": "c".repeat(64),
+                "attempt": 1,
+                "commit": commit,
+            });
+            let receipt: PlanReceipt = serde_json::from_value(body.clone()).unwrap();
+            let intent: PlanIntent = serde_json::from_value(body.clone()).unwrap();
+            assert_eq!(
+                (
+                    serde_json::to_value(receipt).unwrap(),
+                    serde_json::to_value(intent).unwrap()
+                ),
+                (body.clone(), body),
+            );
+        }
+    }
+
+    fn receipt_transaction(receipt: &PlanReceipt) -> &str {
         match &receipt.commit {
-            MirrorPlanCommit::RefJournal { transaction_id, .. } => transaction_id,
-            MirrorPlanCommit::Manifest { .. } => panic!("expected ref-journal receipt"),
+            PlanCommit::RefJournal { transaction_id, .. } => transaction_id,
+            PlanCommit::Manifest { .. } => panic!("expected ref-journal receipt"),
         }
     }
 
@@ -726,6 +833,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unresolved_intent_blocks_execution_without_a_receipt() {
+        let (store, router) = fixture("receipt/unresolved-admission");
+        let plan_id = "e".repeat(64);
+        ensure_plan_unattempted(&store, &router, &plan_id)
+            .await
+            .unwrap();
+        let (transaction, _) = transaction(&store, &router, "refs/heads/main", 'a').await;
+        prepare_ref_journal_plan_intent(&store, &router, &plan_id, &transaction)
+            .await
+            .unwrap();
+        assert!(matches!(
+            ensure_plan_unattempted(&store, &router, &plan_id).await,
+            Err(MetadataError::PlanAlreadyAttempted { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn committed_plan_publishes_a_resolvable_terminal_receipt() {
         let (store, router) = fixture("receipt/commit");
         let plan_id = "1".repeat(64);
@@ -748,6 +872,10 @@ mod tests {
 
         assert_eq!(receipt_transaction(&receipt), committed.transaction_id);
         assert_eq!(receipt.attempt, 1);
+        assert!(matches!(
+            ensure_plan_unattempted(&store, &router, &plan_id).await,
+            Err(MetadataError::PlanAlreadyAttempted { .. })
+        ));
     }
 
     #[tokio::test]
@@ -782,52 +910,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(receipt_transaction(&receipt), committed.transaction_id);
-    }
-
-    #[tokio::test]
-    async fn missing_receipt_recovers_after_journal_compaction() {
-        let (store, router) = fixture("receipt/compaction");
-        crate::layout_descriptor::ensure_canonical_layout(&store, &router)
-            .await
-            .unwrap();
-        let base = Manifest::default_for_repo("refs/heads/main");
-        crate::manifest_store::create_manifest(&store, &router, &base)
-            .await
-            .unwrap();
-        let plan_id = "d".repeat(64);
-        let (mut transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
-        transaction.edits[0].visibility_evidence_hash = None;
-        let committed = commit_ref_transaction_for_plan(
-            &store,
-            &router,
-            &transaction,
-            &heads,
-            &plan_id,
-            || false,
-        )
-        .await
-        .unwrap();
-        store
-            .delete(&router.ref_journal_plan_receipt_path(&plan_id))
-            .await
-            .unwrap();
-
-        crate::manifest_store::compact_ref_journal(
-            &store,
-            &router,
-            "2026-09-03T00:00:00Z".to_owned(),
-            Some("test".to_owned()),
-            "receipt-compaction".to_owned(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let receipt = resolve_plan_receipt(&store, &router, &plan_id)
-            .await
-            .unwrap()
-            .unwrap();
-
         assert_eq!(receipt_transaction(&receipt), committed.transaction_id);
     }
 
@@ -918,12 +1000,49 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            resolve_plan_receipt(&store, &router, &other_plan)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        for read_only in [true, false] {
+            let result = if read_only {
+                read_plan_receipt(&store, &router, &other_plan).await
+            } else {
+                resolve_plan_receipt(&store, &router, &other_plan).await
+            };
+            assert!(result.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn copied_receipt_is_rejected_by_the_requested_plan_binding() {
+        let (store, router) = fixture("receipt/plan-binding");
+        let committed_plan = "4".repeat(64);
+        let requested_plan = "5".repeat(64);
+        let (transaction, heads) = transaction(&store, &router, "refs/heads/main", 'a').await;
+        commit_ref_transaction_for_plan(
+            &store,
+            &router,
+            &transaction,
+            &heads,
+            &committed_plan,
+            || false,
+        )
+        .await
+        .unwrap();
+        let (body, _) = store
+            .get_with_etag(&router.ref_journal_plan_receipt_path(&committed_plan))
+            .await
+            .unwrap();
+        store
+            .put_exact(&router.ref_journal_plan_receipt_path(&requested_plan), body)
+            .await
+            .unwrap();
+
+        for read_only in [true, false] {
+            let result = if read_only {
+                read_plan_receipt(&store, &router, &requested_plan).await
+            } else {
+                resolve_plan_receipt(&store, &router, &requested_plan).await
+            };
+            assert!(matches!(result, Err(MetadataError::CorruptObject { .. })));
+        }
     }
 
     #[tokio::test]
@@ -1064,7 +1183,7 @@ mod tests {
             &store,
             &router,
             &plan_id,
-            MirrorPlanCommit::Manifest {
+            PlanCommit::Manifest {
                 base_generation: base.generation,
                 base_digest: manifest_digest(&base).unwrap(),
                 generation: candidate.generation,
@@ -1088,10 +1207,7 @@ mod tests {
 
         assert!(
             receipt.attempt == 1
-                && matches!(
-                    receipt.commit,
-                    MirrorPlanCommit::Manifest { generation: 1, .. }
-                )
+                && matches!(receipt.commit, PlanCommit::Manifest { generation: 1, .. })
         );
     }
 
@@ -1121,19 +1237,33 @@ mod tests {
         let mut successor = candidate;
         successor.generation += 1;
         successor.session_id = "successor".to_owned();
+        successor
+            .refs
+            .insert("refs/heads/main".to_owned(), "b".repeat(40));
         successor.seal_git_validation();
         write_manifest_cas(&store, &router, &successor, &etag)
             .await
             .unwrap();
 
+        let observed = read_plan_receipt(&store, &router, &plan_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            store
+                .get_with_etag(&router.ref_journal_plan_receipt_path(&plan_id))
+                .await,
+            Err(StorageError::NotFound { .. })
+        ));
         let receipt = resolve_plan_receipt(&store, &router, &plan_id)
             .await
             .unwrap()
             .unwrap();
 
+        assert_eq!(observed, receipt);
         assert!(matches!(
             receipt.commit,
-            MirrorPlanCommit::Manifest { generation: 1, .. }
+            PlanCommit::Manifest { generation: 1, .. }
         ));
     }
 }

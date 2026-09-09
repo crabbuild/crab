@@ -2,7 +2,7 @@ import type { MetadataRoute } from "next"
 import { blogSource } from "@/lib/blog-source"
 import { librarySource } from "@/lib/library-source"
 import { SITE_URL } from "@/lib/metadata"
-import { cliSource } from "@/lib/source"
+import { cliSource, sdkSource } from "@/lib/source"
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const staticRoutes: MetadataRoute.Sitemap = [
@@ -32,6 +32,14 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.8,
     }))
 
+  const sdkDocEntries: MetadataRoute.Sitemap = sdkSource
+    .getPages()
+    .map((page) => ({
+      url: `${SITE_URL}/docs/sdk/${page.slugs.join("/")}`,
+      changeFrequency: "weekly",
+      priority: 0.8,
+    }))
+
   const blogEntries: MetadataRoute.Sitemap = blogSource
     .getPages()
     .map((post) => ({
@@ -50,5 +58,11 @@ export default function sitemap(): MetadataRoute.Sitemap {
       priority: 0.8,
     }))
 
-  return [...staticRoutes, ...blogEntries, ...libraryEntries, ...cliDocEntries]
+  return [
+    ...staticRoutes,
+    ...blogEntries,
+    ...libraryEntries,
+    ...cliDocEntries,
+    ...sdkDocEntries,
+  ]
 }

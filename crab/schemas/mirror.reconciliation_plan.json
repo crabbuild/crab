@@ -48,7 +48,7 @@
       "type": "string"
     }
   },
-  "description": "Immutable, content-identified mirror reconciliation contract.",
+  "description": "Immutable mirror request bound to one preparation.",
   "properties": {
     "actions": {
       "description": "Ordered, source-to-Crab mutations.",
@@ -103,8 +103,12 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "operation_nonce": {
+      "description": "Fresh preparation identity retained when validating or applying this plan.",
+      "type": "string"
+    },
     "plan_id": {
-      "description": "Blake3 identity of the canonical plan body.",
+      "description": "Blake3 identity binding the canonical request and operation nonce.",
       "type": "string"
     },
     "pointer_count": {
@@ -140,6 +144,7 @@
     "crab_refs",
     "destination",
     "format_version",
+    "operation_nonce",
     "plan_id",
     "pointer_count",
     "source",

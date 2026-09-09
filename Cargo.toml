@@ -14,6 +14,8 @@ members = [
     "crates/crab-lfs",
     "crates/crab-metadata",
     "crates/crab-read",
+    "crates/crab-remote",
+    "crates/crab-sdk",
     "crates/crab-remote-git",
     "crates/crab-s3-gateway",
     "crates/crab-staging",
@@ -28,30 +30,34 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+repository = "https://github.com/crabbuild/crab"
+rust-version = "1.91"
 
 [workspace.dependencies]
-crab-auth = { path = "crates/crab-auth", default-features = false }
-crab-auth-server = { path = "crates/crab-auth-server", default-features = false }
-crab-auth-store = { path = "crates/crab-auth-store", default-features = false }
-crab-cache = { path = "crates/crab-cache", default-features = false }
-crab-cache-server = { path = "crates/crab-cache-server", default-features = false }
-crab-cache-store = { path = "crates/crab-cache-store", default-features = false }
-crab-coordination = { path = "crates/crab-coordination", default-features = false }
-crab-diff = { path = "crates/crab-diff", default-features = false }
-crab-git = { path = "crates/crab-git", default-features = false }
-crab-http-server = { path = "crates/crab-http-server", default-features = false }
-crab-lfs = { path = "crates/crab-lfs", default-features = false }
-crab-metadata = { path = "crates/crab-metadata", default-features = false }
-crab-read = { path = "crates/crab-read", default-features = false }
-crab-remote-git = { path = "crates/crab-remote-git", default-features = false }
-crab-s3-gateway = { path = "crates/crab-s3-gateway", default-features = false }
-crab-staging = { path = "crates/crab-staging", default-features = false }
-crab-storage = { path = "crates/crab-storage", default-features = false }
-crab-types = { path = "crates/crab-types", default-features = false }
-crab-vfs = { path = "crates/crab-vfs", default-features = false }
-crab-write = { path = "crates/crab-write", default-features = false }
-crab-workflow = { path = "crates/crab-workflow", default-features = false }
-crab-xet = { path = "crates/crab-xet", default-features = false }
+crab-auth = { version = "=0.1.0", path = "crates/crab-auth", default-features = false }
+crab-auth-server = { version = "=1.2.0", path = "crates/crab-auth-server", default-features = false }
+crab-auth-store = { version = "=0.1.0", path = "crates/crab-auth-store", default-features = false }
+crab-cache = { version = "=0.1.0", path = "crates/crab-cache", default-features = false }
+crab-cache-server = { version = "=1.2.0", path = "crates/crab-cache-server", default-features = false }
+crab-cache-store = { version = "=0.1.0", path = "crates/crab-cache-store", default-features = false }
+crab-coordination = { version = "=0.1.0", path = "crates/crab-coordination", default-features = false }
+crab-diff = { version = "=0.1.0", path = "crates/crab-diff", default-features = false }
+crab-git = { version = "=0.1.0", path = "crates/crab-git", default-features = false }
+crab-http-server = { version = "=0.1.0", path = "crates/crab-http-server", default-features = false }
+crab-lfs = { version = "=0.1.0", path = "crates/crab-lfs", default-features = false }
+crab-metadata = { version = "=0.1.0", path = "crates/crab-metadata", default-features = false }
+crab-read = { version = "=0.1.0", path = "crates/crab-read", default-features = false }
+crab-remote = { version = "=0.1.0", path = "crates/crab-remote", default-features = false }
+crab-sdk = { version = "=0.1.0", path = "crates/crab-sdk", default-features = false }
+crab-remote-git = { version = "=0.1.0", path = "crates/crab-remote-git", default-features = false }
+crab-s3-gateway = { version = "=0.1.0", path = "crates/crab-s3-gateway", default-features = false }
+crab-staging = { version = "=0.1.0", path = "crates/crab-staging", default-features = false }
+crab-storage = { version = "=0.1.0", path = "crates/crab-storage", default-features = false }
+crab-types = { version = "=0.1.0", path = "crates/crab-types", default-features = false }
+crab-vfs = { version = "=0.1.0", path = "crates/crab-vfs", default-features = false }
+crab-write = { version = "=0.1.0", path = "crates/crab-write", default-features = false }
+crab-workflow = { version = "=0.1.0", path = "crates/crab-workflow", default-features = false }
+crab-xet = { version = "=0.1.0", path = "crates/crab-xet", default-features = false }
 
 xet-client = "1.6.0"
 xet-core-structures = "1.6.0"
@@ -116,6 +122,7 @@ async-trait = "0.1"
 blake3 = "1.8"
 md-5 = "0.11"
 bytes = "1.11"
+dunce = "1"
 futures-util = "0.3"
 flate2 = "1"
 globset = "0.4"

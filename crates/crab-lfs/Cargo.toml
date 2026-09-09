@@ -1,9 +1,11 @@
 [package]
 name = "crab-lfs"
 version = "0.1.0"
-publish = false
+publish = true
 edition = "2024"
 license = "Apache-2.0"
+repository.workspace = true
+rust-version.workspace = true
 description = "Git LFS object storage contracts for Crab."
 
 [lib]
@@ -23,6 +25,7 @@ sha2 = "0.10"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync"] }
 tracing = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
