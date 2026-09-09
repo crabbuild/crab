@@ -15,7 +15,8 @@ use std::future::Future;
 use std::io::{Stdout, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -26,6 +27,7 @@ use crate::core::output::event_payloads::{
 };
 use crate::core::output::{JsonlStream, OutputMode};
 use crate::core::perf_phase::PhaseTimer;
+use crate::git::progress::{format_bytes, format_rate, is_tty};
 
 /// Arguments for the `crab clone` command.
 #[derive(Clone)]
@@ -83,6 +85,131 @@ fn emit_phase(stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>, payload: P
         let output = s.emit_schema_event(PERF_PHASE_SCHEMA, "event", payload);
         crate::core::output::report_progress_output(output);
     }
+}
+
+const CLONE_PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+
+struct ClonePackProgressReporter {
+    mode: OutputMode,
+    jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>>,
+    started: OnceLock<Instant>,
+    state: Mutex<ClonePackProgressState>,
+}
+
+#[derive(Default)]
+struct ClonePackProgressState {
+    last_report: Option<Instant>,
+    tty_line_open: bool,
+}
+
+impl ClonePackProgressReporter {
+    fn new(mode: OutputMode, jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>>) -> Self {
+        Self {
+            mode,
+            jsonl_stream,
+            started: OnceLock::new(),
+            state: Mutex::new(ClonePackProgressState::default()),
+        }
+    }
+
+    fn report(&self, progress: crab_remote_git::PackDownloadProgress) {
+        let elapsed = self
+            .started
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_secs_f64();
+        let rate = if elapsed > 0.0 {
+            progress.bytes_downloaded as f64 / elapsed
+        } else {
+            0.0
+        };
+
+        match self.mode {
+            OutputMode::Json => {}
+            OutputMode::Jsonl => {
+                if let Some(stream) = &self.jsonl_stream
+                    && let Ok(mut stream) = stream.lock()
+                {
+                    let output = stream.emit_progress(ProgressPayload {
+                        operation: "downloading_git_packs".to_owned(),
+                        current: progress.packs_completed,
+                        total: progress.packs_total,
+                        bytes: progress.bytes_downloaded,
+                        total_bytes: progress.total_bytes,
+                        rate_bytes_per_sec: rate,
+                        xorbs_produced: None,
+                    });
+                    crate::core::output::report_progress_output(output);
+                }
+            }
+            OutputMode::Text => self.report_text(progress, rate),
+        }
+    }
+
+    fn report_text(&self, progress: crab_remote_git::PackDownloadProgress, rate: f64) {
+        let now = Instant::now();
+        let complete = progress.packs_completed == progress.packs_total
+            && progress.bytes_downloaded == progress.total_bytes;
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if !complete
+            && state
+                .last_report
+                .is_some_and(|last| now.duration_since(last) < CLONE_PROGRESS_INTERVAL)
+        {
+            return;
+        }
+
+        let message = format_clone_pack_progress(progress, rate);
+        if is_tty() {
+            eprint!("\r\x1b[2K{message}");
+            let _ = std::io::stderr().flush();
+            state.tty_line_open = true;
+            if complete {
+                eprintln!();
+                state.tty_line_open = false;
+            }
+        } else {
+            eprintln!("{message}");
+        }
+        state.last_report = Some(now);
+    }
+}
+
+impl Drop for ClonePackProgressReporter {
+    fn drop(&mut self) {
+        if self.mode == OutputMode::Text
+            && let Ok(state) = self.state.lock()
+            && state.tty_line_open
+        {
+            eprintln!();
+        }
+    }
+}
+
+fn format_clone_pack_progress(
+    progress: crab_remote_git::PackDownloadProgress,
+    rate_bytes_per_sec: f64,
+) -> String {
+    let percent = if progress.total_bytes == 0 {
+        0
+    } else {
+        ((u128::from(progress.bytes_downloaded) * 100) / u128::from(progress.total_bytes)).min(100)
+            as u64
+    };
+    let mut message = format!(
+        "Downloading Git packs: {percent}% ({} / {}, {}/{} packs",
+        format_bytes(progress.bytes_downloaded),
+        format_bytes(progress.total_bytes),
+        progress.packs_completed,
+        progress.packs_total,
+    );
+    if rate_bytes_per_sec > 0.0 {
+        let _ = write!(&mut message, ", {}", format_rate(rate_bytes_per_sec));
+    }
+    message.push(')');
+    message
 }
 
 /// Clone a repository, creating the target directory under `parent`.
@@ -145,23 +272,23 @@ pub async fn run_clone_in(
     }
 
     // Set up JSONL stream for streaming mode.
-    let jsonl_stream: Option<std::sync::Mutex<JsonlStream<Stdout>>> =
-        if args.mode == OutputMode::Jsonl {
-            Some(std::sync::Mutex::new(JsonlStream::new(
-                "clone.event",
-                "1.0",
-                std::io::stdout(),
-            )))
-        } else {
-            None
-        };
+    let jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>> = if args.mode == OutputMode::Jsonl {
+        Some(Arc::new(Mutex::new(JsonlStream::new(
+            "clone.event",
+            "1.0",
+            std::io::stdout(),
+        ))))
+    } else {
+        None
+    };
 
     // Step 1: Fetch the repository without populating the worktree yet.
     // The checkout happens only after local checkout settings are
     // configured, otherwise lazy clones pay the non-lazy smudge cost during
     // their first materialization.
-    // Note: git itself prints "Cloning into '...'" via inherited stderr,
-    // so we don't duplicate that message here.
+    if !args.mode.is_machine() {
+        eprintln!("Reading repository metadata...");
+    }
 
     // Emit progress for the git clone phase.
     if let Some(stream) = &jsonl_stream
@@ -180,20 +307,28 @@ pub async fn run_clone_in(
     }
 
     let phase = PhaseTimer::start("clone", "pack_fetch");
+    let pack_progress = ClonePackProgressReporter::new(args.mode, jsonl_stream.clone());
     if args.depth.is_none()
         && let Some(prepared) = Box::pin(prepare_complete_clone_inventory(
             target_dir.parent().unwrap_or(parent),
             args,
             cancel,
+            &pack_progress,
         ))
         .await?
     {
+        if !args.mode.is_machine() {
+            eprintln!("Creating local Git repository...");
+        }
         run_complete_inventory_clone(parent, args, &target_dir, &prepared)?;
     } else {
+        if !args.mode.is_machine() {
+            eprintln!("Fetching Git history...");
+        }
         run_git_clone_no_checkout(parent, args, &target_dir)?;
     }
     scrub_git_pack_appledouble_files(&target_dir)?;
-    emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
+    emit_phase(jsonl_stream.as_deref(), phase.finish(0, 0, 1));
 
     check_cancelled(cancel)?;
 
@@ -229,9 +364,12 @@ pub async fn run_clone_in(
     check_cancelled(cancel)?;
 
     // Step 5: Populate the working tree after crab config is ready.
+    if !args.mode.is_machine() {
+        eprintln!("Checking out files...");
+    }
     let phase = PhaseTimer::start("clone", "checkout");
     checkout_head(&target_dir, &args.url, args.mode)?;
-    emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
+    emit_phase(jsonl_stream.as_deref(), phase.finish(0, 0, 1));
 
     // Historical revisions may predate project configuration. Persist the
     // explicit clone location for subsequent reads only after checkout, so
@@ -269,7 +407,7 @@ pub async fn run_clone_in(
             // from the local cache.
             tracing::warn!(error = %e, "clone: post-clone shard sync failed (non-fatal)");
         }
-        emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
+        emit_phase(jsonl_stream.as_deref(), phase.finish(0, 0, 1));
     }
 
     check_cancelled(cancel)?;
@@ -325,7 +463,7 @@ pub async fn run_clone_in(
         let phase = PhaseTimer::start("clone", "hydration");
         run_post_checkout_hydrate(&target_dir, &hydrate_args, cancel).await?;
         emit_phase(
-            jsonl_stream.as_ref(),
+            jsonl_stream.as_deref(),
             phase.finish(0, 0, effective_include.len() as u64),
         );
 
@@ -367,7 +505,7 @@ pub async fn run_clone_in(
         };
         let phase = PhaseTimer::start("clone", "hydration");
         run_post_checkout_hydrate(&target_dir, &hydrate_args, cancel).await?;
-        emit_phase(jsonl_stream.as_ref(), phase.finish(0, 0, 1));
+        emit_phase(jsonl_stream.as_deref(), phase.finish(0, 0, 1));
 
         if !args.mode.is_machine() {
             eprintln!("Clone complete. All files hydrated.");
@@ -717,6 +855,7 @@ async fn prepare_complete_clone_inventory(
     workspace_parent: &Path,
     args: &CloneArgs,
     cancel: &CancellationToken,
+    progress: &ClonePackProgressReporter,
 ) -> Result<Option<PreparedCompleteClone>> {
     let config = crate::core::config::Config::resolve_local()?;
     let parsed = crate::git::url::CrabUrl::parse(&args.url)?;
@@ -770,8 +909,14 @@ async fn prepare_complete_clone_inventory(
         cancel,
     )
     .await?;
+    let report_progress = |update| progress.report(update);
     let inventory = repository
-        .download_complete_pack_inventory(&plan.object_ids, workspace_parent, cancel)
+        .download_complete_pack_inventory(
+            &plan.object_ids,
+            workspace_parent,
+            cancel,
+            Some(&report_progress),
+        )
         .await
         .map_err(|error| CrabError::Protocol(error.to_string()))?;
     Ok(inventory.map(|inventory| PreparedCompleteClone {
@@ -1519,6 +1664,21 @@ fn record_pointer_extension(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clone_pack_progress_reports_bytes_packs_and_rate() {
+        let progress = crab_remote_git::PackDownloadProgress {
+            packs_completed: 1,
+            packs_total: 3,
+            bytes_downloaded: 40 * 1024 * 1024,
+            total_bytes: 1024 * 1024 * 1024,
+        };
+
+        assert_eq!(
+            format_clone_pack_progress(progress, 12.5 * 1024.0 * 1024.0),
+            "Downloading Git packs: 3% (40.0 MiB / 1.0 GiB, 1/3 packs, 12.5 MiB/s)"
+        );
+    }
 
     fn git_in(repo: &Path, args: &[&str]) {
         let status = std::process::Command::new("git")

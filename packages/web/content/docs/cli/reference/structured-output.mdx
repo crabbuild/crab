@@ -256,6 +256,10 @@ These commands accept both flags. `--json` emits only the terminal result;
 | `crab prune` | `prune` | `prune.event` |
 | `crab clone` | `clone` | `clone.event` |
 
+During a complete-inventory clone, `clone.event` progress records use the
+`downloading_git_packs` operation and populate pack counts, transferred
+pack-body bytes, total pack-body bytes, and `rate_bytes_per_sec`.
+
 `crab push --rebase-on-non-fast-forward` result payloads include
 `integration_retries`, `integration_retry_limit`, and, when retries occur,
 `integration_retry_stages`. The stage map uses bounded names such as

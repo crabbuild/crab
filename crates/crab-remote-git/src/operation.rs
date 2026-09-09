@@ -593,6 +593,7 @@ impl OperationContext {
         pack_id: crab_xet::hash::MerkleHash,
         expected_size: u64,
         destination: &std::path::Path,
+        progress: Option<&(dyn Fn(u64) + Send + Sync)>,
     ) -> Result<crab_git::pack::VerifiedPackIdentity> {
         let reader = self.state.reader.as_ref().ok_or(Error::EmptyRepository)?;
         reader
@@ -602,6 +603,7 @@ impl OperationContext {
                 destination,
                 &self.budget,
                 &self.cancellation,
+                progress,
             )
             .await
     }

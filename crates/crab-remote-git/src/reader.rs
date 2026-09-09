@@ -1472,6 +1472,7 @@ impl RemoteGitReader {
         destination: &std::path::Path,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
+        progress: Option<&(dyn Fn(u64) + Send + Sync)>,
     ) -> Result<VerifiedPackIdentity> {
         use tokio::io::AsyncWriteExt as _;
 
@@ -1526,6 +1527,9 @@ impl RemoteGitReader {
                 .ok_or(Error::Corrupt {
                     stage: CorruptionStage::PackEntry,
                 })?;
+            if let Some(progress) = progress {
+                progress(chunk.len() as u64);
+            }
         }
         file.flush().await.map_err(|source| {
             Error::Metadata(crab_metadata::error::MetadataError::Io { source })
@@ -2570,6 +2574,7 @@ mod tests {
                 destination.path(),
                 &budget,
                 &CancellationToken::new(),
+                None,
             )
             .await;
         assert!(matches!(
