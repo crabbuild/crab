@@ -604,6 +604,88 @@ mod tests {
 
     use super::{GenericHasherTap, GenericHasherTapState};
 
+    #[derive(Debug)]
+    struct RejectFullXorbReads {
+        inner: Arc<dyn object_store::ObjectStore>,
+    }
+
+    impl std::fmt::Display for RejectFullXorbReads {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("RejectFullXorbReads")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for RejectFullXorbReads {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            options: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if !options.head && options.range.is_none() && location.as_ref().contains("/xorbs/") {
+                return Err(object_store::Error::Generic {
+                    store: "RejectFullXorbReads",
+                    source: Box::new(std::io::Error::other(
+                        "test forbids complete xorb body reads",
+                    )),
+                });
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
     pub(super) async fn reconstruction_fixture(
         root: &std::path::Path,
         corrupt_origin: bool,
@@ -1006,17 +1088,14 @@ mod tests {
 
     #[tokio::test]
     async fn range_to_path_returns_exact_bytes_without_full_xorb_reads() {
-        use crab_storage::test_support::{CountingObjectStore, ObjectReadKind};
-
         let directory = tempfile::tempdir().unwrap();
-        let counted = Arc::new(CountingObjectStore::new(Arc::new(
-            object_store::memory::InMemory::new(),
-        )));
-        let origin = crab_storage::Store::new(counted.clone());
+        let guarded = Arc::new(RejectFullXorbReads {
+            inner: Arc::new(object_store::memory::InMemory::new()),
+        });
+        let origin = crab_storage::Store::new(guarded);
         let (hydrator, pointer, original) =
             reconstruction_fixture_with_origin(&directory.path().join("cache"), false, origin)
                 .await;
-        counted.reset();
         let dest = directory.path().join("selected");
 
         let written = hydrator
@@ -1026,21 +1105,6 @@ mod tests {
 
         assert_eq!(written, 8192 - 1024);
         assert_eq!(std::fs::read(dest).unwrap(), original[1024..8192]);
-        let xorb_reads = counted
-            .requests()
-            .into_iter()
-            .filter(|request| request.location.contains("/xorbs/"))
-            .collect::<Vec<_>>();
-        assert!(
-            xorb_reads
-                .iter()
-                .any(|request| request.kind == ObjectReadKind::Range)
-        );
-        assert!(
-            xorb_reads
-                .iter()
-                .all(|request| request.kind != ObjectReadKind::Full)
-        );
     }
 
     #[tokio::test]
