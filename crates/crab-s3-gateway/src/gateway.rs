@@ -728,6 +728,7 @@ impl S3 for Gateway {
         reject_head_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let object = self.read_object(repository, &req.input.key).await?;
+        let tag_count = tag_count(object.attributes.as_ref())?;
         evaluate_conditions(
             req.input.if_match.as_ref(),
             req.input.if_none_match.as_ref(),
@@ -747,7 +748,7 @@ impl S3 for Gateway {
             selection.checksums.as_ref(),
         )?;
         let content_length = selection.range.end - selection.range.start;
-        Ok(S3Response::new(HeadObjectOutput {
+        let mut response = S3Response::new(HeadObjectOutput {
             accept_ranges: Some("bytes".to_owned()),
             content_length: Some(
                 i64::try_from(content_length).map_err(|_| s3_error!(InternalError))?,
@@ -791,7 +792,15 @@ impl S3 for Gateway {
                 .attributes
                 .map(|value| value.metadata.into_iter().collect()),
             ..Default::default()
-        }))
+        });
+        if let Some(tag_count) = tag_count {
+            response.headers.insert(
+                "x-amz-tagging-count",
+                http::HeaderValue::from_str(&tag_count.to_string())
+                    .map_err(|_| s3_error!(InternalError))?,
+            );
+        }
+        Ok(response)
     }
 
     async fn put_object(
