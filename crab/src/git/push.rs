@@ -1632,6 +1632,7 @@ struct UploadedGitPack {
     entry: PackManifestEntry,
     idx_path: PathBuf,
     kind_metadata_published: bool,
+    _evidence_dir: Arc<tempfile::TempDir>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -13169,10 +13170,14 @@ impl PushPipeline {
                 .iter()
                 .map(|update| update.new_sha.clone())
                 .collect::<Vec<_>>();
-            let pack_dir = self.objects_dir()?.join("pack");
+            let evidence_dir = Arc::new(
+                tempfile::Builder::new()
+                    .prefix(".crab-push-evidence-")
+                    .tempdir_in(self.objects_dir()?)?,
+            );
             let mut uploaded = Vec::with_capacity(packed_files.len());
             let ref_tips = &ref_tips;
-            let pack_dir = &pack_dir;
+            let evidence_dir = &evidence_dir;
             let multipart_journal = multipart_journal
                 .as_deref()
                 .map(|journal| journal as &dyn crab_storage::multipart::MultipartJournal);
@@ -13181,7 +13186,7 @@ impl PushPipeline {
                 let pack_sha = packed.pack_blake3_hex.clone();
                 let pack_path = self.router.pack_path(&pack_sha);
                 let installed = pack::install_pack_file_locally_with_timeout(
-                    pack_dir,
+                    evidence_dir.path(),
                     packed.pack_path.as_ref(),
                     &pack_sha,
                     self.config.receive_max_input_size,
@@ -13347,6 +13352,7 @@ impl PushPipeline {
                     entry,
                     idx_path: installed.idx_path,
                     kind_metadata_published: kind_metadata.is_some(),
+                    _evidence_dir: Arc::clone(evidence_dir),
                 }))
             });
             let concurrency = self
@@ -16553,13 +16559,13 @@ impl PushPipeline {
         check_cancelled(&self.cancel)?;
 
         // Step 10b: connectivity check. Before we move refs, prove every
-        // object reachable from each new tip exists locally — at this
-        // point step 10 has already installed the freshly-uploaded pack
-        // into `.git/objects/pack/`, so the same ODB git will serve to
-        // fetchers is what we walk here. A missing object at this stage
-        // is either a pack-gen bug or a corrupt local ODB; either way it
-        // is strictly safer to reject the push than to commit a ref
-        // that points at incomplete history.
+        // object reachable from each new tip exists locally. Step 10 strictly
+        // indexed the outgoing non-thin pack in a temporary evidence directory;
+        // keeping it out of `.git/objects/pack/` prevents repeated pushes from
+        // making every source-ODB walk scan an ever-growing pack set. The source
+        // ODB still owns every packed object, so a missing object here is either
+        // a pack-gen bug or a corrupt local ODB. It is strictly safer to reject
+        // the push than to commit a ref that points at incomplete history.
         //
         // Surfaces per-ref failures via
         // [`CrabError::PushConnectivityMissing`] which is mapped to
@@ -21716,7 +21722,7 @@ mod tests {
         }
     }
 
-    use crate::test::git_repo::{CleanGitEnvGuard, GitDirGuard};
+    use crate::test::git_repo::{CleanGitEnvGuard, GitDirGuard, TEST_GIT_REPO};
 
     fn pack_manifest_entry_with_tips(ref_tips: Vec<String>) -> PackManifestEntry {
         let pack_id = "a".repeat(64);
@@ -23258,6 +23264,49 @@ mod tests {
             0,
             "an unrelated ref advance must reuse immutable dependencies"
         );
+    }
+
+    #[tokio::test]
+    async fn uploading_push_pack_does_not_install_it_in_source_object_database() {
+        let _guard = GitDirGuard::new();
+        let (store, router) = test_store_router("push-pack-evidence");
+        let source_pack_dir = TEST_GIT_REPO.git_dir.join("objects/pack");
+        let source_pack_count = || {
+            std::fs::read_dir(&source_pack_dir)
+                .map(|entries| {
+                    entries
+                        .filter_map(std::result::Result::ok)
+                        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+                        .count()
+                })
+                .unwrap_or_default()
+        };
+        let source_packs_before = source_pack_count();
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            vec![make_spec("refs/heads/main")],
+            Some(store),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+
+        pipeline.prepare_git_pack().await.expect("prepare pack");
+        pipeline.upload_packs().await.expect("upload pack");
+
+        let uploaded = pipeline.uploaded_packs.lock().await;
+        assert!(!uploaded.is_empty());
+        assert!(
+            uploaded
+                .iter()
+                .all(|pack| !pack.idx_path.starts_with(&source_pack_dir)),
+            "outgoing pack evidence must not enter the source object database"
+        );
+        assert_eq!(source_pack_count(), source_packs_before);
     }
 
     #[tokio::test]
@@ -35831,6 +35880,7 @@ mod tests {
             let shard_hash = MerkleHash::from([1u64, 2, 3, 4]);
             pipeline.uploaded_shard_hashes.lock().await.push(shard_hash);
         }
+        let evidence_dir = Arc::new(tempfile::tempdir().unwrap());
         pipeline.uploaded_packs.lock().await.extend([
             UploadedGitPack {
                 entry: PackManifestEntry {
@@ -35842,6 +35892,7 @@ mod tests {
                 },
                 idx_path: PathBuf::from("pack_abc.idx"),
                 kind_metadata_published: false,
+                _evidence_dir: Arc::clone(&evidence_dir),
             },
             UploadedGitPack {
                 entry: PackManifestEntry {
@@ -35853,6 +35904,7 @@ mod tests {
                 },
                 idx_path: PathBuf::from("pack_def.idx"),
                 kind_metadata_published: false,
+                _evidence_dir: evidence_dir,
             },
         ]);
         pipeline
