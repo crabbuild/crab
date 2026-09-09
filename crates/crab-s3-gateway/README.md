@@ -22,6 +22,11 @@ and part inspection APIs. Path-style addressing is always available. Set
 multipart parts support up to 5 GiB, and multipart completion supports S3's
 50 TB object limit.
 Large payloads use bounded-memory spooling and Crab's verified LFS content path.
+Objects already stored as Crab/Xet pointers retain Xet deduplication: partial
+GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
+stream the selected bytes through bounded temporary storage. Low-coverage cold
+reads fetch bounded xorb ranges; the cache may fetch a complete verified xorb
+for high-coverage reads. Complete GETs retain whole-file verification.
 The complete frozen surface and deliberate exclusions are in the protocol
 contract linked below.
 

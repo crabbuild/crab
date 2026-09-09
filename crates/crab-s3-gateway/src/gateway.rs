@@ -118,7 +118,7 @@ impl ReadContent {
         range: std::ops::Range<u64>,
     ) -> S3Result<ContentStream> {
         use futures_util::{StreamExt as _, TryStreamExt as _};
-        use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+        use tokio::io::AsyncReadExt as _;
 
         match self {
             Self::Ordinary(bytes) => {
@@ -147,15 +147,19 @@ impl ReadContent {
                 };
                 let directory = tempfile::tempdir().map_err(|error| gateway_error(error.into()))?;
                 let path = directory.path().join("content");
-                repository
-                    .hydrator
-                    .reconstruct_to_path(&pointer, &path)
-                    .await
-                    .map_err(|error| gateway_error(error.into()))?;
-                let mut file = tokio::fs::File::open(path)
-                    .await
-                    .map_err(|error| gateway_error(error.into()))?;
-                file.seek(std::io::SeekFrom::Start(range.start))
+                if range.start == 0 && range.end == pointer.size {
+                    repository
+                        .hydrator
+                        .reconstruct_to_path(&pointer, &path)
+                        .await
+                } else {
+                    repository
+                        .hydrator
+                        .reconstruct_range_to_path(&pointer, range.start, range.end, &path)
+                        .await
+                }
+                .map_err(|error| gateway_error(error.into()))?;
+                let file = tokio::fs::File::open(path)
                     .await
                     .map_err(|error| gateway_error(error.into()))?;
                 let reader = tokio_util::io::ReaderStream::new(file.take(range.end - range.start));

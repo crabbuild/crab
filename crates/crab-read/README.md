@@ -105,9 +105,13 @@ async fn example(pointer_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>>
 }
 ```
 
-Use `reconstruct_range_from_pointer` for partial reads and
-`reconstruct_to_path` for large files. The pointer and metadata remain the
-source of truth; caches only change where immutable bytes are fetched from.
+Use `reconstruct_range_from_pointer` for bounded in-memory partial reads,
+`reconstruct_range_to_path` for large partial reads, and `reconstruct_to_path`
+for complete large files. Range reconstruction limits the recipe to the Xet
+chunks overlapping the selected byte interval. Cold, low-coverage reads fetch
+bounded xorb ranges; high-coverage reads may cache a complete verified xorb.
+The pointer and metadata remain the source of truth; caches only change where
+immutable bytes are fetched from.
 Use `reconstruct_to_writer` with a sink for verification or cache warming that
 does not need to retain the file. Success verifies actual whole-file hash and
 size, but a writer can receive bytes before final verification; consumers must

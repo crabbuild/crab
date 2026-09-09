@@ -565,6 +565,16 @@ is not a substitute. Read symlinks/submodules only according to phase 0; never
 follow paths into the gateway host filesystem. Version-specific AWS parameters
 remain unsupported unless full S3 versioning was selected and qualified.
 
+For Crab/Xet pointers, a partial GET or copy-source range uses the shared Xet
+range reconstructor and prunes the reconstruction recipe to chunks overlapping
+the selected logical byte interval. Cold, low-coverage reads fetch bounded xorb
+ranges; the cache may fetch and retain a complete verified xorb when the
+selected chunks cover most of it. The selected bytes are streamed from bounded
+temporary storage, so the gateway does not hydrate the complete logical file or
+retain the requested range in memory. A complete GET continues through
+whole-file reconstruction so the pointer hash and declared size are both
+verified.
+
 ### 3.2 Headers, conditions and ranges
 
 | Concern | Required implementation rule |
