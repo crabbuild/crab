@@ -1869,6 +1869,42 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_commit_does_not_enter_automatic_transient_retry() {
+        let spec = PushSpec {
+            force: false,
+            src: "HEAD".into(),
+            dst: "refs/heads/main".into(),
+        };
+        let specs = [spec];
+        let source = || {
+            Box::new(crab_storage::StorageError::Throttled {
+                retry_after: None,
+                source: None,
+            })
+        };
+        for metadata in [
+            crab_metadata::error::MetadataError::RefJournalCommitUncertain {
+                transaction_id: "a".repeat(64),
+                source: source(),
+                verification: None,
+            },
+            crab_metadata::error::MetadataError::ManifestCommitUncertain {
+                path: "repo/manifest".into(),
+                candidate_digest: "b".repeat(64),
+                source: source(),
+            },
+        ] {
+            let error = CrabError::from(crab_write::WriteError::Metadata(metadata));
+            let result = push_result_from_error(&specs, &error);
+            assert_eq!(
+                result.outcomes[&specs[0].dst].protocol_tag(),
+                "indeterminate"
+            );
+            assert_eq!(transient_retry_branch(&specs, &result), None);
+        }
+    }
+
+    #[test]
     fn transient_retry_branch_accepts_current_branch_transport_failures() {
         use std::collections::HashMap;
 

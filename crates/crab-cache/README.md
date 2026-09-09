@@ -112,3 +112,12 @@ there need evidence for both enabled paths and the affected platform.
   cache entries are disposable and must never weaken origin integrity checks.
 - [`crab-read`](../crab-read/README.md) owns reconstruction and shard
   completeness, while this crate owns object reuse.
+
+Private SQLite opens verify byte-lock exclusion through two independently opened
+descriptors before reading or initializing the database generation. Filesystems
+that accept OFD lock calls without enforcing exclusion are rejected as unsafe.
+Shared-memory opens repeat this check on the actual side file before truncation
+or mapping: a newly created side file can behave differently from a reopened
+main file. The check protects live WAL mappings from another opener's reset.
+The probe uses a byte beyond SQLite's lock region and releases its locks on both
+success and failure; it does not modify database contents.

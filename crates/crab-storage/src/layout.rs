@@ -298,6 +298,32 @@ impl<S> StoreLayout<S> {
         repo_pack_kind_metadata_path(&self.repo_prefix, pack_id)
     }
 
+    /// Durable pre-publication pack used to resume one nonce-bound plan.
+    #[must_use]
+    pub fn ref_journal_recovery_pack_path(&self, plan_id: &(impl Display + ?Sized)) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/recovery/v1/{plan_id}.pack"))
+    }
+
+    /// Durable recovery copy of one prepared xorb, rooted by publication plan.
+    #[must_use]
+    pub fn ref_journal_recovery_xorb_path(
+        &self,
+        plan_id: &(impl Display + ?Sized),
+        hash: &(impl Display + ?Sized),
+    ) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/recovery/v1/{plan_id}/xorbs/{hash}"))
+    }
+
+    /// Durable recovery copy of one prepared shard, rooted by publication plan.
+    #[must_use]
+    pub fn ref_journal_recovery_shard_path(
+        &self,
+        plan_id: &(impl Display + ?Sized),
+        hash: &(impl Display + ?Sized),
+    ) -> ObjectPath {
+        self.repo_path(&format!("refs/journal/recovery/v1/{plan_id}/shards/{hash}"))
+    }
+
     /// Path to the version-bound integrity receipt for a Git pack body.
     #[must_use]
     pub fn pack_origin_receipt_path(&self, pack_id: &(impl Display + ?Sized)) -> ObjectPath {
@@ -650,6 +676,10 @@ mod tests {
         assert_eq!(
             layout.pack_kind_metadata_path(&pack_id).as_ref(),
             format!("org/models/packs/pack-{pack_id}.kinds")
+        );
+        assert_eq!(
+            layout.ref_journal_recovery_pack_path(&pack_id).as_ref(),
+            format!("org/models/refs/journal/recovery/v1/{pack_id}.pack")
         );
         assert_eq!(
             layout.pack_origin_receipt_path(&pack_id).as_ref(),

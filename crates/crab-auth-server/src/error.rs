@@ -152,6 +152,7 @@ impl From<crab_metadata::error::MetadataError> for AuthServerError {
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
             | crab_metadata::error::MetadataError::FileLookupLimit { .. }
+            | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
                 Self::Io(io::Error::other(error))
             }

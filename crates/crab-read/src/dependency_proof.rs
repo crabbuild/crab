@@ -1,6 +1,9 @@
 //! Generation-bound content verification for dependencies found by Git validation.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 
 use crab_git::{pointer_detect::PointerKind, receive_plan::PointerDependency};
 use crab_metadata::{
@@ -77,10 +80,34 @@ pub async fn verify_dependencies(
     limits: DependencyProofLimits,
     cancellation: &CancellationToken,
 ) -> Result<()> {
+    verify_dependencies_except_crab(
+        layout,
+        snapshot,
+        dependencies,
+        &BTreeSet::new(),
+        limits,
+        cancellation,
+    )
+    .await
+}
+
+/// Verify dependencies except Crab files supplied by the same fenced publication.
+///
+/// The publication owner must validate and upload every excluded file's xorb
+/// and shard artifacts before exposing the Git pack that contains its pointer.
+#[doc(hidden)]
+pub async fn verify_dependencies_except_crab(
+    layout: &StoreLayout<Store>,
+    snapshot: &RepositorySnapshot,
+    dependencies: &[PointerDependency],
+    excluded_crab: &BTreeSet<[u8; 32]>,
+    limits: DependencyProofLimits,
+    cancellation: &CancellationToken,
+) -> Result<()> {
     let cancellation = cancellation.child_token();
     let _guard = cancellation.clone().drop_guard();
     let proof = async {
-        let unique = normalize(dependencies, limits)?;
+        let unique = normalize(dependencies, excluded_crab, limits)?;
         let hashes: Vec<_> = unique
             .values()
             .filter_map(|dependency| match &dependency.pointer {
@@ -144,10 +171,11 @@ enum ContentId {
     Lfs([u8; 32]),
 }
 
-fn normalize(
-    dependencies: &[PointerDependency],
+fn normalize<'a>(
+    dependencies: &'a [PointerDependency],
+    excluded_crab: &BTreeSet<[u8; 32]>,
     limits: DependencyProofLimits,
-) -> Result<BTreeMap<ContentId, &PointerDependency>> {
+) -> Result<BTreeMap<ContentId, &'a PointerDependency>> {
     if dependencies.len() > limits.max_dependencies {
         return Err(DependencyProofError::Limit("pointer count"));
     }
@@ -155,6 +183,9 @@ fn normalize(
     let mut total = 0u64;
     for dependency in dependencies {
         let (id, size) = identity(dependency)?;
+        if matches!(id, ContentId::Crab(hash) if excluded_crab.contains(&hash)) {
+            continue;
+        }
         if size > limits.content.max_file_bytes
             || (matches!(id, ContentId::Lfs(_)) && size > limits.content.max_read_bytes)
         {

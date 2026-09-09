@@ -169,6 +169,8 @@ pub struct LocalCache {
     chunk_max_bytes: Option<u64>,
     shard_max_bytes: Option<u64>,
     fill_locks: Box<[tokio::sync::Mutex<()>]>,
+    // SQLite coordinates processes; this prevents same-cache writers from starving each other.
+    xorb_index_write_lock: std::sync::Mutex<()>,
 }
 
 impl LocalCache {
@@ -181,6 +183,7 @@ impl LocalCache {
             chunk_max_bytes: None,
             shard_max_bytes: None,
             fill_locks: new_fill_locks(),
+            xorb_index_write_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -200,6 +203,7 @@ impl LocalCache {
             chunk_max_bytes: chunk_max,
             shard_max_bytes: shard_max,
             fill_locks: new_fill_locks(),
+            xorb_index_write_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -655,6 +659,7 @@ impl LocalCache {
         e_tag: Option<&str>,
         version: Option<&str>,
     ) -> Result<bool> {
+        let _write = self.xorb_index_write();
         record_remote_xorb_proof(
             &self.xorb_index_path(),
             hash,
@@ -691,6 +696,7 @@ impl LocalCache {
         version: Option<&str>,
         chunks: &[ChunkMeta],
     ) -> Result<bool> {
+        let _write = self.xorb_index_write();
         record_remote_xorb_index(
             &self.xorb_index_path(),
             hash,
@@ -700,6 +706,12 @@ impl LocalCache {
             version,
             chunks,
         )
+    }
+
+    fn xorb_index_write(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.xorb_index_write_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Evict a cache entry if present.
@@ -1550,16 +1562,23 @@ fn open_xorb_index_once(index_path: &Path) -> Result<crate::private_fs::Database
         XORB_INDEX_BUSY_TIMEOUT,
     )?;
 
-    // Schema creation and validation share the same write transaction. A
-    // concurrent opener therefore waits for initialization instead of
-    // observing SQLite's transient version-0 file.
+    let schema_version = conn
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|source| cache_index_error(index_path, source))?;
+    if schema_version == XORB_INDEX_SCHEMA_VERSION {
+        validate_xorb_index_schema(&conn, index_path, schema_version)?;
+        return Ok(conn);
+    }
+
+    // Only initialization reserves the writer slot. Recheck after acquiring it
+    // because another opener may have committed the schema while this one waited.
     conn.execute_batch("BEGIN IMMEDIATE")
         .map_err(|source| cache_index_error(index_path, source))?;
     let schema_version = conn
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map_err(|source| cache_index_error(index_path, source))?;
     if schema_version == XORB_INDEX_SCHEMA_VERSION {
-        validate_xorb_index_schema(&conn, index_path)?;
+        validate_xorb_index_schema(&conn, index_path, schema_version)?;
         conn.execute_batch("COMMIT")
             .map_err(|source| cache_index_error(index_path, source))?;
         return Ok(conn);
@@ -1611,10 +1630,11 @@ fn open_xorb_index_once(index_path: &Path) -> Result<crate::private_fs::Database
     Ok(conn)
 }
 
-fn validate_xorb_index_schema(conn: &Connection, index_path: &Path) -> Result<()> {
-    let version = conn
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-        .map_err(|source| cache_index_error(index_path, source))?;
+fn validate_xorb_index_schema(
+    conn: &Connection,
+    index_path: &Path,
+    schema_version: i64,
+) -> Result<()> {
     let objects = xorb_index_schema_objects(conn, index_path)?;
     let expected = vec![
         ("index".to_owned(), "idx_xorb_index_xorb_hash".to_owned()),
@@ -1622,8 +1642,8 @@ fn validate_xorb_index_schema(conn: &Connection, index_path: &Path) -> Result<()
         ("table".to_owned(), "remote_xorb_proof".to_owned()),
         ("table".to_owned(), "xorb_index".to_owned()),
     ];
-    if version != XORB_INDEX_SCHEMA_VERSION || objects != expected {
-        return Err(noncanonical_xorb_index_error(index_path, version));
+    if schema_version != XORB_INDEX_SCHEMA_VERSION || objects != expected {
+        return Err(noncanonical_xorb_index_error(index_path, schema_version));
     }
     Ok(())
 }

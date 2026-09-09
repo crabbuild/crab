@@ -1,0 +1,536 @@
+pub mod crab_sdk
+#[non_exhaustive] pub enum crab_sdk::ArchiveEvent
+pub crab_sdk::ArchiveEvent::Data(bytes::bytes::Bytes)
+pub crab_sdk::ArchiveEvent::EndEntry
+pub crab_sdk::ArchiveEvent::Entry
+pub crab_sdk::ArchiveEvent::Entry::entry: crab_sdk::TreeEntry
+pub crab_sdk::ArchiveEvent::Entry::size: core::option::Option<u64>
+#[non_exhaustive] pub enum crab_sdk::ContentMode
+pub crab_sdk::ContentMode::Git
+pub crab_sdk::ContentMode::Hydrated
+#[non_exhaustive] pub enum crab_sdk::DiffClassification
+pub crab_sdk::DiffClassification::Binary
+pub crab_sdk::DiffClassification::CrabPointer
+pub crab_sdk::DiffClassification::LfsPointer
+pub crab_sdk::DiffClassification::Text
+pub crab_sdk::DiffClassification::TooLarge
+pub crab_sdk::DiffClassification::UnsupportedEncoding
+#[non_exhaustive] pub enum crab_sdk::EntryMode
+pub crab_sdk::EntryMode::Executable
+pub crab_sdk::EntryMode::Regular
+pub crab_sdk::EntryMode::Submodule
+pub crab_sdk::EntryMode::Symlink
+pub crab_sdk::EntryMode::Tree
+#[non_exhaustive] pub enum crab_sdk::ErrorKind
+pub crab_sdk::ErrorKind::Authentication
+pub crab_sdk::ErrorKind::Authorization
+pub crab_sdk::ErrorKind::Cancelled
+pub crab_sdk::ErrorKind::Conflict
+pub crab_sdk::ErrorKind::Corruption
+pub crab_sdk::ErrorKind::Indexing
+pub crab_sdk::ErrorKind::InvalidInput
+pub crab_sdk::ErrorKind::Io
+pub crab_sdk::ErrorKind::LimitExceeded
+pub crab_sdk::ErrorKind::LocalSetupRequired
+pub crab_sdk::ErrorKind::NotFound
+pub crab_sdk::ErrorKind::Timeout
+pub crab_sdk::ErrorKind::Transport
+pub crab_sdk::ErrorKind::UnsupportedCapability
+#[non_exhaustive] pub enum crab_sdk::FetchDepth
+pub crab_sdk::FetchDepth::Deepen(u32)
+pub crab_sdk::FetchDepth::Depth(u32)
+pub crab_sdk::FetchDepth::Preserve
+pub crab_sdk::FetchDepth::Unshallow
+#[non_exhaustive] pub enum crab_sdk::HashAlgorithm
+pub crab_sdk::HashAlgorithm::Sha1
+#[non_exhaustive] pub enum crab_sdk::HistoryTraversal
+pub crab_sdk::HistoryTraversal::AllParents
+pub crab_sdk::HistoryTraversal::FirstParent
+#[non_exhaustive] pub enum crab_sdk::HydrationState
+pub crab_sdk::HydrationState::Failed(crab_sdk::Error)
+pub crab_sdk::HydrationState::NotRequested
+pub crab_sdk::HydrationState::Ready
+#[non_exhaustive] pub enum crab_sdk::IntegrationKind
+pub crab_sdk::IntegrationKind::Merge
+pub crab_sdk::IntegrationKind::Rebase
+#[non_exhaustive] pub enum crab_sdk::LocalExecutionPolicy
+pub crab_sdk::LocalExecutionPolicy::Trusted
+pub crab_sdk::LocalExecutionPolicy::Untrusted
+#[non_exhaustive] pub enum crab_sdk::LocalPushOutcome
+pub crab_sdk::LocalPushOutcome::Committed
+pub crab_sdk::LocalPushOutcome::Committed::readiness: crab_sdk::Readiness
+pub crab_sdk::LocalPushOutcome::Committed::receipt: alloc::boxed::Box<crab_sdk::CommitReceipt>
+pub crab_sdk::LocalPushOutcome::DryRun
+pub crab_sdk::LocalPushOutcome::DryRun::destinations: alloc::vec::Vec<alloc::string::String>
+pub crab_sdk::LocalPushOutcome::Indeterminate
+pub crab_sdk::LocalPushOutcome::Indeterminate::recovery: crab_sdk::LocalPushRecoveryToken
+pub crab_sdk::LocalPushOutcome::TransportCommitted
+pub crab_sdk::LocalPushOutcome::TransportCommitted::destinations: alloc::vec::Vec<alloc::string::String>
+#[non_exhaustive] pub enum crab_sdk::ManagedRepositoryState
+pub crab_sdk::ManagedRepositoryState::Active
+pub crab_sdk::ManagedRepositoryState::Archived
+pub crab_sdk::ManagedRepositoryState::Failed
+pub crab_sdk::ManagedRepositoryState::Provisioning
+pub crab_sdk::ManagedRepositoryState::SoftDeleted
+#[non_exhaustive] pub enum crab_sdk::MutationOutcome
+pub crab_sdk::MutationOutcome::Committed
+pub crab_sdk::MutationOutcome::Committed::readiness: crab_sdk::Readiness
+pub crab_sdk::MutationOutcome::Committed::receipt: crab_sdk::CommitReceipt
+pub crab_sdk::MutationOutcome::Indeterminate
+pub crab_sdk::MutationOutcome::Indeterminate::recovery: crab_sdk::RecoveryToken
+pub crab_sdk::MutationOutcome::Rejected
+pub crab_sdk::MutationOutcome::Rejected::reasons: alloc::vec::Vec<crab_sdk::RefRejection>
+#[non_exhaustive] pub enum crab_sdk::ProgressUpdate
+pub crab_sdk::ProgressUpdate::Cancelling
+pub crab_sdk::ProgressUpdate::Delivered
+pub crab_sdk::ProgressUpdate::Delivered::bytes: u64
+pub crab_sdk::ProgressUpdate::Delivered::items: u64
+pub crab_sdk::ProgressUpdate::Started
+#[non_exhaustive] pub enum crab_sdk::PullMode
+pub crab_sdk::PullMode::FastForwardOnly
+pub crab_sdk::PullMode::Merge
+pub crab_sdk::PullMode::Rebase
+#[non_exhaustive] pub enum crab_sdk::PullOutcome
+pub crab_sdk::PullOutcome::Conflict(crab_sdk::ConflictState)
+pub crab_sdk::PullOutcome::UpToDate
+pub crab_sdk::PullOutcome::UpToDate::head: crab_sdk::ObjectId
+pub crab_sdk::PullOutcome::UpToDate::hydration: crab_sdk::HydrationState
+pub crab_sdk::PullOutcome::Updated
+pub crab_sdk::PullOutcome::Updated::head: crab_sdk::ObjectId
+pub crab_sdk::PullOutcome::Updated::hydration: crab_sdk::HydrationState
+#[non_exhaustive] pub enum crab_sdk::Readiness
+pub crab_sdk::Readiness::Pending
+pub crab_sdk::Readiness::Ready
+pub crab_sdk::Readiness::Ready::generation: u64
+#[non_exhaustive] pub enum crab_sdk::RepositoryCapability
+pub crab_sdk::RepositoryCapability::CreateCommits
+pub crab_sdk::RepositoryCapability::ReadContent
+pub crab_sdk::RepositoryCapability::ReadGit
+pub crab_sdk::RepositoryCapability::UpdateRefs
+#[non_exhaustive] pub enum crab_sdk::WritePolicy
+pub crab_sdk::WritePolicy::FastForward
+pub crab_sdk::WritePolicy::ForceWithLease
+pub struct crab_sdk::ArchiveStream(_)
+impl crab_sdk::ArchiveStream
+pub async fn crab_sdk::ArchiveStream::close(self) -> crab_sdk::Result<()>
+pub async fn crab_sdk::ArchiveStream::next(&mut self) -> crab_sdk::Result<core::option::Option<crab_sdk::ArchiveEvent>>
+pub fn crab_sdk::ArchiveStream::operation_id(&self) -> crab_sdk::OperationId
+pub struct crab_sdk::AzureOptions
+impl crab_sdk::AzureOptions
+pub fn crab_sdk::AzureOptions::bearer(&str, &str, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::AzureOptions::sas(&str, &str, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::AzureOptions::with_endpoint(self, &str) -> Self
+impl core::fmt::Debug for crab_sdk::AzureOptions
+pub fn crab_sdk::AzureOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::Blame
+pub crab_sdk::Blame::ranges: alloc::vec::Vec<crab_sdk::BlameRange>
+pub struct crab_sdk::BlameRange
+pub crab_sdk::BlameRange::commit: crab_sdk::Commit
+pub crab_sdk::BlameRange::lines: u64
+pub crab_sdk::BlameRange::source_path: crab_sdk::GitPath
+pub crab_sdk::BlameRange::start: u64
+pub struct crab_sdk::Cancellation(_)
+impl crab_sdk::Cancellation
+pub fn crab_sdk::Cancellation::cancel(&self)
+pub fn crab_sdk::Cancellation::is_cancelled(&self) -> bool
+pub struct crab_sdk::CheckoutOptions
+impl crab_sdk::CheckoutOptions
+pub fn crab_sdk::CheckoutOptions::create_branch(self, &str) -> crab_sdk::Result<Self>
+pub struct crab_sdk::Client(_)
+impl crab_sdk::Client
+pub fn crab_sdk::Client::builder() -> crab_sdk::ClientBuilder
+pub async fn crab_sdk::Client::close(&self) -> crab_sdk::Result<()>
+pub fn crab_sdk::Client::open_remote(&self, crab_sdk::RepositoryLocator) -> crab_sdk::Request<'_, crab_sdk::RemoteRepository, crab_sdk::OperationOptions>
+impl crab_sdk::Client
+pub fn crab_sdk::Client::clone_repository(&self, crab_sdk::RepositoryLocator, impl core::convert::AsRef<std::path::Path>, crab_sdk::CloneOptions) -> crab_sdk::Request<'_, crab_sdk::LocalRepository, crab_sdk::OperationOptions>
+pub fn crab_sdk::Client::configure_local(&self, impl core::convert::AsRef<std::path::Path>) -> crab_sdk::Request<'_, crab_sdk::LocalConfiguration, crab_sdk::OperationOptions>
+pub fn crab_sdk::Client::open_local(&self, impl core::convert::AsRef<std::path::Path>) -> crab_sdk::Request<'_, crab_sdk::LocalRepository, crab_sdk::OperationOptions>
+impl crab_sdk::Client
+pub fn crab_sdk::Client::initialize_remote(&self, crab_sdk::RepositoryLocator, &str) -> crab_sdk::Request<'_, (), crab_sdk::OperationOptions>
+pub async fn crab_sdk::Client::reconcile(&self, crab_sdk::RecoveryToken, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::MutationOutcome>
+pub async fn crab_sdk::Client::resume_mutation(&self, crab_sdk::RecoveryToken, std::path::PathBuf, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::MutationOutcome>
+impl crab_sdk::Client
+pub fn crab_sdk::Client::managed_repositories(&self) -> crab_sdk::Request<'_, crab_sdk::ManagedRepositories, crab_sdk::OperationOptions>
+impl crab_sdk::Client
+pub async fn crab_sdk::Client::reconcile_push(&self, crab_sdk::LocalPushRecoveryToken, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::LocalPushOutcome>
+pub async fn crab_sdk::Client::resume_push(&self, crab_sdk::LocalPushRecoveryToken, std::path::PathBuf, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::LocalPushOutcome>
+pub struct crab_sdk::ClientBuilder
+impl crab_sdk::ClientBuilder
+pub fn crab_sdk::ClientBuilder::build(self) -> crab_sdk::Result<crab_sdk::Client>
+impl crab_sdk::ClientBuilder
+pub fn crab_sdk::ClientBuilder::content_cache(self, crab_sdk::ContentCache) -> Self
+pub fn crab_sdk::ClientBuilder::direct_store(self, crab_sdk::DirectStoreOptions) -> Self
+pub fn crab_sdk::ClientBuilder::local_execution_policy(self, crab_sdk::LocalExecutionPolicy) -> Self
+pub fn crab_sdk::ClientBuilder::local_tools(self, crab_sdk::LocalTools) -> Self
+pub fn crab_sdk::ClientBuilder::managed(self, crab_sdk::ManagedOptions) -> Self
+pub struct crab_sdk::CloneOptions
+impl crab_sdk::CloneOptions
+pub fn crab_sdk::CloneOptions::eager(self) -> Self
+pub fn crab_sdk::CloneOptions::lazy(self) -> Self
+pub fn crab_sdk::CloneOptions::with_branch(self, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::CloneOptions::with_depth(self, u32) -> crab_sdk::Result<Self>
+pub fn crab_sdk::CloneOptions::with_remote_name(self, &str) -> crab_sdk::Result<Self>
+impl core::default::Default for crab_sdk::CloneOptions
+pub fn crab_sdk::CloneOptions::default() -> Self
+pub struct crab_sdk::Commit
+pub crab_sdk::Commit::author: crab_sdk::Signature
+pub crab_sdk::Commit::committer: crab_sdk::Signature
+pub crab_sdk::Commit::encoding: core::option::Option<bytes::bytes::Bytes>
+pub crab_sdk::Commit::id: crab_sdk::ObjectId
+pub crab_sdk::Commit::message: bytes::bytes::Bytes
+pub crab_sdk::Commit::parents: alloc::vec::Vec<crab_sdk::ObjectId>
+pub crab_sdk::Commit::signature_headers: alloc::vec::Vec<crab_sdk::SignatureHeader>
+pub crab_sdk::Commit::tree: crab_sdk::ObjectId
+pub struct crab_sdk::CommitIdentity
+impl crab_sdk::CommitIdentity
+pub fn crab_sdk::CommitIdentity::email(&self) -> &str
+pub fn crab_sdk::CommitIdentity::name(&self) -> &str
+pub fn crab_sdk::CommitIdentity::new(impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, i64, i16) -> crab_sdk::Result<Self>
+pub struct crab_sdk::CommitOptions
+impl crab_sdk::CommitOptions
+pub fn crab_sdk::CommitOptions::initial(&str, crab_sdk::CommitIdentity, crab_sdk::CommitIdentity, impl core::convert::Into<alloc::vec::Vec<u8>>) -> crab_sdk::Result<Self>
+pub fn crab_sdk::CommitOptions::new(crab_sdk::ObjectId, &str, core::option::Option<crab_sdk::ObjectId>, crab_sdk::CommitIdentity, crab_sdk::CommitIdentity, impl core::convert::Into<alloc::vec::Vec<u8>>) -> crab_sdk::Result<Self>
+pub fn crab_sdk::CommitOptions::with_policy(self, crab_sdk::WritePolicy) -> crab_sdk::Result<Self>
+pub struct crab_sdk::CommitReceipt
+impl crab_sdk::CommitReceipt
+pub fn crab_sdk::CommitReceipt::recovery_token(&self) -> &crab_sdk::RecoveryToken
+pub fn crab_sdk::CommitReceipt::transaction_id(&self) -> &str
+pub struct crab_sdk::ConflictState
+impl crab_sdk::ConflictState
+pub const fn crab_sdk::ConflictState::fetched(&self) -> core::option::Option<crab_sdk::ObjectId>
+pub fn crab_sdk::ConflictState::id(&self) -> &crab_sdk::IntegrationId
+pub const fn crab_sdk::ConflictState::kind(&self) -> crab_sdk::IntegrationKind
+pub fn crab_sdk::ConflictState::paths(&self) -> &[std::path::PathBuf]
+pub struct crab_sdk::ContentCache
+impl crab_sdk::ContentCache
+pub fn crab_sdk::ContentCache::new(&std::path::Path, u64) -> crab_sdk::Result<Self>
+pub struct crab_sdk::ContentStream(_)
+impl crab_sdk::ContentStream
+pub async fn crab_sdk::ContentStream::close(self) -> crab_sdk::Result<()>
+pub async fn crab_sdk::ContentStream::next(&mut self) -> crab_sdk::Result<core::option::Option<bytes::bytes::Bytes>>
+pub fn crab_sdk::ContentStream::operation_id(&self) -> crab_sdk::OperationId
+pub struct crab_sdk::Diff
+pub crab_sdk::Diff::classification: crab_sdk::DiffClassification
+pub crab_sdk::Diff::hunks: alloc::vec::Vec<crab_sdk::DiffHunk>
+pub struct crab_sdk::DiffHunk
+pub crab_sdk::DiffHunk::bytes: bytes::bytes::Bytes
+pub crab_sdk::DiffHunk::new_lines: u64
+pub crab_sdk::DiffHunk::new_start: u64
+pub crab_sdk::DiffHunk::old_lines: u64
+pub crab_sdk::DiffHunk::old_start: u64
+pub struct crab_sdk::DirectStoreOptions
+impl crab_sdk::DirectStoreOptions
+pub fn crab_sdk::DirectStoreOptions::azure(crab_sdk::AzureOptions) -> Self
+pub fn crab_sdk::DirectStoreOptions::azure_from_env(&str, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::DirectStoreOptions::filesystem(&std::path::Path) -> crab_sdk::Result<Self>
+pub fn crab_sdk::DirectStoreOptions::gcs(crab_sdk::GcsOptions) -> Self
+pub fn crab_sdk::DirectStoreOptions::gcs_from_env(&str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::DirectStoreOptions::s3(crab_sdk::S3Options) -> Self
+pub fn crab_sdk::DirectStoreOptions::s3_from_env(&str) -> crab_sdk::Result<Self>
+pub struct crab_sdk::Error
+impl crab_sdk::Error
+pub fn crab_sdk::Error::cleanup_error(&self) -> core::option::Option<&crab_sdk::Error>
+pub const fn crab_sdk::Error::kind(&self) -> crab_sdk::ErrorKind
+pub fn crab_sdk::Error::operation_id(&self) -> core::option::Option<crab_sdk::OperationId>
+impl core::fmt::Debug for crab_sdk::Error
+pub fn crab_sdk::Error::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::FetchOptions
+impl crab_sdk::FetchOptions
+pub fn crab_sdk::FetchOptions::prune(self, bool) -> Self
+pub fn crab_sdk::FetchOptions::tags(self, bool) -> Self
+pub fn crab_sdk::FetchOptions::with_depth(self, crab_sdk::FetchDepth) -> crab_sdk::Result<Self>
+pub fn crab_sdk::FetchOptions::with_remote(self, &str) -> crab_sdk::Result<Self>
+impl core::default::Default for crab_sdk::FetchOptions
+pub fn crab_sdk::FetchOptions::default() -> Self
+pub struct crab_sdk::FetchOutcome
+impl crab_sdk::FetchOutcome
+pub fn crab_sdk::FetchOutcome::head(&self) -> core::option::Option<crab_sdk::ObjectId>
+pub const fn crab_sdk::FetchOutcome::is_shallow(&self) -> bool
+pub struct crab_sdk::FileEdit
+impl crab_sdk::FileEdit
+pub fn crab_sdk::FileEdit::delete(crab_sdk::GitPath) -> crab_sdk::Result<Self>
+pub fn crab_sdk::FileEdit::git(crab_sdk::GitPath, crab_sdk::EntryMode, u64, impl tokio::io::async_read::AsyncRead + core::marker::Send + 'static) -> crab_sdk::Result<Self>
+pub fn crab_sdk::FileEdit::hydrated(crab_sdk::GitPath, crab_sdk::EntryMode, u64, impl tokio::io::async_read::AsyncRead + core::marker::Send + 'static) -> crab_sdk::Result<Self>
+impl core::fmt::Debug for crab_sdk::FileEdit
+pub fn crab_sdk::FileEdit::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::GcsOptions
+impl crab_sdk::GcsOptions
+pub fn crab_sdk::GcsOptions::new(&str, &str) -> crab_sdk::Result<Self>
+impl core::fmt::Debug for crab_sdk::GcsOptions
+pub fn crab_sdk::GcsOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::GitPath(_)
+impl crab_sdk::GitPath
+pub fn crab_sdk::GitPath::as_bytes(&self) -> &[u8]
+pub fn crab_sdk::GitPath::is_root(&self) -> bool
+pub fn crab_sdk::GitPath::new(impl core::convert::Into<bytes::bytes::Bytes>) -> crab_sdk::Result<Self>
+pub const fn crab_sdk::GitPath::root() -> Self
+impl core::fmt::Debug for crab_sdk::GitPath
+pub fn crab_sdk::GitPath::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::IntegrationId(_)
+impl crab_sdk::IntegrationId
+pub fn crab_sdk::IntegrationId::as_str(&self) -> &str
+pub fn crab_sdk::IntegrationId::from_string(&str) -> crab_sdk::Result<Self>
+pub struct crab_sdk::LocalCommitOptions
+impl crab_sdk::LocalCommitOptions
+pub fn crab_sdk::LocalCommitOptions::new(crab_sdk::CommitIdentity, crab_sdk::CommitIdentity, impl core::convert::Into<alloc::vec::Vec<u8>>) -> crab_sdk::Result<Self>
+pub struct crab_sdk::LocalConfiguration
+impl crab_sdk::LocalConfiguration
+pub fn crab_sdk::LocalConfiguration::crab_version(&self) -> &str
+pub fn crab_sdk::LocalConfiguration::git_version(&self) -> &str
+pub struct crab_sdk::LocalPushRecoveryToken(_)
+impl crab_sdk::LocalPushRecoveryToken
+pub fn crab_sdk::LocalPushRecoveryToken::from_json(&str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::LocalPushRecoveryToken::to_json(&self) -> crab_sdk::Result<alloc::string::String>
+pub struct crab_sdk::LocalRepository
+impl crab_sdk::LocalRepository
+pub fn crab_sdk::LocalRepository::abort_integration(&self, crab_sdk::IntegrationId) -> crab_sdk::Request<'_, crab_sdk::ObjectId, crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::checkout(&self, &str, crab_sdk::CheckoutOptions) -> crab_sdk::Request<'_, crab_sdk::ObjectId, crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::commit(&self, crab_sdk::LocalCommitOptions) -> crab_sdk::Request<'_, crab_sdk::ObjectId, crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::continue_integration(&self, crab_sdk::IntegrationId) -> crab_sdk::Request<'_, crab_sdk::PullOutcome, crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::dehydrate(&self, alloc::vec::Vec<std::path::PathBuf>) -> crab_sdk::Request<'_, (), crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::hydrate(&self, alloc::vec::Vec<std::path::PathBuf>) -> crab_sdk::Request<'_, (), crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::prefetch_content(&self, alloc::vec::Vec<std::path::PathBuf>) -> crab_sdk::Request<'_, (), crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::pull(&self, crab_sdk::PullOptions) -> crab_sdk::Request<'_, crab_sdk::PullOutcome, crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::stage(&self, alloc::vec::Vec<std::path::PathBuf>) -> crab_sdk::Request<'_, crab_sdk::StageOutcome, crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::status(&self) -> crab_sdk::Request<'_, crab_sdk::LocalStatus, crab_sdk::OperationOptions>
+impl crab_sdk::LocalRepository
+pub fn crab_sdk::LocalRepository::common_directory(&self) -> &std::path::Path
+pub fn crab_sdk::LocalRepository::fetch(&self, crab_sdk::FetchOptions) -> crab_sdk::Request<'_, crab_sdk::FetchOutcome, crab_sdk::OperationOptions>
+pub fn crab_sdk::LocalRepository::path(&self) -> &std::path::Path
+pub fn crab_sdk::LocalRepository::snapshot(&self, &str) -> crab_sdk::Request<'_, crab_sdk::LocalSnapshot, crab_sdk::OperationOptions>
+impl crab_sdk::LocalRepository
+pub fn crab_sdk::LocalRepository::prepare_push(&self, crab_sdk::PushOptions) -> crab_sdk::Request<'_, crab_sdk::PreparedPush, crab_sdk::OperationOptions>
+pub struct crab_sdk::LocalSnapshot
+impl crab_sdk::LocalSnapshot
+pub const fn crab_sdk::LocalSnapshot::commit_id(&self) -> crab_sdk::ObjectId
+pub fn crab_sdk::LocalSnapshot::history(&self, usize) -> crab_sdk::Request<'_, alloc::vec::Vec<crab_sdk::ObjectId>, crab_sdk::OperationOptions>
+pub struct crab_sdk::LocalStatus
+impl crab_sdk::LocalStatus
+pub fn crab_sdk::LocalStatus::branch(&self) -> core::option::Option<&str>
+pub fn crab_sdk::LocalStatus::entries(&self) -> &[crab_sdk::StatusEntry]
+pub const fn crab_sdk::LocalStatus::head(&self) -> core::option::Option<crab_sdk::ObjectId>
+pub fn crab_sdk::LocalStatus::is_clean(&self) -> bool
+pub struct crab_sdk::LocalTools
+impl crab_sdk::LocalTools
+pub fn crab_sdk::LocalTools::new(impl core::convert::AsRef<std::path::Path>, impl core::convert::AsRef<std::path::Path>) -> crab_sdk::Result<Self>
+pub struct crab_sdk::ManagedOptions
+impl crab_sdk::ManagedOptions
+pub fn crab_sdk::ManagedOptions::new(impl core::convert::AsRef<std::path::Path>) -> crab_sdk::Result<Self>
+pub fn crab_sdk::ManagedOptions::with_authority(self, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::ManagedOptions::with_bearer_token(self, impl core::convert::Into<alloc::string::String>) -> crab_sdk::Result<Self>
+impl core::fmt::Debug for crab_sdk::ManagedOptions
+pub fn crab_sdk::ManagedOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::ManagedPage
+impl crab_sdk::ManagedPage
+pub fn crab_sdk::ManagedPage::next_cursor(&self) -> core::option::Option<&str>
+pub fn crab_sdk::ManagedPage::repositories(&self) -> &[crab_sdk::ManagedRepository]
+pub struct crab_sdk::ManagedRepositories
+impl crab_sdk::ManagedRepositories
+pub async fn crab_sdk::ManagedRepositories::archive(&self, &str, &str, u64, &str, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::ManagedRepository>
+pub async fn crab_sdk::ManagedRepositories::create(&self, &str, &str, &str, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::ManagedRepository>
+pub async fn crab_sdk::ManagedRepositories::list(&self, &str, core::option::Option<&str>, u16, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::ManagedPage>
+pub async fn crab_sdk::ManagedRepositories::rename(&self, &str, &str, &str, u64, &str, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::ManagedRepository>
+pub async fn crab_sdk::ManagedRepositories::restore(&self, &str, &str, u64, &str, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::ManagedRepository>
+pub struct crab_sdk::ManagedRepository
+impl crab_sdk::ManagedRepository
+pub fn crab_sdk::ManagedRepository::canonical_url(&self) -> &str
+pub fn crab_sdk::ManagedRepository::id(&self) -> &str
+pub fn crab_sdk::ManagedRepository::organization_id(&self) -> &str
+pub const fn crab_sdk::ManagedRepository::protected_push(&self) -> bool
+pub const fn crab_sdk::ManagedRepository::revision(&self) -> u64
+pub const fn crab_sdk::ManagedRepository::state(&self) -> crab_sdk::ManagedRepositoryState
+pub struct crab_sdk::ObjectId(_)
+impl crab_sdk::ObjectId
+pub const fn crab_sdk::ObjectId::algorithm(&self) -> crab_sdk::HashAlgorithm
+pub const fn crab_sdk::ObjectId::as_bytes(&self) -> &[u8; 20]
+pub fn crab_sdk::ObjectId::from_hex(&str) -> crab_sdk::Result<Self>
+impl core::fmt::Debug for crab_sdk::ObjectId
+pub fn crab_sdk::ObjectId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for crab_sdk::ObjectId
+pub fn crab_sdk::ObjectId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::OperationId(_)
+impl core::fmt::Display for crab_sdk::OperationId
+pub fn crab_sdk::OperationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::OperationOptions
+impl crab_sdk::OperationOptions
+pub fn crab_sdk::OperationOptions::read_limits(&self) -> crab_sdk::ReadLimits
+pub fn crab_sdk::OperationOptions::with_cancellation(self, crab_sdk::Cancellation) -> Self
+pub fn crab_sdk::OperationOptions::with_deadline(self, std::time::Instant) -> Self
+pub fn crab_sdk::OperationOptions::with_limits(self, crab_sdk::ReadLimits) -> crab_sdk::Result<Self>
+pub fn crab_sdk::OperationOptions::with_progress(self, crab_sdk::Progress) -> Self
+pub fn crab_sdk::OperationOptions::with_timeout(self, core::time::Duration) -> crab_sdk::Result<Self>
+pub struct crab_sdk::Page<T>
+pub crab_sdk::Page::items: alloc::vec::Vec<T>
+pub crab_sdk::Page::next: core::option::Option<crab_sdk::PageCursor>
+pub struct crab_sdk::PageCursor
+pub struct crab_sdk::PageRequest
+impl crab_sdk::PageRequest
+pub fn crab_sdk::PageRequest::new(usize, core::option::Option<crab_sdk::PageCursor>) -> crab_sdk::Result<Self>
+pub struct crab_sdk::PreparedMutation
+impl crab_sdk::PreparedMutation
+pub const fn crab_sdk::PreparedMutation::commit_id(&self) -> core::option::Option<crab_sdk::ObjectId>
+pub async fn crab_sdk::PreparedMutation::execute(self, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::MutationOutcome>
+pub fn crab_sdk::PreparedMutation::recovery_token(&self) -> &crab_sdk::RecoveryToken
+pub struct crab_sdk::PreparedPush
+impl crab_sdk::PreparedPush
+pub async fn crab_sdk::PreparedPush::execute(self, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::LocalPushOutcome>
+pub fn crab_sdk::PreparedPush::recovery_token(&self) -> &crab_sdk::LocalPushRecoveryToken
+pub struct crab_sdk::Progress(_)
+impl crab_sdk::Progress
+pub fn crab_sdk::Progress::channel() -> (Self, crab_sdk::ProgressReceiver)
+pub struct crab_sdk::ProgressEvent
+pub crab_sdk::ProgressEvent::operation_id: crab_sdk::OperationId
+pub crab_sdk::ProgressEvent::update: crab_sdk::ProgressUpdate
+pub struct crab_sdk::ProgressReceiver(_)
+impl crab_sdk::ProgressReceiver
+pub async fn crab_sdk::ProgressReceiver::next(&mut self) -> core::option::Option<crab_sdk::ProgressEvent>
+pub struct crab_sdk::PullOptions
+impl crab_sdk::PullOptions
+pub fn crab_sdk::PullOptions::fast_forward_only() -> Self
+pub fn crab_sdk::PullOptions::hydrate(self, bool) -> Self
+pub fn crab_sdk::PullOptions::merge() -> Self
+pub fn crab_sdk::PullOptions::rebase() -> Self
+pub fn crab_sdk::PullOptions::with_branch(self, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::PullOptions::with_remote(self, &str) -> crab_sdk::Result<Self>
+impl core::default::Default for crab_sdk::PullOptions
+pub fn crab_sdk::PullOptions::default() -> Self
+pub struct crab_sdk::PushOptions
+impl crab_sdk::PushOptions
+pub fn crab_sdk::PushOptions::current_branch() -> Self
+pub fn crab_sdk::PushOptions::dry_run(self, bool) -> Self
+pub fn crab_sdk::PushOptions::with_destination(self, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::PushOptions::with_policy(self, crab_sdk::WritePolicy) -> Self
+pub fn crab_sdk::PushOptions::with_refspecs(self, alloc::vec::Vec<crab_sdk::PushRefspec>) -> crab_sdk::Result<Self>
+pub fn crab_sdk::PushOptions::with_remote(self, &str) -> crab_sdk::Result<Self>
+impl core::default::Default for crab_sdk::PushOptions
+pub fn crab_sdk::PushOptions::default() -> Self
+pub struct crab_sdk::PushRefspec
+impl crab_sdk::PushRefspec
+pub fn crab_sdk::PushRefspec::delete(&str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::PushRefspec::update(&str, &str) -> crab_sdk::Result<Self>
+pub struct crab_sdk::ReadLimits
+pub crab_sdk::ReadLimits::max_archive_bytes: u64
+pub crab_sdk::ReadLimits::max_archive_entries: u64
+pub crab_sdk::ReadLimits::max_blame_comparison_cells: u64
+pub crab_sdk::ReadLimits::max_blame_lines: u64
+pub crab_sdk::ReadLimits::max_depth: u64
+pub crab_sdk::ReadLimits::max_diff_input_bytes: u64
+pub crab_sdk::ReadLimits::max_diff_output_bytes: u64
+pub crab_sdk::ReadLimits::max_entries: u64
+pub crab_sdk::ReadLimits::max_fetched_bytes: u64
+pub crab_sdk::ReadLimits::max_history_commits: u64
+pub crab_sdk::ReadLimits::max_inflated_bytes: u64
+pub crab_sdk::ReadLimits::max_logical_objects: u64
+pub crab_sdk::ReadLimits::max_response_bytes: u64
+pub crab_sdk::ReadLimits::max_storage_requests: u64
+impl core::default::Default for crab_sdk::ReadLimits
+pub fn crab_sdk::ReadLimits::default() -> Self
+pub struct crab_sdk::ReadOptions
+impl crab_sdk::ReadOptions
+pub fn crab_sdk::ReadOptions::read_limits(&self) -> crab_sdk::ReadLimits
+pub fn crab_sdk::ReadOptions::with_limits(self, crab_sdk::ReadLimits) -> crab_sdk::Result<Self>
+pub fn crab_sdk::ReadOptions::with_operation(self, crab_sdk::OperationOptions) -> Self
+pub fn crab_sdk::ReadOptions::with_range(self, core::ops::range::Range<u64>) -> crab_sdk::Result<Self>
+pub fn crab_sdk::ReadOptions::with_timeout(self, core::time::Duration) -> crab_sdk::Result<Self>
+pub struct crab_sdk::RecoveryToken(_)
+impl crab_sdk::RecoveryToken
+pub fn crab_sdk::RecoveryToken::from_json(&str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::RecoveryToken::plan_id(&self) -> &str
+pub fn crab_sdk::RecoveryToken::to_json(&self) -> crab_sdk::Result<alloc::string::String>
+pub struct crab_sdk::RefBatch
+impl crab_sdk::RefBatch
+pub fn crab_sdk::RefBatch::new(alloc::vec::Vec<crab_sdk::RefUpdate>) -> crab_sdk::Result<Self>
+pub fn crab_sdk::RefBatch::with_policy(self, crab_sdk::WritePolicy) -> Self
+impl<'de> serde_core::de::Deserialize<'de> for crab_sdk::RefBatch
+pub fn crab_sdk::RefBatch::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+pub struct crab_sdk::RefRejection
+impl crab_sdk::RefRejection
+pub fn crab_sdk::RefRejection::error(&self) -> &crab_sdk::Error
+pub struct crab_sdk::RefUpdate
+impl crab_sdk::RefUpdate
+pub fn crab_sdk::RefUpdate::create(&str, crab_sdk::ObjectId) -> crab_sdk::Result<Self>
+pub fn crab_sdk::RefUpdate::delete(&str, crab_sdk::ObjectId) -> crab_sdk::Result<Self>
+pub fn crab_sdk::RefUpdate::name(&self) -> &str
+pub fn crab_sdk::RefUpdate::update(&str, crab_sdk::ObjectId, crab_sdk::ObjectId) -> crab_sdk::Result<Self>
+impl<'de> serde_core::de::Deserialize<'de> for crab_sdk::RefUpdate
+pub fn crab_sdk::RefUpdate::deserialize<D: serde_core::de::Deserializer<'de>>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>
+pub struct crab_sdk::Reference
+impl crab_sdk::Reference
+pub fn crab_sdk::Reference::name(&self) -> &str
+pub fn crab_sdk::Reference::peeled(&self) -> core::option::Option<crab_sdk::ObjectId>
+pub fn crab_sdk::Reference::target(&self) -> crab_sdk::ObjectId
+pub struct crab_sdk::References
+impl crab_sdk::References
+pub fn crab_sdk::References::entries(&self) -> &[crab_sdk::Reference]
+pub fn crab_sdk::References::head(&self) -> core::option::Option<&str>
+pub struct crab_sdk::RemoteRepository
+impl crab_sdk::RemoteRepository
+pub fn crab_sdk::RemoteRepository::capabilities(&self) -> &[crab_sdk::RepositoryCapability]
+pub fn crab_sdk::RemoteRepository::refresh(&self) -> crab_sdk::Request<'_, Self, crab_sdk::OperationOptions>
+pub fn crab_sdk::RemoteRepository::refs(&self) -> crab_sdk::Request<'_, crab_sdk::References, crab_sdk::OperationOptions>
+pub fn crab_sdk::RemoteRepository::snapshot(&self, crab_sdk::Revision) -> crab_sdk::Request<'_, crab_sdk::Snapshot, crab_sdk::OperationOptions>
+impl crab_sdk::RemoteRepository
+pub async fn crab_sdk::RemoteRepository::prepare_commit(&self, crab_sdk::CommitOptions, alloc::vec::Vec<crab_sdk::FileEdit>, std::path::PathBuf, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::PreparedMutation>
+impl crab_sdk::RemoteRepository
+pub async fn crab_sdk::RemoteRepository::prepare_ref_update(&self, crab_sdk::RefBatch, std::path::PathBuf, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::PreparedMutation>
+pub async fn crab_sdk::RemoteRepository::reconcile(&self, crab_sdk::RecoveryToken, crab_sdk::OperationOptions) -> crab_sdk::Result<crab_sdk::MutationOutcome>
+pub struct crab_sdk::RepositoryLocator(_)
+impl crab_sdk::RepositoryLocator
+pub fn crab_sdk::RepositoryLocator::http(&str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::RepositoryLocator::managed(&str, &str, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::RepositoryLocator::managed_url(&self) -> core::option::Option<alloc::string::String>
+pub fn crab_sdk::RepositoryLocator::new(&str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::RepositoryLocator::prefix(&self) -> core::option::Option<&str>
+pub struct crab_sdk::Request<'a, T, O>
+impl<T, O> crab_sdk::Request<'_, T, O>
+pub fn crab_sdk::Request<'_, T, O>::with_options(self, O) -> Self
+impl<'a, T, O> core::future::into_future::IntoFuture for crab_sdk::Request<'a, T, O>
+pub type crab_sdk::Request<'a, T, O>::IntoFuture = core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = <crab_sdk::Request<'a, T, O> as core::future::into_future::IntoFuture>::Output> + core::marker::Send + 'a)>>
+pub type crab_sdk::Request<'a, T, O>::Output = core::result::Result<T, crab_sdk::Error>
+pub fn crab_sdk::Request<'a, T, O>::into_future(self) -> Self::IntoFuture
+pub struct crab_sdk::Revision(_)
+impl crab_sdk::Revision
+pub fn crab_sdk::Revision::branch(&str) -> crab_sdk::Result<Self>
+pub const fn crab_sdk::Revision::commit(crab_sdk::ObjectId) -> Self
+pub fn crab_sdk::Revision::tag(&str) -> crab_sdk::Result<Self>
+pub struct crab_sdk::S3Options
+impl crab_sdk::S3Options
+pub fn crab_sdk::S3Options::new(&str, &str, &str, &str) -> crab_sdk::Result<Self>
+pub fn crab_sdk::S3Options::with_endpoint(self, &str) -> Self
+pub fn crab_sdk::S3Options::with_session_token(self, &str) -> crab_sdk::Result<Self>
+impl core::fmt::Debug for crab_sdk::S3Options
+pub fn crab_sdk::S3Options::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct crab_sdk::Signature
+pub crab_sdk::Signature::email: bytes::bytes::Bytes
+pub crab_sdk::Signature::name: bytes::bytes::Bytes
+pub crab_sdk::Signature::offset_seconds: i32
+pub crab_sdk::Signature::seconds: i64
+pub struct crab_sdk::SignatureHeader
+pub crab_sdk::SignatureHeader::name: bytes::bytes::Bytes
+pub crab_sdk::SignatureHeader::value: bytes::bytes::Bytes
+pub struct crab_sdk::Snapshot
+impl crab_sdk::Snapshot
+pub fn crab_sdk::Snapshot::archive(&self, crab_sdk::ContentMode) -> crab_sdk::Request<'_, crab_sdk::ArchiveStream, crab_sdk::ReadOptions>
+pub fn crab_sdk::Snapshot::blame(&self, crab_sdk::GitPath) -> crab_sdk::Request<'_, crab_sdk::Blame, crab_sdk::ReadOptions>
+pub fn crab_sdk::Snapshot::commit(&self) -> crab_sdk::Request<'_, crab_sdk::Commit, crab_sdk::ReadOptions>
+pub fn crab_sdk::Snapshot::commit_id(&self) -> crab_sdk::Result<crab_sdk::ObjectId>
+pub fn crab_sdk::Snapshot::diff(&self, crab_sdk::Revision, crab_sdk::GitPath) -> crab_sdk::Request<'_, crab_sdk::Diff, crab_sdk::ReadOptions>
+pub fn crab_sdk::Snapshot::history(&self, crab_sdk::HistoryTraversal, crab_sdk::PageRequest) -> crab_sdk::Request<'_, crab_sdk::Page<crab_sdk::Commit>, crab_sdk::ReadOptions>
+pub fn crab_sdk::Snapshot::open_file(&self, crab_sdk::GitPath) -> crab_sdk::Request<'_, crab_sdk::ContentStream, crab_sdk::ReadOptions>
+pub fn crab_sdk::Snapshot::read_blob(&self, crab_sdk::GitPath) -> crab_sdk::Request<'_, bytes::bytes::Bytes, crab_sdk::ReadOptions>
+pub fn crab_sdk::Snapshot::tree(&self, crab_sdk::GitPath, crab_sdk::PageRequest) -> crab_sdk::Request<'_, crab_sdk::Page<crab_sdk::TreeEntry>, crab_sdk::ReadOptions>
+pub struct crab_sdk::StageOutcome
+impl crab_sdk::StageOutcome
+pub const fn crab_sdk::StageOutcome::paths(&self) -> usize
+pub struct crab_sdk::StatusEntry
+impl crab_sdk::StatusEntry
+pub const fn crab_sdk::StatusEntry::has_worktree_change(&self) -> bool
+pub const fn crab_sdk::StatusEntry::is_conflicted(&self) -> bool
+pub const fn crab_sdk::StatusEntry::is_staged(&self) -> bool
+pub const fn crab_sdk::StatusEntry::is_untracked(&self) -> bool
+pub fn crab_sdk::StatusEntry::path(&self) -> &std::path::Path
+pub struct crab_sdk::TreeEntry
+pub crab_sdk::TreeEntry::id: crab_sdk::ObjectId
+pub crab_sdk::TreeEntry::mode: crab_sdk::EntryMode
+pub crab_sdk::TreeEntry::path: crab_sdk::GitPath
+pub type crab_sdk::Result<T> = core::result::Result<T, crab_sdk::Error>

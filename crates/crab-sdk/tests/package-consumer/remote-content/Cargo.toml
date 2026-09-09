@@ -1,0 +1,10 @@
+[package]
+name = "crab-sdk-consumer-remote-content"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.91"
+
+[dependencies]
+crab-sdk = { version = "=0.1.0", default-features = false, features = ["remote", "content", "write"] }
+tokio = { version = "1", features = ["macros", "rt"] }

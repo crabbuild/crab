@@ -386,7 +386,13 @@ fn parse_tree(object: &GitObject, parent: &GitPath) -> Result<Vec<TreeEntry>> {
 
 pub(crate) fn parse_blob(object: GitObject, mode: EntryMode) -> Result<Blob> {
     require_kind(&object, gix_object::Kind::Blob)?;
-    let (classification, logical_size) = match crab_git::classify(&object.data) {
+    // A symlink stores its literal target, never independently hydrated content.
+    let pointer = if mode.kind() == EntryKind::Symlink {
+        crab_git::PointerKind::NotAPointer
+    } else {
+        crab_git::classify(&object.data)
+    };
+    let (classification, logical_size) = match pointer {
         crab_git::PointerKind::Crab(pointer) => {
             (ContentClassification::CrabPointer, Some(pointer.size))
         }
@@ -454,6 +460,31 @@ mod tests {
             bytes.extend_from_slice(&[index as u8 + 1; 20]);
         }
         object(gix_object::Kind::Tree, &bytes)
+    }
+
+    #[test]
+    fn pointer_shaped_symlink_keeps_literal_content() {
+        let bytes = b"version https://git-lfs.github.com/spec/v1\noid sha256:1111111111111111111111111111111111111111111111111111111111111111\nsize 1048576\n";
+        let regular =
+            parse_blob(object(gix_object::Kind::Blob, bytes), EntryMode::Regular).unwrap();
+        assert_eq!(
+            regular.metadata.classification,
+            ContentClassification::LfsPointer
+        );
+        let symlink =
+            parse_blob(object(gix_object::Kind::Blob, bytes), EntryMode::Symlink).unwrap();
+        assert_eq!(
+            (
+                symlink.metadata.classification,
+                symlink.metadata.logical_size,
+                symlink.bytes.as_ref()
+            ),
+            (
+                ContentClassification::OrdinaryGit,
+                Some(bytes.len() as u64),
+                bytes.as_slice()
+            )
+        );
     }
 
     #[test]

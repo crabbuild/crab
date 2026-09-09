@@ -339,11 +339,19 @@ async fn archive_manifest(
     read_history_entry(store, router, &path).await
 }
 
-/// Read the manifest pointer and return it with the backend CAS token.
+/// Read the manifest pointer and return it with its backend ETag.
 pub async fn read_manifest(
     store: &Store,
     router: &StoreLayout<Store>,
 ) -> Result<(Manifest, String)> {
+    let (manifest, version) = read_manifest_version(store, router).await?;
+    Ok((manifest, version.e_tag.unwrap_or_default()))
+}
+
+async fn read_manifest_version(
+    store: &Store,
+    router: &StoreLayout<Store>,
+) -> Result<(Manifest, ETag)> {
     let path = router.manifest_path();
     let (body, etag) = store.get_with_etag(&path).await?;
     let manifest: Manifest =
@@ -352,7 +360,7 @@ pub async fn read_manifest(
             reason: format!("invalid manifest JSON: {e}"),
         })?;
     validate_manifest_payload(&manifest)?;
-    Ok((manifest, etag.e_tag.unwrap_or_default()))
+    Ok((manifest, etag))
 }
 
 /// Read one coherent repository view including independently committed refs.
@@ -688,6 +696,10 @@ pub async fn upload_bulk_if_absent(
 }
 
 /// Conditional-PUT the manifest pointer with `If-Match: {etag}`.
+///
+/// Failures after attempting the update preserve commit uncertainty, except
+/// explicit failed preconditions. The candidate digest is diagnostic evidence,
+/// not proof that this caller committed; do not automatically replay uncertainty.
 pub async fn write_manifest_cas(
     store: &Store,
     router: &StoreLayout<Store>,
@@ -695,8 +707,8 @@ pub async fn write_manifest_cas(
     etag: &str,
 ) -> Result<String> {
     validate_manifest_payload(manifest)?;
-    let (current, current_etag) = read_manifest(store, router).await?;
-    if current_etag != etag {
+    let (current, update_version) = read_manifest_version(store, router).await?;
+    if update_version.e_tag.as_deref().unwrap_or_default() != etag {
         return Err(MetadataError::ManifestCasConflict {
             path: router.manifest_path().as_ref().to_owned(),
             expected_etag: Some(etag.to_owned()),
@@ -706,13 +718,22 @@ pub async fn write_manifest_cas(
     archive_manifest(store, router, &current).await?;
     let path = router.manifest_path();
     let body = serialize_manifest(manifest)?;
-    let update_version = ETag {
-        e_tag: Some(etag.to_owned()),
-        version: None,
-    };
+    // GCS requires the object version; S3 and Azure require the ETag. Keep
+    // both from this same read so conditional publication works across providers.
+    let candidate_digest = blake3::hash(&body).to_hex().to_string();
     let new_etag = store
         .update(&path, Bytes::from(body), update_version)
-        .await?;
+        .await
+        .map_err(|source| match source {
+            // The storage update contract reports a failed conditional write
+            // separately. Other failures cannot authorize replay after the CAS.
+            source @ StorageError::StateConflict { .. } => MetadataError::from(source),
+            source => MetadataError::ManifestCommitUncertain {
+                path: path.to_string(),
+                candidate_digest,
+                source: Box::new(source),
+            },
+        })?;
     Ok(new_etag.e_tag.unwrap_or_default())
 }
 
@@ -1061,6 +1082,8 @@ mod tests {
         inner: Arc<InMemory>,
         active_writes: AtomicUsize,
         max_active_writes: AtomicUsize,
+        lose_update_reply: bool,
+        require_version: bool,
     }
 
     impl DelayedPublicationStore {
@@ -1069,6 +1092,8 @@ mod tests {
                 inner,
                 active_writes: AtomicUsize::new(0),
                 max_active_writes: AtomicUsize::new(0),
+                lose_update_reply: false,
+                require_version: false,
             }
         }
 
@@ -1101,8 +1126,25 @@ mod tests {
             &self,
             location: &object_store::path::Path,
             payload: PutPayload,
-            options: PutOptions,
+            mut options: PutOptions,
         ) -> object_store::Result<PutResult> {
+            if self.require_version
+                && let object_store::PutMode::Update(version) = &mut options.mode
+            {
+                let expected = format!(
+                    "backend-version:{}",
+                    version.e_tag.as_deref().unwrap_or_default()
+                );
+                if version.version.as_deref() != Some(expected.as_str()) {
+                    return Err(object_store::Error::Generic {
+                        store: "versioned-manifest-test",
+                        source: "conditional update requires the read's version token".into(),
+                    });
+                }
+                version.version = None;
+            }
+            let lose_reply =
+                self.lose_update_reply && matches!(options.mode, object_store::PutMode::Update(_));
             let tracked = Self::tracks(location);
             if tracked {
                 let active = self.active_writes.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1112,6 +1154,15 @@ mod tests {
             let result = self.inner.put_opts(location, payload, options).await;
             if tracked {
                 self.active_writes.fetch_sub(1, Ordering::AcqRel);
+            }
+            if lose_reply && result.is_ok() {
+                return Err(object_store::Error::Generic {
+                    store: "manifest-cas-test",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "lost update response",
+                    )),
+                });
             }
             result
         }
@@ -1129,7 +1180,14 @@ mod tests {
             location: &object_store::path::Path,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
-            self.inner.get_opts(location, options).await
+            let mut result = self.inner.get_opts(location, options).await?;
+            if self.require_version {
+                result.meta.version = Some(format!(
+                    "backend-version:{}",
+                    result.meta.e_tag.as_deref().unwrap_or_default()
+                ));
+            }
+            Ok(result)
         }
 
         fn delete_stream(
@@ -1290,6 +1348,46 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn manifest_cas_preserves_backend_version_token() {
+        let mut backend = DelayedPublicationStore::new(Arc::new(InMemory::new()));
+        backend.require_version = true;
+        let store = Store::new(Arc::new(backend));
+        let router = test_layout(store.clone());
+        let original = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(&store, &router, &original).await.unwrap();
+        let (_, etag) = read_manifest(&store, &router).await.unwrap();
+        let candidate = next_manifest(&original);
+        write_manifest_cas(&store, &router, &candidate, &etag)
+            .await
+            .unwrap();
+        let (observed, _) = read_manifest(&store, &router).await.unwrap();
+        assert_eq!(observed, candidate);
+    }
+
+    #[tokio::test]
+    async fn lost_manifest_update_response_preserves_commit_uncertainty() {
+        let backend = Arc::new(InMemory::new());
+        let mut faulty = DelayedPublicationStore::new(backend.clone());
+        faulty.lose_update_reply = true;
+        let store = Store::new(Arc::new(faulty));
+        let router = test_layout(store.clone());
+        let original = Manifest::default_for_repo("refs/heads/main");
+        create_manifest(&store, &router, &original).await.unwrap();
+        let (_, etag) = read_manifest(&store, &router).await.unwrap();
+        let candidate = next_manifest(&original);
+        let error = write_manifest_cas(&store, &router, &candidate, &etag)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, MetadataError::ManifestCommitUncertain { candidate_digest, .. }
+            if candidate_digest == blake3::hash(&serialize_manifest(&candidate).unwrap()).to_hex().to_string())
+        );
+        let origin = Store::new(backend);
+        let (observed, _) = read_manifest(&origin, &router).await.unwrap();
+        assert_eq!(observed, candidate);
     }
 
     #[tokio::test]

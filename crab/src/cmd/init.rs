@@ -905,19 +905,6 @@ fn is_cargo_test_harness(path: &Path) -> bool {
     suffix.len() >= 8 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Git config keys that define crab's git drivers.
-const DRIVER_CONFIG: &[(&str, &str)] = &[
-    // Long-running filter-process protocol (preferred).
-    ("filter.crab.process", "{bin} filter-process"),
-    // Fallback single-file clean/smudge for older git versions.
-    ("filter.crab.clean", "{bin} filter-process"),
-    ("filter.crab.smudge", "{bin} filter-process"),
-    // Fail loudly if the filter cannot start — never silently skip.
-    ("filter.crab.required", "true"),
-    // External diff driver for files marked with `diff=crab`.
-    ("diff.crab.command", "{bin} diff-driver"),
-];
-
 /// Register crab's git drivers in the local git config.
 ///
 /// Runs `git config --local` for each key so the driver is scoped to
@@ -948,11 +935,14 @@ pub fn install_filter_driver(root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let bin = crab_binary_path();
+    let values = crab_remote::local::filter_driver_values(Path::new(&crab_binary_path())).map_err(
+        |error| CrabError::Configuration {
+            key: "filter.crab.process".to_owned(),
+            origin: error.to_string(),
+        },
+    )?;
 
-    for &(key, value_template) in DRIVER_CONFIG {
-        let value = value_template.replace("{bin}", &bin);
-
+    for (key, value) in values {
         // SHELLOUT: `git config --local` one-shot write registering
         // the git drivers. Keep-table rationale in `requirements.md`
         // Per-Site Decision Matrix: gix-config's write API is less

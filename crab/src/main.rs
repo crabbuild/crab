@@ -210,8 +210,8 @@ enum Cmd {
         /// Shallow clone depth.
         #[arg(long)]
         depth: Option<u32>,
-        /// Leave files as pointers (default). Use --no-lazy for full hydration.
-        #[arg(long, default_value = "true")]
+        /// Leave files as pointers, overriding committed hydration policy.
+        #[arg(long)]
         lazy: bool,
         /// Hydrate everything immediately.
         #[arg(long = "no-lazy")]
@@ -470,6 +470,13 @@ enum Cmd {
     Version {
         /// Structured JSON output (envelope format).
         #[arg(long)]
+        json: bool,
+    },
+    /// Report the versioned executable contract consumed by the Rust SDK.
+    #[command(hide = true)]
+    SdkCapabilities {
+        /// Emit the versioned machine-readable contract.
+        #[arg(long, required = true)]
         json: bool,
     },
     /// List and install the self-contained skills shipped with Crab.
@@ -2096,6 +2103,7 @@ impl Cmd {
             | Self::Doctor { json, .. }
             | Self::Errors { json, .. }
             | Self::Version { json, .. }
+            | Self::SdkCapabilities { json }
             | Self::Track { json, .. } => OutputMode::from_flags(*json, false),
             Self::Skills(command) => command.output_mode(),
             Self::Stat {
@@ -2474,6 +2482,7 @@ impl Cmd {
             Self::Daemon { .. } => "daemon",
             Self::FilterProcess => "filter-process",
             Self::Version { .. } => "version",
+            Self::SdkCapabilities { .. } => "sdk-capabilities",
             Self::Skills(crab::cmd::skills::SkillsCommand::List { .. }) => "skills.list",
             Self::Skills(crab::cmd::skills::SkillsCommand::Install(_)) => "skills.install",
             Self::Upgrade => "upgrade",
@@ -3139,6 +3148,22 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             crab::cmd::version::run_version(mode)?;
             Ok(ExitCode::SUCCESS)
         }
+        Some(Cmd::SdkCapabilities { json: true }) => {
+            let capabilities =
+                crab_remote::local::ExecutableCapabilities::current_with_build(format!(
+                    "crab/{}+{}",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("CRAB_BUILD_GIT_SHA")
+                ));
+            let encoded = serde_json::to_string(&capabilities)
+                .map_err(|error| CrabError::Internal(error.to_string()))?;
+            println!("{encoded}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Some(Cmd::SdkCapabilities { json: false }) => Err(CrabError::Configuration {
+            key: "sdk-capabilities output".to_owned(),
+            origin: "the versioned SDK handshake requires --json".to_owned(),
+        }),
         Some(Cmd::Skills(sub)) => {
             let _span = tracing::info_span!("skills").entered();
             crab::cmd::skills::run(sub)?;
@@ -3493,13 +3518,19 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             let _span = tracing::info_span!("clone", %url).entered();
             let mode = OutputMode::from_flags(json, jsonl);
             // --eager is a convenience alias: equivalent to --no-lazy.
-            let effective_lazy = if eager || no_lazy { false } else { lazy };
+            let explicit_lazy = if eager || no_lazy {
+                Some(false)
+            } else if lazy {
+                Some(true)
+            } else {
+                None
+            };
             let args = crab::cmd::clone::CloneArgs {
                 url,
                 directory,
                 branch,
                 depth,
-                lazy: effective_lazy,
+                lazy: explicit_lazy,
                 include,
                 exclude,
                 sync_chunk_index,

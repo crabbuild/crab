@@ -1,0 +1,20 @@
+{
+  "schema": "crab.sdk-qualification-fixtures",
+  "version": 1,
+  "block_bytes": 1048576,
+  "algorithm": "Concatenate SHAKE-256 blocks; ASCII seed crab-sdk-fixture-v1/{kind}/{zero-based-block-index}; squeeze min(block_bytes, remaining_bytes) bytes per block. SHA-256 covers the concatenated file.",
+  "files": {
+    "ordinary": {
+      "bytes": 4096,
+      "sha256": "38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15"
+    },
+    "crab": {
+      "bytes": 1073741824,
+      "sha256": "9fd9c7f85fc053365cb38a217ddab35a1b22ea647a293c96f85c7bde0ef23b2a"
+    },
+    "lfs": {
+      "bytes": 33554432,
+      "sha256": "fcb9475ae4ec6d3eb19b7ca158d538360917528686c9260d8a2c56d5d0ef7f5f"
+    }
+  }
+}

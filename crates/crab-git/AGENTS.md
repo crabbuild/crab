@@ -25,6 +25,7 @@ Trace one path: `crates/crab-http-server/src/receive/validate.rs` → `validate`
 | --- | --- | --- |
 | Native receive validation | `crates/crab-git/src/receive_plan.rs` | `crates/crab-http-server/src/receive/validate.rs` |
 | Pack decoding | `crates/crab-git/src/incoming_pack.rs`, `crates/crab-git/src/delta.rs` | `crates/crab-remote-git/src/reader.rs` |
+| Streaming pack construction | `crates/crab-git/src/pack_writer.rs` | `crates/crab-http-server/src/receive.rs` |
 | Pointer classification | `crates/crab-git/src/pointer_detect.rs` | `crates/crab-types/src/pointer.rs` |
 
 ## Invariants

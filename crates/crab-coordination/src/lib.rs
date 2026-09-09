@@ -35,4 +35,4 @@ pub use read_admission::*;
 pub use write_coordinator::*;
 
 #[cfg(feature = "object-store-lock")]
-pub use lease_operation::while_renewing;
+pub use lease_operation::{RenewingPushLock, while_renewing};

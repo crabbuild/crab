@@ -237,7 +237,9 @@ pub fn advertise(writer: &mut impl Write, refs: &BTreeMap<String, ObjectId>) -> 
 /// Write an atomic batch's actual result after its outcome is known.
 ///
 /// `rejection` rejects every command. Never use rejection for an uncertain
-/// marker write or a failure after commit; fail the transport in those cases.
+/// marker write or a failure after commit. Report success for known committed
+/// refs even when derived read indexes are pending; fail the transport when
+/// the commit outcome is unknown.
 /// Call only when the client requested `report-status`.
 pub fn report(
     writer: &mut impl Write,

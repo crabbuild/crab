@@ -1370,7 +1370,7 @@ mod tests {
 
         assert!(matches!(
             receipt.commit,
-            crate::plan_receipt::MirrorPlanCommit::RefJournal { transaction_id: committed, .. }
+            crate::plan_receipt::PlanCommit::RefJournal { transaction_id: committed, .. }
                 if committed == transaction_id && snapshot.transactions == [transaction_id]
                     && snapshot.refs == BTreeMap::from([
                         ("refs/heads/left".to_owned(), "a".repeat(40)),

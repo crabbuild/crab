@@ -1,6 +1,7 @@
 //! Bounded verified object ranges derived from standard Git pack indexes.
 
-use std::io::{BufWriter, Write};
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -468,6 +469,8 @@ fn read_u64_le(bytes: &[u8], start: usize) -> Option<u64> {
 }
 
 /// Write a standard Git reverse index using only one `u32` per object.
+///
+/// An existing byte-identical index is retained so repeated generation remains portable.
 pub fn write_pack_reverse_index(idx_path: &Path, rev_path: &Path) -> Result<(), PackLocatorError> {
     let index = open_index(idx_path)?;
     let mut positions: Vec<u32> = (0..index.num_objects()).collect();
@@ -531,12 +534,51 @@ pub fn write_pack_reverse_index(idx_path: &Path, rev_path: &Path) -> Result<(), 
                 source,
             })?;
     }
+    if files_are_identical(rev_path, temp.path()).map_err(|source| {
+        PackLocatorError::ReverseIndexIo {
+            path: rev_path.to_owned(),
+            source,
+        }
+    })? {
+        return Ok(());
+    }
     temp.persist(rev_path)
         .map_err(|error| PackLocatorError::ReverseIndexIo {
             path: rev_path.to_owned(),
             source: error.error,
         })?;
     Ok(())
+}
+
+fn files_are_identical(existing_path: &Path, generated_path: &Path) -> std::io::Result<bool> {
+    let existing = match File::open(existing_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let generated = File::open(generated_path)?;
+    let len = existing.metadata()?.len();
+    if len != generated.metadata()?.len() {
+        return Ok(false);
+    }
+
+    let mut existing = BufReader::new(existing);
+    let mut generated = BufReader::new(generated);
+    let mut existing_chunk = [0_u8; 64 * 1024];
+    let mut generated_chunk = [0_u8; 64 * 1024];
+    let mut remaining = len;
+    while remaining > 0 {
+        let chunk_len = existing_chunk
+            .len()
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+        existing.read_exact(&mut existing_chunk[..chunk_len])?;
+        generated.read_exact(&mut generated_chunk[..chunk_len])?;
+        if existing_chunk[..chunk_len] != generated_chunk[..chunk_len] {
+            return Ok(false);
+        }
+        remaining -= chunk_len as u64;
+    }
+    Ok(true)
 }
 
 fn open_index(idx_path: &Path) -> Result<gix_pack::index::File, PackLocatorError> {

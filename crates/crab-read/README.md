@@ -45,16 +45,26 @@ use checked, fallible reservation and cannot grow beyond the declared size;
 short or overlong results fail. This is not configured memory admission:
 large representable outputs, caller-retained results, and transient decode
 still need resource bounds. Cache capacity is not a whole-read memory bound.
+`reconstruct_range_to_writer_with_cancel` streams an exact range into a
+caller-provided writer and accepts the caller's cancellation token and lookup
+session. It checks range bounds before I/O and verifies chunk integrity and
+the exact output length without allocating a range-sized result. The caller
+must bound the writer and unblock it on cancellation. The existing in-memory
+range API retains its clamping behavior and delegates to this writer path.
+Range verification does not establish the whole-file BLAKE3 hash.
+The operation token also reaches download admission, availability checks and
+chunk transport. Xet waits for source futures during its final writer join;
+these reads must observe cancellation for destination cleanup to finish.
 `ReadRuntimeBuilder` attaches
 the decoded-range cache using the object cache's
 resolved root and budget. Callers cannot accidentally omit range reuse;
 unavailable or unsafe cache storage degrades to verified origin reads.
 
-Reconstruction success waits for that operation's decoded-range cache-write
-attempts. Xet 1.6.0 starts those writes in detached tasks; an operation-local
-cache owner tracks even tasks not yet polled, so immediate runtime shutdown
-does not discard a healthy admitted fill after successful prefetch. Cache
-write errors remain best-effort and cannot replace valid origin output.
+StoreClient reads and fills the decoded-range cache while holding the term's
+download permit and reconstruction buffer admission. It caches each requested
+range independently and finishes fills before returning decoded bytes. Xet is
+not given a cache, so it cannot retain data in detached cache-write tasks.
+Cache write errors remain best-effort and cannot replace valid origin output.
 Cancellation/drop stops pending write attempts. This is not a persistence
 promise when caching is unavailable, over budget, or concurrently evicted,
 nor an aggregate filesystem-latency bound.
@@ -195,3 +205,18 @@ base before exposing refs. Native HTTP receive/publication remains unfinished.
 - [`crab-vfs`](../crab-vfs/README.md) and
   [`crab-auth-server`](../crab-auth-server/README.md) are callers, not
   alternate reconstruction implementations.
+
+`ShardHydrator::with_read_admission` scopes GET/HEAD origin admission to a cloned
+hydrator while retaining its shared cache, download concurrency and decoded
+buffer controls. Shard-hint and bloom-prefilter failures caused by admission
+are terminal, so index fallback cannot replace a budget error with not-found.
+
+`ShardHydrator::file_index_lookup` composes a pinned, write-free lazy lookup with
+its existing metadata cache. Callers pass that handle to reconstruction and
+close it afterward. Unknown reconstruction recipes retain `ReadError::NotFound`
+through Xet; a shard missing its indexed file retains a typed corruption error.
+
+The shared runtime defaults to 128 MiB of decoded-output admission. Compressed
+fetch buffers and cache I/O coexist with that output, so this is not a total RSS
+cap. Explicit caller buffer budgets remain supported. Large-file qualification
+tracks physical memory separately from this admission limit.

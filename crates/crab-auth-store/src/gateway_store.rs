@@ -90,6 +90,7 @@ impl GatewayObjectStore {
     }
 
     async fn metadata(&self, location: &Path) -> object_store::Result<ObjectMeta> {
+        let _receipt = crab_storage::read_transport::request().await?;
         let response = self
             .request(reqwest::Method::HEAD, self.object_url(location)?)
             .send()
@@ -196,15 +197,40 @@ impl ObjectStore for GatewayObjectStore {
         if range.start != 0 || range.end != meta.size {
             request = request.header(RANGE, format!("bytes={}-{}", range.start, range.end - 1));
         }
+        let receipt = crab_storage::read_transport::request().await?;
         let response = request.send().await.map_err(generic_error)?;
         map_status(response.status(), location)?;
-        let payload = response.bytes_stream().map_err(generic_error).boxed();
+        let payload = futures_util::stream::try_unfold(
+            (response.bytes_stream().boxed(), receipt.clone()),
+            |(mut stream, receipt)| async move {
+                let chunk = match &receipt {
+                    Some(receipt) => tokio::select! {
+                        biased;
+                        () = receipt.cancelled() => return Err(cancelled()),
+                        chunk = stream.try_next() => chunk.map_err(generic_error)?,
+                    },
+                    None => stream.try_next().await.map_err(generic_error)?,
+                };
+                let Some(chunk) = chunk else {
+                    return Ok(None);
+                };
+                if let Some(receipt) = &receipt {
+                    receipt.bytes(chunk.len() as u64).await?;
+                }
+                Ok(Some((chunk, (stream, receipt))))
+            },
+        )
+        .boxed();
+        let mut extensions = object_store::Extensions::new();
+        if let Some(receipt) = receipt {
+            receipt.mark(&mut extensions);
+        }
         Ok(GetResult {
             payload: GetResultPayload::Stream(payload),
             meta,
             range,
             attributes: Attributes::default(),
-            extensions: Default::default(),
+            extensions,
         })
     }
 
@@ -258,6 +284,7 @@ impl GatewayObjectStore {
         if !relative.is_empty() {
             url.query_pairs_mut().append_pair("prefix", &relative);
         }
+        let receipt = crab_storage::read_transport::request().await?;
         let response = self
             .request(reqwest::Method::GET, url)
             .send()
@@ -271,6 +298,9 @@ impl GatewayObjectStore {
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.try_next().await.map_err(generic_error)? {
+            if let Some(receipt) = &receipt {
+                receipt.bytes(chunk.len() as u64).await?;
+            }
             if bytes.len().saturating_add(chunk.len()) > 4 * 1024 * 1024 {
                 return Err(generic_error(
                     "managed gateway list response exceeds the client limit",
@@ -302,6 +332,14 @@ impl GatewayObjectStore {
                 })
             })
             .collect()
+    }
+}
+
+fn cancelled() -> object_store::Error {
+    object_store::Error::NotSupported {
+        source: Box::new(crab_storage::StorageError::ReadRejected {
+            source: Box::new(crab_storage::StorageError::Cancelled),
+        }),
     }
 }
 
@@ -359,12 +397,39 @@ fn generic_error(error: impl fmt::Display) -> object_store::Error {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
 
     use futures_util::TryStreamExt as _;
     use object_store::ObjectStoreExt as _;
 
     use super::*;
+
+    const LIST_BODY: &str = r#"{"schema_version":1,"objects":[{"key":"packs/a.pack","size":7}]}"#;
+
+    #[derive(Default)]
+    struct CountingAdmission {
+        requests: AtomicU64,
+        bytes: AtomicU64,
+        cancellation: tokio_util::sync::CancellationToken,
+    }
+
+    #[async_trait::async_trait]
+    impl crab_storage::ReadAdmission for CountingAdmission {
+        fn cancellation(&self) -> &tokio_util::sync::CancellationToken {
+            &self.cancellation
+        }
+
+        async fn request(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        async fn bytes(&self, bytes: u64) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.bytes.fetch_add(bytes, Ordering::Relaxed);
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn gateway_maps_granted_physical_paths_to_relative_object_routes() {
@@ -374,11 +439,7 @@ mod tests {
             let expected = [
                 ("HEAD /gateway/v1/objects/manifest ", "", Some(2)),
                 ("GET /gateway/v1/objects/manifest ", "ok", None),
-                (
-                    "GET /gateway/v1/list?prefix=packs ",
-                    r#"{"schema_version":1,"objects":[{"key":"packs/a.pack","size":7}]}"#,
-                    None,
-                ),
+                ("GET /gateway/v1/list?prefix=packs ", LIST_BODY, None),
             ];
             for (request_line, body, content_length) in expected {
                 let (mut stream, _) = listener.accept().unwrap();
@@ -403,12 +464,23 @@ mod tests {
             None,
         )
         .unwrap();
+        let admission = Arc::new(CountingAdmission::default());
+        let store =
+            crab_storage::Store::new(Arc::new(store)).with_read_admission(admission.clone());
         let object = Path::from("environments/prod/repositories/repo-1/manifest");
 
-        let bytes = store.get(&object).await.unwrap().bytes().await.unwrap();
+        let bytes = store
+            .inner()
+            .get(&object)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
         assert_eq!(bytes.as_ref(), b"ok");
         let prefix = Path::from("environments/prod/repositories/repo-1/packs");
         let objects = store
+            .inner()
             .list(Some(&prefix))
             .try_collect::<Vec<_>>()
             .await
@@ -416,6 +488,11 @@ mod tests {
         assert_eq!(
             objects[0].location,
             Path::from("environments/prod/repositories/repo-1/packs/a.pack")
+        );
+        assert_eq!(admission.requests.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            admission.bytes.load(Ordering::Relaxed),
+            2 + LIST_BODY.len() as u64
         );
         server.join().unwrap();
     }

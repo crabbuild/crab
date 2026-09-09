@@ -15,6 +15,13 @@ pub enum StorageError {
         source: object_store::Error,
     },
 
+    /// Caller rejected an object-body read before further transport work.
+    #[error("storage read rejected: {source}")]
+    ReadRejected {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
     /// Throttling with an optional retry hint and original provider failure.
     /// Local admission failures have no provider source.
     #[error("storage throttled")]
@@ -154,4 +161,28 @@ impl From<std::io::Error> for StorageError {
     fn from(source: std::io::Error) -> Self {
         Self::Io { source }
     }
+}
+
+/// Find a caller admission failure through transport and I/O wrappers.
+#[must_use]
+pub fn read_rejection<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a StorageError> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(error @ StorageError::ReadRejected { .. }) =
+            error.downcast_ref::<StorageError>()
+        {
+            return Some(error);
+        }
+        current = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|error| {
+                error
+                    .get_ref()
+                    .map(|source| source as &(dyn std::error::Error + 'static))
+            })
+            .or_else(|| error.source());
+    }
+    None
 }

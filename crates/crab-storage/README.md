@@ -1,5 +1,10 @@
 # crab-storage
 
+Explicit Azure SAS credentials use the provider's SAS-string parser before
+request query encoding. Percent-encoded signature characters must be decoded
+exactly once; passing encoded strings as query-pair values corrupts signatures.
+The local HTTP regression checks the value actually received by a server.
+
 `crab-storage` is Crab’s provider-neutral object-store boundary. It turns
 S3, S3-compatible, GCS, Azure Blob, and local object stores into one `Store`
 facade with stable paths, retries, conditional writes, range reads, and
@@ -38,6 +43,23 @@ global `.crab/` prefix while keeping manifests, refs, packs, and locks under a
 repository prefix. `Store` adds conditional create/update, optional staged
 writes, bounded reads, byte/request observers, and provider-neutral
 `StorageError` values.
+
+The admission token cancels pending admission, response headers, streamed
+body reads and pending listings without retrying the cancellation.
+
+`Store::with_read_admission` adds caller-owned asynchronous GET/HEAD/listing admission
+after read-route configuration. The supplied policy is shared by clones and
+read routes, including access through `inner()`. It sees each facade retry,
+reserves the advertised body size before payload polling, and rejects body
+length mismatches. `ReadRejected` preserves the caller source and is fatal
+through storage/cache/I/O wrappers. Admission and response-framing failures use
+a non-retryable object_store envelope so SlateDB cannot retry them indefinitely.
+The typed source remains authoritative: the Store facade still retries framing
+corruption once, while admission rejection is terminal.
+Each listing invocation charges one request; streaming listings defer admission
+and backend construction until first poll.
+Provider-internal pagination, listing response bytes and provider-internal HTTP
+retries are outside this hook; writes retain their existing behavior.
 
 Provider builders also bind `Store::target_identity` to credential-free
 transport configuration: provider, bucket/container, effective endpoint and
@@ -127,3 +149,10 @@ The crate enables the AWS, GCP, Azure, and filesystem `object_store` adapters
 for its provider construction API. It has no Crab-specific runtime feature
 flags; callers select the provider and optional behavior at the composition
 boundary.
+
+`build_explicit_store` consumes explicit credentials, endpoint and allow-HTTP
+policy without provider environment overrides. It rejects default credential
+chain selection and retains the built store's signing, multipart and target
+identity capabilities. Azure logical identity retains account and container.
+The existing environment-selection and grant-endpoint constructors retain their
+caller policies; all share the provider construction implementation.

@@ -1936,6 +1936,12 @@ impl From<crab_storage::error::StorageError> for CrabError {
             crab_storage::error::StorageError::AuthExpired { path } => Self::AuthExpired { path },
             crab_storage::error::StorageError::Io { source } => Self::Io(source),
             crab_storage::error::StorageError::Cancelled => Self::Cancelled,
+            error @ crab_storage::error::StorageError::ReadRejected { .. } => {
+                Self::Storage(object_store::Error::Generic {
+                    store: "crab-storage",
+                    source: Box::new(error),
+                })
+            }
             crab_storage::error::StorageError::MultipartJournal { source, .. } => {
                 Self::Storage(object_store::Error::Generic {
                     store: "multipart journal",
@@ -1945,6 +1951,15 @@ impl From<crab_storage::error::StorageError> for CrabError {
             crab_storage::error::StorageError::NotSupported { source }
             | crab_storage::error::StorageError::ObjectStore { source } => Self::Storage(source),
             crab_storage::error::StorageError::Internal(message) => Self::Internal(message),
+        }
+    }
+}
+
+impl From<crab_remote::publication::Error> for CrabError {
+    fn from(error: crab_remote::publication::Error) -> Self {
+        match error {
+            crab_remote::publication::Error::Cancelled => Self::Cancelled,
+            crab_remote::publication::Error::Coordination(source) => Self::from(source),
         }
     }
 }
@@ -1969,6 +1984,7 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Internal(message) => Self::Internal(message),
             crab_write::WriteError::Cancelled => Self::Cancelled,
             error @ (crab_write::WriteError::Namespace(_)
+            | crab_write::WriteError::InitialHead { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }
@@ -1999,7 +2015,9 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
-            | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
+            | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
+            | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
+            | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
                 Self::Io(std::io::Error::other(error))
             }
             crab_metadata::error::MetadataError::Io { source } => Self::Io(source),

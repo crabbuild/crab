@@ -10,16 +10,25 @@ pub mod layout;
 pub mod multipart;
 pub mod provider_options;
 pub mod provider_store;
+mod read_admission;
+pub use read_admission::ReadAdmission;
 pub mod retry;
 pub mod store;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+mod transport_read_admission;
+
+/// Internal cross-crate hook for HTTP stores implemented outside `crab-storage`.
+#[doc(hidden)]
+pub mod read_transport {
+    pub use crate::transport_read_admission::{TransportReadReceipt, request};
+}
 
 pub use cas::{
     DEFAULT_MAX_ATTEMPTS, MAX_CAS_OBJECT_BYTES, cas_update, cas_update_bounded, cas_update_default,
 };
 pub use crab_types::storage::StorageScope;
-pub use error::{Result, StorageError};
+pub use error::{Result, StorageError, read_rejection};
 pub use error_map::{classify_auth_error, map_object_store_error};
 pub use external::{
     ExternalByteStream, ExternalCapabilities, ExternalDataStore, ExternalObjectMeta,
@@ -40,10 +49,10 @@ pub use provider_options::{
 pub use provider_store::{
     AzureAuthorization, BuiltObjectStore, ObjectStoreCredentials, StaticEnvStoreTarget,
     StaticEnvStoreTargetSelection, StaticEnvStoreUrlForm, StaticEnvStoreUrlParts, UrlObjectStore,
-    build_object_store, build_object_store_with_endpoint, build_s3_object_store_with_provider,
-    build_static_env_azure_account_container_store, build_static_env_store,
-    build_static_env_target_store, build_url_object_store, resolve_static_env_provider,
-    resolve_static_env_provider_value, static_env_target_selection,
+    build_explicit_store, build_object_store, build_object_store_with_endpoint,
+    build_s3_object_store_with_provider, build_static_env_azure_account_container_store,
+    build_static_env_store, build_static_env_target_store, build_url_object_store,
+    resolve_static_env_provider, resolve_static_env_provider_value, static_env_target_selection,
     static_env_target_selection_for_provider, validate_static_env_url_provider,
 };
 pub use retry::{RetryClass, RetryPolicy, retry, retry_class};

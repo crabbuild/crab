@@ -1,12 +1,12 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::FileExt as _;
+use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use std::ptr;
 
 use rusqlite::ffi;
 
-use super::locking::{READ_LOCK, UNLOCK, WRITE_LOCK, conflicting_lock, lock};
+use super::locking::{READ_LOCK, UNLOCK, WRITE_LOCK, conflicting_lock, lock, verify_exclusion};
 use super::vfs::{Context, io_code};
 
 const LOCK_BASE: i64 = 120;
@@ -44,6 +44,18 @@ impl SharedMemory {
         let file = context
             .open(&name, true, false, false)?
             .ok_or(ffi::SQLITE_CANTOPEN)?;
+        // Newly created side files can have different lock behavior from the
+        // reopened main file. Prove exclusion here before resetting live SHM.
+        let probe = context
+            .open(&name, false, false, false)?
+            .ok_or(ffi::SQLITE_CANTOPEN)?;
+        let metadata = file.metadata().map_err(io_code)?;
+        let probe_metadata = probe.metadata().map_err(io_code)?;
+        if metadata.dev() != probe_metadata.dev() || metadata.ino() != probe_metadata.ino() {
+            return Err(ffi::SQLITE_IOERR_SHMOPEN);
+        }
+        verify_exclusion(&file, &probe)?;
+        drop(probe);
         // Match SQLite's dead-man-switch protocol: only the first owner may
         // reset abandoned shared memory. An exclusive initializer means BUSY,
         // not permission to proceed with possibly uninitialized contents.

@@ -14,12 +14,15 @@ enum Fault {
     RejectedMarker,
     CancelAfterHead,
     CancelAfterMarker,
+    ReadinessAfterMarker,
 }
 
 #[derive(Debug)]
 struct FaultStore {
     inner: Arc<dyn ObjectStore>,
     marker_prefix: String,
+    manifest_path: String,
+    committed: std::sync::atomic::AtomicBool,
     head_path: String,
     cancel: CancellationToken,
     fault: Fault,
@@ -54,6 +57,10 @@ impl ObjectStore for FaultStore {
             return Err(disconnected());
         }
         let result = self.inner.put_opts(location, payload, options).await?;
+        if marker {
+            self.committed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         if marker && matches!(self.fault, Fault::LostMarkerReply) {
             return Err(disconnected());
         }
@@ -70,6 +77,12 @@ impl ObjectStore for FaultStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if matches!(self.fault, Fault::ReadinessAfterMarker)
+            && self.committed.load(std::sync::atomic::Ordering::SeqCst)
+            && location.as_ref() == self.manifest_path
+        {
+            return Err(disconnected());
+        }
         self.inner.get_opts(location, options).await
     }
     async fn put_multipart_opts(
@@ -127,12 +140,197 @@ async fn body() -> (Vec<u8>, String) {
     (body, oid)
 }
 
-const FAULTS: [Fault; 4] = [
+const FAULTS: [Fault; 5] = [
     Fault::LostMarkerReply,
     Fault::RejectedMarker,
     Fault::CancelAfterHead,
+    Fault::ReadinessAfterMarker,
     Fault::CancelAfterMarker,
 ];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
+    use crab_metadata::{manifest_store, plan_receipt};
+    use crab_remote::publication::{CommitOutcome, with_leases, with_plan};
+    type TestError = Box<dyn std::error::Error + Send + Sync>;
+
+    let (wire, oid) = body().await;
+    let server = maintenance_tests::fixture().await;
+    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let directory = tempfile::tempdir().unwrap();
+    let wire_path = directory.path().join("wire");
+    std::fs::write(&wire_path, wire).unwrap();
+    let mut input = std::io::BufReader::new(std::fs::File::open(wire_path).unwrap());
+    let request = crab_git::receive_wire::read_request(&mut input).unwrap();
+    let names: Vec<_> = request
+        .updates
+        .iter()
+        .map(|update| update.name.clone())
+        .collect();
+    let plan_id = "d".repeat(64);
+    let ttl = Duration::from_secs(60);
+    let cancel = CancellationToken::new();
+    let outcome = with_plan(
+        &repo.store,
+        &repo.layout,
+        &plan_id,
+        ttl,
+        &cancel,
+        |cancel| {
+            let plan_id = &plan_id;
+            let server = &server;
+            async move {
+                with_leases(
+                    &repo.store,
+                    &repo.layout,
+                    names,
+                    ttl,
+                    &cancel,
+                    |holders, cancel| async move {
+                        let snapshot =
+                            manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
+                                .await?;
+                        let repository = RemoteGitRepository::open(
+                            repo.store.clone(),
+                            repo.layout.clone(),
+                            repo.identity.clone(),
+                            server.runtime.clone(),
+                            RepositoryOptions::default(),
+                            &cancel,
+                        )
+                        .await?;
+                        let prepared = crab_remote::prepare::prepare(
+                            repository,
+                            directory.path().to_owned(),
+                            Some(input),
+                            request.updates,
+                            BTreeMap::new(),
+                            &cancel,
+                            crab_remote::prepare::Options {
+                                layout: repo.layout.clone(),
+                                graph: crab_git::receive_plan::GraphLimits {
+                                    max_ref_updates: 16,
+                                    max_graph_steps: 1024,
+                                    max_object_bytes: 1024 * 1024,
+                                    max_read_bytes: 4 * 1024 * 1024,
+                                },
+                                pack: crab_git::incoming_pack::ReceiveLimits {
+                                    max_pack_bytes: 4 * 1024 * 1024,
+                                    max_objects: 1024,
+                                    max_object_bytes: 1024 * 1024,
+                                    max_inflated_bytes: 4 * 1024 * 1024,
+                                    max_delta_depth: 128,
+                                },
+                                policy: |_: &str| crab_git::receive_plan::RefPolicy {
+                                    allow_delete: true,
+                                    allow_non_fast_forward: false,
+                                },
+                            },
+                        )
+                        .await?;
+                        let limits = crab_read::dependency_proof::DependencyProofLimits {
+                            max_dependencies: 16,
+                            max_total_file_bytes: 4 * 1024 * 1024,
+                            max_duration: ttl,
+                            lookup: crab_metadata::file_index_lookup::FileIndexLookupLimits {
+                                max_files: 16,
+                                max_shard_visits: 16,
+                                max_shard_bytes: 4 * 1024 * 1024,
+                                max_recipe_entries: 1024,
+                            },
+                            content: crab_read::pointer_proof::PointerProofLimits {
+                                max_file_bytes: 4 * 1024 * 1024,
+                                max_shard_bytes: 4 * 1024 * 1024,
+                                max_xorb_bytes: 4 * 1024 * 1024,
+                                max_read_bytes: 4 * 1024 * 1024,
+                                max_chunks: 1024,
+                                max_duration: ttl,
+                            },
+                        };
+                        let artifacts = prepared
+                            .upload(&snapshot, limits, &holders, &cancel)
+                            .await?;
+                        let outcome = artifacts
+                            .commit(
+                                None,
+                                crab_write::journal::CommitOptions::new(ttl, &cancel)
+                                    .with_plan(plan_id),
+                            )
+                            .await?;
+                        Ok::<_, TestError>(outcome)
+                    },
+                )
+                .await
+            }
+        },
+    )
+    .await
+    .unwrap();
+    let CommitOutcome::Committed(committed) = outcome else {
+        panic!("successful marker must retain commitment");
+    };
+    // Exercise the same catalog maintenance used after HTTP receive, then read
+    // the plan's historical proof after its active marker has been compacted.
+    repo.invalidate().await;
+    let repository = repo
+        .open_current(&server, RepositoryOptions::default(), &cancel)
+        .await
+        .unwrap();
+    let receipt = plan_receipt::read_plan_receipt(&repo.store, &repo.layout, &plan_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(receipt.commit, plan_receipt::PlanCommit::RefJournal { transaction_id, .. }
+        if transaction_id == committed.transaction_id)
+    );
+    assert_eq!(repository.refs().entries[0].target.to_string(), oid);
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::Repository, &cancel)
+        .await
+        .unwrap();
+    let snapshot = repository
+        .snapshot(
+            &crab_remote_git::Revision::from_oid_hex(&oid).unwrap(),
+            &operation,
+        )
+        .await
+        .unwrap();
+    let content = snapshot
+        .read_blob(
+            &crab_remote_git::GitPath::new("README.md").unwrap(),
+            &operation,
+        )
+        .await;
+    let content = operation.finish(content).await.unwrap();
+    assert_eq!(content.bytes.as_ref(), b"fault qualification\n");
+    let snapshot = manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
+        .await
+        .unwrap();
+    assert!(snapshot.journal.transactions.is_empty());
+    let mut replayed = false;
+    let blocked = with_plan(
+        &repo.store,
+        &repo.layout,
+        &plan_id,
+        ttl,
+        &cancel,
+        |_| async {
+            replayed = true;
+            Ok::<_, TestError>(())
+        },
+    )
+    .await;
+    assert!(!replayed);
+    assert!(matches!(
+        blocked
+            .unwrap_err()
+            .downcast_ref::<crab_metadata::error::MetadataError>(),
+        Some(crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. })
+    ));
+    server.cancellation.cancel();
+    server.runtime.shutdown().await;
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn receive_faults_preserve_exact_commit_outcomes_and_repair_on_restart() {
@@ -216,6 +414,8 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
         Arc::new(FaultStore {
             inner: Arc::clone(origin.inner()),
             marker_prefix: format!("{}/", repo.layout.ref_journal_active_prefix()),
+            manifest_path: repo.layout.manifest_path().to_string(),
+            committed: std::sync::atomic::AtomicBool::new(false),
             head_path: repo
                 .layout
                 .ref_journal_head_path(&crab_metadata::ref_journal::ref_name_hash(
@@ -247,8 +447,12 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
         .unwrap();
     let status = response.status();
     let response = response.into_body().collect().await.unwrap().to_bytes();
-    if matches!(fault, Fault::LostMarkerReply) {
-        assert_eq!(status, StatusCode::OK);
+    let committed = matches!(
+        fault,
+        Fault::LostMarkerReply | Fault::CancelAfterMarker | Fault::ReadinessAfterMarker
+    );
+    if committed {
+        assert_eq!(status, StatusCode::OK, "{fault:?}");
         assert!(String::from_utf8_lossy(&response).contains("ok refs/heads/main"));
     } else {
         assert!(!status.is_success(), "{fault:?}");
@@ -262,7 +466,6 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     let snapshot = crab_metadata::manifest_store::read_repository_snapshot(&origin, &origin_layout)
         .await
         .unwrap();
-    let committed = matches!(fault, Fault::LostMarkerReply | Fault::CancelAfterMarker);
     assert_eq!(
         snapshot
             .journal

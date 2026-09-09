@@ -1,4 +1,4 @@
-import { cliDocs } from 'collections/server';
+import { cliDocs, sdkDocs } from 'collections/server';
 import { loader } from 'fumadocs-core/source';
 import type * as PageTree from 'fumadocs-core/page-tree';
 import { getSidebarIcon } from '@/components/docs/docs-sidebar-icons';
@@ -74,3 +74,8 @@ export const cliSource = loader({
 });
 cliSource.pageTree.children = removeHiddenSections(cliSource.pageTree.children);
 attachIcons(cliSource.pageTree.children);
+
+export const sdkSource = loader({
+  baseUrl: '/docs/sdk',
+  source: sdkDocs.toFumadocsSource(),
+});

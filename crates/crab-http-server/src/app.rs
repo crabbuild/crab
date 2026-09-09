@@ -85,7 +85,7 @@ pub(crate) enum Error {
     #[error("Pull request merge failed")]
     Merge(#[source] Box<crate::receive::ReceiveError>),
     #[error("Pull request merge object construction failed")]
-    MergeObject(#[source] Box<crate::git_objects::Error>),
+    MergeObject(#[source] Box<crab_remote::objects::Error>),
     #[error(
         "This submission ID was already used for different content; check the existing discussion before submitting again"
     )]

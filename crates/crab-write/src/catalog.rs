@@ -1,6 +1,5 @@
 //! Canonical Git locator publication shared by CLI and server owners.
 use crate::{Result, WriteError};
-use bytes::Bytes;
 use crab_metadata::manifests::PackManifestEntry;
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
@@ -110,7 +109,6 @@ async fn download_locator_pack_evidence(
     store: &Store,
     router: &StoreLayout<Store>,
     pack: &PackManifestEntry,
-    populate_kind_metadata: bool,
     cancel: &CancellationToken,
 ) -> Result<LocatorPackEvidence> {
     check_cancelled(cancel)?;
@@ -172,114 +170,7 @@ async fn download_locator_pack_evidence(
         &expected_git_sha1,
         router.pack_index_path(&pack.pack_id).as_ref(),
     )?;
-    let kind_by_oid = if let Some(kinds) =
-        load_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?
-    {
-        Some(kinds)
-    } else if populate_kind_metadata {
-        crab_git::initialize_bare_git_dir(temp.path())?;
-        let source = temp.path().join("source.pack");
-        let downloaded = store
-            .download_to_path_bounded(&router.pack_path(&pack.pack_id), &source, pack.size)
-            .await?;
-        check_cancelled(cancel)?;
-        if downloaded != pack.size {
-            return Err(WriteError::CorruptObject {
-                path: source.display().to_string(),
-                reason: format!(
-                    "committed pack has size {downloaded}, expected {}",
-                    pack.size
-                ),
-            });
-        }
-        let git_dir = temp.path().to_owned();
-        let pack_dir = git_dir.join("objects/pack");
-        let canonical_name = pack.pack_id.clone();
-        let index_path = idx_path.clone();
-        let reverse_index_path = rev_path.clone();
-        let object_count = pack.object_count;
-        let pack_size = pack.size;
-        let (kinds, kind_metadata) = tokio::task::spawn_blocking(move || -> Result<_> {
-            std::fs::create_dir_all(&pack_dir)?;
-            crab_git::pack::install_pack_file_from_path(
-                &pack_dir,
-                &source,
-                &canonical_name,
-                0,
-                false,
-            )?;
-            let mut locations = crab_git::pack_locator::PackLocationIter::open(
-                &index_path,
-                &reverse_index_path,
-                pack_size,
-            )
-            .map_err(crab_git::pack::PackError::from)?;
-            let object_ids = locations
-                .by_ref()
-                .map(|location| {
-                    location
-                        .map(|location| location.oid)
-                        .map_err(crab_git::pack::PackError::from)
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(WriteError::from)?;
-            if object_ids.len() != object_count as usize {
-                return Err(WriteError::CorruptObject {
-                    path: index_path.display().to_string(),
-                    reason: format!(
-                        "pack index contains {} objects, expected {object_count}",
-                        object_ids.len()
-                    ),
-                });
-            }
-            let kinds = crab_git::object_kinds_from_git_dir(&git_dir, &object_ids)
-                .map_err(WriteError::from)?;
-            if kinds.len() != object_ids.len() {
-                return Err(WriteError::Internal(
-                    "Git object-kind catalog returned an incomplete pack result".to_owned(),
-                ));
-            }
-            let ordered_kinds = object_ids
-                .iter()
-                .map(|oid| {
-                    kinds.get(oid).copied().ok_or_else(|| {
-                        WriteError::Internal(
-                            "Git object-kind catalog omitted a pack object".to_owned(),
-                        )
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let kind_metadata = crab_git::pack_locator::encode_pack_kind_metadata(
-                locations.pack_checksum(),
-                &ordered_kinds,
-            )
-            .map_err(crab_git::pack::PackError::from)
-            .map_err(WriteError::from)?;
-            let kinds = kinds
-                .into_iter()
-                .map(|(oid, kind)| {
-                    let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
-                        WriteError::Internal(
-                            "Git object-kind catalog returned a non-SHA1 object".to_owned(),
-                        )
-                    })?;
-                    Ok((oid, metadata_kind(kind)))
-                })
-                .collect::<Result<HashMap<_, _>>>()?;
-            Ok((kinds, kind_metadata))
-        })
-        .await
-        .map_err(WriteError::Worker)??;
-        store
-            .put(
-                &router.pack_kind_metadata_path(&pack.pack_id),
-                Bytes::from(kind_metadata),
-            )
-            .await?;
-        Some(Arc::new(kinds))
-    } else {
-        None
-    };
+    let kind_by_oid = load_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?;
     check_cancelled(cancel)?;
     let pack_id =
         MerkleHash::from_hex(&pack.pack_id).map_err(|source| WriteError::PackIdentity {
@@ -365,7 +256,6 @@ async fn collect_locator_pack_evidence(
     local_evidence: &mut HashMap<MerkleHash, LocatorPackEvidence>,
     packs: &[PackManifestEntry],
     skip_packs: &HashSet<MerkleHash>,
-    populate_kind_metadata: bool,
     cancel: &CancellationToken,
 ) -> Result<Vec<LocatorPackEvidence>> {
     let mut evidence = Vec::new();
@@ -403,8 +293,7 @@ async fn collect_locator_pack_evidence(
     let remote_evidence =
         futures_util::stream::iter(remote_packs.into_iter().map(|pack| async move {
             check_cancelled(cancel)?;
-            download_locator_pack_evidence(store, router, &pack, populate_kind_metadata, cancel)
-                .await
+            download_locator_pack_evidence(store, router, &pack, cancel).await
         }))
         .buffer_unordered(LOCATOR_EVIDENCE_CONCURRENCY)
         .try_collect::<Vec<_>>()
@@ -531,7 +420,6 @@ pub async fn publish_inventory(
         local_evidence,
         current_packs,
         &covered,
-        false,
         cancel,
     )
     .await?;
@@ -566,7 +454,6 @@ pub async fn publish_inventory(
             local_evidence,
             current_packs,
             &already_loaded,
-            false,
             cancel,
         )
         .await?;

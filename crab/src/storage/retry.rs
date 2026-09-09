@@ -292,6 +292,9 @@ pub fn retry_class(err: &CrabError) -> RetryClass {
 // `#[from]`). Apply the same transient-vs-permanent split here so those
 // paths still retry correctly.
 pub(crate) fn classify_storage(err: &object_store::Error) -> RetryClass {
+    if crab_storage::read_rejection(err).is_some() {
+        return RetryClass::Fatal;
+    }
     match err {
         object_store::Error::Generic { .. } => RetryClass::Transient,
         object_store::Error::Precondition { .. } | object_store::Error::AlreadyExists { .. } => {

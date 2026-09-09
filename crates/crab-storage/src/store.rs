@@ -275,6 +275,36 @@ impl Store {
         self
     }
 
+    /// Add caller-owned admission to GET/HEAD/listing on this store and its read routes.
+    ///
+    /// Apply after configuring read routes. Clones share the supplied admission;
+    /// applying again nests the policies. Cloud stores built by `crab-storage`
+    /// account provider retries, listing pages and response bytes at the HTTP
+    /// boundary. Other stores account logical calls and successful object bodies.
+    /// Writes retain their original behavior.
+    #[must_use]
+    pub fn with_read_admission(mut self, admission: Arc<dyn crate::ReadAdmission>) -> Self {
+        let wrap = |inner: Arc<dyn ObjectStore>| -> Arc<dyn ObjectStore> {
+            Arc::new(crate::read_admission::AdmittedStore {
+                inner,
+                admission: Arc::clone(&admission),
+            })
+        };
+        self.inner = wrap(self.inner);
+        self.read_routes = self.read_routes.map(|routes| {
+            Arc::new(
+                routes
+                    .iter()
+                    .map(|route| ReadRoute {
+                        prefix: route.prefix.clone(),
+                        inner: wrap(Arc::clone(&route.inner)),
+                    })
+                    .collect(),
+            )
+        });
+        self
+    }
+
     #[must_use]
     pub fn with_read_byte_observer(mut self, observer: Arc<dyn Fn(u64) + Send + Sync>) -> Self {
         self.read_byte_observer = Some(observer);

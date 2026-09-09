@@ -7,7 +7,6 @@ use std::{
 use crab_coordination::{CoordinationError, GIT_REF_NAMESPACE_RESOURCE, PushLockAcquireContext};
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
 
 use crate::WriteError;
 
@@ -40,7 +39,7 @@ where
         })?;
     let mut context = PushLockAcquireContext::new(Arc::clone(store.inner()));
     let mut attempt = 0;
-    let mut lease = loop {
+    let lease = loop {
         if cancel.is_cancelled() {
             return Err(E::from(WriteError::Cancelled));
         }
@@ -65,24 +64,9 @@ where
         }
     };
     let scoped = cancel.child_token();
-    let mut outcome = None;
-    let renewal = crab_coordination::while_renewing(&mut lease, Some(&scoped), async {
-        outcome = Some(operation(scoped.clone()).await);
-        Ok::<(), CoordinationError>(())
-    })
-    .await;
-    let release = lease.release().await;
-    // The inner result records whether the active marker/CAS committed. A late
-    // lease or cleanup error must not turn an accepted write into a rejection.
-    if let Err(error) = renewal {
-        warn!(%error, "ref namespace renewal failed; preserving publication outcome");
-    }
-    if let Err(error) = release {
-        warn!(%error, "ref namespace release failed; preserving publication outcome");
-    }
-    outcome.ok_or_else(|| {
-        E::from(WriteError::Internal(
-            "namespace operation did not complete".into(),
-        ))
-    })?
+    let lease = crab_coordination::RenewingPushLock::start(lease, &scoped);
+    let outcome = operation(scoped).await;
+    // Drain coordination without replacing the callback's known commit outcome.
+    lease.release().await;
+    outcome
 }

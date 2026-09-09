@@ -1,4 +1,9 @@
+mod shared;
+pub(crate) use shared::SharedBudget;
+
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use tokio_util::sync::CancellationToken;
 
 use tokio::sync::Mutex;
 
@@ -74,13 +79,27 @@ const CACHED_SEMANTIC_DIMENSIONS: [BudgetDimension; 7] = [
     BudgetDimension::ResponseBytes,
 ];
 
+static NEXT_BUDGET_ID: AtomicU64 = AtomicU64::new(1);
+
 impl OperationBudget {
-    pub(crate) fn new(limits: OperationLimits, runtime: Arc<RemoteGitRuntime>, id: u64) -> Self {
+    pub(crate) fn new(limits: OperationLimits, runtime: Arc<RemoteGitRuntime>) -> Self {
         Self {
             work: Arc::new(Mutex::new(WorkBudget::new(limits))),
             runtime,
-            id,
+            id: NEXT_BUDGET_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    pub(crate) fn read_admission(
+        &self,
+        cancellation: CancellationToken,
+    ) -> Arc<dyn crab_storage::ReadAdmission> {
+        Arc::new(ReadBudgetAdmission {
+            budget: self.clone(),
+            cancellation,
+            rejected: AtomicBool::new(false),
+            rejection: std::sync::Mutex::new(None),
+        })
     }
 
     pub(crate) const fn id(&self) -> u64 {
@@ -195,9 +214,129 @@ impl WorkBudget {
     }
 }
 
+struct ReadBudgetAdmission {
+    budget: OperationBudget,
+    cancellation: CancellationToken,
+    rejected: AtomicBool,
+    rejection: std::sync::Mutex<Option<Arc<Error>>>,
+}
+
+#[derive(Debug)]
+struct RejectedRead(Arc<Error>);
+
+impl std::fmt::Display for RejectedRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for RejectedRead {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+impl ReadBudgetAdmission {
+    fn rejection(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
+        if !self.rejected.load(Ordering::Acquire) {
+            return None;
+        }
+        self.rejection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map(|source| Box::new(RejectedRead(source)) as _)
+    }
+
+    fn reject(&self, error: Error) -> Box<dyn std::error::Error + Send + Sync> {
+        let mut rejection = self
+            .rejection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let source = rejection.get_or_insert_with(|| Arc::new(error)).clone();
+        self.rejected.store(true, Ordering::Release);
+        Box::new(RejectedRead(source))
+    }
+}
+
+#[async_trait::async_trait]
+impl crab_storage::ReadAdmission for ReadBudgetAdmission {
+    fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    async fn request(&self) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.cancellation.is_cancelled() {
+            return Err(Box::new(Error::Cancelled));
+        }
+        if let Some(error) = self.rejection() {
+            return Err(error);
+        }
+        self.budget
+            .charge(BudgetDimension::StorageRequests, 1)
+            .await
+            .map_err(|error| self.reject(error))?;
+        Ok(())
+    }
+
+    async fn bytes(
+        &self,
+        bytes: u64,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.cancellation.is_cancelled() {
+            return Err(Box::new(Error::Cancelled));
+        }
+        if let Some(error) = self.rejection() {
+            return Err(error);
+        }
+        self.budget
+            .charge(BudgetDimension::FetchedBytes, bytes)
+            .await
+            .map_err(|error| self.reject(error))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_admission_reuses_the_first_budget_rejection() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let budget = OperationBudget::new(
+            OperationLimits {
+                max_storage_requests: 1,
+                max_fetched_bytes: 1,
+                ..OperationLimits::default()
+            },
+            runtime,
+        );
+        let admission = budget.read_admission(CancellationToken::new());
+
+        let first = admission.bytes(2).await.expect_err("byte limit");
+        let second = admission.request().await.expect_err("sticky rejection");
+
+        for rejection in [first, second] {
+            assert!(matches!(
+                rejection
+                    .downcast_ref::<RejectedRead>()
+                    .map(|error| error.0.as_ref()),
+                Some(Error::LimitExceeded {
+                    limit: "fetched bytes",
+                    actual: 2,
+                    maximum: 1,
+                })
+            ));
+        }
+        assert_eq!(
+            budget
+                .usage()
+                .await
+                .amount(BudgetDimension::StorageRequests),
+            0
+        );
+    }
 
     #[test]
     fn counter_overflow_fails_closed_without_changing_other_dimensions() {

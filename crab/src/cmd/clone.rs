@@ -38,8 +38,9 @@ pub struct CloneArgs {
     pub branch: Option<String>,
     /// Shallow clone depth (number of commits).
     pub depth: Option<u32>,
-    /// Leave files as pointers — skip automatic hydration (default: true).
-    pub lazy: bool,
+    /// Explicit hydration mode; absent values defer to committed configuration,
+    /// then default to lazy checkout.
+    pub lazy: Option<bool>,
     /// Glob patterns to hydrate immediately after clone (implies not fully lazy).
     pub include: Vec<String>,
     /// Glob patterns to exclude from post-clone hydration.
@@ -119,7 +120,7 @@ pub async fn run_clone_in(
         "clone",
         url = %args.url,
         target = %target_dir.display(),
-        lazy = args.lazy,
+        lazy = args.lazy.unwrap_or(true),
     )
     .entered();
 
@@ -214,9 +215,10 @@ pub async fn run_clone_in(
 
     // Determine effective hydration behavior before checkout so the filter
     // process sees the right lazy/eager state during first materialization.
-    let (effective_lazy, effective_include) =
+    let hydration =
         resolve_hydration_from_config(args.lazy, &args.include, project_config.as_ref());
-    let checkout_lazy = effective_lazy || !effective_include.is_empty();
+    let checkout_lazy = hydration.lazy();
+    let effective_include = hydration.patterns();
 
     if checkout_lazy {
         configure_lazy_checkout(&target_dir)?;
@@ -273,7 +275,7 @@ pub async fn run_clone_in(
     check_cancelled(cancel)?;
 
     // Step 6: Report and optionally hydrate after checkout.
-    if effective_lazy && effective_include.is_empty() {
+    if checkout_lazy && effective_include.is_empty() {
         if !args.mode.is_machine() {
             eprintln!(
                 "Clone complete (lazy). Pointer files remain dehydrated.\n\
@@ -309,7 +311,7 @@ pub async fn run_clone_in(
         }
 
         let hydrate_args = crate::cmd::hydrate::HydrateArgs {
-            patterns: effective_include.clone(),
+            patterns: effective_include.to_vec(),
             include: vec![],
             exclude: args.exclude.clone(),
             all: false,
@@ -1298,46 +1300,27 @@ pub(crate) fn autotrack_pointer_extensions(target: &Path, mode: OutputMode) -> R
 
 /// Resolve effective hydration behavior by merging CLI flags with `crab.toml` config.
 ///
-/// Returns `(effective_lazy, effective_include_patterns)`. The `crab.toml`
-/// settings only apply when the user didn't pass explicit CLI flags.
+/// Explicit CLI settings override the committed repository policy. With no
+/// explicit setting, clone remains lazy unless `crab.toml` selects eager mode.
 fn resolve_hydration_from_config(
-    user_lazy: bool,
+    user_lazy: Option<bool>,
     user_include: &[String],
     project_config: Option<&crate::core::project_config::ProjectConfig>,
-) -> (bool, Vec<String>) {
-    let Some(config) = project_config else {
-        return (user_lazy, user_include.to_vec());
-    };
-
-    let Some(ref hydrate_config) = config.hydrate else {
-        return (user_lazy, user_include.to_vec());
-    };
-
-    // If user passed explicit --include patterns, those take precedence.
-    if !user_include.is_empty() {
-        return (user_lazy, user_include.to_vec());
-    }
-
-    // If crab.toml says eager and user didn't pass explicit --lazy,
-    // hydrate everything (lazy=false).
-    let effective_lazy = match hydrate_config.default {
-        crate::core::project_config::HydrateMode::Eager => {
-            // Only override if user didn't explicitly pass --lazy (which
-            // would be the default value of true). Since we can't distinguish
-            // "user passed --lazy" from "default true", we treat Eager config
-            // as overriding the default.
-            false
-        }
-        crate::core::project_config::HydrateMode::Lazy => user_lazy,
-    };
-
-    // If crab.toml has auto_patterns, use them as include patterns.
-    let effective_include = match &hydrate_config.auto_patterns {
-        Some(patterns) if !patterns.is_empty() => patterns.clone(),
-        _ => vec![],
-    };
-
-    (effective_lazy, effective_include)
+) -> crab_remote::config::CheckoutHydration {
+    let repository = project_config
+        .and_then(|config| config.hydrate.as_ref())
+        .map(|hydrate| {
+            let default = match hydrate.default {
+                crate::core::project_config::HydrateMode::Lazy => {
+                    crab_remote::config::HydrationMode::Lazy
+                }
+                crate::core::project_config::HydrateMode::Eager => {
+                    crab_remote::config::HydrationMode::Eager
+                }
+            };
+            crab_remote::config::RepositoryHydration::new(default, hydrate.auto_patterns.clone())
+        });
+    crab_remote::config::resolve_checkout_hydration(user_lazy, user_include, repository.as_ref())
 }
 
 const CLONE_POINTER_SUMMARY_SCAN_LIMIT: usize = 10_000;
@@ -1802,7 +1785,7 @@ mod tests {
             directory: Some(PathBuf::from(target_name)),
             branch: None,
             depth: None,
-            lazy: true,
+            lazy: None,
             include: vec![],
             exclude: vec![],
             sync_chunk_index: false,
@@ -2342,6 +2325,23 @@ mod tests {
             config.hydrate.as_ref().unwrap().default,
             crate::core::project_config::HydrateMode::Eager
         ));
+    }
+
+    #[test]
+    fn shared_clone_hydration_resolver_preserves_cli_precedence() {
+        let config = crate::core::project_config::ProjectConfig::parse(
+            "[remote]\nurl = \"crab://bucket/repo\"\n\n[hydrate]\ndefault = \"eager\"\nauto_patterns = [\"models/**\"]\n",
+            "fixture",
+        )
+        .unwrap();
+
+        let repository = resolve_hydration_from_config(None, &[], Some(&config));
+        assert!(repository.lazy());
+        assert_eq!(repository.patterns(), ["models/**"]);
+
+        let explicit = resolve_hydration_from_config(Some(true), &[], Some(&config));
+        assert!(explicit.lazy());
+        assert!(explicit.patterns().is_empty());
     }
 
     // --- auto_hydrate_always_profile tests ---

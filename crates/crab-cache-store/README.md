@@ -159,3 +159,8 @@ a service that may be unavailable at startup.
   reconstruction; this crate supplies verified xorb bytes and metadata.
 - [`crab-coordination`](../crab-coordination/README.md) owns mutable write
   authority, which cached reads never replace.
+
+`CachingStore::with_read_admission` scopes origin GET/HEAD admission while
+preserving the existing local cache and shared verified-xorb state. Local
+cache hits do not consume origin transport budget. Remote cache-service
+traffic is not intercepted by this origin-only hook.

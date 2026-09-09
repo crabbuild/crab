@@ -10,7 +10,10 @@ use std::path::Path as StdPath;
 use std::pin::Pin;
 
 mod origin;
+#[cfg(test)]
+mod stream_tests;
 
+use crate::LfsReadSession;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use object_store::path::Path;
@@ -178,25 +181,54 @@ impl LfsObjectStore {
         }
     }
 
-    /// Verifies an object before opening a backpressured stream.
+    /// Opens a read-only, verified and backpressured object stream.
     ///
-    /// Range reads are checked against the complete SHA-256 object first, so a
-    /// corrupt immutable key is never served as a successful transfer. The
-    /// served response must retain the verified strong ETag or object version;
-    /// backends without either return a storage `NotSupported` error. Use
-    /// [`Self::download_to_file`] to verify a single streamed read without one.
+    /// Ranges bind complete-object verification to a strong provider validator.
+    /// Full reads also verify delivered bytes through EOF. Observe stream EOF
+    /// to establish integrity; dropping a stream does not establish success.
     pub async fn get_stream(
         &self,
         oid: &[u8; 32],
         expected_size: u64,
         range: Option<Range<u64>>,
     ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
+        self.stream_with_session(oid, expected_size, range, None)
+            .await
+    }
+
+    /// Open an integrity-checked stream with caller-owned verification lifetime.
+    ///
+    /// The caller must drop outstanding read futures and the stream, then await
+    /// session close to drain hashing work even after cancellation.
+    pub async fn get_stream_with_session(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        range: Option<Range<u64>>,
+        session: &LfsReadSession,
+    ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
+        self.stream_with_session(oid, expected_size, range, Some(session))
+            .await
+    }
+
+    async fn stream_with_session(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        range: Option<Range<u64>>,
+        session: Option<&LfsReadSession>,
+    ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
+        // A replica must be checked before delivery so a corrupt selected
+        // source can still switch to primary without replaying emitted bytes.
+        let preverify = self.primary_fallback.is_some();
         match Self::get_verified_stream_at(
             &self.store,
             &self.prefix,
             oid,
             expected_size,
             range.clone(),
+            preverify,
+            session,
         )
         .await
         {
@@ -216,6 +248,8 @@ impl LfsObjectStore {
                     oid,
                     expected_size,
                     range,
+                    false,
+                    session,
                 )
                 .await
             }
@@ -450,9 +484,9 @@ impl LfsObjectStore {
         Ok(bytes)
     }
 
-    /// Verifies an LFS object without retaining its body in memory.
+    /// Verifies an LFS object and records its validator receipt without buffering its body.
     pub async fn verify_size(&self, oid: &[u8; 32], expected_size: u64) -> Result<()> {
-        match Self::verify_size_at(&self.store, &self.prefix, oid, expected_size).await {
+        match Self::verify_size_at(&self.store, &self.prefix, oid, expected_size, None).await {
             Ok(meta) => {
                 Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
                     .await;
@@ -467,8 +501,14 @@ impl LfsObjectStore {
                     error = %error,
                     "LFS verification from selected remote failed; retrying primary"
                 );
-                match Self::verify_size_at(fallback_store, fallback_prefix, oid, expected_size)
-                    .await
+                match Self::verify_size_at(
+                    fallback_store,
+                    fallback_prefix,
+                    oid,
+                    expected_size,
+                    None,
+                )
+                .await
                 {
                     Ok(meta) => {
                         Self::record_verification_receipt_with_meta(
@@ -493,7 +533,7 @@ impl LfsObjectStore {
     /// Dropping the future stops reads; detached hash work retains admission.
     pub async fn verify_origin(&self, oid: &[u8; 32], expected_size: u64) -> Result<()> {
         let path = self.object_path(oid);
-        match origin::inspect(&self.store, &path, oid, Some(expected_size)).await? {
+        match origin::inspect(&self.store, &path, oid, Some(expected_size), None).await? {
             ExistingObject::Valid(_) => Ok(()),
             ExistingObject::Missing => Err(LfsError::ObjectMissing {
                 oid: hex_encode(oid),
@@ -594,9 +634,10 @@ impl LfsObjectStore {
         prefix: &str,
         oid: &[u8; 32],
         expected_size: u64,
+        session: Option<&LfsReadSession>,
     ) -> Result<ObjectMeta> {
         let path = Self::object_path_at(prefix, oid);
-        match Self::inspect_existing_at(store, prefix, &path, oid).await? {
+        match Self::inspect_existing_at(store, prefix, &path, oid, session).await? {
             ExistingObject::Valid(meta) => {
                 if meta.size == expected_size {
                     Ok(meta)
@@ -621,36 +662,108 @@ impl LfsObjectStore {
         oid: &[u8; 32],
         expected_size: u64,
         range: Option<Range<u64>>,
+        preverify: bool,
+        session: Option<&LfsReadSession>,
     ) -> Result<(ObjectMeta, Range<u64>, LfsByteStream)> {
-        let verified_meta = Self::verify_size_at(store, prefix, oid, expected_size).await?;
-        if !has_byte_validator(&verified_meta) {
-            return Err(StorageError::NotSupported {
-                source: object_store::Error::NotSupported {
-                    source: "verified LFS streaming requires a strong ETag or object version"
-                        .into(),
-                },
+        let requested = range.clone().unwrap_or(0..expected_size);
+        if requested.start > requested.end || requested.end > expected_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "LFS range is outside the declared object size",
+            )
+            .into());
+        }
+        let full = requested == (0..expected_size);
+        let verified_meta = if preverify || !full || requested.is_empty() {
+            Some(Self::verify_size_at(store, prefix, oid, expected_size, session).await?)
+        } else {
+            None
+        };
+        if let Some(meta) = &verified_meta
+            && requested.is_empty()
+        {
+            return Ok((
+                meta.clone(),
+                requested,
+                futures_util::stream::empty().boxed(),
+            ));
+        }
+        let pinned = verified_meta.as_ref().is_some_and(has_byte_validator);
+        if !full && !pinned {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "LFS range verification requires a strong object version validator",
+            )
+            .into());
+        }
+        let path = Self::object_path_at(prefix, oid);
+        let (meta, result_range, stream) =
+            store
+                .get_stream(&path, range)
+                .await
+                .map_err(|error| match error {
+                    StorageError::NotFound { .. } => LfsError::ObjectMissing {
+                        oid: hex_encode(oid),
+                    },
+                    source => LfsError::Storage { source },
+                })?;
+        if pinned
+            && verified_meta.as_ref().is_some_and(|verified| {
+                meta.e_tag != verified.e_tag || meta.version != verified.version
+            })
+        {
+            return Err(StorageError::StateConflict {
+                path: path.to_string(),
             }
             .into());
         }
-        Self::record_verification_receipt_with_meta(store, prefix, oid, &verified_meta).await;
-        let path = Self::object_path_at(prefix, oid);
-        let (meta, result_range, stream) = store
-            .get_stream(&path, range)
-            .await
-            .map_err(LfsError::from)?;
-        // This response must identify the bytes hashed earlier, including for
-        // range requests. Equal lengths alone allow a same-size replacement.
-        if meta.e_tag != verified_meta.e_tag
-            || meta.version != verified_meta.version
-            || meta.size != expected_size
-            || result_range.start > result_range.end
-            || result_range.end > meta.size
-        {
+        if meta.size != expected_size || result_range != requested {
             return Err(LfsError::ObjectCorrupt {
                 oid: hex_encode(oid),
             });
         }
-        let stream = stream.map(|chunk| chunk.map_err(Into::into)).boxed();
+        // Partial delivery binds the separately verified version. Full reads
+        // hash delivered bytes directly, avoiding a second full download.
+        let expected_bytes = requested.end - requested.start;
+        let oid = *oid;
+        let session = session.cloned();
+        let stream = futures_util::stream::try_unfold(
+            (stream, 0u64, Sha256::new(), false, session),
+            move |(mut stream, received, hasher, complete, session)| async move {
+                if complete {
+                    return Ok(None);
+                }
+                let corrupt = || LfsError::ObjectCorrupt {
+                    oid: hex_encode(&oid),
+                };
+                let chunk = stream.next().await.ok_or_else(corrupt)??;
+                let received = received
+                    .checked_add(chunk.len() as u64)
+                    .filter(|size| *size <= expected_bytes)
+                    .ok_or_else(corrupt)?;
+                let (hasher, chunk) = if full {
+                    origin::hash_delivery_chunk(hasher, chunk, session.as_ref()).await?
+                } else {
+                    (hasher, chunk)
+                };
+                let complete = received == expected_bytes;
+                if complete {
+                    // Withhold the last bytes until integrity and framing are
+                    // proven. HTTP Content-Length consumers can finish before
+                    // polling another stream item, so a later error is too late.
+                    while let Some(extra) = stream.next().await {
+                        if !extra?.is_empty() {
+                            return Err(corrupt());
+                        }
+                    }
+                    if full && hasher.clone().finalize().as_slice() != oid {
+                        return Err(corrupt());
+                    }
+                }
+                Ok(Some((chunk, (stream, received, hasher, complete, session))))
+            },
+        )
+        .boxed();
         Ok((meta, result_range, stream))
     }
 
@@ -790,7 +903,7 @@ impl LfsObjectStore {
     }
 
     async fn inspect_existing(&self, path: &Path, oid: &[u8; 32]) -> Result<ExistingObject> {
-        Self::inspect_existing_at(&self.store, &self.prefix, path, oid).await
+        Self::inspect_existing_at(&self.store, &self.prefix, path, oid, None).await
     }
 
     async fn inspect_existing_at(
@@ -798,6 +911,7 @@ impl LfsObjectStore {
         prefix: &str,
         path: &Path,
         oid: &[u8; 32],
+        session: Option<&LfsReadSession>,
     ) -> Result<ExistingObject> {
         let meta = match store.head(path).await {
             Ok(meta) => meta,
@@ -808,7 +922,7 @@ impl LfsObjectStore {
             return Ok(ExistingObject::Valid(meta));
         }
 
-        origin::inspect(store, path, oid, None).await
+        origin::inspect(store, path, oid, None, session).await
     }
 }
 

@@ -12,6 +12,35 @@ fn field(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
+/// Digest a validated publication request using canonical JSON object ordering.
+///
+/// Arrays retain their order; callers must include placement, edits, content and
+/// policy, excluding the operation nonce and derived plan identity.
+/// Returns an error if the request cannot be represented as JSON.
+pub fn publication_request_digest(request: &impl Serialize) -> Result<[u8; 32]> {
+    let mut value = serde_json::to_value(request).map_err(|source| MetadataError::Io {
+        source: std::io::Error::other(source),
+    })?;
+    value.sort_all_objects();
+    let mut hasher = blake3::Hasher::new_derive_key("crab publication request v1");
+    serde_json::to_writer(&mut hasher, &value).map_err(|source| MetadataError::Io {
+        source: std::io::Error::other(source),
+    })?;
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Bind a publication request to a fresh operation nonce.
+///
+/// Reconciliation must retain the original nonce; new preparations generate a
+/// new one. This identity is not an authorization credential.
+#[must_use]
+pub fn publication_plan_id(request_digest: &[u8; 32], operation_nonce: &[u8; 16]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_derive_key("crab publication plan v1");
+    hasher.update(request_digest);
+    hasher.update(operation_nonce);
+    *hasher.finalize().as_bytes()
+}
+
 /// Digest the protected-push ref edit set in canonical destination order.
 #[must_use]
 pub fn protected_ref_edit_digest(updates: &[(String, Option<String>, String)]) -> [u8; 32] {
@@ -584,6 +613,74 @@ fn invalid_receipt(reason: String) -> MetadataError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_identity_binds_request_order_and_nonce() {
+        let request = serde_json::json!({
+            "placement": "bucket/repo",
+            "edits": [{"ref": "refs/heads/main", "old": null, "new": "a"}],
+            "policy": "fast_forward",
+            "content": ["first", "second"],
+        });
+        let digest = publication_request_digest(&request).unwrap();
+        for field in ["placement", "edits", "policy", "content"] {
+            let mut changed = request.clone();
+            changed[field] = serde_json::Value::Null;
+            assert_ne!(
+                digest,
+                publication_request_digest(&changed).unwrap(),
+                "{field}"
+            );
+        }
+        let mut reordered = request;
+        reordered["content"] = serde_json::json!(["second", "first"]);
+        assert_ne!(digest, publication_request_digest(&reordered).unwrap());
+        assert_ne!(
+            publication_plan_id(&digest, &[1; 16]),
+            publication_plan_id(&digest, &[2; 16])
+        );
+        assert_eq!(
+            publication_plan_id(&[1; 32], &[1; 16]),
+            blake3::derive_key("crab publication plan v1", &[1; 48]),
+        );
+    }
+
+    #[test]
+    fn publication_request_digest_ignores_object_serialization_order() {
+        #[derive(Serialize)]
+        struct Forward {
+            first: u8,
+            second: u8,
+        }
+        #[derive(Serialize)]
+        struct Reverse {
+            second: u8,
+            first: u8,
+        }
+        assert_eq!(
+            publication_request_digest(&[Forward {
+                first: 1,
+                second: 2
+            }])
+            .unwrap(),
+            publication_request_digest(&[Reverse {
+                second: 2,
+                first: 1
+            }])
+            .unwrap(),
+        );
+        assert_eq!(
+            publication_request_digest(&[Forward {
+                first: 1,
+                second: 2
+            }])
+            .unwrap(),
+            blake3::derive_key(
+                "crab publication request v1",
+                br#"[{"first":1,"second":2}]"#
+            ),
+        );
+    }
 
     fn committed_receipt() -> CommittedChunkReceipt {
         CommittedChunkReceipt {

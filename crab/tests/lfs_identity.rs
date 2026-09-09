@@ -123,19 +123,19 @@ fn fixture(
 }
 
 #[tokio::test]
-async fn stream_rejects_replacement_between_verification_and_serving() {
-    for range in [None, Some(1..4)] {
-        let (inner, lfs, oid, path) = fixture(Some(false), Validator::Etag);
-        inner
-            .put(&path, Bytes::from_static(b"hello").into())
-            .await
-            .unwrap();
-        let result = lfs.get_stream(&oid, 5, range.clone()).await;
-        assert!(
-            matches!(result, Err(LfsError::ObjectCorrupt { .. })),
-            "range={range:?}: replacement must not be served"
-        );
-    }
+async fn range_stream_rejects_replacement_between_verification_and_serving() {
+    let (inner, lfs, oid, path) = fixture(Some(false), Validator::Etag);
+    inner
+        .put(&path, Bytes::from_static(b"hello").into())
+        .await
+        .unwrap();
+    let result = lfs.get_stream(&oid, 5, Some(1..4)).await;
+    assert!(matches!(
+        result,
+        Err(LfsError::Storage {
+            source: crab_storage::StorageError::StateConflict { .. }
+        })
+    ));
 }
 
 #[tokio::test]
@@ -163,13 +163,21 @@ async fn upload_cannot_certify_a_later_head_as_verified_content() {
 }
 
 #[tokio::test]
-async fn stream_without_a_validator_cannot_reuse_an_earlier_hash() {
+async fn full_stream_without_a_validator_hashes_delivered_bytes() {
     let (inner, lfs, oid, path) = fixture(None, Validator::Missing);
     inner
         .put(&path, Bytes::from_static(b"hello").into())
         .await
         .unwrap();
-    assert!(lfs.get_stream(&oid, 5, None).await.is_err());
+    let (_, _, stream) = lfs.get_stream(&oid, 5, None).await.unwrap();
+    let bytes = stream
+        .try_fold(Vec::new(), |mut bytes, chunk| async move {
+            bytes.extend_from_slice(&chunk);
+            Ok(bytes)
+        })
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"hello");
 }
 
 #[tokio::test]
@@ -223,18 +231,21 @@ async fn verified_streams_support_etags_versions_and_primary_fallback() {
 }
 
 #[tokio::test]
-async fn weak_etag_requires_a_single_read_verifier() {
+async fn weak_etag_supports_verified_full_streaming() {
     let (inner, lfs, oid, path) = fixture(None, Validator::Weak);
     inner
         .put(&path, Bytes::from_static(b"hello").into())
         .await
         .unwrap();
-    assert!(matches!(
-        lfs.get_stream(&oid, 5, None).await,
-        Err(LfsError::Storage {
-            source: crab_storage::StorageError::NotSupported { .. }
+    let (_, _, stream) = lfs.get_stream(&oid, 5, None).await.unwrap();
+    let bytes = stream
+        .try_fold(Vec::new(), |mut bytes, chunk| async move {
+            bytes.extend_from_slice(&chunk);
+            Ok(bytes)
         })
-    ));
+        .await
+        .unwrap();
+    assert_eq!(bytes, b"hello");
     let dir = tempfile::tempdir().unwrap();
     let destination = dir.path().join("download");
     lfs.download_to_file(&oid, 5, &destination).await.unwrap();

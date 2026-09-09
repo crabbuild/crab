@@ -7,6 +7,8 @@
 
 pub mod lock;
 pub mod object_store;
+mod read_session;
+pub use read_session::LfsReadSession;
 
 pub use lock::{LfsLockError, LfsLockManager, LockRecord, LockResult};
 pub use object_store::{LfsByteStream, LfsError, LfsObjectStore, Result};

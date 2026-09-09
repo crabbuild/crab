@@ -1,0 +1,9 @@
+[package]
+name = "crab-sdk-consumer-minimal"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.91"
+
+[dependencies]
+crab-sdk = { version = "=0.1.0", default-features = false }

@@ -50,6 +50,12 @@ var cliDocs = defineDocs({
     schema: externalDocsSchema
   }
 });
+var sdkDocs = defineDocs({
+  dir: "content/docs/sdk",
+  docs: {
+    schema: externalDocsSchema
+  }
+});
 var guideSchema = pageSchema.extend({
   date: z.string().optional(),
   author: z.string().optional(),
@@ -121,5 +127,6 @@ export {
   blog,
   cliDocs,
   source_config_default as default,
-  library
+  library,
+  sdkDocs
 };

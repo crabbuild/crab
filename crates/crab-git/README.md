@@ -49,6 +49,8 @@ The main surfaces are:
   decoder used by incoming packs and remote reads;
 - `pack`, `pack_locator`, `walk`, `odb_adapter`, and `repack` for immutable
   Git objects and pack mechanics;
+- `pack_writer` for checksummed SHA-1 pack construction from sized readers,
+  with a caller-selected output limit and cooperative cancellation;
 - `pointer_detect`, `lfs_pointer`, `pointer_ref`, and `filter_attr_cache` for
   pointer-aware repository behavior;
 - `tag` and `push_state` for annotated refs and push bookkeeping;
@@ -142,6 +144,14 @@ user-facing decision without re-parsing error strings.
 inspection and reconstruction enforce the same copy ranges and output sizes.
 Validation does not allocate the reconstructed object; application also checks
 the supplied base length and reserves output fallibly.
+
+`pack_writer::write_pack` streams full objects through a 64 KiB input buffer
+and zlib directly to the caller's writer. Its byte limit includes the pack
+headers and checksum trailer; it rejects truncated or oversized object readers.
+Call it on a blocking worker with caller-owned I/O deadlines and private output
+that is discarded on failure. It does not validate object graphs or publish
+anything. HTTP generated-object publication uses this writer, removing its
+additional compressed-pack buffer; HTTP still owns in-memory input objects.
 
 `incoming_pack::quarantine` accepts a reader, an existing temporary directory,
 explicit resource bounds, a cancellation probe and a thin-base lookup. Invoke it

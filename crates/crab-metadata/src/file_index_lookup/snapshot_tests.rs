@@ -281,3 +281,97 @@ async fn accelerated_snapshot_lookup_preserves_capture_and_scoped_read_only_acce
         );
     }
 }
+
+#[tokio::test]
+async fn lazy_pinned_index_ignores_latest_state_and_never_attempts_writes() {
+    let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let file = hash_from_seed(71);
+    let (body, shard) = shard_with_file(file);
+    seed_file_index(inner.clone(), "lazy/repo", &[(file, shard)]).await;
+    let storage = crab_storage::Store::new(inner.clone());
+    let router = crab_storage::StoreLayout::new(storage.clone(), "lazy/repo".to_owned());
+    storage
+        .put(&router.shard_path(&shard), Bytes::from(body))
+        .await
+        .unwrap();
+    let snapshot = crate::manifest_store::read_repository_snapshot(&storage, &router)
+        .await
+        .unwrap();
+    let readonly = Arc::new(ReadOnlyStore {
+        inner,
+        writes: AtomicUsize::new(0),
+    });
+    let layout = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(readonly.clone()),
+        "lazy/repo".to_owned(),
+    );
+    let lookup = SharedFileIndexLookup::for_shard_index(
+        layout.clone(),
+        snapshot.manifest.shard_index_hash.clone(),
+        snapshot.manifest.generation,
+        super::tests::lookup_limits(),
+    );
+    let mut next = snapshot.manifest.clone();
+    next.generation += 1;
+    next.shard_index_hash.clear();
+    next.seal_git_validation();
+    crate::manifest_store::write_manifest_cas(&storage, &router, &next, &snapshot.manifest_etag)
+        .await
+        .unwrap();
+    assert_eq!(
+        lookup
+            .lookup_batch(&[file, hash_from_seed(99)])
+            .await
+            .unwrap(),
+        vec![Some(shard), None]
+    );
+    let closed = lookup.clone();
+    lookup.close().await.unwrap();
+    assert!(closed.lookup(&file).await.is_err());
+    let denied = SharedFileIndexLookup::for_shard_index(
+        layout,
+        snapshot.manifest.shard_index_hash,
+        snapshot.manifest.generation,
+        FileIndexLookupLimits {
+            max_shard_visits: 0,
+            ..super::tests::lookup_limits()
+        },
+    );
+    assert!(matches!(
+        denied.lookup(&file).await,
+        Err(MetadataError::FileLookupLimit {
+            resource: "shard visits",
+            maximum: 0
+        })
+    ));
+    denied.close().await.unwrap();
+    assert_eq!(readonly.writes.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn lazy_pinned_index_retains_invalid_hash_source_without_writes() {
+    let readonly = Arc::new(ReadOnlyStore {
+        inner: Arc::new(InMemory::new()),
+        writes: AtomicUsize::new(0),
+    });
+    let layout = crab_storage::StoreLayout::new(
+        crab_storage::Store::new(readonly.clone()),
+        "lazy/repo".to_owned(),
+    );
+    let lookup = SharedFileIndexLookup::for_shard_index(
+        layout,
+        "invalid".to_owned(),
+        1,
+        super::tests::lookup_limits(),
+    );
+    let error = lookup.lookup(&hash_from_seed(1)).await.unwrap_err();
+    lookup.close().await.unwrap();
+    match error {
+        MetadataError::Io { source } => {
+            assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+            assert!(source.get_ref().is_some());
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(readonly.writes.load(Ordering::Relaxed), 0);
+}

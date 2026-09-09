@@ -1590,24 +1590,22 @@ class ConcurrentPushSmoke:
             clone["protocol_v2"] and actual == content,
             {"protocol_v2": clone["protocol_v2"], "content_visible": actual == content},
         )
-        expected_failure_attempts = 1
         retry_telemetry_ok = (
             failed.integration_retries is None
             and failed.integration_retry_limit is None
             and not failed.integration_retry_stages
         )
         if self.args.rebase_on_non_fast_forward:
-            expected_failure_attempts += marker_retry_limit
             retry_telemetry_ok = (
-                failed.integration_retries == marker_retry_limit
+                failed.integration_retries == 0
                 and failed.integration_retry_limit == marker_retry_limit
-                and failed.integration_retry_stages == {"ref-commit": marker_retry_limit}
+                and not failed.integration_retry_stages
             )
         self.check(
-            "marker-write-failure-is-structured-retryable",
-            failed.status == "transient"
-            and failed.retryable is True
-            and failed.failure_stages == {"ref-commit": expected_failure_attempts}
+            "marker-write-failure-is-structured-indeterminate",
+            failed.status == "indeterminate"
+            and failed.retryable is False
+            and failed.failure_stages == {"ref-commit": 1}
             and retry_telemetry_ok,
             {
                 "status": failed.status,

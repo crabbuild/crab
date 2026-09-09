@@ -1239,15 +1239,21 @@ releases each recorded holder with the same holder-checked CAS. A failed head
 promotion retains the marker for a later compaction pass, so upload-pack never
 mistakes a half-repaired generation for a stable repository state.
 
-An object-store failure before the active-marker write returns a structured,
-retryable `transient` outcome and runs the normal holder-checked release path;
+Retryable object-store failures before the active-marker write return a structured,
+retryable `transient` outcome and run the normal holder-checked release path;
 the ref remains invisible. If the immutable marker was stored but its success
-response was lost, the exact-byte create retry observes the existing marker
-and reconciles the write as success instead of reporting an ambiguous push.
-The Git-facing rejection tag remains `transient`. The local push audit adds a
+response was lost, exact marker readback can prove the write succeeded.
+If that proof is unavailable, the Git-facing tag is `indeterminate`, with
+`retryable: false`; automatic integration retry must not replay the attempt.
+Reconcile durable transaction evidence before an explicit retry. Matching
+current refs alone cannot prove historical commitment. The local push audit adds a
 stable `failure_stage` such as `lock`, `xorb-upload`, `git-pack-upload`, or
 `ref-commit`, allowing qualification reports to attribute retries without
 parsing backend messages or changing the remote-helper protocol.
+First-import manifest CAS failures follow the same uncertainty rule after the
+conditional update is attempted, retaining the candidate manifest digest.
+An explicit failed precondition remains a conflict; validation and history
+publication failures before the CAS retain their original errors.
 Retryable failures before pipeline delegation use `store-resolve` or
 `discovery` and enter the same structured command-level retry path. Legacy
 protected-push prepare failures remain terminal because that endpoint has no

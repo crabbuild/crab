@@ -1,0 +1,60 @@
+# Remote repositories
+
+Remote APIs read and modify a Crab repository without a checkout, local Git object database, Git executable, or Crab executable.
+
+## Pinned reads
+
+`RemoteRepository::snapshot` resolves a branch, tag, or complete reachable commit against the handle's captured generation. A `Snapshot` provides commit metadata, paginated tree and history traversal, diff, blame, raw blobs, hydrated files, and streamed archives.
+
+`read_blob` returns exact Git blob bytes. A large-file entry therefore returns its Crab or Git LFS pointer. With the `content` feature, `open_file` reconstructs and verifies the referenced content.
+
+```rust
+use crab_sdk::{GitPath, Revision};
+
+let snapshot = repository.snapshot(Revision::branch("main")?).await?;
+let pointer = snapshot.read_blob(GitPath::new("model.bin")?).await?;
+let mut content = snapshot.open_file(GitPath::new("model.bin")?).await?;
+while let Some(bytes) = content.next().await? {
+    consume(bytes);
+}
+content.close().await?;
+```
+
+Successful EOF proves full-file integrity. Closing early drains the operation but does not claim verification of unread bytes.
+
+## Remote commits
+
+With `write`, a remote commit accepts streamed file replacements and deletions. Hydrated edits are chunked into Crab content before their pointer enters the Git tree.
+
+```rust
+use crab_sdk::{CommitIdentity, CommitOptions, EntryMode, FileEdit, GitPath};
+
+let identity = CommitIdentity::new("Build bot", "bot@example.com", 1_800_000_000, 0)?;
+let commit = CommitOptions::new(
+    Some(snapshot.commit_id()?),
+    "refs/heads/main",
+    snapshot.commit_id()?,
+    identity.clone(),
+    identity,
+    b"Update model".to_vec(),
+)?;
+let prepared = repository
+    .prepare_commit(
+        commit,
+        vec![FileEdit::hydrated(
+            GitPath::new("model.bin")?,
+            EntryMode::Blob,
+            size,
+            reader,
+        )?],
+        scratch_directory,
+        Default::default(),
+    )
+    .await?;
+```
+
+Persist the returned recovery token before `execute`. Preparation never advances refs.
+
+## Ref batches
+
+`RefBatch` applies branch and tag create, update, and delete operations atomically. Update and delete operations always include the expected old object ID. `WritePolicy::ForceWithLease` allows an explicit rewrite while retaining that expected value.

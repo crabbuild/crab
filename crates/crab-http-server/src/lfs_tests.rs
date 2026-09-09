@@ -1,5 +1,5 @@
 use super::*;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -93,6 +93,68 @@ async fn lfs_batch_upload_download_is_verified_and_idempotent() {
         StatusCode::NOT_IMPLEMENTED
     );
     server.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn lfs_download_does_not_publish_verification_receipts() {
+    use futures_util::TryStreamExt;
+    let server = maintenance_tests::fixture().await;
+    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let oid = crab_git::lfs_pointer::LfsPointer::parse(
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{HELLO}\nsize 5\n")
+            .as_bytes(),
+    )
+    .unwrap()
+    .oid;
+    let path = crab_lfs::LfsObjectStore::object_path_for_prefix(&repo.config.prefix, &oid);
+    repo.store
+        .put(&path, Bytes::from_static(b"hello"))
+        .await
+        .unwrap();
+    let before: Vec<_> = repo.store.inner().list(None).try_collect().await.unwrap();
+
+    let response = request(
+        &server,
+        "GET",
+        &format!("/git/team/repo.git/info/lfs/objects/{HELLO}?size=5"),
+        Body::empty(),
+    )
+    .await;
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let after: Vec<_> = repo.store.inner().list(None).try_collect().await.unwrap();
+    server.runtime.shutdown().await;
+    assert_eq!((bytes, after), (Bytes::from_static(b"hello"), before));
+}
+
+#[tokio::test]
+async fn lfs_corrupt_download_fails_its_body_and_releases_admission() {
+    let server = maintenance_tests::fixture().await;
+    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let oid = crab_git::lfs_pointer::LfsPointer::parse(
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{HELLO}\nsize 5\n")
+            .as_bytes(),
+    )
+    .unwrap()
+    .oid;
+    let path = crab_lfs::LfsObjectStore::object_path_for_prefix(&repo.config.prefix, &oid);
+    repo.store
+        .put(&path, Bytes::from_static(b"wrong"))
+        .await
+        .unwrap();
+
+    let response = request(
+        &server,
+        "GET",
+        &format!("/git/team/repo.git/info/lfs/objects/{HELLO}?size=5"),
+        Body::empty(),
+    )
+    .await;
+    let result = response.into_body().collect().await;
+    server.runtime.shutdown().await;
+    assert_eq!(
+        (result.is_err(), server.git_admission.available_permits()),
+        (true, 4)
+    );
 }
 
 #[tokio::test]

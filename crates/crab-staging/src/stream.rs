@@ -439,6 +439,37 @@ async fn open_regular_file_no_follow(path: &Path) -> Result<std::fs::File> {
         .map_err(|error| CrabError::Internal(format!("no-follow open task failed: {error}")))?
 }
 
+#[cfg(windows)]
+fn open_regular_file_no_follow_sync(path: &Path) -> Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // Inspect and read through one no-follow handle. A path-only check followed
+    // by File::open would allow a reparse point to replace the checked file.
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = options.open(path).map_err(CrabError::Io)?;
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(CrabError::Configuration {
+            key: path.display().to_string(),
+            origin: "staging refuses reparse points".to_owned(),
+        });
+    }
+    if !metadata.file_type().is_file() {
+        return Err(CrabError::Configuration {
+            key: path.display().to_string(),
+            origin: "staging requires a regular file".to_owned(),
+        });
+    }
+    Ok(file)
+}
+
+#[cfg(not(windows))]
 fn open_regular_file_no_follow_sync(path: &Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -447,13 +478,7 @@ fn open_regular_file_no_follow_sync(path: &Path) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     if path.symlink_metadata()?.file_type().is_symlink() {
         return Err(CrabError::Configuration {
             key: path.display().to_string(),
@@ -492,6 +517,7 @@ pub async fn stage_file_streaming(
         abs_path,
         repo_root,
         None,
+        None,
         staging,
         progress,
         cancel,
@@ -513,6 +539,36 @@ pub async fn stage_file_streaming_as(
         abs_path,
         repo_root,
         Some(repo_path),
+        None,
+        staging,
+        progress,
+        cancel,
+        StreamStageHooks::default(),
+    )
+    .await
+}
+
+/// Stream an already-open regular file into staging under an explicit repository path.
+///
+/// The descriptor must permit reads and refer to `abs_path`. This avoids reopening
+/// caller-owned temporary files while retaining the same path/descriptor validation.
+pub async fn stage_file_streaming_from_descriptor_as(
+    mut descriptor: std::fs::File,
+    abs_path: &Path,
+    repo_root: &Path,
+    repo_path: &Path,
+    staging: &StagingArea,
+    progress: StreamStageProgress,
+    cancel: &CancellationToken,
+) -> Result<StreamStageResult> {
+    use std::io::{Seek as _, SeekFrom};
+
+    descriptor.seek(SeekFrom::Start(0))?;
+    stage_file_streaming_inner(
+        abs_path,
+        repo_root,
+        Some(repo_path),
+        Some(descriptor),
         staging,
         progress,
         cancel,
@@ -537,13 +593,17 @@ async fn stage_file_streaming_with_hooks(
     cancel: &CancellationToken,
     hooks: StreamStageHooks,
 ) -> Result<StreamStageResult> {
-    stage_file_streaming_inner(abs_path, repo_root, None, staging, progress, cancel, hooks).await
+    stage_file_streaming_inner(
+        abs_path, repo_root, None, None, staging, progress, cancel, hooks,
+    )
+    .await
 }
 
 async fn stage_file_streaming_inner(
     abs_path: &Path,
     repo_root: &Path,
     repo_path: Option<&Path>,
+    descriptor: Option<std::fs::File>,
     staging: &StagingArea,
     progress: StreamStageProgress,
     cancel: &CancellationToken,
@@ -559,9 +619,12 @@ async fn stage_file_streaming_inner(
         },
         Path::to_path_buf,
     );
-    let descriptor = open_regular_file_no_follow(abs_path)
-        .await
-        .map_err(|error| with_path(abs_path, error))?;
+    let descriptor = match descriptor {
+        Some(descriptor) => descriptor,
+        None => open_regular_file_no_follow(abs_path)
+            .await
+            .map_err(|error| with_path(abs_path, error))?,
+    };
     let before_stream_stat =
         VerifiedIndexStat::from_file(&descriptor).ok_or_else(|| CrabError::Configuration {
             key: abs_path.display().to_string(),

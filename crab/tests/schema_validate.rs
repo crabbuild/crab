@@ -597,8 +597,9 @@ fn validate_mirror_reconciliation_plan() {
     validate(
         "mirror.reconciliation_plan",
         &MirrorReconciliationPlan {
-            format_version: 1,
+            format_version: 2,
             plan_id: "b".repeat(64),
+            operation_nonce: "01900000-0000-7000-8000-000000000001".into(),
             source: "https://example.com/org/repo.git".into(),
             destination: "crab://bucket/org/repo".into(),
             source_refs: BTreeMap::from([("refs/heads/main".into(), oid.clone())]),

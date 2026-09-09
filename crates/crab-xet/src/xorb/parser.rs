@@ -5,6 +5,8 @@
 //! to its per-chunk compression scheme and hash-verified on retrieval.
 
 use bytes::Bytes;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 use xet_core_structures::merklehash::{MerkleHash, compute_data_hash, xorb_hash};
 use xet_core_structures::xorb_object::Chunk;
 
@@ -28,6 +30,97 @@ pub struct XorbParser {
     hash: XorbHash,
     payload_digest: [u8; 32],
     payload_len: usize,
+}
+
+/// Bounded metadata and digests verified from a serialized xorb file.
+#[derive(Debug)]
+pub struct InspectedXorb {
+    pub hash: XorbHash,
+    pub payload_digest: [u8; 32],
+    pub body_digest: [u8; 32],
+    pub size: u64,
+    pub chunks: Vec<ChunkMeta>,
+}
+
+/// Inspect a xorb file without retaining its compressed payload in memory.
+///
+/// The footer and bounded metadata are parsed first; the complete body is then
+/// streamed once to verify both its raw Blake3 identity and payload digest.
+pub fn inspect_file(
+    path: &Path,
+    maximum_size: u64,
+    cancelled: impl Fn() -> bool,
+) -> Result<InspectedXorb> {
+    let io = |section, source| XetError::ShardReplayIo { section, source };
+    let mut file = std::fs::File::open(path).map_err(|error| io("open xorb file", error))?;
+    let size = file
+        .metadata()
+        .map_err(|error| io("stat xorb file", error))?
+        .len();
+    if size > maximum_size || size < FOOTER_SIZE as u64 {
+        return Err(corrupt("xorb file size is outside its admitted bounds"));
+    }
+    let footer_offset = size - FOOTER_SIZE as u64;
+    file.seek(SeekFrom::Start(footer_offset))
+        .map_err(|error| io("seek xorb footer", error))?;
+    let mut footer = [0; FOOTER_SIZE];
+    file.read_exact(&mut footer)
+        .map_err(|error| io("read xorb footer", error))?;
+    let size_usize = usize::try_from(size).map_err(|_| corrupt("xorb size is not addressable"))?;
+    let parsed_footer = parse_xorb_footer(size_usize, &footer)?;
+    let mut metadata = vec![0; parsed_footer.region.len];
+    file.seek(SeekFrom::Start(parsed_footer.region.offset as u64))
+        .map_err(|error| io("seek xorb metadata", error))?;
+    file.read_exact(&mut metadata)
+        .map_err(|error| io("read xorb metadata", error))?;
+    let (chunks, hash) = parse_xorb_metadata(&metadata, &parsed_footer)?;
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| io("rewind xorb file", error))?;
+    let mut body = blake3::Hasher::new();
+    let mut payload = blake3::Hasher::new();
+    let mut offset = 0usize;
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        if cancelled() {
+            return Err(XetError::Internal("xorb inspection cancelled".to_owned()));
+        }
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| io("read xorb file", error))?;
+        if read == 0 {
+            break;
+        }
+        body.update(&buffer[..read]);
+        if offset < parsed_footer.region.offset {
+            let payload_end = read.min(parsed_footer.region.offset - offset);
+            payload.update(&buffer[..payload_end]);
+        }
+        offset = offset
+            .checked_add(read)
+            .ok_or_else(|| corrupt("xorb read size overflow"))?;
+    }
+    if offset != size_usize || payload.finalize().as_bytes() != &parsed_footer.payload_digest {
+        return Err(corrupt("serialized xorb digest or size mismatch"));
+    }
+    for chunk in &chunks {
+        if cancelled() {
+            return Err(XetError::Internal("xorb inspection cancelled".to_owned()));
+        }
+        file.seek(SeekFrom::Start(u64::from(chunk.offset)))
+            .map_err(|error| io("seek xorb chunk", error))?;
+        let mut compressed = vec![0; chunk.compressed_len as usize];
+        file.read_exact(&mut compressed)
+            .map_err(|error| io("read xorb chunk", error))?;
+        verify_compressed_chunk(chunk, &compressed)?;
+    }
+    Ok(InspectedXorb {
+        hash,
+        payload_digest: parsed_footer.payload_digest,
+        body_digest: *body.finalize().as_bytes(),
+        size,
+        chunks,
+    })
 }
 
 impl XorbParser {
@@ -560,6 +653,48 @@ mod tests {
         let recovered = parsed.get_chunk(0).unwrap();
         assert_eq!(recovered.hash, original.hash);
         assert_eq!(recovered.data, original.data);
+    }
+
+    #[test]
+    fn file_inspection_streams_and_verifies_the_exact_body() {
+        let original = make_chunk(31, 2 * 1024 * 1024);
+        let mut builder = XorbBuilder::new();
+        builder.push(&original, RunId(0)).unwrap();
+        let xorb = builder.finalize().unwrap().pop().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("content.xorb");
+        std::fs::write(&path, &xorb.bytes).unwrap();
+
+        let inspected = inspect_file(&path, xorb.bytes.len() as u64, || false).unwrap();
+
+        assert_eq!(inspected.hash, xorb.hash);
+        assert_eq!(inspected.body_digest, *blake3::hash(&xorb.bytes).as_bytes());
+        assert_eq!(inspected.size, xorb.bytes.len() as u64);
+        assert_eq!(inspected.chunks.len(), 1);
+    }
+
+    #[test]
+    fn file_inspection_rejects_bounds_corruption_and_cancellation() {
+        let original = make_chunk(37, 4096);
+        let mut builder = XorbBuilder::new();
+        builder.push(&original, RunId(0)).unwrap();
+        let xorb = builder.finalize().unwrap().pop().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("content.xorb");
+        std::fs::write(&path, &xorb.bytes).unwrap();
+
+        assert!(matches!(
+            inspect_file(&path, xorb.bytes.len() as u64 - 1, || false),
+            Err(XetError::CorruptObject { .. })
+        ));
+        assert!(matches!(
+            inspect_file(&path, xorb.bytes.len() as u64, || true),
+            Err(XetError::Internal(message)) if message.contains("cancelled")
+        ));
+        let mut changed = xorb.bytes.to_vec();
+        changed[0] ^= 1;
+        std::fs::write(&path, changed).unwrap();
+        assert!(inspect_file(&path, xorb.bytes.len() as u64, || false).is_err());
     }
 
     #[test]

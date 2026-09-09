@@ -21,8 +21,8 @@ use crab_metadata::{
         parse_pack_metadata, serialize_pack_metadata_bounded, validate_pack_metadata_for_entry,
     },
     receipts::{
-        CommittedChunkReceipt, GenerationIndexReceipt, OriginReceipt, PushCommitReceipt,
-        RECEIPT_SCHEMA_VERSION, generation_file_index_digest, generation_git_object_locator_digest,
+        CommittedChunkReceipt, GenerationIndexReceipt, OriginReceipt, RECEIPT_SCHEMA_VERSION,
+        generation_file_index_digest, generation_git_object_locator_digest,
     },
     ref_registry::ActiveActiveCoordinatorRegistration,
     remote_index::{RemoteIndexConfig, RemoteIndexWriter},
@@ -42,6 +42,8 @@ use crab_xet::xorb::format::FOOTER_SIZE;
 use crab_xet::xorb::parser::{XorbParser, xorb_payload_digest_from_footer};
 use object_store::path::Path as ObjectPath;
 use serde::{Deserialize, Serialize};
+
+pub use crab_remote::protected::ProtectedPushPlan;
 
 use crate::error::{AuthServerError, Result};
 
@@ -94,24 +96,6 @@ pub struct ExpectedXorbChunk {
 pub struct ActiveActiveReceiveConfig {
     pub replication: ActiveActiveReplicationConfig,
     pub writer: String,
-}
-
-/// Protected-push plan uploaded by the client before receive verification.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct ProtectedPushPlan {
-    pub schema_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mirror_plan_id: Option<String>,
-    pub repo_prefix: String,
-    pub push_id: String,
-    pub upload_prefix: String,
-    pub base_manifest_generation: Option<u64>,
-    pub base_manifest_etag: Option<String>,
-    pub ref_updates: Vec<PushRefUpdate>,
-    pub candidate_manifest: Manifest,
-    pub push_commit_receipt: Option<PushCommitReceipt>,
-    pub staged_objects: Vec<StagedWrite>,
 }
 
 /// Source-repository materialization produced from a protected view push.
@@ -2673,6 +2657,7 @@ mod tests {
     use bytes::Bytes;
     use crab_metadata::file_index_lookup::resolve_file_hash_to_shard;
     use crab_metadata::pack_metadata::PackMetadata;
+    use crab_metadata::receipts::PushCommitReceipt;
     use crab_metadata::remote_index::read_chunk_index_entry;
     use crab_metadata::segmented::ShardSegmentEntry;
     use crab_storage::{StorageError, repo_pack_metadata_path};

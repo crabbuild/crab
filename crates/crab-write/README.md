@@ -142,6 +142,9 @@ does not prove rejection: a compactor may already have published the generation
 and removed the active marker. No prepared-head rollback follows a marker attempt.
 Callers must reconcile an uncertain outcome before reporting failure. Successful journal commit
 means refs are durable, not that the derived catalog is ready for reads.
+Current ref values alone cannot establish the historical transaction outcome;
+use its bound receipt or retained commit evidence. An unresolved outcome does
+not authorize replay, even when the refs match the attempted update.
 
 This crate does not yet own the complete generation service: receive-to-commit,
 index receipts and restart repair still need a shared composing path before HTTP

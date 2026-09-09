@@ -365,8 +365,9 @@ impl RemoteGitRepository {
                 options,
                 generation: manifest.generation,
                 git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
+                shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                 manifest_etag: snapshot.manifest_etag.clone(),
-                coverage: None,
+                catalog_identity: None,
                 inventory,
                 refs,
                 reader: Some(reader),
@@ -379,7 +380,8 @@ impl RemoteGitRepository {
 
     /// Open one consistent repository generation from an authenticated store.
     ///
-    /// The supplied cancellation token is checked around metadata I/O. Empty
+    /// Cancellation, runtime shutdown and the operation duration govern the
+    /// complete handshake; interrupted work drains before returning. Empty
     /// repositories open successfully but snapshot operations return
     /// [`Error::EmptyRepository`]. Locator publication lag returns the retryable
     /// [`Error::RepositoryIndexing`]; malformed metadata, provider failures, and
@@ -394,16 +396,64 @@ impl RemoteGitRepository {
     ) -> Result<Self> {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         let _task_token = runtime.operation_token();
+        let deadline = tokio::time::Instant::now()
+            .checked_add(options.operation_limits().max_duration)
+            .ok_or(Error::InvalidLimit {
+                name: "operation duration",
+            })?;
         let runtime_cancellation = runtime.background_cancellation();
+        let operation_cancellation = cancellation.child_token();
+        let _cancel_on_drop = operation_cancellation.clone().drop_guard();
+        let worker = Self::open_inner(
+            store,
+            layout,
+            identity,
+            runtime,
+            options,
+            &operation_cancellation,
+        );
+        tokio::pin!(worker);
+        let timed_out = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => false,
+            () = runtime_cancellation.cancelled() => false,
+            () = tokio::time::sleep_until(deadline) => true,
+            result = &mut worker => return result,
+        };
+        // Request cancellation without dropping the handshake: locator sessions
+        // and tracked metadata work must drain before returning or shutdown.
+        operation_cancellation.cancel();
+        match worker.await {
+            Ok(_) => Err(Error::Cancelled.after_interruption(timed_out)),
+            Err(error) => Err(error.after_interruption(timed_out)),
+        }
+    }
+
+    async fn open_inner(
+        store: Store,
+        layout: StoreLayout<Store>,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        let runtime_cancellation = runtime.background_cancellation();
+        let budget =
+            crate::budget::OperationBudget::new(options.operation_limits(), runtime.clone());
+        // Admission belongs to this opening attempt, not the returned handle.
+        // Keep the original store in RepositoryState for later operation budgets.
+        let read_store = store
+            .clone()
+            .with_read_admission(budget.read_admission(cancellation.clone()));
 
         for attempt in 0..2 {
             check_cancelled(cancellation)?;
             check_cancelled(&runtime_cancellation)?;
-            let active_transactions = list_active_transactions(&store, &layout)
+            let active_transactions = list_active_transactions(&read_store, &layout)
                 .await
                 .map_err(Error::Metadata)?;
             let (manifest, manifest_etag) = load_manifest(
-                &store,
+                &read_store,
                 &layout,
                 &runtime,
                 &identity,
@@ -418,13 +468,13 @@ impl RemoteGitRepository {
                     biased;
                     () = cancellation.cancelled() => return Err(Error::Cancelled),
                     () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
-                    result = read_bulk_pack_list(&store, &layout, &manifest.pack_index_hash) => {
+                    result = read_bulk_pack_list(&read_store, &layout, &manifest.pack_index_hash) => {
                         result.map_err(|source| Error::Inventory { source })?
                     }
                 }
             };
             let journal = materialize_ref_journal(
-                &store,
+                &read_store,
                 &layout,
                 &manifest,
                 &base_packs,
@@ -451,8 +501,9 @@ impl RemoteGitRepository {
                     options,
                     generation: manifest.generation,
                     git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
+                    shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
-                    coverage: None,
+                    catalog_identity: None,
                     inventory: std::collections::HashMap::new(),
                     refs,
                     reader: None,
@@ -491,7 +542,7 @@ impl RemoteGitRepository {
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
                 () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
                 session = GitObjectLocatorSession::open_for_operation(
-                    Arc::clone(store.inner()),
+                    Arc::clone(read_store.inner()),
                     layout.repo_prefix(),
                     options.operation_limits().max_duration,
                 ) => session?,
@@ -499,7 +550,10 @@ impl RemoteGitRepository {
             let session = TrackedLocatorSession::new(session, Arc::clone(&runtime));
             let observed = session.coverage();
             if observed == Some(coverage) {
-                session.close().await.map_err(Error::Metadata)?;
+                let catalog_identity = session.catalog_identity().ok_or(Error::Corrupt {
+                    stage: crate::CorruptionStage::Locator,
+                });
+                let catalog_identity = finish_locator_validation(session, catalog_identity).await?;
                 let reader = RemoteGitReader::from_pinned(
                     store.clone(),
                     layout.repo_prefix(),
@@ -510,7 +564,7 @@ impl RemoteGitRepository {
                     manifest.generation,
                 )?;
                 let commit_graph = match CommitGraphIndex::load(
-                    &store,
+                    &read_store,
                     &layout,
                     manifest.commit_graph_hash.as_deref(),
                     manifest.generation,
@@ -528,7 +582,11 @@ impl RemoteGitRepository {
                 .await
                 {
                     Ok(index) => index.map(Arc::new),
-                    Err(Error::Cancelled) => return Err(Error::Cancelled),
+                    Err(error)
+                        if matches!(error, Error::Cancelled) || admission_rejected(&error) =>
+                    {
+                        return Err(error);
+                    }
                     Err(_) => {
                         runtime.metrics().record(crate::MetricObservation {
                             kind: crate::MetricKind::Metadata,
@@ -545,7 +603,7 @@ impl RemoteGitRepository {
                     () = cancellation.cancelled() => return Err(Error::Cancelled),
                     () = runtime_cancellation.cancelled() => return Err(Error::Cancelled),
                     result = crab_metadata::shallow_closure::load_shallow_closure_descriptor(
-                        &store,
+                        &read_store,
                         &layout,
                         &manifest.git_validation_digest,
                         manifest.generation,
@@ -554,6 +612,12 @@ impl RemoteGitRepository {
                     ) => result.map_err(Error::Metadata),
                 } {
                     Ok(index) => index.map(Arc::new),
+                    // Optional acceleration must never swallow exhausted admission.
+                    Err(error)
+                        if matches!(error, Error::Cancelled) || admission_rejected(&error) =>
+                    {
+                        return Err(error);
+                    }
                     Err(error) => {
                         tracing::warn!(error = %error, "shallow closure index unavailable; using bounded traversal");
                         runtime.metrics().record(crate::MetricObservation {
@@ -574,8 +638,9 @@ impl RemoteGitRepository {
                     options,
                     generation: manifest.generation,
                     git_validation_digest: Arc::from(manifest.git_validation_digest.as_str()),
+                    shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
-                    coverage: Some(coverage),
+                    catalog_identity: Some(catalog_identity),
                     inventory,
                     refs,
                     reader: Some(Arc::new(reader)),
@@ -618,6 +683,12 @@ impl RemoteGitRepository {
         })
     }
 
+    /// Return the immutable shard-index root captured with this repository generation.
+    #[must_use]
+    pub fn shard_index_hash(&self) -> &str {
+        &self.state.shard_index_hash
+    }
+
     /// Return the immutable manifest generation pinned by this handle.
     #[must_use]
     pub fn generation(&self) -> u64 {
@@ -657,6 +728,32 @@ impl RemoteGitRepository {
         &self.state.identity
     }
 
+    /// Check that a snapshot identifies this compacted manifest without pending commits.
+    ///
+    /// Pair with placement validation; an ETag is meaningful only within its store
+    /// and key. This does not replace a current-state check before publication.
+    #[must_use]
+    pub fn matches_snapshot(
+        &self,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+    ) -> bool {
+        self.state.manifest_etag == snapshot.manifest_etag
+            && self.state.generation == snapshot.manifest.generation
+            && snapshot.journal.transactions.is_empty()
+    }
+
+    /// Check that a layout uses this reader's exact transport and storage prefixes.
+    ///
+    /// This is in-process binding, not authorization or durable provider identity.
+    /// Independently constructed transports must be reopened and validated first.
+    #[must_use]
+    pub fn matches_store_layout(&self, layout: &StoreLayout<Store>) -> bool {
+        Arc::ptr_eq(self.state.store.inner(), layout.store().inner())
+            && Arc::ptr_eq(self.state.layout.store().inner(), layout.store().inner())
+            && self.state.layout.repo_prefix() == layout.repo_prefix()
+            && self.state.layout.global_prefix() == layout.global_prefix()
+    }
+
     /// Install product-owned coordination for generated response-pack misses.
     ///
     /// The provider must protect this repository's object-store namespace.
@@ -690,7 +787,7 @@ impl RemoteGitRepository {
         let runtime_cancellation = self.state.runtime.background_cancellation();
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
-        let Some(coverage) = self.state.coverage else {
+        let Some(coverage) = self.state.coverage() else {
             return Ok(self.state.refs.is_empty());
         };
         let pack_index_hash = coverage.pack_index_hash.to_string();
@@ -723,7 +820,7 @@ impl RemoteGitRepository {
         let runtime_cancellation = self.state.runtime.background_cancellation();
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
-        let coverage = self.state.coverage.ok_or_else(|| {
+        let coverage = self.state.coverage().ok_or_else(|| {
             if self.state.refs.is_empty() {
                 Error::EmptyRepository
             } else {
@@ -832,7 +929,7 @@ impl RemoteGitRepository {
         let runtime_cancellation = self.state.runtime.background_cancellation();
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
-        let index = if let Some(coverage) = self.state.coverage {
+        let index = if let Some(coverage) = self.state.coverage() {
             let pack_index_hash = coverage.pack_index_hash.to_string();
             let read = crab_metadata::git_visibility::read_with_format(
                 &self.state.store,
@@ -907,7 +1004,7 @@ impl RemoteGitRepository {
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
         let pack_index_hash = self
             .state
-            .coverage
+            .coverage()
             .map(|coverage| coverage.pack_index_hash.to_string())
             .unwrap_or_default();
         crate::visibility::rebuild(self, pack_index_hash, cancellation).await
@@ -948,7 +1045,23 @@ impl RemoteGitRepository {
         kind: OperationKind,
         cancellation: &CancellationToken,
     ) -> Result<OperationContext> {
-        OperationContext::open(Arc::clone(&self.state), kind, cancellation).await
+        self.operation_with_limits(kind, cancellation, self.state.options.operation_limits())
+            .await
+    }
+
+    /// Start an operation with independent validated aggregate work limits.
+    ///
+    /// The snapshot and object limits remain pinned to this repository. The
+    /// supplied limits govern this operation's deadline, cache hits and batch
+    /// admission without changing concurrent operations on the same handle.
+    pub async fn operation_with_limits(
+        &self,
+        kind: OperationKind,
+        cancellation: &CancellationToken,
+        limits: OperationLimits,
+    ) -> Result<OperationContext> {
+        validate_operation_limits(limits)?;
+        OperationContext::open(Arc::clone(&self.state), kind, cancellation, limits).await
     }
 
     /// Prove which candidate commits are reachable from any pinned graph root.
@@ -1048,7 +1161,7 @@ impl RemoteGitRepository {
     ) -> Result<RemoteGitSnapshot> {
         let resolved = self.resolve(revision, operation).await?;
         let commit = operation.read_commit(resolved.commit).await?;
-        let pack_index_hash = match self.state.coverage {
+        let pack_index_hash = match self.state.coverage() {
             Some(coverage) => coverage.pack_index_hash,
             None if self.state.reader.is_some() => self
                 .state
@@ -1386,6 +1499,18 @@ fn ensure_operation(operation: &OperationContext, state: &Arc<RepositoryState>) 
     }
 }
 
+fn admission_rejected(error: &Error) -> bool {
+    // Transparent error wrappers skip their contained error in source(). Inspect
+    // those variants directly or optional indexes can hide an exhausted budget.
+    match error {
+        Error::Storage(source)
+        | Error::Metadata(crab_metadata::error::MetadataError::Storage { source }) => {
+            crab_storage::read_rejection(source).is_some()
+        }
+        _ => crab_storage::read_rejection(error).is_some(),
+    }
+}
+
 fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
     if cancellation.is_cancelled() {
         Err(Error::Cancelled)
@@ -1429,7 +1554,8 @@ mod tests {
         manifest_started: tokio::sync::Notify,
         manifest_release: tokio::sync::Notify,
         block_fragment: std::sync::Mutex<Option<String>>,
-        request_started: tokio::sync::Notify,
+        reject_fragment: std::sync::Mutex<Option<String>>,
+        request_started: Arc<tokio::sync::Notify>,
         request_release: tokio::sync::Notify,
     }
 
@@ -1445,7 +1571,8 @@ mod tests {
                 manifest_started: tokio::sync::Notify::new(),
                 manifest_release: tokio::sync::Notify::new(),
                 block_fragment: std::sync::Mutex::new(None),
-                request_started: tokio::sync::Notify::new(),
+                reject_fragment: std::sync::Mutex::new(None),
+                request_started: Arc::new(tokio::sync::Notify::new()),
                 request_release: tokio::sync::Notify::new(),
             }
         }
@@ -1485,6 +1612,24 @@ mod tests {
             location: &ObjectPath,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
+            if self
+                .reject_fragment
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|fragment| location.as_ref().contains(fragment))
+            {
+                return Err(object_store::Error::Generic {
+                    store: "test admission",
+                    source: Box::new(crab_storage::StorageError::ReadRejected {
+                        source: Box::new(Error::LimitExceeded {
+                            limit: "storage requests",
+                            actual: 2,
+                            maximum: 1,
+                        }),
+                    }),
+                });
+            }
             let should_block = self
                 .block_fragment
                 .lock()
@@ -1527,6 +1672,21 @@ mod tests {
             &self,
             prefix: Option<&ObjectPath>,
         ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            let blocked = self
+                .block_fragment
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|fragment| {
+                    prefix.is_some_and(|prefix| prefix.as_ref().contains(fragment))
+                });
+            if blocked {
+                let started = self.request_started.clone();
+                return Box::pin(futures_util::stream::once(async move {
+                    started.notify_one();
+                    std::future::pending().await
+                }));
+            }
             self.inner.list(prefix)
         }
 
@@ -1644,6 +1804,28 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    async fn optional_indexes_propagate_admission_rejection() {
+        for fragment in ["manifests/commit-graph-", "shallow-closure"] {
+            let mut fixture = open_fixture(1, Some(1)).await;
+            fixture.manifest.commit_graph_hash = Some("a".repeat(64));
+            fixture
+                .store
+                .put_overwrite(
+                    &fixture.layout.manifest_path(),
+                    Bytes::from(serde_json::to_vec(&fixture.manifest).unwrap()),
+                )
+                .await
+                .unwrap();
+            *fixture.backend.reject_fragment.lock().unwrap() = Some(fragment.to_owned());
+            let error = match open(&fixture).await {
+                Err(error) => error,
+                Ok(_) => panic!("opening unexpectedly accepted {fragment}"),
+            };
+            assert!(admission_rejected(&error), "{error:?}");
+        }
+    }
+
     #[test]
     fn identity_is_exact_for_equality_but_redacted_for_debug() {
         let first = RepositoryIdentity::new("provider-a", "repository-a", 1).expect("identity");
@@ -1696,6 +1878,9 @@ mod tests {
         let object_store: Arc<dyn ObjectStore> = backend;
         let store = Store::new(object_store);
         let layout = StoreLayout::new(store.clone(), "org/empty".to_owned());
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+            .await
+            .expect("create layout");
         create_manifest(
             &store,
             &layout,
@@ -1704,8 +1889,8 @@ mod tests {
         .await
         .expect("create empty manifest");
         let repository = RemoteGitRepository::open(
-            store,
-            layout,
+            store.clone(),
+            layout.clone(),
             RepositoryIdentity::new("memory", "org/empty", 1).expect("identity"),
             Arc::new(RemoteGitRuntime::default()),
             RepositoryOptions::default(),
@@ -1721,6 +1906,27 @@ mod tests {
                 .await
                 .expect("empty repository visibility proof")
         );
+        let mut snapshot = crab_metadata::manifest_store::read_repository_snapshot(&store, &layout)
+            .await
+            .expect("snapshot");
+        assert!(repository.matches_snapshot(&snapshot));
+        snapshot.manifest_etag.push_str("-different");
+        assert!(!repository.matches_snapshot(&snapshot));
+        assert!(repository.matches_store_layout(&layout));
+        for other in [
+            StoreLayout::new(store.clone(), "org/other".to_owned()),
+            StoreLayout::with_global_prefix(
+                store,
+                "org/empty".to_owned(),
+                "other-global".to_owned(),
+            ),
+            StoreLayout::new(
+                Store::new(Arc::new(object_store::memory::InMemory::new())),
+                "org/empty".to_owned(),
+            ),
+        ] {
+            assert!(!repository.matches_store_layout(&other));
+        }
     }
 
     #[tokio::test]
@@ -1739,43 +1945,48 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn runtime_shutdown_cancels_and_drains_repository_open() {
-        let fixture = open_fixture(1, Some(1)).await;
-        fixture.backend.block_manifest.store(true, Ordering::SeqCst);
-        let manifest_started = fixture.backend.manifest_started.notified();
-        let runtime = Arc::new(RemoteGitRuntime::default());
-        let open_runtime = Arc::clone(&runtime);
-        let store = fixture.store.clone();
-        let layout = fixture.layout.clone();
-        let open = tokio::spawn(async move {
-            RemoteGitRepository::open(
-                store,
-                layout,
-                RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
-                open_runtime,
-                RepositoryOptions::default(),
-                &CancellationToken::new(),
-            )
-            .await
-        });
-        manifest_started.await;
-        let shutdown_runtime = Arc::clone(&runtime);
-        let shutdown = tokio::spawn(async move {
-            shutdown_runtime.shutdown().await;
-        });
+        for fragment in ["refs/journal/active", "org/repo/manifest"] {
+            let fixture = open_fixture(1, Some(1)).await;
+            fixture.backend.block_path_containing(fragment);
+            let request_started = fixture.backend.request_started.notified();
+            let runtime = Arc::new(RemoteGitRuntime::default());
+            let open_runtime = Arc::clone(&runtime);
+            let store = fixture.store.clone();
+            let layout = fixture.layout.clone();
+            let open = tokio::spawn(async move {
+                RemoteGitRepository::open(
+                    store,
+                    layout,
+                    RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
+                    open_runtime,
+                    RepositoryOptions::default(),
+                    &CancellationToken::new(),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(1), request_started)
+                .await
+                .unwrap();
+            let shutdown_runtime = Arc::clone(&runtime);
+            let shutdown = tokio::spawn(async move {
+                shutdown_runtime.shutdown().await;
+            });
 
-        assert!(matches!(
-            open.await.expect("open task"),
-            Err(Error::Cancelled)
-        ));
-        tokio::time::timeout(Duration::from_secs(1), shutdown)
-            .await
-            .expect("shutdown drains repository open")
-            .expect("shutdown task");
+            assert!(matches!(
+                open.await.expect("open task"),
+                Err(Error::Cancelled)
+            ));
+            tokio::time::timeout(Duration::from_secs(1), shutdown)
+                .await
+                .expect("shutdown drains repository open")
+                .expect("shutdown task");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn caller_cancellation_interrupts_each_repository_open_io_phase() {
         for fragment in [
+            "refs/journal/active",
             "org/repo/manifest",
             "metadata/pack/",
             "git_object_catalog_db/",
@@ -1813,6 +2024,46 @@ mod tests {
                 Err(Error::Cancelled)
             ));
             runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repository_open_deadline_drains_pending_metadata_work() {
+        for fragment in [
+            "refs/journal/active",
+            "org/repo/manifest",
+            "git_object_catalog_db/",
+        ] {
+            let fixture = open_fixture(1, Some(1)).await;
+            fixture.backend.block_path_containing(fragment);
+            let runtime = Arc::new(RemoteGitRuntime::default());
+            let options = RepositoryOptions::new(
+                ObjectLimits::default(),
+                OperationLimits {
+                    max_duration: Duration::from_millis(50),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                RemoteGitRepository::open(
+                    fixture.store,
+                    fixture.layout,
+                    RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
+                    runtime.clone(),
+                    options,
+                    &CancellationToken::new(),
+                ),
+            )
+            .await;
+            assert!(
+                matches!(result, Ok(Err(Error::Timeout { .. }))),
+                "{fragment}: {result:?}"
+            );
+            tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+                .await
+                .unwrap();
         }
     }
 
@@ -2016,15 +2267,16 @@ mod tests {
             repository.refs().head.as_ref().map(|head| head.target),
             Some(parse_oid("1111111111111111111111111111111111111111").expect("OID"))
         );
-        assert!(matches!(
-            repository
-                .operation(OperationKind::Repository, &CancellationToken::new())
-                .await,
-            Err(Error::RepositoryIndexing {
-                observed: Some(2),
-                required: 1
-            })
-        ));
+        // A new operation on an old handle must retain its immutable catalog,
+        // rather than follow the checkpoint published with the new refs.
+        let operation = repository
+            .operation(OperationKind::Repository, &CancellationToken::new())
+            .await
+            .expect("open pinned catalog after publication");
+        operation
+            .finish(Ok(()))
+            .await
+            .expect("close pinned catalog");
 
         let current = open(&fixture).await.expect("open generation two");
         assert_eq!(current.generation(), 2);

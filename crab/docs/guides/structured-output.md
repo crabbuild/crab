@@ -274,6 +274,9 @@ sum to `integration_retries`.
 Per-ref push outcomes also include `retryable` and `retry_after_secs` when Crab
 can classify the rejection. If Crab's automatic rebase cannot integrate the
 agent's commit, the ref status is `integration-failed` with `retryable: false`.
+An unconfirmed journal or manifest commit reports `indeterminate` with `retryable: false`
+and its commit identity in the diagnostic. It requires durable outcome
+reconciliation; the automatic transient retry path does not replay it.
 
 ### Remote Helper Exception
 

@@ -64,6 +64,13 @@ impl ReadFailure {
                             retry: RetryClass::Transient,
                         });
                     }
+                    StorageError::ReadRejected { .. } => {
+                        let display = format_args!("Generic crab-storage error: {error}");
+                        return diagnostic(Cause::Store {
+                            display: &display,
+                            retry: RetryClass::Fatal,
+                        });
+                    }
                     StorageError::Io { source } => return diagnostic(Cause::Io(source)),
                     StorageError::Throttled { retry_after, .. } => {
                         // This temporary value formats the product diagnostic;
@@ -333,6 +340,9 @@ mod tests {
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             },
             StorageError::Cancelled,
+            StorageError::ReadRejected {
+                source: "caller budget exhausted".into(),
+            },
             StorageError::MultipartJournal {
                 operation: "claim",
                 source: Box::new(std::io::Error::from(std::io::ErrorKind::Interrupted)),

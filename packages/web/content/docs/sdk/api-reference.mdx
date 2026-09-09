@@ -1,0 +1,29 @@
+# API reference
+
+The Rust API is organized around validated values and concrete repository handles.
+
+| Type | Purpose |
+| --- | --- |
+| `ClientBuilder` | Select direct storage, managed authentication, local tools, and content cache |
+| `Client` | Open, clone, initialize, recover, and close repositories |
+| `RemoteRepository` | Read a pinned generation and prepare remote mutations |
+| `Snapshot` | Read commits, trees, history, diffs, blame, blobs, files, and archives |
+| `LocalRepository` | Worktree status, stage, commit, checkout, pull, content, fetch, and push |
+| `ManagedRepositories` | List, create, rename, archive, and restore managed repositories |
+| `OperationOptions` | Cancellation, deadline, limits, and progress |
+| `Error` / `ErrorKind` | Stable classification with source and cleanup errors |
+
+## Locators and revisions
+
+- `RepositoryLocator::new` validates a direct storage prefix.
+- `RepositoryLocator::managed` validates an authority, organization, and repository.
+- `RepositoryLocator::http` validates an HTTP(S) URL for local Git workflows.
+- `Revision::branch`, `Revision::tag`, and `Revision::commit` avoid ambiguous names.
+- `GitPath` stores repository-relative bytes and rejects absolute, empty, NUL, and parent components.
+- `ObjectId` accepts complete SHA-1 IDs and rejects SHA-256 input explicitly.
+
+## Outcomes
+
+Remote mutations return `MutationOutcome::{Committed, Rejected, Indeterminate}`. Local push adds `DryRun` and a transport acknowledgement outcome. Local pull distinguishes updated, already-current, conflict, and committed-with-pending-hydration states.
+
+Use the generated rustdoc for every constructor, option, limit, and error condition. Public enums are non-exhaustive; include a fallback arm when matching them outside this crate.

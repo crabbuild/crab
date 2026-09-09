@@ -748,7 +748,9 @@ pub async fn move_prepared_xorb(
         return Ok(bytes);
     }
     fail_if_existing_prepared_xorb_is_corrupt(&path, xorb_hash).await?;
-    tokio::fs::File::open(&tmp).await?.sync_all().await?;
+    let file = tokio::fs::OpenOptions::new().write(true).open(&tmp).await?;
+    file.sync_all().await?;
+    drop(file);
     install_prepared_xorb_temp(&tmp, &path, xorb_hash, &payload_hash, bytes, true).await?;
     tmp_guard.disarm();
     Ok(bytes)
@@ -1543,6 +1545,30 @@ mod tests {
 
         assert!(matches!(error, StagingError::StagingCorrupt(_)));
         assert!(!prepared_xorb_path(tmp.path(), &xorb_hash).exists());
+        assert!(!source.exists());
+    }
+
+    #[tokio::test]
+    async fn move_prepared_xorb_installs_stream_payload() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let chunks = [(
+            compute_data_hash(b"stream payload"),
+            b"stream payload".to_vec(),
+        )];
+        let (bytes, xorb_hash, _) = xorb_with_chunks(&chunks);
+        let source = tmp.path().join("stream-prepared.xorb");
+        std::fs::write(&source, &bytes).expect("write source");
+        let payload_hash = *blake3::hash(&bytes).as_bytes();
+
+        let moved = move_prepared_xorb(tmp.path(), &xorb_hash, &source, &payload_hash)
+            .await
+            .expect("install streamed xorb");
+
+        assert_eq!(moved, bytes.len() as u64);
+        assert_eq!(
+            std::fs::read(prepared_xorb_path(tmp.path(), &xorb_hash)).expect("read installed xorb"),
+            bytes
+        );
         assert!(!source.exists());
     }
 

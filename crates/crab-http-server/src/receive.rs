@@ -54,6 +54,8 @@ pub(crate) enum ReceiveError {
     Pack(#[from] crab_git::incoming_pack::IncomingPackError),
     #[error("incoming graph rejected")]
     Graph(#[from] crab_git::receive_plan::ReceivePlanError),
+    #[error("generated pack construction failed")]
+    PackWrite(#[from] crab_git::pack_writer::Error),
     #[error("pack preparation failed")]
     Prepare(#[from] crab_git::incoming_pack::PreparePackError),
     #[error("remote lookup failed")]
@@ -74,8 +76,6 @@ pub(crate) enum ReceiveError {
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("receive publication failed")]
     Write(#[from] crab_write::WriteError),
-    #[error("Git object hashing failed")]
-    Hash(#[from] gix_hash::hasher::Error),
     #[error("pointer content rejected")]
     Dependency(#[source] Box<crab_read::dependency_proof::DependencyProofError>),
     #[error("receive failed and its remote reader also failed to close")]
@@ -86,43 +86,13 @@ pub(crate) enum ReceiveError {
     },
 }
 
-fn pack_header(kind: gix_object::Kind, size: usize, output: &mut Vec<u8>) {
-    let kind = match kind {
-        gix_object::Kind::Commit => 1,
-        gix_object::Kind::Tree => 2,
-        gix_object::Kind::Blob => 3,
-        gix_object::Kind::Tag => 4,
-    };
-    let mut remaining = size >> 4;
-    let mut byte = (kind << 4) | (size as u8 & 0x0f);
-    while remaining != 0 {
-        output.push(byte | 0x80);
-        byte = (remaining as u8) & 0x7f;
-        remaining >>= 7;
+impl From<crab_remote::publication::Error> for ReceiveError {
+    fn from(error: crab_remote::publication::Error) -> Self {
+        match error {
+            crab_remote::publication::Error::Cancelled => Self::Cancelled,
+            crab_remote::publication::Error::Coordination(error) => Self::Coordination(error),
+        }
     }
-    output.push(byte);
-}
-
-fn write_pack(path: &std::path::Path, objects: &[(gix_object::Kind, Vec<u8>)]) -> Result<()> {
-    use std::io::Write as _;
-
-    let count = u32::try_from(objects.len())
-        .map_err(|_| ReceiveError::Request("Too many generated Git objects"))?;
-    let mut bytes = b"PACK\0\0\0\x02".to_vec();
-    bytes.extend_from_slice(&count.to_be_bytes());
-    for (kind, data) in objects {
-        pack_header(*kind, data.len(), &mut bytes);
-        let mut encoder =
-            flate2::write::ZlibEncoder::new(&mut bytes, flate2::Compression::default());
-        encoder.write_all(data)?;
-        encoder.finish()?;
-    }
-    let mut hasher = gix_hash::hasher(gix_hash::Kind::Sha1);
-    hasher.update(&bytes);
-    let checksum = hasher.try_finalize()?;
-    bytes.extend_from_slice(checksum.as_bytes());
-    std::fs::write(path, bytes)?;
-    Ok(())
 }
 
 pub(crate) async fn publish_objects(
@@ -186,7 +156,17 @@ async fn publish_generated_objects(
             let directory = tokio::task::spawn_blocking(tempfile::tempdir).await??;
             let path = directory.path().join("generated.pack");
             let pack_path = path.clone();
-            tokio::task::spawn_blocking(move || write_pack(&pack_path, &objects)).await??;
+            let packing_cancel = worker_cancel.clone();
+            tokio::task::spawn_blocking(move || {
+                let output = std::io::BufWriter::new(std::fs::File::create(pack_path)?);
+                let inputs = objects
+                    .iter()
+                    .map(|(kind, data)| Ok((*kind, data.len() as u64, data.as_slice())));
+                crab_git::pack_writer::write_pack(output, inputs, MAX_BODY, || {
+                    packing_cancel.is_cancelled()
+                })
+            })
+            .await??;
             let file = tokio::task::spawn_blocking(move || std::fs::File::open(path)).await??;
             publish::publish_pack(
                 &worker_server,
@@ -242,6 +222,13 @@ impl IntoResponse for ReceiveError {
             Self::DefaultBranchChanged | Self::BranchChanged => {
                 (StatusCode::CONFLICT, "Repository changed; retry")
             }
+            Self::PackWrite(crab_git::pack_writer::Error::Limit) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "Receive body exceeds 2 GiB")
+            }
+            Self::PackWrite(crab_git::pack_writer::Error::Cancelled) => (
+                StatusCode::REQUEST_TIMEOUT,
+                "Receive cancelled or timed out",
+            ),
             Self::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "Receive body exceeds 2 GiB"),
             Self::Cancelled => (
                 StatusCode::REQUEST_TIMEOUT,

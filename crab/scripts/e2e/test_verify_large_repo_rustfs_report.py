@@ -530,6 +530,33 @@ class ReportVerificationTests(unittest.TestCase):
         self.assertEqual(parsed["cache_hits"], 2)
         self.assertEqual(parsed["cache_misses"], 2)
 
+    def test_transfer_counters_exclude_shared_participant_reservations(self) -> None:
+        path = self.root / "client.stderr.log"
+        events = [
+            {"storage_request": "range_get", "storage_bytes": 123},
+            *[{
+                "telemetry_event": "operation_summary",
+                "storage_requests": 1,
+                "fetched_bytes": 123,
+                "logical_objects": 1,
+            } for _ in range(8)],
+        ]
+        path.write_text("\n".join(json.dumps({"fields": event}) for event in events))
+        qualification = QUALIFICATION.LargeRepositoryQualification.__new__(
+            QUALIFICATION.LargeRepositoryQualification
+        )
+        parsed = qualification.telemetry_from_log(path)
+        smoke = PROTOCOL.ProtocolV2PartialCloneSmoke.__new__(
+            PROTOCOL.ProtocolV2PartialCloneSmoke
+        )
+        smoke.logs = self.root
+        protocol = smoke.storage_telemetry()
+        self.assertEqual(
+            (parsed["storage_requests"], parsed["storage_bytes"], parsed["logical_objects"],
+             protocol["requests"], protocol["bytes"]),
+            (1, 123, 8, 1, 123),
+        )
+
     def test_protocol_telemetry_parser_accepts_debug_enum_cache_events(self) -> None:
         logs = self.root / "logs"
         logs.mkdir()

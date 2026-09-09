@@ -2,12 +2,13 @@ use std::io::Write;
 use std::sync::Arc;
 
 mod buffer;
-mod cache_completion;
 #[cfg(test)]
 mod cache_completion_tests;
 #[cfg(test)]
 mod failure_tests;
 mod output;
+#[cfg(test)]
+mod range_tests;
 use buffer::ReconstructionBuffer;
 
 use crab_cache_store::CachingStore;
@@ -44,7 +45,9 @@ impl ReadRuntimeBuilder {
             store,
             router,
             download_concurrency,
-            buffer_budget_bytes: 256 * 1024 * 1024,
+            // Admission counts decoded output; fetching, decoding and cache I/O
+            // also retain bytes. Reserve headroom for those overlapping allocations.
+            buffer_budget_bytes: 128 * 1024 * 1024,
             availability: None,
         }
     }
@@ -114,6 +117,34 @@ pub struct ShardHydrator {
 }
 
 impl ShardHydrator {
+    /// Scope origin admission while sharing cache, download and buffer budgets.
+    #[must_use]
+    pub fn with_read_admission(mut self, admission: Arc<dyn crab_storage::ReadAdmission>) -> Self {
+        self.store = self.store.with_read_admission(Arc::clone(&admission));
+        self.router = crab_storage::StoreLayout::with_global_prefix(
+            self.router.store().clone().with_read_admission(admission),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        self
+    }
+
+    /// Create a lazy, write-free lookup from the caller's pinned shard inventory.
+    #[must_use]
+    pub fn file_index_lookup(
+        &self,
+        shard_index_hash: String,
+        generation: u64,
+        limits: crab_metadata::file_index_lookup::FileIndexLookupLimits,
+    ) -> SharedFileIndexLookup {
+        let router = crab_storage::StoreLayout::with_global_prefix(
+            self.store.cache_aware_storage(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        SharedFileIndexLookup::for_shard_index(router, shard_index_hash, generation, limits)
+    }
+
     fn store_client(&self) -> StoreClient {
         let mut client = StoreClient::new(
             self.store.clone(),
@@ -227,29 +258,91 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
+        self.reconstruct_writer(ptr, writer, None, file_index_lookup, cancel)
+            .await
+    }
+
+    /// Reconstruct an exact range into a writer with caller-owned cancellation.
+    ///
+    /// Rejects ranges outside the pointer size. Verifies chunks and output size,
+    /// not the whole-file hash. The writer must provide bounded backpressure.
+    pub async fn reconstruct_range_to_writer_with_cancel<W>(
+        &self,
+        ptr: &Pointer,
+        range: std::ops::Range<u64>,
+        writer: W,
+        file_index_lookup: Option<&SharedFileIndexLookup>,
+        cancel: &CancellationToken,
+    ) -> Result<u64>
+    where
+        W: Write + Send + 'static,
+    {
+        if range.start > range.end || range.end > ptr.size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "reconstruction range is outside the declared file size",
+            )
+            .into());
+        }
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
+        if range.is_empty() {
+            return Ok(0);
+        }
+        self.reconstruct_writer(ptr, writer, Some(range), file_index_lookup, cancel)
+            .await
+    }
+
+    async fn reconstruct_writer<W>(
+        &self,
+        ptr: &Pointer,
+        writer: W,
+        range: Option<std::ops::Range<u64>>,
+        file_index_lookup: Option<&SharedFileIndexLookup>,
+        cancel: &CancellationToken,
+    ) -> Result<u64>
+    where
+        W: Write + Send + 'static,
+    {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        let expected_size = range
+            .as_ref()
+            .map_or(ptr.size, |range| range.end - range.start);
+        let full = range.is_none();
         let file_hash = MerkleHash::from(ptr.file_hash);
         let client = self.store_client_for_pointer(ptr, file_index_lookup);
-        self.preflight_shard_coverage(&client, ptr).await?;
+        if full {
+            self.preflight_shard_coverage(&client, ptr).await?;
+        }
 
         let (actual_hash, bytes_written) = self
-            .reconstruct_bounded_to_writer(client, file_hash, writer, None, ptr.size, cancel)
+            .reconstruct_bounded_to_writer(
+                client,
+                file_hash,
+                writer,
+                range.map(|range| FileRange::new(range.start, range.end)),
+                expected_size,
+                cancel,
+            )
             .await?;
 
-        if actual_hash != ptr.file_hash {
+        if let Some(actual_hash) = actual_hash
+            && actual_hash != ptr.file_hash
+        {
             return Err(ReadError::HashMismatch {
                 requested: crab_types::pointer::hex_encode(&ptr.file_hash),
                 actual: crab_types::pointer::hex_encode(&actual_hash),
             });
         }
-        if bytes_written != ptr.size {
+        if bytes_written != expected_size {
             return Err(ReadError::CorruptObject {
                 path: file_hash.hex(),
                 reason: format!(
-                    "reconstruction size mismatch: expected {}, got {bytes_written}",
-                    ptr.size
+                    "reconstruction size mismatch: expected {}, got {}",
+                    expected_size, bytes_written
                 ),
             });
         }
@@ -266,8 +359,6 @@ impl ShardHydrator {
         let ptr = Pointer::parse(pointer_bytes)?;
         // VFS windows retain decoded Xet ranges and expect one non-installing
         // whole-xorb source read. The path API opts into selective origin reads.
-        let client = self.store_client_for_pointer(&ptr, None);
-
         let (start, end) = checked_range(ptr.size, start, end, "reconstruct_range_from_pointer")?;
         if start >= end {
             return Ok(Vec::new());
@@ -275,19 +366,19 @@ impl ShardHydrator {
 
         let buffer = ReconstructionBuffer::new(end - start)?;
         let file_hash = MerkleHash::from(ptr.file_hash);
-        let range = FileRange::new(start, end);
         let cancel = CancellationToken::new();
         let _cancel_on_drop = cancel.clone().drop_guard();
 
         let outcome = self
-            .reconstruct_to_writer_unverified(
-                client,
-                file_hash,
+            .reconstruct_range_to_writer_with_cancel(
+                &ptr,
+                start..end,
                 buffer.writer(),
-                Some(range),
+                None,
                 &cancel,
             )
-            .await;
+            .await
+            .map(|_| ());
         buffer.finish(outcome, &file_hash)
     }
 
@@ -336,8 +427,14 @@ impl ShardHydrator {
         // Attach observations after advisory preflight, and never to the shared
         // hydrator: concurrent reconstructions must not inherit each other's errors.
         let failures = Arc::new(crate::error::OperationFailures::default());
+        let client = match self.chunk_cache.clone() {
+            Some(cache) => {
+                client.with_chunk_cache(cache, xet_context.config.data.default_prefix.clone())
+            }
+            None => client,
+        };
         let client: Arc<dyn xet_client::cas_client::Client> =
-            Arc::new(client.with_failures(Arc::clone(&failures)));
+            Arc::new(client.with_operation(Arc::clone(&failures), cancel.clone()));
         let output = output::OutputOwner::new(writer);
         let writer = output.writer(Arc::clone(&failures));
         let reconstructor =
@@ -348,16 +445,6 @@ impl ShardHydrator {
             Some(range) => reconstructor.with_byte_range(range),
             None => reconstructor,
         };
-        let cache_cancel = cancel.child_token();
-        let _cancel_cache_on_drop = cache_cancel.clone().drop_guard();
-        let (reconstructor, cache_done) = match self.chunk_cache.clone() {
-            Some(cache) => {
-                let (cache, completion) = cache_completion::track(cache, cache_cancel);
-                (reconstructor.with_chunk_cache(cache), Some(completion))
-            }
-            None => (reconstructor, None),
-        };
-
         let outcome = reconstructor.reconstruct_to_writer(writer).await;
         drop(output);
         if let Err(error) = outcome {
@@ -370,15 +457,10 @@ impl ShardHydrator {
                 source,
             });
         }
-        // Xet returns after output is written, but spawns cache puts without
-        // joining them. Await this operation's cache owners so a completed
-        // prefetch survives immediate runtime/process shutdown and reopening.
-        if let Some(completion) = cache_done {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(ReadError::Cancelled),
-                _ = completion => {}
-            }
+        // Xet returns Ok(0) for cancellation without a recorded error. Preserve
+        // that outcome before incomplete output becomes a hash/size failure.
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
         }
         Ok(())
     }
@@ -391,13 +473,13 @@ impl ShardHydrator {
         range: Option<FileRange>,
         expected_size: u64,
         cancel: &CancellationToken,
-    ) -> Result<([u8; 32], u64)>
+    ) -> Result<(Option<[u8; 32]>, u64)>
     where
         W: Write + Send + 'static,
     {
         let tap_state = Arc::new(std::sync::Mutex::new(GenericHasherTapState {
             writer: Some(writer),
-            hasher: blake3::Hasher::new(),
+            hasher: range.is_none().then(blake3::Hasher::new),
             bytes_written: 0,
             expected_size,
             exceeded: false,
@@ -437,7 +519,10 @@ impl ShardHydrator {
             })?;
         }
         drop(writer);
-        let hash: [u8; 32] = guard.hasher.finalize().into();
+        let hash = guard
+            .hasher
+            .as_ref()
+            .map(|hasher| *hasher.finalize().as_bytes());
         Ok((hash, guard.bytes_written))
     }
 
@@ -496,7 +581,7 @@ fn fixed_hydrate_concurrency(concurrency: usize) -> Result<Arc<AdaptiveConcurren
 
 struct GenericHasherTapState<W: Write> {
     writer: Option<W>,
-    hasher: blake3::Hasher,
+    hasher: Option<blake3::Hasher>,
     bytes_written: u64,
     expected_size: u64,
     exceeded: bool,
@@ -563,7 +648,9 @@ impl<W: Write> Write for GenericHasherTap<W> {
             .as_mut()
             .ok_or_else(|| std::io::Error::other("hasher tap: writer already taken"))?
             .write(buf)?;
-        guard.hasher.update(&buf[..written]);
+        if let Some(hasher) = &mut guard.hasher {
+            hasher.update(&buf[..written]);
+        }
         guard.bytes_written += written as u64;
         Ok(written)
     }
@@ -580,7 +667,9 @@ impl<W: Write> Write for GenericHasherTap<W> {
             .as_mut()
             .ok_or_else(|| std::io::Error::other("hasher tap: writer already taken"))?
             .write_vectored(bufs)?;
-        hash_vectored_prefix(&mut guard.hasher, bufs, written);
+        if let Some(hasher) = &mut guard.hasher {
+            hash_vectored_prefix(hasher, bufs, written);
+        }
         guard.bytes_written += written as u64;
         Ok(written)
     }
@@ -1259,6 +1348,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reopened_decoded_cache_reconstructs_without_origin_xorb() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("cache");
+        let (hydrator, pointer, original) = reconstruction_fixture(&root, false).await;
+        hydrator
+            .reconstruct_from_pointer(&pointer.serialize())
+            .await
+            .unwrap();
+        let shard = hydrator
+            .router
+            .shard_path(&crab_xet::hash::MerkleHash::from(
+                pointer.shard_hint.unwrap(),
+            ));
+        let (metadata, _) = hydrator.store.origin().get_with_etag(&shard).await.unwrap();
+        drop(hydrator);
+        let reopened = runtime(&root, 1024 * 1024);
+        reopened.store.origin().put(&shard, metadata).await.unwrap();
+        let bytes = reopened
+            .reconstruct_from_pointer(&pointer.serialize())
+            .await
+            .unwrap();
+        assert_eq!(bytes, original);
+    }
+
     #[test]
     fn unsafe_cache_does_not_prevent_runtime_construction() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -1301,7 +1415,7 @@ mod tests {
     fn generic_hasher_tap_hashes_only_partial_vectored_write() {
         let shared = Arc::new(Mutex::new(GenericHasherTapState {
             writer: Some(PartialVectoredWriter),
-            hasher: blake3::Hasher::new(),
+            hasher: Some(blake3::Hasher::new()),
             bytes_written: 0,
             expected_size: 7,
             exceeded: false,
@@ -1313,7 +1427,7 @@ mod tests {
 
         let written = tap.write_vectored(&bufs).expect("partial vectored write");
         let guard = shared.lock().expect("hasher state");
-        let actual = *guard.hasher.finalize().as_bytes();
+        let actual = *guard.hasher.as_ref().unwrap().finalize().as_bytes();
 
         assert_eq!(
             (written, guard.bytes_written, actual),
@@ -1326,7 +1440,7 @@ mod tests {
         for vectored in [false, true] {
             let shared = Arc::new(Mutex::new(GenericHasherTapState {
                 writer: Some(Vec::new()),
-                hasher: blake3::Hasher::new(),
+                hasher: Some(blake3::Hasher::new()),
                 bytes_written: 0,
                 expected_size: 2,
                 exceeded: false,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1742,8 +1743,12 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
     "pub use yaml::",
 }
 PRIVATE_INTERNAL_PACKAGES = {
-    "crab-write",
     "crab-http-server",
+    "crab-s3-gateway",
+    "crab-vfs",
+    "crab-workflow",
+}
+PUBLISHED_LIBRARY_PACKAGES = {
     "crab-auth",
     "crab-auth-store",
     "crab-cache",
@@ -1754,10 +1759,13 @@ PRIVATE_INTERNAL_PACKAGES = {
     "crab-lfs",
     "crab-metadata",
     "crab-read",
-    "crab-s3-gateway",
+    "crab-remote",
+    "crab-remote-git",
+    "crab-sdk",
+    "crab-staging",
     "crab-storage",
     "crab-types",
-    "crab-workflow",
+    "crab-write",
     "crab-xet",
 }
 SHIPPED_BINARY_PACKAGES = {
@@ -1778,6 +1786,13 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-s3-gateway": set(),
 }
 WORKSPACE_DEPENDENCY_POLICY = {
+    "crab-remote": {
+        "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
+    },
+    "crab-sdk": {
+        "normal": {"crab-auth", "crab-auth-store", "crab-cache", "crab-cache-store", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote", "crab-remote-git", "crab-staging", "crab-storage", "crab-types", "crab-write", "crab-xet"},
+        "dev": {"crab-git", "crab-xet"},
+    },
     "crab-write": {"normal": {"crab-coordination", "crab-types", "crab-git", "crab-metadata", "crab-remote-git", "crab-storage", "crab-xet"}},
     # The browser server is the product composition boundary for Git,
     # metadata, write, coordination, LFS, and remote-read behavior.
@@ -1791,6 +1806,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-remote-git",
             "crab-storage",
             "crab-write",
+            "crab-remote",
         }
     },
     "crab": {
@@ -1813,6 +1829,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-write",
             "crab-xet",
             "crab-vfs",
+            "crab-remote",
         },
         "dev": {"crab-cache-server", "crab-storage", "crab-workflow"},
     },
@@ -1831,6 +1848,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-storage",
             "crab-types",
             "crab-xet",
+            "crab-remote",
         },
     },
     "crab-auth-store": {
@@ -1919,7 +1937,9 @@ WORKSPACE_DEPENDENCY_PATHS = {
     "crab-lfs": "crates/crab-lfs",
     "crab-metadata": "crates/crab-metadata",
     "crab-read": "crates/crab-read",
+    "crab-remote": "crates/crab-remote",
     "crab-remote-git": "crates/crab-remote-git",
+    "crab-sdk": "crates/crab-sdk",
     "crab-s3-gateway": "crates/crab-s3-gateway",
     "crab-staging": "crates/crab-staging",
     "crab-storage": "crates/crab-storage",
@@ -2116,12 +2136,32 @@ def check_package_release_policy(metadata: dict) -> bool:
     violations: list[str] = []
     product_version = package_by_name(metadata, "crab")["version"]
 
+    classified = (
+        PRIVATE_INTERNAL_PACKAGES
+        | PUBLISHED_LIBRARY_PACKAGES
+        | set(SHIPPED_BINARY_PACKAGES)
+    )
+    workspace_packages = {package["name"] for package in metadata["packages"]}
+    for name in sorted(workspace_packages - classified):
+        violations.append(f"{name}: missing package release policy")
+    for name in sorted(classified - workspace_packages):
+        violations.append(f"{name}: release policy exists for missing package")
+
     for name in sorted(PRIVATE_INTERNAL_PACKAGES):
         package = package_by_name(metadata, name)
         if package["version"] != "0.1.0":
             violations.append(f"{name}: private split crate version is {package['version']}; expected 0.1.0")
         if package["publish"] != []:
             violations.append(f"{name}: private split crate must set publish = false")
+
+    for name in sorted(PUBLISHED_LIBRARY_PACKAGES):
+        package = package_by_name(metadata, name)
+        if package["version"] != "0.1.0":
+            violations.append(
+                f"{name}: SDK dependency version is {package['version']}; expected 0.1.0"
+            )
+        if package["publish"] == []:
+            violations.append(f"{name}: SDK dependency must be publishable")
 
     for name, expected_bins in sorted(SHIPPED_BINARY_PACKAGES.items()):
         package = package_by_name(metadata, name)
@@ -2136,7 +2176,9 @@ def check_package_release_policy(metadata: dict) -> bool:
 
     if not violations:
         print(
-            f"ok: {len(PRIVATE_INTERNAL_PACKAGES)} private split crates are unpublished and shipped package versions align"
+            f"ok: {len(PUBLISHED_LIBRARY_PACKAGES)} SDK libraries are publishable, "
+            f"{len(PRIVATE_INTERNAL_PACKAGES)} private crates stay unpublished, "
+            "and shipped package versions align"
         )
         return True
 
@@ -2313,6 +2355,22 @@ def check_workspace_dependency_sources(root: Path, metadata: dict) -> bool:
                     continue
                 inherited_refs += 1
                 label = f"{rel(root, manifest_path)}:{table_name}.{dependency_name}"
+                if (
+                    package["name"] in PUBLISHED_LIBRARY_PACKAGES
+                    and table_name.endswith("dev-dependencies")
+                    and dependency_name in SERVER_PACKAGES
+                ):
+                    expected_path = Path(
+                        os.path.relpath(
+                            root / WORKSPACE_DEPENDENCY_PATHS[dependency_name],
+                            manifest_path.parent,
+                        )
+                    ).as_posix()
+                    if dependency != {"path": expected_path}:
+                        violations.append(
+                            f"{label}: publishable crate server fixture must be the path-only dependency {expected_path!r}"
+                        )
+                    continue
                 if not isinstance(dependency, dict):
                     violations.append(f"{label}: internal Crab dependency must inherit workspace")
                     continue
@@ -3241,6 +3299,7 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
                 "dep:object_store",
                 "dep:slatedb",
                 "dep:tokio",
+                "dep:tokio-util",
                 "storage",
             ],
             "local-index": ["dep:rusqlite"],
@@ -3267,6 +3326,7 @@ def check_metadata_feature_budget(root: Path, cargo: str, metadata: dict) -> boo
         "rusqlite",
         "slatedb",
         "tokio",
+        "tokio-util",
     ):
         dependency = normal_dependency(package, name)
         if dependency is None or not dependency["optional"]:
@@ -4273,7 +4333,12 @@ def check_storage_module_scope(root: Path, metadata: dict) -> bool:
             except UnicodeDecodeError:
                 continue
             for index, line in enumerate(text.splitlines(), start=1):
-                if any(pattern in line for pattern in STORAGE_MODULE_FORBIDDEN_PATTERNS):
+                # A dependency prefix may name a crate family (aws_sdk_*), but
+                # embedded words in a test/function name are not imports.
+                if any(
+                    re.search(r"(?<!\w)" + re.escape(pattern), line)
+                    for pattern in STORAGE_MODULE_FORBIDDEN_PATTERNS
+                ):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
 
     if not violations:

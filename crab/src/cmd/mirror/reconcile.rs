@@ -28,7 +28,7 @@ use super::types::{
 };
 use crab_cache::lifecycle::CacheUseGuard;
 
-const PLAN_FORMAT_VERSION: u32 = 1;
+const PLAN_FORMAT_VERSION: u32 = 2;
 
 pub(super) async fn run_integrity_command(
     args: &MirrorArgs,
@@ -79,7 +79,8 @@ pub(super) async fn run_integrity_command(
     // cancellation must not emit success or persist a reconciliation plan.
     check_cancelled(cancel)?;
     if let Some(path) = &args.write_plan {
-        let plan = build_plan(&check, args.allow_delete_refs)?;
+        let nonce = uuid::Uuid::now_v7().to_string();
+        let plan = build_plan(&check, args.allow_delete_refs, &nonce)?;
         write_plan(path, &plan)?;
         if options.mode == OutputMode::Text {
             eprintln!(
@@ -477,6 +478,7 @@ fn snapshot_identity(identity: &str, snapshot: &RepositorySnapshot) -> Result<St
 fn build_plan(
     check: &MirrorCheckSummary,
     allow_delete_refs: bool,
+    operation_nonce: &str,
 ) -> Result<MirrorReconciliationPlan> {
     let mut blockers = Vec::new();
     let mut actions = Vec::new();
@@ -533,6 +535,7 @@ fn build_plan(
     let mut plan = MirrorReconciliationPlan {
         format_version: PLAN_FORMAT_VERSION,
         plan_id: String::new(),
+        operation_nonce: operation_nonce.to_owned(),
         source: check.source.clone(),
         destination: check.destination.clone(),
         source_refs: ref_map(&check.refs, true),
@@ -564,14 +567,14 @@ fn ref_map(refs: &[MirrorRefStatus], source: bool) -> BTreeMap<String, String> {
 }
 
 fn plan_digest(plan: &MirrorReconciliationPlan) -> Result<String> {
+    let nonce = uuid::Uuid::parse_str(&plan.operation_nonce)
+        .map_err(|source| CrabError::Io(std::io::Error::other(source)))?;
     let mut canonical = plan.clone();
     canonical.plan_id.clear();
-    let bytes = serde_json::to_vec(&canonical).map_err(|error| {
-        CrabError::Internal(format!(
-            "failed to serialize mirror reconciliation plan: {error}"
-        ))
-    })?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    canonical.operation_nonce.clear();
+    let request = crab_metadata::receipts::publication_request_digest(&canonical)?;
+    let identity = crab_metadata::receipts::publication_plan_id(&request, nonce.as_bytes());
+    Ok(blake3::Hash::from(identity).to_hex().to_string())
 }
 
 fn write_plan(path: &Path, plan: &MirrorReconciliationPlan) -> Result<()> {
@@ -718,7 +721,7 @@ async fn apply_plan(
             "reconciliation plan is stale; run `crab mirror --check --write-plan` again".to_owned(),
         ));
     }
-    let canonical_plan = build_plan(&before, plan.allow_delete_refs)?;
+    let canonical_plan = build_plan(&before, plan.allow_delete_refs, &plan.operation_nonce)?;
     if canonical_plan.blocked || canonical_plan.plan_id != plan.plan_id {
         return Err(CrabError::Protocol(
             "reconciliation plan actions do not match the revalidated ref state".to_owned(),
@@ -826,7 +829,7 @@ async fn resolve_plan_commit(
         return Ok(None);
     };
     match receipt.commit {
-        crab_metadata::plan_receipt::MirrorPlanCommit::RefJournal { transaction_id, .. } => {
+        crab_metadata::plan_receipt::PlanCommit::RefJournal { transaction_id, .. } => {
             let transaction = crate::metadata::manifest::read_ref_journal_transaction(
                 store,
                 router,
@@ -871,7 +874,7 @@ async fn resolve_plan_commit(
                 manifest_digest: None,
             }))
         }
-        crab_metadata::plan_receipt::MirrorPlanCommit::Manifest {
+        crab_metadata::plan_receipt::PlanCommit::Manifest {
             base_generation,
             base_digest,
             generation,

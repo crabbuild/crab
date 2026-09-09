@@ -113,7 +113,7 @@ async fn build_merge_commit(
                 .map_err(|error| Error::Repository(crate::Error::Remote(error)))?;
             Ok(plan)
         }
-        Err(merge_tree::Error::Object(crate::git_objects::Error::Remote(error))) => {
+        Err(merge_tree::Error::Object(crab_remote::objects::Error::Remote(error))) => {
             let error = operation.finish::<()>(Err(error)).await.err().unwrap_or(
                 crab_remote_git::Error::InternalInvariant {
                     invariant: "failed pull request merge read unexpectedly succeeded",

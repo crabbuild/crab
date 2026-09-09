@@ -1,0 +1,68 @@
+# Rust SDK quickstart
+
+`crab-sdk` is an asynchronous Rust client for reading and changing Crab repositories. It can work directly with cloud object storage, through a managed Crab service, or with a local Git working directory.
+
+## Features
+
+The crate has no default features. Select only the surfaces your application uses:
+
+| Feature | Adds |
+| --- | --- |
+| `remote` | Pinned remote Git reads |
+| `content` | Verified Crab and Git LFS reconstruction |
+| `write` | Remote initialization, commits, ref updates, and recovery |
+| `local` | Git working-directory workflows; implies `write` and `content` |
+| `managed` | Managed-service grants and repository lifecycle APIs |
+
+```toml
+[dependencies]
+crab-sdk = { version = "0.1", features = ["remote", "content"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+The package is in preview. Use the version supported by the matching Crab release.
+
+## Open a direct repository
+
+```rust
+use crab_sdk::{Client, DirectStoreOptions, RepositoryLocator, Revision, S3Options};
+
+# async fn example() -> crab_sdk::Result<()> {
+let store = DirectStoreOptions::s3(S3Options::new(
+    "bucket",
+    "us-west-2",
+    "access-key",
+    "secret-key",
+)?);
+let client = Client::builder().direct_store(store).build()?;
+let repository = client
+    .open_remote(RepositoryLocator::new("repositories/example")?)
+    .await?;
+let snapshot = repository.snapshot(Revision::branch("main")?).await?;
+println!("{}", snapshot.commit_id()?);
+client.close().await?;
+# Ok(())
+# }
+```
+
+Every remote handle is pinned to a repository generation. Call `refresh()` to observe later branch movement. Call `Client::close().await` before destroying the Tokio runtime so abandoned streams and operations can finish cleanup.
+
+## Operation controls
+
+Requests start when awaited. Attach deadlines, cancellation, read limits, and progress before that point:
+
+```rust
+use crab_sdk::{Cancellation, OperationOptions};
+use std::time::Duration;
+
+let cancellation = Cancellation::default();
+let options = OperationOptions::default()
+    .with_cancellation(cancellation.clone())
+    .with_timeout(Duration::from_secs(30))?;
+let refs = repository.refs().with_options(options).await?;
+```
+
+Errors expose a stable `ErrorKind`, preserve their source chain, and carry the operation ID when work reached the SDK runtime.
+Storage request limits include Crab retries plus each cloud-provider HTTP retry
+and listing page. Fetched-byte limits charge streamed object and listing response
+chunks, and exhaustion stops before the next request or chunk is delivered.

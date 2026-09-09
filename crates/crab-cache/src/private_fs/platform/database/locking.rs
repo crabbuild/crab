@@ -29,6 +29,28 @@ pub(super) fn conflicting_lock(file: &File, offset: i64, length: i64) -> Result<
     control(file, WRITE_LOCK, offset, length, true)
 }
 
+pub(super) fn verify_exclusion(first: &File, second: &File) -> Result<(), i32> {
+    // Use an otherwise unused byte beyond SQLite's database lock region.
+    // Some filesystems accept OFD calls without excluding another description.
+    let offset = PENDING + 512;
+    lock(first, READ_LOCK, offset, 1)?;
+    let result = (|| {
+        if conflicting_lock(second, offset, 1)? != READ_LOCK {
+            return Err(ffi::SQLITE_IOERR_LOCK);
+        }
+        match lock(second, WRITE_LOCK, offset, 1) {
+            Err(ffi::SQLITE_BUSY) => Ok(()),
+            Err(code) => Err(code),
+            Ok(()) => {
+                lock(second, UNLOCK, offset, 1)?;
+                Err(ffi::SQLITE_IOERR_LOCK)
+            }
+        }
+    })();
+    let release = lock(first, UNLOCK, offset, 1);
+    result.and(release)
+}
+
 fn control(file: &File, kind: i32, offset: i64, length: i64, query: bool) -> Result<i32, i32> {
     // SAFETY: flock is a C integer record; zero initializes unused fields,
     // including the pid required by open-file-description locks.
@@ -125,5 +147,28 @@ impl DatabaseLock {
             return Ok(true);
         }
         Ok(conflicting_lock(file, RESERVED, 1)? != UNLOCK)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exclusion_probe_requires_independent_descriptions_and_releases_its_lock() {
+        let first = tempfile::NamedTempFile::new().unwrap();
+        let second = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(first.path())
+            .unwrap();
+        verify_exclusion(first.as_file(), &second).unwrap();
+        let duplicate = first.as_file().try_clone().unwrap();
+        assert_eq!(
+            verify_exclusion(first.as_file(), &duplicate),
+            Err(ffi::SQLITE_IOERR_LOCK)
+        );
+        lock(&second, WRITE_LOCK, PENDING + 512, 1).unwrap();
+        lock(&second, UNLOCK, PENDING + 512, 1).unwrap();
     }
 }

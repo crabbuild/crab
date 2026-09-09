@@ -76,6 +76,17 @@ pub async fn read_records_with_limit<T: for<'de> Deserialize<'de>>(
     max_records: u64,
 ) -> Result<Vec<T>> {
     let index = read_index(store, router, kind, index_hash).await?;
+    read_records_from_index(store, router, kind, index_hash, index, max_records).await
+}
+
+pub(crate) async fn read_records_from_index<T: for<'de> Deserialize<'de>>(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    kind: SegmentKind,
+    index_hash: &str,
+    index: SegmentIndex,
+    max_records: u64,
+) -> Result<Vec<T>> {
     if index.total_records > max_records {
         return Err(MetadataError::CorruptObject {
             path: index_relative_path(kind, index_hash),
