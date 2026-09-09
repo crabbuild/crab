@@ -163,7 +163,7 @@ For custom URL schemes, Git invokes a helper binary that handles all network int
 
 ```
 ┌───────────────────────┬───────────────────────────────────────┐
-│   Git responsibility  │   crab responsibility               │
+│   Git responsibility  │   crab responsibility                 │
 ├───────────────────────┼───────────────────────────────────────┤
 │ Commit graph          │ Large-file chunking                   │
 │ Tree structure        │ Chunk deduplication                   │
@@ -1682,7 +1682,7 @@ User-facing messages use Git vocabulary:
 |Shard            |reconstruction metadata            |
 |Chunk            |(usually hidden) byte range        |
 |MerkleHash       |(usually hidden) content hash      |
-|File-hash pointer|file tracked by crab             |
+|File-hash pointer|file tracked by crab               |
 |CAS conflict     |ref update conflict / push rejected|
 
 ### 15.4 Error Messages
