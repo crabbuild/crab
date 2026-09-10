@@ -473,11 +473,14 @@ impl RemoteGitRepository {
             return Ok(None);
         }
 
+        // Both operations must descend from the same child. Cancelling it on
+        // either failure stops already-running body reads in the sibling.
+        let concurrent_cancellation = cancellation.child_token();
         // Pack streams do not query the locator. Keeping them on a separate
         // operation lets transfer start while the exact catalog scan runs.
         let operation = crate::OperationContext::open_pack_transfer(
             Arc::clone(&self.state),
-            cancellation,
+            &concurrent_cancellation,
             self.state.options.operation_limits(),
         )
         .await?;
@@ -487,7 +490,6 @@ impl RemoteGitRepository {
             let workspace = tempfile::tempdir_in(workspace_parent).map_err(io_error)?;
             let download_dir = workspace.path().join("source-packs");
             std::fs::create_dir_all(&download_dir).map_err(io_error)?;
-            let concurrent_cancellation = cancellation.child_token();
             let download = async {
                 let result = download_repack_sources(
                     &operation,

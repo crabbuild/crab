@@ -1413,17 +1413,20 @@ mod tests {
         .await;
         assert!(regular.is_err());
 
+        let concurrent_cancellation = cancellation.child_token();
         let transfer = OperationContext::open_pack_transfer(
             state,
-            &cancellation,
+            &concurrent_cancellation,
             crate::OperationLimits::default(),
         )
         .await
         .expect("pack transfer operation");
-        transfer
-            .finish(Ok(()))
-            .await
-            .expect("finish pack transfer operation");
+        concurrent_cancellation.cancel();
+        assert!(transfer.cancellation().is_cancelled());
+        assert!(matches!(
+            transfer.finish::<()>(Err(Error::Cancelled)).await,
+            Err(Error::Cancelled)
+        ));
     }
 
     #[derive(Clone, Default)]
