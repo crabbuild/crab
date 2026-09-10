@@ -1887,6 +1887,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     # behavior.
     "crab-s3-gateway": {
         "normal": {
+            "crab-cache",
             "crab-cache-store",
             "crab-coordination",
             "crab-git",
