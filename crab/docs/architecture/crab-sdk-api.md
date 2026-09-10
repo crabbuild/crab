@@ -1,16 +1,11 @@
-# Crab SDK API overhaul
+# Crab SDK API
 
-Status: implemented. The SDK behavior baseline landed in PR #160; PR #169
-performs the single-cutover API migration and installs its permanent gates.
+This document defines the public `crab-sdk` API: repository access, task
+namespaces, lifecycle operations, feature boundaries, recovery, and performance
+contracts. The behavior, safety, and qualification requirements in
+[the SDK delivery plan](crab-sdk.md) are authoritative.
 
-This document is the plan of record for simplifying the public `crab-sdk` API.
-It changes API organization and naming while preserving the behavior, safety,
-performance, and qualification requirements in
-[the SDK delivery plan](crab-sdk.md). The crate has not been published, so the
-overhaul replaces the current preview API directly. It does not retain aliases
-or a second compatibility surface.
-
-## 1. Decision
+## 1. API model
 
 Applications open every existing repository through one `Client::open` method
 and receive one `Repository` handle. `OpenOptions` selects remote or local mode:
@@ -58,7 +53,7 @@ transport or authorization choices. They are not repository modes:
 
 - A direct or managed locator can open a remote repository.
 - A direct, managed, or HTTP locator can be cloned into a local repository.
-- Managed repository administration remains a client service.
+- Managed repository administration is a client service.
 - Local mode means an on-disk Git worktree. Its fetch, pull, and push operations
   may still use the network.
 
@@ -66,75 +61,22 @@ Repository creation stays explicit. `initialize_remote`, `clone_local`, and
 `configure_local` create or change durable state, so they do not become variants
 of `open`.
 
-## 2. Problem
+| Task | API entry point |
+| --- | --- |
+| Open an object-store or managed repository | `client.open(OpenOptions::remote(locator))` |
+| Open an existing Git worktree | `client.open(OpenOptions::local(path))` |
+| Initialize a remote repository | `client.initialize_remote(locator, head)` |
+| Clone into a new local worktree | `client.clone_local(locator, destination, options)` |
+| Configure an existing local worktree | `client.configure_local(path)` |
+| Administer managed repositories | `client.managed()` |
+| Recover a remote mutation | `client.resume_remote(token, scratch)` or `client.reconcile_remote(token)` |
+| Recover a local push | `client.resume_local_push(token, scratch)` or `client.reconcile_local_push(token)` |
 
-The preview API exports almost every public type at the crate root and divides
-repositories into `RemoteRepository` and `LocalRepository` before an application
-can express its workflow. This produces four costs:
-
-1. Applications must choose between separate open methods and carry separate
-   handle types even when configuration decides the mode at runtime.
-2. Names such as `LocalRepository`, `LocalStatus`, `LocalTools`, and
-   `ManagedRepositories` repeat context already established by their module.
-3. Storage, operation, managed-service, local, read, and publication types share
-   one autocomplete list.
-4. Recovery and lifecycle methods are difficult to discover because their names
-   are mixed with repository opening and administration.
-
-The implementation already has the right lower-level seams. `crab-sdk` owns
-validated application-facing values and outcomes. `crab-remote-git` and
-`crab-read` own reads, `crab-remote` owns reusable orchestration,
-`crab-write` owns publication mechanics, and the auth crates own managed
-resolution. The overhaul changes the public interface and the adapter at that
-boundary. It does not move mechanics into the SDK or create a second execution
-path.
-
-## 3. Goals and boundaries
-
-The overhaul must provide:
-
-- one discoverable repository opening path;
-- one concrete repository handle for applications that choose mode at runtime;
-- remote and local interfaces with concise names and no unrelated methods;
-- namespaces that reflect user tasks instead of implementation crates;
-- the same typed errors, cancellation, recovery, integrity, and cleanup
-  guarantees as the current implementation;
-- the same minimal feature graph and no measurable data-plane regression;
-- one canonical API, documentation set, test entry point, and API snapshot.
-
-The overhaul does not add new Git behavior, storage providers, a blocking API,
-public backend traits, or repository administration beyond the SDK delivery
-plan. It does not make HTTP repositories available to the remote interface.
-
-## 4. Public namespace
+## 2. Public namespaces
 
 The crate root contains only the types needed to construct a client, identify a
-repository, select an interface, and handle errors:
-
-```rust,ignore
-pub use value::{
-    GitPath, HashAlgorithm, ObjectId, RepositoryLocator, Revision,
-};
-#[cfg(feature = "write")]
-pub use write_policy::WritePolicy;
-pub use error::{Error, ErrorKind, Result};
-pub use client::ClientBuilder;
-
-#[cfg(feature = "remote")]
-pub use client::Client;
-#[cfg(feature = "remote")]
-pub use repository::{OpenOptions, Repository, RepositoryMode};
-
-#[cfg(feature = "local")]
-pub mod local;
-#[cfg(feature = "managed")]
-pub mod managed;
-#[cfg(feature = "remote")]
-pub mod operation;
-#[cfg(feature = "remote")]
-pub mod remote;
-pub mod storage;
-```
+repository, select an interface, and handle errors. Task-specific types live in
+the modules below.
 
 The modules form the public task-oriented interface:
 
@@ -147,7 +89,7 @@ The modules form the public task-oriented interface:
 | `storage` | Direct provider configuration and shared content-cache configuration |
 | `operation` | Per-operation options, read limits, cancellation, progress, request builders, and operation identity |
 
-The target export inventory is explicit. Items may remain in private source
+The export inventory is explicit. Items may live in private source
 modules, but rustdoc exposes them only at these paths:
 
 | Namespace | Exported types |
@@ -160,50 +102,22 @@ modules, but rustdoc exposes them only at these paths:
 | `storage` | `DirectStoreOptions`, `S3Options`, `GcsOptions`, `AzureOptions`, `ContentCache` |
 | `operation` | `Request`, `Options`, `ReadOptions`, `ReadLimits`, `Cancellation`, `Progress`, `ProgressEvent`, `ProgressReceiver`, `ProgressUpdate`, `Id` |
 
-This inventory contains every preview root export; each item retains its feature
-gate from section 11. Future additions must belong to one of these
-responsibilities and pass the same public API review. The overhaul does not
-expose owner-crate implementation types.
+Each item retains its feature gate from section 9. Future additions must belong
+to one of these responsibilities and pass the same public API review. Owner-crate
+implementation types stay private.
 
-Types lose a prefix when their module supplies the same information:
+`Error`, `ErrorKind`, and `Result` live at the root because every workflow uses
+them. Core identifiers live at the root because they cross remote, local,
+managed, and recovery boundaries. `WritePolicy` also lives at the root because
+remote mutations and local pushes enforce the same policy contract.
 
-| Preview name | Target name |
-| --- | --- |
-| `RemoteRepository` | `Repository` plus `remote::Remote<'_>` |
-| `LocalRepository` | `Repository` plus `local::Local<'_>` |
-| `LocalSnapshot` | `local::Snapshot` |
-| `LocalStatus` | `local::Status` |
-| `LocalTools` | `local::Tools` |
-| `LocalConfiguration` | `local::Configuration` |
-| `LocalExecutionPolicy` | `local::ExecutionPolicy` |
-| `LocalCommitOptions` | `local::CommitOptions` |
-| `LocalPushOutcome` | `local::PushOutcome` |
-| `LocalPushRecoveryToken` | `local::PushRecoveryToken` |
-| `ManagedRepositories` | `managed::Managed` |
-| `ManagedOptions` | `managed::Options` |
-| `ManagedPage` | `managed::Page` |
-| `ManagedRepository` | `managed::RepositoryInfo` |
-| `ManagedRepositoryState` | `managed::RepositoryState` |
-| `DirectStoreOptions` | `storage::DirectStoreOptions` |
-| `ContentCache` | `storage::ContentCache` |
-| `OperationOptions` | `operation::Options` |
-| `ReadOptions` | `operation::ReadOptions` |
-| `ReadLimits` | `operation::ReadLimits` |
-| `OperationId` | `operation::Id` |
-
-`Error`, `ErrorKind`, and `Result` remain at the root because every workflow
-uses them. Core identifiers remain at the root because they cross remote,
-local, managed, and recovery boundaries. `WritePolicy` also remains at the root
-because remote mutations and local pushes enforce the same policy contract.
-Other preview root re-exports are removed.
-
-## 5. Client and repository lifecycle
+## 3. Client and repository lifecycle
 
 ### Client construction
 
-The client remains cheap to clone and owns shared bounded runtimes, credential
+The client is cheap to clone and owns shared bounded runtimes, credential
 resolution, operation tracking, and cleanup. Configuration groups related
-values instead of adding one builder method per local setting:
+values into task options:
 
 ```rust,ignore
 let client = Client::builder()
@@ -215,13 +129,12 @@ let client = Client::builder()
     .build()?;
 ```
 
-`local::Options` replaces the separate `local_tools` and
-`local_execution_policy` builder inputs. It requires explicit tools because
-local workflows depend on compatible Git and Crab executables. A client that
-uses only the remote interface does not require `local::Options` or either
-executable.
+`local::Options` groups the tool paths and execution policy. It requires
+explicit tools because local workflows depend on compatible Git and Crab
+executables. A client that uses only the remote interface does not require
+`local::Options` or either executable.
 
-The existing builder precedence remains: explicit builder values win over
+Builder precedence is deterministic: explicit builder values win over
 explicitly loaded configuration, provider defaults run only when selected, and
 the SDK does not mutate process environment, current directory, global Git
 configuration, or tracing.
@@ -251,7 +164,7 @@ impl Client {
 The constructors do not perform filesystem or network I/O. `Client::open`
 validates mode-specific configuration before mutation or storage access. Local
 open canonicalizes the worktree and Git common-directory identities and performs
-the same interrupted-operation inspection as the preview `open_local` path.
+interrupted-operation inspection before returning the handle.
 Remote open captures an immutable repository generation and never repairs it.
 
 `Repository` owns exactly one existing mode:
@@ -276,7 +189,7 @@ content chunks do not dispatch through the enum.
 
 ### Creating repository state
 
-State-creating methods remain on `Client`. Clone returns an opened `Repository`;
+State-creating methods live on `Client`. Clone returns an opened `Repository`;
 initialization and configuration return their smallest durable result because a
 new remote repository may still need indexing and local configuration does not
 need to open a long-lived handle:
@@ -313,12 +226,12 @@ mutation.
 
 ### Shutdown
 
-`Client::close().await` remains required. It stops admission, cancels and drains
-tracked workers, closes read owners and metadata databases, and reports the
-first unobserved cleanup failure. Repository and interface drops do not promise
-asynchronous cleanup after runtime or process termination.
+Call `Client::close().await` to stop admission, cancel and drain tracked workers,
+close read owners and metadata databases, and report the first unobserved cleanup
+failure. Repository and interface drops do not promise asynchronous cleanup
+after runtime or process termination.
 
-## 6. Remote interface
+## 4. Remote interface
 
 `remote::Remote<'a>` is a small borrowed interface. It owns validation,
 capability checks, and public request construction; owner crates retain the
@@ -331,7 +244,7 @@ let refs = remote.refs().await?;
 let snapshot = remote.snapshot(Revision::branch("main")?).await?;
 ```
 
-Its stable methods are:
+Its public methods are:
 
 | Method | Contract |
 | --- | --- |
@@ -370,10 +283,10 @@ let outcome = prepared
 ```
 
 Preparation, durable tokens, truthful `Committed`/`Rejected`/`Indeterminate`
-outcomes, read readiness, lease ordering, GC fencing, and finalize recovery keep
+outcomes, read readiness, lease ordering, GC fencing, and finalize recovery use
 the contracts in the SDK delivery plan.
 
-## 7. Local interface
+## 5. Local interface
 
 `local::Local<'a>` controls one opened Git worktree. The public name is local;
 documentation uses the precise domain terms worktree and working tree when
@@ -400,7 +313,7 @@ an immutable remote repository read view. A common snapshot trait would expose
 their least-common denominator and make async trait behavior public, so the two
 concrete types remain separate.
 
-## 8. Managed administration
+## 6. Managed administration
 
 Managed service access is client-scoped because listing and creating
 repositories do not operate on an already opened repository:
@@ -430,7 +343,7 @@ A managed locator still opens through `Client::open(OpenOptions::remote(...))`
 or acts as the source for `Client::clone_local`. The caller does not receive a third
 managed repository handle.
 
-## 9. Operation and recovery model
+## 7. Operation and recovery model
 
 Every admitted repository, administration, and recovery operation uses the same
 request builder:
@@ -444,14 +357,14 @@ let snapshot = client
     .await?;
 ```
 
-`operation::Request<'a, T, O>` remains awaitable and accepts its operation
+`operation::Request<'a, T, O>` is awaitable and accepts its operation
 options through `with_options`. Repository methods return the builder instead of
 adding an options parameter to every common call. Remote read methods use
 `operation::ReadOptions`; other work uses `operation::Options`. Consuming
 `PreparedMutation::execute` and `PreparedPush::execute` also return request
 builders rather than taking operation options directly.
 
-Recovery remains client-owned when an operation may need to resume before a
+Recovery is client-owned when an operation may need to resume before a
 repository can be opened. Names state the recovery family explicitly:
 
 ```rust,ignore
@@ -464,17 +377,17 @@ client.reconcile_local_push(token).await?;
 These methods return `operation::Request` builders, so callers apply
 `operation::Options` through `with_options` like every other asynchronous SDK
 operation. An opened remote interface also exposes `reconcile` so it can verify
-that a token belongs to the handle. Remote mutation and local push tokens remain
+that a token belongs to the handle. Remote mutation and local push tokens are
 separate versioned types because they bind different evidence and replay
 contracts. The API does not introduce a broad token enum or infer recovery
 outcomes from current refs.
 
-## 10. Errors and capability behavior
+## 8. Errors and capability behavior
 
 All errors use root `Error` and stable `ErrorKind`. Sources, operation identity,
-bounded redacted context, and cleanup errors remain inspectable.
+bounded redacted context, and cleanup errors are inspectable.
 
-The facade adds one deterministic rule: asking a repository for the wrong
+The facade enforces one deterministic rule: asking a repository for the wrong
 interface returns `UnsupportedCapability` synchronously and performs no I/O.
 Other unsupported combinations are rejected before mutation:
 
@@ -487,11 +400,11 @@ Other unsupported combinations are rejected before mutation:
 
 Capabilities report implemented mechanisms for the opened backend. They do not
 predict authorization, branch policy, transient service state, or credential
-validity. Those remain operation outcomes.
+validity. Those are operation outcomes.
 
-## 11. Features and dependency isolation
+## 9. Features and dependency isolation
 
-The feature graph remains:
+The feature graph is:
 
 | Feature | Public additions | Dependency rule |
 | --- | --- | --- |
@@ -507,13 +420,13 @@ remote-only consumer never compiles local process code. Namespaces organize the
 public API; they do not weaken Cargo feature isolation or create dummy types for
 disabled features.
 
-## 12. Internal ownership and performance
+## 10. Internal ownership and performance
 
 The public facade is an adapter with a small, deep interface. It validates mode
 selection and constructs SDK requests. It does not forward storage or Git owner
 types into public signatures.
 
-Implementation ownership remains:
+Implementation ownership:
 
 ```text
 crab-sdk::Repository / remote::Remote / local::Local
@@ -524,80 +437,31 @@ crab-sdk::Repository / remote::Remote / local::Local
   -> crab-git and owned processes for local worktree operations
 ```
 
-The migration must reuse existing owner objects. It must not reopen a repository
+The facade reuses existing owner objects. It must not reopen a repository
 when selecting an interface, copy configuration into a second runtime, or wrap
 streams in per-chunk dynamic dispatch. One enum match per operation is allowed.
-The following performance contracts remain release gates:
+The following performance contracts are release gates:
 
 - no additional storage requests or transferred bytes for the same remote read;
 - no additional full-file buffer for streaming reads, archives, edits, fetch, or
   push;
 - current request budgets, backpressure, cancellation, and cleanup behavior;
 - 512 MiB large-file resident-memory bound from the SDK delivery plan;
-- benchmark ratios and request/byte accounting remain within the existing CI
+- benchmark ratios and request/byte accounting stay within the configured CI
   thresholds.
 
-## 13. Migration plan
+## 11. Qualification
 
-The API is unpublished, so each phase changes source, tests, examples,
-documentation, and the API snapshot together. No phase leaves two supported
-ways to perform the same operation.
+The public API is qualified only when all of the following are true:
 
-### Phase A: namespace without behavior changes
-
-1. Create public `remote`, `remote::write`, `local`, `managed`, `operation`, and
-   `storage` modules.
-2. Move or re-export implementation modules beneath their final namespace.
-3. Rename context-prefixed types according to section 4.
-4. Update owner references, examples, package consumers, rustdoc, and the public
-   API snapshot in the same commit.
-5. Remove the old root exports and names.
-
-### Phase B: repository facade and unified open
-
-1. Add private `RepositoryBackend`, public `RepositoryMode`, `Repository`, and
-   `OpenOptions`.
-2. Make the existing remote and local owners private implementation details.
-3. Replace `open_remote` and `open_local` with `open`.
-4. Return `Repository` from refresh and clone; preserve the small initialization
-   and configuration results described in section 5.
-5. Migrate every SDK test through `Repository::remote` or
-   `Repository::local`, then delete the old entry points.
-
-### Phase C: configuration and lifecycle cleanup
-
-1. Replace separate local builder setters with `local::Options`.
-2. Replace `managed_repositories` with `managed`.
-3. Rename recovery methods by family and keep recovery possible without an open
-   handle.
-4. Verify feature-minimal consumers expose only their selected namespace.
-
-### Phase D: documentation and release qualification
-
-1. Rewrite `crates/crab-sdk/README.md` and every public SDK guide around unified
-   open and the task namespaces.
-2. Compile every example and package-consumer matrix cell.
-3. Regenerate the API snapshot and fail CI on old names or root exports.
-4. Run the complete SDK behavior, fault, performance, MSRV, rustdoc, semver, and
-   external-consumer qualification gates.
-5. Run credentialed GCS/Azure and real managed-service qualification before
-   declaring those backends supported.
-
-Registry publication remains a separate authorized release action.
-
-## 14. Verification
-
-The overhaul is complete only when all of the following are true:
-
-- every existing SDK acceptance test enters through `Client::open`,
+- every SDK acceptance test enters through `Client::open`,
   `Client::clone_local`, `Client::configure_local`, or `Client::initialize_remote`;
 - remote and local interface mismatch tests prove typed, synchronous, side-effect
   free failure;
 - direct, managed, and HTTP behavior retains every applicable cell in
   [the capability inventory](sdk-capabilities.md);
-- no old public handle, root export, open method, builder setter, or recovery
-  method appears in rustdoc, examples, guides, package consumers, or the API
-  snapshot;
+- rustdoc, examples, guides, package consumers, and the checked API snapshot
+  expose the inventory in section 2;
 - minimal, remote, content, write, local, managed, and combined feature builds
   pass;
 - compile-fail coverage proves disabled features do not leak public types;
@@ -609,37 +473,3 @@ The overhaul is complete only when all of the following are true:
   consistently;
 - external consumer, MSRV, rustdoc warning, API snapshot, semver, and packaging
   checks pass.
-
-## 15. Alternatives rejected
-
-### Public `enum Repository`
-
-Requiring callers to match `Remote` and `Local` restores two handle types at
-every call site and makes adding private implementations a public semver event.
-The concrete facade keeps backend dispatch private.
-
-### One repository type with every method
-
-A handle containing remote reads, local stage/checkout, and managed
-administration would make many methods fail by mode and would hide capability
-boundaries. Borrowed remote and local interfaces make invalid operations absent
-from autocomplete after mode selection.
-
-### Public traits or `Repository<B>`
-
-Public async traits constrain object safety, cancellation, stream associated
-types, and semver. A generic backend parameter spreads implementation selection
-through application types. Crab has no external backend implementation contract
-that justifies either surface.
-
-### Separate `open_remote` and `open_local`
-
-These methods force applications that choose mode from configuration to branch
-before opening and retain duplicate repository lifecycle APIs. `OpenOptions`
-keeps mode selection explicit while returning one handle.
-
-### Compatibility aliases
-
-The SDK is unpublished. Aliases would double documentation and autocomplete,
-preserve the flat surface, and create an unsupported migration contract. The
-overhaul uses one direct cutover before publication.
