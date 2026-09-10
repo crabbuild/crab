@@ -12,6 +12,10 @@ and `operation` modules.
 > [!IMPORTANT]
 > `crab-sdk` is not published on crates.io yet. Depend on a pinned Git revision
 > until the first registry release.
+>
+> CI continuously qualifies direct and local workflows against isolated
+> S3-compatible RustFS storage. GCS, Azure, and managed-service APIs remain
+> preview until their mandatory credentialed qualification environments run.
 
 ## Installation
 
