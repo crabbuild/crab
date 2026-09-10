@@ -32,6 +32,7 @@ class QualificationRunnerTests(unittest.TestCase):
                         "failures": 0,
                     }))
                     trials.append({
+                        "trial": index + 1,
                         "implementation": implementation,
                         "cache_state": cache_state,
                         "measurement": f"{stem}.json",
@@ -124,6 +125,56 @@ class QualificationRunnerTests(unittest.TestCase):
             ], cwd=ROOT, check=False, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("shared-core baselines", result.stderr)
+
+    def test_compare_read_normalizes_each_alternating_pair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.write_read_fixture(root)
+            payload = json.loads(manifest.read_text())
+            elapsed = {
+                "core": [10.15, 7.71, 7.19, 7.60, 8.47],
+                "sdk": [11.00, 9.13, 7.89, 8.66, 6.40],
+            }
+            for trial in payload["trials"]:
+                if trial["cache_state"] != "cold":
+                    continue
+                measurement = root / trial["measurement"]
+                values = json.loads(measurement.read_text())
+                values["elapsed_seconds"] = elapsed[trial["implementation"]][trial["trial"] - 1]
+                measurement.write_text(json.dumps(values))
+            report = root / "report.json"
+
+            result = subprocess.run([
+                "python3", str(SCRIPT), "compare-read", "--manifest", str(manifest),
+                "--output", str(report),
+            ], cwd=ROOT, check=False)
+            report_payload = json.loads(report.read_text())
+
+            unpaired_ratio = (
+                report_payload["medians"]["sdk_cold"]["wall_seconds"]
+                / report_payload["medians"]["core_cold"]["wall_seconds"]
+            )
+            self.assertGreater(unpaired_ratio, 1.10)
+            self.assertLessEqual(
+                report_payload["sdk_to_core_ratios"]["cold"]["wall_seconds"], 1.10
+            )
+            self.assertEqual(result.returncode, 0)
+
+    def test_compare_read_rejects_duplicate_pair_member(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = self.write_read_fixture(root)
+            payload = json.loads(manifest.read_text())
+            payload["trials"][1]["trial"] = payload["trials"][0]["trial"]
+            manifest.write_text(json.dumps(payload))
+
+            result = subprocess.run([
+                "python3", str(SCRIPT), "compare-read", "--manifest", str(manifest),
+                "--output", str(root / "report.json"),
+            ], cwd=ROOT, check=False, capture_output=True, text=True)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("duplicate", result.stderr)
 
 
 if __name__ == "__main__":
