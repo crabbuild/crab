@@ -1420,12 +1420,15 @@ smoke and Compose multipart recovery across container replacement. It also
 includes the canonical Helm chart, values schema, EKS example and CI validation
 against Kubernetes 1.29 schemas. The private management listener exports
 bounded-cardinality Prometheus HTTP, response-stream, admission-pressure,
-content-scratch and aggregate multipart-reconciliation metrics, with
+content-scratch, logical object-store latency/outcome/byte, and aggregate
+multipart-reconciliation metrics, with
 packaged-image qualification proving the scrape contract and that request or
 credential identities are absent. Live EKS, external TLS, independent
-Git-history proof, backend latency/error and filesystem-capacity metrics, alert
-delivery, ECS and broader operations evidence remain requirements, not
-qualified deployment support.
+Git-history proof, provider wire-attempt and filesystem-capacity metrics, alert
+delivery, ECS, and broader operations evidence remain requirements, not
+qualified deployment support. Provider-native or load-balancer telemetry must
+cover wire attempts because the application metrics intentionally measure
+logical object-store calls across their complete response-stream lifetime.
 
 Build a locked, multi-stage image with the executable as PID 1, non-root user,
 read-only root filesystem, explicit writable scratch/cache directories and

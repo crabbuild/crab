@@ -16,6 +16,7 @@ use crate::{
     multipart::SweepStats,
 };
 
+mod backend;
 mod scratch;
 
 pub(crate) use scratch::{ScratchFailure, ScratchPurpose, ScratchUsage};
@@ -69,6 +70,7 @@ struct MetricsInner {
     methods: [MethodMetrics; METHOD_COUNT],
     admission: [AdmissionMetrics; RequestClass::ALL.len()],
     multipart_maintenance: MultipartMaintenanceMetrics,
+    backend: backend::BackendMetrics,
     scratch: scratch::ScratchMetrics,
 }
 
@@ -136,6 +138,7 @@ impl Metrics {
         let admission =
             RequestClass::ALL.map(|class| AdmissionMetrics::new(&recorder, class.label()));
         let multipart_maintenance = MultipartMaintenanceMetrics::new(&recorder);
+        let backend = backend::BackendMetrics::new(&recorder);
         let scratch = scratch::ScratchMetrics::new(&recorder);
         Ok(Self {
             inner: Arc::new(MetricsInner {
@@ -143,6 +146,7 @@ impl Metrics {
                 methods,
                 admission,
                 multipart_maintenance,
+                backend,
                 scratch,
             }),
         })
@@ -234,6 +238,10 @@ impl Metrics {
 
     pub(crate) fn start_scratch(&self, purpose: ScratchPurpose) -> ScratchUsage {
         self.inner.scratch.start(purpose)
+    }
+
+    pub(crate) fn storage_observer(&self) -> Arc<dyn crab_storage::StorageObserver> {
+        self.inner.backend.observer()
     }
 
     pub(crate) fn render(&self, admission: &Admission) -> String {

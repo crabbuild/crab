@@ -247,6 +247,7 @@ impl Gateway {
     pub(crate) fn new(config: Config, cancellation: CancellationToken) -> crate::Result<Self> {
         let auth = GatewayAuth::load(&config)?;
         let region = Arc::from(config.region.clone());
+        let metrics = Metrics::new()?;
         let mut stores: BTreeMap<String, Store> = BTreeMap::new();
         let mut repositories = BTreeMap::new();
         for entry in config.repositories {
@@ -254,7 +255,8 @@ impl Gateway {
             let store = match stores.get(&store_key) {
                 Some(store) => store.clone(),
                 None => {
-                    let store = build_store(&entry)?;
+                    let store =
+                        build_store(&entry)?.with_storage_observer(metrics.storage_observer());
                     stores.insert(store_key, store.clone());
                     store
                 }
@@ -264,7 +266,6 @@ impl Gateway {
         }
         let runtime = Arc::new(RemoteGitRuntime::default());
         let options = RepositoryOptions::default();
-        let metrics = Metrics::new()?;
         let admission = Admission::new(
             config.max_in_flight_requests,
             cancellation.clone(),

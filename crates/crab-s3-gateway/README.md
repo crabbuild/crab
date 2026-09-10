@@ -168,6 +168,12 @@ into a successful sweep. Content-spool and Xet-reconstruction series expose
 currently owned temporary files and logical bytes, cumulative bytes written,
 and bounded create/write/flush/read failures. Ownership remains charged until
 the spool or response stream drops, including cancellation and disconnect.
+Backend series cover the complete logical object-store call and response-stream
+lifetime for GET, HEAD, range, PUT, delete, list, copy, and multipart lifecycle
+operations. They expose fixed success/failure classes, active calls, duration,
+body bytes delivered, and payload bytes accepted by successful writes. These
+are logical Crab transport operations; provider-internal HTTP retries may make
+more wire requests than the counters report.
 Metric labels are fixed enums; they never contain
 repository names, refs, keys, upload IDs, principals, access keys, or secrets.
 The corresponding CLI checks are suitable for container and orchestration

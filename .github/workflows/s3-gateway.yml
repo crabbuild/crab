@@ -376,6 +376,24 @@ jobs:
             "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_scratch_bytes_written_total\{purpose="content_spool"\} [1-9][0-9]*$' \
             "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_backend_requests_total\{operation="(get|head|range|put|list)",outcome="success"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_backend_bytes_read_total\{operation="(get|range)"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_backend_bytes_written_total\{operation="(put|multipart_part)"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          backend_idle=false
+          for _ in $(seq 1 30); do
+            if test "$(grep -Ec '^crab_s3_gateway_backend_in_flight_requests\{operation="(get|head|range|put|delete|list|copy|multipart_start|multipart_part|multipart_complete|multipart_abort)"\} 0$' \
+              "${metrics_root}.txt")" = 11; then
+              backend_idle=true
+              break
+            fi
+            sleep 1
+            curl --fail --silent --show-error http://127.0.0.1:18081/metrics \
+              --output "${metrics_root}.txt"
+          done
+          test "${backend_idle}" = true
           test "$(grep -Ec '^crab_s3_gateway_scratch_(bytes|files)\{purpose="(content_spool|xet_reconstruction)"\} 0$' \
             "${metrics_root}.txt")" = 4
           test "$(grep -Ec '^crab_s3_gateway_scratch_io_failures_total\{purpose="(content_spool|xet_reconstruction)",operation="(create|write|flush|read)"\} 0$' \

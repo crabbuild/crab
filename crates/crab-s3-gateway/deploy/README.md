@@ -81,6 +81,13 @@ metric measures owned content files, while filesystem telemetry remains the
 authority for total volume usage. Use
 `rate(crab_s3_gateway_scratch_bytes_written_total[5m])` to distinguish sustained
 spool traffic from a leaked or slow request.
+Alert on sustained increases in backend `auth`, `throttled`, `transient`, or
+`error` outcomes and on backend duration against the deployment's service-level
+budget. Use `crab_s3_gateway_backend_in_flight_requests` with admission pressure
+to distinguish provider saturation from local queue pressure, and compare
+backend byte rates with provider billing and network telemetry. These metrics
+count logical object-store calls; provider-internal retries require provider or
+load-balancer telemetry for wire-attempt counts.
 
 The checked CI qualification also creates a multipart session, uploads a valid
 non-final part, force-recreates the gateway container, verifies the replacement

@@ -36,6 +36,10 @@ Alert on any increase in `crab_s3_gateway_scratch_io_failures_total`, and compar
 the per-pod sum of `crab_s3_gateway_scratch_bytes` with `scratch.sizeLimit` plus
 the pod's filesystem telemetry. The application metric follows content-file
 ownership; the filesystem remains authoritative for all bytes on the volume.
+Alert on sustained backend `auth`, `throttled`, `transient`, or `error` outcomes
+and backend duration outside the service-level budget. Correlate backend
+in-flight calls with admission queues before scaling: one identifies provider
+work while the other identifies local request pressure.
 
 Before installation:
 

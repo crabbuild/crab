@@ -1,5 +1,6 @@
 use super::*;
 use http_body_util::BodyExt as _;
+use object_store::{ObjectStoreExt as _, path::Path};
 use tokio_util::sync::CancellationToken;
 
 fn setup() -> (Admission, Metrics) {
@@ -174,4 +175,60 @@ fn scratch_failures_use_only_bounded_purpose_and_operation_labels() {
         "crab_s3_gateway_scratch_io_failures_total{purpose=\"xet_reconstruction\",operation=\"read\"} 1"
     ));
     assert!(!body.contains("path="));
+}
+
+#[tokio::test]
+async fn backend_metrics_cover_stream_lifetime_ranges_and_write_bytes() {
+    let (admission, metrics) = setup();
+    let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_storage_observer(metrics.storage_observer());
+    let path = Path::from("private/repository/large-object");
+    store
+        .inner()
+        .put(&path, Bytes::from_static(b"0123456789").into())
+        .await
+        .unwrap();
+
+    let result = store.inner().get_range(&path, 2..8).await.unwrap();
+    assert_eq!(result, b"234567"[..]);
+    store
+        .inner()
+        .get(&Path::from("private/repository/missing"))
+        .await
+        .unwrap_err();
+    let listing = store.inner().list(None);
+    assert!(
+        metrics
+            .render(&admission)
+            .contains("crab_s3_gateway_backend_in_flight_requests{operation=\"list\"} 1")
+    );
+    drop(listing);
+
+    let body = metrics.render(&admission);
+    assert!(body.contains(
+        "crab_s3_gateway_backend_requests_total{operation=\"put\",outcome=\"success\"} 1"
+    ));
+    assert!(body.contains("crab_s3_gateway_backend_bytes_written_total{operation=\"put\"} 10"));
+    assert!(body.contains(
+        "crab_s3_gateway_backend_requests_total{operation=\"range\",outcome=\"success\"} 1"
+    ));
+    assert!(body.contains(
+        "crab_s3_gateway_backend_requests_total{operation=\"get\",outcome=\"not_found\"} 1"
+    ));
+    assert!(body.contains("crab_s3_gateway_backend_bytes_read_total{operation=\"range\"} 6"));
+    assert!(body.contains(
+        "crab_s3_gateway_backend_requests_total{operation=\"list\",outcome=\"cancelled\"} 1"
+    ));
+    assert!(
+        body.contains(
+            "crab_s3_gateway_backend_request_duration_seconds_count{operation=\"range\"} 1"
+        )
+    );
+    assert_eq!(
+        body.lines()
+            .filter(|line| line.starts_with("crab_s3_gateway_backend_requests_total{"))
+            .count(),
+        crab_storage::StorageOperation::ALL.len() * crab_storage::StorageOutcome::ALL.len()
+    );
+    assert!(!body.contains("private/repository"));
 }

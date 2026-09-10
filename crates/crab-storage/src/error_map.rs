@@ -97,7 +97,7 @@ pub fn map_object_store_error(err: object_store::Error, path: &str) -> StorageEr
     }
 }
 
-fn is_throttling_message(message: &str) -> bool {
+pub(crate) fn is_throttling_message(message: &str) -> bool {
     message.contains("throttl")
         || message.contains("slowdown")
         || message.contains("slow down")
