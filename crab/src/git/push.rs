@@ -97,6 +97,9 @@ use crab_xet::xorb::parser::{XorbParser, xorb_metadata_region};
 
 const RECIPE_PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const RECIPE_PAGE_CACHE_ENTRY_OVERHEAD: usize = 128;
+// Keep normal push snapshots within one journal download batch. The existing
+// reader-safe compactor owns all manifest CAS and concurrent-writer handling.
+const PUSH_REF_JOURNAL_COMPACTION_THRESHOLD: usize = 32;
 
 fn bulk_data_bytes(bulk: &BulkData) -> u64 {
     let shard_segment_bytes: u64 = bulk
@@ -6940,22 +6943,14 @@ impl PushPipeline {
             return Ok(());
         };
 
-        match crate::metadata::manifest::read_repository_snapshot_with_cache(
+        let mut snapshot = match crate::metadata::manifest::read_repository_snapshot_with_cache(
             store,
             self.caching_store.as_ref(),
             &self.router,
         )
         .await
         {
-            Ok(snapshot) => {
-                debug!(
-                    generation = snapshot.manifest.generation,
-                    refs = snapshot.journal.refs.len(),
-                    "read base manifest"
-                );
-                *self.manifest_etag.lock().await = Some(snapshot.manifest_etag.clone());
-                *self.base_snapshot.lock().await = Some(Arc::new(snapshot));
-            }
+            Ok(snapshot) => snapshot,
             Err(CrabError::NotFound { path }) if path == self.router.manifest_path().as_ref() => {
                 return Err(CrabError::CorruptObject {
                     path,
@@ -6963,7 +6958,40 @@ impl PushPipeline {
                 });
             }
             Err(e) => return Err(e),
+        };
+
+        if snapshot.journal.transactions.len() >= PUSH_REF_JOURNAL_COMPACTION_THRESHOLD {
+            info!(
+                transactions = snapshot.journal.transactions.len(),
+                threshold = PUSH_REF_JOURNAL_COMPACTION_THRESHOLD,
+                "compacting deep ref journal before push"
+            );
+            if compact_ref_journal_for_reader(
+                store,
+                &self.router,
+                self.config.lock_ttl,
+                None,
+                &self.cancel,
+            )
+            .await?
+            {
+                snapshot = crate::metadata::manifest::read_repository_snapshot_with_cache(
+                    store,
+                    self.caching_store.as_ref(),
+                    &self.router,
+                )
+                .await?;
+            }
         }
+
+        debug!(
+            generation = snapshot.manifest.generation,
+            refs = snapshot.journal.refs.len(),
+            transactions = snapshot.journal.transactions.len(),
+            "read base manifest"
+        );
+        *self.manifest_etag.lock().await = Some(snapshot.manifest_etag.clone());
+        *self.base_snapshot.lock().await = Some(Arc::new(snapshot));
 
         Ok(())
     }
@@ -23972,6 +24000,79 @@ mod tests {
         .await
         .expect("admission completes the pending handoff");
         assert_eq!(repository.generation(), compacted.manifest.generation);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_base_read_compacts_journal_at_the_bounded_depth() {
+        let (store, router) = test_store_router("push-bounded-journal");
+        ensure_test_layout(&store, &router).await;
+        let initial = Manifest::default_for_repo("refs/heads/main");
+        create_manifest_with_etag(&store, &router, &initial)
+            .await
+            .expect("create initial manifest");
+
+        let mut old_oid = None;
+        for ordinal in 1..=PUSH_REF_JOURNAL_COMPACTION_THRESHOLD {
+            let expected = crate::metadata::manifest::read_ref_journal_head(
+                &store,
+                &router,
+                "refs/heads/main",
+            )
+            .await
+            .expect("read ref head");
+            let new_oid = format!("{ordinal:040x}");
+            let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+                BTreeMap::from([(
+                    "refs/heads/main".to_owned(),
+                    expected.visible_transaction.clone(),
+                )]),
+                vec![crate::metadata::manifest::RefJournalEdit {
+                    ref_name: "refs/heads/main".to_owned(),
+                    old_oid: old_oid.clone(),
+                    new_oid: Some(new_oid.clone()),
+                    peeled_oid: None,
+                    lock_holder: None,
+                    visibility_evidence_hash: None,
+                }],
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("build transaction");
+            crate::metadata::manifest::commit_ref_journal_transaction(
+                &store,
+                &router,
+                &transaction,
+                &[expected],
+            )
+            .await
+            .expect("commit transaction");
+            old_oid = Some(new_oid);
+        }
+
+        let pipeline = PushPipeline::new(
+            PushConfig::default(),
+            Vec::new(),
+            Some(store),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline
+            .read_base_manifest()
+            .await
+            .expect("read and compact the bounded journal");
+        let snapshot = pipeline.base_snapshot.lock().await.clone().unwrap();
+
+        assert!(snapshot.journal.transactions.is_empty());
+        assert_eq!(
+            snapshot.journal.refs.get("refs/heads/main"),
+            old_oid.as_ref()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
