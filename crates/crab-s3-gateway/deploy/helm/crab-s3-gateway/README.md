@@ -33,9 +33,14 @@ At minimum, alert on increasing
 than three minutes for five minutes. Alert on admission queue saturation before
 scaling pressure becomes sustained S3 `SlowDown` responses.
 Alert on any increase in `crab_s3_gateway_scratch_io_failures_total`, and compare
-the per-pod sum of `crab_s3_gateway_scratch_bytes` with `scratch.sizeLimit` plus
-the pod's filesystem telemetry. The application metric follows content-file
-ownership; the filesystem remains authoritative for all bytes on the volume.
+the per-pod sum of `crab_s3_gateway_scratch_bytes` with
+`crab_s3_gateway_scratch_filesystem_available_bytes`. Alert when the filesystem
+probe-success gauge is zero, its failure counter increases, or the reported
+available-to-total ratio crosses the deployment's headroom threshold. The
+application metric follows content-file ownership; the filesystem gauges cover
+all bytes visible on the mount. Kubelet ephemeral-storage telemetry remains
+authoritative for `scratch.sizeLimit` when the `emptyDir` policy cap is not
+represented as a filesystem quota by the node runtime.
 Alert on sustained backend `auth`, `throttled`, `transient`, or `error` outcomes
 and backend duration outside the service-level budget. Correlate backend
 in-flight calls with admission queues before scaling: one identifies provider

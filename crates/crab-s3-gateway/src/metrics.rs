@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod backend;
+mod filesystem;
 mod scratch;
 
 pub(crate) use scratch::{ScratchFailure, ScratchPurpose, ScratchUsage};
@@ -71,6 +72,7 @@ struct MetricsInner {
     admission: [AdmissionMetrics; RequestClass::ALL.len()],
     multipart_maintenance: MultipartMaintenanceMetrics,
     backend: backend::BackendMetrics,
+    filesystem: filesystem::FilesystemMetrics,
     scratch: scratch::ScratchMetrics,
 }
 
@@ -130,6 +132,12 @@ impl MaintenanceFailure {
 
 impl Metrics {
     pub(crate) fn new() -> Result<Self, metrics_exporter_prometheus::BuildError> {
+        Self::new_with_scratch_path(std::env::temp_dir())
+    }
+
+    fn new_with_scratch_path(
+        scratch_path: std::path::PathBuf,
+    ) -> Result<Self, metrics_exporter_prometheus::BuildError> {
         let recorder = PrometheusBuilder::new()
             .set_buckets(&DURATION_BUCKETS_SECONDS)?
             .build_recorder();
@@ -139,6 +147,7 @@ impl Metrics {
             RequestClass::ALL.map(|class| AdmissionMetrics::new(&recorder, class.label()));
         let multipart_maintenance = MultipartMaintenanceMetrics::new(&recorder);
         let backend = backend::BackendMetrics::new(&recorder);
+        let filesystem = filesystem::FilesystemMetrics::new(&recorder, scratch_path);
         let scratch = scratch::ScratchMetrics::new(&recorder);
         Ok(Self {
             inner: Arc::new(MetricsInner {
@@ -147,6 +156,7 @@ impl Metrics {
                 admission,
                 multipart_maintenance,
                 backend,
+                filesystem,
                 scratch,
             }),
         })
@@ -245,6 +255,7 @@ impl Metrics {
     }
 
     pub(crate) fn render(&self, admission: &Admission) -> String {
+        self.inner.filesystem.refresh();
         for pool in admission.snapshot() {
             let metrics = &self.inner.admission[pool.class.index()];
             metrics.in_flight.set(pool.active as f64);

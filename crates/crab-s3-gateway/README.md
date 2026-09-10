@@ -173,7 +173,11 @@ lifetime for GET, HEAD, range, PUT, delete, list, copy, and multipart lifecycle
 operations. They expose fixed success/failure classes, active calls, duration,
 body bytes delivered, and payload bytes accepted by successful writes. These
 are logical Crab transport operations; provider-internal HTTP retries may make
-more wire requests than the counters report.
+more wire requests than the counters report. Scratch-filesystem gauges report
+the total, free, and process-available bytes seen at the configured process
+temporary directory on every scrape. A separate probe-success gauge and failure
+counter make mount loss distinguishable from genuine zero capacity; a failed
+probe clears all three capacity gauges rather than retaining stale values.
 Metric labels are fixed enums; they never contain
 repository names, refs, keys, upload IDs, principals, access keys, or secrets.
 The corresponding CLI checks are suitable for container and orchestration

@@ -1423,12 +1423,17 @@ bounded-cardinality Prometheus HTTP, response-stream, admission-pressure,
 content-scratch, logical object-store latency/outcome/byte, and aggregate
 multipart-reconciliation metrics, with
 packaged-image qualification proving the scrape contract and that request or
-credential identities are absent. Live EKS, external TLS, independent
-Git-history proof, provider wire-attempt and filesystem-capacity metrics, alert
-delivery, ECS, and broader operations evidence remain requirements, not
-qualified deployment support. Provider-native or load-balancer telemetry must
-cover wire attempts because the application metrics intentionally measure
-logical object-store calls across their complete response-stream lifetime.
+credential identities are absent. The same endpoint reports the process view
+of scratch-filesystem total, free, and available capacity, plus explicit probe
+health; failed probes clear stale capacity. Live EKS, external TLS, independent
+Git-history proof, provider wire-attempt metrics, Kubernetes policy-quota
+telemetry, alert delivery, ECS, and broader operations evidence remain
+requirements, not qualified deployment support. Provider-native or
+load-balancer telemetry must cover wire attempts because the application
+metrics intentionally measure logical object-store calls across their complete
+response-stream lifetime. Kubelet telemetry remains authoritative for an
+`emptyDir.sizeLimit` that the node runtime does not expose as a filesystem
+quota.
 
 Build a locked, multi-stage image with the executable as PID 1, non-root user,
 read-only root filesystem, explicit writable scratch/cache directories and

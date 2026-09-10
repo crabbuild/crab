@@ -9,6 +9,14 @@ fn setup() -> (Admission, Metrics) {
     (admission, metrics)
 }
 
+fn metric_value(body: &str, name: &str) -> f64 {
+    body.lines()
+        .find_map(|line| line.strip_prefix(&format!("{name} ")))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
 #[test]
 fn completed_request_exports_bounded_prometheus_series() {
     let (admission, metrics) = setup();
@@ -104,6 +112,59 @@ fn renderer_emits_the_configured_cumulative_histogram() {
             "crab_s3_gateway_http_request_duration_seconds_bucket{{method=\"get\",le=\"{bound}\"}}"
         )));
     }
+}
+
+#[test]
+fn renderer_exports_current_scratch_filesystem_capacity() {
+    let scratch = tempfile::tempdir().unwrap();
+    let metrics = Metrics::new_with_scratch_path(scratch.path().to_owned()).unwrap();
+    let admission = Admission::new(8, CancellationToken::new(), metrics.clone());
+
+    let body = metrics.render(&admission);
+    let size = metric_value(&body, "crab_s3_gateway_scratch_filesystem_size_bytes");
+    let free = metric_value(&body, "crab_s3_gateway_scratch_filesystem_free_bytes");
+    let available = metric_value(&body, "crab_s3_gateway_scratch_filesystem_available_bytes");
+
+    assert!(size > 0.0);
+    assert!(free <= size);
+    assert!(available <= free);
+    assert_eq!(
+        metric_value(&body, "crab_s3_gateway_scratch_filesystem_probe_success"),
+        1.0
+    );
+    assert_eq!(
+        metric_value(
+            &body,
+            "crab_s3_gateway_scratch_filesystem_probe_failures_total"
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn failed_scratch_filesystem_probe_clears_capacity_and_counts_failure() {
+    let scratch = tempfile::tempdir().unwrap();
+    let missing = scratch.path().join("missing");
+    let metrics = Metrics::new_with_scratch_path(missing).unwrap();
+    let admission = Admission::new(8, CancellationToken::new(), metrics.clone());
+
+    let body = metrics.render(&admission);
+
+    for name in [
+        "crab_s3_gateway_scratch_filesystem_size_bytes",
+        "crab_s3_gateway_scratch_filesystem_free_bytes",
+        "crab_s3_gateway_scratch_filesystem_available_bytes",
+        "crab_s3_gateway_scratch_filesystem_probe_success",
+    ] {
+        assert_eq!(metric_value(&body, name), 0.0);
+    }
+    assert_eq!(
+        metric_value(
+            &body,
+            "crab_s3_gateway_scratch_filesystem_probe_failures_total"
+        ),
+        1.0
+    );
 }
 
 #[test]

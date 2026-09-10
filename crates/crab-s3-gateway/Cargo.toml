@@ -24,6 +24,7 @@ crab-storage = { workspace = true }
 crab-write = { workspace = true }
 crc-fast = "1"
 flate2 = { workspace = true }
+fs4 = "0.13"
 futures-util = { workspace = true }
 gix-hash = { workspace = true, features = ["sha1"] }
 gix-object = { workspace = true }

@@ -76,9 +76,13 @@ client fanout before they become sustained `SlowDown` responses.
 Alert when
 `increase(crab_s3_gateway_scratch_io_failures_total[5m]) > 0`. Compare
 `sum by (pod) (crab_s3_gateway_scratch_bytes)` with the pod's scratch-volume
-capacity and alert before the configured headroom is exhausted; the application
-metric measures owned content files, while filesystem telemetry remains the
-authority for total volume usage. Use
+capacity and alert before the configured headroom is exhausted. Alert when
+`crab_s3_gateway_scratch_filesystem_probe_success == 0`, on increasing
+`crab_s3_gateway_scratch_filesystem_probe_failures_total`, and when
+`crab_s3_gateway_scratch_filesystem_available_bytes /
+crab_s3_gateway_scratch_filesystem_size_bytes` crosses the deployment's
+headroom threshold. The owned-byte metric attributes live gateway content;
+the filesystem gauges include every byte on the mount. Use
 `rate(crab_s3_gateway_scratch_bytes_written_total[5m])` to distinguish sustained
 spool traffic from a leaked or slow request.
 Alert on sustained increases in backend `auth`, `throttled`, `transient`, or

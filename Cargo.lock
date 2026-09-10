@@ -2464,6 +2464,7 @@ dependencies = [
  "crab-write",
  "crc-fast",
  "flate2",
+ "fs4",
  "futures-util",
  "gix-hash",
  "gix-object",

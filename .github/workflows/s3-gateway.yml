@@ -376,6 +376,16 @@ jobs:
             "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_scratch_bytes_written_total\{purpose="content_spool"\} [1-9][0-9]*$' \
             "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_filesystem_size_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_filesystem_free_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_filesystem_available_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_filesystem_probe_success 1' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_filesystem_probe_failures_total 0' \
+            "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_backend_requests_total\{operation="(get|head|range|put|list)",outcome="success"\} [1-9][0-9]*$' \
             "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_backend_bytes_read_total\{operation="(get|range)"\} [1-9][0-9]*$' \
