@@ -157,9 +157,15 @@ The S3 and management listeners are deliberately separate. `GET /livez` on
 `management_listen` reports only that the process can serve requests. `GET
 /readyz` freshly reads and constructs every configured repository's current
 immutable view; it returns `503 Service Unavailable` with `Retry-After: 5` when
-any repository is unsafe to serve. The corresponding CLI checks are suitable
-for container and orchestration probes. Do not publish the unauthenticated
-management listener through the S3 ingress.
+any repository is unsafe to serve. `GET /metrics` returns Prometheus 0.0.4 text
+for bounded HTTP method/outcome counts, full response-stream duration and
+in-flight requests, response-body errors/aborts, and control/read/transfer
+admission capacity, queue pressure, and outcomes. Metric labels are fixed enums;
+they never contain repository names, refs, keys, upload IDs, principals, access
+keys, or secrets. The corresponding CLI checks are suitable for container and
+orchestration probes. The metrics endpoint is unauthenticated by design; scrape
+it only over the private management network and never publish that listener
+through the S3 ingress.
 
 The backing provider uses Crab's existing environment credential chain. Set
 the usual AWS, GCP, or Azure credentials for the selected provider. For an

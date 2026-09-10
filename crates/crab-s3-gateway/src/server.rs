@@ -8,11 +8,18 @@ use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::{conn::auto::Builder as ConnectionBuilder, graceful::GracefulShutdown},
 };
-use s3s::{host::SingleDomain, service::S3ServiceBuilder};
+use s3s::{
+    host::SingleDomain,
+    service::{S3Service, S3ServiceBuilder},
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Config, Result, gateway::Gateway};
+use crate::{
+    Config, Result,
+    gateway::Gateway,
+    metrics::{Metrics, ObservedBody},
+};
 
 /// Serve the configured gateway until SIGINT or SIGTERM.
 pub async fn serve(config: Config) -> Result<()> {
@@ -40,7 +47,12 @@ pub async fn serve(config: Config) -> Result<()> {
         tokio::select! {
             accepted = listener.accept() => {
                 let (socket, peer) = accepted?;
-                let connection = connections.serve_connection(TokioIo::new(socket), service.clone());
+                let s3_service = service.clone();
+                let metrics = gateway.metrics();
+                let service = service_fn(move |request| {
+                    observed_s3_response(s3_service.clone(), metrics.clone(), request)
+                });
+                let connection = connections.serve_connection(TokioIo::new(socket), service);
                 let connection = graceful.watch(connection.into_owned());
                 tokio::spawn(async move {
                     if let Err(error) = connection.await {
@@ -119,7 +131,8 @@ async fn management_response(
     let response = match (request.method(), request.uri().path()) {
         (&Method::GET, "/livez") => json_response(StatusCode::OK, b"{\"status\":\"ok\"}"),
         (&Method::GET, "/readyz") => readiness_response(&gateway).await,
-        (_, "/livez" | "/readyz") => {
+        (&Method::GET, "/metrics") => metrics_response(gateway.render_metrics()),
+        (_, "/livez" | "/readyz" | "/metrics") => {
             let mut response = json_response(
                 StatusCode::METHOD_NOT_ALLOWED,
                 b"{\"status\":\"method_not_allowed\"}",
@@ -132,6 +145,28 @@ async fn management_response(
         _ => json_response(StatusCode::NOT_FOUND, b"{\"status\":\"not_found\"}"),
     };
     Ok(response)
+}
+
+async fn observed_s3_response(
+    service: S3Service,
+    metrics: Metrics,
+    request: Request<Incoming>,
+) -> std::result::Result<Response<ObservedBody>, s3s::HttpError> {
+    let observation = metrics.start_request(request.method());
+    match service.call(request.map(s3s::Body::from)).await {
+        Ok(response) => {
+            let observation = observation.response(response.status());
+            let (parts, body) = response.into_parts();
+            Ok(Response::from_parts(
+                parts,
+                ObservedBody::new(body, observation),
+            ))
+        }
+        Err(error) => {
+            observation.transport_error();
+            Err(error)
+        }
+    }
 }
 
 async fn readiness_response(gateway: &Gateway) -> Response<Full<Bytes>> {
@@ -165,6 +200,19 @@ fn json_response(status: StatusCode, body: &'static [u8]) -> Response<Full<Bytes
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         http::HeaderValue::from_static("application/json"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+fn metrics_response(body: String) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from(body)));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        http::HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
     );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -240,5 +288,17 @@ mod tests {
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
             assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
         }
+    }
+
+    #[test]
+    fn metrics_response_uses_prometheus_content_type_and_disables_caching() {
+        let response = metrics_response("metric 1\n".to_owned());
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
     }
 }

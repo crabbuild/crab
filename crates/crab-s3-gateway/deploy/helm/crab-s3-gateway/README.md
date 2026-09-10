@@ -13,6 +13,20 @@ liveness probes; it is never added to the Service. The pod runs as UID/GID
 projects the Secret as root-owned, process-group-readable files; the gateway
 accepts that `0440` shape only when the file group matches its effective group.
 
+Prometheus scrapes `GET /metrics` on the pod's named `management` port. Select
+the chart's pod labels with a PodMonitor or annotation-based pod discovery and
+restrict that traffic with the cluster's monitoring NetworkPolicy. Do not add
+port 8081 to the public S3 Service. A direct operator check can use a temporary
+pod port-forward:
+
+```sh
+pod="$(kubectl get pod --namespace crab-s3-gateway \
+  --selector app.kubernetes.io/name=crab-s3-gateway,app.kubernetes.io/instance=crab-s3-gateway \
+  --output jsonpath='{.items[0].metadata.name}')"
+kubectl port-forward --namespace crab-s3-gateway "pod/${pod}" 18081:8081
+curl --fail --silent --show-error http://127.0.0.1:18081/metrics
+```
+
 Before installation:
 
 - Initialize every configured Crab repository using the same image, backend

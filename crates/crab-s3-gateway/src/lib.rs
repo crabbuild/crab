@@ -6,6 +6,7 @@ mod auth;
 mod config;
 mod content;
 mod gateway;
+mod metrics;
 mod multipart;
 mod mutation;
 mod namespace;
@@ -36,6 +37,8 @@ pub enum Error {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("repository cache setup failed")]
     Cache(#[from] crab_cache_store::CacheStoreError),
+    #[error("gateway metrics setup failed")]
+    Metrics(#[from] metrics_exporter_prometheus::BuildError),
     #[error("repository hydration failed")]
     Read(#[from] crab_read::ReadError),
     #[error("Git LFS hydration failed")]

@@ -34,6 +34,8 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "http1", "http2", "tokio"] }
 libc = "0.2"
 md-5 = { workspace = true }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 object_store = { workspace = true }
 percent-encoding = "2"
 reqwest = { workspace = true }

@@ -351,6 +351,32 @@ jobs:
           aws --endpoint-url "${endpoint}" s3api delete-object \
             --bucket "${bucket}" --key "${key}" >/dev/null
 
+          metrics_root="${qualification_root}/metrics"
+          curl --fail --silent --show-error --dump-header "${metrics_root}.headers" \
+            http://127.0.0.1:18081/metrics --output "${metrics_root}.txt"
+          grep -Eiq '^content-type: text/plain; version=0\.0\.4; charset=utf-8' \
+            "${metrics_root}.headers"
+          grep -Eq '^crab_s3_gateway_http_requests_total\{method="(get|put|delete)",outcome="2xx"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_admission_events_total\{class="(read|transfer)",outcome="admitted_immediate"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Fq 'crab_s3_gateway_http_request_duration_seconds_bucket' \
+            "${metrics_root}.txt"
+          if grep -Fq \
+            -e "${GATEWAY_ACCESS_KEY}" \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e "${bucket}" \
+            -e "${key}" \
+            -e 'service-account:qualification' \
+            "${metrics_root}.txt"; then
+            echo "metrics exposed request or credential identity" >&2
+            exit 1
+          fi
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --request POST http://127.0.0.1:18081/metrics)" = 405
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://127.0.0.1:18080/metrics)" = 403
+
       - name: Verify graceful termination
         run: |
           set -euo pipefail

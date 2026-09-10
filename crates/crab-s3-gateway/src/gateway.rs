@@ -22,6 +22,7 @@ use crate::{
     Config, RepositoryAccess, RepositoryConfig,
     admission::{Admission, RequestClass, RequestPermit},
     auth::GatewayAuth,
+    metrics::Metrics,
     mutation, namespace,
 };
 
@@ -79,6 +80,7 @@ pub(crate) struct Gateway {
     auth: GatewayAuth,
     region: Arc<str>,
     admission: Admission,
+    metrics: Metrics,
     cancellation: CancellationToken,
 }
 
@@ -241,7 +243,12 @@ impl Gateway {
         }
         let runtime = Arc::new(RemoteGitRuntime::default());
         let options = RepositoryOptions::default();
-        let admission = Admission::new(config.max_in_flight_requests, cancellation.clone());
+        let metrics = Metrics::new()?;
+        let admission = Admission::new(
+            config.max_in_flight_requests,
+            cancellation.clone(),
+            metrics.clone(),
+        );
         Ok(Self {
             repositories: Arc::new(repositories),
             mutations: Arc::new(mutation::Coordinator::new(Arc::clone(&runtime), options)),
@@ -250,6 +257,7 @@ impl Gateway {
             auth,
             region,
             admission,
+            metrics,
             cancellation,
         })
     }
@@ -430,6 +438,14 @@ impl Gateway {
 
     pub(crate) fn auth(&self) -> GatewayAuth {
         self.auth.clone()
+    }
+
+    pub(crate) fn metrics(&self) -> Metrics {
+        self.metrics.clone()
+    }
+
+    pub(crate) fn render_metrics(&self) -> String {
+        self.metrics.render(&self.admission)
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -3983,7 +3999,7 @@ mod tests {
 
     #[tokio::test]
     async fn response_stream_holds_read_capacity_until_client_disconnects() {
-        let admission = Admission::new(8, CancellationToken::new());
+        let admission = Admission::new(8, CancellationToken::new(), Metrics::new().unwrap());
         let permit = admission.acquire(RequestClass::Read).await.unwrap();
         let _second = admission.acquire(RequestClass::Read).await.unwrap();
         let _third = admission.acquire(RequestClass::Read).await.unwrap();
@@ -4396,6 +4412,7 @@ mod tests {
         let cancellation = CancellationToken::new();
         let runtime = Arc::new(RemoteGitRuntime::default());
         let options = RepositoryOptions::default();
+        let metrics = Metrics::new().unwrap();
         let gateway = Gateway {
             repositories: Arc::new(BTreeMap::from([("repo".to_owned(), repository)])),
             mutations: Arc::new(mutation::Coordinator::new(Arc::clone(&runtime), options)),
@@ -4403,7 +4420,8 @@ mod tests {
             options,
             auth,
             region: Arc::from("us-east-1"),
-            admission: Admission::new(8, cancellation.clone()),
+            admission: Admission::new(8, cancellation.clone(), metrics.clone()),
+            metrics,
             cancellation,
         };
         let repository = &gateway.repositories["repo"];
