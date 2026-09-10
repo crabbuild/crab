@@ -30,10 +30,11 @@ lockfile        ── process-wide advisory flock
 push upload / recipe publication
 ```
 
-`StagingArea::open` acquires an exclusive process lock, runs migrations and
-crash recovery, and opens the current segment. `StagingAreaReadOnly` acquires
-a shared lock for concurrent push readers. In-process index and writer locks
-are scoped so no synchronous mutex is held across an async suspension.
+`StagingArea::open` acquires an exclusive process lock, validates the canonical
+schema, runs crash recovery, and opens the current segment.
+`StagingAreaReadOnly` acquires a shared lock for concurrent push readers.
+In-process index and writer locks are scoped so no synchronous mutex is held
+across an async suspension.
 
 `stage_chunks_batch` is the hot path: it deduplicates, appends, inserts
 locators atomically, and performs the configured flush check. `flush_pending`
