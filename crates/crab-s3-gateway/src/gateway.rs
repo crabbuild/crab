@@ -3942,21 +3942,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multipart_assembly_above_inline_threshold_hashes_without_a_spool() {
-        let mut writer = MultipartAssemblyWriter::new(crate::content::INLINE_GIT_BLOB_BYTES + 1)
+    async fn large_multipart_assembly_replays_durable_parts_into_lfs() {
+        use futures_util::TryStreamExt as _;
+
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let repository = Repository::new(
+            RepositoryConfig {
+                name: "repo".to_owned(),
+                provider: StorageProviderKind::Local,
+                bucket: "memory".to_owned(),
+                prefix: "multipart-replay-test".to_owned(),
+                default_branch: "main".to_owned(),
+                members: Vec::new(),
+                protected_branches: Vec::new(),
+            },
+            store,
+        )
+        .unwrap();
+        let session = crate::multipart::create(
+            &repository,
+            crate::multipart::Initiation {
+                bucket: "repo",
+                key: "main/file.bin",
+                branch: "refs/heads/main",
+                path: "file.bin",
+                principal: "user",
+                attributes: crate::attributes::PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 10,
+            },
+        )
+        .await
+        .unwrap();
+        let body = Bytes::from_static(b"durable multipart bytes");
+        let etag = md5_hex(&body);
+        let mut part_writer = crate::content::SpoolWriter::new().await.unwrap();
+        part_writer.write(&body, u64::MAX).await.unwrap();
+        let part_spool = part_writer.finish().await.unwrap();
+        let loaded = crate::multipart::load(&repository, &session.id)
             .await
             .unwrap();
-        writer.write(b"large object", u64::MAX).await.unwrap();
-        let assembly = writer.finish().await.unwrap();
+        crate::multipart::register_part(
+            &repository,
+            loaded,
+            1,
+            &part_spool,
+            etag.clone(),
+            crate::attributes::Checksums::default(),
+            11,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let loaded = crate::multipart::load(&repository, &session.id)
+            .await
+            .unwrap();
+        let (_, parts) = crate::multipart::freeze(
+            &repository,
+            loaded,
+            &[(1, etag)],
+            crate::content::MAX_MULTIPART_OBJECT_BYTES,
+        )
+        .await
+        .unwrap();
+        let mut digester = crate::content::Digester::new();
+        digester.write(&body, u64::MAX).unwrap();
+        let (size, digests) = digester.finish().unwrap();
 
-        let MultipartAssembly::Large { size, digests } = assembly else {
-            panic!("large multipart completion must not allocate an assembled spool");
+        let mutation = mutation_multipart_bytes(
+            &repository,
+            &parts,
+            MultipartAssembly::Large { size, digests },
+        )
+        .await
+        .unwrap();
+
+        let PointerKind::Lfs(pointer) = crab_git::classify(&mutation.bytes) else {
+            panic!("expected an LFS pointer");
         };
-        assert_eq!(size, 12);
-        assert_eq!(
-            digests.sha256,
-            <sha2::Sha256 as sha2::Digest>::digest(b"large object").as_slice()
-        );
+        let (_, _, stream) = repository
+            .lfs
+            .get_stream(&pointer.oid, pointer.size, None)
+            .await
+            .unwrap();
+        let actual = stream.try_collect::<Vec<_>>().await.unwrap().concat();
+        assert_eq!(actual, body);
     }
 
     #[tokio::test]
