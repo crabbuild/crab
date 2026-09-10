@@ -127,6 +127,23 @@ class OriginFixtureSafetyTests(unittest.TestCase):
         self.smoke.run_aws.assert_not_called()
 
 
+class CacheIntegrityFixtureTests(unittest.TestCase):
+    def test_ref_transaction_uses_local_cache_hash_path(self) -> None:
+        smoke = object.__new__(smoke_module.CacheServiceRustfsSmoke)
+        smoke.cache_root = Path("cache")
+        transaction_hash = "a" * 64
+
+        object_type, path = smoke.cache_file_for_integrity_key(
+            f"repo/refs/journal/transactions/{transaction_hash}.json"
+        )
+
+        self.assertEqual(object_type, "ref-transaction")
+        self.assertEqual(
+            path,
+            Path("cache/ref-transactions/aa") / transaction_hash,
+        )
+
+
 class ReportAuditTests(unittest.TestCase):
     def test_audit_uses_packaged_verifier_not_report_selected_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

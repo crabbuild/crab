@@ -5080,6 +5080,12 @@ class CacheServiceRustfsSmoke:
             return "xorb", self.cache_root / "xorbs" / hash_hex[:2] / hash_hex
         if key.startswith(".crab/shards/"):
             return "shard", self.cache_root / "shards" / hash_hex[:2] / hash_hex
+        if "/refs/journal/transactions/" in key:
+            hash_hex = hash_hex.removesuffix(".json")
+            return (
+                "ref-transaction",
+                self.cache_root / "ref-transactions" / hash_hex[:2] / hash_hex,
+            )
         raise SmokeError(f"unsupported integrity repair key: {key}")
 
     def corrupt_persisted_cache_file(self, path: Path, object_type: str) -> int:
@@ -5102,6 +5108,10 @@ class CacheServiceRustfsSmoke:
             (
                 ".crab/shards/{first-two-hex}/{hash}",
                 lambda key: key.startswith(".crab/shards/"),
+            ),
+            (
+                "{repo}/refs/journal/transactions/{hash}.json",
+                lambda key: "/refs/journal/transactions/" in key,
             ),
         ):
             key, origin_body = self.origin_object_matching(pattern, predicate)
