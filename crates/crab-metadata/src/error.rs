@@ -110,6 +110,11 @@ pub enum MetadataError {
         source: object_store::Error,
     },
 
+    /// An immutable Git catalog proof outlived its exact SlateDB checkpoint.
+    #[cfg(feature = "remote-index")]
+    #[error("published Git catalog checkpoint {catalog_digest} is missing")]
+    GitCatalogCheckpointMissing { catalog_digest: String },
+
     /// SlateDB metadata reader could not read a key.
     #[cfg(any(feature = "file-index-reader", feature = "remote-index"))]
     #[error("metadata database read failed for {db}: {source}")]

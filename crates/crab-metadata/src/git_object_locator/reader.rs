@@ -173,8 +173,8 @@ impl GitObjectLocatorSession {
         let checkpoint =
             reader_checkpoint_id(Arc::clone(&store), &path, Some(identity.catalog_digest))
                 .await?
-                .ok_or_else(|| {
-                    corrupt("checkpoint", "published Git catalog checkpoint is missing")
+                .ok_or_else(|| MetadataError::GitCatalogCheckpointMissing {
+                    catalog_digest: identity.catalog_digest.to_string(),
                 })?;
         let session =
             Self::open_with_checkpoint(store, repo_prefix, options, Some(checkpoint)).await?;

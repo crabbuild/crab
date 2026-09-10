@@ -61,9 +61,12 @@ visibility evidence required by current background readability maintenance. If
 the gateway reports that visibility repair is required, run `crab fsck
 --repair` against the same repository to backfill historical generations, then
 run `crab metadb owner --once` to fully verify and publish the current
-catalog-bound proof. The gateway deliberately does not infer this proof from
-unverified objects inside a request or background sweep. New gateway writes
-carry their own immutable visibility evidence and continue the repaired proof.
+catalog-bound proof. A repaired self-contained proof remains usable for
+integrity checks after an older catalog checkpoint retires; current accelerated
+Git reads still require the owner-published catalog-bound proof. The gateway
+deliberately does not infer this proof from unverified objects inside a request
+or background sweep. New gateway writes carry their own immutable visibility
+evidence and continue the repaired proof.
 
 Large payloads use bounded-memory request spools and Crab's verified LFS content
 path. Multipart completion keeps objects through 64 MiB in a local spool. Above
