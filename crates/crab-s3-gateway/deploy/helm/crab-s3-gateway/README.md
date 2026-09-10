@@ -54,7 +54,9 @@ CI checks their syntax and executes both healthy and faulting scenarios with a
 pinned `promtool`. Route critical storage-integrity and authorization alerts to
 the storage on-call; route warning capacity and degradation alerts to the
 gateway owner. Prometheus selection and Alertmanager receiver delivery still
-require live cluster proof.
+require live cluster proof. Every rule links directly to its trigger,
+diagnostic, safe-action, and recovery-proof procedure in
+the [operations runbook](../../operations.md).
 
 Admission pressure should drive scaling before sustained S3 `SlowDown`
 responses. Correlate backend in-flight calls with admission queues: one

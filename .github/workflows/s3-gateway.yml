@@ -79,6 +79,26 @@ jobs:
           docker run --rm --volume "${PWD}/${rules}:/monitoring:ro" \
             --workdir /monitoring --entrypoint /bin/promtool \
             "${prometheus_image}" test rules prometheus-rules.test.yaml
+          runbook=crates/crab-s3-gateway/deploy/operations.md
+          test "$(grep -c 'runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#' \
+            "${rules}/prometheus-rules.yaml")" = 14
+          for invariant in \
+            '## Availability and publication' \
+            '## Credential and backend authentication' \
+            '## Admission and scratch pressure' \
+            '## Cache degradation' \
+            '## Backend degradation'; do
+            grep -Fq "${invariant}" "${runbook}"
+          done
+          for anchor in \
+            availability-and-publication \
+            credential-and-backend-authentication \
+            admission-and-scratch-pressure \
+            cache-degradation \
+            backend-degradation; do
+            grep -Fq "operations.md#${anchor}" \
+              "${rules}/prometheus-rules.yaml"
+          done
 
           monitoring="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" \

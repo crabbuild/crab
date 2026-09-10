@@ -1436,8 +1436,11 @@ verified-hit byte counters, local-persistence failures, and coalesced read-only
 catalog usage/health probes. The Helm chart now includes opt-in, release-scoped
 PodMonitor and PrometheusRule resources backed by syntax validation and healthy
 and faulting rule tests. Live Prometheus selection, Alertmanager receiver
-delivery, Kubernetes policy-quota telemetry, ECS, and broader operations
-evidence remain requirements, not qualified deployment support. One explicitly
+delivery, Kubernetes policy-quota telemetry, and ECS remain requirements, not
+qualified deployment support. The checked operations runbook now binds every
+alert to a trigger, bounded diagnosis/action, and recovery proof, and covers
+scaling, credential rotation, repository maintenance, backup/restore, and
+upgrade/rollback without claiming unqualified platforms. One explicitly
 placed, startup-probed, byte-bounded local cache is shared across every
 repository in a process and mounted separately from scratch. Provider-native
 or load-balancer telemetry must cover wire attempts because the application

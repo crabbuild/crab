@@ -238,7 +238,9 @@ docker build -f crates/crab-s3-gateway/deploy/Dockerfile -t crab-s3-gateway .
 The isolated Docker Compose qualification procedure is in `deploy/README.md`.
 The statically validated Kubernetes workload and EKS values are in
 `deploy/helm/crab-s3-gateway/`. They are deployment assets, not evidence of a
-live EKS qualification.
+live EKS qualification. Operational alert response, scaling, credential
+rotation, repository maintenance, backup/restore, and upgrade/rollback are in
+the [operations runbook](deploy/operations.md).
 
 Run it with a read-only root filesystem, a capacity-limited writable scratch
 mount at `/var/lib/crab/tmp`, a separate bounded cache mount whose child path

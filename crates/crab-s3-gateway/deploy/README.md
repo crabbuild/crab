@@ -74,39 +74,11 @@ sync, and remove a probe file. Keep the cache volume separate from
 `/var/lib/crab/tmp`; the former is app-evicted reusable data while the latter is
 capacity-reserved live request state.
 
-Alert when `increase(crab_s3_gateway_multipart_maintenance_failures_total[5m])
-> 0`, or when `time() -
-crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds > 180`
-persists for five minutes. The latter deliberately fires before the first clean
-cycle if maintenance never starts. Admission queue utilization and
-`overloaded`/`timeout` event increases should drive replica scaling or a lower
-client fanout before they become sustained `SlowDown` responses.
-Alert when
-`increase(crab_s3_gateway_scratch_io_failures_total[5m]) > 0`. Compare
-`sum by (pod) (crab_s3_gateway_scratch_bytes)` with the pod's scratch-volume
-capacity and alert before the configured headroom is exhausted. Alert when
-`crab_s3_gateway_scratch_filesystem_probe_success == 0`, on increasing
-`crab_s3_gateway_scratch_filesystem_probe_failures_total`, and when
-`crab_s3_gateway_scratch_filesystem_available_bytes /
-crab_s3_gateway_scratch_filesystem_size_bytes` crosses the deployment's
-headroom threshold. Alert on any increase in
-`crab_s3_gateway_scratch_capacity_rejections_total`; sustained `exhausted`
-means the replica needs more scratch or lower transfer concurrency, while
-`probe_error` means the mount is unsafe. The gateway reserves 10% of the
-filesystem, bounded to 64 MiB–1 GiB, and reports live pre-write claims through
-`crab_s3_gateway_scratch_pending_bytes`. The owned-byte metric attributes live
-gateway content; the filesystem gauges include every byte on the mount. Give
-each replica a private scratch mount because pending reservations coordinate
-within one process. Use
-`rate(crab_s3_gateway_scratch_bytes_written_total[5m])` to distinguish sustained
-spool traffic from a leaked or slow request.
-Alert on sustained increases in backend `auth`, `throttled`, `transient`, or
-`error` outcomes and on backend duration against the deployment's service-level
-budget. Use `crab_s3_gateway_backend_in_flight_requests` with admission pressure
-to distinguish provider saturation from local queue pressure, and compare
-backend byte rates with provider billing and network telemetry. These metrics
-count logical object-store calls; provider-internal retries require provider or
-load-balancer telemetry for wire-attempt counts.
+The canonical alert rules and their trigger, diagnosis, safe-action, and
+recovery-proof procedures live in the [operations runbook](operations.md).
+Keep that runbook and the PrometheusRule from the same source revision.
+Provider-internal retries still require provider or load-balancer telemetry
+because gateway metrics count complete logical object-store operations.
 
 The checked CI qualification also creates a multipart session, uploads a valid
 non-final part, force-recreates the gateway container, verifies the replacement
