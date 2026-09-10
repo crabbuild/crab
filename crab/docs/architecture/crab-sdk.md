@@ -1,6 +1,7 @@
 # Crab Rust SDK: technical design and delivery plan
 
-Status: implementation complete on PR #160; release qualification in progress.
+Status: behavior implementation merged in PR #160; API simplification is
+accepted for follow-up implementation.
 Baseline: `ebd0e40d14ca862cefa5366c1f856847e2401660` (2026-09-06).
 Public package: `crab-sdk`; Rust import: `crab_sdk`.
 Implementation location: `crates/crab-sdk/`.
@@ -9,6 +10,10 @@ Delivery evidence: [capability inventory](sdk-capabilities.md) and
 [qualification inputs and phase-0 record](sdk-qualification.md).
 Phases 0 through 8 are implemented. Backend support is declared only after the
 mandatory credentialed, platform, fault, package, and performance cells pass.
+The [SDK API overhaul](sdk-api-overhaul.md) is the plan of record for public
+names, namespaces, unified opening, and repository handle shape. The behavior,
+safety, recovery, performance, and qualification contracts in this document
+remain authoritative.
 
 ## 1. Outcome and scope
 
@@ -84,13 +89,16 @@ below enters through the new public SDK API where that API exists.
 
 ## 3. Architecture and ownership
 
-The public client exposes two concrete repository handles. Backend dispatch is
-private and uses the existing `RepositoryLocator` classification. Avoid a public
-generic `Repository<B>` or a trait containing unsupported worktree methods.
+The public client exposes one concrete `Repository` facade with borrowed remote
+and local interfaces. Backend dispatch is private and uses the existing
+`RepositoryLocator` classification. Avoid a public generic `Repository<B>`, a
+public backend trait, or one oversized method set containing unsupported local
+and remote operations. The exact public shape and migration are defined by the
+[SDK API overhaul](sdk-api-overhaul.md).
 
 ```text
 Rust application
-  crab-sdk: Client, RemoteRepository, LocalRepository, ManagedRepositories
+  crab-sdk: Client, Repository, remote::Remote, local::Local, managed::Managed
     remote reads -> crab-remote-git + crab-read
     direct writes / transfers / local workflow -> crab-remote (new)
     managed resolution / publication / management -> crab-auth + crab-auth-store
@@ -127,10 +135,13 @@ The CLI consumes shared services directly; it need not depend on the public SDK.
 Remove extracted implementations from their old locations in the same change.
 Keep only argument/config projection and output mapping at CLI entry points.
 
-## 4. Public API contract
+## 4. Behavioral contract and preview API
 
-The names and semantics below define the implemented contract. The public guide
-and package examples compile against this surface.
+The behavior and semantics below define the implemented contract. The names in
+this section record the preview API that supplied the original acceptance
+evidence. They are replaced, without compatibility aliases, by the names and
+namespaces in the [SDK API overhaul](sdk-api-overhaul.md). Tests, examples,
+guides, and package consumers move to the new surface together.
 
 ```rust,ignore
 let client = Client::builder()
