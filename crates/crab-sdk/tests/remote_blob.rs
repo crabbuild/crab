@@ -543,16 +543,16 @@ async fn verify_native_reads(bucket: Option<String>) {
         archive::close_during_hydration(&current).await;
     }
 
+    // Stream setup performs real provider I/O. Leave enough headroom to test
+    // idle expiration instead of backend scheduling latency.
+    let idle_timeout = std::time::Duration::from_secs(2);
+    let idle_wait = idle_timeout + std::time::Duration::from_millis(200);
     let mut expired = current
         .archive(crab_sdk::remote::ContentMode::Git)
-        .with_options(
-            ReadOptions::default()
-                .with_timeout(std::time::Duration::from_millis(200))
-                .unwrap(),
-        )
+        .with_options(ReadOptions::default().with_timeout(idle_timeout).unwrap())
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(idle_wait).await;
     let terminal = loop {
         match expired.next().await {
             Ok(Some(_)) => continue,
@@ -588,14 +588,10 @@ async fn verify_native_reads(bucket: Option<String>) {
     }
     let mut expired = current
         .open_file(GitPath::new(filename.clone()).unwrap())
-        .with_options(
-            ReadOptions::default()
-                .with_timeout(std::time::Duration::from_millis(200))
-                .unwrap(),
-        )
+        .with_options(ReadOptions::default().with_timeout(idle_timeout).unwrap())
         .await
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(idle_wait).await;
     let terminal = loop {
         match expired.next().await {
             Ok(Some(_)) => continue,

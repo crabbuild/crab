@@ -786,9 +786,11 @@ Acceptance:
   and scoped-GC cases pass; Git fsck and independent byte comparison pass.
 - Controlled Linux runner: 1 GiB streaming read peak RSS <= 512 MiB; local
   clone/stage/push peak RSS <= 2 GiB. Across five cold/warm runs against the same
-  shared-core baseline, median read requests/bytes and wall time regress <= 10%
-  from facade overhead. Publish absolute timings and fixture/runner details;
-  if the baseline violates an absolute limit, fix before promoting the cell.
+  shared-core baseline, the median of the five paired SDK/core read-request,
+  response-byte and wall-time ratios regresses <= 10% from facade overhead.
+  Alternate execution order within each numbered pair and publish both absolute
+  measurements and paired ratios with fixture/runner details. If the baseline
+  violates an absolute limit, fix before promoting the cell.
 - Quickstart, local prerequisites, async shutdown, pointer/content distinction,
   conflict recovery, credentials and indeterminate push examples compile.
 - Public docs are served at `https://crab.build/docs/sdk`; run web typecheck,

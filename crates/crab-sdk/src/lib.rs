@@ -1,8 +1,11 @@
-//! Preview Rust SDK for remote, local, and managed Crab repository workflows.
-//!
-//! Open existing repositories through [`Client::open`] and select the
-//! repository's [`remote`] or [`local`] interface. The API is unpublished while
-//! mandatory backend and release qualification gates run.
+#![cfg_attr(
+    all(feature = "local", feature = "managed"),
+    doc = include_str!("../README.md")
+)]
+#![cfg_attr(
+    not(all(feature = "local", feature = "managed")),
+    doc = "Asynchronous Rust client for remote, local, and managed Crab repository workflows."
+)]
 
 #[cfg(feature = "remote")]
 mod archive;

@@ -9,6 +9,9 @@ rust-version.workspace = true
 readme = "README.md"
 description = "Rust client for Crab repositories."
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 default = []
 remote = ["dep:tokio", "dep:tokio-util", "dep:crab-remote-git", "dep:crab-storage", "dep:crab-metadata", "dep:object_store", "dep:blake3"]

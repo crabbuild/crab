@@ -10,7 +10,7 @@ on:
       - "crab/Cargo.toml"
       - "crab/scripts/*sdk*"
       - "crab/scripts/tests/test_*sdk*"
-      - "crab/docs/architecture/crab-sdk.md"
+      - "crab/docs/architecture/crab-sdk*"
       - "crab/docs/architecture/sdk-*"
       - "crab/src/cmd/gc/**"
       - "crab/src/cmd/mirror/**"
@@ -28,7 +28,7 @@ on:
       - "crab/Cargo.toml"
       - "crab/scripts/*sdk*"
       - "crab/scripts/tests/test_*sdk*"
-      - "crab/docs/architecture/crab-sdk.md"
+      - "crab/docs/architecture/crab-sdk*"
       - "crab/docs/architecture/sdk-*"
       - "crab/src/cmd/gc/**"
       - "crab/src/cmd/mirror/**"
@@ -114,7 +114,9 @@ jobs:
       - name: Deny rustdoc warnings
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo "+${SDK_MSRV}" doc -p crab-sdk --locked --all-features --no-deps
+        run: |
+          cargo "+${SDK_MSRV}" doc -p crab-sdk --locked --all-features --no-deps
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --doc --all-features
 
       - name: Verify public API snapshot
         run: |
@@ -365,6 +367,19 @@ jobs:
               --features remote,content,write --test remote_write "$test" \
               -- --exact --ignored --nocapture
           done
+          QUALIFICATION_BUCKET="$CRAB_SDK_TEST_S3_BUCKET" \
+          QUALIFICATION_PREFIX="qualification/sdk-ref-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-evidence/ref_batches_rustfs_recover_without_git_after_restart.json" \
+              --backend rustfs --features remote,content,write \
+              --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+              --expected-tests 1 --toolchain "$SDK_MSRV" \
+              --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
+              --timeout-seconds 1200 -- \
+              cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+              --features remote,content,write --lib \
+              client::mutation::tests::ref_batches_rustfs_recover_without_git_after_restart \
+              -- --exact --ignored --nocapture
       - name: Qualify shared HTTP publication faults
         env:
           QUALIFICATION_BUCKET: ${{ env.CRAB_SDK_TEST_S3_BUCKET }}
@@ -379,17 +394,21 @@ jobs:
           cargo "+${SDK_MSRV}" test -p crab-http-server --locked --lib
           server::receive_fault_tests::receive_faults_rustfs
           -- --exact --ignored --nocapture
-      - name: Qualify local round trip and memory
-        run: >-
-          python3 crab/scripts/qualify_sdk.py run
-          --output "$RUNNER_TEMP/sdk-evidence/local-round-trip.json"
-          --backend rustfs --features local
-          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
-          --expected-tests 1 --require-rss-below 2147483648
-          --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN"
-          --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1800 --
-          "$CRAB_SDK_LOCAL_ROUND_TRIP_BIN" stage_commit_push_round_trip
-          --exact --ignored --nocapture
+      - name: Qualify local workflows and memory
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in stage_commit_push_round_trip fetch_checkout_and_pull_round_trip conflict_continue_and_abort_round_trip; do
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-evidence/${test}.json" \
+              --backend rustfs --features local \
+              --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+              --expected-tests 1 --require-rss-below 2147483648 \
+              --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN" \
+              --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1800 -- \
+              "$CRAB_SDK_LOCAL_ROUND_TRIP_BIN" "$test" \
+              --exact --ignored --nocapture
+          done
       - name: Remove qualification fixtures and verify cleanup
         run: |
           aws --endpoint-url "$AWS_ENDPOINT_URL" s3 rm \

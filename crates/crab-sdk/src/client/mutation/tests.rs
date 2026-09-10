@@ -1089,8 +1089,10 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 .await
                 .unwrap();
             let refs = client
-                .open_remote_with_options(locator, OperationOptions::default())
+                .open(crate::OpenOptions::remote(locator))
                 .await
+                .unwrap()
+                .remote()
                 .unwrap()
                 .refs()
                 .await
@@ -1099,10 +1101,12 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             assert!(refs.entries().is_empty());
         } else if phase == "prepare" {
             let repo = client
-                .open_remote_with_options(locator.clone(), OperationOptions::default())
+                .open(crate::OpenOptions::remote(locator.clone()))
                 .await
                 .unwrap();
             let tip = repo
+                .remote()
+                .unwrap()
                 .refs()
                 .await
                 .unwrap()
@@ -1112,11 +1116,12 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 .unwrap()
                 .target();
             let prepared = repo
+                .remote()
+                .unwrap()
                 .prepare_ref_update(
                     RefBatch::new(vec![RefUpdate::create("refs/tags/recover", tip).unwrap()])
                         .unwrap(),
                     scratch.clone(),
-                    OperationOptions::default(),
                 )
                 .await
                 .unwrap();
@@ -1127,10 +1132,8 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
         } else if phase == "execute" {
             let token =
                 RecoveryToken::from_json(&std::fs::read_to_string(&saved).unwrap()).unwrap();
-            let MutationOutcome::Committed { receipt, readiness } = client
-                .resume_mutation(token, scratch.clone(), OperationOptions::default())
-                .await
-                .unwrap()
+            let MutationOutcome::Committed { receipt, readiness } =
+                client.resume_remote(token, scratch.clone()).await.unwrap()
             else {
                 panic!("expected direct commitment")
             };
@@ -1138,10 +1141,12 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             std::fs::write(scratch.join("transaction"), receipt.transaction_id()).unwrap();
         } else if phase == "advance" {
             let repo = client
-                .open_remote_with_options(locator.clone(), OperationOptions::default())
+                .open(crate::OpenOptions::remote(locator.clone()))
                 .await
                 .unwrap();
             let tip = repo
+                .remote()
+                .unwrap()
                 .refs()
                 .await
                 .unwrap()
@@ -1151,11 +1156,12 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 .unwrap()
                 .target();
             let prepared = repo
+                .remote()
+                .unwrap()
                 .prepare_ref_update(
                     RefBatch::new(vec![RefUpdate::delete("refs/tags/recover", tip).unwrap()])
                         .unwrap(),
                     scratch.clone(),
-                    OperationOptions::default(),
                 )
                 .await
                 .unwrap();
@@ -1170,7 +1176,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             if phase == "pending" {
                 assert_eq!(
                     client
-                        .open_remote_with_options(locator.clone(), OperationOptions::default())
+                        .open(crate::OpenOptions::remote(locator.clone()))
                         .await
                         .err()
                         .unwrap()
@@ -1179,8 +1185,10 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 );
             } else {
                 let refs = client
-                    .open_remote_with_options(locator.clone(), OperationOptions::default())
+                    .open(crate::OpenOptions::remote(locator.clone()))
                     .await
+                    .unwrap()
+                    .remote()
                     .unwrap()
                     .refs()
                     .await
@@ -1196,11 +1204,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             if phase == "pending" {
                 assert!(matches!(
                     client
-                        .resume_mutation(
-                            token.clone(),
-                            scratch.join("absent"),
-                            OperationOptions::default()
-                        )
+                        .resume_remote(token.clone(), scratch.join("absent"))
                         .await
                         .unwrap(),
                     MutationOutcome::Committed {
@@ -1209,10 +1213,8 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                     }
                 ));
             }
-            let MutationOutcome::Committed { receipt, readiness } = client
-                .reconcile(token, OperationOptions::default())
-                .await
-                .unwrap()
+            let MutationOutcome::Committed { receipt, readiness } =
+                client.reconcile_remote(token).await.unwrap()
             else {
                 panic!("saved token must prove the historical commit")
             };

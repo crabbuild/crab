@@ -251,10 +251,14 @@ def compare_read(args: argparse.Namespace) -> None:
     manifest = json.loads(args.manifest.read_text())
     trials = manifest.get("trials", [])
     groups: dict[tuple[str, str], list[dict]] = {}
+    pairs: dict[tuple[str, int], dict[str, dict]] = {}
     for trial in trials:
         key = (trial.get("implementation"), trial.get("cache_state"))
         if key not in {("core", "cold"), ("core", "warm"), ("sdk", "cold"), ("sdk", "warm")}:
             raise ValueError(f"invalid read trial group: {key}")
+        pair_number = trial.get("trial")
+        if type(pair_number) is not int or pair_number not in range(1, 6):
+            raise ValueError(f"invalid read trial number: {pair_number}")
         measured = measurement((args.manifest.parent / trial["measurement"]).resolve())
         origin = json.loads((args.manifest.parent / trial["origin_metrics"]).read_text())
         requests = origin.get("read_requests")
@@ -266,12 +270,18 @@ def compare_read(args: argparse.Namespace) -> None:
             raise ValueError("origin metrics must contain nonnegative integer counters")
         if writes != 0 or failures != 0:
             raise ValueError("read qualification observed an origin write or transport failure")
-        groups.setdefault(key, []).append({
+        values = {
+            "trial": pair_number,
             "wall_seconds": measured["elapsed_seconds"],
             "peak_rss_bytes": measured["peak_rss_bytes"],
             "origin_requests": requests,
             "origin_response_bytes": response_bytes,
-        })
+        }
+        pair = pairs.setdefault((key[1], pair_number), {})
+        if key[0] in pair:
+            raise ValueError(f"duplicate {key[0]} {key[1]} trial {pair_number}")
+        pair[key[0]] = values
+        groups.setdefault(key, []).append(values)
     if any(len(groups.get(key, [])) != 5 for key in (
         ("core", "cold"), ("core", "warm"), ("sdk", "cold"), ("sdk", "warm")
     )):
@@ -283,14 +293,31 @@ def compare_read(args: argparse.Namespace) -> None:
         }
         for (implementation, cache), values in groups.items()
     }
-    if any(medians[f"core_{cache}"][field] <= 0 for cache in ("cold", "warm")
-           for field in ("wall_seconds", "origin_requests", "origin_response_bytes")):
+    if any(set(pairs.get((cache, trial), {})) != {"core", "sdk"}
+           for cache in ("cold", "warm") for trial in range(1, 6)):
+        raise ValueError("read qualification requires one core and SDK measurement in each pair")
+    fields = ("wall_seconds", "origin_requests", "origin_response_bytes")
+    if any(pairs[(cache, trial)]["core"][field] <= 0
+           for cache in ("cold", "warm") for trial in range(1, 6) for field in fields):
         raise ValueError("shared-core baselines must contain positive timing and origin traffic")
+    paired_ratios = {
+        cache: [
+            {
+                "trial": trial,
+                **{
+                    field: pairs[(cache, trial)]["sdk"][field]
+                    / pairs[(cache, trial)]["core"][field]
+                    for field in fields
+                },
+            }
+            for trial in range(1, 6)
+        ]
+        for cache in ("cold", "warm")
+    }
     ratios = {
         cache: {
-            field: medians[f"sdk_{cache}"][field] / medians[f"core_{cache}"][field]
-            if medians[f"core_{cache}"][field] else 1.0
-            for field in ("wall_seconds", "origin_requests", "origin_response_bytes")
+            field: statistics.median(pair[field] for pair in paired_ratios[cache])
+            for field in fields
         }
         for cache in ("cold", "warm")
     }
@@ -312,6 +339,7 @@ def compare_read(args: argparse.Namespace) -> None:
             for (implementation, cache), values in groups.items()
         },
         "medians": medians,
+        "paired_ratios": paired_ratios,
         "sdk_to_core_ratios": ratios,
         "peak_rss_bytes": max_rss,
         "terminal_state": "passed" if passed else "failed",
@@ -465,6 +493,7 @@ def benchmark_read(args: argparse.Namespace) -> None:
                             "failures": after_failures - before_failures,
                         }, indent=2) + "\n")
                         manifest["trials"].append({
+                            "trial": trial + 1,
                             "implementation": implementation,
                             "cache_state": cache_state,
                             "measurement": measurement_path.name,
