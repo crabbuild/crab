@@ -30,6 +30,15 @@ replacement reclaims the prior unreferenced payload, while a registration that
 loses to Abort or completion reclaims only its own payload. This prevents
 same-part concurrency from deleting the winning bytes or accumulating every
 replaced version.
+Each repository has a bounded durable slot catalog shared by every gateway
+instance. `max_active_multipart_uploads` caps non-terminal sessions,
+`multipart_staging_bytes_per_upload` caps their registered temporary bytes, and
+`multipart_upload_ttl_seconds` persists the Open-session expiry chosen when the
+upload starts. The defaults are 1,024 sessions, S3's 50 TB object ceiling, and
+seven days. Every instance serving the same repository must use the same three
+values. A once-per-minute reconciler aborts expired Open sessions, retries terminal
+cleanup, and reclaims expired slots whose process died before writing the session
+record. Completing sessions remain fenced and are never expired.
 Large payloads use bounded-memory request spools and Crab's verified LFS content
 path. Multipart completion keeps objects through 64 MiB in a local spool. Above
 that threshold it hashes and validates the durable selected parts, then replays
@@ -72,6 +81,11 @@ additional full-object spool, so its local scratch does not scale with the
 assembled object size. Deployments must still place `TMPDIR` on
 capacity-managed scratch storage sized for concurrent request bodies and reserve
 it independently from the request count budget.
+Registered multipart staging is bounded by the configured active-slot count
+times the per-upload byte budget. Transfers that have not registered yet add at
+most one 5 GiB payload per admitted transfer request; the transfer admission
+pool bounds that crash window. An interrupted replacement can retain its
+superseded immutable payload until the upload completes, aborts, or expires.
 
 Each mutation rewrites only the target path's ancestor trees and persists one
 path-local attribute delta. Immutable pack, index, visibility, and attribute

@@ -15,6 +15,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let listener = TcpListener::bind(config.listen).await?;
     let cancellation = CancellationToken::new();
     let gateway = Gateway::new(config, cancellation.clone())?;
+    let multipart_maintenance = gateway.start_multipart_maintenance();
     let mut builder = S3ServiceBuilder::new(gateway.clone());
     builder.set_auth(gateway.auth());
     if let Some(domain) = endpoint_domain {
@@ -50,6 +51,7 @@ pub async fn serve(config: Config) -> Result<()> {
         }
     }
     gateway.shutdown().await;
+    multipart_maintenance.await?;
     Ok(())
 }
 

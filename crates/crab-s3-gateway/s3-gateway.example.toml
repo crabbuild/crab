@@ -19,6 +19,11 @@ bucket = "physical-storage-bucket"
 prefix = "repositories/analytics"
 default_branch = "main"
 protected_branches = ["release"]
+# These persisted limits bound durable multipart staging across every gateway
+# instance serving this repository. Open uploads expire after seven days.
+max_active_multipart_uploads = 1024
+multipart_staging_bytes_per_upload = 50000000000000
+multipart_upload_ttl_seconds = 604800
 
 [[repositories.members]]
 principal = "service-account:analytics"

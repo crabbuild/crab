@@ -326,6 +326,9 @@ mod tests {
                         access: RepositoryAccess::Read,
                     }],
                     protected_branches: Vec::new(),
+                    max_active_multipart_uploads: 16,
+                    multipart_staging_bytes_per_upload: 50_000_000_000_000,
+                    multipart_upload_ttl_seconds: 604_800,
                 },
                 store,
             )

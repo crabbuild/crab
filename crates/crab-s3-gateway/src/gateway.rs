@@ -267,6 +267,82 @@ impl Gateway {
         Ok(())
     }
 
+    pub(crate) fn start_multipart_maintenance(&self) -> tokio::task::JoinHandle<()> {
+        let repositories = Arc::clone(&self.repositories);
+        let cancellation = self.cancellation.clone();
+        tokio::spawn(async move {
+            loop {
+                let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                    Ok(duration) => duration.as_secs(),
+                    Err(error) => {
+                        tracing::warn!(%error, "multipart maintenance clock unavailable");
+                        0
+                    }
+                };
+                if now != 0 {
+                    let names = repositories.keys().cloned().collect::<Vec<_>>();
+                    let maintenance = futures_util::stream::iter(names)
+                        .map(|name| {
+                            let repositories = Arc::clone(&repositories);
+                            async move {
+                                let result = if let Some(repository) = repositories.get(&name) {
+                                    // Every transition is restart-idempotent; a timed-out
+                                    // pass retains its slot/state for the next sweep.
+                                    Some(
+                                        tokio::time::timeout(
+                                            Duration::from_secs(30),
+                                            crate::multipart::sweep(repository, now),
+                                        )
+                                        .await,
+                                    )
+                                } else {
+                                    None
+                                };
+                                (name, result)
+                            }
+                        })
+                        .buffer_unordered(4)
+                        .collect::<Vec<_>>();
+                    let results = tokio::select! {
+                        () = cancellation.cancelled() => break,
+                        results = maintenance => results,
+                    };
+                    for (repository, result) in results {
+                        match result {
+                            None => {
+                                tracing::warn!(%repository, "multipart repository disappeared");
+                            }
+                            Some(Err(_)) => {
+                                tracing::warn!(%repository, "multipart maintenance timed out");
+                            }
+                            Some(Ok(Ok(stats)))
+                                if stats.expired != 0
+                                    || stats.terminal_cleanups != 0
+                                    || stats.missing_cleanups != 0 =>
+                            {
+                                tracing::info!(
+                                    %repository,
+                                    expired = stats.expired,
+                                    terminal_cleanups = stats.terminal_cleanups,
+                                    missing_cleanups = stats.missing_cleanups,
+                                    "multipart maintenance completed"
+                                );
+                            }
+                            Some(Ok(Ok(_))) => {}
+                            Some(Ok(Err(error))) => {
+                                tracing::warn!(%repository, %error, "multipart maintenance failed");
+                            }
+                        }
+                    }
+                }
+                tokio::select! {
+                    () = cancellation.cancelled() => break,
+                    () = tokio::time::sleep(Duration::from_secs(60)) => {}
+                }
+            }
+        })
+    }
+
     pub(crate) fn auth(&self) -> GatewayAuth {
         self.auth.clone()
     }
@@ -1654,7 +1730,8 @@ impl S3 for Gateway {
         reject_upload_part_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?.to_owned();
-        let loaded = crate::multipart::load(repository, &req.input.upload_id)
+        let now = now_seconds()?;
+        let loaded = crate::multipart::load_open(repository, &req.input.upload_id, now)
             .await
             .map_err(multipart_error)?;
         crate::multipart::authorize(
@@ -1768,7 +1845,8 @@ impl S3 for Gateway {
             .await?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?.to_owned();
-        let loaded = crate::multipart::load(repository, &req.input.upload_id)
+        let now = now_seconds()?;
+        let loaded = crate::multipart::load_open(repository, &req.input.upload_id, now)
             .await
             .map_err(multipart_error)?;
         crate::multipart::authorize(
@@ -1793,7 +1871,7 @@ impl S3 for Gateway {
             &spool,
             etag.clone(),
             part_checksums.clone(),
-            now_seconds()?,
+            now,
             &self.cancellation,
         )
         .await
@@ -1828,9 +1906,10 @@ impl S3 for Gateway {
         let expected_size = req.input.mpu_object_size;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?.to_owned();
-        let loaded = crate::multipart::load(repository, &req.input.upload_id)
-            .await
-            .map_err(multipart_error)?;
+        let loaded =
+            crate::multipart::load_completion(repository, &req.input.upload_id, now_seconds()?)
+                .await
+                .map_err(multipart_error)?;
         crate::multipart::authorize(
             &loaded.session,
             &req.input.bucket,
@@ -2038,7 +2117,7 @@ impl S3 for Gateway {
         }
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?.to_owned();
-        let loaded = crate::multipart::load(repository, &req.input.upload_id)
+        let loaded = crate::multipart::load_open(repository, &req.input.upload_id, now_seconds()?)
             .await
             .map_err(multipart_error)?;
         crate::multipart::authorize(
@@ -2069,7 +2148,7 @@ impl S3 for Gateway {
         }
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?;
-        let loaded = crate::multipart::load(repository, &req.input.upload_id)
+        let loaded = crate::multipart::load_open(repository, &req.input.upload_id, now_seconds()?)
             .await
             .map_err(multipart_error)?;
         crate::multipart::authorize(
@@ -2158,7 +2237,7 @@ impl S3 for Gateway {
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?;
         let prefix = req.input.prefix.as_deref().unwrap_or("");
-        let sessions = crate::multipart::list(repository)
+        let sessions = crate::multipart::list(repository, now_seconds()?)
             .await
             .map_err(multipart_error)?
             .into_iter()
@@ -3632,6 +3711,7 @@ fn multipart_error(error: crate::multipart::Error) -> s3s::S3Error {
         crate::multipart::Error::InvalidPartOrder => s3_error!(InvalidPartOrder),
         crate::multipart::Error::EntityTooSmall => s3_error!(EntityTooSmall),
         crate::multipart::Error::EntityTooLarge => s3_error!(EntityTooLarge),
+        crate::multipart::Error::Capacity => s3_error!(SlowDown),
         crate::multipart::Error::Cancelled => s3_error!(RequestTimeout),
         crate::multipart::Error::Conflict => s3_error!(OperationAborted),
         error => {
@@ -3909,6 +3989,9 @@ mod tests {
                 default_branch: "main".to_owned(),
                 members: Vec::new(),
                 protected_branches: Vec::new(),
+                max_active_multipart_uploads: 16,
+                multipart_staging_bytes_per_upload: 50_000_000_000_000,
+                multipart_upload_ttl_seconds: 604_800,
             },
             store,
         )
@@ -3955,6 +4038,9 @@ mod tests {
                 default_branch: "main".to_owned(),
                 members: Vec::new(),
                 protected_branches: Vec::new(),
+                max_active_multipart_uploads: 16,
+                multipart_staging_bytes_per_upload: 50_000_000_000_000,
+                multipart_upload_ttl_seconds: 604_800,
             },
             store,
         )

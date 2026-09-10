@@ -196,8 +196,9 @@ Gateway multipart state is provider-neutral and separate from native provider
 multipart uploads. The durable catalog uses versioned records and conditional
 updates. An upload records its repository placement, branch/key, initiator,
 attributes, timestamp, state, revision, registered immutable parts, the frozen
-completion request, and the terminal
-completion ETag. The committed attribute manifest carries the upload identity
+completion request, terminal completion ETag, capacity-slot generation, expiry,
+and per-upload staging-byte budget. The committed attribute manifest carries the
+upload identity
 so an identical retry can recognize a publication that completed before its
 multipart record reached the terminal state.
 
@@ -218,10 +219,26 @@ cause another mutation. An uncertain result remains `Completing` and an
 identical retry resumes from the frozen part set.
 
 List APIs are ordered and bounded, reauthorize every page, exclude terminal and
-replaced transfers, and work without process-local iterator state. Abort first
-persists the terminal state, then synchronously removes part objects. Completion
-persists its terminal outcome before best-effort part cleanup; a cleanup failure
-does not erase the completed outcome.
+replaced transfers, and work without process-local iterator state. Abort and
+completion first persist their terminal state, then attempt immediate part
+cleanup. A cleanup failure does not erase the terminal outcome or release its
+capacity slot; background reconciliation retries it.
+
+Every configured repository owns a fixed durable capacity-slot catalog. Slot
+create/reuse and release use conditional generations, so concurrent gateway
+instances cannot exceed `max_active_multipart_uploads` and a delayed worker
+cannot release a newer occupant. Session creation persists its slot generation,
+absolute Open-state expiry, and staging-byte budget before acknowledging the
+upload. All instances serving a repository must use the same capacity, staging,
+and expiry values. Registered part replacement is rejected with `SlowDown` when
+the persisted byte budget would be exceeded, leaving the former part
+authoritative.
+
+The bounded background reconciler scans only capacity slots. It conditionally
+transitions expired Open sessions to Aborted, retries cleanup for terminal
+sessions, and reclaims an expired slot and payload prefix when a process died
+between capacity acquisition and session publication. Completing sessions and
+their frozen parts are retained regardless of Open-session expiry.
 
 Limits follow the S3 general-purpose bucket contract: 5 GiB per single PUT or
 multipart part, 10,000 parts per upload, 50 TB per completed multipart object,
@@ -260,6 +277,7 @@ boundary without credentials or request bodies.
 | Missing/terminal multipart session | `NoSuchUpload` |
 | Bad completion selection/order/size | `InvalidPart`, `InvalidPartOrder`, `EntityTooSmall` |
 | Bounded admission queue exhaustion or wait timeout | `SlowDown` |
+| Multipart active-session or persisted staging-byte capacity exhausted | `SlowDown` |
 | Corrupt/unavailable committed data | `InternalError` |
 
 Request bodies are streamed through bounded memory to temporary storage while

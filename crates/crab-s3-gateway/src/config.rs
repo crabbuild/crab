@@ -49,6 +49,15 @@ pub struct RepositoryConfig {
     pub members: Vec<RepositoryMember>,
     #[serde(default)]
     pub protected_branches: Vec<String>,
+    /// Distributed capacity for durable, non-terminal multipart sessions.
+    #[serde(default = "default_max_active_multipart_uploads")]
+    pub max_active_multipart_uploads: usize,
+    /// Maximum registered temporary bytes retained by one multipart session.
+    #[serde(default = "default_multipart_staging_bytes_per_upload")]
+    pub multipart_staging_bytes_per_upload: u64,
+    /// Inactivity-independent lifetime of an open multipart session.
+    #[serde(default = "default_multipart_upload_ttl_seconds")]
+    pub multipart_upload_ttl_seconds: u64,
 }
 
 /// One principal's repository permission.
@@ -143,6 +152,23 @@ impl Config {
                     "repository bucket/prefix placements must be present and unique",
                 ));
             }
+            if !(1..=10_000).contains(&repository.max_active_multipart_uploads) {
+                return Err(Error::Config(
+                    "max_active_multipart_uploads must be between 1 and 10000",
+                ));
+            }
+            if !(5 * 1024 * 1024..=50_000_000_000_000)
+                .contains(&repository.multipart_staging_bytes_per_upload)
+            {
+                return Err(Error::Config(
+                    "multipart_staging_bytes_per_upload must be between 5 MiB and 50 TB",
+                ));
+            }
+            if !(1..=365 * 24 * 60 * 60).contains(&repository.multipart_upload_ttl_seconds) {
+                return Err(Error::Config(
+                    "multipart_upload_ttl_seconds must be between 1 second and 365 days",
+                ));
+            }
             let branch = format!("refs/heads/{}", repository.default_branch);
             if repository.default_branch.starts_with("refs/")
                 || crab_git::validate_push_refname(&branch).is_err()
@@ -219,6 +245,18 @@ fn default_provider() -> StorageProviderKind {
     StorageProviderKind::S3
 }
 
+fn default_max_active_multipart_uploads() -> usize {
+    1_024
+}
+
+fn default_multipart_staging_bytes_per_upload() -> u64 {
+    50_000_000_000_000
+}
+
+fn default_multipart_upload_ttl_seconds() -> u64 {
+    7 * 24 * 60 * 60
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,6 +283,9 @@ mod tests {
                     access: RepositoryAccess::Write,
                 }],
                 protected_branches: Vec::new(),
+                max_active_multipart_uploads: default_max_active_multipart_uploads(),
+                multipart_staging_bytes_per_upload: default_multipart_staging_bytes_per_upload(),
+                multipart_upload_ttl_seconds: default_multipart_upload_ttl_seconds(),
             }],
         }
     }
@@ -278,6 +319,29 @@ mod tests {
             config.max_in_flight_requests = value;
             assert!(config.validate().is_err());
         }
+    }
+
+    #[test]
+    fn multipart_capacity_rejects_unbounded_or_invalid_policy() {
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(secret.path(), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut config = valid_config(secret.path().to_owned());
+        config.repositories[0].max_active_multipart_uploads = 0;
+        let no_sessions = config.validate();
+        config.repositories[0].max_active_multipart_uploads = 1;
+        config.repositories[0].multipart_staging_bytes_per_upload = 5 * 1024 * 1024 - 1;
+        let undersized_staging = config.validate();
+        config.repositories[0].multipart_staging_bytes_per_upload = 5 * 1024 * 1024;
+        config.repositories[0].multipart_upload_ttl_seconds = 0;
+        let no_expiry = config.validate();
+
+        assert!(no_sessions.is_err() && undersized_staging.is_err() && no_expiry.is_err());
     }
 
     #[cfg(unix)]

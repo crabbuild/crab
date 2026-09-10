@@ -7,9 +7,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{attributes::PutAttributes, gateway::Repository};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+const SLOT_VERSION: u32 = 1;
 const MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SLOT_RECORD_BYTES: u64 = 4 * 1024;
 const MAX_PARTS: usize = 10_000;
+const MAX_CAPACITY_SLOTS: usize = 10_000;
+const CATALOG_READ_CONCURRENCY: usize = 32;
 // One admitted high-fanout part burst should converge in the gateway. Conflicts
 // beyond this bound remain retryable across independently scaled instances.
 const MAX_STATE_UPDATE_ATTEMPTS: usize = 64;
@@ -35,6 +39,8 @@ pub(crate) enum Error {
     EntityTooSmall,
     #[error("the completed multipart object exceeds the S3 object limit")]
     EntityTooLarge,
+    #[error("multipart staging capacity is exhausted")]
+    Capacity,
     #[error("multipart state changed concurrently")]
     Conflict,
     #[error("multipart state update was cancelled")]
@@ -45,7 +51,7 @@ pub(crate) enum Error {
     Storage(#[from] crab_storage::StorageError),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum State {
     Open,
@@ -80,6 +86,10 @@ pub(crate) struct Session {
     pub(crate) path: String,
     pub(crate) principal: String,
     pub(crate) created_seconds: u64,
+    expires_seconds: u64,
+    max_staged_bytes: u64,
+    capacity_slot: u32,
+    capacity_generation: u64,
     revision: u64,
     state: State,
     pub(crate) attributes: PutAttributes,
@@ -99,6 +109,35 @@ pub(crate) struct Loaded {
     etag: ETag,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapacityOwner {
+    upload_id: String,
+    created_seconds: u64,
+    expires_seconds: u64,
+}
+
+// Slots are released by CAS to an empty owner, never deleted. The generation
+// fences a delayed release after another upload reuses it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapacitySlot {
+    version: u32,
+    number: u32,
+    generation: u64,
+    owner: Option<CapacityOwner>,
+}
+
+struct LoadedCapacitySlot {
+    slot: CapacitySlot,
+    etag: ETag,
+}
+
+struct CapacityReservation {
+    number: u32,
+    generation: u64,
+}
+
 pub(crate) struct Initiation<'a> {
     pub(crate) bucket: &'a str,
     pub(crate) key: &'a str,
@@ -114,6 +153,12 @@ pub(crate) struct Initiation<'a> {
 pub(crate) async fn create(repository: &Repository, initiation: Initiation<'_>) -> Result<Session> {
     for _ in 0..8 {
         let id = ulid::Ulid::new().to_string();
+        let expires_seconds = initiation
+            .now
+            .checked_add(repository.config.multipart_upload_ttl_seconds)
+            .ok_or(Error::Capacity)?;
+        let reservation =
+            acquire_capacity(repository, &id, initiation.now, expires_seconds).await?;
         let session = Session {
             version: VERSION,
             id: id.clone(),
@@ -123,6 +168,10 @@ pub(crate) async fn create(repository: &Repository, initiation: Initiation<'_>) 
             path: initiation.path.to_owned(),
             principal: initiation.principal.to_owned(),
             created_seconds: initiation.now,
+            expires_seconds,
+            max_staged_bytes: repository.config.multipart_staging_bytes_per_upload,
+            capacity_slot: reservation.number,
+            capacity_generation: reservation.generation,
             revision: 0,
             state: State::Open,
             attributes: initiation.attributes.clone(),
@@ -140,11 +189,42 @@ pub(crate) async fn create(repository: &Repository, initiation: Initiation<'_>) 
             .await
         {
             Ok(()) => return Ok(session),
-            Err(crab_storage::StorageError::StateConflict { .. }) => {}
-            Err(error) => return Err(error.into()),
+            Err(crab_storage::StorageError::StateConflict { .. }) => {
+                if load(repository, &id)
+                    .await
+                    .is_ok_and(|loaded| session_identity_matches(&loaded.session, &session))
+                {
+                    return Ok(session);
+                }
+                release_capacity(repository, &id, &reservation).await?;
+            }
+            Err(error) => {
+                let created = load(repository, &id)
+                    .await
+                    .is_ok_and(|loaded| session_identity_matches(&loaded.session, &session));
+                if created {
+                    return Ok(session);
+                }
+                release_capacity(repository, &id, &reservation).await?;
+                return Err(error.into());
+            }
         }
     }
     Err(Error::Conflict)
+}
+
+fn session_identity_matches(actual: &Session, expected: &Session) -> bool {
+    actual.version == expected.version
+        && actual.id == expected.id
+        && actual.bucket == expected.bucket
+        && actual.key == expected.key
+        && actual.branch == expected.branch
+        && actual.path == expected.path
+        && actual.principal == expected.principal
+        && actual.created_seconds == expected.created_seconds
+        && actual.expires_seconds == expected.expires_seconds
+        && actual.capacity_slot == expected.capacity_slot
+        && actual.capacity_generation == expected.capacity_generation
 }
 
 pub(crate) async fn load(repository: &Repository, id: &str) -> Result<Loaded> {
@@ -164,11 +244,184 @@ pub(crate) async fn load(repository: &Repository, id: &str) -> Result<Loaded> {
     Ok(Loaded { session, etag })
 }
 
+pub(crate) async fn load_open(repository: &Repository, id: &str, now: u64) -> Result<Loaded> {
+    let loaded = load(repository, id).await?;
+    if matches!(loaded.session.state, State::Open) && now >= loaded.session.expires_seconds {
+        abort(repository, loaded).await?;
+        return Err(Error::NotOpen);
+    }
+    if matches!(loaded.session.state, State::Open) {
+        Ok(loaded)
+    } else {
+        Err(Error::NotOpen)
+    }
+}
+
+pub(crate) async fn load_completion(repository: &Repository, id: &str, now: u64) -> Result<Loaded> {
+    let loaded = load(repository, id).await?;
+    if matches!(loaded.session.state, State::Open) && now >= loaded.session.expires_seconds {
+        abort(repository, loaded).await?;
+        return Err(Error::NotOpen);
+    }
+    if matches!(loaded.session.state, State::Aborted) {
+        Err(Error::NotOpen)
+    } else {
+        Ok(loaded)
+    }
+}
+
+async fn acquire_capacity(
+    repository: &Repository,
+    upload_id: &str,
+    created_seconds: u64,
+    expires_seconds: u64,
+) -> Result<CapacityReservation> {
+    let count = repository.config.max_active_multipart_uploads;
+    let start = upload_id.bytes().fold(0_usize, |value, byte| {
+        value.rotate_left(5) ^ usize::from(byte)
+    }) % count;
+    for offset in 0..count {
+        let number = u32::try_from((start + offset) % count).map_err(|_| Error::Capacity)?;
+        let path = capacity_path(repository, number);
+        let owner = CapacityOwner {
+            upload_id: upload_id.to_owned(),
+            created_seconds,
+            expires_seconds,
+        };
+        let initial = CapacitySlot {
+            version: SLOT_VERSION,
+            number,
+            generation: 0,
+            owner: Some(owner.clone()),
+        };
+        let initial_bytes = Bytes::from(serde_json::to_vec(&initial)?);
+        match repository.store.create_strict(&path, initial_bytes).await {
+            Ok(()) => {
+                return Ok(CapacityReservation {
+                    number,
+                    generation: 0,
+                });
+            }
+            Err(crab_storage::StorageError::StateConflict { .. }) => {}
+            Err(error) => {
+                let loaded = load_capacity_path(repository, &path).await;
+                if loaded
+                    .as_ref()
+                    .is_ok_and(|loaded| loaded.slot.owner.as_ref() == Some(&owner))
+                {
+                    return Ok(CapacityReservation {
+                        number,
+                        generation: 0,
+                    });
+                }
+                return Err(error.into());
+            }
+        }
+        let loaded = load_capacity_path(repository, &path).await?;
+        if loaded.slot.generation == 0 && loaded.slot.owner.as_ref() == Some(&owner) {
+            return Ok(CapacityReservation {
+                number,
+                generation: 0,
+            });
+        }
+        if loaded.slot.owner.is_some() {
+            continue;
+        }
+        let generation = loaded.slot.generation.saturating_add(1);
+        let replacement = CapacitySlot {
+            owner: Some(owner.clone()),
+            generation,
+            ..loaded.slot
+        };
+        let bytes = Bytes::from(serde_json::to_vec(&replacement)?);
+        match repository.store.update(&path, bytes, loaded.etag).await {
+            Ok(_) => return Ok(CapacityReservation { number, generation }),
+            Err(crab_storage::StorageError::StateConflict { .. }) => continue,
+            Err(error) => {
+                let current = load_capacity_path(repository, &path).await;
+                if current.as_ref().is_ok_and(|current| {
+                    current.slot.generation == generation
+                        && current.slot.owner.as_ref() == Some(&owner)
+                }) {
+                    return Ok(CapacityReservation { number, generation });
+                }
+                return Err(error.into());
+            }
+        }
+    }
+    Err(Error::Capacity)
+}
+
+async fn load_capacity_path(
+    repository: &Repository,
+    path: &object_store::path::Path,
+) -> Result<LoadedCapacitySlot> {
+    let (bytes, etag) = repository
+        .store
+        .get_with_etag_bounded(path, MAX_SLOT_RECORD_BYTES)
+        .await?;
+    let slot: CapacitySlot = serde_json::from_slice(&bytes)?;
+    if slot.version != SLOT_VERSION || capacity_path(repository, slot.number) != *path {
+        return Err(Error::Identity);
+    }
+    Ok(LoadedCapacitySlot { slot, etag })
+}
+
+async fn release_capacity(
+    repository: &Repository,
+    upload_id: &str,
+    reservation: &CapacityReservation,
+) -> Result<()> {
+    let path = capacity_path(repository, reservation.number);
+    for _ in 0..MAX_STATE_UPDATE_ATTEMPTS {
+        let loaded = load_capacity_path(repository, &path).await?;
+        let owned = loaded.slot.generation == reservation.generation
+            && loaded
+                .slot
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.upload_id == upload_id);
+        if !owned {
+            return Ok(());
+        }
+        let released = CapacitySlot {
+            owner: None,
+            ..loaded.slot
+        };
+        let bytes = Bytes::from(serde_json::to_vec(&released)?);
+        match repository.store.update(&path, bytes, loaded.etag).await {
+            Ok(_) => return Ok(()),
+            Err(crab_storage::StorageError::StateConflict { .. }) => continue,
+            Err(error) => {
+                let current = load_capacity_path(repository, &path).await;
+                if current.as_ref().is_ok_and(|current| {
+                    current.slot.generation != reservation.generation
+                        || current
+                            .slot
+                            .owner
+                            .as_ref()
+                            .is_none_or(|owner| owner.upload_id != upload_id)
+                }) {
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
+        }
+    }
+    Err(Error::Conflict)
+}
+
 pub(crate) fn authorize(session: &Session, bucket: &str, key: &str, principal: &str) -> Result<()> {
     if session.bucket != bucket || session.key != key || session.principal != principal {
         return Err(Error::Identity);
     }
     Ok(())
+}
+
+fn capacity_path(repository: &Repository, number: u32) -> object_store::path::Path {
+    repository
+        .layout
+        .repo_path(&format!("s3/multipart/capacity/{number:05}.json"))
 }
 
 pub(crate) async fn register_part(
@@ -185,6 +438,10 @@ pub(crate) async fn register_part(
         return Err(Error::PartNumber);
     }
     if !matches!(loaded.session.state, State::Open) {
+        return Err(Error::NotOpen);
+    }
+    if now >= loaded.session.expires_seconds {
+        abort(repository, loaded).await?;
         return Err(Error::NotOpen);
     }
     // A transfer-specific identity lets a losing registration delete only its
@@ -222,7 +479,23 @@ pub(crate) async fn register_part(
         }
         let replaced = loaded.session.parts.insert(number, part.clone());
         if loaded.session.parts.len() > MAX_PARTS {
+            cleanup_part_object(repository, &loaded.session.id, &part).await;
             return Err(Error::PartNumber);
+        }
+        let staged_bytes = loaded
+            .session
+            .parts
+            .values()
+            .try_fold(0_u64, |total, registered| {
+                total.checked_add(registered.size).ok_or(Error::Capacity)
+            });
+        let Ok(staged_bytes) = staged_bytes else {
+            cleanup_part_object(repository, &loaded.session.id, &part).await;
+            return Err(Error::Capacity);
+        };
+        if staged_bytes > loaded.session.max_staged_bytes {
+            cleanup_part_object(repository, &loaded.session.id, &part).await;
+            return Err(Error::Capacity);
         }
         loaded.session.revision = loaded.session.revision.saturating_add(1);
         match save(repository, &loaded).await {
@@ -439,8 +712,8 @@ pub(crate) async fn complete(
     loaded.session.completion_checksums = Some(checksums);
     loaded.session.revision = loaded.session.revision.saturating_add(1);
     save(repository, &loaded).await?;
-    if let Err(error) = cleanup_parts(repository, &loaded.session.id).await {
-        tracing::warn!(upload_id = %loaded.session.id, %error, "completed multipart part cleanup failed");
+    if let Err(error) = cleanup_terminal(repository, &loaded.session).await {
+        tracing::warn!(upload_id = %loaded.session.id, %error, "completed multipart cleanup failed");
     }
     Ok(())
 }
@@ -465,8 +738,25 @@ pub(crate) async fn abort(repository: &Repository, mut loaded: Loaded) -> Result
     loaded.session.state = State::Aborted;
     loaded.session.revision = loaded.session.revision.saturating_add(1);
     save(repository, &loaded).await?;
-    cleanup_parts(repository, &loaded.session.id).await?;
+    if let Err(error) = cleanup_terminal(repository, &loaded.session).await {
+        // The durable terminal state prevents future registration. Retaining
+        // capacity lets restart maintenance retry physical cleanup safely.
+        tracing::warn!(upload_id = %loaded.session.id, %error, "aborted multipart cleanup failed");
+    }
     Ok(())
+}
+
+async fn cleanup_terminal(repository: &Repository, session: &Session) -> Result<()> {
+    cleanup_parts(repository, &session.id).await?;
+    release_capacity(
+        repository,
+        &session.id,
+        &CapacityReservation {
+            number: session.capacity_slot,
+            generation: session.capacity_generation,
+        },
+    )
+    .await
 }
 
 async fn cleanup_parts(repository: &Repository, id: &str) -> Result<()> {
@@ -477,24 +767,180 @@ async fn cleanup_parts(repository: &Repository, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn list(repository: &Repository) -> Result<Vec<Session>> {
-    let prefix = repository.layout.repo_path("s3/multipart/uploads/");
+pub(crate) async fn list(repository: &Repository, now: u64) -> Result<Vec<Session>> {
+    use futures_util::StreamExt as _;
+
+    let prefix = repository.layout.repo_path("s3/multipart/capacity/");
+    let slots = repository
+        .store
+        .list_prefix_bounded(&prefix, MAX_CAPACITY_SLOTS)
+        .await?
+        .ok_or(Error::Capacity)?;
+    let results = futures_util::stream::iter(slots)
+        .map(|object| list_session_for_slot(repository, object.location, now))
+        .buffer_unordered(CATALOG_READ_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
     let mut sessions = Vec::new();
-    for object in repository.store.list_prefix(&prefix).await? {
-        if !object.location.as_ref().ends_with("/state.json") {
-            continue;
-        }
-        let (bytes, _) = repository
-            .store
-            .get_with_etag_bounded(&object.location, MAX_RECORD_BYTES)
-            .await?;
-        let session: Session = serde_json::from_slice(&bytes)?;
-        if session.version == VERSION && matches!(session.state, State::Open) {
+    for result in results {
+        if let Some(session) = result? {
             sessions.push(session);
         }
     }
     sessions.sort_by(|left, right| (&left.key, &left.id).cmp(&(&right.key, &right.id)));
     Ok(sessions)
+}
+
+async fn list_session_for_slot(
+    repository: &Repository,
+    path: object_store::path::Path,
+    now: u64,
+) -> Result<Option<Session>> {
+    let slot = load_capacity_path(repository, &path).await?.slot;
+    let Some(owner) = slot.owner else {
+        return Ok(None);
+    };
+    let loaded = match load(repository, &owner.upload_id).await {
+        Ok(loaded) => loaded,
+        Err(Error::NoSuchUpload) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if loaded.session.capacity_slot != slot.number
+        || loaded.session.capacity_generation != slot.generation
+        || loaded.session.expires_seconds != owner.expires_seconds
+    {
+        return Err(Error::Identity);
+    }
+    if !matches!(loaded.session.state, State::Open) {
+        return Ok(None);
+    }
+    if now >= loaded.session.expires_seconds {
+        return match abort(repository, loaded).await {
+            Ok(()) | Err(Error::Conflict) | Err(Error::NotOpen) => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
+    Ok(Some(loaded.session))
+}
+
+#[derive(Default)]
+pub(crate) struct SweepStats {
+    pub(crate) expired: usize,
+    pub(crate) terminal_cleanups: usize,
+    pub(crate) missing_cleanups: usize,
+}
+
+pub(crate) async fn sweep(repository: &Repository, now: u64) -> Result<SweepStats> {
+    use futures_util::StreamExt as _;
+
+    let prefix = repository.layout.repo_path("s3/multipart/capacity/");
+    let slots = repository
+        .store
+        .list_prefix_bounded(&prefix, MAX_CAPACITY_SLOTS)
+        .await?
+        .ok_or(Error::Capacity)?;
+    let reconciled = futures_util::stream::iter(slots)
+        .map(|object| reconcile_capacity_slot(repository, object.location, now))
+        .buffer_unordered(CATALOG_READ_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    let stats = reconciled
+        .into_iter()
+        .fold(SweepStats::default(), |mut total, item| {
+            total.expired += item.expired;
+            total.terminal_cleanups += item.terminal_cleanups;
+            total.missing_cleanups += item.missing_cleanups;
+            total
+        });
+    Ok(stats)
+}
+
+async fn reconcile_capacity_slot(
+    repository: &Repository,
+    path: object_store::path::Path,
+    now: u64,
+) -> SweepStats {
+    let loaded_slot = match load_capacity_path(repository, &path).await {
+        Ok(slot) => slot,
+        Err(error) => {
+            tracing::warn!(%path, %error, "multipart capacity record reconciliation failed");
+            return SweepStats::default();
+        }
+    };
+    let Some(owner) = loaded_slot.slot.owner.clone() else {
+        return SweepStats::default();
+    };
+    let reservation = CapacityReservation {
+        number: loaded_slot.slot.number,
+        generation: loaded_slot.slot.generation,
+    };
+    match load(repository, &owner.upload_id).await {
+        Ok(mut loaded) => {
+            if loaded.session.capacity_slot != reservation.number
+                || loaded.session.capacity_generation != reservation.generation
+                || loaded.session.expires_seconds != owner.expires_seconds
+            {
+                tracing::warn!(upload_id = %owner.upload_id, "multipart capacity ownership mismatch");
+                return SweepStats::default();
+            }
+            match loaded.session.state {
+                State::Open if now >= loaded.session.expires_seconds => {
+                    loaded.session.state = State::Aborted;
+                    loaded.session.revision = loaded.session.revision.saturating_add(1);
+                    match save(repository, &loaded).await {
+                        Ok(()) => {
+                            if let Err(error) = cleanup_terminal(repository, &loaded.session).await
+                            {
+                                tracing::warn!(upload_id = %owner.upload_id, %error, "expired multipart cleanup failed");
+                            }
+                            SweepStats {
+                                expired: 1,
+                                ..SweepStats::default()
+                            }
+                        }
+                        Err(Error::Conflict) => SweepStats::default(),
+                        Err(error) => {
+                            tracing::warn!(upload_id = %owner.upload_id, %error, "multipart expiry transition failed");
+                            SweepStats::default()
+                        }
+                    }
+                }
+                State::Completed | State::Aborted => {
+                    if let Err(error) = cleanup_terminal(repository, &loaded.session).await {
+                        tracing::warn!(upload_id = %owner.upload_id, %error, "terminal multipart cleanup retry failed");
+                        SweepStats::default()
+                    } else {
+                        SweepStats {
+                            terminal_cleanups: 1,
+                            ..SweepStats::default()
+                        }
+                    }
+                }
+                State::Open | State::Completing => SweepStats::default(),
+            }
+        }
+        Err(Error::NoSuchUpload) if now >= owner.expires_seconds => {
+            if let Err(error) = cleanup_parts(repository, &owner.upload_id).await {
+                tracing::warn!(upload_id = %owner.upload_id, %error, "unregistered multipart cleanup failed");
+                return SweepStats::default();
+            }
+            match release_capacity(repository, &owner.upload_id, &reservation).await {
+                Ok(()) => SweepStats {
+                    missing_cleanups: 1,
+                    ..SweepStats::default()
+                },
+                Err(error) => {
+                    tracing::warn!(upload_id = %owner.upload_id, %error, "unregistered multipart capacity release failed");
+                    SweepStats::default()
+                }
+            }
+        }
+        Err(Error::NoSuchUpload) => SweepStats::default(),
+        Err(error) => {
+            tracing::warn!(upload_id = %owner.upload_id, %error, "multipart state reconciliation failed");
+            SweepStats::default()
+        }
+    }
 }
 
 async fn save(repository: &Repository, loaded: &Loaded) -> Result<()> {
@@ -535,6 +981,14 @@ mod tests {
     use crate::{RepositoryAccess, RepositoryConfig, RepositoryMember};
 
     async fn fixture() -> Repository {
+        fixture_with_limits(64, 50_000_000_000_000, 604_800).await
+    }
+
+    async fn fixture_with_limits(
+        max_active_multipart_uploads: usize,
+        multipart_staging_bytes_per_upload: u64,
+        multipart_upload_ttl_seconds: u64,
+    ) -> Repository {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = crab_storage::StoreLayout::new(store.clone(), "multipart-test".to_owned());
         crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
@@ -552,6 +1006,9 @@ mod tests {
                     access: RepositoryAccess::Write,
                 }],
                 protected_branches: vec![],
+                max_active_multipart_uploads,
+                multipart_staging_bytes_per_upload,
+                multipart_upload_ttl_seconds,
             },
             store,
         )
@@ -565,22 +1022,27 @@ mod tests {
     }
 
     async fn create_session(repository: &Repository) -> Session {
+        create_session_at(repository, "main/file.bin", 10)
+            .await
+            .unwrap()
+    }
+
+    async fn create_session_at(repository: &Repository, key: &str, now: u64) -> Result<Session> {
         create(
             repository,
             Initiation {
                 bucket: "repo",
-                key: "main/file.bin",
+                key,
                 branch: "refs/heads/main",
                 path: "file.bin",
                 principal: "user",
                 attributes: PutAttributes::default(),
                 checksum_algorithm: None,
                 checksum_type: None,
-                now: 10,
+                now,
             },
         )
         .await
-        .unwrap()
     }
 
     #[tokio::test]
@@ -592,6 +1054,222 @@ mod tests {
             wait_for_state_retry("01TESTUPLOAD00000000000000", 1, 5, &cancel).await,
             Err(Error::Cancelled)
         ));
+    }
+
+    #[tokio::test]
+    async fn capacity_slot_is_reused_without_stale_release() {
+        let repository = fixture_with_limits(1, 50_000_000_000_000, 100).await;
+        let first = create_session(&repository).await;
+        let first_reservation = CapacityReservation {
+            number: first.capacity_slot,
+            generation: first.capacity_generation,
+        };
+        let saturated = create_session_at(&repository, "main/second.bin", 11).await;
+        abort(&repository, load(&repository, &first.id).await.unwrap())
+            .await
+            .unwrap();
+        let replacement = create_session_at(&repository, "main/replacement.bin", 12)
+            .await
+            .unwrap();
+        release_capacity(&repository, &first.id, &first_reservation)
+            .await
+            .unwrap();
+        let still_saturated = create_session_at(&repository, "main/fourth.bin", 13).await;
+
+        assert!(
+            matches!(saturated, Err(Error::Capacity))
+                && replacement.capacity_generation > first.capacity_generation
+                && matches!(still_saturated, Err(Error::Capacity))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_creates_cannot_exceed_distributed_capacity() {
+        let repository = Arc::new(fixture_with_limits(8, 50_000_000_000_000, 100).await);
+        let barrier = Arc::new(tokio::sync::Barrier::new(64));
+        let mut creates = tokio::task::JoinSet::new();
+        for number in 0..64 {
+            let repository = Arc::clone(&repository);
+            let barrier = Arc::clone(&barrier);
+            creates.spawn(async move {
+                barrier.wait().await;
+                create_session_at(&repository, &format!("main/{number}.bin"), 10).await
+            });
+        }
+        let mut created = 0;
+        let mut saturated = 0;
+        while let Some(result) = creates.join_next().await {
+            match result.unwrap() {
+                Ok(_) => created += 1,
+                Err(Error::Capacity) => saturated += 1,
+                Err(error) => panic!("unexpected create error: {error}"),
+            }
+        }
+
+        assert_eq!((created, saturated), (8, 56));
+    }
+
+    #[tokio::test]
+    async fn registered_parts_cannot_exceed_the_persisted_byte_budget() {
+        let repository = fixture_with_limits(4, 10, 100).await;
+        let session = create_session(&repository).await;
+        let first_body = Bytes::from_static(b"12345678");
+        let first_spool = spool(&first_body).await;
+        register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            &first_spool,
+            crate::gateway::md5_hex(&first_body),
+            crate::attributes::Checksums::default(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let second_body = Bytes::from_static(b"four");
+        let second_spool = spool(&second_body).await;
+        let result = register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            2,
+            &second_spool,
+            crate::gateway::md5_hex(&second_body),
+            crate::attributes::Checksums::default(),
+            12,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        let reloaded = load(&repository, &session.id).await.unwrap();
+        let prefix = repository
+            .layout
+            .repo_path(&format!("s3/multipart/parts/{}/", session.id));
+
+        assert!(
+            matches!(result, Err(Error::Capacity))
+                && reloaded.session.parts.len() == 1
+                && repository.store.list_prefix(&prefix).await.unwrap().len() == 1
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_expires_open_upload_and_releases_its_capacity() {
+        let repository = fixture_with_limits(1, 50_000_000_000_000, 10).await;
+        let session = create_session(&repository).await;
+        let body = Bytes::from_static(b"temporary bytes");
+        let body_spool = spool(&body).await;
+        register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            &body_spool,
+            crate::gateway::md5_hex(&body),
+            crate::attributes::Checksums::default(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let before = sweep(&repository, 19).await.unwrap();
+        let after = sweep(&repository, 20).await.unwrap();
+        let terminal = load(&repository, &session.id).await.unwrap();
+        let replacement = create_session_at(&repository, "main/replacement.bin", 20).await;
+        let prefix = repository
+            .layout
+            .repo_path(&format!("s3/multipart/parts/{}/", session.id));
+
+        assert!(
+            before.expired == 0
+                && after.expired == 1
+                && matches!(terminal.session.state, State::Aborted)
+                && repository
+                    .store
+                    .list_prefix(&prefix)
+                    .await
+                    .unwrap()
+                    .is_empty()
+                && replacement.is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn configuration_change_does_not_shorten_an_existing_upload() {
+        let mut repository = fixture_with_limits(1, 50_000_000_000_000, 100).await;
+        let session = create_session(&repository).await;
+        repository.config.multipart_upload_ttl_seconds = 1;
+
+        let stats = sweep(&repository, 20).await.unwrap();
+        let loaded = load_open(&repository, &session.id, 20).await;
+
+        assert!(stats.expired == 0 && loaded.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sweep_never_expires_a_frozen_completion() {
+        let repository = fixture_with_limits(1, 50_000_000_000_000, 10).await;
+        let session = create_session(&repository).await;
+        let body = Bytes::from_static(b"frozen bytes");
+        let body_spool = spool(&body).await;
+        let etag = crate::gateway::md5_hex(&body);
+        register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            &body_spool,
+            etag.clone(),
+            crate::attributes::Checksums::default(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        freeze(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            &[(1, etag)],
+            u64::MAX,
+        )
+        .await
+        .unwrap();
+
+        let stats = sweep(&repository, 20).await.unwrap();
+        let frozen = load(&repository, &session.id).await.unwrap();
+        let saturated = create_session_at(&repository, "main/replacement.bin", 20).await;
+
+        assert!(
+            stats.expired == 0
+                && matches!(frozen.session.state, State::Completing)
+                && matches!(saturated, Err(Error::Capacity))
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_a_slot_and_payload_without_a_session_record() {
+        let repository = fixture_with_limits(1, 50_000_000_000_000, 10).await;
+        let upload_id = ulid::Ulid::new().to_string();
+        acquire_capacity(&repository, &upload_id, 10, 20)
+            .await
+            .unwrap();
+        let payload = repository
+            .layout
+            .repo_path(&format!("s3/multipart/parts/{upload_id}/1/orphan/transfer"));
+        repository
+            .store
+            .put_exact(&payload, Bytes::from_static(b"orphan"))
+            .await
+            .unwrap();
+
+        let stats = sweep(&repository, 20).await.unwrap();
+        let replacement = create_session_at(&repository, "main/replacement.bin", 20).await;
+
+        assert!(
+            stats.missing_cleanups == 1
+                && matches!(
+                    repository.store.head(&payload).await,
+                    Err(crab_storage::StorageError::NotFound { .. })
+                )
+                && replacement.is_ok()
+        );
     }
 
     #[tokio::test]
@@ -638,12 +1316,22 @@ mod tests {
                 .unwrap(),
             body
         );
-        assert_eq!(list(&repository).await.unwrap().len(), 1);
+        assert_eq!(list(&repository, 11).await.unwrap().len(), 1);
 
         abort(&repository, reloaded).await.unwrap();
-        assert!(list(&repository).await.unwrap().is_empty());
+        assert!(list(&repository, 12).await.unwrap().is_empty());
         let terminal = load(&repository, &session.id).await.unwrap();
-        assert!(matches!(terminal.session.state, State::Aborted));
+        assert!(
+            matches!(terminal.session.state, State::Aborted)
+                && matches!(
+                    load_open(&repository, &session.id, 12).await,
+                    Err(Error::NotOpen)
+                )
+                && matches!(
+                    load_completion(&repository, &session.id, 12).await,
+                    Err(Error::NotOpen)
+                )
+        );
     }
 
     #[tokio::test]
@@ -932,7 +1620,9 @@ mod tests {
         .await
         .unwrap();
 
-        let loaded = load(&repository, &session.id).await.unwrap();
+        let loaded = load_completion(&repository, &session.id, u64::MAX)
+            .await
+            .unwrap();
         assert_eq!(
             completed_etag(&loaded.session, &selected).unwrap(),
             Some("result-etag")
