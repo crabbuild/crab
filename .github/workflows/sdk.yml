@@ -114,7 +114,9 @@ jobs:
       - name: Deny rustdoc warnings
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo "+${SDK_MSRV}" doc -p crab-sdk --locked --all-features --no-deps
+        run: |
+          cargo "+${SDK_MSRV}" doc -p crab-sdk --locked --all-features --no-deps
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --doc --all-features
 
       - name: Verify public API snapshot
         run: |
