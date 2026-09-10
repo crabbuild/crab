@@ -5100,6 +5100,10 @@ class CacheServiceRustfsSmoke:
     def verify_persisted_cache_integrity_repairs(self, support_repo: Path) -> None:
         state = self.require_proxy_state()
         fixtures: list[dict[str, Any]] = []
+        synthetic = {
+            pattern: (key, data)
+            for pattern, key, data in self.synthetic_immutable_route_specs()
+        }
         for pattern, predicate in (
             (
                 ".crab/xorbs/{first-two-hex}/{hash}",
@@ -5114,7 +5118,9 @@ class CacheServiceRustfsSmoke:
                 lambda key: "/refs/journal/transactions/" in key,
             ),
         ):
-            key, origin_body = self.origin_object_matching(pattern, predicate)
+            key, origin_body = synthetic.get(pattern) or self.origin_object_matching(
+                pattern, predicate
+            )
             object_type, cache_file = self.cache_file_for_integrity_key(key)
             status, headers, body = self.cache_get(key)
             self.check(
