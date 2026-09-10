@@ -38,6 +38,9 @@ flowchart TD
   Fetch and validation failures still propagate. Explicit `put` calls are fallible.
 - `LocalCache::new` has no disk cap. Bounded retention uses `Some(bytes)`, including
   zero; per-object validation limits still apply.
+- Long-running services that require a writable cache call `LocalCache::prepare`
+  before listening. It creates the private root and proves descriptor-relative
+  publication, sync, and removal without retaining a probe entry.
 - Manifest body/ETag publication is not an atomic pair. Logical manifest and
   stage-content validation belongs to the caller.
 

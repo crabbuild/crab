@@ -3,6 +3,10 @@ management_listen = "0.0.0.0:8081"
 region = "us-east-1"
 max_in_flight_requests = 32
 
+[cache]
+directory = "/var/lib/crab/cache-volume/cache"
+max_bytes = 536870912
+
 [[credentials]]
 # Synthetic credential for this isolated Compose smoke only.
 access_key = "gateway-qualification"

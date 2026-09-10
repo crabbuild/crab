@@ -7,7 +7,8 @@ use std::{
 
 use base64::Engine as _;
 use bytes::Bytes;
-use crab_cache_store::{CacheConfig, CachingStore};
+use crab_cache::LocalCache;
+use crab_cache_store::{CacheConfig as StoreCacheConfig, CachingStore};
 use crab_git::pointer_detect::PointerKind;
 use crab_remote_git::{
     ContentClassification, EntryKind, OperationKind, RemoteGitRuntime, RepositoryIdentity,
@@ -38,9 +39,17 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
-    pub(crate) fn new(config: RepositoryConfig, store: Store) -> crate::Result<Self> {
+    pub(crate) fn new_with_cache(
+        config: RepositoryConfig,
+        store: Store,
+        local_cache: Arc<LocalCache>,
+    ) -> crate::Result<Self> {
         let layout = StoreLayout::new(store.clone(), config.prefix.clone());
-        let caching = CachingStore::new(store.clone(), CacheConfig::default())?;
+        let cache_config = StoreCacheConfig {
+            max_bytes: local_cache.max_bytes(),
+            ..StoreCacheConfig::default()
+        };
+        let caching = CachingStore::new_with_local_cache(store.clone(), cache_config, local_cache)?;
         let read_layout = crab_read::ReadStoreLayout::with_global_prefix(
             store.clone(),
             layout.repo_prefix().to_owned(),
@@ -60,6 +69,16 @@ impl Repository {
             store,
             layout,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new(config: RepositoryConfig, store: Store) -> crate::Result<Self> {
+        let cache = Arc::new(LocalCache::with_limits(
+            crab_cache::default_cache_root(),
+            128 * 1024 * 1024,
+            Some(128 * 1024 * 1024),
+        ));
+        Self::new_with_cache(config, store, cache)
     }
 
     fn access(&self, principal: &str) -> Option<RepositoryAccess> {
@@ -255,6 +274,13 @@ impl Gateway {
         let auth = GatewayAuth::load(&config)?;
         let region = Arc::from(config.region.clone());
         let metrics = Metrics::new()?;
+        let local_cache = Arc::new(LocalCache::with_limits(
+            config.cache.directory.clone(),
+            config.cache.max_bytes,
+            Some(config.cache.max_bytes),
+        ));
+        local_cache.prepare()?;
+        metrics.set_cache_limit(config.cache.max_bytes);
         let mut stores: BTreeMap<String, Store> = BTreeMap::new();
         let mut repositories = BTreeMap::new();
         for entry in config.repositories {
@@ -268,7 +294,8 @@ impl Gateway {
                     store
                 }
             };
-            let repository = Repository::new(entry.clone(), store)?;
+            let repository =
+                Repository::new_with_cache(entry.clone(), store, Arc::clone(&local_cache))?;
             repositories.insert(entry.name.clone(), repository);
         }
         let runtime = Arc::new(RemoteGitRuntime::default());
@@ -4502,6 +4529,10 @@ mod tests {
             endpoint_domain: None,
             region: "us-east-1".to_owned(),
             max_in_flight_requests: 8,
+            cache: crate::LocalCacheConfig {
+                directory: std::env::temp_dir().join("crab-s3-gateway-recovery-cache"),
+                max_bytes: 128 * 1024 * 1024,
+            },
             credentials: vec![crate::CredentialConfig {
                 access_key: "recovery-key".to_owned(),
                 secret_key_file: secret.path().to_owned(),

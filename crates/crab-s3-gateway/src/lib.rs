@@ -13,7 +13,10 @@ mod namespace;
 mod repository;
 mod server;
 
-pub use config::{Config, CredentialConfig, RepositoryAccess, RepositoryConfig, RepositoryMember};
+pub use config::{
+    Config, CredentialConfig, LocalCacheConfig, RepositoryAccess, RepositoryConfig,
+    RepositoryMember,
+};
 pub use server::{check_liveness, check_readiness, initialize, serve};
 
 /// Gateway startup, configuration, and runtime failures.
@@ -37,6 +40,8 @@ pub enum Error {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("repository cache setup failed")]
     Cache(#[from] crab_cache_store::CacheStoreError),
+    #[error("local cache filesystem setup failed")]
+    LocalCache(#[from] crab_cache::CacheError),
     #[error("gateway metrics setup failed")]
     Metrics(#[from] metrics_exporter_prometheus::BuildError),
     #[error("repository hydration failed")]

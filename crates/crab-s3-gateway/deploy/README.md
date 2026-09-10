@@ -3,7 +3,9 @@
 This stack is an isolated local smoke environment, not a production credential
 or storage configuration. It runs the packaged gateway with a non-root user,
 read-only root filesystem, dropped capabilities, bounded scratch, private
-management port, and a persistent RustFS data volume.
+management port, a process-bounded persistent gateway cache, and a persistent
+RustFS data volume. The cache is disposable and survives gateway-container
+replacement; it is never authoritative repository state.
 
 From the repository root, choose an untracked working directory and create the
 synthetic gateway secret with mode `0600`:
@@ -66,6 +68,12 @@ The endpoint contains only fixed method, outcome, and admission-class labels.
 Treat a repository name, ref, key, upload ID, principal, access key, or secret in
 that response as a security defect.
 
+`crab_s3_gateway_cache_limit_bytes` must match `[cache].max_bytes`. The image
+fails startup if the configured cache root cannot privately create, publish,
+sync, and remove a probe file. Keep the cache volume separate from
+`/var/lib/crab/tmp`; the former is app-evicted reusable data while the latter is
+capacity-reserved live request state.
+
 Alert when `increase(crab_s3_gateway_multipart_maintenance_failures_total[5m])
 > 0`, or when `time() -
 crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds > 180`
@@ -104,7 +112,9 @@ The checked CI qualification also creates a multipart session, uploads a valid
 non-final part, force-recreates the gateway container, verifies the replacement
 process can list the durable part, uploads the final part, completes the object,
 and compares every assembled byte. RustFS retains the shared upload catalog and
-repository data; the gateway's scratch filesystem remains disposable.
+repository data; the gateway's scratch filesystem remains disposable. The
+named `gateway-cache` volume may warm the replacement process but is not needed
+for correctness or recovery.
 
 Stop containers without deleting repository data:
 
@@ -112,7 +122,8 @@ Stop containers without deleting repository data:
 docker compose -f crates/crab-s3-gateway/deploy/compose.yaml down
 ```
 
-Only the explicit isolated-smoke teardown removes the RustFS volume:
+Only the explicit isolated-smoke teardown removes the RustFS and disposable
+gateway-cache volumes:
 
 ```sh
 docker compose -f crates/crab-s3-gateway/deploy/compose.yaml down --volumes

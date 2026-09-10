@@ -34,6 +34,7 @@ services:
     volumes: &gateway-mounts
       - ${CRAB_S3_GATEWAY_CONFIG:?set CRAB_S3_GATEWAY_CONFIG}:/etc/crab/s3-gateway.toml:ro
       - ${CRAB_S3_GATEWAY_SECRET_FILE:?set CRAB_S3_GATEWAY_SECRET_FILE}:/run/secrets/crab-s3-secret:ro
+      - gateway-cache:/var/lib/crab/cache-volume
 
   gateway:
     image: ${CRAB_S3_GATEWAY_IMAGE:-crab-s3-gateway:local}
@@ -54,3 +55,4 @@ services:
 
 volumes:
   rustfs-data:
+  gateway-cache:

@@ -36,10 +36,13 @@ resources:
   limits:
     cpu: "2"
     memory: 4Gi
-    ephemeral-storage: 10Gi
+    ephemeral-storage: 16Gi
 
 scratch:
   sizeLimit: 8Gi
+
+cache:
+  sizeLimit: 3Gi
 
 startupProbe:
   periodSeconds: 5

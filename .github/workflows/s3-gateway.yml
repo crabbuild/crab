@@ -88,6 +88,7 @@ jobs:
             'fsGroup: 10001' \
             'allowPrivilegeEscalation: false' \
             'readOnlyRootFilesystem: true' \
+            'mountPath: /var/lib/crab/cache-volume' \
             'minDomains: 2' \
             'defaultMode: 0400'; do
             grep -Fq "${invariant}" <<< "${deployment}"
@@ -161,6 +162,10 @@ jobs:
             'region = "us-east-1"' \
             'max_in_flight_requests = 32' \
             '' \
+            '[cache]' \
+            'directory = "/var/lib/crab/cache-volume/cache"' \
+            'max_bytes = 134217728' \
+            '' \
             '[[credentials]]' \
             "access_key = \"${GATEWAY_ACCESS_KEY}\"" \
             'secret_key_file = "/run/secrets/crab-s3-secret"' \
@@ -181,11 +186,27 @@ jobs:
             'access = "write"' \
             > "${config_root}/gateway.toml"
 
+          if docker run --rm \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            crab-s3-gateway:test \
+            --config /etc/crab/s3-gateway.toml --initialize \
+            >"${config_root}/missing-cache.stdout" \
+            2>"${config_root}/missing-cache.stderr"; then
+            echo "gateway unexpectedly started without its writable cache volume" >&2
+            exit 1
+          fi
+          grep -Fq 'LocalCache' \
+            "${config_root}/missing-cache.stderr"
+
           docker run --detach \
             --name crab-s3-gateway-unready \
             --network crab-s3-gateway-qualification \
             --read-only \
             --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/crab/cache-volume:rw,noexec,nosuid,nodev,size=160m,uid=10001,gid=10001,mode=0700 \
             --publish 127.0.0.1:18081:8081 \
             --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
             --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
@@ -215,6 +236,9 @@ jobs:
 
           docker run --rm \
             --network crab-s3-gateway-qualification \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/crab/cache-volume:rw,noexec,nosuid,nodev,size=160m,uid=10001,gid=10001,mode=0700 \
             --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
             --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
             --env AWS_DEFAULT_REGION=us-east-1 \
@@ -235,6 +259,7 @@ jobs:
             --network crab-s3-gateway-qualification \
             --read-only \
             --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/crab/cache-volume:rw,noexec,nosuid,nodev,size=160m,uid=10001,gid=10001,mode=0700 \
             --publish 18080:8080 \
             --publish 127.0.0.1:18081:8081 \
             --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
@@ -260,6 +285,8 @@ jobs:
           done
           docker exec crab-s3-gateway \
             crab-s3-gateway --config /etc/crab/s3-gateway.toml --healthcheck
+          test "$(docker exec crab-s3-gateway stat --format '%u:%g %a' \
+            /var/lib/crab/cache-volume/cache)" = '10001:10001 700'
           for attempt in $(seq 1 60); do
             health="$(docker inspect crab-s3-gateway --format '{{.State.Health.Status}}')"
             if [[ "${health}" == healthy ]]; then
@@ -410,6 +437,8 @@ jobs:
           grep -Eq '^crab_s3_gateway_scratch_capacity_rejections_total\{reason="exhausted"\} [1-9][0-9]*$' \
             "${metrics_root}.txt"
           grep -Fqx 'crab_s3_gateway_scratch_capacity_rejections_total{reason="probe_error"} 0' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_limit_bytes 134217728' \
             "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_backend_requests_total\{operation="(get|head|range|put|list)",outcome="success"\} [1-9][0-9]*$' \
             "${metrics_root}.txt"

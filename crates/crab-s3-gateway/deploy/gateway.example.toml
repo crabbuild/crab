@@ -6,6 +6,12 @@ region = "us-east-1"
 # Per-process active request budget. Queued bursts wait for bounded capacity;
 # tune from measured CPU, memory, file-descriptor, and scratch usage.
 max_in_flight_requests = 32
+
+# Keep the cache on a writable volume separate from request scratch. The
+# application cap remains authoritative even when the volume exposes more space.
+[cache]
+directory = "/var/lib/crab/cache-volume/cache"
+max_bytes = 2147483648
 # Set to the public host (and port, when non-default) to also accept
 # virtual-hosted requests such as repository.example.s3.crab.build.
 # endpoint_domain = "s3.crab.build"

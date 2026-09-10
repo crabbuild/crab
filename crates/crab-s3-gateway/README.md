@@ -88,6 +88,12 @@ GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
 stream the selected bytes through bounded temporary storage. Low-coverage cold
 reads fetch bounded xorb ranges; the cache may fetch a complete verified xorb
 for high-coverage reads. Complete GETs retain whole-file verification.
+Every process uses one cache instance shared by all configured repositories.
+The required `[cache]` section supplies an absolute writable directory and a
+positive `max_bytes` retention ceiling; startup proves descriptor-relative
+publish and removal before opening the listener. Keep this cache on a private
+volume separate from request scratch so eviction and upload admission do not
+compete for the same free-space signal.
 The complete frozen surface and deliberate exclusions are in the protocol
 contract linked below.
 
@@ -223,8 +229,9 @@ The statically validated Kubernetes workload and EKS values are in
 `deploy/helm/crab-s3-gateway/`. They are deployment assets, not evidence of a
 live EKS qualification.
 
-Run it with a read-only root filesystem, a capacity-limited writable mount at
-`/var/lib/crab/tmp`, the configuration mounted at
+Run it with a read-only root filesystem, a capacity-limited writable scratch
+mount at `/var/lib/crab/tmp`, a separate bounded cache mount whose child path
+matches `[cache].directory`, the configuration mounted at
 `/etc/crab/s3-gateway.toml`, and credential files mounted read-only for UID/GID
 10001. Credential files may be owner-only or readable only by the process's
 effective group; group write/execute and all other-user access are rejected.

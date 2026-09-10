@@ -147,6 +147,20 @@ fn renderer_exports_current_scratch_filesystem_capacity() {
 }
 
 #[test]
+fn renderer_exports_configured_cache_limit() {
+    let (admission, metrics) = setup();
+    metrics.set_cache_limit(128 * 1024 * 1024);
+
+    assert_eq!(
+        metric_value(
+            &metrics.render(&admission),
+            "crab_s3_gateway_cache_limit_bytes",
+        ),
+        (128 * 1024 * 1024) as f64,
+    );
+}
+
+#[test]
 fn scratch_reservation_is_visible_and_released_on_drop() {
     let scratch = tempfile::tempdir().unwrap();
     let metrics = Metrics::new_with_scratch_path(scratch.path().to_owned()).unwrap();

@@ -12,6 +12,11 @@ liveness probes; it is never added to the Service. The pod runs as UID/GID
 10001 with a read-only root filesystem and no Linux capabilities. Kubernetes
 projects the Secret as root-owned, process-group-readable files; the gateway
 accepts that `0440` shape only when the file group matches its effective group.
+Each pod also receives separate scratch and cache `emptyDir` volumes. Configure
+`[cache].directory = "/var/lib/crab/cache-volume/cache"` and keep
+`[cache].max_bytes` below `cache.sizeLimit`; the process creates the private
+child directory and fails startup if it cannot publish and remove cache files.
+The cache accelerates immutable reads but remains disposable across pod loss.
 
 Prometheus scrapes `GET /metrics` on the pod's named `management` port. Select
 the chart's pod labels with a PodMonitor or annotation-based pod discovery and
@@ -57,6 +62,9 @@ Before installation:
   does not initialize storage.
 - Create the ConfigMap and Secret outside this chart. Secret keys must have the
   same filenames used by each `secret_key_file` configuration path.
+- Set the required cache directory and byte ceiling in the ConfigMap. Account
+  for both `scratch.sizeLimit` and `cache.sizeLimit` in the container's
+  ephemeral-storage limit.
 - Push the qualified image to the selected registry and replace the example
   repository and digest with its immutable values.
 - Associate the chart ServiceAccount with a least-privilege EKS Pod Identity

@@ -13,6 +13,7 @@ bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-coordination = { workspace = true, features = ["object-store-lock"] }
+crab-cache = { workspace = true, features = ["local-cache"] }
 crab-cache-store = { workspace = true }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage"] }

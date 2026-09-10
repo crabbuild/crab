@@ -1430,9 +1430,12 @@ reconstruction, and generated Git packs now share atomic pre-write capacity
 admission. Declared bodies reserve before consumption, unknown streams reserve
 in bounded increments, and a 10% headroom policy bounded to 64 MiB–1 GiB turns
 pressure or mount loss into retryable `SlowDown`. Live EKS, external TLS,
-independent Git-history proof, provider wire-attempt metrics, Kubernetes
-policy-quota telemetry, alert delivery, ECS, and broader operations evidence
-remain requirements, not qualified deployment support. Provider-native or
+independent Git-history proof, provider wire-attempt metrics, cache usage and
+failure telemetry, Kubernetes policy-quota telemetry, alert delivery, ECS, and
+broader operations evidence remain requirements, not qualified deployment
+support. One explicitly placed, startup-probed, byte-bounded local cache is
+shared across every repository in a process and mounted separately from
+scratch. Provider-native or
 load-balancer telemetry must cover wire attempts because the application
 metrics intentionally measure logical object-store calls across their complete
 response-stream lifetime. Kubelet telemetry remains authoritative for an

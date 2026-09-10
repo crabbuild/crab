@@ -318,10 +318,18 @@ returned only after their committed outcome is durable and read-ready.
 The temporary-storage requirement is proportional to each in-progress request
 body or copied range, not to a completed multipart object's aggregate size.
 Production deployments must place the process temporary directory on
-capacity-managed scratch storage; request admission bounds concurrency but does
-not reserve scratch bytes. Newly published large multipart content costs a
-second read of the frozen durable parts; an already verified LFS object can skip
-that replay.
+capacity-managed scratch storage; atomic reservations bind admitted work to
+currently visible free space before it writes. Newly published large multipart
+content costs a second read of the frozen durable parts; an already verified
+LFS object can skip that replay.
+
+The process-local immutable read cache is also explicit: configuration requires
+an absolute directory and positive retention ceiling. All repositories in one
+gateway process share that bounded cache. Startup fails before listening unless
+the cache owner can safely create, publish, sync, and remove a
+descriptor-relative probe. Deploy the cache on a private volume separate from
+scratch; cache loss may reduce performance but never removes acknowledged
+repository state.
 
 ## Repository extension API
 

@@ -90,6 +90,8 @@ spec:
               readOnly: true
             - name: scratch
               mountPath: /var/lib/crab/tmp
+            - name: cache
+              mountPath: /var/lib/crab/cache-volume
       topologySpreadConstraints:
         {{- range .Values.topologySpreadConstraints }}
         - maxSkew: {{ .maxSkew }}
@@ -129,3 +131,6 @@ spec:
         - name: scratch
           emptyDir:
             sizeLimit: {{ .Values.scratch.sizeLimit }}
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.cache.sizeLimit }}

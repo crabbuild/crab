@@ -75,6 +75,7 @@ struct MetricsInner {
     backend: backend::BackendMetrics,
     filesystem: filesystem::FilesystemMetrics,
     scratch: scratch::ScratchMetrics,
+    cache_limit: Gauge,
 }
 
 struct MethodMetrics {
@@ -150,6 +151,10 @@ impl Metrics {
         let backend = backend::BackendMetrics::new(&recorder);
         let filesystem = filesystem::FilesystemMetrics::new(&recorder, scratch_path);
         let scratch = scratch::ScratchMetrics::new(&recorder);
+        let cache_limit = recorder.register_gauge(
+            &Key::from_static_name("crab_s3_gateway_cache_limit_bytes"),
+            &METADATA,
+        );
         Ok(Self {
             inner: Arc::new(MetricsInner {
                 handle: recorder.handle(),
@@ -159,8 +164,13 @@ impl Metrics {
                 backend,
                 filesystem,
                 scratch,
+                cache_limit,
             }),
         })
+    }
+
+    pub(crate) fn set_cache_limit(&self, bytes: u64) {
+        self.inner.cache_limit.set(bytes as f64);
     }
 
     pub(crate) fn start_request(&self, method: &Method) -> RequestObservation {
@@ -611,6 +621,11 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds",
         "Unix timestamp of the last cycle with no repository failures.",
+    );
+    describe_gauge(
+        recorder,
+        "crab_s3_gateway_cache_limit_bytes",
+        "Configured process-local cache retention ceiling.",
     );
 }
 

@@ -9,6 +9,9 @@ use serde::Deserialize;
 
 use crate::{Error, Result};
 
+const MIN_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024 * 1024 * 1024;
+
 /// Listener, credentials, and logical repository catalog.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -23,8 +26,18 @@ pub struct Config {
     /// Per-process active request budget. Capacity is reserved by operation class.
     #[serde(default = "default_max_in_flight_requests")]
     pub max_in_flight_requests: usize,
+    /// Required process-local read cache placement and retention budget.
+    pub cache: LocalCacheConfig,
     pub credentials: Vec<CredentialConfig>,
     pub repositories: Vec<RepositoryConfig>,
+}
+
+/// Process-local cache policy shared by every repository served by this process.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalCacheConfig {
+    pub directory: PathBuf,
+    pub max_bytes: u64,
 }
 
 /// One Crab-issued S3 access key mapped to a logical principal.
@@ -110,6 +123,13 @@ impl Config {
         if !(8..=4096).contains(&self.max_in_flight_requests) {
             return Err(Error::Config(
                 "max_in_flight_requests must be between 8 and 4096",
+            ));
+        }
+        if !self.cache.directory.is_absolute()
+            || !(MIN_CACHE_BYTES..=MAX_CACHE_BYTES).contains(&self.cache.max_bytes)
+        {
+            return Err(Error::Config(
+                "cache.directory must be absolute and cache.max_bytes must be between 64 MiB and 1 PiB",
             ));
         }
         if let Some(domain) = self.endpoint_domain.as_deref() {
@@ -286,6 +306,10 @@ mod tests {
             endpoint_domain: None,
             region: default_region(),
             max_in_flight_requests: default_max_in_flight_requests(),
+            cache: LocalCacheConfig {
+                directory: std::env::temp_dir().join("crab-s3-gateway-test-cache"),
+                max_bytes: 128 * 1024 * 1024,
+            },
             credentials: vec![CredentialConfig {
                 access_key: "test-access-key".to_owned(),
                 secret_key_file,
@@ -353,6 +377,28 @@ mod tests {
         let mut config = valid_config(secret.path().to_owned());
         config.management_listen = config.listen;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn local_cache_requires_explicit_bounded_absolute_placement() {
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(secret.path(), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut config = valid_config(secret.path().to_owned());
+        config.cache.directory = PathBuf::from("relative-cache");
+        let relative = config.validate();
+        config.cache.directory = std::env::temp_dir().join("crab-s3-gateway-test-cache");
+        config.cache.max_bytes = MIN_CACHE_BYTES - 1;
+        let undersized = config.validate();
+        config.cache.max_bytes = MAX_CACHE_BYTES + 1;
+        let oversized = config.validate();
+
+        assert!(relative.is_err() && undersized.is_err() && oversized.is_err());
     }
 
     #[test]

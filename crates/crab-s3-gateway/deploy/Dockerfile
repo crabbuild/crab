@@ -16,7 +16,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && printf 'crab:x:10001:\n' >> /etc/group \
     && printf 'crab:x:10001:10001:Crab S3 gateway:/var/lib/crab:/bin/false\n' >> /etc/passwd \
-    && install -d -o 10001 -g 10001 /etc/crab /var/lib/crab/tmp
+    && install -d -o 10001 -g 10001 /etc/crab /var/lib/crab/tmp /var/lib/crab/cache-volume
 
 COPY --from=builder /build/target/release/crab-s3-gateway /usr/local/bin/crab-s3-gateway
 
