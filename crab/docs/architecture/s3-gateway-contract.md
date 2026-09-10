@@ -71,8 +71,12 @@ complete logical key is at most 1024 UTF-8 bytes. Its repository path is
 non-empty, uses `/` separators, and has components of 1–255 bytes. Empty, `.`,
 `..`, and case-insensitive `.git` components are rejected. NUL, ASCII control
 characters, repeated separators, leading or trailing separators, and trailing
-folder-marker objects are rejected. The gateway never normalizes Unicode or
-path separators.
+folder-marker objects are rejected. Empty `REF/path/` PUT and DELETE requests
+are accepted as virtual directory hints for filesystem clients. They are
+validated and authorized against `REF/path`, but are not persisted, listed, or
+returned as objects because Git trees already represent non-empty directories.
+Non-empty marker PUTs are rejected. The gateway never normalizes Unicode or path
+separators.
 
 Writes create ordinary non-executable Git blobs. They reject a path whose
 ancestor is a blob or whose existing entry is a tree. Overwriting a symlink,
@@ -137,7 +141,7 @@ virtual-hosted addressing under that base domain; DNS and TLS wildcard coverage
 remain deployment responsibilities. HTTPS is mandatory beyond loopback and is
 terminated by the deployment ingress. Browser POST, bucket create/delete, ACLs, policies, IAM,
 version mutation/listing, Select, object lock, retention, torrent, website, inventory,
-replication, acceleration, notification, storage-class selection, and all SSE
+replication, acceleration, notification, non-standard storage classes, and all SSE
 request headers return `NotImplemented` or the operation-specific documented S3
 error before mutation.
 
@@ -147,12 +151,12 @@ Supported operations:
 | --- | --- |
 | `ListBuckets`, `HeadBucket`, `GetBucketLocation`, `GetBucketVersioning` | Authorized logical repositories only; deterministic order; configured region; honest unversioned response |
 | `GetObject`, `HeadObject`, `GetObjectAttributes` | metadata, response overrides, RFC dates, ETag/date conditions, checksum mode, object size, ETag, part-number reads, and paginated multipart-part attributes; one byte range including open and suffix forms |
-| `ListObjects`, `ListObjectsV2` | prefix, delimiter `/`, marker/start-after, max keys, reusable keys, common prefixes |
-| `PutObject` | body up to 5 GiB, atomic `If-Match` and `If-None-Match: *`, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, tags, metadata and standard content headers |
+| `ListObjects`, `ListObjectsV2` | prefix, delimiter `/`, marker/start-after, max keys, reusable keys, common prefixes, and the `RestoreStatus` optional-object hint |
+| `PutObject` | body up to 5 GiB, atomic `If-Match` and `If-None-Match: *`, `Content-MD5`, SigV4 payload hash, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, tags, metadata, standard content headers, explicit `STANDARD` storage class, and virtual empty directory-marker hints |
 | `GetObjectTagging`, `PutObjectTagging`, `DeleteObjectTagging` | Up to ten current-object tags; tag changes publish metadata-only commits without changing object bytes or ETag |
-| `DeleteObject`, `DeleteObjects` | S3 missing-key success, per-key authorization/results, quiet mode, and at most 1000 XML entries |
-| `CopyObject` | pinned source, source conditions/range where defined, metadata/tag `COPY`/`REPLACE`, checksum selection, separately authorized destination |
-| Multipart create/upload/copy/list/abort/complete | durable opaque sessions, conditional completion, validated full-object CRC and composite CRC/SHA checksums, part replacement, ordered selection, 10,000 parts, 5 GiB per part, 50 TB completed objects, restart and multi-instance retry |
+| `DeleteObject`, `DeleteObjects` | S3 missing-key success, virtual directory-marker deletion, per-key authorization/results, quiet mode, and at most 1000 XML entries |
+| `CopyObject` | pinned source, source conditions/range where defined, metadata/tag `COPY`/`REPLACE`, checksum selection, explicit `STANDARD` storage class, separately authorized destination |
+| Multipart create/upload/copy/list/abort/complete | durable opaque sessions, conditional completion, validated full-object CRC and composite CRC/SHA checksums, part replacement, explicit `STANDARD` storage class, ordered selection, 10,000 parts, 5 GiB per part, 50 TB completed objects, restart and multi-instance retry |
 
 Modeled unsupported request headers and query parameters are rejected rather
 than ignored. Multi-range GET returns `InvalidRange`. `versionId` returns

@@ -9,6 +9,7 @@ use crate::{attributes::PutAttributes, gateway::Repository};
 const VERSION: u32 = 1;
 const MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PARTS: usize = 10_000;
+const MAX_STATE_UPDATE_ATTEMPTS: usize = 16;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -201,13 +202,22 @@ pub(crate) async fn register_part(
         checksums,
         path,
     };
-    loaded.session.parts.insert(number, part.clone());
-    if loaded.session.parts.len() > MAX_PARTS {
-        return Err(Error::PartNumber);
+    for _ in 0..MAX_STATE_UPDATE_ATTEMPTS {
+        if !matches!(loaded.session.state, State::Open) {
+            return Err(Error::NotOpen);
+        }
+        loaded.session.parts.insert(number, part.clone());
+        if loaded.session.parts.len() > MAX_PARTS {
+            return Err(Error::PartNumber);
+        }
+        loaded.session.revision = loaded.session.revision.saturating_add(1);
+        match save(repository, &loaded).await {
+            Ok(()) => return Ok(part),
+            Err(Error::Conflict) => loaded = load(repository, &loaded.session.id).await?,
+            Err(error) => return Err(error),
+        }
     }
-    loaded.session.revision = loaded.session.revision.saturating_add(1);
-    save(repository, &loaded).await?;
-    Ok(part)
+    Err(Error::Conflict)
 }
 
 pub(crate) async fn part_stream(
@@ -493,6 +503,66 @@ mod tests {
         assert!(list(&repository).await.unwrap().is_empty());
         let terminal = load(&repository, &session.id).await.unwrap();
         assert!(matches!(terminal.session.state, State::Aborted));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_distinct_parts_merge_into_the_session() {
+        let repository = fixture().await;
+        let session = create(
+            &repository,
+            Initiation {
+                bucket: "repo",
+                key: "main/file.bin",
+                branch: "refs/heads/main",
+                path: "file.bin",
+                principal: "user",
+                attributes: PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 10,
+            },
+        )
+        .await
+        .unwrap();
+        let first_loaded = load(&repository, &session.id).await.unwrap();
+        let second_loaded = load(&repository, &session.id).await.unwrap();
+        let first_body = Bytes::from_static(b"first part");
+        let second_body = Bytes::from_static(b"second part");
+        let first_spool = spool(&first_body).await;
+        let second_spool = spool(&second_body).await;
+        let first_cancel = tokio_util::sync::CancellationToken::new();
+        let second_cancel = tokio_util::sync::CancellationToken::new();
+
+        let (first, second) = tokio::join!(
+            register_part(
+                &repository,
+                first_loaded,
+                1,
+                &first_spool,
+                crate::gateway::md5_hex(&first_body),
+                crate::attributes::Checksums::default(),
+                11,
+                &first_cancel,
+            ),
+            register_part(
+                &repository,
+                second_loaded,
+                2,
+                &second_spool,
+                crate::gateway::md5_hex(&second_body),
+                crate::attributes::Checksums::default(),
+                12,
+                &second_cancel,
+            )
+        );
+
+        first.unwrap();
+        second.unwrap();
+        let reloaded = load(&repository, &session.id).await.unwrap();
+        assert_eq!(
+            reloaded.session.parts.keys().copied().collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[tokio::test]

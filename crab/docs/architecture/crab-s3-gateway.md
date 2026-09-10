@@ -83,8 +83,8 @@ are addressed explicitly; they are not an infinite synthetic directory tree.
 S3 keys are not Git paths. Current `crab-sdk/src/value.rs::GitPath` rejects empty
 and parent components; Git trees also cannot contain both file `a` and file
 `a/b`. A release must specify either a restricted repository-path profile or a
-lossless object-key representation, including folder markers and Git-client
-round trips. No silent normalization, dropped markers or false full-key parity.
+lossless object-key representation, including explicit folder-marker behavior
+and Git-client round trips. No silent normalization or false full-key parity.
 
 ## Versioning and write visibility
 
