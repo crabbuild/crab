@@ -5,6 +5,16 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.2.2 - 2026-09-09
+
+### Git And Progress
+
+- Added live progress reporting for clone and large-push operations, including
+  Git pack counts, transferred bytes, and transfer rates.
+- Improved interactive and JSONL output so long-running Git operations expose
+  their current phase instead of appearing stalled.
+- Documented clone and push progress events and their structured fields.
+
 ## 1.2.1 - 2026-09-09
 
 ### SDK And S3
