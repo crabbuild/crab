@@ -27,13 +27,17 @@ pub struct LfsCheckoutOptions {
 /// With a path, replaces only that file. With `--to`, writes the resolved
 /// content to the specified output path.
 pub fn run_lfs_checkout(options: LfsCheckoutOptions) -> Result<()> {
-    let stage = checkout_stage(&options)?;
     let repo_root = std::env::current_dir()?;
+    run_lfs_checkout_in(&repo_root, options)
+}
+
+pub(crate) fn run_lfs_checkout_in(repo_root: &Path, options: LfsCheckoutOptions) -> Result<()> {
+    let stage = checkout_stage(&options)?;
 
     if let Some(stage) = stage {
         return match (options.paths.as_slice(), options.to.as_deref()) {
             ([file_path], Some(output_path)) => checkout_conflict(
-                &repo_root,
+                repo_root,
                 Path::new(file_path),
                 Path::new(output_path),
                 stage,
@@ -47,12 +51,12 @@ pub fn run_lfs_checkout(options: LfsCheckoutOptions) -> Result<()> {
 
     match (options.paths.as_slice(), options.to.as_deref()) {
         (paths @ [_, ..], None) => {
-            checkout_paths(&repo_root, paths)?;
-            refresh_index(&repo_root)
+            checkout_paths(repo_root, paths)?;
+            refresh_index(repo_root)
         }
         ([], None) => {
-            checkout_all(&repo_root)?;
-            refresh_index(&repo_root)
+            checkout_all(repo_root)?;
+            refresh_index(repo_root)
         }
         (_, Some(_)) => Err(CrabError::Configuration {
             key: "checkout".to_owned(),
@@ -648,6 +652,28 @@ mod tests {
         let checked_out = checkout_file(repo.path(), Path::new("asset.bin")).unwrap();
 
         assert!(checked_out);
+        assert_eq!(
+            fs::read(repo.path().join("asset.bin")).unwrap(),
+            b"content\n"
+        );
+    }
+
+    #[test]
+    fn checkout_in_materializes_from_the_explicit_repository() {
+        let repo = temp_git_repo();
+        let pointer = write_lfs_pointer_blob(repo.path(), b"content\n");
+        write_index_entry(repo.path(), "asset.bin", &pointer.blob_oid);
+        fs::write(repo.path().join("asset.bin"), &pointer.bytes).unwrap();
+
+        run_lfs_checkout_in(
+            repo.path(),
+            LfsCheckoutOptions {
+                paths: vec!["asset.bin".to_owned()],
+                ..LfsCheckoutOptions::default()
+            },
+        )
+        .unwrap();
+
         assert_eq!(
             fs::read(repo.path().join("asset.bin")).unwrap(),
             b"content\n"

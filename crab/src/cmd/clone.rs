@@ -462,6 +462,14 @@ pub async fn run_clone_in(
         };
         let phase = PhaseTimer::start("clone", "hydration");
         run_post_checkout_hydrate(&target_dir, &hydrate_args, cancel).await?;
+        run_post_checkout_lfs_pull(
+            &target_dir,
+            has_lfs_pointers,
+            effective_include,
+            &args.exclude,
+            cancel,
+        )
+        .await?;
         emit_phase(
             jsonl_stream.as_deref(),
             phase.finish(0, 0, effective_include.len() as u64),
@@ -505,6 +513,8 @@ pub async fn run_clone_in(
         };
         let phase = PhaseTimer::start("clone", "hydration");
         run_post_checkout_hydrate(&target_dir, &hydrate_args, cancel).await?;
+        run_post_checkout_lfs_pull(&target_dir, has_lfs_pointers, &[], &args.exclude, cancel)
+            .await?;
         emit_phase(jsonl_stream.as_deref(), phase.finish(0, 0, 1));
 
         if !args.mode.is_machine() {
@@ -620,6 +630,31 @@ async fn run_post_checkout_hydrate(
 ) -> Result<()> {
     let config = crate::core::config::Config::resolve_for_repo(target_dir)?;
     crate::cmd::hydrate::hydrate_worktree(target_dir, args, &config, cancel).await
+}
+
+async fn run_post_checkout_lfs_pull(
+    target_dir: &Path,
+    has_lfs_pointers: bool,
+    include: &[String],
+    exclude: &[String],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let Some(options) = post_checkout_lfs_pull_options(has_lfs_pointers, include, exclude) else {
+        return Ok(());
+    };
+    crate::cmd::lfs::fetch::run_lfs_pull_in(target_dir, options, cancel).await
+}
+
+fn post_checkout_lfs_pull_options(
+    has_lfs_pointers: bool,
+    include: &[String],
+    exclude: &[String],
+) -> Option<crate::cmd::lfs::fetch::LfsPullOptions> {
+    has_lfs_pointers.then(|| crate::cmd::lfs::fetch::LfsPullOptions {
+        remote: None,
+        include: (!include.is_empty()).then(|| include.join(",")),
+        exclude: (!exclude.is_empty()).then(|| exclude.join(",")),
+    })
 }
 
 async fn run_post_clone_shard_sync_with_selector<F, Fut>(
@@ -2306,6 +2341,19 @@ mod tests {
 
         assert_eq!(counts.total, 3);
         assert_eq!(counts.pointers, Some(2));
+    }
+
+    #[test]
+    fn eager_lfs_pull_preserves_clone_path_filters() {
+        assert!(post_checkout_lfs_pull_options(false, &[], &[]).is_none());
+
+        let include = vec!["models/**".to_owned(), "data/*.bin".to_owned()];
+        let exclude = vec!["models/private/**".to_owned()];
+        let options = post_checkout_lfs_pull_options(true, &include, &exclude).unwrap();
+
+        assert!(options.remote.is_none());
+        assert_eq!(options.include.as_deref(), Some("models/**,data/*.bin"));
+        assert_eq!(options.exclude.as_deref(), Some("models/private/**"));
     }
 
     #[test]

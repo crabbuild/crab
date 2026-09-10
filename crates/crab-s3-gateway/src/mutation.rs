@@ -35,6 +35,8 @@ pub(crate) enum Error {
     NotDirectory,
     #[error("object path names a directory")]
     IsDirectory,
+    #[error("the nearest .gitattributes entry cannot carry an LFS tracking rule")]
+    InvalidAttributes,
     #[error("object write precondition failed")]
     PreconditionFailed,
     #[error("repository mutation was cancelled")]
@@ -88,6 +90,9 @@ impl From<crate::Error> for Error {
 pub(crate) enum Change {
     Put {
         bytes: Bytes,
+        // Large S3 bodies are committed as LFS pointers. The same commit must
+        // teach Git how to materialize that pointer for ordinary clones.
+        track_lfs: bool,
         attributes: Box<attributes::PutAttributes>,
         condition: PutCondition,
     },
@@ -739,9 +744,28 @@ async fn build_commit(
     };
     let path_string = std::str::from_utf8(path.as_bytes())
         .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
+    let lfs_attributes = match &change {
+        Change::Put {
+            track_lfs: true, ..
+        } if name.as_slice() == b".gitattributes" => return Err(Error::InvalidAttributes),
+        Change::Put {
+            track_lfs: true, ..
+        } => {
+            prepare_lfs_attributes(
+                snapshot.as_ref(),
+                &directory_path,
+                leaf_entries,
+                name,
+                operation,
+            )
+            .await?
+        }
+        Change::Put { .. } | Change::Attributes { .. } | Change::Delete => None,
+    };
     let (etag, changed, pending_attributes) = match change {
         Change::Put {
             bytes,
+            track_lfs: _,
             attributes,
             condition,
         } => {
@@ -766,6 +790,7 @@ async fn build_commit(
                 && old.is_some_and(|(old_oid, mode)| old_oid == oid && mode == EntryMode::Regular)
                 && current_attributes
                     .is_some_and(|stored| stored.matches_pending(&attributes, &etag, logical_size))
+                && lfs_attributes.is_none()
             {
                 return Ok(Build::Noop(Outcome { etag: Some(etag) }));
             }
@@ -817,6 +842,18 @@ async fn build_commit(
     let mut objects = Vec::new();
     if let Some(bytes) = changed {
         objects.push((Kind::Blob, bytes));
+    }
+    if let Some(attributes) = lfs_attributes {
+        replace_entry(
+            leaf_entries,
+            b".gitattributes",
+            Some(tree::Entry {
+                mode: attributes.mode,
+                filename: BString::from(b".gitattributes".to_vec()),
+                oid: attributes.oid,
+            }),
+        );
+        objects.push((Kind::Blob, attributes.bytes));
     }
     let mut tree_oid = None;
     for depth in (0..frames.len()).rev() {
@@ -871,6 +908,98 @@ async fn build_commit(
         path: path_string.to_owned(),
         attributes: object_attributes,
     })))
+}
+
+struct LfsAttributesChange {
+    oid: ObjectId,
+    mode: gix_object::tree::EntryMode,
+    bytes: Vec<u8>,
+}
+
+async fn prepare_lfs_attributes(
+    snapshot: Option<&crab_remote_git::RemoteGitSnapshot>,
+    directory: &crab_remote_git::GitPath,
+    entries: &[tree::Entry],
+    filename: &[u8],
+    operation: &crab_remote_git::OperationContext,
+) -> Result<Option<LfsAttributesChange>> {
+    let attributes_entry = find_entry(entries, b".gitattributes");
+    let (mut bytes, mode, old_oid) = match (snapshot, attributes_entry) {
+        (Some(snapshot), Some(entry)) => {
+            let mode = entry_mode(entry.mode)?;
+            if !matches!(mode, EntryMode::Regular | EntryMode::Executable) {
+                return Err(Error::InvalidAttributes);
+            }
+            let path = push_component(directory, b".gitattributes")?;
+            let blob = snapshot.read_blob(&path, operation).await?;
+            if !matches!(
+                crab_git::classify(&blob.bytes),
+                crab_git::PointerKind::NotAPointer
+            ) {
+                return Err(Error::InvalidAttributes);
+            }
+            (blob.bytes.to_vec(), entry.mode, Some(entry.oid))
+        }
+        (_, None) => (Vec::new(), tree::EntryKind::Blob.into(), None),
+        (None, Some(_)) => {
+            return Err(
+                std::io::Error::other("empty repository contains a .gitattributes entry").into(),
+            );
+        }
+    };
+    let line = lfs_attributes_line(filename);
+    if bytes
+        .split(|byte| *byte == b'\n')
+        .any(|existing| existing.strip_suffix(b"\r").unwrap_or(existing) == line.as_bytes())
+    {
+        return Ok(None);
+    }
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    let oid = object_id(Kind::Blob, &bytes)?;
+    if old_oid == Some(oid) {
+        return Ok(None);
+    }
+    Ok(Some(LfsAttributesChange { oid, mode, bytes }))
+}
+
+fn lfs_attributes_line(filename: &[u8]) -> String {
+    format!(
+        "{} filter=lfs diff=lfs merge=lfs -text",
+        quote_literal_attribute_pattern(filename)
+    )
+}
+
+fn quote_literal_attribute_pattern(filename: &[u8]) -> String {
+    let mut pattern = Vec::with_capacity(filename.len() + 1);
+    pattern.push(b'/');
+    for byte in filename {
+        if matches!(byte, b'\\' | b'*' | b'?' | b'[' | b']') {
+            pattern.push(b'\\');
+        }
+        pattern.push(*byte);
+    }
+
+    let mut quoted = String::with_capacity(pattern.len() + 2);
+    quoted.push('"');
+    for byte in pattern {
+        match byte {
+            b'"' => quoted.push_str("\\\""),
+            b'\\' => quoted.push_str("\\\\"),
+            0x20..=0x7e => quoted.push(char::from(byte)),
+            _ => {
+                quoted.push('\\');
+                quoted.push(char::from(b'0' + ((byte >> 6) & 0o7)));
+                quoted.push(char::from(b'0' + ((byte >> 3) & 0o7)));
+                quoted.push(char::from(b'0' + (byte & 0o7)));
+            }
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 async fn load_directory(
@@ -1198,6 +1327,7 @@ mod tests {
                 &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
                 Change::Put {
                     bytes: Bytes::copy_from_slice(body.as_bytes()),
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition: PutCondition::None,
                 },
@@ -1234,12 +1364,199 @@ mod tests {
         runtime.shutdown().await;
     }
 
+    #[test]
+    fn literal_lfs_attribute_pattern_matches_only_the_exact_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap();
+        let filename = "model [v1] #*?.bin";
+        std::fs::write(
+            directory.path().join(".gitattributes"),
+            format!("{}\n", lfs_attributes_line(filename.as_bytes())),
+        )
+        .unwrap();
+
+        let exact = std::process::Command::new("git")
+            .args(["check-attr", "filter", "--", filename])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        let similar = std::process::Command::new("git")
+            .args(["check-attr", "filter", "--", "model av1] #xx.bin"])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        let descendant = std::process::Command::new("git")
+            .args(["check-attr", "filter", "--", &format!("deeper/{filename}")])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8(exact.stdout).unwrap(),
+            format!("{filename}: filter: lfs\n")
+        );
+        assert_eq!(
+            String::from_utf8(similar.stdout).unwrap(),
+            "model av1] #xx.bin: filter: unspecified\n"
+        );
+        assert_eq!(
+            String::from_utf8(descendant.stdout).unwrap(),
+            format!("deeper/{filename}: filter: unspecified\n")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lfs_put_commits_a_same_directory_tracking_rule() {
+        let (repository, runtime, cancel) = fixture().await;
+        let attributes_path =
+            crab_remote_git::GitPath::new(b"nested/.gitattributes".to_vec()).unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &attributes_path,
+            Change::Put {
+                bytes: Bytes::from_static(b"README.md text\n"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let filename = "model [v1] #*?.bin";
+        let path =
+            crab_remote_git::GitPath::new(format!("nested/{filename}").into_bytes()).unwrap();
+        let pointer = crab_git::LfsPointer {
+            oid: [7; 32],
+            size: 10 * 1024 * 1024,
+            extensions: Vec::new(),
+        }
+        .serialize();
+        let change = Change::Put {
+            bytes: Bytes::from(pointer.clone()),
+            track_lfs: true,
+            attributes: Box::new(attributes::PutAttributes {
+                logical_size: Some(10 * 1024 * 1024),
+                ..Default::default()
+            }),
+            condition: PutCondition::None,
+        };
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            change.clone(),
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            change,
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read(
+                &repository,
+                Arc::clone(&runtime),
+                &cancel,
+                "nested/.gitattributes",
+            )
+            .await,
+            format!(
+                "README.md text\n{}\n",
+                lfs_attributes_line(filename.as_bytes())
+            )
+        );
+        assert_eq!(
+            read(
+                &repository,
+                Arc::clone(&runtime),
+                &cancel,
+                &format!("nested/{filename}"),
+            )
+            .await,
+            pointer
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lfs_put_rejects_pointer_backed_attributes() {
+        let (repository, runtime, cancel) = fixture().await;
+        let attributes_path =
+            crab_remote_git::GitPath::new(b"nested/.gitattributes".to_vec()).unwrap();
+        let attributes_pointer = crab_git::LfsPointer {
+            oid: [3; 32],
+            size: 1,
+            extensions: Vec::new(),
+        }
+        .serialize();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &attributes_path,
+            Change::Put {
+                bytes: Bytes::from(attributes_pointer),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        let result = apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &crab_remote_git::GitPath::new(b"nested/object.bin".to_vec()).unwrap(),
+            Change::Put {
+                bytes: Bytes::from_static(b"pointer"),
+                track_lfs: true,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::InvalidAttributes)));
+        runtime.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn multipart_completion_token_makes_publication_retry_idempotent() {
         let (repository, runtime, cancel) = fixture().await;
         let path = crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap();
         let change = Change::Put {
             bytes: Bytes::from_static(b"multipart content"),
+            track_lfs: false,
             attributes: Box::new(attributes::PutAttributes {
                 etag_override: Some("multipart-etag-1".to_owned()),
                 completion_upload_id: Some("upload-id".to_owned()),
@@ -1290,6 +1607,7 @@ mod tests {
             &path,
             Change::Put {
                 bytes: bytes.clone(),
+                track_lfs: false,
                 attributes: Box::new(attributes::PutAttributes::default()),
                 condition: PutCondition::None,
             },
@@ -1342,6 +1660,7 @@ mod tests {
                 &path,
                 Change::Put {
                     bytes,
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition,
                 },
@@ -1386,6 +1705,7 @@ mod tests {
                 &path,
                 Change::Put {
                     bytes,
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition,
                 },
@@ -1432,6 +1752,7 @@ mod tests {
                         &crab_remote_git::GitPath::new(path.into_bytes()).unwrap(),
                         Change::Put {
                             bytes: Bytes::from(format!("value-{index}")),
+                            track_lfs: false,
                             attributes: Box::new(attributes::PutAttributes::default()),
                             condition: PutCondition::None,
                         },
@@ -1498,6 +1819,7 @@ mod tests {
                 &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
                 Change::Put {
                     bytes: Bytes::from(path.to_owned()),
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition: PutCondition::None,
                 },

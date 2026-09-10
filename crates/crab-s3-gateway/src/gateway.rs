@@ -590,7 +590,15 @@ fn provider_name(provider: StorageProviderKind) -> &'static str {
     }
 }
 
-async fn mutation_bytes(repository: &Repository, spool: &crate::content::Spool) -> S3Result<Bytes> {
+struct MutationContent {
+    bytes: Bytes,
+    track_lfs: bool,
+}
+
+async fn mutation_bytes(
+    repository: &Repository,
+    spool: &crate::content::Spool,
+) -> S3Result<MutationContent> {
     mutation_bytes_with_inline_limit(repository, spool, crate::content::INLINE_GIT_BLOB_BYTES).await
 }
 
@@ -598,9 +606,12 @@ async fn mutation_bytes_with_inline_limit(
     repository: &Repository,
     spool: &crate::content::Spool,
     inline_limit: u64,
-) -> S3Result<Bytes> {
+) -> S3Result<MutationContent> {
     if spool.size <= inline_limit {
-        return spool.bytes().await.map_err(content_error);
+        return Ok(MutationContent {
+            bytes: spool.bytes().await.map_err(content_error)?,
+            track_lfs: false,
+        });
     }
     // The LFS object is content-addressed and uploaded before its pointer commit.
     // Crab's GC grace period protects this brief publication window and cleans an
@@ -610,14 +621,17 @@ async fn mutation_bytes_with_inline_limit(
         .put_stream_with_size(&spool.digests.sha256, Some(spool.size), spool.path())
         .await
         .map_err(|error| gateway_error(error.into()))?;
-    Ok(Bytes::from(
-        crab_git::LfsPointer {
-            oid: spool.digests.sha256,
-            size: spool.size,
-            extensions: Vec::new(),
-        }
-        .serialize(),
-    ))
+    Ok(MutationContent {
+        bytes: Bytes::from(
+            crab_git::LfsPointer {
+                oid: spool.digests.sha256,
+                size: spool.size,
+                extensions: Vec::new(),
+            }
+            .serialize(),
+        ),
+        track_lfs: true,
+    })
 }
 
 #[async_trait::async_trait]
@@ -954,7 +968,7 @@ impl S3 for Gateway {
                 ..Default::default()
             }));
         }
-        let bytes = mutation_bytes(repository, &spool).await?;
+        let content = mutation_bytes(repository, &spool).await?;
         let outcome = self
             .mutations
             .apply(
@@ -965,7 +979,8 @@ impl S3 for Gateway {
                     .ok_or_else(|| s3_error!(MethodNotAllowed))?,
                 &address.path,
                 mutation::Change::Put {
-                    bytes,
+                    bytes: content.bytes,
+                    track_lfs: content.track_lfs,
                     attributes: Box::new(crate::attributes::PutAttributes {
                         etag_override: Some(etag),
                         completion_upload_id: None,
@@ -1438,7 +1453,7 @@ impl S3 for Gateway {
                 .unwrap_or_else(|| default_checksums(&spool.digests)),
         };
         let response_checksums = attributes.checksums.clone();
-        let bytes = mutation_bytes(repository, &spool).await?;
+        let content = mutation_bytes(repository, &spool).await?;
         let outcome = self
             .mutations
             .apply(
@@ -1449,7 +1464,8 @@ impl S3 for Gateway {
                     .ok_or_else(|| s3_error!(MethodNotAllowed))?,
                 &address.path,
                 mutation::Change::Put {
-                    bytes,
+                    bytes: content.bytes,
+                    track_lfs: content.track_lfs,
                     attributes: Box::new(attributes),
                     condition: mutation::PutCondition::None,
                 },
@@ -1881,14 +1897,15 @@ impl S3 for Gateway {
             })
             .collect();
         let address = namespace::object_address(&session.key).map_err(namespace_error)?;
-        let bytes = mutation_bytes(repository, &spool).await?;
+        let content = mutation_bytes(repository, &spool).await?;
         self.mutations
             .apply(
                 repository,
                 &session.branch,
                 &address.path,
                 mutation::Change::Put {
-                    bytes,
+                    bytes: content.bytes,
+                    track_lfs: content.track_lfs,
                     attributes: Box::new(attributes),
                     condition,
                 },
@@ -3416,7 +3433,9 @@ fn object_entry_error(kind: EntryKind) -> s3s::S3Error {
 
 fn mutation_error(error: mutation::Error) -> s3s::S3Error {
     match error {
-        mutation::Error::NotDirectory | mutation::Error::IsDirectory => {
+        mutation::Error::NotDirectory
+        | mutation::Error::IsDirectory
+        | mutation::Error::InvalidAttributes => {
             s3_error!(InvalidObjectState)
         }
         mutation::Error::Cancelled => s3_error!(RequestTimeout),
@@ -3808,10 +3827,11 @@ mod tests {
         writer.write(content, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
 
-        let pointer_bytes = mutation_bytes_with_inline_limit(&repository, &spool, 8)
+        let mutation = mutation_bytes_with_inline_limit(&repository, &spool, 8)
             .await
             .unwrap();
-        let PointerKind::Lfs(pointer) = crab_git::classify(&pointer_bytes) else {
+        assert!(mutation.track_lfs);
+        let PointerKind::Lfs(pointer) = crab_git::classify(&mutation.bytes) else {
             panic!("expected an LFS pointer");
         };
         let (_, _, stream) = repository

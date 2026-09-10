@@ -26,6 +26,9 @@ requests are treated as validated virtual directory hints for filesystem
 clients; they do not create marker blobs because Git trees represent
 directories.
 Large payloads use bounded-memory spooling and Crab's verified LFS content path.
+The pointer commit atomically adds an exact, same-directory LFS tracking rule,
+so Git clones materialize gateway-authored large objects without local attribute
+workarounds.
 Objects already stored as Crab/Xet pointers retain Xet deduplication: partial
 GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
 stream the selected bytes through bounded temporary storage. Low-coverage cold

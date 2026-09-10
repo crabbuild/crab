@@ -251,9 +251,12 @@ Request bodies and multipart completion are streamed through bounded memory to
 temporary storage while checksums are computed. Objects above the inline Git
 threshold are stored through Crab's verified LFS content path; the committed Git
 blob is the canonical LFS pointer and the S3 attribute record retains the logical
-size and ETag. GET streams LFS content directly and reconstructs Crab pointers to
-temporary storage before opening the response. Successful writes are returned
-only after their committed outcome is durable and read-ready.
+size and ETag. That same Git commit appends an exact tracking rule to the nearest
+`.gitattributes`, preserving any existing rules, so ordinary Git/LFS checkout
+interprets the pointer consistently. GET streams LFS content directly and
+reconstructs Crab pointers to temporary storage before opening the response.
+Successful writes are returned only after their committed outcome is durable and
+read-ready.
 
 ## Repository extension API
 
