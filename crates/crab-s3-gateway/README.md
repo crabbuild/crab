@@ -98,9 +98,11 @@ the committed size and ETag without opening blob payloads.
 The per-process `max_in_flight_requests` budget is split into reserved control,
 read, and transfer pools so large uploads cannot starve bucket discovery,
 metadata, or range reads. Each pool admits a bounded FIFO burst for up to 60
-seconds before returning S3 `SlowDown`; request bodies are not consumed while
-waiting. The default budget is 32 and should be tuned from measured CPU, memory,
-file-descriptor, and scratch usage rather than client fanout alone. Each
+seconds before returning S3 `SlowDown` with `Retry-After: 1`; request bodies are
+not consumed while waiting. Standard S3 SDK retry policies handle this response;
+custom clients should retry with exponential backoff and jitter. The default
+budget is 32 and should be tuned from measured CPU, memory, file-descriptor, and
+scratch usage rather than client fanout alone. Each
 PutObject, UploadPart, and copied source range uses a request-local temporary
 file. Large multipart completion rereads durable parts instead of creating an
 additional full-object spool, so its local scratch does not scale with the
@@ -124,6 +126,14 @@ is immediately readable by the gateway; catalog compaction and commit-graph
 maintenance continue after the write burst becomes idle. Maintenance is
 coalesced so a later journal wave never advances from a generation whose
 visibility proof is still being finalized.
+
+Run `crab metadb owner` as one continuously supervised worker for each backing
+repository. The owner performs bounded geometric repack outside request
+acknowledgement, along with catalog, visibility, and commit-graph maintenance.
+Monitor its `geometric_repack_packs`, `action`, and maintenance byte fields; a
+persistently nonzero candidate count means the worker is absent, repeatedly
+deferred by its maintenance budget, or failing. `crab repack` remains the
+explicit catch-up command for an already fragmented repository.
 
 ## Build and run
 

@@ -290,6 +290,11 @@ boundary without credentials or request bodies.
 | Multipart active-session or persisted staging-byte capacity exhausted | `SlowDown` |
 | Corrupt/unavailable committed data | `InternalError` |
 
+Every gateway-generated `SlowDown` includes `Retry-After: 1`. Clients should
+still apply their normal S3 exponential-backoff policy with jitter; the header
+is a retry floor, not a promise that distributed capacity will be free after
+one second.
+
 Request bodies are streamed through bounded memory to temporary storage while
 checksums are computed. Multipart completion keeps objects through 64 MiB in a
 local spool; larger objects validate and hash the frozen durable parts, then

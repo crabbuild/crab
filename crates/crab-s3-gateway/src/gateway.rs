@@ -3704,7 +3704,7 @@ fn remote_error(error: crab_remote_git::Error) -> s3s::S3Error {
         crab_remote_git::Error::EntryNotBlob { actual } => object_entry_error(actual),
         crab_remote_git::Error::Revision { .. } => s3_error!(NoSuchKey),
         crab_remote_git::Error::Cancelled => s3_error!(RequestTimeout),
-        crab_remote_git::Error::LimitExceeded { .. } => s3_error!(SlowDown),
+        crab_remote_git::Error::LimitExceeded { .. } => slow_down_error(),
         error => {
             tracing::error!(error = ?error, "S3 repository read failed");
             s3_error!(InternalError)
@@ -3731,9 +3731,7 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
         | mutation::Error::Publication(crab_remote::publication::Error::Cancelled) => {
             s3_error!(RequestTimeout)
         }
-        mutation::Error::Overloaded | mutation::Error::AdmissionTimeout => {
-            s3_error!(SlowDown)
-        }
+        mutation::Error::Overloaded | mutation::Error::AdmissionTimeout => slow_down_error(),
         mutation::Error::PreconditionFailed => s3_error!(PreconditionFailed),
         mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => {
             s3_error!(
@@ -3764,7 +3762,7 @@ fn admission_error(error: crate::admission::Error) -> s3s::S3Error {
     match error {
         crate::admission::Error::Cancelled => s3_error!(RequestTimeout),
         crate::admission::Error::Overloaded | crate::admission::Error::AdmissionTimeout => {
-            s3_error!(SlowDown)
+            slow_down_error()
         }
         crate::admission::Error::AdmissionState => {
             tracing::error!(%error, "S3 request admission failed");
@@ -3776,6 +3774,15 @@ fn admission_error(error: crate::admission::Error) -> s3s::S3Error {
 fn gateway_error(error: crate::Error) -> s3s::S3Error {
     tracing::error!(error = ?error, "S3 gateway persistence failed");
     s3_error!(InternalError)
+}
+
+fn slow_down_error() -> s3s::S3Error {
+    let mut error = s3_error!(SlowDown);
+    error.set_headers(http::HeaderMap::from_iter([(
+        http::header::RETRY_AFTER,
+        http::HeaderValue::from_static("1"),
+    )]));
+    error
 }
 
 fn content_error(error: crate::content::Error) -> s3s::S3Error {
@@ -3900,7 +3907,7 @@ fn multipart_error(error: crate::multipart::Error) -> s3s::S3Error {
         crate::multipart::Error::InvalidPartOrder => s3_error!(InvalidPartOrder),
         crate::multipart::Error::EntityTooSmall => s3_error!(EntityTooSmall),
         crate::multipart::Error::EntityTooLarge => s3_error!(EntityTooLarge),
-        crate::multipart::Error::Capacity => s3_error!(SlowDown),
+        crate::multipart::Error::Capacity => slow_down_error(),
         crate::multipart::Error::Cancelled => s3_error!(RequestTimeout),
         crate::multipart::Error::Conflict => s3_error!(OperationAborted),
         error => {
@@ -4620,6 +4627,18 @@ mod tests {
         assert_eq!(
             object_entry_error(EntryKind::Submodule).code().as_str(),
             "InvalidObjectState"
+        );
+    }
+
+    #[test]
+    fn slow_down_tells_clients_when_to_retry() {
+        let error = slow_down_error();
+
+        assert_eq!(
+            error
+                .headers()
+                .and_then(|headers| headers.get(http::header::RETRY_AFTER)),
+            Some(&http::HeaderValue::from_static("1"))
         );
     }
 
