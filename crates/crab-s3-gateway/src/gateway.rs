@@ -267,6 +267,23 @@ impl Gateway {
         Ok(())
     }
 
+    pub(crate) async fn ready(&self) -> crate::Result<()> {
+        let cancellation = self.cancellation.child_token();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        for repository in self.repositories.values() {
+            repository
+                .read_views
+                .current(
+                    repository,
+                    Arc::clone(&self.runtime),
+                    self.options,
+                    &cancellation,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn start_multipart_maintenance(&self) -> tokio::task::JoinHandle<()> {
         let gateway = self.clone();
         let repositories = Arc::clone(&self.repositories);
@@ -4364,6 +4381,7 @@ mod tests {
         std::fs::write(secret.path(), "multipart-recovery-secret").unwrap();
         let auth = GatewayAuth::load(&Config {
             listen: "127.0.0.1:0".parse().unwrap(),
+            management_listen: "127.0.0.1:1".parse().unwrap(),
             endpoint_domain: None,
             region: "us-east-1".to_owned(),
             max_in_flight_requests: 8,

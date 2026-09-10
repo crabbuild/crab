@@ -263,15 +263,19 @@ A phase is complete only when every acceptance criterion has evidence at the
 same commit. Compilation and mocked unit tests alone cannot close a phase that
 introduces an externally visible operation.
 
-Planned artifacts (create them in the indicated phases; they do not exist yet):
+Phase-owned artifacts:
 
 - Phase 0: `crab/docs/architecture/s3-gateway-contract.md`, the exact protocol,
   semantic decisions, supported feature cells and error mapping.
-- Phase 2: `crates/crab-s3-gateway/`, with integration tests under `tests/`,
-  plus `crab/scripts/e2e/qualify_s3_gateway.py`.
-- Phase 8: `.github/workflows/s3-gateway.yml`, client/backend test jobs and
-  validation of qualification reports.
-- Phase 9: crate README, deployment assets and product documentation.
+- Phase 2: `crates/crab-s3-gateway/` exists; integration tests under `tests/`
+  and `crab/scripts/e2e/qualify_s3_gateway.py` remain planned.
+- Phase 8: `.github/workflows/s3-gateway.yml` builds and qualifies the packaged
+  image against RustFS with an unchanged signed AWS client. Qualification-report
+  production and validation remain planned.
+- Phase 9: the crate README, pinned image, example configuration, separate
+  management probes and container runtime smoke exist. Compose, Helm, ECS and
+  full operations assets below remain planned and are not yet supported
+  deployment profiles.
 
 Proposed runner interface, to implement in phase 2 and extend per phase:
 
@@ -1407,6 +1411,11 @@ Create `crates/crab-s3-gateway/deploy/` with:
   a second data store.
 - `operations.md` covering monitoring, scaling, rotation, cleanup, incident
   response, backup/restore and upgrade/rollback for all three environments.
+
+Current implementation covers the locked `deploy/Dockerfile`,
+`deploy/gateway.example.toml`, liveness/readiness contract and packaged-image
+RustFS smoke. The remaining assets in this list are requirements, not existing
+or qualified deployment support.
 
 Build a locked, multi-stage image with the executable as PID 1, non-root user,
 read-only root filesystem, explicit writable scratch/cache directories and

@@ -30,10 +30,12 @@ gix-object = { workspace = true }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
+hyper = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "http1", "http2", "tokio"] }
 md-5 = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = "2"
+reqwest = { workspace = true }
 s3s = "=0.14.1"
 serde = { workspace = true }
 serde_json = { workspace = true }

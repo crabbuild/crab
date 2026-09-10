@@ -13,7 +13,7 @@ mod repository;
 mod server;
 
 pub use config::{Config, CredentialConfig, RepositoryAccess, RepositoryConfig, RepositoryMember};
-pub use server::{initialize, serve};
+pub use server::{check_liveness, check_readiness, initialize, serve};
 
 /// Gateway startup, configuration, and runtime failures.
 #[derive(Debug, thiserror::Error)]
@@ -47,6 +47,16 @@ pub enum Error {
     },
     #[error("gateway worker failed")]
     Worker(#[from] tokio::task::JoinError),
+    #[error("gateway logging initialization failed")]
+    Logging {
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[error("gateway management probe failed")]
+    Healthcheck {
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 /// Gateway result retaining original sources.

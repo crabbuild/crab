@@ -145,11 +145,21 @@ explicit catch-up command for an already fragmented repository.
 cargo build --release -p crab-s3-gateway --locked
 crab-s3-gateway --config /etc/crab/s3-gateway.toml --initialize
 crab-s3-gateway --config /etc/crab/s3-gateway.toml
+crab-s3-gateway --config /etc/crab/s3-gateway.toml --healthcheck
+crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check
 ```
 
 `--initialize` creates missing canonical Crab metadata only for empty configured
 prefixes, then exits. It is safe to run repeatedly. Normal serving never
 initializes or converts repository storage.
+
+The S3 and management listeners are deliberately separate. `GET /livez` on
+`management_listen` reports only that the process can serve requests. `GET
+/readyz` freshly reads and constructs every configured repository's current
+immutable view; it returns `503 Service Unavailable` with `Retry-After: 5` when
+any repository is unsafe to serve. The corresponding CLI checks are suitable
+for container and orchestration probes. Do not publish the unauthenticated
+management listener through the S3 ingress.
 
 The backing provider uses Crab's existing environment credential chain. Set
 the usual AWS, GCP, or Azure credentials for the selected provider. For an
@@ -161,10 +171,22 @@ is set, both `https://endpoint.example/repository/key` and
 `https://repository.endpoint.example/key` address the same logical bucket.
 The deployment's DNS and TLS certificate must cover the wildcard host.
 
-See `s3-gateway.example.toml` for configuration and
+See `deploy/gateway.example.toml` for configuration and
 `crab/docs/architecture/s3-gateway-contract.md` for the protocol contract.
 Terminate with SIGTERM or SIGINT for graceful connection draining.
 
 Production deployments should bind to a private listener and terminate TLS at
 an ingress, load balancer, or service mesh. Do not expose the plain HTTP
 listener beyond a trusted network boundary.
+
+Build the checked image from the repository root with:
+
+```sh
+docker build -f crates/crab-s3-gateway/deploy/Dockerfile -t crab-s3-gateway .
+```
+
+Run it with a read-only root filesystem, a capacity-limited writable mount at
+`/var/lib/crab/tmp`, the configuration mounted at
+`/etc/crab/s3-gateway.toml`, and credential files mounted read-only for UID/GID
+10001. Expose port 8080 only through the S3 ingress and port 8081 only to the
+workload's probe network.

@@ -1,4 +1,7 @@
-listen = "127.0.0.1:8080"
+listen = "0.0.0.0:8080"
+# Keep this management listener private to the workload network. It serves
+# unauthenticated process liveness and repository readiness probes only.
+management_listen = "0.0.0.0:8081"
 region = "us-east-1"
 # Per-process active request budget. Queued bursts wait for bounded capacity;
 # tune from measured CPU, memory, file-descriptor, and scratch usage.

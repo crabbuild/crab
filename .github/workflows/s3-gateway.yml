@@ -1,0 +1,305 @@
+name: S3 gateway
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/s3-gateway.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/**"
+      - "crates/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s3-gateway-container-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+  RUSTFS_ACCESS_KEY: crab
+  RUSTFS_SECRET_KEY: crab
+  GATEWAY_ACCESS_KEY: gateway-qualification
+  GATEWAY_SECRET_KEY: gateway-qualification-secret
+
+jobs:
+  image:
+    name: Build and qualify image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Build locked gateway image
+        run: >-
+          docker build
+          --file crates/crab-s3-gateway/deploy/Dockerfile
+          --tag crab-s3-gateway:test
+          .
+
+      - name: Verify runtime contract
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect crab-s3-gateway:test --format '{{.Config.User}}')" = "crab:crab"
+          test "$(docker image inspect crab-s3-gateway:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
+          docker image inspect crab-s3-gateway:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"--healthcheck"'
+          test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -u)" = "10001"
+          test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -g)" = "10001"
+          docker run --rm crab-s3-gateway:test --help | grep -F -- "--healthcheck"
+          docker run --rm crab-s3-gateway:test --help | grep -F -- "--readiness-check"
+
+      - name: Start RustFS and initialize repository
+        run: |
+          set -euo pipefail
+          docker network create crab-s3-gateway-qualification
+          docker run --detach \
+            --name crab-s3-gateway-rustfs \
+            --network crab-s3-gateway-qualification \
+            --publish 19000:9000 \
+            --env RUSTFS_ACCESS_KEY \
+            --env RUSTFS_SECRET_KEY \
+            "${RUSTFS_IMAGE}" /data
+
+          for attempt in $(seq 1 60); do
+            if AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+              AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              AWS_DEFAULT_REGION=us-east-1 \
+              aws --endpoint-url http://127.0.0.1:19000 s3api list-buckets >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "RustFS did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 \
+            aws --endpoint-url http://127.0.0.1:19000 \
+            s3api create-bucket --bucket crab-s3-gateway-qualification >/dev/null
+
+          config_root="${RUNNER_TEMP}/crab-s3-gateway"
+          install -d "${config_root}"
+          printf '%s' "${GATEWAY_SECRET_KEY}" > "${config_root}/gateway-secret"
+          chmod 0600 "${config_root}/gateway-secret"
+          sudo chown 10001:10001 "${config_root}/gateway-secret"
+          printf '%s\n' \
+            'listen = "0.0.0.0:8080"' \
+            'management_listen = "0.0.0.0:8081"' \
+            'region = "us-east-1"' \
+            'max_in_flight_requests = 32' \
+            '' \
+            '[[credentials]]' \
+            "access_key = \"${GATEWAY_ACCESS_KEY}\"" \
+            'secret_key_file = "/run/secrets/crab-s3-secret"' \
+            'principal = "service-account:qualification"' \
+            '' \
+            '[[repositories]]' \
+            'name = "gateway-repository"' \
+            'provider = "s3"' \
+            'bucket = "crab-s3-gateway-qualification"' \
+            'prefix = "repositories/qualification"' \
+            'default_branch = "main"' \
+            'max_active_multipart_uploads = 16' \
+            'multipart_staging_bytes_per_upload = 5368709120' \
+            'multipart_upload_ttl_seconds = 3600' \
+            '' \
+            '[[repositories.members]]' \
+            'principal = "service-account:qualification"' \
+            'access = "write"' \
+            > "${config_root}/gateway.toml"
+
+          docker run --detach \
+            --name crab-s3-gateway-unready \
+            --network crab-s3-gateway-qualification \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --publish 127.0.0.1:18081:8081 \
+            --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            --env AWS_DEFAULT_REGION=us-east-1 \
+            --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
+            --env AWS_ALLOW_HTTP=true \
+            --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            crab-s3-gateway:test
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18081/livez >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" == 30 ]]; then
+              echo "uninitialized gateway liveness did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          readiness_headers="$(curl --silent --show-error --dump-header - \
+            --output /dev/null http://127.0.0.1:18081/readyz)"
+          grep -Fq '503 Service Unavailable' <<< "${readiness_headers}"
+          grep -Eiq '^retry-after: 5' <<< "${readiness_headers}"
+          docker stop --time 35 crab-s3-gateway-unready >/dev/null
+          docker rm crab-s3-gateway-unready >/dev/null
+
+          docker run --rm \
+            --network crab-s3-gateway-qualification \
+            --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            --env AWS_DEFAULT_REGION=us-east-1 \
+            --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
+            --env AWS_ALLOW_HTTP=true \
+            --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            crab-s3-gateway:test \
+            --config /etc/crab/s3-gateway.toml --initialize
+
+      - name: Start constrained gateway
+        run: |
+          set -euo pipefail
+          config_root="${RUNNER_TEMP}/crab-s3-gateway"
+          docker run --detach \
+            --name crab-s3-gateway \
+            --network crab-s3-gateway-qualification \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700 \
+            --publish 18080:8080 \
+            --publish 127.0.0.1:18081:8081 \
+            --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            --env AWS_DEFAULT_REGION=us-east-1 \
+            --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
+            --env AWS_ALLOW_HTTP=true \
+            --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            crab-s3-gateway:test
+
+          for attempt in $(seq 1 60); do
+            if docker exec crab-s3-gateway \
+              crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "gateway did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec crab-s3-gateway \
+            crab-s3-gateway --config /etc/crab/s3-gateway.toml --healthcheck
+          for attempt in $(seq 1 60); do
+            health="$(docker inspect crab-s3-gateway --format '{{.State.Health.Status}}')"
+            if [[ "${health}" == healthy ]]; then
+              break
+            fi
+            if [[ "${health}" == unhealthy || "${attempt}" == 60 ]]; then
+              echo "container healthcheck failed with status ${health}" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Verify signed S3 traffic and range reads
+        run: |
+          set -euo pipefail
+          qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
+          install -d "${qualification_root}"
+          printf '%s\n' \
+            '[default]' \
+            'region = us-east-1' \
+            's3 =' \
+            '    signature_version = s3v4' \
+            > "${qualification_root}/aws-config"
+          head -c 2097152 /dev/zero > "${qualification_root}/input.bin"
+
+          export AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}"
+          export AWS_DEFAULT_REGION=us-east-1
+          export AWS_CONFIG_FILE="${qualification_root}/aws-config"
+          endpoint=http://127.0.0.1:18080
+          bucket=gateway-repository
+          key=main/qualification/signed.bin
+
+          aws --endpoint-url "${endpoint}" s3api list-buckets \
+            --query 'Buckets[?Name==`gateway-repository`].Name | [0]' \
+            --output text | grep -Fx gateway-repository
+          aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket "${bucket}" --key "${key}" \
+            --body "${qualification_root}/input.bin" >/dev/null
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket "${bucket}" --key "${key}" \
+            "${qualification_root}/output.bin" >/dev/null
+          cmp "${qualification_root}/input.bin" "${qualification_root}/output.bin"
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket "${bucket}" --key "${key}" \
+            --range bytes=1048576-1114111 \
+            "${qualification_root}/range.bin" >/dev/null
+          test "$(wc -c < "${qualification_root}/range.bin" | tr -d ' ')" = 65536
+
+          presigned_url="$(aws --endpoint-url "${endpoint}" s3 presign \
+            "s3://${bucket}/${key}" --expires-in 60)"
+          grep -Fq 'X-Amz-Signature=' <<< "${presigned_url}"
+          curl --fail --silent --show-error "${presigned_url}" \
+            --output "${qualification_root}/presigned.bin"
+          cmp "${qualification_root}/input.bin" "${qualification_root}/presigned.bin"
+
+          PRESIGNED_URL="${presigned_url}" python3 - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          url = os.environ["PRESIGNED_URL"]
+          marker = "X-Amz-Signature="
+          prefix, remainder = url.split(marker, 1)
+          signature, separator, suffix = remainder.partition("&")
+          replacement = "0" if signature[-1] != "0" else "1"
+          tampered = prefix + marker + signature[:-1] + replacement
+          if separator:
+              tampered += separator + suffix
+          try:
+              urllib.request.urlopen(tampered, timeout=10)
+          except urllib.error.HTTPError as error:
+              if error.code == 403:
+                  raise SystemExit(0)
+              raise
+          raise SystemExit("tampered signature was accepted")
+          PY
+
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            "${endpoint}/${bucket}/${key}")" = 403
+          if AWS_SECRET_ACCESS_KEY=wrong-qualification-secret \
+            aws --endpoint-url "${endpoint}" s3api head-object \
+              --bucket "${bucket}" --key "${key}" >/dev/null 2>&1; then
+            echo "incorrect signing secret was accepted" >&2
+            exit 1
+          fi
+          aws --endpoint-url "${endpoint}" s3api delete-object \
+            --bucket "${bucket}" --key "${key}" >/dev/null
+
+      - name: Verify graceful termination
+        run: |
+          set -euo pipefail
+          docker stop --time 35 crab-s3-gateway >/dev/null
+          test "$(docker inspect crab-s3-gateway --format '{{.State.ExitCode}}')" = "0"
+
+      - name: Print service logs after failure
+        if: failure()
+        run: |
+          docker logs crab-s3-gateway 2>&1 || true
+          docker logs crab-s3-gateway-rustfs 2>&1 || true
+
+      - name: Clean up services
+        if: always()
+        run: |
+          docker rm --force \
+            crab-s3-gateway crab-s3-gateway-unready crab-s3-gateway-rustfs \
+            >/dev/null 2>&1 || true
+          docker network rm crab-s3-gateway-qualification >/dev/null 2>&1 || true

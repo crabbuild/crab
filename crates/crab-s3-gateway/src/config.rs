@@ -14,6 +14,8 @@ use crate::{Error, Result};
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
+    /// Private listener for orchestration liveness and readiness probes.
+    pub management_listen: SocketAddr,
     /// Base domain used to accept both path-style and virtual-hosted requests.
     pub endpoint_domain: Option<String>,
     #[serde(default = "default_region")]
@@ -86,6 +88,11 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.listen == self.management_listen {
+            return Err(Error::Config(
+                "listen and management_listen must use different addresses",
+            ));
+        }
         if self.repositories.is_empty() || self.credentials.is_empty() {
             return Err(Error::Config(
                 "configure at least one repository and one credential",
@@ -264,6 +271,7 @@ mod tests {
     fn valid_config(secret_key_file: PathBuf) -> Config {
         Config {
             listen: "127.0.0.1:8080".parse().unwrap(),
+            management_listen: "127.0.0.1:8081".parse().unwrap(),
             endpoint_domain: None,
             region: default_region(),
             max_in_flight_requests: default_max_in_flight_requests(),
@@ -319,6 +327,21 @@ mod tests {
             config.max_in_flight_requests = value;
             assert!(config.validate().is_err());
         }
+    }
+
+    #[test]
+    fn management_listener_must_be_separate() {
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(secret.path(), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut config = valid_config(secret.path().to_owned());
+        config.management_listen = config.listen;
+        assert!(config.validate().is_err());
     }
 
     #[test]
