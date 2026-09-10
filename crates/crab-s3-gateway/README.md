@@ -120,12 +120,13 @@ path-local attribute delta. Immutable pack, index, visibility, and attribute
 artifacts are prepared and uploaded before the destination ref lease; the lease
 contains only branch revalidation and journal publication. Same-ref requests are
 admitted through a bounded FIFO queue, while different refs may prepare in
-parallel. A new write cancels in-flight derived maintenance so foreground traffic
-does not wait behind catalog or commit-graph work. Successful journal publication
-is immediately readable by the gateway; catalog compaction and commit-graph
-maintenance continue after the write burst becomes idle. Maintenance is
-coalesced so a later journal wave never advances from a generation whose
-visibility proof is still being finalized.
+parallel. A new write cancels maintenance that is still in the idle debounce.
+Once a pass starts canonical publication, it drains across the manifest,
+catalog, and visibility boundary; a write that arrives during that pass is
+coalesced into a follow-up pass. Successful journal publication is immediately
+readable by the gateway; catalog compaction and commit-graph maintenance continue
+after the write burst becomes idle. This prevents cancellation from leaving an
+intermediate manifest generation without its verified visibility proof.
 
 Run `crab metadb owner` as one continuously supervised worker for each backing
 repository. The owner performs bounded geometric repack outside request

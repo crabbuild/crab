@@ -1341,6 +1341,7 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
+    use crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE;
     use std::collections::BTreeMap;
 
     async fn fixture() -> (
@@ -1434,6 +1435,31 @@ mod tests {
             .find(|reference| reference.name == "refs/heads/main")
             .unwrap()
             .target
+    }
+
+    async fn coordinated_put(
+        coordinator: &Coordinator,
+        repository: &Repository,
+        cancel: &CancellationToken,
+        path: &str,
+        body: &'static [u8],
+    ) {
+        coordinator
+            .apply(
+                repository,
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+                Change::Put {
+                    bytes: Bytes::from_static(body),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
+                },
+                "user",
+                cancel,
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1944,6 +1970,88 @@ mod tests {
             );
         }
         runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn write_during_canonical_maintenance_retains_visibility_proof() {
+        let (repository, runtime, cancel) = fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+        );
+        coordinated_put(
+            &coordinator,
+            &repository,
+            &cancel,
+            "baseline.txt",
+            b"baseline",
+        )
+        .await;
+        let baseline = wait_for_visibility(&repository).await;
+        let blocker = loop {
+            match PushLock::acquire_internal(
+                repository.store.inner(),
+                repository.layout.repo_prefix(),
+                GIT_OBJECT_LOCATOR_RESOURCE,
+                LOCK_TTL,
+            )
+            .await
+            {
+                Ok(blocker) => break blocker,
+                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("failed to acquire catalog blocker: {error}"),
+            }
+        };
+
+        coordinated_put(&coordinator, &repository, &cancel, "first.txt", b"first").await;
+        wait_for_generation_after(&repository, baseline).await;
+        coordinated_put(&coordinator, &repository, &cancel, "second.txt", b"second").await;
+        blocker.release().await.unwrap();
+        let final_generation = wait_for_visibility(&repository).await;
+
+        assert!(final_generation > baseline);
+        runtime.shutdown().await;
+    }
+
+    async fn wait_for_generation_after(repository: &Repository, generation: u64) {
+        for _ in 0..500 {
+            let (manifest, _) =
+                crab_metadata::manifest_store::read_manifest(&repository.store, &repository.layout)
+                    .await
+                    .unwrap();
+            if manifest.generation > generation {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("background maintenance did not advance the manifest");
+    }
+
+    async fn wait_for_visibility(repository: &Repository) -> u64 {
+        for _ in 0..500 {
+            let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+                &repository.store,
+                &repository.layout,
+            )
+            .await
+            .unwrap();
+            if snapshot.journal.transactions.is_empty()
+                && crab_metadata::git_visibility::read_for_manifest(
+                    &repository.store,
+                    &repository.layout,
+                    &snapshot.manifest,
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                return snapshot.manifest.generation;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("background maintenance did not publish a visibility proof");
     }
 
     #[tokio::test(flavor = "multi_thread")]
