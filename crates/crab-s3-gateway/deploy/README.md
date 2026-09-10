@@ -12,6 +12,8 @@ synthetic gateway secret with mode `0600`:
 mkdir -p /path/to/crab-s3-gateway-smoke
 umask 077
 printf '%s' 'gateway-qualification-secret' > /path/to/crab-s3-gateway-smoke/gateway-secret
+sudo chown 10001:10001 /path/to/crab-s3-gateway-smoke/gateway-secret
+chmod 0600 /path/to/crab-s3-gateway-smoke/gateway-secret
 ```
 
 Set the smoke environment. All credentials below are synthetic and valid only

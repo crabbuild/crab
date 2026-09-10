@@ -186,9 +186,14 @@ docker build -f crates/crab-s3-gateway/deploy/Dockerfile -t crab-s3-gateway .
 ```
 
 The isolated Docker Compose qualification procedure is in `deploy/README.md`.
+The statically validated Kubernetes workload and EKS values are in
+`deploy/helm/crab-s3-gateway/`. They are deployment assets, not evidence of a
+live EKS qualification.
 
 Run it with a read-only root filesystem, a capacity-limited writable mount at
 `/var/lib/crab/tmp`, the configuration mounted at
 `/etc/crab/s3-gateway.toml`, and credential files mounted read-only for UID/GID
-10001. Expose port 8080 only through the S3 ingress and port 8081 only to the
-workload's probe network.
+10001. Credential files may be owner-only or readable only by the process's
+effective group; group write/execute and all other-user access are rejected.
+Expose port 8080 only through the S3 ingress and port 8081 only to the workload's
+probe network.

@@ -274,8 +274,10 @@ Phase-owned artifacts:
   production and validation remain planned.
 - Phase 9: the crate README, pinned image, example configuration, separate
   management probes, container runtime smoke and isolated Compose profile
-  exist. Helm, ECS and full operations assets below remain planned and are not
-  yet supported deployment profiles.
+  exist. The canonical Helm chart is schema-checked, rendered and validated as
+  Kubernetes 1.29 resources in CI, but has no live EKS evidence. ECS and full
+  operations assets below remain planned. None of EKS, ECS or the operations
+  profile is qualified production deployment support yet.
 
 Proposed runner interface, to implement in phase 2 and extend per phase:
 
@@ -1414,9 +1416,10 @@ Create `crates/crab-s3-gateway/deploy/` with:
 
 Current implementation covers the locked `deploy/Dockerfile`, example and
 Compose configurations, liveness/readiness contract, packaged-image RustFS
-smoke and Compose multipart recovery across container replacement. The
-remaining external TLS, independent Git-history proof, Helm, ECS and operations
-assets in this list are requirements, not existing or qualified deployment
+smoke and Compose multipart recovery across container replacement. It also
+includes the canonical Helm chart, values schema, EKS example and CI validation
+against Kubernetes 1.29 schemas. Live EKS, external TLS, independent Git-history
+proof, ECS and operations evidence remain requirements, not qualified deployment
 support.
 
 Build a locked, multi-stage image with the executable as PID 1, non-root user,

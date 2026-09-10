@@ -28,6 +28,71 @@ env:
   GATEWAY_SECRET_KEY: gateway-qualification-secret
 
 jobs:
+  helm:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Lint, render, and validate Kubernetes resources
+        run: |
+          set -euo pipefail
+          chart=crates/crab-s3-gateway/deploy/helm/crab-s3-gateway
+          values="${chart}/eks-values.example.yaml"
+          helm_image=alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9
+          kubeconform_image=ghcr.io/yannh/kubeconform:v0.7.0@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c
+
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" lint --strict "${chart}" >/dev/null 2>&1; then
+            echo "chart accepted mutable or missing deployment inputs" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" lint --strict "${chart}" --values "${values}" \
+              --set serviceAccount.automountServiceAccountToken=true \
+              >/dev/null 2>&1; then
+            echo "chart accepted automatic Kubernetes API credentials" >&2
+            exit 1
+          fi
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" lint --strict "${chart}" --values "${values}"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              > "${RUNNER_TEMP}/crab-s3-gateway.yaml"
+          docker run --rm \
+            --volume "${RUNNER_TEMP}/crab-s3-gateway.yaml:/manifests/gateway.yaml:ro" \
+            "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
+              /manifests/gateway.yaml
+
+          service="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              --show-only templates/service.yaml)"
+          grep -Fq 'name: s3' <<< "${service}"
+          if grep -Fq 'management' <<< "${service}"; then
+            echo "management port was exposed through the S3 Service" >&2
+            exit 1
+          fi
+          deployment="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              --show-only templates/deployment.yaml)"
+          for invariant in \
+            'automountServiceAccountToken: false' \
+            'enableServiceLinks: false' \
+            'runAsNonRoot: true' \
+            'runAsUser: 10001' \
+            'runAsGroup: 10001' \
+            'fsGroup: 10001' \
+            'allowPrivilegeEscalation: false' \
+            'readOnlyRootFilesystem: true' \
+            'minDomains: 2' \
+            'defaultMode: 0400'; do
+            grep -Fq "${invariant}" <<< "${deployment}"
+          done
+
   image:
     name: Build and qualify image
     runs-on: ubuntu-latest
@@ -88,8 +153,8 @@ jobs:
           config_root="${RUNNER_TEMP}/crab-s3-gateway"
           install -d "${config_root}"
           printf '%s' "${GATEWAY_SECRET_KEY}" > "${config_root}/gateway-secret"
-          chmod 0600 "${config_root}/gateway-secret"
-          sudo chown 10001:10001 "${config_root}/gateway-secret"
+          sudo chown 0:10001 "${config_root}/gateway-secret"
+          chmod 0440 "${config_root}/gateway-secret"
           printf '%s\n' \
             'listen = "0.0.0.0:8080"' \
             'management_listen = "0.0.0.0:8081"' \

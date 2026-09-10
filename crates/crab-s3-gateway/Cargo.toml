@@ -32,6 +32,7 @@ http-body = "1"
 http-body-util = "0.1"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "http1", "http2", "tokio"] }
+libc = "0.2"
 md-5 = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = "2"

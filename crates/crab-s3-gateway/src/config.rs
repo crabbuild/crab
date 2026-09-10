@@ -210,14 +210,25 @@ impl Config {
 
 #[cfg(unix)]
 fn validate_secret_permissions(metadata: &std::fs::Metadata) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-    if metadata.permissions().mode() & 0o077 != 0 {
+    // Kubernetes projects read-only Secrets as root-owned files whose group is
+    // the pod fsGroup. Limit that exception to this process's effective group.
+    // SAFETY: getegid only reads the calling process's effective identity.
+    let process_gid = unsafe { libc::getegid() };
+    if !secret_permissions_are_private(metadata.permissions().mode(), metadata.gid(), process_gid) {
         return Err(Error::Config(
-            "credential secret files must not be accessible by group or other users",
+            "credential secret files must be owner-only or read-only by the process group",
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn secret_permissions_are_private(mode: u32, file_gid: u32, process_gid: u32) -> bool {
+    let group_permissions = mode & 0o070;
+    mode & 0o007 == 0
+        && (group_permissions == 0 || (group_permissions == 0o040 && file_gid == process_gid))
 }
 
 #[cfg(not(unix))]
@@ -369,13 +380,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn credential_secret_rejects_group_or_other_access() {
-        use std::os::unix::fs::PermissionsExt as _;
+    fn credential_secret_accepts_owner_only_access() {
+        assert!(secret_permissions_are_private(0o600, 10, 20));
+    }
 
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o640)).unwrap();
-        assert!(validate_secret_permissions(&std::fs::metadata(file.path()).unwrap()).is_err());
-        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
-        validate_secret_permissions(&std::fs::metadata(file.path()).unwrap()).unwrap();
+    #[cfg(unix)]
+    #[test]
+    fn credential_secret_accepts_read_access_by_process_group() {
+        assert!(secret_permissions_are_private(0o440, 20, 20));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_secret_rejects_broader_access() {
+        let insecure = [
+            secret_permissions_are_private(0o440, 10, 20),
+            secret_permissions_are_private(0o460, 20, 20),
+            secret_permissions_are_private(0o444, 20, 20),
+        ];
+        assert!(insecure.into_iter().all(|accepted| !accepted));
     }
 }
