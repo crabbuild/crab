@@ -379,6 +379,23 @@ impl Gateway {
         repository: &Repository,
         loaded: crate::multipart::Loaded,
     ) -> S3Result<bool> {
+        let plan_id = crate::multipart::publication_plan_id(&loaded.session.id);
+        if crab_metadata::plan_receipt::resolve_plan_receipt(
+            &repository.store,
+            &repository.layout,
+            &plan_id,
+        )
+        .await
+        .map_err(|error| gateway_error(error.into()))?
+        .is_some()
+            && let Some((etag, checksums)) =
+                crate::multipart::planned_completion(&loaded.session).map_err(multipart_error)?
+        {
+            crate::multipart::complete(repository, loaded, etag, checksums)
+                .await
+                .map_err(multipart_error)?;
+            return Ok(true);
+        }
         let Some(attributes) = self
             .current_object_attributes(repository, &loaded.session.key)
             .await?
@@ -2056,27 +2073,33 @@ impl S3 for Gateway {
         {
             return Err(s3_error!(InvalidPartOrder));
         }
-        if let Some(etag) =
-            crate::multipart::completed_etag(&loaded.session, &selected).map_err(multipart_error)?
-        {
-            let checksums = loaded
-                .session
-                .completion_checksums
-                .clone()
-                .unwrap_or_default();
-            return Ok(S3Response::new(CompleteMultipartUploadOutput {
-                bucket: Some(req.input.bucket),
-                key: Some(req.input.key),
-                e_tag: Some(ETag::Strong(etag.to_owned())),
-                checksum_crc32: checksums.crc32,
-                checksum_crc32c: checksums.crc32c,
-                checksum_crc64nvme: checksums.crc64nvme,
-                checksum_sha1: checksums.sha1,
-                checksum_sha256: checksums.sha256,
-                checksum_type: checksums.checksum_type.map(ChecksumType::from),
-                ..Default::default()
-            }));
+        if let Some(response) = completed_multipart_response(
+            &loaded.session,
+            &selected,
+            &req.input.bucket,
+            &req.input.key,
+        )? {
+            return Ok(response);
         }
+        let loaded = if crate::multipart::is_completing(&loaded.session) {
+            let recovered = self.recover_published_multipart(repository, loaded).await?;
+            let loaded =
+                crate::multipart::load_completion(repository, &req.input.upload_id, now_seconds()?)
+                    .await
+                    .map_err(multipart_error)?;
+            if recovered {
+                return completed_multipart_response(
+                    &loaded.session,
+                    &selected,
+                    &req.input.bucket,
+                    &req.input.key,
+                )?
+                .ok_or_else(|| s3_error!(InternalError));
+            }
+            loaded
+        } else {
+            loaded
+        };
         let condition = self
             .put_condition_values(repository, &req.input.key, if_match, if_none_match)
             .await?;
@@ -2141,6 +2164,14 @@ impl S3 for Gateway {
                 .stored_for_algorithm(assembly.digests(), session.checksum_algorithm.as_deref())?
         };
         let etag = multipart_etag(&parts)?;
+        let session = crate::multipart::record_completion_outcome(
+            repository,
+            &session.id,
+            &etag,
+            &stored_checksums,
+        )
+        .await
+        .map_err(multipart_error)?;
         let mut attributes = session.attributes.clone();
         attributes.etag_override = Some(etag.clone());
         attributes.completion_upload_id = Some(session.id.clone());
@@ -3696,7 +3727,10 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
         | mutation::Error::InvalidAttributes => {
             s3_error!(InvalidObjectState)
         }
-        mutation::Error::Cancelled => s3_error!(RequestTimeout),
+        mutation::Error::Cancelled
+        | mutation::Error::Publication(crab_remote::publication::Error::Cancelled) => {
+            s3_error!(RequestTimeout)
+        }
         mutation::Error::Overloaded | mutation::Error::AdmissionTimeout => {
             s3_error!(SlowDown)
         }
@@ -3709,9 +3743,15 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
         }
         mutation::Error::Coordination(crab_coordination::CoordinationError::PushLockHeld {
             ..
+        })
+        | mutation::Error::Publication(crab_remote::publication::Error::Coordination(
+            crab_coordination::CoordinationError::PushLockHeld { .. },
+        ))
+        | mutation::Error::Metadata(crab_metadata::error::MetadataError::PlanAlreadyAttempted {
+            ..
         }) => s3_error!(
             OperationAborted,
-            "The destination branch is busy; retry the request"
+            "The write outcome is being reconciled; retry the request"
         ),
         error => {
             tracing::error!(error = ?error, "S3 repository mutation failed");
@@ -3779,6 +3819,32 @@ fn multipart_etag(parts: &[crate::multipart::Part]) -> S3Result<String> {
     let digest = md5::Md5::digest(binary);
     let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok(format!("{hash}-{}", parts.len()))
+}
+
+fn completed_multipart_response(
+    session: &crate::multipart::Session,
+    selected: &[(i32, String)],
+    bucket: &str,
+    key: &str,
+) -> S3Result<Option<S3Response<CompleteMultipartUploadOutput>>> {
+    let Some(etag) =
+        crate::multipart::completed_etag(session, selected).map_err(multipart_error)?
+    else {
+        return Ok(None);
+    };
+    let checksums = session.completion_checksums.clone().unwrap_or_default();
+    Ok(Some(S3Response::new(CompleteMultipartUploadOutput {
+        bucket: Some(bucket.to_owned()),
+        key: Some(key.to_owned()),
+        e_tag: Some(ETag::Strong(etag.to_owned())),
+        checksum_crc32: checksums.crc32,
+        checksum_crc32c: checksums.crc32c,
+        checksum_crc64nvme: checksums.crc64nvme,
+        checksum_sha1: checksums.sha1,
+        checksum_sha256: checksums.sha256,
+        checksum_type: checksums.checksum_type.map(ChecksumType::from),
+        ..Default::default()
+    })))
 }
 
 fn completion_receipt(
@@ -4362,6 +4428,14 @@ mod tests {
         .await
         .unwrap();
         let completion_etag = multipart_etag(&parts).unwrap();
+        let session = crate::multipart::record_completion_outcome(
+            repository,
+            &session.id,
+            &completion_etag,
+            &crate::attributes::Checksums::default(),
+        )
+        .await
+        .unwrap();
         let mut attributes = session.attributes.clone();
         attributes.etag_override = Some(completion_etag.clone());
         attributes.completion_upload_id = Some(session.id.clone());
@@ -4381,9 +4455,27 @@ mod tests {
                 &session.branch,
                 &crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap(),
                 mutation::Change::Put {
-                    bytes: body,
+                    bytes: body.clone(),
                     track_lfs: false,
                     attributes: Box::new(attributes),
+                    condition: mutation::PutCondition::None,
+                },
+                "user",
+                &gateway.cancellation,
+            )
+            .await
+            .unwrap();
+        let overwrite = Bytes::from_static(b"newer object version");
+        gateway
+            .mutations
+            .apply(
+                repository,
+                &session.branch,
+                &crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap(),
+                mutation::Change::Put {
+                    bytes: overwrite.clone(),
+                    track_lfs: false,
+                    attributes: Box::default(),
                     condition: mutation::PutCondition::None,
                 },
                 "user",
@@ -4419,12 +4511,20 @@ mod tests {
             },
         )
         .await;
+        let current = gateway
+            .read_object(repository, "main/object.bin")
+            .await
+            .unwrap();
+        let ReadContent::Ordinary(current) = current.content else {
+            panic!("expected ordinary overwrite");
+        };
 
         assert!(
             recovered
                 && crate::multipart::completed_etag(&terminal.session, &[(1, part_etag)])
                     .is_ok_and(|etag| etag == Some(completion_etag.as_str()))
                 && replacement.is_ok()
+                && current == overwrite
         );
         gateway.shutdown().await;
     }

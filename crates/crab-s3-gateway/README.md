@@ -39,9 +39,11 @@ seven days. Every instance serving the same repository must use the same three
 values. A once-per-minute reconciler aborts expired Open sessions, retries terminal
 cleanup, and reclaims expired slots whose process died before writing the session
 record. For a frozen Completing session, it reads only the current object's
-Git-bound attributes and closes the session when the exact upload ID, ETag, size,
-selected parts, and user attributes prove that publication succeeded. A session
-without that durable receipt remains fenced for an identical client retry.
+Git-bound attributes or resolves its deterministic ref-journal publication plan,
+then closes the session only when durable evidence proves that publication
+succeeded. Plan evidence remains valid after a later write replaces the object.
+A session without committed evidence remains fenced for an identical client
+retry.
 Large payloads use bounded-memory request spools and Crab's verified LFS content
 path. Multipart completion keeps objects through 64 MiB in a local spool. Above
 that threshold it hashes and validates the durable selected parts, then replays

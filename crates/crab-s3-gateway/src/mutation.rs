@@ -67,6 +67,8 @@ pub(crate) enum Error {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("repository coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("repository publication admission failed")]
+    Publication(#[from] crab_remote::publication::Error),
     #[error("repository publication failed")]
     Write(#[from] crab_write::WriteError),
     #[error("mutation worker failed")]
@@ -335,6 +337,14 @@ impl RefLease {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ApplyRequest<'a> {
+    branch: &'a str,
+    path: &'a crab_remote_git::GitPath,
+    principal: &'a str,
+    plan_id: Option<&'a str>,
+}
+
 async fn apply_admitted(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
@@ -343,6 +353,105 @@ async fn apply_admitted(
     path: &crab_remote_git::GitPath,
     change: Change,
     principal: &str,
+    cancel: &CancellationToken,
+) -> Result<Outcome> {
+    let completion_plan = match &change {
+        Change::Put { attributes, .. } => {
+            attributes
+                .completion_upload_id
+                .as_deref()
+                .map(|id| CompletionPlan {
+                    id: crate::multipart::publication_plan_id(id),
+                    etag: attributes.etag_override.clone(),
+                })
+        }
+        Change::Attributes { .. } | Change::Delete => None,
+    };
+    let Some(completion_plan) = completion_plan else {
+        return apply_with_gc_fences(
+            repository,
+            runtime,
+            options,
+            change,
+            ApplyRequest {
+                branch,
+                path,
+                principal,
+                plan_id: None,
+            },
+            cancel,
+        )
+        .await;
+    };
+    if let Some(outcome) = resolved_completion_plan(repository, &completion_plan).await? {
+        return Ok(outcome);
+    }
+    let executing_plan_id = completion_plan.id.clone();
+    let result = crab_remote::publication::with_plan(
+        &repository.store,
+        &repository.layout,
+        &completion_plan.id,
+        LOCK_TTL,
+        cancel,
+        |scoped| async move {
+            apply_with_gc_fences(
+                repository,
+                runtime,
+                options,
+                change,
+                ApplyRequest {
+                    branch,
+                    path,
+                    principal,
+                    plan_id: Some(&executing_plan_id),
+                },
+                &scoped,
+            )
+            .await
+        },
+    )
+    .await;
+    match result {
+        Err(
+            error @ Error::Metadata(crab_metadata::error::MetadataError::PlanAlreadyAttempted {
+                ..
+            }),
+        ) => resolved_completion_plan(repository, &completion_plan)
+            .await?
+            .ok_or(error),
+        result => result,
+    }
+}
+
+struct CompletionPlan {
+    id: String,
+    etag: Option<String>,
+}
+
+async fn resolved_completion_plan(
+    repository: &Repository,
+    plan: &CompletionPlan,
+) -> Result<Option<Outcome>> {
+    crab_metadata::plan_receipt::resolve_plan_receipt(
+        &repository.store,
+        &repository.layout,
+        &plan.id,
+    )
+    .await
+    .map(|receipt| {
+        receipt.map(|_| Outcome {
+            etag: plan.etag.clone(),
+        })
+    })
+    .map_err(Into::into)
+}
+
+async fn apply_with_gc_fences(
+    repository: &Repository,
+    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    options: crab_remote_git::RepositoryOptions,
+    change: Change,
+    request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
     let mut fences = Vec::new();
@@ -361,10 +470,8 @@ async fn apply_admitted(
             repository,
             Arc::clone(&runtime),
             options,
-            branch,
-            path,
             change,
-            principal,
+            request,
             cancel,
         ))
         .await
@@ -386,10 +493,8 @@ async fn apply_with_fences(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    branch: &str,
-    path: &crab_remote_git::GitPath,
     change: Change,
-    principal: &str,
+    request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
     for _ in 0..MAX_REPREPARE_ATTEMPTS {
@@ -398,10 +503,10 @@ async fn apply_with_fences(
             repository,
             Arc::clone(&runtime),
             options,
-            branch,
-            path,
+            request.branch,
+            request.path,
             change.clone(),
-            principal,
+            request.principal,
             cancel,
         )
         .await?;
@@ -409,9 +514,16 @@ async fn apply_with_fences(
             Prepared::Noop(outcome) => return Ok(outcome),
             Prepared::Commit(prepared) => prepared,
         };
-        let lease = RefLease::acquire(repository, branch, cancel).await?;
-        let published =
-            publish_prepared(repository, branch, &lease.holder, &prepared, cancel).await;
+        let lease = RefLease::acquire(repository, request.branch, cancel).await?;
+        let published = publish_prepared(
+            repository,
+            request.branch,
+            &lease.holder,
+            &prepared,
+            request.plan_id,
+            cancel,
+        )
+        .await;
         lease.release().await;
         match published? {
             Publish::Committed => {
@@ -423,7 +535,7 @@ async fn apply_with_fences(
         }
     }
     Err(crab_write::WriteError::RefChanged {
-        ref_name: branch.to_owned(),
+        ref_name: request.branch.to_owned(),
         path: repository.layout.repo_prefix().to_owned(),
     }
     .into())
@@ -627,6 +739,7 @@ async fn publish_prepared(
     branch: &str,
     holder: &str,
     prepared: &UploadedMutation,
+    plan_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<Publish> {
     check_cancelled(cancel)?;
@@ -645,6 +758,11 @@ async fn publish_prepared(
     if current != prepared.parent {
         return Ok(Publish::Reprepare);
     }
+    let options = crab_write::journal::CommitOptions::new(LOCK_TTL, cancel);
+    let options = match plan_id {
+        Some(plan_id) => options.with_plan(plan_id),
+        None => options,
+    };
     crab_write::journal::commit_edits(
         &repository.store,
         &repository.layout,
@@ -660,7 +778,7 @@ async fn publish_prepared(
         prepared.parent.is_none().then(|| branch.to_owned()),
         vec![prepared.pack.clone()],
         vec![],
-        crab_write::journal::CommitOptions::new(LOCK_TTL, cancel),
+        options,
     )
     .await?;
     Ok(Publish::Committed)
@@ -1586,14 +1704,32 @@ mod tests {
             crab_remote_git::RepositoryOptions::default(),
             "refs/heads/main",
             &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"newer content"),
+                track_lfs: false,
+                attributes: Box::default(),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let overwritten = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
             change,
             "user",
             &cancel,
         )
         .await
         .unwrap();
-        let second = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        assert_eq!(first, second);
+        let recovered = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        assert!(first != overwritten && recovered == overwritten);
         runtime.shutdown().await;
     }
 

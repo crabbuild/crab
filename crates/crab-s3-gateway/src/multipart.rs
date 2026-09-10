@@ -18,6 +18,7 @@ const CATALOG_READ_CONCURRENCY: usize = 32;
 // beyond this bound remain retryable across independently scaled instances.
 const MAX_STATE_UPDATE_ATTEMPTS: usize = 64;
 const MAX_STATE_RETRY_EXPONENT: usize = 5;
+const COMPLETION_PLAN_CONTEXT: &str = "crab s3 multipart completion plan v1";
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -148,6 +149,15 @@ pub(crate) struct Initiation<'a> {
     pub(crate) checksum_algorithm: Option<String>,
     pub(crate) checksum_type: Option<String>,
     pub(crate) now: u64,
+}
+
+pub(crate) fn publication_plan_id(upload_id: &str) -> String {
+    blake3::Hash::from_bytes(blake3::derive_key(
+        COMPLETION_PLAN_CONTEXT,
+        upload_id.as_bytes(),
+    ))
+    .to_hex()
+    .to_string()
 }
 
 pub(crate) async fn create(repository: &Repository, initiation: Initiation<'_>) -> Result<Session> {
@@ -699,13 +709,22 @@ pub(crate) async fn complete(
     etag: String,
     checksums: crate::attributes::Checksums,
 ) -> Result<()> {
-    if matches!(loaded.session.state, State::Completed)
-        && loaded.session.completion_etag.as_deref() == Some(&etag)
-    {
-        return Ok(());
+    if matches!(loaded.session.state, State::Completed) {
+        return if loaded.session.completion_etag.as_deref() == Some(&etag)
+            && loaded.session.completion_checksums.as_ref() == Some(&checksums)
+        {
+            Ok(())
+        } else {
+            Err(Error::InvalidPart)
+        };
     }
     if !matches!(loaded.session.state, State::Completing) {
         return Err(Error::NotOpen);
+    }
+    if let Some((planned_etag, planned_checksums)) = planned_completion(&loaded.session)?
+        && (planned_etag != etag || planned_checksums != checksums)
+    {
+        return Err(Error::InvalidPart);
     }
     loaded.session.state = State::Completed;
     loaded.session.completion_etag = Some(etag);
@@ -716,6 +735,54 @@ pub(crate) async fn complete(
         tracing::warn!(upload_id = %loaded.session.id, %error, "completed multipart cleanup failed");
     }
     Ok(())
+}
+
+pub(crate) async fn record_completion_outcome(
+    repository: &Repository,
+    id: &str,
+    etag: &str,
+    checksums: &crate::attributes::Checksums,
+) -> Result<Session> {
+    for _ in 0..MAX_STATE_UPDATE_ATTEMPTS {
+        let mut loaded = load(repository, id).await?;
+        if !matches!(loaded.session.state, State::Completing | State::Completed) {
+            return Err(Error::NotOpen);
+        }
+        match planned_completion(&loaded.session)? {
+            Some((recorded_etag, recorded_checksums))
+                if recorded_etag == etag && &recorded_checksums == checksums =>
+            {
+                return Ok(loaded.session);
+            }
+            Some(_) => return Err(Error::InvalidPart),
+            None if matches!(loaded.session.state, State::Completed) => {
+                return Err(Error::InvalidPart);
+            }
+            None => {}
+        }
+        loaded.session.completion_etag = Some(etag.to_owned());
+        loaded.session.completion_checksums = Some(checksums.clone());
+        loaded.session.revision = loaded.session.revision.saturating_add(1);
+        match save(repository, &loaded).await {
+            Ok(()) => return Ok(loaded.session),
+            Err(Error::Conflict) => tokio::task::yield_now().await,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::Conflict)
+}
+
+pub(crate) fn planned_completion(
+    session: &Session,
+) -> Result<Option<(String, crate::attributes::Checksums)>> {
+    match (
+        session.completion_etag.as_ref(),
+        session.completion_checksums.as_ref(),
+    ) {
+        (Some(etag), Some(checksums)) => Ok(Some((etag.clone(), checksums.clone()))),
+        (None, None) => Ok(None),
+        (Some(_), None) | (None, Some(_)) => Err(Error::InvalidPart),
+    }
 }
 
 pub(crate) fn completed_etag<'a>(
@@ -729,6 +796,10 @@ pub(crate) fn completed_etag<'a>(
         return Err(Error::InvalidPart);
     }
     Ok(session.completion_etag.as_deref())
+}
+
+pub(crate) fn is_completing(session: &Session) -> bool {
+    matches!(session.state, State::Completing)
 }
 
 pub(crate) fn frozen_parts(session: &Session) -> Result<Option<Vec<Part>>> {
@@ -1644,15 +1715,17 @@ mod tests {
         freeze(&repository, loaded, &selected, 1024).await.unwrap();
         let loaded = load(&repository, &session.id).await.unwrap();
         freeze(&repository, loaded, &selected, 1024).await.unwrap();
+        let checksums = crate::attributes::Checksums::default();
+        record_completion_outcome(&repository, &session.id, "result-etag", &checksums)
+            .await
+            .unwrap();
+        record_completion_outcome(&repository, &session.id, "result-etag", &checksums)
+            .await
+            .unwrap();
         let loaded = load(&repository, &session.id).await.unwrap();
-        complete(
-            &repository,
-            loaded,
-            "result-etag".to_owned(),
-            crate::attributes::Checksums::default(),
-        )
-        .await
-        .unwrap();
+        complete(&repository, loaded, "result-etag".to_owned(), checksums)
+            .await
+            .unwrap();
 
         let loaded = load_completion(&repository, &session.id, u64::MAX)
             .await

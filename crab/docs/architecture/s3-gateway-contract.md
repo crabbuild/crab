@@ -238,11 +238,15 @@ The bounded background reconciler scans only capacity slots. It conditionally
 transitions expired Open sessions to Aborted, retries cleanup for terminal
 sessions, and reclaims an expired slot and payload prefix when a process died
 between capacity acquisition and session publication. For Completing sessions,
-it reads only the current object's Git-bound attributes and transitions to
-Completed when upload ID, ETag, logical size, selected parts, and user attributes
-prove that publication succeeded. A missing or mismatched receipt leaves the
-frozen parts fenced for an identical client retry; Completing sessions are never
-expired merely because their original Open deadline passed.
+the gateway persists the planned ETag and checksums before mutation and derives a
+deterministic ref-journal publication-plan ID from the upload ID. The reconciler
+transitions to Completed when that plan's immutable commit evidence proves
+publication, including after a later write replaces the object. Current
+Git-bound upload ID, ETag, logical size, selected parts, and user attributes are
+the compatibility proof for a record created before plan binding. Missing or
+mismatched evidence leaves the frozen parts fenced for an identical client retry;
+Completing sessions are never expired merely because their original Open
+deadline passed.
 
 Limits follow the S3 general-purpose bucket contract: 5 GiB per single PUT or
 multipart part, 10,000 parts per upload, 50 TB per completed multipart object,

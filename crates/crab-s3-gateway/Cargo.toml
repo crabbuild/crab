@@ -16,6 +16,7 @@ crab-coordination = { workspace = true, features = ["object-store-lock"] }
 crab-cache-store = { workspace = true }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage"] }
+crab-remote = { workspace = true, features = ["publication"] }
 crab-remote-git = { workspace = true }
 crab-read = { workspace = true }
 crab-git = { workspace = true }
