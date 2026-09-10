@@ -8446,13 +8446,14 @@ impl PushPipeline {
             .as_ref()
             .map(|snapshot| snapshot.materialized_manifest());
         let current_snapshot =
-            crate::metadata::manifest::read_repository_snapshot_with_cache(
+            crate::metadata::manifest::read_repository_snapshot_with_cache_reusing(
                 store,
                 self.caching_store.as_ref(),
                 &self.router,
+                base_snapshot.as_deref(),
             )
-                .await
-                .map_err(|error| match error {
+            .await
+        .map_err(|error| match error {
                     CrabError::NotFound { path }
                         if path == self.router.manifest_path().as_ref() =>
                     {
@@ -13489,10 +13490,14 @@ impl PushPipeline {
         let store = self.store.as_ref().ok_or_else(|| {
             CrabError::Internal("under-lock base refresh requires a store".to_owned())
         })?;
-        let current = crate::metadata::manifest::read_repository_snapshot_with_cache(
+        let previous = self.base_snapshot.lock().await.clone().ok_or_else(|| {
+            CrabError::Internal("under-lock base refresh requires a base snapshot".to_owned())
+        })?;
+        let current = crate::metadata::manifest::read_repository_snapshot_with_cache_reusing(
             store,
             self.caching_store.as_ref(),
             &self.router,
+            Some(&previous),
         )
         .await?;
         let prior_etag = {
@@ -14772,10 +14777,12 @@ impl PushPipeline {
         let store = self.store.as_ref().ok_or_else(|| {
             CrabError::Internal("candidate metadata requires an object store".to_owned())
         })?;
-        let snapshot = crate::metadata::manifest::read_repository_snapshot_with_cache(
+        let previous = self.base_snapshot.lock().await.clone();
+        let snapshot = crate::metadata::manifest::read_repository_snapshot_with_cache_reusing(
             store,
             self.caching_store.as_ref(),
             &self.router,
+            previous.as_deref(),
         )
         .await?;
         let initial_manifest = snapshot.manifest.generation == 0

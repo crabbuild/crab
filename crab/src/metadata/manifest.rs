@@ -46,11 +46,33 @@ pub async fn read_repository_snapshot_with_cache(
     caching_store: Option<&crab_cache_store::CachingStore>,
     router: &StoreLayout,
 ) -> Result<RepositorySnapshot> {
+    read_repository_snapshot_with_cache_reusing(store, caching_store, router, None).await
+}
+
+/// Reuse a verified snapshot when every mutable dependency is unchanged.
+pub async fn read_repository_snapshot_with_cache_reusing(
+    store: &Store,
+    caching_store: Option<&crab_cache_store::CachingStore>,
+    router: &StoreLayout,
+    previous: Option<&RepositorySnapshot>,
+) -> Result<RepositorySnapshot> {
     let read_store = caching_store
         .map(crab_cache_store::CachingStore::cache_aware_storage)
         .map(Store::from)
         .unwrap_or_else(|| store.clone());
-    read_repository_snapshot(&read_store, router).await
+    match previous {
+        Some(previous) => {
+            let layout = storage_layout(&read_store, router);
+            crab_metadata::manifest_store::read_repository_snapshot_reusing(
+                read_store.as_storage(),
+                &layout,
+                previous,
+            )
+            .await
+            .map_err(CrabError::from)
+        }
+        None => read_repository_snapshot(&read_store, router).await,
+    }
 }
 
 pub async fn read_ref_journal_head(
@@ -310,6 +332,27 @@ mod tests {
             request.location == router.manifest_path().as_ref()
                 && request.kind == crab_storage::test_support::ObjectReadKind::Full
         }));
+
+        counted.reset();
+        let reused =
+            read_repository_snapshot_with_cache_reusing(&store, None, &router, Some(&first))
+                .await
+                .expect("reuse unchanged snapshot");
+        assert_eq!(reused, first);
+        let requests = counted.requests();
+        assert!(requests.iter().any(|request| {
+            request.location == router.manifest_path().as_ref()
+                && request.kind == crab_storage::test_support::ObjectReadKind::Full
+        }));
+        assert!(requests.iter().any(|request| {
+            request.location == router.layout_descriptor_path().as_ref()
+                && request.kind == crab_storage::test_support::ObjectReadKind::Full
+        }));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.location != transaction_path.as_ref())
+        );
     }
 }
 

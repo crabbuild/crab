@@ -432,6 +432,33 @@ pub async fn read_repository_snapshot(
     ))
 }
 
+/// Reuse a verified snapshot when its complete mutable dependency set is unchanged.
+pub async fn read_repository_snapshot_reusing(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    previous: &RepositorySnapshot,
+) -> Result<RepositorySnapshot> {
+    // Capture markers before the manifest, matching the full snapshot's
+    // compaction-boundary ordering. Any mismatch falls back to that full path.
+    let active = list_active_transactions(store, router).await?;
+    let (manifest, manifest_etag) = read_manifest(store, router).await?;
+    let layout = read_canonical_layout(store, router).await?;
+    let transactions_unchanged = active.len() == previous.journal.transactions.len()
+        && previous
+            .journal
+            .transactions
+            .iter()
+            .all(|transaction| active.contains(transaction));
+    if manifest == previous.manifest
+        && manifest_etag == previous.manifest_etag
+        && layout == previous.layout
+        && transactions_unchanged
+    {
+        return Ok(previous.clone());
+    }
+    read_repository_snapshot(store, router).await
+}
+
 /// Fold committed journal transactions into one bounded manifest snapshot.
 ///
 /// Immutable indexes and the matching frontier are written before the
