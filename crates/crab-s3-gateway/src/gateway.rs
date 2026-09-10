@@ -403,7 +403,7 @@ impl Gateway {
                 .map_err(remote_error)?
                 .ok_or_else(|| s3_error!(NoSuchKey))?;
             if entry.kind != EntryKind::Blob {
-                return Err(s3_error!(InvalidObjectState));
+                return Err(object_entry_error(entry.kind));
             }
             let path = std::str::from_utf8(address.path.as_bytes())
                 .map_err(|_| s3_error!(InvalidObjectState))?;
@@ -455,9 +455,18 @@ impl Gateway {
         bucket: &str,
         key: &str,
     ) -> S3Result<(&Repository, namespace::ObjectAddress, String)> {
+        let address = namespace::object_address(key).map_err(namespace_error)?;
+        self.writable_object_address(req, bucket, address)
+    }
+
+    fn writable_object_address<'a, T>(
+        &'a self,
+        req: &S3Request<T>,
+        bucket: &str,
+        address: namespace::ObjectAddress,
+    ) -> S3Result<(&'a Repository, namespace::ObjectAddress, String)> {
         let principal = self.principal(req)?.to_owned();
         let repository = self.repository(req, bucket, RepositoryAccess::Write)?;
-        let address = namespace::object_address(key).map_err(namespace_error)?;
         let branch = address
             .branch
             .as_deref()
@@ -901,11 +910,19 @@ impl S3 for Gateway {
             .try_acquire()
             .map_err(|_| s3_error!(SlowDown))?;
         reject_put_extensions(&req.input)?;
-        let (repository, address, principal) =
-            self.writable_address(&req, &req.input.bucket, &req.input.key)?;
-        let condition = self
-            .put_condition(repository, &req.input.key, &req.input)
-            .await?;
+        let marker_address =
+            namespace::directory_marker_address(&req.input.key).map_err(namespace_error)?;
+        let is_directory_marker = marker_address.is_some();
+        let (repository, address, principal) = match marker_address {
+            Some(address) => self.writable_object_address(&req, &req.input.bucket, address)?,
+            None => self.writable_address(&req, &req.input.bucket, &req.input.key)?,
+        };
+        let condition = if is_directory_marker {
+            virtual_marker_put_condition(&req.input)?
+        } else {
+            self.put_condition(repository, &req.input.key, &req.input)
+                .await?
+        };
         let content_length = req.input.content_length;
         let content_md5 = req.input.content_md5.clone();
         let mut checksums = RequestChecksums::from(&req.input);
@@ -913,7 +930,11 @@ impl S3 for Gateway {
         let spool = crate::content::spool_body(
             req.input.body,
             content_length,
-            crate::content::MAX_PUT_OBJECT_BYTES,
+            if is_directory_marker {
+                0
+            } else {
+                crate::content::MAX_PUT_OBJECT_BYTES
+            },
         )
         .await
         .map_err(content_error)?;
@@ -922,6 +943,20 @@ impl S3 for Gateway {
         checksums.verify(&spool.digests)?;
         let stored_checksums = checksums.stored(&spool.digests);
         let etag = crate::content::md5_hex(&spool.digests.md5);
+        if is_directory_marker {
+            // Filesystem clients use empty trailing-slash PUTs as directory hints.
+            // Git trees already represent non-empty directories, so no blob is published.
+            return Ok(S3Response::new(PutObjectOutput {
+                e_tag: Some(ETag::Strong(etag)),
+                checksum_crc32: stored_checksums.crc32,
+                checksum_crc32c: stored_checksums.crc32c,
+                checksum_crc64nvme: stored_checksums.crc64nvme,
+                checksum_sha1: stored_checksums.sha1,
+                checksum_sha256: stored_checksums.sha256,
+                checksum_type: stored_checksums.checksum_type.map(ChecksumType::from),
+                ..Default::default()
+            }));
+        }
         let bytes = mutation_bytes(repository, &spool).await?;
         let outcome = self
             .mutations
@@ -1188,8 +1223,16 @@ impl S3 for Gateway {
             .try_acquire()
             .map_err(|_| s3_error!(SlowDown))?;
         reject_delete_extensions(&req.input)?;
-        let (repository, address, principal) =
-            self.writable_address(&req, &req.input.bucket, &req.input.key)?;
+        let marker_address =
+            namespace::directory_marker_address(&req.input.key).map_err(namespace_error)?;
+        let is_directory_marker = marker_address.is_some();
+        let (repository, address, principal) = match marker_address {
+            Some(address) => self.writable_object_address(&req, &req.input.bucket, address)?,
+            None => self.writable_address(&req, &req.input.bucket, &req.input.key)?,
+        };
+        if is_directory_marker {
+            return Ok(S3Response::new(DeleteObjectOutput::default()));
+        }
         self.mutations
             .apply(
                 repository,
@@ -1250,9 +1293,18 @@ impl S3 for Gateway {
                 continue;
             }
             let key = object.key;
-            let result = async {
-                let address = namespace::object_address(&key).map_err(namespace_error)?;
+            let result: S3Result<()> = async {
+                let marker_address =
+                    namespace::directory_marker_address(&key).map_err(namespace_error)?;
+                let is_directory_marker = marker_address.is_some();
+                let address = match marker_address {
+                    Some(address) => address,
+                    None => namespace::object_address(&key).map_err(namespace_error)?,
+                };
                 let branch = writable_branch(repository, &address)?;
+                if is_directory_marker {
+                    return Ok(());
+                }
                 self.mutations
                     .apply(
                         repository,
@@ -1263,7 +1315,8 @@ impl S3 for Gateway {
                         &self.cancellation,
                     )
                     .await
-                    .map_err(mutation_error)
+                    .map_err(mutation_error)?;
+                Ok(())
             }
             .await;
             match result {
@@ -2190,7 +2243,7 @@ impl S3 for Gateway {
             .delimiter
             .as_deref()
             .is_some_and(|value| value != "/")
-            || req.input.optional_object_attributes.is_some()
+            || !supported_list_attributes(req.input.optional_object_attributes.as_ref())
             || req.input.request_payer.is_some()
         {
             return Err(s3_error!(NotImplemented));
@@ -2391,13 +2444,23 @@ fn reject_put_extensions(input: &PutObjectInput) -> S3Result<()> {
         || input.sse_customer_key_md5.is_some()
         || input.ssekms_encryption_context.is_some()
         || input.ssekms_key_id.is_some()
-        || input.storage_class.is_some()
+        || !standard_storage_class(input.storage_class.as_ref())
         || input.website_redirect_location.is_some()
         || input.write_offset_bytes.is_some()
     {
         return Err(s3_error!(NotImplemented));
     }
     Ok(())
+}
+
+fn virtual_marker_put_condition(input: &PutObjectInput) -> S3Result<mutation::PutCondition> {
+    if input.if_match.is_some() {
+        return Err(s3_error!(PreconditionFailed));
+    }
+    match input.if_none_match {
+        None | Some(ETagCondition::Any) => Ok(mutation::PutCondition::None),
+        Some(ETagCondition::ETag(_)) => Err(s3_error!(InvalidRequest)),
+    }
 }
 
 #[derive(Clone, Default)]
@@ -2768,7 +2831,8 @@ fn response_checksums(
 ) -> S3Result<crate::attributes::Checksums> {
     match mode {
         None => Ok(crate::attributes::Checksums::default()),
-        Some(value) if value.as_str() == ChecksumMode::ENABLED => {
+        // AWS SDKs emit different casing for this modeled header value.
+        Some(value) if value.as_str().eq_ignore_ascii_case(ChecksumMode::ENABLED) => {
             Ok(checksums.cloned().unwrap_or_default())
         }
         Some(_) => Err(s3_error!(InvalidArgument)),
@@ -3048,7 +3112,7 @@ fn reject_copy_extensions(input: &CopyObjectInput) -> S3Result<()> {
         || input.sse_customer_key_md5.is_some()
         || input.ssekms_encryption_context.is_some()
         || input.ssekms_key_id.is_some()
-        || input.storage_class.is_some()
+        || !standard_storage_class(input.storage_class.as_ref())
         || input.website_redirect_location.is_some()
     {
         return Err(s3_error!(NotImplemented));
@@ -3074,12 +3138,24 @@ fn reject_create_multipart_extensions(input: &CreateMultipartUploadInput) -> S3R
         || input.sse_customer_key_md5.is_some()
         || input.ssekms_encryption_context.is_some()
         || input.ssekms_key_id.is_some()
-        || input.storage_class.is_some()
+        || !standard_storage_class(input.storage_class.as_ref())
         || input.website_redirect_location.is_some()
     {
         return Err(s3_error!(NotImplemented));
     }
     Ok(())
+}
+
+fn standard_storage_class(storage_class: Option<&StorageClass>) -> bool {
+    storage_class.is_none_or(|value| value.as_str() == StorageClass::STANDARD)
+}
+
+fn supported_list_attributes(values: Option<&OptionalObjectAttributesList>) -> bool {
+    values.is_none_or(|values| {
+        values
+            .iter()
+            .all(|value| value.as_str() == OptionalObjectAttributes::RESTORE_STATUS)
+    })
 }
 
 fn reject_upload_part_extensions(input: &UploadPartInput) -> S3Result<()> {
@@ -3342,6 +3418,7 @@ fn namespace_error(error: namespace::NamespaceError) -> s3s::S3Error {
 fn remote_error(error: crab_remote_git::Error) -> s3s::S3Error {
     match error {
         crab_remote_git::Error::PathNotFound => s3_error!(NoSuchKey),
+        crab_remote_git::Error::EntryNotBlob { actual } => object_entry_error(actual),
         crab_remote_git::Error::Revision { .. } => s3_error!(NoSuchKey),
         crab_remote_git::Error::Cancelled => s3_error!(RequestTimeout),
         crab_remote_git::Error::LimitExceeded { .. } => s3_error!(SlowDown),
@@ -3349,6 +3426,14 @@ fn remote_error(error: crab_remote_git::Error) -> s3s::S3Error {
             tracing::error!(error = ?error, "S3 repository read failed");
             s3_error!(InternalError)
         }
+    }
+}
+
+fn object_entry_error(kind: EntryKind) -> s3s::S3Error {
+    if kind == EntryKind::Tree {
+        s3_error!(NoSuchKey)
+    } else {
+        s3_error!(InvalidObjectState)
     }
 }
 
@@ -3732,5 +3817,71 @@ mod tests {
         };
 
         assert!(checksums.ensure_single_value().is_err());
+    }
+
+    #[test]
+    fn checksum_mode_accepts_case_insensitive_enabled_value() {
+        let mode = ChecksumMode::from_static("enabled");
+        let checksums = crate::attributes::Checksums {
+            sha256: Some("checksum".to_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            response_checksums(Some(&mode), Some(&checksums))
+                .unwrap()
+                .sha256,
+            checksums.sha256
+        );
+    }
+
+    #[test]
+    fn copy_accepts_explicit_standard_storage_class() {
+        let input = CopyObjectInput::builder()
+            .bucket("repo".to_owned())
+            .key("main/copy.bin".to_owned())
+            .copy_source(CopySource::Bucket {
+                bucket: "repo".into(),
+                key: "main/source.bin".into(),
+                version_id: None,
+            })
+            .storage_class(Some(StorageClass::from_static(StorageClass::STANDARD)))
+            .build()
+            .unwrap();
+
+        reject_copy_extensions(&input).unwrap();
+    }
+
+    #[test]
+    fn git_trees_are_absent_from_the_object_namespace() {
+        assert_eq!(
+            object_entry_error(EntryKind::Tree).code().as_str(),
+            "NoSuchKey"
+        );
+        assert_eq!(
+            object_entry_error(EntryKind::Submodule).code().as_str(),
+            "InvalidObjectState"
+        );
+    }
+
+    #[test]
+    fn virtual_directory_marker_supports_create_if_absent() {
+        let input = PutObjectInput::builder()
+            .bucket("repo".to_owned())
+            .key("main/path/".to_owned())
+            .if_none_match(Some(ETagCondition::Any))
+            .build()
+            .unwrap();
+
+        assert!(virtual_marker_put_condition(&input).is_ok());
+    }
+
+    #[test]
+    fn list_accepts_the_restore_status_optional_attribute() {
+        let values = vec![OptionalObjectAttributes::from_static(
+            OptionalObjectAttributes::RESTORE_STATUS,
+        )];
+
+        assert!(supported_list_attributes(Some(&values)));
     }
 }

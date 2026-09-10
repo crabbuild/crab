@@ -39,6 +39,16 @@ pub(crate) fn object_address(key: &str) -> Result<ObjectAddress, NamespaceError>
     })
 }
 
+pub(crate) fn directory_marker_address(key: &str) -> Result<Option<ObjectAddress>, NamespaceError> {
+    let Some(path) = key.strip_suffix('/') else {
+        return Ok(None);
+    };
+    if key.len() > MAX_KEY_BYTES {
+        return Err(NamespaceError::InvalidPath);
+    }
+    object_address(path).map(Some)
+}
+
 pub(crate) fn listing_reference(prefix: &str) -> Result<Option<(String, String)>, NamespaceError> {
     let Some((encoded_ref, path_prefix)) = prefix.split_once('/') else {
         if prefix.is_empty() {
@@ -136,5 +146,26 @@ mod tests {
         for key in ["main~/a", "main^/a", "main@{1}/a"] {
             assert!(object_address(key).is_err(), "{key}");
         }
+    }
+
+    #[test]
+    fn directory_markers_preserve_the_validated_object_address() {
+        let address = directory_marker_address("main/path/to/table/")
+            .unwrap()
+            .unwrap();
+        assert_eq!(address.reference, "refs/heads/main");
+        assert_eq!(address.path.as_bytes(), b"path/to/table");
+    }
+
+    #[test]
+    fn invalid_directory_markers_are_rejected() {
+        for key in ["main/", "main/path//"] {
+            assert!(directory_marker_address(key).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn ordinary_keys_are_not_directory_markers() {
+        assert_eq!(directory_marker_address("main/path").unwrap(), None);
     }
 }

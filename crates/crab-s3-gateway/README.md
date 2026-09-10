@@ -20,7 +20,11 @@ multipart full-object and composite checksum profiles are returned by object
 and part inspection APIs. Path-style addressing is always available. Set
 `endpoint_domain` to also accept virtual-hosted requests. Single PUTs and
 multipart parts support up to 5 GiB, and multipart completion supports S3's
-50 TB object limit.
+50 TB object limit. Explicit `STANDARD` storage-class hints and the
+`RestoreStatus` listing hint are accepted. Empty trailing-slash PUT and DELETE
+requests are treated as validated virtual directory hints for filesystem
+clients; they do not create marker blobs because Git trees represent
+directories.
 Large payloads use bounded-memory spooling and Crab's verified LFS content path.
 Objects already stored as Crab/Xet pointers retain Xet deduplication: partial
 GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
