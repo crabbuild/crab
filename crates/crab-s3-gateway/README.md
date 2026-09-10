@@ -11,6 +11,9 @@ each access key to a Crab principal and authorizes that principal against the
 logical repository catalog. Gateway credentials are static Crab credentials,
 not SigV4a or temporary STS credentials, and are independent of the cloud
 credentials used for the backing object store.
+HMAC-signed SigV4 streaming requests verify every chained chunk before
+publication. Their `aws-chunked` transport encoding is removed from stored
+object metadata, matching S3; any accompanying application encoding remains.
 
 The client-compatible surface includes bucket listing/head/location/versioning
 discovery, object GET/HEAD/PUT/DELETE/COPY/attributes/tagging, V1/V2 object

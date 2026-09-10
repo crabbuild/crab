@@ -270,14 +270,17 @@ Phase-owned artifacts:
 - Phase 2: `crates/crab-s3-gateway/` exists; integration tests under `tests/`
   and `crab/scripts/e2e/qualify_s3_gateway.py` remain planned.
 - Phase 8: `.github/workflows/s3-gateway.yml` builds and qualifies the packaged
-  image against RustFS with an unchanged signed AWS client. Qualification-report
+  image against RustFS with an unchanged signed AWS client. It separately
+  exercises chained SigV4 streaming signatures, S3-compatible transport metadata,
+  and rejection atomicity for a corrupted chunk signature. Qualification-report
   production and validation remain planned.
 - Phase 9: the crate README, pinned image, example configuration, separate
   management probes, container runtime smoke and isolated Compose profile
   exist. The canonical Helm chart is schema-checked, rendered and validated as
   Kubernetes 1.29 resources in CI, but has no live EKS evidence. ECS and full
-  operations assets below remain planned. None of EKS, ECS or the operations
-  profile is qualified production deployment support yet.
+  ECS assets below remain planned. The operations runbook and alert mappings
+  exist, but live Prometheus and Alertmanager delivery remain unqualified. None
+  of EKS or ECS is qualified production deployment support yet.
 
 Proposed runner interface, to implement in phase 2 and extend per phase:
 

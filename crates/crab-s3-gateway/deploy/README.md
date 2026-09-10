@@ -87,6 +87,9 @@ and compares every assembled byte. RustFS retains the shared upload catalog and
 repository data; the gateway's scratch filesystem remains disposable. The
 named `gateway-cache` volume may warm the replacement process but is not needed
 for correctness or recovery.
+It also sends a multi-chunk HMAC-signed SigV4 `PutObject`, verifies the decoded
+bytes and S3-compatible `Content-Encoding` metadata, then corrupts a chunk
+signature and proves no object was published.
 
 Stop containers without deleting repository data:
 

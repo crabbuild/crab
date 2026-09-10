@@ -1380,6 +1380,10 @@ impl S3 for Gateway {
         let content_md5 = req.input.content_md5.clone();
         let mut checksums = RequestChecksums::from(&req.input);
         let trailing_headers = req.trailing_headers.clone();
+        let content_encoding = stored_content_encoding(
+            req.input.content_encoding.as_deref(),
+            trailing_headers.is_some(),
+        );
         let spool = crate::content::spool_body(
             req.input.body,
             content_length,
@@ -1433,7 +1437,7 @@ impl S3 for Gateway {
                         parts: Vec::new(),
                         cache_control: req.input.cache_control,
                         content_disposition: req.input.content_disposition,
-                        content_encoding: req.input.content_encoding,
+                        content_encoding,
                         content_language: req.input.content_language,
                         content_type: req.input.content_type,
                         expires: req.input.expires,
@@ -2923,6 +2927,19 @@ fn virtual_marker_put_condition(input: &PutObjectInput) -> S3Result<mutation::Pu
         None | Some(ETagCondition::Any) => Ok(mutation::PutCondition::None),
         Some(ETagCondition::ETag(_)) => Err(s3_error!(InvalidRequest)),
     }
+}
+
+fn stored_content_encoding(value: Option<&str>, streaming: bool) -> Option<String> {
+    if !streaming {
+        return value.map(str::to_owned);
+    }
+
+    let encodings = value?
+        .split(',')
+        .map(str::trim)
+        .filter(|encoding| !encoding.eq_ignore_ascii_case("aws-chunked"))
+        .collect::<Vec<_>>();
+    (!encodings.is_empty()).then(|| encodings.join(","))
 }
 
 #[derive(Clone, Default)]
@@ -4882,6 +4899,28 @@ mod tests {
             .unwrap();
 
         assert!(virtual_marker_put_condition(&input).is_ok());
+    }
+
+    #[test]
+    fn streaming_transport_encoding_is_not_stored_as_object_metadata() {
+        assert_eq!(stored_content_encoding(Some("aws-chunked"), true), None);
+        assert_eq!(
+            stored_content_encoding(Some("gzip, aws-chunked"), true).as_deref(),
+            Some("gzip")
+        );
+        assert_eq!(
+            stored_content_encoding(Some("AWS-CHUNKED, br"), true).as_deref(),
+            Some("br")
+        );
+    }
+
+    #[test]
+    fn ordinary_content_encoding_is_preserved_verbatim() {
+        assert_eq!(
+            stored_content_encoding(Some("gzip, aws-chunked"), false).as_deref(),
+            Some("gzip, aws-chunked")
+        );
+        assert_eq!(stored_content_encoding(None, true), None);
     }
 
     #[test]

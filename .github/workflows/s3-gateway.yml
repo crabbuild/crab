@@ -392,6 +392,48 @@ jobs:
             "${qualification_root}/range.bin" >/dev/null
           test "$(wc -c < "${qualification_root}/range.bin" | tr -d ' ')" = 65536
 
+          python3 -m unittest crab/scripts/e2e/test_s3_sigv4_streaming.py
+          streaming_key=main/qualification/streaming-signed.bin
+          python3 crab/scripts/e2e/s3_sigv4_streaming.py \
+            --endpoint "${endpoint}" --bucket "${bucket}" \
+            --key "${streaming_key}" --input "${qualification_root}/input.bin"
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket "${bucket}" --key "${streaming_key}" \
+            "${qualification_root}/streaming-output.bin" >/dev/null
+          cmp "${qualification_root}/input.bin" \
+            "${qualification_root}/streaming-output.bin"
+          aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${streaming_key}" \
+            --output json > "${qualification_root}/streaming-head.json"
+          STREAMING_HEAD="${qualification_root}/streaming-head.json" python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["STREAMING_HEAD"], encoding="utf-8") as response:
+              head = json.load(response)
+          if "ContentEncoding" in head:
+              raise SystemExit("aws-chunked transport encoding leaked into object metadata")
+          PY
+          aws --endpoint-url "${endpoint}" s3api delete-object \
+            --bucket "${bucket}" --key "${streaming_key}" >/dev/null
+
+          tampered_key=main/qualification/streaming-tampered.bin
+          head -c 8192 /dev/zero > "${qualification_root}/tampered-input.bin"
+          python3 crab/scripts/e2e/s3_sigv4_streaming.py \
+            --endpoint "${endpoint}" --bucket "${bucket}" \
+            --key "${tampered_key}" \
+            --input "${qualification_root}/tampered-input.bin" \
+            --tamper-first-chunk --expect-rejection
+          if AWS_MAX_ATTEMPTS=1 aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${tampered_key}" \
+            >"${qualification_root}/tampered-head.stdout" \
+            2>"${qualification_root}/tampered-head.stderr"; then
+            echo "streaming request with a bad chunk signature published an object" >&2
+            exit 1
+          fi
+          grep -Eq '(404|Not Found)' "${qualification_root}/tampered-head.stderr"
+          curl --fail --silent --show-error http://127.0.0.1:18081/readyz >/dev/null
+
           presigned_url="$(aws --endpoint-url "${endpoint}" s3 presign \
             "s3://${bucket}/${key}" --expires-in 60)"
           grep -Fq 'X-Amz-Signature=' <<< "${presigned_url}"
