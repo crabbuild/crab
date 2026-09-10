@@ -68,6 +68,10 @@ repository creation, Crab configuration, and checkout as separate steps. Large
 pack downloads include transferred pack-body bytes, total pack-body bytes,
 completed pack count, and transfer rate. `--jsonl` emits the same measurements with the
 `downloading_git_packs` operation; `--json` remains a single terminal result.
+For a complete large-repository clone, downloading starts as soon as the compact
+visibility catalog authorizes the full pack inventory. Crab overlaps the full
+catalog/index integrity comparison with transfer instead of completing that
+repository-sized scan before the first pack byte.
 
 ### Hydrate selected content
 

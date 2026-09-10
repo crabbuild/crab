@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use crab_git::pack::VerifiedPackIdentity;
 use crab_metadata::git_object_locator::GitPackInventoryEntry;
+use crab_metadata::git_visibility::GitCatalogVisibilityIndex;
 use flate2::{Compression, write::ZlibEncoder};
 use futures_util::stream::{self, StreamExt as _, TryStreamExt as _};
 use gix_hash::ObjectId;
@@ -414,49 +415,122 @@ impl GeneratedPack {
 }
 
 impl RemoteGitRepository {
-    /// Download the canonical pack inventory when it exactly covers a large selection.
+    fn complete_catalog_is_visible(
+        repository_catalog: Option<crab_metadata::git_object_locator::GitObjectCatalogIdentity>,
+        repository_validation_digest: &str,
+        visibility_catalog: crab_metadata::git_object_locator::GitObjectCatalogIdentity,
+        visibility_validation_digest: &str,
+        visible_objects: u64,
+    ) -> Result<bool> {
+        if repository_catalog != Some(visibility_catalog)
+            || repository_validation_digest != visibility_validation_digest
+        {
+            return Err(Error::RepositoryState {
+                reason: crate::RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+        Ok(visible_objects == visibility_catalog.object_count)
+    }
+
+    /// Download the canonical pack inventory when visible refs cover the complete catalog.
     ///
-    /// The selected IDs must already have passed generation-pinned authorization.
-    /// `None` means the inventory is not a complete large-repository clone candidate.
+    /// The visibility proof must match this repository's generation-pinned catalog. Pack
+    /// transfer overlaps the exact catalog/index comparison, and no inventory is returned
+    /// until that integrity check passes. `None` means the visible selection is incomplete
+    /// or too small for a complete-inventory clone.
     pub async fn download_complete_pack_inventory(
         &self,
-        object_ids: &[ObjectId],
+        visibility: &GitCatalogVisibilityIndex,
+        visible_ref_names: &[String],
         workspace_parent: &Path,
         cancellation: &CancellationToken,
         progress: Option<&(dyn Fn(PackDownloadProgress) + Send + Sync)>,
     ) -> Result<Option<DownloadedPackInventory>> {
+        visibility.validate().map_err(Error::Metadata)?;
+        let catalog_identity = visibility.catalog_identity().map_err(Error::Metadata)?;
+        let visible_objects = u64::try_from(
+            visibility.object_count_for_refs(visible_ref_names.iter().map(String::as_str)),
+        )
+        .unwrap_or(u64::MAX);
+        let complete_catalog_visible = Self::complete_catalog_is_visible(
+            self.state.catalog_identity,
+            &self.state.git_validation_digest,
+            catalog_identity,
+            &visibility.git_validation_digest,
+            visible_objects,
+        )?;
         let inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
         let inventory_objects = inventory
             .iter()
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
         let source_artifact_bytes = repack_source_artifact_bytes(&inventory)?;
-        if object_ids.len() < COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS
+        if visible_objects < COMPLETE_PACK_CONSOLIDATION_MIN_OBJECTS as u64
+            || !complete_catalog_visible
             || inventory.is_empty()
-            || inventory_objects < u64::try_from(object_ids.len()).unwrap_or(u64::MAX)
+            || inventory_objects < visible_objects
             || source_artifact_bytes > self.state.options.operation_limits().max_fetched_bytes
         {
             return Ok(None);
         }
 
-        let operation = self
-            .operation(OperationKind::UploadPack, cancellation)
-            .await?;
+        // Both operations must descend from the same child. Cancelling it on
+        // either failure stops already-running body reads in the sibling.
+        let concurrent_cancellation = cancellation.child_token();
+        // Pack streams do not query the locator. Keeping them on a separate
+        // operation lets transfer start while the exact catalog scan runs.
+        let operation = crate::OperationContext::open_pack_transfer(
+            Arc::clone(&self.state),
+            &concurrent_cancellation,
+            self.state.options.operation_limits(),
+        )
+        .await?;
         let result = async {
             // Keep the temporary inventory on the clone destination's
             // filesystem so installation can hard-link multi-gigabyte packs.
             let workspace = tempfile::tempdir_in(workspace_parent).map_err(io_error)?;
             let download_dir = workspace.path().join("source-packs");
             std::fs::create_dir_all(&download_dir).map_err(io_error)?;
-            let packs = download_repack_sources(
-                &operation,
-                inventory,
-                &download_dir,
-                cancellation,
-                progress,
-            )
-            .await?;
+            let download = async {
+                let result = download_repack_sources(
+                    &operation,
+                    inventory,
+                    &download_dir,
+                    &concurrent_cancellation,
+                    progress,
+                )
+                .await;
+                if result.is_err() {
+                    concurrent_cancellation.cancel();
+                }
+                result
+            };
+            let catalog = async {
+                let result = async {
+                    let catalog_operation = self
+                        .operation(OperationKind::UploadPack, &concurrent_cancellation)
+                        .await?;
+                    let object_ids = catalog_operation.all_catalog_object_ids().await;
+                    catalog_operation.finish(object_ids).await
+                }
+                .await;
+                if result.is_err() {
+                    concurrent_cancellation.cancel();
+                }
+                result
+            };
+            // Await both operations so each one closes its pinned metadata session even
+            // when its sibling fails. Cancellation stops unnecessary origin reads, while
+            // the result merge retains the error that caused sibling cancellation.
+            let (packs, selected_oids) = tokio::join!(download, catalog);
+            let (packs, selected_oids) = merge_inventory_parts(packs, selected_oids)?;
+            if u64::try_from(selected_oids.len()).unwrap_or(u64::MAX)
+                != catalog_identity.object_count
+            {
+                return Err(Error::Corrupt {
+                    stage: crate::CorruptionStage::Locator,
+                });
+            }
             let check_packs = packs.clone();
-            let selected_oids = object_ids.to_vec();
             let covers = tokio::task::spawn_blocking(move || {
                 crab_git::repack::source_pack_inventory_covers_object_ids(
                     &check_packs,
@@ -1137,6 +1211,22 @@ impl RemoteGitRepository {
             )
             .await?;
         Ok(generated.as_ref().clone())
+    }
+}
+
+fn merge_inventory_parts<T, U>(packs: Result<T>, catalog: Result<U>) -> Result<(T, U)> {
+    match (packs, catalog) {
+        (Ok(packs), Ok(catalog)) => Ok((packs, catalog)),
+        (Err(Error::Cancelled), Err(catalog_error))
+            if !matches!(catalog_error, Error::Cancelled) =>
+        {
+            Err(catalog_error)
+        }
+        (Err(pack_error), Err(Error::Cancelled)) if !matches!(pack_error, Error::Cancelled) => {
+            Err(pack_error)
+        }
+        (Err(pack_error), _) => Err(pack_error),
+        (_, Err(catalog_error)) => Err(catalog_error),
     }
 }
 
@@ -3015,6 +3105,88 @@ mod tests {
         assert!(
             !RemoteGitRepository::near_complete_pack_consolidation_candidate(1, 101_000, 100_000,)
         );
+    }
+
+    #[test]
+    fn complete_inventory_requires_matching_fully_visible_catalog() {
+        let catalog = crab_metadata::git_object_locator::GitObjectCatalogIdentity {
+            generation: 7,
+            pack_index_hash: MerkleHash::from([1; 32]),
+            object_count: 100_000,
+            catalog_digest: MerkleHash::from([2; 32]),
+        };
+        assert!(
+            RemoteGitRepository::complete_catalog_is_visible(
+                Some(catalog),
+                "validation",
+                catalog,
+                "validation",
+                catalog.object_count,
+            )
+            .expect("matching complete catalog")
+        );
+        assert!(
+            !RemoteGitRepository::complete_catalog_is_visible(
+                Some(catalog),
+                "validation",
+                catalog,
+                "validation",
+                catalog.object_count - 1,
+            )
+            .expect("partial visibility")
+        );
+
+        let mismatched = crab_metadata::git_object_locator::GitObjectCatalogIdentity {
+            generation: catalog.generation + 1,
+            ..catalog
+        };
+        assert!(matches!(
+            RemoteGitRepository::complete_catalog_is_visible(
+                Some(catalog),
+                "validation",
+                mismatched,
+                "validation",
+                mismatched.object_count,
+            ),
+            Err(Error::RepositoryState {
+                reason: crate::RepositoryStateError::VisibilityProofMismatch,
+            })
+        ));
+        assert!(matches!(
+            RemoteGitRepository::complete_catalog_is_visible(
+                Some(catalog),
+                "validation",
+                catalog,
+                "other-validation",
+                catalog.object_count,
+            ),
+            Err(Error::RepositoryState {
+                reason: crate::RepositoryStateError::VisibilityProofMismatch,
+            })
+        ));
+    }
+
+    #[test]
+    fn concurrent_inventory_errors_retain_the_failure_that_cancelled_its_sibling() {
+        let pack_error = Error::InternalInvariant {
+            invariant: "pack failure",
+        };
+        let catalog_error = Error::InternalInvariant {
+            invariant: "catalog failure",
+        };
+
+        assert!(matches!(
+            merge_inventory_parts::<(), ()>(Err(Error::Cancelled), Err(catalog_error)),
+            Err(Error::InternalInvariant {
+                invariant: "catalog failure",
+            })
+        ));
+        assert!(matches!(
+            merge_inventory_parts::<(), ()>(Err(pack_error), Err(Error::Cancelled)),
+            Err(Error::InternalInvariant {
+                invariant: "pack failure",
+            })
+        ));
     }
 
     #[test]
