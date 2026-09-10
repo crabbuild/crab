@@ -148,6 +148,12 @@ consume new request admission. Pack inventory size is a preflight bound and an
 integrity check, not the byte-accounting authority. These stream paths retain
 backpressure and verification before returning the completed artifact.
 
+Complete-inventory clone transfer starts after the catalog visibility bitmap
+proves every catalog ordinal is visible. Pack bodies use a locator-free transfer
+operation while a separate operation scans the pinned catalog concurrently;
+the downloaded pack indexes must still cover that exact OID set before the
+inventory is returned. Partial visibility keeps the normal planned-pack path.
+
 Operation-owned coalesced ranges and packed-entry metadata reads use the same
 admission boundary: failed headers charge a request but no advertised body,
 and each facade retry reserves its own request and response bytes. An early

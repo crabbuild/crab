@@ -890,29 +890,11 @@ async fn prepare_complete_clone_inventory(
     if !head_visible {
         return Ok(None);
     }
-    let wants = visible_refs
-        .iter()
-        .filter_map(|name| repository.refs().find(name).map(|entry| entry.target))
-        .collect::<Vec<_>>();
-    if wants.is_empty() {
-        return Ok(None);
-    }
-    let request = crab_read::UploadPackRequest {
-        wants,
-        ..crab_read::UploadPackRequest::default()
-    };
-    let plan = crab_read::plan_upload_pack_catalog(
-        &repository,
-        &visibility,
-        &visible_refs,
-        &request,
-        cancel,
-    )
-    .await?;
     let report_progress = |update| progress.report(update);
     let inventory = repository
         .download_complete_pack_inventory(
-            &plan.object_ids,
+            &visibility,
+            &visible_refs,
             workspace_parent,
             cancel,
             Some(&report_progress),

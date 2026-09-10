@@ -189,6 +189,31 @@ impl OperationContext {
         cancellation: &CancellationToken,
         limits: OperationLimits,
     ) -> Result<Self> {
+        Self::open_inner(state, kind, cancellation, limits, true).await
+    }
+
+    pub(crate) async fn open_pack_transfer(
+        state: Arc<RepositoryState>,
+        cancellation: &CancellationToken,
+        limits: OperationLimits,
+    ) -> Result<Self> {
+        Self::open_inner(
+            state,
+            OperationKind::UploadPack,
+            cancellation,
+            limits,
+            false,
+        )
+        .await
+    }
+
+    async fn open_inner(
+        state: Arc<RepositoryState>,
+        kind: OperationKind,
+        cancellation: &CancellationToken,
+        limits: OperationLimits,
+        open_catalog: bool,
+    ) -> Result<Self> {
         let task_token = state.runtime.operation_token();
         let runtime_cancellation = state.runtime.background_cancellation();
         let started = Instant::now();
@@ -205,7 +230,7 @@ impl OperationContext {
         let span = operation_span(correlation_id, kind);
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
-        let session = if let Some(catalog) = state.catalog_identity {
+        let session = if open_catalog && let Some(catalog) = state.catalog_identity {
             // Keep catalog acquisition and later page reads on the same budget.
             // The pinned repository store remains reusable by other operations.
             let store = state
@@ -282,6 +307,26 @@ impl OperationContext {
             span,
             _task_token: task_token,
         })
+    }
+
+    pub(crate) async fn all_catalog_object_ids(&self) -> Result<Vec<gix_hash::ObjectId>> {
+        check_cancelled(&self.cancellation)?;
+        let session = self
+            .session
+            .as_ref()
+            .and_then(TrackedLocatorSession::session)
+            .ok_or(Error::InternalInvariant {
+                invariant: "catalog object scan has no locator session",
+            })?;
+        let object_ids = tokio::select! {
+            biased;
+            () = self.cancellation.cancelled() => return Err(Error::Cancelled),
+            object_ids = session.all_object_ids() => object_ids?,
+        };
+        Ok(object_ids
+            .into_iter()
+            .map(gix_hash::ObjectId::from)
+            .collect())
     }
 
     /// Return the cancellation token governing all work in this operation.
@@ -1314,9 +1359,14 @@ fn record_drop(span: &tracing::Span, correlation_id: u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::fmt::Write as _;
     use std::sync::{Arc, Mutex};
 
+    use crab_metadata::git_object_locator::GitObjectCatalogIdentity;
+    use crab_storage::{Store, StoreLayout};
+    use crab_xet::hash::MerkleHash;
+    use object_store::memory::InMemory;
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
@@ -1324,6 +1374,57 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    #[tokio::test]
+    async fn pack_transfer_operation_does_not_open_the_catalog() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(object_store);
+        let state = Arc::new(crate::state::RepositoryState {
+            store: store.clone(),
+            layout: StoreLayout::new(store, "org/repo".to_owned()),
+            runtime: Arc::new(crate::RemoteGitRuntime::default()),
+            identity: crate::RepositoryIdentity::new("memory", "org/repo", 1)
+                .expect("repository identity"),
+            options: crate::RepositoryOptions::default(),
+            generation: 1,
+            git_validation_digest: Arc::from("validation"),
+            manifest_etag: "etag".to_owned(),
+            shard_index_hash: Arc::from("shards"),
+            catalog_identity: Some(GitObjectCatalogIdentity {
+                generation: 1,
+                pack_index_hash: MerkleHash::from([1; 32]),
+                object_count: 1,
+                catalog_digest: MerkleHash::from([2; 32]),
+            }),
+            inventory: HashMap::new(),
+            refs: crate::RepositoryRefs::default(),
+            reader: None,
+            commit_graph: None,
+            shallow_closure: None,
+        });
+        let cancellation = CancellationToken::new();
+
+        let regular = OperationContext::open(
+            Arc::clone(&state),
+            OperationKind::UploadPack,
+            &cancellation,
+            crate::OperationLimits::default(),
+        )
+        .await;
+        assert!(regular.is_err());
+
+        let transfer = OperationContext::open_pack_transfer(
+            state,
+            &cancellation,
+            crate::OperationLimits::default(),
+        )
+        .await
+        .expect("pack transfer operation");
+        transfer
+            .finish(Ok(()))
+            .await
+            .expect("finish pack transfer operation");
+    }
 
     #[derive(Clone, Default)]
     struct Capture(Arc<Mutex<String>>);
