@@ -1943,7 +1943,7 @@ impl S3 for Gateway {
                     .ok_or_else(|| s3_error!(EntityTooLarge))?;
                 digest.update(&chunk);
                 writer
-                    .write(&chunk, max_object_bytes)
+                    .write(&chunk, selected_size)
                     .await
                     .map_err(content_error)?;
             }
