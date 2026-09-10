@@ -417,10 +417,14 @@ impl GeneratedPack {
 impl RemoteGitRepository {
     fn complete_catalog_is_visible(
         repository_catalog: Option<crab_metadata::git_object_locator::GitObjectCatalogIdentity>,
+        repository_validation_digest: &str,
         visibility_catalog: crab_metadata::git_object_locator::GitObjectCatalogIdentity,
+        visibility_validation_digest: &str,
         visible_objects: u64,
     ) -> Result<bool> {
-        if repository_catalog != Some(visibility_catalog) {
+        if repository_catalog != Some(visibility_catalog)
+            || repository_validation_digest != visibility_validation_digest
+        {
             return Err(Error::RepositoryState {
                 reason: crate::RepositoryStateError::VisibilityProofMismatch,
             });
@@ -442,6 +446,7 @@ impl RemoteGitRepository {
         cancellation: &CancellationToken,
         progress: Option<&(dyn Fn(PackDownloadProgress) + Send + Sync)>,
     ) -> Result<Option<DownloadedPackInventory>> {
+        visibility.validate().map_err(Error::Metadata)?;
         let catalog_identity = visibility.catalog_identity().map_err(Error::Metadata)?;
         let visible_objects = u64::try_from(
             visibility.object_count_for_refs(visible_ref_names.iter().map(String::as_str)),
@@ -449,7 +454,9 @@ impl RemoteGitRepository {
         .unwrap_or(u64::MAX);
         let complete_catalog_visible = Self::complete_catalog_is_visible(
             self.state.catalog_identity,
+            &self.state.git_validation_digest,
             catalog_identity,
+            &visibility.git_validation_digest,
             visible_objects,
         )?;
         let inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
@@ -480,25 +487,40 @@ impl RemoteGitRepository {
             let workspace = tempfile::tempdir_in(workspace_parent).map_err(io_error)?;
             let download_dir = workspace.path().join("source-packs");
             std::fs::create_dir_all(&download_dir).map_err(io_error)?;
-            let download = download_repack_sources(
-                &operation,
-                inventory,
-                &download_dir,
-                cancellation,
-                progress,
-            );
+            let concurrent_cancellation = cancellation.child_token();
+            let download = async {
+                let result = download_repack_sources(
+                    &operation,
+                    inventory,
+                    &download_dir,
+                    &concurrent_cancellation,
+                    progress,
+                )
+                .await;
+                if result.is_err() {
+                    concurrent_cancellation.cancel();
+                }
+                result
+            };
             let catalog = async {
-                let catalog_operation = self
-                    .operation(OperationKind::UploadPack, cancellation)
-                    .await?;
-                let object_ids = catalog_operation.all_catalog_object_ids().await;
-                catalog_operation.finish(object_ids).await
+                let result = async {
+                    let catalog_operation = self
+                        .operation(OperationKind::UploadPack, &concurrent_cancellation)
+                        .await?;
+                    let object_ids = catalog_operation.all_catalog_object_ids().await;
+                    catalog_operation.finish(object_ids).await
+                }
+                .await;
+                if result.is_err() {
+                    concurrent_cancellation.cancel();
+                }
+                result
             };
             // Await both operations so each one closes its pinned metadata session even
-            // when its sibling fails.
+            // when its sibling fails. Cancellation stops unnecessary origin reads, while
+            // the result merge retains the error that caused sibling cancellation.
             let (packs, selected_oids) = tokio::join!(download, catalog);
-            let packs = packs?;
-            let selected_oids = selected_oids?;
+            let (packs, selected_oids) = merge_inventory_parts(packs, selected_oids)?;
             if u64::try_from(selected_oids.len()).unwrap_or(u64::MAX)
                 != catalog_identity.object_count
             {
@@ -1187,6 +1209,22 @@ impl RemoteGitRepository {
             )
             .await?;
         Ok(generated.as_ref().clone())
+    }
+}
+
+fn merge_inventory_parts<T, U>(packs: Result<T>, catalog: Result<U>) -> Result<(T, U)> {
+    match (packs, catalog) {
+        (Ok(packs), Ok(catalog)) => Ok((packs, catalog)),
+        (Err(Error::Cancelled), Err(catalog_error))
+            if !matches!(catalog_error, Error::Cancelled) =>
+        {
+            Err(catalog_error)
+        }
+        (Err(pack_error), Err(Error::Cancelled)) if !matches!(pack_error, Error::Cancelled) => {
+            Err(pack_error)
+        }
+        (Err(pack_error), _) => Err(pack_error),
+        (_, Err(catalog_error)) => Err(catalog_error),
     }
 }
 
@@ -3078,7 +3116,9 @@ mod tests {
         assert!(
             RemoteGitRepository::complete_catalog_is_visible(
                 Some(catalog),
+                "validation",
                 catalog,
+                "validation",
                 catalog.object_count,
             )
             .expect("matching complete catalog")
@@ -3086,7 +3126,9 @@ mod tests {
         assert!(
             !RemoteGitRepository::complete_catalog_is_visible(
                 Some(catalog),
+                "validation",
                 catalog,
+                "validation",
                 catalog.object_count - 1,
             )
             .expect("partial visibility")
@@ -3099,11 +3141,48 @@ mod tests {
         assert!(matches!(
             RemoteGitRepository::complete_catalog_is_visible(
                 Some(catalog),
+                "validation",
                 mismatched,
+                "validation",
                 mismatched.object_count,
             ),
             Err(Error::RepositoryState {
                 reason: crate::RepositoryStateError::VisibilityProofMismatch,
+            })
+        ));
+        assert!(matches!(
+            RemoteGitRepository::complete_catalog_is_visible(
+                Some(catalog),
+                "validation",
+                catalog,
+                "other-validation",
+                catalog.object_count,
+            ),
+            Err(Error::RepositoryState {
+                reason: crate::RepositoryStateError::VisibilityProofMismatch,
+            })
+        ));
+    }
+
+    #[test]
+    fn concurrent_inventory_errors_retain_the_failure_that_cancelled_its_sibling() {
+        let pack_error = Error::InternalInvariant {
+            invariant: "pack failure",
+        };
+        let catalog_error = Error::InternalInvariant {
+            invariant: "catalog failure",
+        };
+
+        assert!(matches!(
+            merge_inventory_parts::<(), ()>(Err(Error::Cancelled), Err(catalog_error)),
+            Err(Error::InternalInvariant {
+                invariant: "catalog failure",
+            })
+        ));
+        assert!(matches!(
+            merge_inventory_parts::<(), ()>(Err(pack_error), Err(Error::Cancelled)),
+            Err(Error::InternalInvariant {
+                invariant: "pack failure",
             })
         ));
     }
