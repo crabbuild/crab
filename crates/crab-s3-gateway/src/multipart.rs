@@ -187,7 +187,14 @@ pub(crate) async fn register_part(
     if !matches!(loaded.session.state, State::Open) {
         return Err(Error::NotOpen);
     }
-    let path = format!("s3/multipart/parts/{}/{number}/{etag}", loaded.session.id);
+    // A transfer-specific identity lets a losing registration delete only its
+    // own payload; content-derived paths let concurrent equal-ETag requests
+    // accidentally delete the winner's bytes.
+    let path = format!(
+        "s3/multipart/parts/{}/{number}/{etag}/{}",
+        loaded.session.id,
+        ulid::Ulid::new()
+    );
     repository
         .store
         .put_multipart_file_retry(
@@ -210,23 +217,89 @@ pub(crate) async fn register_part(
     };
     for attempt in 0..MAX_STATE_UPDATE_ATTEMPTS {
         if !matches!(loaded.session.state, State::Open) {
+            cleanup_unreferenced_part(repository, &loaded.session, &part).await;
             return Err(Error::NotOpen);
         }
-        loaded.session.parts.insert(number, part.clone());
+        let replaced = loaded.session.parts.insert(number, part.clone());
         if loaded.session.parts.len() > MAX_PARTS {
             return Err(Error::PartNumber);
         }
         loaded.session.revision = loaded.session.revision.saturating_add(1);
         match save(repository, &loaded).await {
-            Ok(()) => return Ok(part),
-            Err(Error::Conflict) if attempt + 1 < MAX_STATE_UPDATE_ATTEMPTS => {
-                wait_for_state_retry(&loaded.session.id, number, attempt, cancel).await?;
-                loaded = load(repository, &loaded.session.id).await?;
+            Ok(()) => {
+                if let Some(replaced) = replaced {
+                    cleanup_unreferenced_part(repository, &loaded.session, &replaced).await;
+                }
+                return Ok(part);
             }
-            Err(error) => return Err(error),
+            Err(Error::Conflict) => {
+                if attempt + 1 == MAX_STATE_UPDATE_ATTEMPTS {
+                    break;
+                }
+                if let Err(error) =
+                    wait_for_state_retry(&loaded.session.id, number, attempt, cancel).await
+                {
+                    cleanup_part_object(repository, &loaded.session.id, &part).await;
+                    return Err(error);
+                }
+                loaded = match load(repository, &loaded.session.id).await {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        cleanup_part_object(repository, &loaded.session.id, &part).await;
+                        return Err(error);
+                    }
+                };
+            }
+            Err(error) => {
+                let Ok(current) = load(repository, &loaded.session.id).await else {
+                    // The update outcome is ambiguous while its state cannot be
+                    // read back. Retain the unique payload for later recovery.
+                    return Err(error);
+                };
+                if current
+                    .session
+                    .parts
+                    .get(&number)
+                    .is_some_and(|registered| registered.path == part.path)
+                {
+                    if let Some(replaced) = replaced {
+                        cleanup_unreferenced_part(repository, &current.session, &replaced).await;
+                    }
+                    return Ok(part);
+                }
+                cleanup_unreferenced_part(repository, &current.session, &part).await;
+                return Err(error);
+            }
         }
     }
+    cleanup_part_object(repository, &loaded.session.id, &part).await;
     Err(Error::Conflict)
+}
+
+async fn cleanup_unreferenced_part(repository: &Repository, session: &Session, part: &Part) {
+    if session
+        .parts
+        .values()
+        .any(|registered| registered.path == part.path)
+    {
+        return;
+    }
+    cleanup_part_object(repository, &session.id, part).await;
+}
+
+async fn cleanup_part_object(repository: &Repository, upload_id: &str, part: &Part) {
+    let path = repository.layout.repo_path(&part.path);
+    match repository.store.delete(&path).await {
+        Ok(()) | Err(crab_storage::StorageError::NotFound { .. }) => {}
+        Err(error) => {
+            tracing::warn!(
+                %upload_id,
+                part_number = part.number,
+                %error,
+                "multipart orphan cleanup failed"
+            );
+        }
+    }
 }
 
 async fn wait_for_state_retry(
@@ -491,6 +564,25 @@ mod tests {
         writer.finish().await.unwrap()
     }
 
+    async fn create_session(repository: &Repository) -> Session {
+        create(
+            repository,
+            Initiation {
+                bucket: "repo",
+                key: "main/file.bin",
+                branch: "refs/heads/main",
+                path: "file.bin",
+                principal: "user",
+                attributes: PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 10,
+            },
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn cancelled_state_retry_stops_without_waiting() {
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -552,6 +644,95 @@ mod tests {
         assert!(list(&repository).await.unwrap().is_empty());
         let terminal = load(&repository, &session.id).await.unwrap();
         assert!(matches!(terminal.session.state, State::Aborted));
+    }
+
+    #[tokio::test]
+    async fn replacement_reclaims_the_previous_part_payload() {
+        let repository = fixture().await;
+        let session = create_session(&repository).await;
+        let first_body = Bytes::from_static(b"first version");
+        let first_spool = spool(&first_body).await;
+        let first = register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            &first_spool,
+            crate::gateway::md5_hex(&first_body),
+            crate::attributes::Checksums::default(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let second_body = Bytes::from_static(b"second version");
+        let second_spool = spool(&second_body).await;
+        let second = register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            &second_spool,
+            crate::gateway::md5_hex(&second_body),
+            crate::attributes::Checksums::default(),
+            12,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let old = repository
+            .store
+            .head(&repository.layout.repo_path(&first.path))
+            .await;
+        let new_exists = repository
+            .store
+            .head(&repository.layout.repo_path(&second.path))
+            .await
+            .is_ok();
+        assert_eq!(
+            (
+                matches!(old, Err(crab_storage::StorageError::NotFound { .. })),
+                new_exists,
+            ),
+            (true, true)
+        );
+    }
+
+    #[tokio::test]
+    async fn late_registration_reclaims_its_rejected_payload() {
+        let repository = fixture().await;
+        let session = create_session(&repository).await;
+        let stale = load(&repository, &session.id).await.unwrap();
+        abort(&repository, load(&repository, &session.id).await.unwrap())
+            .await
+            .unwrap();
+        let body = Bytes::from_static(b"late payload");
+        let body_spool = spool(&body).await;
+
+        let error = register_part(
+            &repository,
+            stale,
+            1,
+            &body_spool,
+            crate::gateway::md5_hex(&body),
+            crate::attributes::Checksums::default(),
+            12,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        let prefix = repository
+            .layout
+            .repo_path(&format!("s3/multipart/parts/{}/", session.id));
+
+        assert!(
+            matches!(error, Error::NotOpen)
+                && repository
+                    .store
+                    .list_prefix(&prefix)
+                    .await
+                    .unwrap()
+                    .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -651,6 +832,53 @@ mod tests {
         assert_eq!(
             reloaded.session.parts.keys().copied().collect::<Vec<_>>(),
             (1..=64).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_replacements_retain_only_the_winning_payload() {
+        let repository = Arc::new(fixture().await);
+        let session = create_session(&repository).await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(32));
+        let mut writes = tokio::task::JoinSet::new();
+        for replacement in 0..32 {
+            let repository = Arc::clone(&repository);
+            let upload_id = session.id.clone();
+            let barrier = Arc::clone(&barrier);
+            writes.spawn(async move {
+                let body = Bytes::from(format!("replacement-{replacement}"));
+                let body_spool = spool(&body).await;
+                let loaded = load(&repository, &upload_id).await.unwrap();
+                barrier.wait().await;
+                register_part(
+                    &repository,
+                    loaded,
+                    1,
+                    &body_spool,
+                    crate::gateway::md5_hex(&body),
+                    crate::attributes::Checksums::default(),
+                    10 + replacement,
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            });
+        }
+        while let Some(result) = writes.join_next().await {
+            result.unwrap().unwrap();
+        }
+        let reloaded = load(&repository, &session.id).await.unwrap();
+        let winner = &reloaded.session.parts[&1];
+        let prefix = repository
+            .layout
+            .repo_path(&format!("s3/multipart/parts/{}/", session.id));
+        let objects = repository.store.list_prefix(&prefix).await.unwrap();
+
+        assert_eq!(
+            objects
+                .iter()
+                .map(|object| object.location.clone())
+                .collect::<Vec<_>>(),
+            vec![repository.layout.repo_path(&winner.path)]
         );
     }
 

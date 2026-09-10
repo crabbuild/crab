@@ -25,6 +25,11 @@ multipart parts support up to 5 GiB, and multipart completion supports S3's
 requests are treated as validated virtual directory hints for filesystem
 clients; they do not create marker blobs because Git trees represent
 directories.
+Each UploadPart transfer uses a unique immutable backend object. A successful
+replacement reclaims the prior unreferenced payload, while a registration that
+loses to Abort or completion reclaims only its own payload. This prevents
+same-part concurrency from deleting the winning bytes or accumulating every
+replaced version.
 Large payloads use bounded-memory request spools and Crab's verified LFS content
 path. Multipart completion keeps objects through 64 MiB in a local spool. Above
 that threshold it hashes and validates the durable selected parts, then replays

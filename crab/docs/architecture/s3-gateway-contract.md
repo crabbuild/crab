@@ -205,7 +205,10 @@ The state machine is `Open -> Completing -> Completed` or `Open -> Aborted`.
 Registration, freeze, and abort use conditional revisions. A network transfer
 does not hold a branch lock. A part is acknowledged only after its immutable
 bytes and catalog registration are durable. Replacing a part number swaps the
-record to a new immutable object. Frozen and active objects remain GC roots.
+record to a new immutable object. Every transfer has a unique payload identity,
+so the winning replacement can reclaim the prior payload and a losing
+registration can reclaim its own bytes without deleting a concurrent winner.
+Frozen and active objects remain GC roots.
 
 Completion requires 1–10,000 strictly ascending selected parts, matching quoted
 ETags, and at least 5 MiB for every selected part except the last. It freezes the
@@ -259,21 +262,26 @@ boundary without credentials or request bodies.
 | Bounded admission queue exhaustion or wait timeout | `SlowDown` |
 | Corrupt/unavailable committed data | `InternalError` |
 
-Request bodies and multipart completion are streamed through bounded memory to
-temporary storage while checksums are computed. Objects above the inline Git
-threshold are stored through Crab's verified LFS content path; the committed Git
-blob is the canonical LFS pointer and the S3 attribute record retains the logical
-size and ETag. That same Git commit appends an exact tracking rule to the nearest
-`.gitattributes`, preserving any existing rules, so ordinary Git/LFS checkout
-interprets the pointer consistently. GET streams LFS content directly and
-reconstructs Crab pointers to temporary storage before opening the response.
-Successful writes are returned only after their committed outcome is durable and
-read-ready.
+Request bodies are streamed through bounded memory to temporary storage while
+checksums are computed. Multipart completion keeps objects through 64 MiB in a
+local spool; larger objects validate and hash the frozen durable parts, then
+replay them through size-and-SHA-verified LFS publication without assembling the
+logical object on local disk. Objects above the inline Git threshold are stored
+through Crab's verified LFS content path; the committed Git blob is the canonical
+LFS pointer and the S3 attribute record retains the logical size and ETag. That
+same Git commit appends an exact tracking rule to the nearest `.gitattributes`,
+preserving any existing rules, so ordinary Git/LFS checkout interprets the
+pointer consistently. GET streams LFS content directly and reconstructs Crab
+pointers to temporary storage before opening the response. Successful writes are
+returned only after their committed outcome is durable and read-ready.
 
-The temporary-storage requirement is proportional to each in-progress body and
-assembled multipart object. Production deployments must place the process
-temporary directory on capacity-managed scratch storage; request admission
-bounds concurrency but does not reserve scratch bytes.
+The temporary-storage requirement is proportional to each in-progress request
+body or copied range, not to a completed multipart object's aggregate size.
+Production deployments must place the process temporary directory on
+capacity-managed scratch storage; request admission bounds concurrency but does
+not reserve scratch bytes. Newly published large multipart content costs a
+second read of the frozen durable parts; an already verified LFS object can skip
+that replay.
 
 ## Repository extension API
 
