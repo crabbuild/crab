@@ -153,8 +153,8 @@ jobs:
           config_root="${RUNNER_TEMP}/crab-s3-gateway"
           install -d "${config_root}"
           printf '%s' "${GATEWAY_SECRET_KEY}" > "${config_root}/gateway-secret"
-          sudo chown 0:10001 "${config_root}/gateway-secret"
           chmod 0440 "${config_root}/gateway-secret"
+          sudo chown 0:10001 "${config_root}/gateway-secret"
           printf '%s\n' \
             'listen = "0.0.0.0:8080"' \
             'management_listen = "0.0.0.0:8081"' \
@@ -293,6 +293,8 @@ jobs:
           bucket=gateway-repository
           key=main/qualification/signed.bin
 
+          # JMESPath backticks are literals inside this single-quoted query.
+          # shellcheck disable=SC2016
           aws --endpoint-url "${endpoint}" s3api list-buckets \
             --query 'Buckets[?Name==`gateway-repository`].Name | [0]' \
             --output text | grep -Fx gateway-repository
@@ -400,6 +402,8 @@ jobs:
             fi
             sleep 1
           done
+          # JMESPath backticks are literals inside this single-quoted query.
+          # shellcheck disable=SC2016
           AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}" \
             AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}" \
             AWS_DEFAULT_REGION=us-east-1 \
