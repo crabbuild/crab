@@ -67,7 +67,7 @@ impl TrafficByObjectTypeCounters {
             ObjectType::Shard => &self.shard,
             ObjectType::Pack => &self.pack,
             ObjectType::PackIndex => &self.pack_index,
-            ObjectType::Metadata => &self.metadata,
+            ObjectType::Metadata | ObjectType::RefTransaction => &self.metadata,
         }
     }
 

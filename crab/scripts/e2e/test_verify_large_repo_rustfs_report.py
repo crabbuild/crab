@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -151,6 +152,31 @@ class QualificationHarnessTests(unittest.TestCase):
             source.write_text("replacement build", encoding="utf-8")
 
             self.assertEqual(resolved.read_text(encoding="utf-8"), "first build")
+
+    @unittest.skipUnless(os.name == "posix", "private directory modes are POSIX-specific")
+    def test_setup_creates_a_private_cache_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "run"
+            qualification = QUALIFICATION.LargeRepositoryQualification.__new__(
+                QUALIFICATION.LargeRepositoryQualification
+            )
+            qualification.args = SimpleNamespace(team_load=False)
+            qualification.run_root = root
+            qualification.logs = root / "logs"
+            qualification.artifacts = root / "artifacts"
+            qualification.temp_root = root / "tmp"
+            qualification.cache_root = root / "cache"
+            qualification.clone_root = root / "clones"
+            qualification.bin_root = root / "bin"
+            qualification.crab_source_bin = Path(sys.executable)
+            qualification.crab_bin = qualification.bin_root / "crab"
+            qualification.report_lock = threading.RLock()
+            qualification.report = {"artifacts": {}}
+
+            qualification.setup()
+
+            mode = stat.S_IMODE(qualification.cache_root.stat().st_mode)
+            self.assertEqual(mode & 0o077, 0)
 
 
 def resources() -> dict[str, Any]:

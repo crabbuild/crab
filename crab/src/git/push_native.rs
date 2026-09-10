@@ -371,7 +371,13 @@ async fn run_native_push_inner(
         // client; the protected upload store is not a canonical read handle.
         Some(prepared_ref_frontier(&session.ref_updates))
     } else {
-        match crate::metadata::manifest::read_repository_snapshot(&store, &router).await {
+        match crate::metadata::manifest::read_repository_snapshot_with_cache(
+            &store,
+            caching_store.as_ref(),
+            &router,
+        )
+        .await
+        {
             Ok(snapshot) => Some(snapshot.journal.refs),
             Err(CrabError::NotFound { path })
                 if config.followtags && path == router.manifest_path().as_ref() =>

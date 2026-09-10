@@ -83,7 +83,9 @@ pub(crate) fn entry_kind(relative: &Path) -> EntryKind {
 
 pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
     match parts {
-        ["chunks" | "xorbs" | "shards" | "stages" | "manifests" | "hints"] => EntryKind::Directory,
+        ["chunks" | "xorbs" | "shards" | "ref-transactions" | "stages" | "manifests" | "hints"] => {
+            EntryKind::Directory
+        }
         ["hints", "clean-bloom.bin"] => EntryKind::Payload,
         ["manifests", name]
             if [".json", ".etag"].iter().any(|suffix| {
@@ -93,14 +95,15 @@ pub(crate) fn object_entry_kind(parts: &[&str]) -> EntryKind {
         {
             EntryKind::Payload
         }
-        ["chunks" | "xorbs" | "shards" | "stages", prefix] if hex(prefix, 2) => {
-            EntryKind::Directory
-        }
-        ["chunks" | "xorbs" | "shards" | "stages", prefix, hash]
-            if hex(prefix, 2) && hex(hash, 64) && hash.starts_with(prefix) =>
-        {
-            EntryKind::Payload
-        }
+        [
+            "chunks" | "xorbs" | "shards" | "ref-transactions" | "stages",
+            prefix,
+        ] if hex(prefix, 2) => EntryKind::Directory,
+        [
+            "chunks" | "xorbs" | "shards" | "ref-transactions" | "stages",
+            prefix,
+            hash,
+        ] if hex(prefix, 2) && hex(hash, 64) && hash.starts_with(prefix) => EntryKind::Payload,
         _ => EntryKind::Retain,
     }
 }
@@ -161,6 +164,7 @@ mod tests {
             format!("chunks/ab/{hash}"),
             format!("shards/ab/{hash}"),
             format!("xorbs/ab/{hash}"),
+            format!("ref-transactions/ab/{hash}"),
             format!("stages/ab/{hash}"),
             "manifests/repo.json".into(),
             "manifests/repo.etag".into(),
@@ -189,14 +193,14 @@ mod tests {
         let preview = clean_cache(&root, true, &CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!((preview.files_removed, preview.bytes_reclaimed), (6, 42));
+        assert_eq!((preview.files_removed, preview.bytes_reclaimed), (7, 49));
         for path in &payloads {
             assert_eq!(std::fs::read(root.join(path)).unwrap(), b"fixture");
         }
         let report = clean_cache(&root, false, &CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!((report.files_removed, report.bytes_reclaimed), (6, 42));
+        assert_eq!((report.files_removed, report.bytes_reclaimed), (7, 49));
         assert_eq!(report.retained_entries, retained.len() as u64);
         for path in retained {
             assert_eq!(
