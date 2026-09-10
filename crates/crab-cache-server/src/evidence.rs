@@ -28,6 +28,7 @@ const EXPECTED_IMMUTABLE_ROUTE_PATTERNS: &[&str] = &[
     "{repo}/packs/pack-{id}.idx",
     "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
     "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+    "{repo}/refs/journal/transactions/{hash}.json",
     "{repo}/file_index_db/compacted/*.sst",
     "{repo}/file_index_db/manifest/*.manifest",
     "{repo}/file_index_db/wal/*.sst",
