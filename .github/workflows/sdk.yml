@@ -365,6 +365,19 @@ jobs:
               --features remote,content,write --test remote_write "$test" \
               -- --exact --ignored --nocapture
           done
+          QUALIFICATION_BUCKET="$CRAB_SDK_TEST_S3_BUCKET" \
+          QUALIFICATION_PREFIX="qualification/sdk-ref-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-evidence/ref_batches_rustfs_recover_without_git_after_restart.json" \
+              --backend rustfs --features remote,content,write \
+              --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+              --expected-tests 1 --toolchain "$SDK_MSRV" \
+              --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
+              --timeout-seconds 1200 -- \
+              cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+              --features remote,content,write --lib \
+              client::mutation::tests::ref_batches_rustfs_recover_without_git_after_restart \
+              -- --exact --ignored --nocapture
       - name: Qualify shared HTTP publication faults
         env:
           QUALIFICATION_BUCKET: ${{ env.CRAB_SDK_TEST_S3_BUCKET }}
