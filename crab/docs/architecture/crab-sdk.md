@@ -10,7 +10,7 @@ Delivery evidence: [capability inventory](sdk-capabilities.md) and
 [qualification inputs and phase-0 record](sdk-qualification.md).
 Phases 0 through 8 are implemented. Backend support is declared only after the
 mandatory credentialed, platform, fault, package, and performance cells pass.
-The [SDK API overhaul](sdk-api.md) is the plan of record for public
+The [SDK API overhaul](crab-sdk-api.md) is the plan of record for public
 names, namespaces, unified opening, and repository handle shape. The behavior,
 safety, recovery, performance, and qualification contracts in this document
 remain authoritative.
@@ -94,7 +94,7 @@ and local interfaces. Backend dispatch is private and uses the existing
 `RepositoryLocator` classification. Avoid a public generic `Repository<B>`, a
 public backend trait, or one oversized method set containing unsupported local
 and remote operations. The exact public shape and migration are defined by the
-[SDK API overhaul](sdk-api.md).
+[SDK API overhaul](crab-sdk-api.md).
 
 ```text
 Rust application
@@ -139,7 +139,7 @@ Keep only argument/config projection and output mapping at CLI entry points.
 
 The behavior, names, and semantics below define the implemented contract. The
 namespace and repository-facade decisions are detailed in the
-[SDK API overhaul](sdk-api.md).
+[SDK API overhaul](crab-sdk-api.md).
 
 ```rust,ignore
 let client = Client::builder()
