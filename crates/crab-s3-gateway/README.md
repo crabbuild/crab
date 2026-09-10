@@ -28,7 +28,15 @@ directories.
 Large payloads use bounded-memory spooling and Crab's verified LFS content path.
 The pointer commit atomically adds an exact, same-directory LFS tracking rule,
 so Git clones materialize gateway-authored large objects without local attribute
-workarounds.
+workarounds. LFS publication chooses an aligned backend part size from the final
+object length, keeping every supported multipart object within its provider's
+part-count and part-size limits. S3 uses at most 10,000 5 GiB parts, GCS uses at
+most 10,000 5 GiB parts and caps objects at 5 TiB, and Azure uses at most 50,000
+4,000 MiB blocks. Parts above the normal retained-payload budget upload
+synchronously rather than retaining two multi-gigabyte payloads.
+Successful publication records the provider's completion validator, so later
+range requests bind to the verified object version without rehashing the whole
+object for every slice.
 Objects already stored as Crab/Xet pointers retain Xet deduplication: partial
 GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
 stream the selected bytes through bounded temporary storage. Low-coverage cold
@@ -50,6 +58,10 @@ metadata, or range reads. Each pool admits a bounded FIFO burst for up to 60
 seconds before returning S3 `SlowDown`; request bodies are not consumed while
 waiting. The default budget is 32 and should be tuned from measured CPU, memory,
 file-descriptor, and scratch usage rather than client fanout alone.
+Ingress bodies and multipart completion currently require temporary disk space
+proportional to the assembled logical object. Deployments must place `TMPDIR` on
+capacity-managed scratch storage and reserve it independently from the request
+count budget.
 
 Each mutation rewrites only the target path's ancestor trees and persists one
 path-local attribute delta. Immutable pack, index, visibility, and attribute

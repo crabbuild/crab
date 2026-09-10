@@ -222,8 +222,20 @@ does not erase the completed outcome.
 
 Limits follow the S3 general-purpose bucket contract: 5 GiB per single PUT or
 multipart part, 10,000 parts per upload, 50 TB per completed multipart object,
-and 1000 results per multipart listing page. Unknown-length streams are counted
-as they arrive. Requests beyond an operation's S3 limit return `EntityTooLarge`.
+and 1000 results per multipart listing page. A GCS-backed repository caps the
+completed object at GCS's lower 5 TiB physical limit. Unknown-length streams are
+counted as they arrive. Requests beyond the applicable limit return
+`EntityTooLarge` before multipart assembly begins.
+LFS publication derives an aligned backend part size from the completed object
+length so the content-addressed upload stays within the configured provider's
+part-count and part-size limits: 10,000 5 GiB parts for S3 and GCS, or 50,000
+4,000 MiB blocks for Azure. When an adaptive part exceeds the normal
+retained-payload budget, it is submitted synchronously to avoid retaining a
+second large part concurrently.
+Successful LFS multipart completion records the provider's returned validator.
+Subsequent range requests compare that validator with the current object and
+read only the requested bytes instead of rehashing the complete object for each
+range.
 
 ## Error and response contract
 
@@ -257,6 +269,11 @@ interprets the pointer consistently. GET streams LFS content directly and
 reconstructs Crab pointers to temporary storage before opening the response.
 Successful writes are returned only after their committed outcome is durable and
 read-ready.
+
+The temporary-storage requirement is proportional to each in-progress body and
+assembled multipart object. Production deployments must place the process
+temporary directory on capacity-managed scratch storage; request admission
+bounds concurrency but does not reserve scratch bytes.
 
 ## Repository extension API
 

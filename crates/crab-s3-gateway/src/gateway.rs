@@ -1825,14 +1825,12 @@ impl S3 for Gateway {
         let condition = self
             .put_condition_values(repository, &req.input.key, if_match, if_none_match)
             .await?;
-        let (session, parts) = crate::multipart::freeze(
-            repository,
-            loaded,
-            &selected,
-            crate::content::MAX_MULTIPART_OBJECT_BYTES,
-        )
-        .await
-        .map_err(multipart_error)?;
+        let max_object_bytes =
+            crate::content::max_multipart_object_bytes(repository.config.provider);
+        let (session, parts) =
+            crate::multipart::freeze(repository, loaded, &selected, max_object_bytes)
+                .await
+                .map_err(multipart_error)?;
         let mut writer = crate::content::SpoolWriter::new()
             .await
             .map_err(content_error)?;
@@ -1852,7 +1850,7 @@ impl S3 for Gateway {
                     .ok_or_else(|| s3_error!(EntityTooLarge))?;
                 digest.update(&chunk);
                 writer
-                    .write(&chunk, crate::content::MAX_MULTIPART_OBJECT_BYTES)
+                    .write(&chunk, max_object_bytes)
                     .await
                     .map_err(content_error)?;
             }

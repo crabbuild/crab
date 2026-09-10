@@ -60,9 +60,9 @@ async fn full_and_final_parts_share_the_admission_bound() {
     use object_store::memory::InMemory;
 
     for size in [
-        STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS,
-        STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS + 1,
-        STREAM_PART_SIZE * (MAX_IN_FLIGHT_PARTS + 1) + 1,
+        MIN_STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS,
+        MIN_STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS + 1,
+        MIN_STREAM_PART_SIZE * (MAX_IN_FLIGHT_PARTS + 1) + 1,
     ] {
         let (file, oid) = super::tests::temp_file_of_size(size, 0x42);
         let store = InMemory::new();
@@ -81,6 +81,11 @@ async fn full_and_final_parts_share_the_admission_bound() {
             Some(size as u64),
             file.path(),
             &path,
+            upload_plan(
+                size as u64,
+                crab_storage::multipart::upload_limits(crab_storage::StorageProviderKind::Local),
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -99,11 +104,49 @@ async fn full_and_final_parts_share_the_admission_bound() {
 
 #[tokio::test]
 #[expect(clippy::unwrap_used, reason = "test fixture and assertions")]
+async fn synchronous_plan_never_retains_two_payloads() {
+    use object_store::memory::InMemory;
+
+    let size = 3 * 1024 + 1;
+    let (file, oid) = super::tests::temp_file_of_size(size, 0x24);
+    let store = InMemory::new();
+    let path = Path::from("synchronous-upload");
+    let counts = Arc::new(PartCounts::default());
+    let mut upload = ObservedUpload {
+        inner: store.put_multipart(&path).await.unwrap(),
+        counts: Arc::clone(&counts),
+        fail_next: false,
+    };
+    let mut reader = tokio::fs::File::open(file.path()).await.unwrap();
+
+    stream_file_parts(
+        &mut reader,
+        &mut upload,
+        &oid,
+        Some(size as u64),
+        file.path(),
+        &path,
+        UploadPlan {
+            part_size: 1024,
+            max_pending_parts: 0,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(counts.submitted.load(Ordering::SeqCst), 4);
+    assert_eq!(counts.maximum.load(Ordering::SeqCst), 1);
+    assert_eq!(counts.retained.load(Ordering::SeqCst), 0);
+    upload.abort().await.unwrap();
+}
+
+#[tokio::test]
+#[expect(clippy::unwrap_used, reason = "test fixture and assertions")]
 async fn failed_part_stops_tail_admission_and_releases_pending_parts() {
     use object_store::memory::InMemory;
     use std::error::Error;
 
-    let size = STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS + 1;
+    let size = MIN_STREAM_PART_SIZE * MAX_IN_FLIGHT_PARTS + 1;
     let (file, oid) = super::tests::temp_file_of_size(size, 0x42);
     let store = InMemory::new();
     let path = Path::from("failed-upload");
@@ -121,6 +164,11 @@ async fn failed_part_stops_tail_admission_and_releases_pending_parts() {
         Some(size as u64),
         file.path(),
         &path,
+        upload_plan(
+            size as u64,
+            crab_storage::multipart::upload_limits(crab_storage::StorageProviderKind::Local),
+        )
+        .unwrap(),
     )
     .await
     .unwrap_err();
