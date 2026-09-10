@@ -1,0 +1,13 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "crab-s3-gateway.fullname" . }}
+  labels:
+    {{- include "crab-s3-gateway.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- .Files.Get "monitoring/prometheus-rules.yaml" | nindent 2 }}
+{{- end }}

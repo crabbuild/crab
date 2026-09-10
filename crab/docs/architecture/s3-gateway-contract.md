@@ -344,6 +344,13 @@ catalog. No series includes a repository, ref, path, endpoint, principal, or
 credential label. Origin transport metrics remain the authority for fallback
 cost and provider failures.
 
+The canonical Helm chart can optionally install a release-scoped PodMonitor and
+PrometheusRule. Both are opt-in because their CRDs belong to the Prometheus
+Operator, not Crab. The bundled rules pass syntax validation plus healthy and
+faulting semantic tests with a pinned `promtool`. Production qualification must
+still prove that the deployed Prometheus selects both resources and that
+Alertmanager delivers every routed severity to a real receiver.
+
 ## Repository extension API
 
 S3 methods are not repurposed for Git concepts. A separate authenticated

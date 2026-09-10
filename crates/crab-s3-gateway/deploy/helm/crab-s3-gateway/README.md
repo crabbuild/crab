@@ -18,10 +18,25 @@ Each pod also receives separate scratch and cache `emptyDir` volumes. Configure
 child directory and fails startup if it cannot publish and remove cache files.
 The cache accelerates immutable reads but remains disposable across pod loss.
 
-Prometheus scrapes `GET /metrics` on the pod's named `management` port. Select
-the chart's pod labels with a PodMonitor or annotation-based pod discovery and
-restrict that traffic with the cluster's monitoring NetworkPolicy. Do not add
-port 8081 to the public S3 Service. A direct operator check can use a temporary
+Prometheus scrapes `GET /metrics` on the pod's named `management` port. The
+chart can install a release-scoped PodMonitor and the gateway's canonical alert
+rules when the Prometheus Operator CRDs are present:
+
+```yaml
+monitoring:
+  labels:
+    release: kube-prometheus-stack
+  podMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+```
+
+Both resources are disabled by default so the chart remains installable without
+those CRDs. Set `monitoring.labels` to labels selected by the cluster's
+Prometheus instance. The PodMonitor reads the private pod port directly; port
+8081 is never added to the public S3 Service. Restrict that traffic with the
+cluster's monitoring NetworkPolicy. A direct operator check can use a temporary
 pod port-forward:
 
 ```sh
@@ -32,28 +47,23 @@ kubectl port-forward --namespace crab-s3-gateway "pod/${pod}" 18081:8081
 curl --fail --silent --show-error http://127.0.0.1:18081/metrics
 ```
 
-At minimum, alert on increasing
-`crab_s3_gateway_multipart_maintenance_failures_total` and on a
-`crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds` older
-than three minutes for five minutes. Alert on admission queue saturation before
-scaling pressure becomes sustained S3 `SlowDown` responses.
-Alert on any increase in `crab_s3_gateway_scratch_io_failures_total`, and compare
-the per-pod sum of `crab_s3_gateway_scratch_bytes` with
-`crab_s3_gateway_scratch_filesystem_available_bytes`. Alert when the filesystem
-probe-success gauge is zero, its failure counter increases, or the reported
-available-to-total ratio crosses the deployment's headroom threshold. The
-application metric follows content-file ownership; the filesystem gauges cover
-all bytes visible on the mount. Kubelet ephemeral-storage telemetry remains
-authoritative for `scratch.sizeLimit` when the `emptyDir` policy cap is not
-represented as a filesystem quota by the node runtime. Alert on increasing
-scratch-capacity rejections and nonzero pending reservations that do not drain.
-Each pod's `emptyDir` is intentionally private: the atomic pre-write gate is
-process-local and retains 10% of visible filesystem capacity, bounded to
-64 MiB–1 GiB.
-Alert on sustained backend `auth`, `throttled`, `transient`, or `error` outcomes
-and backend duration outside the service-level budget. Correlate backend
-in-flight calls with admission queues before scaling: one identifies provider
-work while the other identifies local request pressure.
+The canonical rules under `monitoring/` cover stalled multipart maintenance,
+server and response-stream errors, backend authorization/degradation, admission
+pressure, scratch health/capacity/I/O, and cache health/capacity/persistence.
+CI checks their syntax and executes both healthy and faulting scenarios with a
+pinned `promtool`. Route critical storage-integrity and authorization alerts to
+the storage on-call; route warning capacity and degradation alerts to the
+gateway owner. Prometheus selection and Alertmanager receiver delivery still
+require live cluster proof.
+
+Admission pressure should drive scaling before sustained S3 `SlowDown`
+responses. Correlate backend in-flight calls with admission queues: one
+identifies provider work while the other identifies local request pressure.
+Kubelet ephemeral-storage telemetry remains authoritative for
+`scratch.sizeLimit` when the node runtime does not represent the `emptyDir`
+policy cap as a filesystem quota. Each pod's `emptyDir` is intentionally
+private: the atomic pre-write gate is process-local and retains 10% of visible
+filesystem capacity, bounded to 64 MiB–1 GiB.
 
 Before installation:
 

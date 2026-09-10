@@ -1,0 +1,20 @@
+{{- if .Values.monitoring.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "crab-s3-gateway.fullname" . }}
+  labels:
+    {{- include "crab-s3-gateway.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "crab-s3-gateway.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: management
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+{{- end }}

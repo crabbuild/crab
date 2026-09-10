@@ -70,6 +70,13 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
+monitoring:
+  labels: {}
+  podMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+
 topologySpreadConstraints:
   - maxSkew: 1
     minDomains: 2

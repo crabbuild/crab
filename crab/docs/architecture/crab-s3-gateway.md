@@ -1433,12 +1433,14 @@ pressure or mount loss into retryable `SlowDown`. Live EKS, external TLS,
 independent Git-history proof, provider wire-attempt metrics, cache usage and
 failure telemetry are now implemented with fixed cache-layer/outcome counters,
 verified-hit byte counters, local-persistence failures, and coalesced read-only
-catalog usage/health probes. Live Kubernetes alert delivery for those series,
-Kubernetes policy-quota telemetry, ECS, and broader operations evidence remain
-requirements, not qualified deployment support. One explicitly placed,
-startup-probed, byte-bounded local cache is shared across every repository in a
-process and mounted separately from scratch. Provider-native or
-load-balancer telemetry must cover wire attempts because the application
+catalog usage/health probes. The Helm chart now includes opt-in, release-scoped
+PodMonitor and PrometheusRule resources backed by syntax validation and healthy
+and faulting rule tests. Live Prometheus selection, Alertmanager receiver
+delivery, Kubernetes policy-quota telemetry, ECS, and broader operations
+evidence remain requirements, not qualified deployment support. One explicitly
+placed, startup-probed, byte-bounded local cache is shared across every
+repository in a process and mounted separately from scratch. Provider-native
+or load-balancer telemetry must cover wire attempts because the application
 metrics intentionally measure logical object-store calls across their complete
 response-stream lifetime. Kubelet telemetry remains authoritative for an
 `emptyDir.sizeLimit` that the node runtime does not expose as a filesystem

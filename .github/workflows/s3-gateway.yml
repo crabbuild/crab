@@ -42,6 +42,7 @@ jobs:
           values="${chart}/eks-values.example.yaml"
           helm_image=alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9
           kubeconform_image=ghcr.io/yannh/kubeconform:v0.7.0@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c
+          prometheus_image=prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
 
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" lint --strict "${chart}" >/dev/null 2>&1; then
@@ -65,6 +66,38 @@ jobs:
             --volume "${RUNNER_TEMP}/crab-s3-gateway.yaml:/manifests/gateway.yaml:ro" \
             "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
               /manifests/gateway.yaml
+          if grep -Eq '^kind: (PodMonitor|PrometheusRule)$' \
+            "${RUNNER_TEMP}/crab-s3-gateway.yaml"; then
+            echo "monitoring CRDs were rendered without explicit enablement" >&2
+            exit 1
+          fi
+
+          rules="${chart}/monitoring"
+          docker run --rm --volume "${PWD}/${rules}:/monitoring:ro" \
+            --entrypoint /bin/promtool "${prometheus_image}" \
+            check rules /monitoring/prometheus-rules.yaml
+          docker run --rm --volume "${PWD}/${rules}:/monitoring:ro" \
+            --workdir /monitoring --entrypoint /bin/promtool \
+            "${prometheus_image}" test rules prometheus-rules.test.yaml
+
+          monitoring="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              --set monitoring.podMonitor.enabled=true \
+              --set monitoring.prometheusRule.enabled=true \
+              --set monitoring.labels.release=kube-prometheus-stack \
+              --show-only templates/podmonitor.yaml \
+              --show-only templates/prometheusrule.yaml)"
+          for invariant in \
+            'kind: PodMonitor' \
+            'kind: PrometheusRule' \
+            'release: kube-prometheus-stack' \
+            'port: management' \
+            'path: /metrics'; do
+            grep -Fq "${invariant}" <<< "${monitoring}"
+          done
+          test "$(grep -Ec '^[[:space:]]+- alert: CrabS3Gateway' \
+            <<< "${monitoring}")" = 14
 
           service="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" \
