@@ -6450,6 +6450,35 @@ pub struct PrePopulatedWalk {
     pub remote_alias: String,
 }
 
+/// Ref leases and read-only work captured while those leases were active.
+///
+/// `locked_base_snapshot` may only be set when the snapshot was read after
+/// `leases` were acquired. The pipeline still revalidates the complete mutable
+/// snapshot after classification because unrelated refs can advance under
+/// independent leases.
+pub(crate) struct LockedPushHandoff {
+    leases: PushLockLease,
+    prepopulated: Option<PrePopulatedWalk>,
+    locked_base_snapshot: Option<Arc<RepositorySnapshot>>,
+}
+
+impl LockedPushHandoff {
+    pub(crate) fn new(leases: PushLockLease, prepopulated: Option<PrePopulatedWalk>) -> Self {
+        Self {
+            leases,
+            prepopulated,
+            locked_base_snapshot: None,
+        }
+    }
+
+    /// Attach a snapshot captured after this handoff's ref leases were acquired.
+    #[must_use]
+    pub(crate) fn with_locked_base_snapshot(mut self, snapshot: Arc<RepositorySnapshot>) -> Self {
+        self.locked_base_snapshot = Some(snapshot);
+        self
+    }
+}
+
 impl PushPipeline {
     /// Create a new pipeline for the given push specs.
     #[must_use]
@@ -6932,6 +6961,11 @@ impl PushPipeline {
     async fn read_base_manifest(&self) -> Result<()> {
         if self.config.protected_push.is_some() {
             debug!("read_base_manifest: protected push uses service-owned source manifest reads");
+            return Ok(());
+        }
+
+        if self.base_snapshot.lock().await.is_some() {
+            debug!("read_base_manifest: reusing snapshot captured under push locks");
             return Ok(());
         }
 
@@ -13587,6 +13621,17 @@ impl PushPipeline {
         *self.lock_acquired_at.lock().await = Some(Instant::now());
     }
 
+    /// Install a coherent snapshot read while the supplied ref leases were active.
+    async fn install_locked_base_snapshot(&self, snapshot: Arc<RepositorySnapshot>) {
+        debug!(
+            generation = snapshot.manifest.generation,
+            refs = snapshot.journal.refs.len(),
+            "installing base snapshot captured under push locks"
+        );
+        *self.manifest_etag.lock().await = Some(snapshot.manifest_etag.clone());
+        *self.base_snapshot.lock().await = Some(snapshot);
+    }
+
     /// Install a pre-computed pointer walk produced by the native push
     /// orchestrator.
     ///
@@ -16565,9 +16610,13 @@ pub(crate) async fn run_push_batch_with_locks(
     metrics: Option<Arc<Metrics>>,
     cancel: CancellationToken,
     progress: Option<Arc<NativePushProgress>>,
-    leases: PushLockLease,
-    prepopulated: Option<PrePopulatedWalk>,
+    handoff: LockedPushHandoff,
 ) -> PushResult {
+    let LockedPushHandoff {
+        leases,
+        prepopulated,
+        locked_base_snapshot,
+    } = handoff;
     if specs.is_empty() {
         debug!("push batch is empty, releasing pre-acquired locks");
         release_push_lock_leases(leases).await;
@@ -16614,6 +16663,9 @@ pub(crate) async fn run_push_batch_with_locks(
         progress,
     );
     pipeline.install_locks(leases).await;
+    if let Some(snapshot) = locked_base_snapshot {
+        pipeline.install_locked_base_snapshot(snapshot).await;
+    }
     if let Some(pre) = prepopulated {
         pipeline.install_prepopulated_walk(pre).await;
     }
@@ -25105,8 +25157,7 @@ mod tests {
             None,
             CancellationToken::new(),
             None,
-            leases,
-            None,
+            LockedPushHandoff::new(leases, None),
         )
         .await;
 
@@ -35551,6 +35602,78 @@ mod tests {
         );
         assert!(pipeline.base_commit_graph.lock().await.is_none());
         assert!(!*pipeline.base_commit_graph_loaded.lock().await);
+    }
+
+    #[tokio::test]
+    async fn locked_base_snapshot_elides_pipeline_initial_read() {
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let recording_store: Arc<dyn object_store::ObjectStore> = Arc::new(RecordingReadStore {
+            inner: Arc::clone(&inner),
+            reads: Arc::clone(&reads),
+        });
+        let store = Store::new(recording_store);
+        let router = StoreLayout::new(store.clone(), "locked-snapshot".to_owned());
+        initialize_test_repository(&store, &router).await;
+        let specs = vec![make_spec("refs/heads/main")];
+        let config = PushConfig::default();
+        let leases = acquire_push_lock_leases(
+            &store,
+            router.repo_prefix(),
+            &specs,
+            &config,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("acquire ref lease before snapshot");
+        let snapshot = Arc::new(
+            crate::metadata::manifest::read_repository_snapshot(&store, &router)
+                .await
+                .expect("read snapshot under ref lease"),
+        );
+        reads
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+
+        let pipeline = PushPipeline::new(
+            config,
+            specs,
+            Some(store),
+            None,
+            None,
+            router.repo_prefix().to_owned(),
+            router,
+            None,
+            CancellationToken::new(),
+            None,
+        );
+        pipeline.install_locks(leases).await;
+        pipeline
+            .install_locked_base_snapshot(Arc::clone(&snapshot))
+            .await;
+
+        pipeline
+            .read_base_manifest()
+            .await
+            .expect("reuse locked snapshot");
+
+        assert!(
+            reads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "pipeline must not reread a snapshot captured under its active ref leases"
+        );
+        assert_eq!(
+            pipeline.base_snapshot.lock().await.as_deref(),
+            Some(snapshot.as_ref())
+        );
+        assert_eq!(
+            pipeline.manifest_etag.lock().await.as_deref(),
+            Some(snapshot.manifest_etag.as_str())
+        );
+        pipeline.stop_heartbeat_and_release_lock().await;
     }
 
     #[tokio::test]
