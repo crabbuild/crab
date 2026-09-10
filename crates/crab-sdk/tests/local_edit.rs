@@ -115,6 +115,37 @@ async fn hydrated_status_is_clean() {
     sdk.close().await.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn prefetch_passes_exact_paths_as_include_patterns() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let repository = scratch.path().join("repository");
+    std::fs::create_dir(&repository).unwrap();
+    let git = git_path();
+    run(&git, &repository, &["init", "-b", "main"]);
+    commit(&git, &repository, "file.txt", "initial");
+    std::fs::write(scratch.path().join("crab fixture.enable-fetch"), b"").unwrap();
+    let sdk = client(store.path(), scratch.path());
+    let repository_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+
+    repository_handle
+        .local()
+        .unwrap()
+        .prefetch_content(vec!["models/a.bin".into(), "space name.bin".into()])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("crab fixture.fetch")).unwrap(),
+        "--json\n--include\nmodels/a.bin\n--include\nspace name.bin\n"
+    );
+    sdk.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stage_commit_push_round_trip() {
     let scratch = tempfile::tempdir().unwrap();

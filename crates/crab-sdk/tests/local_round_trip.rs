@@ -5,13 +5,16 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crab_sdk::local::{
-    CloneOptions, CommitOptions as LocalCommitOptions, Options as LocalOptions, PushOptions,
+    CheckoutOptions, CloneOptions, CommitOptions as LocalCommitOptions, FetchDepth, FetchOptions,
+    IntegrationKind, Options as LocalOptions, PullOptions, PullOutcome, PushOptions,
     PushOutcome as LocalPushOutcome, PushRefspec, Tools as LocalTools,
 };
 use crab_sdk::remote::EntryMode;
-use crab_sdk::remote::write::{CommitIdentity, CommitOptions, FileEdit, MutationOutcome};
+use crab_sdk::remote::write::{
+    CommitIdentity, CommitOptions, FileEdit, MutationOutcome, RefBatch, RefUpdate,
+};
 use crab_sdk::storage::{ContentCache, DirectStoreOptions, S3Options};
-use crab_sdk::{Client, GitPath, RepositoryLocator};
+use crab_sdk::{Client, GitPath, ObjectId, OpenOptions, RepositoryLocator};
 use futures_util::TryStreamExt as _;
 use object_store::ObjectStoreExt as _;
 use sha2::{Digest as _, Sha256};
@@ -65,7 +68,7 @@ fn identity() -> CommitIdentity {
     CommitIdentity::new("SDK qualification", "sdk@example.invalid", 1_700_000_000, 0).unwrap()
 }
 
-async fn initial_commit(client: &Client, locator: &RepositoryLocator, scratch: &Path) {
+async fn initial_commit(client: &Client, locator: &RepositoryLocator, scratch: &Path) -> ObjectId {
     client
         .initialize_remote(locator.clone(), "refs/heads/main")
         .await
@@ -118,10 +121,57 @@ async fn initial_commit(client: &Client, locator: &RepositoryLocator, scratch: &
         )
         .await
         .unwrap();
+    let commit = prepared.commit_id().unwrap();
     assert!(matches!(
         prepared.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
+    commit
+}
+
+async fn advance_remote(
+    client: &Client,
+    locator: &RepositoryLocator,
+    base: ObjectId,
+    index: usize,
+    scratch: &Path,
+) -> ObjectId {
+    let content = format!("remote revision {index}\n").into_bytes();
+    let prepared = client
+        .open(OpenOptions::remote(locator.clone()))
+        .await
+        .unwrap()
+        .remote()
+        .unwrap()
+        .prepare_commit(
+            CommitOptions::new(
+                base,
+                "refs/heads/main",
+                Some(base),
+                identity(),
+                identity(),
+                format!("remote revision {index}\n").into_bytes(),
+            )
+            .unwrap(),
+            vec![
+                FileEdit::git(
+                    GitPath::new(format!("revision-{index}.txt")).unwrap(),
+                    EntryMode::Regular,
+                    content.len() as u64,
+                    std::io::Cursor::new(content),
+                )
+                .unwrap(),
+            ],
+            scratch.to_owned(),
+        )
+        .await
+        .unwrap();
+    let commit = prepared.commit_id().unwrap();
+    assert!(matches!(
+        prepared.execute().await.unwrap(),
+        MutationOutcome::Committed { .. }
+    ));
+    commit
 }
 
 async fn cleanup(locator: &RepositoryLocator) {
@@ -317,6 +367,30 @@ async fn stage_commit_push_round_trip() {
         local_commit.to_string()
     );
 
+    let configuration = client.configure_local(&verified).await.unwrap();
+    assert!(!configuration.git_version().is_empty());
+    assert!(!configuration.crab_version().is_empty());
+    drop(cloned_repository);
+    let reopened = client.open(OpenOptions::local(&verified)).await.unwrap();
+    let reopened = reopened.local().unwrap();
+    assert_eq!(reopened.path(), verified.canonicalize().unwrap());
+    assert!(reopened.common_directory().ends_with(".git"));
+    let snapshot = reopened.snapshot("HEAD").await.unwrap();
+    assert_eq!(snapshot.commit_id(), local_commit);
+    assert_eq!(snapshot.history(10).await.unwrap().len(), 2);
+    reopened.dehydrate(vec!["large.bin".into()]).await.unwrap();
+    assert!(std::fs::metadata(verified.join("large.bin")).unwrap().len() < 1024);
+    reopened
+        .prefetch_content(vec!["large.bin".into()])
+        .await
+        .unwrap();
+    reopened.hydrate(vec!["large.bin".into()]).await.unwrap();
+    assert_eq!(
+        file_digest(&verified.join("large.bin")),
+        (large_size, large_digest)
+    );
+    assert!(reopened.status().await.unwrap().is_clean());
+
     let deleted = local
         .prepare_push(
             PushOptions::current_branch()
@@ -345,6 +419,298 @@ async fn stage_commit_push_round_trip() {
             .iter()
             .all(|reference| reference.name() != "refs/tags/sdk-round-trip")
     );
+
+    client.close().await.unwrap();
+    cleanup(&locator).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated writable S3 or RustFS bucket and built Git/Crab executables"]
+async fn fetch_checkout_and_pull_round_trip() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (client, locator) = live_client(scratch.path());
+    let first = initial_commit(&client, &locator, scratch.path()).await;
+    let second = advance_remote(&client, &locator, first, 2, scratch.path()).await;
+    let third = advance_remote(&client, &locator, second, 3, scratch.path()).await;
+    let fourth = advance_remote(&client, &locator, third, 4, scratch.path()).await;
+    let tag = client
+        .open(OpenOptions::remote(locator.clone()))
+        .await
+        .unwrap()
+        .remote()
+        .unwrap()
+        .prepare_ref_update(
+            RefBatch::new(vec![
+                RefUpdate::create("refs/tags/retained", fourth).unwrap(),
+            ])
+            .unwrap(),
+            scratch.path().to_owned(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        tag.execute().await.unwrap(),
+        MutationOutcome::Committed { .. }
+    ));
+
+    let checkout = scratch.path().join("shallow");
+    let repository = client
+        .clone_local(
+            locator.clone(),
+            &checkout,
+            CloneOptions::default()
+                .with_branch("main")
+                .unwrap()
+                .with_depth(1)
+                .unwrap()
+                .with_remote_name("upstream")
+                .unwrap(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{}", failure(&error)));
+    let local = repository.local().unwrap();
+    let git = PathBuf::from(required("CRAB_SDK_TEST_GIT_BIN"));
+    let git_output = |arguments: &[&str]| {
+        let output = std::process::Command::new(&git)
+            .current_dir(&checkout)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    assert_eq!(git_output(&["rev-list", "--count", "HEAD"]), "1");
+    let deepened = local
+        .fetch(
+            FetchOptions::default()
+                .with_remote("upstream")
+                .unwrap()
+                .with_depth(FetchDepth::Deepen(2))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(deepened.is_shallow());
+    assert_eq!(deepened.head(), Some(fourth));
+    assert_eq!(git_output(&["rev-list", "--count", "HEAD"]), "3");
+    let complete = local
+        .fetch(
+            FetchOptions::default()
+                .with_remote("upstream")
+                .unwrap()
+                .tags(true)
+                .with_depth(FetchDepth::Unshallow)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!complete.is_shallow());
+    assert_eq!(git_output(&["rev-list", "--count", "HEAD"]), "4");
+    assert_eq!(
+        git_output(&["rev-parse", "refs/tags/retained"]),
+        fourth.to_string()
+    );
+
+    git_output(&["update-ref", "refs/remotes/upstream/obsolete", "HEAD"]);
+    git_output(&["update-ref", "refs/tags/obsolete", "HEAD"]);
+    local
+        .fetch(
+            FetchOptions::default()
+                .with_remote("upstream")
+                .unwrap()
+                .tags(true)
+                .prune(true),
+        )
+        .await
+        .unwrap();
+    assert!(git_output(&["tag", "--list", "obsolete"]).is_empty());
+    let missing = std::process::Command::new(&git)
+        .current_dir(&checkout)
+        .args(["show-ref", "--verify", "refs/remotes/upstream/obsolete"])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+
+    assert_eq!(
+        local
+            .checkout(
+                "HEAD",
+                CheckoutOptions::default().create_branch("work").unwrap(),
+            )
+            .await
+            .unwrap(),
+        fourth
+    );
+    assert_eq!(
+        local
+            .checkout("main", CheckoutOptions::default())
+            .await
+            .unwrap(),
+        fourth
+    );
+
+    let fifth = advance_remote(&client, &locator, fourth, 5, scratch.path()).await;
+    let pulled = local
+        .pull(
+            PullOptions::fast_forward_only()
+                .with_remote("upstream")
+                .unwrap()
+                .hydrate(false),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(pulled, PullOutcome::Updated { head, .. } if head == fifth));
+    assert_eq!(git_output(&["rev-parse", "HEAD"]), fifth.to_string());
+
+    let linked = scratch.path().join("linked");
+    let linked_text = linked.to_str().unwrap();
+    git_output(&["worktree", "add", "-b", "linked", linked_text]);
+    let linked_repository = client.open(OpenOptions::local(&linked)).await.unwrap();
+    let linked_local = linked_repository.local().unwrap();
+    assert_eq!(linked_local.path(), linked.canonicalize().unwrap());
+    assert_eq!(linked_local.common_directory(), local.common_directory());
+    assert_eq!(
+        linked_local.snapshot("HEAD").await.unwrap().commit_id(),
+        fifth
+    );
+
+    client.close().await.unwrap();
+    cleanup(&locator).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires an isolated writable S3 or RustFS bucket and built Git/Crab executables"]
+async fn conflict_continue_and_abort_round_trip() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (client, locator) = live_client(scratch.path());
+    let initial = initial_commit(&client, &locator, scratch.path()).await;
+    let remote_path = scratch.path().join("remote-writer");
+    let merge_path = scratch.path().join("merge-conflict");
+    let abort_path = scratch.path().join("rebase-abort");
+    let remote_repository = client
+        .clone_local(locator.clone(), &remote_path, CloneOptions::default())
+        .await
+        .unwrap();
+    let merge_repository = client
+        .clone_local(locator.clone(), &merge_path, CloneOptions::default())
+        .await
+        .unwrap();
+    let abort_repository = client
+        .clone_local(locator.clone(), &abort_path, CloneOptions::default())
+        .await
+        .unwrap();
+    let remote = remote_repository.local().unwrap();
+    let merge = merge_repository.local().unwrap();
+    let abort = abort_repository.local().unwrap();
+
+    std::fs::write(merge_path.join("README.md"), b"local merge change\n").unwrap();
+    merge.stage(vec!["README.md".into()]).await.unwrap();
+    let identity = self::identity();
+    merge
+        .commit(
+            LocalCommitOptions::new(identity.clone(), identity, b"local merge change\n".to_vec())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    std::fs::write(abort_path.join("README.md"), b"local rebase change\n").unwrap();
+    abort.stage(vec!["README.md".into()]).await.unwrap();
+    let identity = self::identity();
+    let abort_head = abort
+        .commit(
+            LocalCommitOptions::new(
+                identity.clone(),
+                identity,
+                b"local rebase change\n".to_vec(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    std::fs::write(remote_path.join("README.md"), b"remote change\n").unwrap();
+    remote.stage(vec!["README.md".into()]).await.unwrap();
+    let identity = self::identity();
+    remote
+        .commit(
+            LocalCommitOptions::new(identity.clone(), identity, b"remote change\n".to_vec())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        remote
+            .prepare_push(PushOptions::current_branch())
+            .await
+            .unwrap()
+            .execute()
+            .await
+            .unwrap(),
+        LocalPushOutcome::Committed { .. }
+    ));
+
+    let PullOutcome::Conflict(conflict) = merge
+        .pull(PullOptions::merge().hydrate(false))
+        .await
+        .unwrap()
+    else {
+        panic!("divergent merge did not conflict")
+    };
+    assert_eq!(conflict.kind(), IntegrationKind::Merge);
+    assert_eq!(conflict.paths(), &[PathBuf::from("README.md")]);
+    std::fs::write(merge_path.join("README.md"), b"resolved merge\n").unwrap();
+    merge.stage(vec!["README.md".into()]).await.unwrap();
+    assert!(matches!(
+        merge
+            .continue_integration(conflict.id().clone())
+            .await
+            .unwrap(),
+        PullOutcome::Updated { .. }
+    ));
+    let git = PathBuf::from(required("CRAB_SDK_TEST_GIT_BIN"));
+    let merge_parents = std::process::Command::new(&git)
+        .current_dir(&merge_path)
+        .args(["rev-list", "--parents", "-n", "1", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(merge_parents.status.success());
+    assert_eq!(
+        String::from_utf8(merge_parents.stdout)
+            .unwrap()
+            .split_whitespace()
+            .count(),
+        3
+    );
+
+    let PullOutcome::Conflict(conflict) = abort
+        .pull(PullOptions::rebase().hydrate(false))
+        .await
+        .unwrap()
+    else {
+        panic!("divergent rebase did not conflict")
+    };
+    assert_eq!(conflict.kind(), IntegrationKind::Rebase);
+    std::fs::write(abort_path.join("later.txt"), b"preserve after abort\n").unwrap();
+    assert_eq!(
+        abort
+            .abort_integration(conflict.id().clone())
+            .await
+            .unwrap(),
+        abort_head
+    );
+    assert_eq!(
+        std::fs::read(abort_path.join("later.txt")).unwrap(),
+        b"preserve after abort\n"
+    );
+    assert_eq!(
+        abort.snapshot("HEAD").await.unwrap().commit_id(),
+        abort_head
+    );
+    assert_ne!(abort_head, initial);
 
     client.close().await.unwrap();
     cleanup(&locator).await;

@@ -793,12 +793,12 @@ impl LocalRepository {
 
     /// Hydrate exact paths, or all tracked paths when the selection is empty.
     pub fn hydrate(&self, paths: Vec<PathBuf>) -> crate::Request<'_, (), OperationOptions> {
-        self.crab_paths("hydrate", paths)
+        self.crab_paths("hydrate", None, paths)
     }
 
     /// Replace exact hydrated paths with pointers, or all paths when empty.
     pub fn dehydrate(&self, paths: Vec<PathBuf>) -> crate::Request<'_, (), OperationOptions> {
-        self.crab_paths("dehydrate", paths)
+        self.crab_paths("dehydrate", None, paths)
     }
 
     /// Warm content for exact paths, or all reachable HEAD content when empty.
@@ -806,22 +806,24 @@ impl LocalRepository {
         &self,
         paths: Vec<PathBuf>,
     ) -> crate::Request<'_, (), OperationOptions> {
-        self.crab_paths("fetch", paths)
+        self.crab_paths("fetch", Some("--include"), paths)
     }
 
     fn crab_paths<'a>(
         &'a self,
         command: &'static str,
+        path_flag: Option<&'static str>,
         paths: Vec<PathBuf>,
     ) -> crate::Request<'a, (), OperationOptions> {
         crate::Request::new(move |operation| {
-            Box::pin(self.crab_paths_with_options(command, paths, operation))
+            Box::pin(self.crab_paths_with_options(command, path_flag, paths, operation))
         })
     }
 
     async fn crab_paths_with_options(
         &self,
         command: &'static str,
+        path_flag: Option<&'static str>,
         paths: Vec<PathBuf>,
         operation: OperationOptions,
     ) -> Result<()> {
@@ -843,6 +845,9 @@ impl LocalRepository {
                     args.push("--all".into());
                 } else {
                     for path in paths {
+                        if let Some(flag) = path_flag {
+                            args.push(flag.into());
+                        }
                         args.push(path.into_os_string());
                     }
                 }

@@ -38,7 +38,7 @@ pub fn fake_crab(directory: &Path) -> PathBuf {
     std::fs::write(
         &path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = sdk-capabilities ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nif [ \"$1\" = hydrate ] && [ -f \"$0.enable-hydrate\" ]; then\n  shift\n  printf '%s\\n' \"$@\" > \"$0.hydrate\"\n  exit 0\nfi\nexit 64\n",
+            "#!/bin/sh\nif [ \"$1\" = sdk-capabilities ]; then\n  printf '%s\\n' '{}'\n  exit 0\nfi\nif [ \"$1\" = hydrate ] && [ -f \"$0.enable-hydrate\" ]; then\n  shift\n  printf '%s\\n' \"$@\" > \"$0.hydrate\"\n  exit 0\nfi\nif [ \"$1\" = fetch ] && [ -f \"$0.enable-fetch\" ]; then\n  shift\n  printf '%s\\n' \"$@\" > \"$0.fetch\"\n  exit 0\nfi\nexit 64\n",
             crab_remote::local::CURRENT_CAPABILITIES_JSON
         ),
     )
