@@ -67,6 +67,7 @@ EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     "{repo}/packs/pack-{id}.idx",
     "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
     "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+    "{repo}/refs/journal/transactions/{hash}.json",
     "{repo}/file_index_db/compacted/*.sst",
     "{repo}/file_index_db/manifest/*.manifest",
     "{repo}/file_index_db/wal/*.sst",
@@ -87,6 +88,11 @@ EXPECTED_MUTABLE_ROUTE_PATTERNS = [
     ".crab/ref-registry/*",
     "{repo}/file_index_db/manifest/current",
     ".crab/chunk_index_db/manifest/current",
+]
+EXPECTED_IMMUTABLE_POISONING_PATTERNS = [
+    ".crab/xorbs/{first-two-hex}/{hash}",
+    ".crab/shards/{first-two-hex}/{hash}",
+    "{repo}/refs/journal/transactions/{hash}.json",
 ]
 
 
@@ -3712,6 +3718,8 @@ class CacheServiceRustfsSmoke:
     def synthetic_immutable_route_specs(self) -> list[tuple[str, str, bytes]]:
         prefix = f"{REMOTE_PREFIX}/{self.run_id}/route-contract-immutable"
         generated_hash = "9" * 64
+        transaction_body = b'{"version":1,"edits":[]}'
+        transaction_hash = "6003afa08563fa5cc27ad45ebb7def0282eaafb8bf1e17e1ba139d62465f57de"
         specs = [
             ("{repo}/packs/pack-{id}.pack", f"{prefix}/packs/pack-route-contract.pack"),
             ("{repo}/packs/pack-{id}.idx", f"{prefix}/packs/pack-route-contract.idx"),
@@ -3722,6 +3730,10 @@ class CacheServiceRustfsSmoke:
             (
                 "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
                 f"{prefix}/generated-packs/v1/requests/99/{generated_hash}.json",
+            ),
+            (
+                "{repo}/refs/journal/transactions/{hash}.json",
+                f"{prefix}/refs/journal/transactions/{transaction_hash}.json",
             ),
             (
                 "{repo}/file_index_db/compacted/*.sst",
@@ -3741,7 +3753,13 @@ class CacheServiceRustfsSmoke:
             ),
         ]
         return [
-            (pattern, key, deterministic_bytes(4096, f"{self.run_id}:{pattern}"))
+            (
+                pattern,
+                key,
+                transaction_body
+                if pattern == "{repo}/refs/journal/transactions/{hash}.json"
+                else deterministic_bytes(4096, f"{self.run_id}:{pattern}"),
+            )
             for pattern, key in specs
         ]
 
@@ -3883,19 +3901,16 @@ class CacheServiceRustfsSmoke:
             == sorted(EXPECTED_IMMUTABLE_ROUTE_PATTERNS),
             {"patterns": [record["pattern"] for record in self.report.immutable_route_write_behaviors]},
         )
-        self.assert_immutable_route_pattern_rejects_poisoning(
-            ".crab/xorbs/{first-two-hex}/{hash}", xorb_key, xorb_body
-        )
-        self.assert_immutable_route_pattern_rejects_poisoning(
-            ".crab/shards/{first-two-hex}/{hash}", shard_key, shard_body
-        )
+        poisoning_specs = {
+            pattern: (key, data) for pattern, key, data in real_specs + synthetic_specs
+        }
+        for pattern in EXPECTED_IMMUTABLE_POISONING_PATTERNS:
+            key, data = poisoning_specs[pattern]
+            self.assert_immutable_route_pattern_rejects_poisoning(pattern, key, data)
         self.check(
             "route-contract-immutable-poisoning-patterns-covered",
             sorted(record["pattern"] for record in self.report.immutable_poisoning_controls)
-            == [
-                ".crab/shards/{first-two-hex}/{hash}",
-                ".crab/xorbs/{first-two-hex}/{hash}",
-            ],
+            == sorted(EXPECTED_IMMUTABLE_POISONING_PATTERNS),
             {"patterns": [record["pattern"] for record in self.report.immutable_poisoning_controls]},
         )
 
@@ -5065,6 +5080,12 @@ class CacheServiceRustfsSmoke:
             return "xorb", self.cache_root / "xorbs" / hash_hex[:2] / hash_hex
         if key.startswith(".crab/shards/"):
             return "shard", self.cache_root / "shards" / hash_hex[:2] / hash_hex
+        if "/refs/journal/transactions/" in key:
+            hash_hex = hash_hex.removesuffix(".json")
+            return (
+                "ref-transaction",
+                self.cache_root / "ref-transactions" / hash_hex[:2] / hash_hex,
+            )
         raise SmokeError(f"unsupported integrity repair key: {key}")
 
     def corrupt_persisted_cache_file(self, path: Path, object_type: str) -> int:
@@ -5079,6 +5100,10 @@ class CacheServiceRustfsSmoke:
     def verify_persisted_cache_integrity_repairs(self, support_repo: Path) -> None:
         state = self.require_proxy_state()
         fixtures: list[dict[str, Any]] = []
+        synthetic = {
+            pattern: (key, data)
+            for pattern, key, data in self.synthetic_immutable_route_specs()
+        }
         for pattern, predicate in (
             (
                 ".crab/xorbs/{first-two-hex}/{hash}",
@@ -5088,8 +5113,14 @@ class CacheServiceRustfsSmoke:
                 ".crab/shards/{first-two-hex}/{hash}",
                 lambda key: key.startswith(".crab/shards/"),
             ),
+            (
+                "{repo}/refs/journal/transactions/{hash}.json",
+                lambda key: "/refs/journal/transactions/" in key,
+            ),
         ):
-            key, origin_body = self.origin_object_matching(pattern, predicate)
+            key, origin_body = synthetic.get(pattern) or self.origin_object_matching(
+                pattern, predicate
+            )
             object_type, cache_file = self.cache_file_for_integrity_key(key)
             status, headers, body = self.cache_get(key)
             self.check(

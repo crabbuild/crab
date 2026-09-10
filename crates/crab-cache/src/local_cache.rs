@@ -1,17 +1,19 @@
 //! Per-repo local cache with hash-verified reads and LRU eviction.
 //!
 //! Chunks and shards are stored under `{dir}/{hash[:2]}/{hash}` and
-//! verified via `compute_data_hash` on every read. A mismatch evicts
-//! the stale entry and refetches via the caller-supplied closure.
+//! verified via `compute_data_hash` on every read. Ref-journal transactions
+//! use the same layout but retain their native plain-Blake3 identity. A
+//! mismatch evicts the stale entry and refetches via the caller-supplied closure.
 //!
 //! Xorbs also use the two-level layout, but validate their aggregate xorb
 //! identity from serialized metadata instead of hashing the whole object.
 //!
 //! LRU eviction uses file modification time (mtime) as the access
-//! timestamp — object hits touch their retained file descriptor; manifest
-//! reads and metadata-only existence/size probes do not. Prune sorts
-//! by mtime ascending and removes the oldest entries until the cache
-//! fits within its configured byte budget.
+//! timestamp — object hits touch their retained file descriptor, with
+//! ref-transaction touches coalesced to avoid repeated snapshot write
+//! amplification. Manifest reads and metadata-only existence/size probes do
+//! not touch. Prune sorts by mtime ascending and removes the oldest entries
+//! until the cache fits within its configured byte budget.
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -49,6 +51,7 @@ const HASH_BYTES: usize = 32;
 const XORB_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const XORB_INDEX_OPEN_RETRY_DELAYS_MS: [u64; 4] = [5, 20, 50, 100];
 const CACHE_FILL_LOCK_STRIPES: usize = 256;
+const REF_TRANSACTION_TOUCH_INTERVAL: Duration = Duration::from_secs(60);
 pub const XORB_INDEX_SCHEMA_VERSION: i64 = 1;
 
 fn new_fill_locks() -> Box<[tokio::sync::Mutex<()>]> {
@@ -66,6 +69,8 @@ pub struct PruneStats {
     pub shards_evicted: u64,
     /// Number of xorb files evicted.
     pub xorbs_evicted: u64,
+    /// Number of immutable ref-journal transaction files evicted.
+    pub ref_transactions_evicted: u64,
     /// Total bytes freed across all evictions.
     pub bytes_freed: u64,
     /// Cache objects pruned or selected for pruning.
@@ -87,6 +92,7 @@ pub enum PruneObjectKind {
     Chunk,
     Shard,
     Xorb,
+    RefTransaction,
 }
 
 impl PruneObjectKind {
@@ -96,6 +102,7 @@ impl PruneObjectKind {
             Self::Chunk => "chunk",
             Self::Shard => "shard",
             Self::Xorb => "xorb",
+            Self::RefTransaction => "ref-transaction",
         }
     }
 }
@@ -112,7 +119,10 @@ impl PruneStats {
     /// Total object count pruned or selected for pruning.
     #[must_use]
     pub fn objects_evicted(&self) -> u64 {
-        self.chunks_evicted + self.shards_evicted + self.xorbs_evicted
+        self.chunks_evicted
+            + self.shards_evicted
+            + self.xorbs_evicted
+            + self.ref_transactions_evicted
     }
 }
 
@@ -142,6 +152,10 @@ pub struct CacheStats {
     pub xorb_bytes: u64,
     /// Number of cached xorb files.
     pub xorb_count: u64,
+    /// Total bytes used by immutable ref-journal transactions.
+    pub ref_transaction_bytes: u64,
+    /// Number of cached immutable ref-journal transactions.
+    pub ref_transaction_count: u64,
     /// Total bytes used by cached workflow stage entries.
     pub stage_bytes: u64,
     /// Number of cached workflow stage entries.
@@ -388,6 +402,10 @@ impl LocalCache {
                 self.try_read_verified_limited(&self.hash_path(key), hash, max_bytes)
                     .await
             }
+            CacheKey::RefTransaction(hash) => {
+                self.try_read_ref_transaction_limited(&self.hash_path(key), hash, max_bytes)
+                    .await
+            }
             CacheKey::Xorb(hash) => {
                 self.try_read_xorb_bytes_limited(&self.hash_path(key), hash, max_bytes)
                     .await
@@ -542,9 +560,11 @@ impl LocalCache {
     #[doc(hidden)]
     pub async fn put_unchecked_for_test(&self, key: &CacheKey, data: &[u8]) -> Result<()> {
         let path = match key {
-            CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
-                self.hash_path(key)
-            }
+            CacheKey::Chunk(_)
+            | CacheKey::Shard(_)
+            | CacheKey::Xorb(_)
+            | CacheKey::RefTransaction(_)
+            | CacheKey::Stage(_) => self.hash_path(key),
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
         self.atomic_write(&path, data).await
@@ -558,6 +578,7 @@ impl LocalCache {
         enforce_key_size(key, data.len() as u64)?;
         match key {
             CacheKey::Chunk(hash) | CacheKey::Shard(hash) => verify_data_hash(data, hash),
+            CacheKey::RefTransaction(hash) => verify_blake3_hash(data, hash),
             CacheKey::Xorb(hash) => verify_xorb_payload(&Bytes::copy_from_slice(data), hash),
             CacheKey::Stage(_) | CacheKey::Manifest { .. } => Ok(()),
         }
@@ -568,6 +589,7 @@ impl LocalCache {
         enforce_key_size(key, data.len() as u64)?;
         match key {
             CacheKey::Chunk(hash) | CacheKey::Shard(hash) => verify_data_hash(data, hash),
+            CacheKey::RefTransaction(hash) => verify_blake3_hash(data, hash),
             CacheKey::Xorb(hash) => verify_xorb_payload(data, hash),
             CacheKey::Stage(_) | CacheKey::Manifest { .. } => Ok(()),
         }
@@ -576,9 +598,11 @@ impl LocalCache {
     /// Check if a key exists in cache (does not verify hash).
     pub async fn contains(&self, key: &CacheKey) -> bool {
         let path = match key {
-            CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
-                self.hash_path(key)
-            }
+            CacheKey::Chunk(_)
+            | CacheKey::Shard(_)
+            | CacheKey::Xorb(_)
+            | CacheKey::RefTransaction(_)
+            | CacheKey::Stage(_) => self.hash_path(key),
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
         private_cache_file_metadata(&self.root, &path)
@@ -591,9 +615,11 @@ impl LocalCache {
     /// Return the size of an existing cache entry without reading its body.
     pub async fn cached_size(&self, key: &CacheKey) -> Result<Option<u64>> {
         let path = match key {
-            CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
-                self.hash_path(key)
-            }
+            CacheKey::Chunk(_)
+            | CacheKey::Shard(_)
+            | CacheKey::Xorb(_)
+            | CacheKey::RefTransaction(_)
+            | CacheKey::Stage(_) => self.hash_path(key),
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
         Ok(private_cache_file_metadata(&self.root, &path)
@@ -620,6 +646,10 @@ impl LocalCache {
                 let path = self.hash_path(key);
                 self.try_verify_xorb_payload_file(&path, hash).await
             }
+            CacheKey::RefTransaction(hash) => self
+                .try_read_ref_transaction_limited(&self.hash_path(key), hash, None)
+                .await
+                .is_some(),
             CacheKey::Stage(_) | CacheKey::Manifest { .. } => self.contains(key).await,
         }
     }
@@ -724,9 +754,11 @@ impl LocalCache {
     /// Returns [`CacheError::Io`] when the entry exists but cannot be removed.
     pub async fn evict(&self, key: &CacheKey) -> Result<()> {
         let path = match key {
-            CacheKey::Chunk(_) | CacheKey::Shard(_) | CacheKey::Xorb(_) | CacheKey::Stage(_) => {
-                self.hash_path(key)
-            }
+            CacheKey::Chunk(_)
+            | CacheKey::Shard(_)
+            | CacheKey::Xorb(_)
+            | CacheKey::RefTransaction(_)
+            | CacheKey::Stage(_) => self.hash_path(key),
             CacheKey::Manifest { name, .. } => self.manifest_data_path(name),
         };
         crate::catalog::remove_file(&self.root, &path).await?;
@@ -843,6 +875,13 @@ impl LocalCache {
             CacheKey::Chunk(h) => self.merkle_path("chunks", h),
             CacheKey::Shard(h) => self.merkle_path("shards", h),
             CacheKey::Xorb(h) => self.merkle_path("xorbs", h),
+            CacheKey::RefTransaction(h) => {
+                let hex = h.to_hex();
+                self.root
+                    .join("ref-transactions")
+                    .join(&hex[..2])
+                    .join(hex.as_str())
+            }
             CacheKey::Stage(h) => {
                 let hex = h.as_hex();
                 self.root.join("stages").join(&hex[..2]).join(&hex)
@@ -882,6 +921,22 @@ impl LocalCache {
         .await
         .ok()??;
         entry.touch().await;
+        Some(data)
+    }
+
+    async fn try_read_ref_transaction_limited(
+        &self,
+        path: &Path,
+        expected: &blake3::Hash,
+        max_bytes: Option<u64>,
+    ) -> Option<Bytes> {
+        let limit = max_bytes.unwrap_or(u64::MAX);
+        let (data, entry) = read_file_bounded_result(&self.root, path, limit, |data| {
+            verify_blake3_hash(data, expected)
+        })
+        .await
+        .ok()??;
+        entry.touch_if_stale(REF_TRANSACTION_TOUCH_INTERVAL).await;
         Some(data)
     }
 
@@ -999,6 +1054,7 @@ fn cache_family_for_path(root: &Path, path: &Path) -> &'static str {
         Some("chunks") => "chunk",
         Some("xorbs") => "xorb",
         Some("shards") => "shard",
+        Some("ref-transactions") => "ref-transaction",
         Some("manifests") => "manifest",
         Some("stages") => "stage",
         _ => "other",
@@ -1045,6 +1101,7 @@ fn effective_read_limit(key: &CacheKey, requested: Option<u64>) -> Option<u64> {
         CacheKey::Shard(_) => Some(MAX_CACHE_SHARD_BYTES),
         CacheKey::Xorb(_) => Some(MAX_XORB_SIZE as u64),
         CacheKey::Chunk(_) => Some(MAX_CACHE_CHUNK_BYTES),
+        CacheKey::RefTransaction(_) => None,
         CacheKey::Stage(_) => Some(MAX_CACHE_STAGE_BYTES),
         CacheKey::Manifest { .. } => Some(MAX_CACHE_MANIFEST_BYTES),
     };
@@ -1121,6 +1178,17 @@ fn verify_data_hash(data: &[u8], expected: &MerkleHash) -> Result<()> {
     Err(CacheError::HashMismatch {
         requested: expected.hex(),
         actual: actual.hex(),
+    })
+}
+
+fn verify_blake3_hash(data: &[u8], expected: &blake3::Hash) -> Result<()> {
+    let actual = blake3::hash(data);
+    if actual == *expected {
+        return Ok(());
+    }
+    Err(CacheError::HashMismatch {
+        requested: expected.to_hex().to_string(),
+        actual: actual.to_hex().to_string(),
     })
 }
 
@@ -1755,6 +1823,44 @@ mod tests {
         .unwrap();
         assert_eq!(report.bytes_reclaimed, 4);
         assert!(reopened.read_clean_bloom().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn ref_transaction_hits_coalesce_recent_recency_writes() {
+        let (_dir, cache) = temp_cache();
+        let body: &[u8] = b"transaction";
+        let key = CacheKey::RefTransaction(blake3::hash(body));
+        cache.put(&key, body).await.unwrap();
+        let path = cache.hash_path(&key);
+        let recent = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        assert_eq!(
+            cache
+                .get_or_fetch(&key, || async { unreachable!() })
+                .await
+                .unwrap(),
+            body
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            recent
+        );
+
+        let stale = std::time::UNIX_EPOCH + Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        assert_eq!(
+            cache
+                .get_or_fetch(&key, || async { unreachable!() })
+                .await
+                .unwrap(),
+            body
+        );
+        assert!(std::fs::metadata(path).unwrap().modified().unwrap() > stale);
     }
 
     #[test]

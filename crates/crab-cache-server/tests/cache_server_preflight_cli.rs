@@ -1422,11 +1422,11 @@ fn evidence_summarize_reports_customer_proof_without_config() {
     );
     assert_eq!(
         summary["routes"]["expected_immutable_route_count"].as_u64(),
-        Some(14)
+        Some(immutable_route_patterns().len() as u64)
     );
     assert_eq!(
         summary["routes"]["immutable_route_count"].as_u64(),
-        Some(14)
+        Some(immutable_route_patterns().len() as u64)
     );
     assert_eq!(
         summary["routes"]["expected_mutable_route_count"].as_u64(),
@@ -2128,6 +2128,7 @@ fn immutable_route_patterns() -> Vec<&'static str> {
         "{repo}/packs/pack-{id}.idx",
         "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
         "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+        "{repo}/refs/journal/transactions/{hash}.json",
         "{repo}/file_index_db/compacted/*.sst",
         "{repo}/file_index_db/manifest/*.manifest",
         "{repo}/file_index_db/wal/*.sst",

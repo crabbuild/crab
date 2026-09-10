@@ -92,6 +92,7 @@ pub enum ObjectType {
     Pack,
     PackIndex,
     Metadata,
+    RefTransaction,
 }
 
 impl ObjectType {
@@ -102,6 +103,7 @@ impl ObjectType {
             Self::Shard => "shards",
             Self::Pack | Self::PackIndex => "packs",
             Self::Metadata => "metadata",
+            Self::RefTransaction => "ref-transactions",
         }
     }
 
@@ -112,6 +114,7 @@ impl ObjectType {
             Self::Pack => "pack",
             Self::PackIndex => "pack_index",
             Self::Metadata => "metadata",
+            Self::RefTransaction => "ref_transaction",
         }
     }
 
@@ -122,6 +125,7 @@ impl ObjectType {
             Self::Pack => 3,
             Self::PackIndex => 4,
             Self::Metadata => 5,
+            Self::RefTransaction => 6,
         }
     }
 
@@ -132,6 +136,7 @@ impl ObjectType {
             3 => Some(Self::Pack),
             4 => Some(Self::PackIndex),
             5 => Some(Self::Metadata),
+            6 => Some(Self::RefTransaction),
             _ => None,
         }
     }
@@ -144,6 +149,7 @@ impl ObjectType {
             "pack" => Some(Self::Pack),
             "pack-index" | "pack_index" | "packindex" => Some(Self::PackIndex),
             "metadata" => Some(Self::Metadata),
+            "ref-transaction" | "ref_transaction" | "reftransaction" => Some(Self::RefTransaction),
             _ => None,
         }
     }
@@ -211,7 +217,7 @@ impl CacheEvictionCounters {
             ObjectType::Shard => &self.shard,
             ObjectType::Pack => &self.pack,
             ObjectType::PackIndex => &self.pack_index,
-            ObjectType::Metadata => &self.metadata,
+            ObjectType::Metadata | ObjectType::RefTransaction => &self.metadata,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -673,12 +679,13 @@ impl CacheStore {
 
     /// Verify cached immutable objects whose key is their content identity.
     ///
-    /// Xorbs use aggregate xorb identity from metadata, while shards are keyed
-    /// by the Blake3/Merkle content hash of their serialized bytes.
+    /// Xorbs use aggregate xorb identity from metadata, shards use the
+    /// Blake3/Merkle content hash, and ref transactions use plain Blake3.
     pub fn verify_cached_object_identity(&self, key: &ServerObjectKey) -> Result<bool> {
         match key.object_type {
             ObjectType::Xorb => self.verify_cached_xorb_identity(key),
             ObjectType::Shard => self.verify_cached_shard_identity(key),
+            ObjectType::RefTransaction => self.verify_cached_ref_transaction_identity(key),
             _ => Ok(true),
         }
     }
@@ -714,6 +721,46 @@ impl CacheStore {
             expected = %expected,
             actual = %actual,
             "cached shard identity mismatch, evicting"
+        );
+        self.evict_invalid_cache_file(key, &path)?;
+        Ok(false)
+    }
+
+    fn verify_cached_ref_transaction_identity(&self, key: &ServerObjectKey) -> Result<bool> {
+        debug_assert_eq!(key.object_type, ObjectType::RefTransaction);
+
+        let path = self.object_path(key);
+        let expected = match blake3::Hash::from_hex(&key.hash) {
+            Ok(hash) => hash,
+            Err(_) => return Ok(false),
+        };
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.remove_metadata_for_missing_file(key, &path)?;
+                return Ok(false);
+            }
+            Err(e) => {
+                return Err(CacheServiceError::InternalError(
+                    format!(
+                        "failed to read cached ref transaction {}: {e}",
+                        path.display()
+                    )
+                    .into(),
+                ));
+            }
+        };
+
+        let actual = blake3::hash(&data);
+        if actual == expected {
+            return Ok(true);
+        }
+
+        warn!(
+            path = %path.display(),
+            expected = %expected.to_hex(),
+            actual = %actual.to_hex(),
+            "cached ref transaction identity mismatch, evicting"
         );
         self.evict_invalid_cache_file(key, &path)?;
         Ok(false)
@@ -1069,7 +1116,7 @@ impl CacheStore {
                 Some(ObjectType::Xorb) => xorb_count += 1,
                 Some(ObjectType::Shard) => shard_count += 1,
                 Some(ObjectType::Pack | ObjectType::PackIndex) => pack_count += 1,
-                Some(ObjectType::Metadata) => metadata_count += 1,
+                Some(ObjectType::Metadata | ObjectType::RefTransaction) => metadata_count += 1,
                 None => {}
             }
         }
@@ -1632,11 +1679,12 @@ fn reconcile_unindexed_files(
     initial_bytes: &mut u64,
     integrity: &mut CacheIntegrityStats,
 ) -> Result<()> {
-    for dir_name in ["xorbs", "shards", "packs", "metadata"] {
+    for dir_name in ["xorbs", "shards", "packs", "metadata", "ref-transactions"] {
         let recoverable_type = match dir_name {
             "xorbs" => Some(ObjectType::Xorb),
             "shards" => Some(ObjectType::Shard),
             "metadata" => Some(ObjectType::Metadata),
+            "ref-transactions" => Some(ObjectType::RefTransaction),
             _ => None,
         };
         let object_dir = root.join(dir_name);
@@ -1817,7 +1865,9 @@ fn make_meta_key(object_type: ObjectType, hash: &[u8; 32]) -> [u8; META_KEY_LEN]
 
 fn storage_id_bytes(key: &ServerObjectKey) -> Option<[u8; 32]> {
     match key.object_type {
-        ObjectType::Xorb | ObjectType::Shard => parse_hash_hex(&key.hash),
+        ObjectType::Xorb | ObjectType::Shard | ObjectType::RefTransaction => {
+            parse_hash_hex(&key.hash)
+        }
         ObjectType::Pack | ObjectType::PackIndex => {
             let mut hasher = blake3::Hasher::new();
             hasher.update(&[key.object_type.as_u8()]);
@@ -1889,7 +1939,7 @@ fn epoch_millis() -> u64 {
 /// they're evicted last.
 fn eviction_type_weight(type_byte: u8) -> u8 {
     match type_byte {
-        3..=5 => 1, // Pack / PackIndex / Metadata
+        3..=6 => 1, // Pack / PackIndex / Metadata / RefTransaction
         1 => 3,     // Shard — evict last
         _ => 0,     // Xorb and unknown values — evict first
     }
@@ -1986,6 +2036,7 @@ mod tests {
             ObjectType::Pack,
             ObjectType::PackIndex,
             ObjectType::Metadata,
+            ObjectType::RefTransaction,
         ] {
             assert_eq!(ObjectType::from_u8(ot.as_u8()), Some(ot));
         }
@@ -1999,6 +2050,7 @@ mod tests {
         assert_eq!(ObjectType::Pack.dir_name(), "packs");
         assert_eq!(ObjectType::PackIndex.dir_name(), "packs");
         assert_eq!(ObjectType::Metadata.dir_name(), "metadata");
+        assert_eq!(ObjectType::RefTransaction.dir_name(), "ref-transactions");
     }
 
     #[test]
@@ -2012,6 +2064,22 @@ mod tests {
                 "xorbs/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             )
         );
+    }
+
+    #[test]
+    fn ref_transaction_object_path_uses_content_identity() {
+        let store = test_store();
+        let hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let key = ServerObjectKey {
+            bucket: "test-bucket".to_owned(),
+            repo_path: "org/repo".to_owned(),
+            object_type: ObjectType::RefTransaction,
+            hash: hash.to_owned(),
+        };
+
+        let path = store.object_path(&key);
+
+        assert!(path.ends_with(Path::new("ref-transactions").join("ab").join(hash)));
     }
 
     #[test]
@@ -2187,6 +2255,31 @@ mod tests {
         assert_eq!(stats.runtime_integrity.missing_files_repaired, 0);
         assert_eq!(stats.runtime_integrity.invalid_objects_evicted, 1);
         assert_eq!(stats.runtime_integrity.metadata_entries_recreated, 0);
+    }
+
+    #[test]
+    fn verify_cached_object_identity_evicts_corrupt_ref_transaction() {
+        let store = test_store();
+        let data = Bytes::from_static(br#"{"version":1,"edits":[]}"#);
+        let hash = blake3::hash(&data);
+        let key = ServerObjectKey {
+            bucket: "b".into(),
+            repo_path: "r".into(),
+            object_type: ObjectType::RefTransaction,
+            hash: hash.to_hex().to_string(),
+        };
+
+        store.put_unverified(&key, data).unwrap();
+        assert!(store.verify_cached_object_identity(&key).unwrap());
+
+        std::fs::write(store.object_path(&key), b"corrupt transaction").unwrap();
+
+        assert!(!store.verify_cached_object_identity(&key).unwrap());
+        assert!(!store.object_path(&key).exists());
+        assert_eq!(store.current_bytes(), 0);
+        let stats = store.stats().unwrap();
+        assert_eq!(stats.metadata_count, 0);
+        assert_eq!(stats.runtime_integrity.invalid_objects_evicted, 1);
     }
 
     #[test]
@@ -3086,6 +3179,10 @@ mod tests {
         assert_eq!(
             ObjectType::from_name("metadata"),
             Some(ObjectType::Metadata)
+        );
+        assert_eq!(
+            ObjectType::from_name("ref-transaction"),
+            Some(ObjectType::RefTransaction)
         );
         assert_eq!(ObjectType::from_name("unknown"), None);
     }

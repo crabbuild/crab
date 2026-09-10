@@ -26,6 +26,7 @@ pub enum CacheObjectKind {
     Pack,
     PackIndex,
     GeneratedPack,
+    RefTransaction,
     Metadata,
 }
 
@@ -69,6 +70,10 @@ pub fn cache_route_contract() -> CacheRouteContract {
             (
                 "generated_pack",
                 "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+            ),
+            (
+                "ref_transaction",
+                "{repo}/refs/journal/transactions/{hash}.json",
             ),
             ("metadata", "{repo}/file_index_db/compacted/*.sst"),
             ("metadata", "{repo}/file_index_db/manifest/*.manifest"),
@@ -130,20 +135,28 @@ pub fn parse_cache_object_path(path: &str) -> Option<CacheObjectPath<'_>> {
     parse_global_crab_object(path)
         .or_else(|| parse_pack_object(path))
         .or_else(|| parse_generated_pack_object(path))
+        .or_else(|| parse_ref_transaction(path))
         .or_else(|| parse_versioned_metadb_object(path))
 }
 
 /// Map a cache-service object path to the local disk cache key, when supported.
 ///
 /// Pack and metadata routes are immutable cache-service objects, but the local
-/// disk cache currently stores only xorb and shard object bodies by hash.
+/// disk cache stores only xorbs, shards, and ref transactions with native
+/// content identities.
 #[must_use]
 pub fn cache_key_for_path(path: &str) -> Option<CacheKey> {
     let parsed = parse_cache_object_path(path)?;
-    let hash = MerkleHash::from_hex(parsed.identity.as_ref()).ok()?;
     match parsed.kind {
-        CacheObjectKind::Xorb => Some(CacheKey::Xorb(hash)),
-        CacheObjectKind::Shard => Some(CacheKey::Shard(hash)),
+        CacheObjectKind::Xorb => Some(CacheKey::Xorb(
+            MerkleHash::from_hex(parsed.identity.as_ref()).ok()?,
+        )),
+        CacheObjectKind::Shard => Some(CacheKey::Shard(
+            MerkleHash::from_hex(parsed.identity.as_ref()).ok()?,
+        )),
+        CacheObjectKind::RefTransaction => Some(CacheKey::RefTransaction(
+            blake3::Hash::from_hex(parsed.identity.as_ref()).ok()?,
+        )),
         CacheObjectKind::Pack
         | CacheObjectKind::PackIndex
         | CacheObjectKind::GeneratedPack
@@ -214,6 +227,25 @@ fn parse_generated_pack_object(path: &str) -> Option<CacheObjectPath<'_>> {
         repo_path,
         kind: CacheObjectKind::GeneratedPack,
         identity: Cow::Owned(blake3::hash(path.as_bytes()).to_hex().to_string()),
+    })
+}
+
+fn parse_ref_transaction(path: &str) -> Option<CacheObjectPath<'_>> {
+    let marker = "/refs/journal/transactions/";
+    let marker_position = path.find(marker)?;
+    let repo_path = &path[..marker_position];
+    let filename = &path[marker_position + marker.len()..];
+    if repo_path.is_empty() || filename.contains('/') {
+        return None;
+    }
+    let identity = filename.strip_suffix(".json")?;
+    if !is_hash_hex(identity) {
+        return None;
+    }
+    Some(CacheObjectPath {
+        repo_path,
+        kind: CacheObjectKind::RefTransaction,
+        identity: Cow::Borrowed(identity),
     })
 }
 
@@ -345,6 +377,7 @@ mod tests {
         let xorb_hash = hex_hash('a');
         let shard_hash = hex_hash('b');
         let generated_hash = hex_hash('c');
+        let transaction_hash = hex_hash('d');
         vec![
             RouteContractCase {
                 name: "global xorb",
@@ -421,6 +454,17 @@ mod tests {
                     .to_string(),
                 }),
                 docs_token: "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+            },
+            RouteContractCase {
+                name: "ref journal transaction",
+                path: format!("/v1/org/repo/refs/journal/transactions/{transaction_hash}.json"),
+                class: PathClass::Immutable,
+                parsed: Some(ParsedRouteContract {
+                    repo_path: "org/repo",
+                    kind: CacheObjectKind::RefTransaction,
+                    identity: transaction_hash,
+                }),
+                docs_token: "{repo}/refs/journal/transactions/{hash}.json",
             },
             RouteContractCase {
                 name: "file index db sst",
@@ -539,6 +583,7 @@ mod tests {
             "{repo}/packs/pack-{id}.idx",
             "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
             "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+            "{repo}/refs/journal/transactions/{hash}.json",
             "{repo}/file_index_db/manifest/*.manifest",
             ".crab/chunk_index_db/manifest/*.manifest",
         ] {
@@ -582,6 +627,7 @@ mod tests {
     fn local_cache_key_mapping_covers_hash_addressed_objects_only() {
         let xorb_hash = MerkleHash::from([9u64, 10, 11, 12]);
         let shard_hash = MerkleHash::from([1u64, 2, 3, 4]);
+        let transaction_hash = blake3::hash(b"transaction");
 
         let xorb_key = cache_key_for_path(&format!(
             ".crab/xorbs/{}/{}",
@@ -598,6 +644,15 @@ mod tests {
         ))
         .expect("shard path should map to local cache key");
         assert!(matches!(shard_key, CacheKey::Shard(hash) if hash == shard_hash));
+
+        let transaction_key = cache_key_for_path(&format!(
+            "org/repo/refs/journal/transactions/{}.json",
+            transaction_hash.to_hex()
+        ))
+        .expect("ref transaction should map to local cache key");
+        assert!(
+            matches!(transaction_key, CacheKey::RefTransaction(hash) if hash == transaction_hash)
+        );
 
         assert!(cache_key_for_path("org/repo/packs/pack-abc.pack").is_none());
         assert!(

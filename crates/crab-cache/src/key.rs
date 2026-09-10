@@ -12,6 +12,8 @@ pub enum CacheKey {
     Shard(MerkleHash),
     /// A content-addressed xorb.
     Xorb(MerkleHash),
+    /// An immutable ref-journal transaction identified by plain Blake3.
+    RefTransaction(blake3::Hash),
     /// A named manifest with an optional freshness token.
     Manifest { name: String, etag: Option<String> },
     /// A workflow stage cache entry.

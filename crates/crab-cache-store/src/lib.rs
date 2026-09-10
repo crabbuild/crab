@@ -1513,7 +1513,7 @@ fn immutable_read_limit(path: &Path) -> Option<u64> {
         CacheKey::Chunk(_) => Some(MAX_CACHE_CHUNK_BYTES),
         CacheKey::Shard(_) => Some(MAX_CACHE_SHARD_BYTES),
         CacheKey::Xorb(_) => Some(MAX_XORB_SIZE as u64),
-        CacheKey::Stage(_) | CacheKey::Manifest { .. } => None,
+        CacheKey::RefTransaction(_) | CacheKey::Stage(_) | CacheKey::Manifest { .. } => None,
     }
 }
 
@@ -2460,6 +2460,40 @@ mod tests {
 
     #[cfg(feature = "remote-client")]
     #[tokio::test]
+    async fn ref_transaction_uses_verified_cache_service_body_across_fresh_clients() {
+        let server = start_test_cache_server().await;
+        let body = Bytes::from_static(br#"{"version":1,"edits":[]}"#);
+        let hash = blake3::hash(&body);
+        let path = Path::from(format!(
+            "org/repo/refs/journal/transactions/{}.json",
+            hash.to_hex()
+        ));
+        server
+            .origin
+            .put(&path, PutPayload::from_bytes(body.clone()))
+            .await
+            .unwrap();
+
+        let config = cache_service_config(server.addr);
+        for client in ["transaction-client-a", "transaction-client-b"] {
+            let store = CachingStore::new_with_local_cache(
+                Store::new(Arc::new(InMemory::new())),
+                &config,
+                Arc::new(LocalCache::new(server._tempdir.path().join(client))),
+            )
+            .unwrap();
+            assert_eq!(store.get_with_etag(&path).await.unwrap().0, body);
+        }
+
+        assert_eq!(
+            server.origin_get_count.load(Ordering::Relaxed),
+            1,
+            "fresh clients should reuse the server's verified transaction"
+        );
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
     async fn download_to_path_uses_cache_service_for_pack_bodies() {
         let server = start_test_cache_server().await;
         let body = Bytes::from_static(b"pack body served from cache");
@@ -3320,6 +3354,39 @@ mod tests {
         assert_eq!(got, good_body);
         let cached = cache
             .get_or_fetch(&CacheKey::Xorb(hash), || async {
+                panic!("verified origin fallback should populate local cache")
+            })
+            .await
+            .unwrap();
+        assert_eq!(cached, good_body);
+    }
+
+    #[cfg(feature = "remote-client")]
+    #[tokio::test]
+    async fn get_with_etag_rejects_bad_ref_transaction_cache_service_body() {
+        let server = start_malformed_object_server(b"bad transaction body", false).await;
+        let good_body = Bytes::from_static(br#"{"version":1,"edits":[]}"#);
+        let hash = blake3::hash(&good_body);
+        let path = Path::from(format!(
+            "org/repo/refs/journal/transactions/{}.json",
+            hash.to_hex()
+        ));
+        let origin = origin_store();
+        origin.put(&path, good_body.clone()).await.unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("client-cache")));
+        let store = CachingStore::new_with_local_cache(
+            origin,
+            cache_service_config(server.addr),
+            Arc::clone(&cache),
+        )
+        .unwrap();
+
+        let (got, _) = store.get_with_etag(&path).await.unwrap();
+
+        assert_eq!(got, good_body);
+        let cached = cache
+            .get_or_fetch(&CacheKey::RefTransaction(hash), || async {
                 panic!("verified origin fallback should populate local cache")
             })
             .await
@@ -4454,6 +4521,38 @@ mod tests {
         let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let (got, _) = cs.get_with_etag(&path).await.unwrap();
         assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn ref_transaction_is_hash_verified_and_reused_without_an_origin_read() {
+        let body = Bytes::from_static(br#"{"version":1,"edits":[]}"#);
+        let hash = blake3::hash(&body);
+        let path = Path::from(format!(
+            "repo/refs/journal/transactions/{}.json",
+            hash.to_hex()
+        ));
+        let inner = Arc::new(InMemory::new());
+        inner
+            .put(&path, PutPayload::from_bytes(body.clone()))
+            .await
+            .unwrap();
+        let counting_origin = Arc::new(CountingObjectStore::new(inner));
+        let origin = Store::new(Arc::clone(&counting_origin) as Arc<dyn ObjectStore>);
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let store =
+            CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
+                .unwrap();
+
+        assert_eq!(store.get_with_etag(&path).await.unwrap().0, body);
+        assert_eq!(store.get_with_etag(&path).await.unwrap().0, body);
+
+        assert_eq!(counting_origin.counts().body_requests(), 1);
+        assert!(
+            cache
+                .contains_verified(&CacheKey::RefTransaction(hash))
+                .await
+        );
     }
 
     #[tokio::test]

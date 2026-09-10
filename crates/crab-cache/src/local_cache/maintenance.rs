@@ -7,7 +7,7 @@ use super::*;
 use crate::clean::{EntryKind, object_entry_kind};
 use crate::private_fs::{FileStat, PinnedRoot, check_cancelled, with_pinned_root};
 
-const OBJECT_FAMILIES: &[&str] = &["chunks", "xorbs", "shards"];
+const OBJECT_FAMILIES: &[&str] = &["chunks", "xorbs", "shards", "ref-transactions"];
 const MAX_CACHE_LRU_ENTRIES: usize = 1_000_000;
 
 impl LocalCache {
@@ -97,15 +97,14 @@ impl LocalCache {
             move |root, cancel| {
                 let mut entries = collect_objects(root, cancel)?;
                 entries.sort_unstable_by(|a, b| {
-                    (a.kind == PruneObjectKind::Shard, a.modified, &a.path).cmp(&(
-                        b.kind == PruneObjectKind::Shard,
+                    (uses_shard_budget(a.kind), a.modified, &a.path).cmp(&(
+                        uses_shard_budget(b.kind),
                         b.modified,
                         &b.path,
                     ))
                 });
-                let boundary =
-                    entries.partition_point(|entry| entry.kind != PruneObjectKind::Shard);
-                let (large, shards) = entries.split_at(boundary);
+                let boundary = entries.partition_point(|entry| !uses_shard_budget(entry.kind));
+                let (large, metadata) = entries.split_at(boundary);
                 let mut removal =
                     crate::catalog::PayloadRemoval::open(Some(root), &root_path, options.dry_run)?;
                 let target = large_max.map_or(Ok(0), |max| {
@@ -121,19 +120,21 @@ impl LocalCache {
                     cancel,
                 )?;
                 if let Some(max) = shard_max {
-                    let target = total_bytes(shards)?.saturating_sub(max);
-                    let shard_stats = evict_oldest(
+                    let target = total_bytes(metadata)?.saturating_sub(max);
+                    let metadata_stats = evict_oldest(
                         root,
                         &mut removal,
                         &root_path,
-                        shards,
+                        metadata,
                         target,
                         options,
                         cancel,
                     )?;
-                    stats.shards_evicted = shard_stats.shards_evicted;
-                    stats.bytes_freed = stats.bytes_freed.saturating_add(shard_stats.bytes_freed);
-                    stats.entries.extend(shard_stats.entries);
+                    stats.shards_evicted = metadata_stats.shards_evicted;
+                    stats.ref_transactions_evicted = metadata_stats.ref_transactions_evicted;
+                    stats.bytes_freed =
+                        stats.bytes_freed.saturating_add(metadata_stats.bytes_freed);
+                    stats.entries.extend(metadata_stats.entries);
                 }
                 Ok(stats)
             },
@@ -194,13 +195,24 @@ impl LocalCache {
             let mut stats = CacheStats::default();
             visit_objects(
                 root,
-                &["chunks", "shards", "xorbs", "stages", "manifests"],
+                &[
+                    "chunks",
+                    "shards",
+                    "xorbs",
+                    "ref-transactions",
+                    "stages",
+                    "manifests",
+                ],
                 cancel,
                 &mut |path, metadata| {
                     let (bytes, count) = match family(path) {
                         Some("chunks") => (&mut stats.chunk_bytes, &mut stats.chunk_count),
                         Some("shards") => (&mut stats.shard_bytes, &mut stats.shard_count),
                         Some("xorbs") => (&mut stats.xorb_bytes, &mut stats.xorb_count),
+                        Some("ref-transactions") => (
+                            &mut stats.ref_transaction_bytes,
+                            &mut stats.ref_transaction_count,
+                        ),
                         Some("stages") => (&mut stats.stage_bytes, &mut stats.stage_count),
                         Some("manifests") => {
                             if path.extension().is_some_and(|ext| ext == "json") {
@@ -294,8 +306,16 @@ fn object_kind(path: &Path) -> Option<PruneObjectKind> {
         Some("chunks") => Some(PruneObjectKind::Chunk),
         Some("shards") => Some(PruneObjectKind::Shard),
         Some("xorbs") => Some(PruneObjectKind::Xorb),
+        Some("ref-transactions") => Some(PruneObjectKind::RefTransaction),
         _ => None,
     }
+}
+
+fn uses_shard_budget(kind: PruneObjectKind) -> bool {
+    matches!(
+        kind,
+        PruneObjectKind::Shard | PruneObjectKind::RefTransaction
+    )
 }
 
 fn object_hash(path: &Path) -> Result<MerkleHash> {
@@ -305,6 +325,16 @@ fn object_hash(path: &Path) -> Result<MerkleHash> {
         .ok_or_else(|| CacheError::UnsafeRoot {
             path: path.display().to_string(),
             reason: "object has no content-addressed filename".into(),
+        })
+}
+
+fn ref_transaction_hash(path: &Path) -> Result<blake3::Hash> {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| blake3::Hash::from_hex(name).ok())
+        .ok_or_else(|| CacheError::UnsafeRoot {
+            path: path.display().to_string(),
+            reason: "ref transaction has no Blake3 filename".into(),
         })
 }
 
@@ -354,6 +384,7 @@ fn evict_oldest(
             PruneObjectKind::Chunk => stats.chunks_evicted += 1,
             PruneObjectKind::Shard => stats.shards_evicted += 1,
             PruneObjectKind::Xorb => stats.xorbs_evicted += 1,
+            PruneObjectKind::RefTransaction => stats.ref_transactions_evicted += 1,
         }
         stats.bytes_freed = stats.bytes_freed.saturating_add(bytes);
         if options.record_entries {
@@ -373,8 +404,29 @@ fn verify_file(
     kind: PruneObjectKind,
     cancel: &CancellationToken,
 ) -> Result<bool> {
-    let expected = object_hash(path)?;
     let bytes = file.metadata()?.len();
+    if kind == PruneObjectKind::RefTransaction {
+        let expected = ref_transaction_hash(path)?;
+        let mut actual = blake3::Hasher::new();
+        let mut buffer = vec![0; 64 * 1024];
+        let mut remaining = bytes;
+        loop {
+            check_cancelled(cancel)?;
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            let Some(rest) = remaining.checked_sub(read as u64) else {
+                return Ok(false);
+            };
+            remaining = rest;
+            actual.update(&buffer[..read]);
+        }
+        return Ok(remaining == 0
+            && file.metadata()?.len() == bytes
+            && actual.finalize() == expected);
+    }
+    let expected = object_hash(path)?;
     if kind == PruneObjectKind::Xorb {
         return match super::xorb_file::verify(file, path, bytes, &expected, cancel) {
             Ok(()) => Ok(true),
@@ -388,15 +440,20 @@ fn verify_file(
             Err(error) => Err(error),
         };
     }
-    let limit = if kind == PruneObjectKind::Chunk {
-        MAX_CACHE_CHUNK_BYTES
-    } else {
-        MAX_CACHE_SHARD_BYTES
+    let limit = match kind {
+        PruneObjectKind::Chunk => MAX_CACHE_CHUNK_BYTES,
+        PruneObjectKind::Shard => MAX_CACHE_SHARD_BYTES,
+        PruneObjectKind::RefTransaction => {
+            return Err(CacheError::Internal(
+                "ref transaction bypassed its native hash verifier".into(),
+            ));
+        }
+        PruneObjectKind::Xorb => MAX_XORB_SIZE as u64,
     };
     if bytes > limit {
         return Ok(false);
     }
-    let mut hashed = crab_xet::hash::HashedWrite::new(std::io::sink());
+    let mut data_hash = crab_xet::hash::HashedWrite::new(std::io::sink());
     let mut buffer = vec![0; 64 * 1024];
     let mut remaining = bytes;
     loop {
@@ -409,9 +466,9 @@ fn verify_file(
             return Ok(false);
         };
         remaining = rest;
-        hashed.write_all(&buffer[..read])?;
+        data_hash.write_all(&buffer[..read])?;
     }
-    Ok(remaining == 0 && file.metadata()?.len() == bytes && hashed.hash() == expected)
+    Ok(remaining == 0 && file.metadata()?.len() == bytes && data_hash.hash() == expected)
 }
 
 #[cfg(test)]
@@ -428,6 +485,7 @@ mod tests {
             PruneObjectKind::Chunk,
             PruneObjectKind::Shard,
             PruneObjectKind::Xorb,
+            PruneObjectKind::RefTransaction,
         ] {
             let mut file = File::options().write(true).open(&path)?;
             let result = verify_file(&mut file, &path, kind, &CancellationToken::new());

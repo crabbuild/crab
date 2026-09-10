@@ -23,6 +23,7 @@ EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
     "{repo}/packs/pack-{id}.idx",
     "{repo}/generated-packs/v1/artifacts/{first-two-hex}/{hash}.pack",
     "{repo}/generated-packs/v1/requests/{first-two-hex}/{hash}.json",
+    "{repo}/refs/journal/transactions/{hash}.json",
     "{repo}/file_index_db/compacted/*.sst",
     "{repo}/file_index_db/manifest/*.manifest",
     "{repo}/file_index_db/wal/*.sst",
@@ -35,6 +36,7 @@ EXPECTED_IMMUTABLE_ROUTE_PATTERNS = [
 EXPECTED_IMMUTABLE_POISONING_PATTERNS = [
     ".crab/xorbs/{first-two-hex}/{hash}",
     ".crab/shards/{first-two-hex}/{hash}",
+    "{repo}/refs/journal/transactions/{hash}.json",
 ]
 EXPECTED_MUTABLE_ROUTE_PATTERNS = [
     "{repo}/refs/heads/*",

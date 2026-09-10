@@ -349,7 +349,10 @@ pub async fn read_object(
     if cached_object_valid_for_read(&state, &cache_key, &hash) {
         if matches!(
             object_type,
-            ObjectType::Pack | ObjectType::PackIndex | ObjectType::Metadata
+            ObjectType::Pack
+                | ObjectType::PackIndex
+                | ObjectType::Metadata
+                | ObjectType::RefTransaction
         ) {
             // Keep large immutable cache hits file-backed so a pack does not
             // consume one response-sized allocation on the cache server.
@@ -777,7 +780,44 @@ async fn validate_staged_cache_object(
                 Err(CacheServiceError::HashMismatch { expected, actual })
             }
         }
+        ObjectType::RefTransaction => {
+            verify_streamed_ref_transaction_body(staged.temp_path.as_ref(), &key.hash).await
+        }
         ObjectType::Pack | ObjectType::PackIndex | ObjectType::Metadata => Ok(()),
+    }
+}
+
+async fn verify_streamed_ref_transaction_body(
+    path: &FsPath,
+    expected_hash: &str,
+) -> std::result::Result<(), CacheServiceError> {
+    let expected =
+        blake3::Hash::from_hex(expected_hash).map_err(|_| CacheServiceError::BadRequest {
+            reason: format!("invalid ref transaction hash: {expected_hash}"),
+        })?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| push_warming_temp_io_cache_error("open", e))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|e| push_warming_temp_io_cache_error("hash", e))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = hasher.finalize();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(CacheServiceError::HashMismatch {
+            expected: expected.to_hex().to_string(),
+            actual: actual.to_hex().to_string(),
+        })
     }
 }
 
@@ -1359,6 +1399,7 @@ fn check_mutable_read_action(
 /// - `.crab/shards/ab/abcdef...`  → Shard (CLI global path)
 /// - `org/repo/packs/sha.pack`        → Pack
 /// - `org/repo/packs/sha.idx`         → PackIndex
+/// - ref-journal transaction bodies   → RefTransaction
 /// - versioned SlateDB metadata objects → Metadata
 fn parse_object_path(path: &str) -> Option<(String, String, ObjectType, String)> {
     let parsed = parse_cache_object_path(path)?;
@@ -1368,6 +1409,7 @@ fn parse_object_path(path: &str) -> Option<(String, String, ObjectType, String)>
         CacheObjectKind::Pack => ObjectType::Pack,
         CacheObjectKind::PackIndex => ObjectType::PackIndex,
         CacheObjectKind::GeneratedPack => ObjectType::Pack,
+        CacheObjectKind::RefTransaction => ObjectType::RefTransaction,
         CacheObjectKind::Metadata => ObjectType::Metadata,
     };
     Some((
@@ -1585,7 +1627,10 @@ async fn fetch_and_cache_data_locked(
     if cached_object_valid_for_read(state, key, expected_hash) {
         if matches!(
             key.object_type,
-            ObjectType::Pack | ObjectType::PackIndex | ObjectType::Metadata
+            ObjectType::Pack
+                | ObjectType::PackIndex
+                | ObjectType::Metadata
+                | ObjectType::RefTransaction
         ) {
             match state.cache_store.get_file(key) {
                 Ok(Some(cached)) => {
@@ -1693,7 +1738,10 @@ async fn commit_origin_fill_or_read_temp(
             }
             if matches!(
                 key.object_type,
-                ObjectType::Pack | ObjectType::PackIndex | ObjectType::Metadata
+                ObjectType::Pack
+                    | ObjectType::PackIndex
+                    | ObjectType::Metadata
+                    | ObjectType::RefTransaction
             ) {
                 return match state.cache_store.get_file(key) {
                     Ok(Some(cached)) => Ok(CachedFetchBody::OpenFile {
@@ -1760,7 +1808,10 @@ async fn read_staged_temp_body(
 }
 
 fn is_integrity_checked_object(object_type: ObjectType) -> bool {
-    matches!(object_type, ObjectType::Shard | ObjectType::Xorb)
+    matches!(
+        object_type,
+        ObjectType::Shard | ObjectType::Xorb | ObjectType::RefTransaction
+    )
 }
 
 async fn ingest_cached_shard(state: &AppState, shard_hash: &str, data: &Bytes) {
@@ -3070,6 +3121,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_object_rejects_corrupt_ref_transaction_body() {
+        let valid = Bytes::from_static(br#"{"version":1,"edits":[]}"#);
+        let hash = blake3::hash(&valid);
+        let path = format!("org/repo/refs/journal/transactions/{}.json", hash.to_hex());
+        let key = ServerObjectKey {
+            bucket: String::new(),
+            repo_path: "org/repo".to_string(),
+            object_type: ObjectType::RefTransaction,
+            hash: hash.to_hex().to_string(),
+        };
+        let TestDedupState { state, _tempdir } = test_dedup_state();
+        let state = Arc::new(state);
+
+        let response = write_object(
+            State(Arc::clone(&state)),
+            Path(path),
+            axum::Extension(test_identity()),
+            Body::from(Bytes::from_static(b"corrupt transaction")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(state.cache_store.get(&key).unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn write_object_waits_for_body_permit_before_polling_body() {
         let TestDedupState {
             mut state,
@@ -3169,6 +3246,17 @@ mod tests {
         assert_eq!(repo, "org/repo");
         assert_eq!(ot, ObjectType::PackIndex);
         assert_eq!(hash, "pack-abc");
+    }
+
+    #[test]
+    fn parse_ref_transaction_path() {
+        let hash = hex_hash('d');
+        let path = format!("org/repo/refs/journal/transactions/{hash}.json");
+        let (bucket, repo, object_type, identity) = parse_object_path(&path).unwrap();
+        assert_eq!(bucket, "");
+        assert_eq!(repo, "org/repo");
+        assert_eq!(object_type, ObjectType::RefTransaction);
+        assert_eq!(identity, hash);
     }
 
     #[test]

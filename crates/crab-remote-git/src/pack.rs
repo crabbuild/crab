@@ -421,12 +421,20 @@ impl RemoteGitRepository {
         visibility_catalog: crab_metadata::git_object_locator::GitObjectCatalogIdentity,
         visibility_validation_digest: &str,
         visible_objects: u64,
+        maximum_objects: u64,
     ) -> Result<bool> {
         if repository_catalog != Some(visibility_catalog)
             || repository_validation_digest != visibility_validation_digest
         {
             return Err(Error::RepositoryState {
                 reason: crate::RepositoryStateError::VisibilityProofMismatch,
+            });
+        }
+        if visible_objects > maximum_objects {
+            return Err(Error::LimitExceeded {
+                limit: "upload-pack planned objects",
+                actual: visible_objects,
+                maximum: maximum_objects,
             });
         }
         Ok(visible_objects == visibility_catalog.object_count)
@@ -458,6 +466,7 @@ impl RemoteGitRepository {
             catalog_identity,
             &visibility.git_validation_digest,
             visible_objects,
+            self.state.options.operation_limits().max_logical_objects,
         )?;
         let inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
         let inventory_objects = inventory
@@ -3122,6 +3131,7 @@ mod tests {
                 catalog,
                 "validation",
                 catalog.object_count,
+                catalog.object_count,
             )
             .expect("matching complete catalog")
         );
@@ -3132,6 +3142,7 @@ mod tests {
                 catalog,
                 "validation",
                 catalog.object_count - 1,
+                catalog.object_count,
             )
             .expect("partial visibility")
         );
@@ -3147,6 +3158,7 @@ mod tests {
                 mismatched,
                 "validation",
                 mismatched.object_count,
+                mismatched.object_count,
             ),
             Err(Error::RepositoryState {
                 reason: crate::RepositoryStateError::VisibilityProofMismatch,
@@ -3159,10 +3171,26 @@ mod tests {
                 catalog,
                 "other-validation",
                 catalog.object_count,
+                catalog.object_count,
             ),
             Err(Error::RepositoryState {
                 reason: crate::RepositoryStateError::VisibilityProofMismatch,
             })
+        ));
+        assert!(matches!(
+            RemoteGitRepository::complete_catalog_is_visible(
+                Some(catalog),
+                "validation",
+                catalog,
+                "validation",
+                catalog.object_count,
+                catalog.object_count - 1,
+            ),
+            Err(Error::LimitExceeded {
+                limit: "upload-pack planned objects",
+                actual,
+                maximum,
+            }) if actual == catalog.object_count && maximum == catalog.object_count - 1
         ));
     }
 

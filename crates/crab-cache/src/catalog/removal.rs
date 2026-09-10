@@ -30,6 +30,7 @@ pub(crate) struct PayloadRead {
     display_root: PathBuf,
     relative: PathBuf,
     original: std::fs::File,
+    modified: Option<std::time::SystemTime>,
 }
 
 impl PayloadRead {
@@ -39,10 +40,23 @@ impl PayloadRead {
         crate::private_fs::run_blocking(&tokio_util::sync::CancellationToken::new(), move |_| {
             let root = PinnedRoot::open(&display_root)?;
             let original = root.open_read(&relative)?;
+            let modified = original
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok());
             // Only this duplicate reads the shared cursor. The retained
             // descriptor pins identity until validation and repair finish.
             let reader = tokio::fs::File::from_std(original.try_clone()?);
-            Ok((Self { root, display_root, relative, original }, reader))
+            Ok((
+                Self {
+                    root,
+                    display_root,
+                    relative,
+                    original,
+                    modified,
+                },
+                reader,
+            ))
         })
         .await
         .inspect_err(|error| {
@@ -89,6 +103,20 @@ impl PayloadRead {
             self.original.set_modified(std::time::SystemTime::now())
         })
         .await;
+    }
+
+    pub(crate) async fn touch_if_stale(self, minimum_age: std::time::Duration) {
+        // Repeated coherent-snapshot reads may hit the same immutable object
+        // several times in one operation. Preserve LRU recency without turning
+        // each verified read into a filesystem metadata write.
+        if self
+            .modified
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < minimum_age)
+        {
+            return;
+        }
+        self.touch().await;
     }
 
     pub(crate) async fn discard(self) -> Result<()> {

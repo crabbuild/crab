@@ -602,7 +602,8 @@ class LargeRepositoryQualification:
         self.logs.mkdir(parents=True)
         self.artifacts.mkdir()
         self.temp_root.mkdir()
-        self.cache_root.mkdir()
+        # Crab rejects group/world-accessible cache roots before reading them.
+        self.cache_root.mkdir(mode=0o700)
         self.clone_root.mkdir()
         if self.args.team_load:
             self.fetch_root.mkdir()

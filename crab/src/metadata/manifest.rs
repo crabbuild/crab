@@ -40,6 +40,41 @@ pub async fn read_repository_snapshot(
         .map_err(CrabError::from)
 }
 
+/// Read a coherent snapshot while caching only immutable metadata objects.
+pub async fn read_repository_snapshot_with_cache(
+    store: &Store,
+    caching_store: Option<&crab_cache_store::CachingStore>,
+    router: &StoreLayout,
+) -> Result<RepositorySnapshot> {
+    read_repository_snapshot_with_cache_reusing(store, caching_store, router, None).await
+}
+
+/// Reuse a verified snapshot when every mutable dependency is unchanged.
+pub async fn read_repository_snapshot_with_cache_reusing(
+    store: &Store,
+    caching_store: Option<&crab_cache_store::CachingStore>,
+    router: &StoreLayout,
+    previous: Option<&RepositorySnapshot>,
+) -> Result<RepositorySnapshot> {
+    let read_store = caching_store
+        .map(crab_cache_store::CachingStore::cache_aware_storage)
+        .map(Store::from)
+        .unwrap_or_else(|| store.clone());
+    match previous {
+        Some(previous) => {
+            let layout = storage_layout(&read_store, router);
+            crab_metadata::manifest_store::read_repository_snapshot_reusing(
+                read_store.as_storage(),
+                &layout,
+                previous,
+            )
+            .await
+            .map_err(CrabError::from)
+        }
+        None => read_repository_snapshot(&read_store, router).await,
+    }
+}
+
 pub async fn read_ref_journal_head(
     store: &Store,
     router: &StoreLayout,
@@ -190,6 +225,135 @@ pub async fn select_manifest_history(
     )
     .await
     .map_err(CrabError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use crab_cache::LocalCache;
+    use crab_storage::test_support::CountingObjectStore;
+    use object_store::memory::InMemory;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn snapshot_cache_repairs_transactions_and_rereads_mutable_state() {
+        let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let counted = Arc::new(CountingObjectStore::new(memory));
+        let store = Store::new(Arc::clone(&counted) as Arc<dyn object_store::ObjectStore>);
+        let router = StoreLayout::new(store.clone(), "snapshot-cache".to_owned());
+        crate::core::remote_layout::initialize(&store, &router)
+            .await
+            .expect("initialize repository layout");
+        crate::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
+            .await
+            .expect("create initial manifest");
+
+        let head = read_ref_journal_head(&store, &router, "refs/heads/main")
+            .await
+            .expect("read initial ref head");
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([("refs/heads/main".to_owned(), None)]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: Some("a".repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("build ref transaction");
+        let transaction_id = transaction.id().expect("transaction identity");
+        commit_ref_journal_transaction(&store, &router, &transaction, &[head])
+            .await
+            .expect("commit ref transaction");
+
+        let tempdir = tempfile::tempdir().expect("cache directory");
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let caching_store = crab_cache_store::CachingStore::new_with_local_cache(
+            store.as_storage().clone(),
+            crab_cache_store::CacheConfig::default(),
+            Arc::clone(&cache),
+        )
+        .expect("cache store");
+        let transaction_path = router.ref_journal_transaction_path(&transaction_id);
+        counted.reset();
+
+        let first = read_repository_snapshot_with_cache(&store, Some(&caching_store), &router)
+            .await
+            .expect("first snapshot");
+        assert_eq!(
+            first.journal.refs.get("refs/heads/main"),
+            Some(&"a".repeat(40))
+        );
+        assert!(counted.requests().iter().any(|request| {
+            request.location == transaction_path.as_ref()
+                && request.kind == crab_storage::test_support::ObjectReadKind::Full
+        }));
+
+        cache
+            .put_unchecked_for_test(
+                &crab_cache::CacheKey::RefTransaction(
+                    blake3::Hash::from_hex(&transaction_id).expect("transaction hash"),
+                ),
+                b"corrupt transaction",
+            )
+            .await
+            .expect("corrupt cached transaction");
+        counted.reset();
+        let repaired = read_repository_snapshot_with_cache(&store, Some(&caching_store), &router)
+            .await
+            .expect("snapshot after cache repair");
+        assert_eq!(first.journal, repaired.journal);
+        assert!(counted.requests().iter().any(|request| {
+            request.location == transaction_path.as_ref()
+                && request.kind == crab_storage::test_support::ObjectReadKind::Full
+        }));
+
+        counted.reset();
+        counted.block_body_reads_for(&transaction_path);
+        let second = read_repository_snapshot_with_cache(&store, Some(&caching_store), &router)
+            .await
+            .expect("cached snapshot");
+        assert_eq!(first.journal, second.journal);
+        assert!(
+            counted
+                .requests()
+                .iter()
+                .all(|request| request.location != transaction_path.as_ref())
+        );
+        assert!(counted.requests().iter().any(|request| {
+            request.location == router.manifest_path().as_ref()
+                && request.kind == crab_storage::test_support::ObjectReadKind::Full
+        }));
+
+        counted.reset();
+        let reused =
+            read_repository_snapshot_with_cache_reusing(&store, None, &router, Some(&first))
+                .await
+                .expect("reuse unchanged snapshot");
+        assert_eq!(reused, first);
+        let requests = counted.requests();
+        assert!(requests.iter().any(|request| {
+            request.location == router.manifest_path().as_ref()
+                && request.kind == crab_storage::test_support::ObjectReadKind::Full
+        }));
+        assert!(requests.iter().any(|request| {
+            request.location == router.layout_descriptor_path().as_ref()
+                && request.kind == crab_storage::test_support::ObjectReadKind::Full
+        }));
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.location != transaction_path.as_ref())
+        );
+    }
 }
 
 pub async fn read_bulk_shard_list(

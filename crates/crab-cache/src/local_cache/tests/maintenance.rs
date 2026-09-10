@@ -9,7 +9,11 @@ async fn maintenance_retains_unknown_entries_and_stats_count_only_owned_payloads
     let data = b"data";
     let (xorb_hash, xorb_data) = test_xorb(data);
     let chunk = CacheKey::Chunk(compute_data_hash(data));
-    for key in [&chunk, &CacheKey::Shard(compute_data_hash(data))] {
+    for key in [
+        &chunk,
+        &CacheKey::Shard(compute_data_hash(data)),
+        &CacheKey::RefTransaction(blake3::hash(data)),
+    ] {
         cache.put(key, data).await.unwrap();
     }
     cache
@@ -55,21 +59,23 @@ async fn maintenance_retains_unknown_entries_and_stats_count_only_owned_payloads
             stats.chunk_count,
             stats.shard_count,
             stats.xorb_count,
+            stats.ref_transaction_count,
             stats.stage_count,
             stats.manifest_count
         ),
-        (1, 1, 1, 1, 1)
+        (1, 1, 1, 1, 1, 1)
     );
     assert_eq!(
         (
             stats.chunk_bytes,
             stats.shard_bytes,
             stats.xorb_bytes,
+            stats.ref_transaction_bytes,
             stats.stage_bytes
         ),
-        (4, 4, xorb_data.len() as u64, 4)
+        (4, 4, xorb_data.len() as u64, 4, 4)
     );
-    assert_eq!(cache.verify().await.unwrap().valid, 3);
+    assert_eq!(cache.verify().await.unwrap().valid, 4);
     let pruner = LocalCache::with_limits(cache.root.clone(), 0, Some(0));
     let preview = pruner
         .prune_with_options(PruneOptions {
@@ -81,9 +87,9 @@ async fn maintenance_retains_unknown_entries_and_stats_count_only_owned_payloads
     let applied = pruner.prune().await.unwrap();
     assert_eq!(
         (preview.objects_evicted(), applied.objects_evicted()),
-        (3, 3)
+        (4, 4)
     );
-    assert_eq!(applied.bytes_freed, 8 + xorb_data.len() as u64);
+    assert_eq!(applied.bytes_freed, 12 + xorb_data.len() as u64);
     let stats = cache.stats().await.unwrap();
     assert_eq!((stats.stage_count, stats.manifest_count), (1, 1));
     for path in retained {
@@ -101,6 +107,10 @@ async fn every_object_family_retains_active_readers_during_maintenance() {
         ),
         (
             CacheKey::Shard(compute_data_hash(b"data")),
+            b"data".as_slice(),
+        ),
+        (
+            CacheKey::RefTransaction(blake3::hash(b"data")),
             b"data".as_slice(),
         ),
         (CacheKey::Xorb(xorb_hash), xorb.as_ref()),
