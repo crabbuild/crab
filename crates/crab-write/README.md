@@ -56,8 +56,13 @@ planning and again after closing the writer. A superseded sample returns `None`;
 a current sample returns advancement and catalog/sweep statistics. The CLI owner
 reports superseded samples before writing a generation receipt or running later
 maintenance. Its continuous loop retries immediately; a one-shot run reports the
-superseded sample and exits. The shared anchor parser also serves native push, repack and history
-recovery; malformed index hashes retain their source errors.
+superseded sample and exits. After ref-journal compaction, the CLI's continuous
+owner instead requires a clean elapsed quiet window of at least one polling interval
+and five seconds before it starts repository-sized derived maintenance. Once that
+work is complete, unchanged manifest identity uses
+the last verified maintenance snapshot until the periodic revalidation. The shared
+anchor parser also serves native push, repack and history recovery; malformed index
+hashes retain their source errors.
 
 `generation::maintain_commit_graph` derives a missing generation-bound split
 commit graph through bounded `crab-remote-git` batches after catalog readiness.

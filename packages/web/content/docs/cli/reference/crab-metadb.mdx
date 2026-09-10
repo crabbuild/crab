@@ -56,7 +56,15 @@ crab metadb owner --interval 30 --jsonl
 ```
 
 Push clients then hand generation-bound Git locator publication to that owner.
+The continuous owner always drains committed ref-journal transactions first.
+After a drain, it observes an elapsed quiet window of at least one polling interval
+and five seconds before starting repository-sized catalog, commit-graph, or repack
+work. Sustained pushes
+therefore keep ref publication bounded instead of competing with background
+maintenance. `--once` remains eager for explicit operator maintenance.
 The default idle polling cost is 2,880 manifest reads per repository per day,
-plus two renewable object-store leases and a ten-minute visibility-evidence
-revalidation. Increase `--interval` when storage request cost matters more than
-the delay before protocol-v2 fetch becomes available for a new generation.
+plus two renewable object-store leases and a ten-minute derived-state
+revalidation. Between revalidations, an unchanged manifest identity reports the
+last verified maintenance snapshot without reopening the repository catalog.
+Increase `--interval` when storage request cost matters more than the delay
+before protocol-v2 fetch becomes available for a new generation.
