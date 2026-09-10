@@ -16,7 +16,7 @@ pub const CAPABILITIES_SCHEMA_VERSION: u32 = 1;
 /// Minimum compatible local-workflow protocol implemented by this crate.
 pub const LOCAL_WORKFLOW_PROTOCOL_VERSION: u32 = 1;
 pub const STORAGE_FORMAT_VERSION: u32 = 1;
-pub const STAGING_FORMAT_VERSION: u32 = 3;
+pub const STAGING_FORMAT_VERSION: u32 = 1;
 
 /// Process-local bridge to the canonical durable publication-plan owner.
 pub const PUBLICATION_PLAN_ID_ENV: &str = "CRAB_INTERNAL_MIRROR_PLAN_ID";
@@ -27,7 +27,7 @@ pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\",\"product_build\":\"crab-remote/",
     env!("CARGO_PKG_VERSION"),
-    "\",\"local_workflow_protocol\":1,\"storage_format_version\":1,\"staging_format_version\":3,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\"]}"
+    "\",\"local_workflow_protocol\":1,\"storage_format_version\":1,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\"]}"
 );
 
 /// Capabilities advertised by a Crab executable to a local SDK client.
@@ -60,9 +60,15 @@ impl ExecutableCapabilities {
     /// Return current capabilities with the executable's exact build identity.
     #[must_use]
     pub fn current_with_build(product_build: String) -> Self {
+        Self::for_executable(env!("CARGO_PKG_VERSION").to_owned(), product_build)
+    }
+
+    /// Return current capabilities for an executable release and build.
+    #[must_use]
+    pub fn for_executable(crab_version: String, product_build: String) -> Self {
         Self {
             schema_version: CAPABILITIES_SCHEMA_VERSION,
-            crab_version: env!("CARGO_PKG_VERSION").to_owned(),
+            crab_version,
             product_build,
             local_workflow_protocol: LOCAL_WORKFLOW_PROTOCOL_VERSION,
             storage_format_version: STORAGE_FORMAT_VERSION,

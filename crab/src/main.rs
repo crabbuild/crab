@@ -3149,12 +3149,14 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some(Cmd::SdkCapabilities { json: true }) => {
-            let capabilities =
-                crab_remote::local::ExecutableCapabilities::current_with_build(format!(
+            let capabilities = crab_remote::local::ExecutableCapabilities::for_executable(
+                env!("CRAB_BUILD_VERSION").to_owned(),
+                format!(
                     "crab/{}+{}",
-                    env!("CARGO_PKG_VERSION"),
+                    env!("CRAB_BUILD_VERSION"),
                     env!("CRAB_BUILD_GIT_SHA")
-                ));
+                ),
+            );
             let encoded = serde_json::to_string(&capabilities)
                 .map_err(|error| CrabError::Internal(error.to_string()))?;
             println!("{encoded}");
