@@ -626,7 +626,15 @@ pub async fn materialize_ref_journal(
         }
     }
 
-    let order = transaction_order(&transactions)?;
+    let mut order = transaction_order(&transactions)?;
+    if !ref_edits_match_base(base, &transactions, &order) && !compacted.is_empty() {
+        // Cleanup may retain an older marker after a transient failure. Walk
+        // immutable frontier ancestry only on mismatch to prove it was compacted.
+        let compacted_ancestors =
+            active_frontier_ancestors(store, router, &compacted, &transactions).await?;
+        transactions.retain(|transaction_id, _| !compacted_ancestors.contains(transaction_id));
+        order = transaction_order(&transactions)?;
+    }
     let mut refs = base.refs.clone();
     let mut peeled_refs = base.peeled_refs.clone();
     let mut head = base.head.clone();
@@ -713,6 +721,63 @@ pub async fn materialize_ref_journal(
         visible_heads,
         state_digest: hasher.finalize().to_hex().to_string(),
     })
+}
+
+fn ref_edits_match_base(
+    base: &Manifest,
+    transactions: &BTreeMap<String, RefJournalTransaction>,
+    order: &[String],
+) -> bool {
+    let mut refs = base.refs.clone();
+    for transaction_id in order {
+        let Some(transaction) = transactions.get(transaction_id) else {
+            return false;
+        };
+        for edit in &transaction.edits {
+            if refs.get(&edit.ref_name) != edit.old_oid.as_ref() {
+                return false;
+            }
+            match &edit.new_oid {
+                Some(oid) => {
+                    refs.insert(edit.ref_name.clone(), oid.clone());
+                }
+                None => {
+                    refs.remove(&edit.ref_name);
+                }
+            }
+        }
+    }
+    true
+}
+
+async fn active_frontier_ancestors(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    frontier_transactions: &BTreeSet<String>,
+    active_transactions: &BTreeMap<String, RefJournalTransaction>,
+) -> Result<BTreeSet<String>> {
+    let mut pending = frontier_transactions.clone();
+    let mut visited = BTreeSet::new();
+    let mut compacted = BTreeSet::new();
+    while let Some(transaction_id) = pending.pop_first() {
+        if !visited.insert(transaction_id.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_REF_HEADS {
+            return Err(MetadataError::Internal(
+                "ref journal frontier ancestry limit exceeded".to_owned(),
+            ));
+        }
+        let transaction = match active_transactions.get(&transaction_id) {
+            Some(transaction) => transaction.clone(),
+            None => read_transaction(store, router, &transaction_id).await?,
+        };
+        if active_transactions.contains_key(&transaction_id) {
+            compacted.insert(transaction_id);
+        }
+        pending.extend(transaction.parents.into_values().flatten());
+    }
+    Ok(compacted)
 }
 
 pub(crate) async fn read_ref_journal_frontier(
@@ -1112,6 +1177,40 @@ mod tests {
             RefJournalTransaction::new(parents, edits, None, Vec::new(), Vec::new()).unwrap(),
             heads,
         )
+    }
+
+    async fn commit_main(
+        store: &Store,
+        layout: &StoreLayout<Store>,
+        old: Option<char>,
+        new: char,
+    ) -> String {
+        let head = read_ref_head(store, layout, "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = RefJournalTransaction::new(
+            BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                head.visible_transaction.clone(),
+            )]),
+            vec![RefJournalEdit {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: old.map(|byte| byte.to_string().repeat(40)),
+                new_oid: Some(new.to_string().repeat(40)),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let transaction_id = transaction.id().unwrap();
+        commit_ref_transaction(store, layout, &transaction, &[head], || false)
+            .await
+            .unwrap();
+        transaction_id
     }
 
     async fn materialize(
@@ -1649,6 +1748,66 @@ mod tests {
 
         assert!(after.transactions.is_empty());
         assert_eq!(after.refs["refs/heads/main"], "a".repeat(40));
+    }
+
+    #[tokio::test]
+    async fn compaction_frontier_stops_replaying_captured_ancestor_markers() {
+        let (store, layout) = fixture();
+        let base = Manifest::default_for_repo("refs/heads/main");
+        commit_main(&store, &layout, None, 'a').await;
+        let second_id = commit_main(&store, &layout, Some('a'), 'b').await;
+        let captured_active = list_active_transactions(&store, &layout).await.unwrap();
+        let snapshot = materialize(&store, &layout, &base).await;
+        let mut compacted = base;
+        compacted.generation = 1;
+        compacted.refs = snapshot.refs;
+        compacted.peeled_refs = snapshot.peeled_refs;
+        compacted.head = snapshot.head;
+        compacted.seal_git_validation();
+        write_ref_journal_frontier(&store, &layout, &compacted, &snapshot.visible_heads)
+            .await
+            .unwrap();
+
+        let after =
+            materialize_ref_journal(&store, &layout, &compacted, &[], &[], &captured_active)
+                .await
+                .unwrap();
+
+        assert!(after.transactions.is_empty());
+        assert_eq!(after.refs["refs/heads/main"], "b".repeat(40));
+
+        store
+            .delete(&layout.ref_journal_active_path(&second_id))
+            .await
+            .unwrap();
+        let retained_ancestor = list_active_transactions(&store, &layout).await.unwrap();
+        let after_partial_cleanup =
+            materialize_ref_journal(&store, &layout, &compacted, &[], &[], &retained_ancestor)
+                .await
+                .unwrap();
+
+        assert!(after_partial_cleanup.transactions.is_empty());
+        assert_eq!(
+            after_partial_cleanup.refs["refs/heads/main"],
+            "b".repeat(40)
+        );
+
+        let third_id = commit_main(&store, &layout, Some('b'), 'c').await;
+        let active_with_descendant = list_active_transactions(&store, &layout).await.unwrap();
+
+        let with_descendant = materialize_ref_journal(
+            &store,
+            &layout,
+            &compacted,
+            &[],
+            &[],
+            &active_with_descendant,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(with_descendant.transactions, [third_id]);
+        assert_eq!(with_descendant.refs["refs/heads/main"], "c".repeat(40));
     }
 
     #[tokio::test]
