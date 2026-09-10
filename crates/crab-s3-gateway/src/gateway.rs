@@ -268,6 +268,7 @@ impl Gateway {
     }
 
     pub(crate) fn start_multipart_maintenance(&self) -> tokio::task::JoinHandle<()> {
+        let gateway = self.clone();
         let repositories = Arc::clone(&self.repositories);
         let cancellation = self.cancellation.clone();
         tokio::spawn(async move {
@@ -283,6 +284,7 @@ impl Gateway {
                     let names = repositories.keys().cloned().collect::<Vec<_>>();
                     let maintenance = futures_util::stream::iter(names)
                         .map(|name| {
+                            let gateway = gateway.clone();
                             let repositories = Arc::clone(&repositories);
                             async move {
                                 let result = if let Some(repository) = repositories.get(&name) {
@@ -291,7 +293,7 @@ impl Gateway {
                                     Some(
                                         tokio::time::timeout(
                                             Duration::from_secs(30),
-                                            crate::multipart::sweep(repository, now),
+                                            gateway.maintain_multipart_repository(repository, now),
                                         )
                                         .await,
                                     )
@@ -318,13 +320,15 @@ impl Gateway {
                             Some(Ok(Ok(stats)))
                                 if stats.expired != 0
                                     || stats.terminal_cleanups != 0
-                                    || stats.missing_cleanups != 0 =>
+                                    || stats.missing_cleanups != 0
+                                    || stats.published_recoveries != 0 =>
                             {
                                 tracing::info!(
                                     %repository,
                                     expired = stats.expired,
                                     terminal_cleanups = stats.terminal_cleanups,
                                     missing_cleanups = stats.missing_cleanups,
+                                    published_recoveries = stats.published_recoveries,
                                     "multipart maintenance completed"
                                 );
                             }
@@ -341,6 +345,53 @@ impl Gateway {
                 }
             }
         })
+    }
+
+    async fn maintain_multipart_repository(
+        &self,
+        repository: &Repository,
+        now: u64,
+    ) -> crate::multipart::Result<crate::multipart::SweepStats> {
+        let mut stats = crate::multipart::sweep(repository, now).await?;
+        let recoveries = futures_util::stream::iter(stats.take_completing())
+            .map(|loaded| async move {
+                let upload_id = loaded.session.id.clone();
+                let result = self.recover_published_multipart(repository, loaded).await;
+                (upload_id, result)
+            })
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
+        for (upload_id, result) in recoveries {
+            match result {
+                Ok(true) => stats.published_recoveries += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%upload_id, %error, "multipart publication recovery failed");
+                }
+            }
+        }
+        Ok(stats)
+    }
+
+    async fn recover_published_multipart(
+        &self,
+        repository: &Repository,
+        loaded: crate::multipart::Loaded,
+    ) -> S3Result<bool> {
+        let Some(attributes) = self
+            .current_object_attributes(repository, &loaded.session.key)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let Some((etag, checksums)) = completion_receipt(&loaded.session, &attributes)? else {
+            return Ok(false);
+        };
+        crate::multipart::complete(repository, loaded, etag, checksums)
+            .await
+            .map_err(multipart_error)?;
+        Ok(true)
     }
 
     pub(crate) fn auth(&self) -> GatewayAuth {
@@ -538,6 +589,43 @@ impl Gateway {
                 modified: timestamp(commit.committer.seconds)?,
                 attributes: None,
             })
+        }
+        .await;
+        finish(operation, result).await
+    }
+
+    async fn current_object_attributes(
+        &self,
+        repository: &Repository,
+        key: &str,
+    ) -> S3Result<Option<crate::attributes::ObjectAttributes>> {
+        let address = namespace::object_address(key).map_err(namespace_error)?;
+        let view = self.open(repository).await?;
+        let operation = view
+            .remote()
+            .operation(OperationKind::Repository, &self.cancellation)
+            .await
+            .map_err(remote_error)?;
+        let result = async {
+            let snapshot = view
+                .snapshot(&address.reference, &operation)
+                .await
+                .map_err(gateway_error)?;
+            let Some(entry) = snapshot
+                .entry(&address.path, &operation)
+                .await
+                .map_err(remote_error)?
+            else {
+                return Ok(None);
+            };
+            if entry.kind != EntryKind::Blob {
+                return Ok(None);
+            }
+            let path = std::str::from_utf8(address.path.as_bytes())
+                .map_err(|_| s3_error!(InvalidObjectState))?;
+            view.object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                .await
+                .map_err(gateway_error)
         }
         .await;
         finish(operation, result).await
@@ -3693,6 +3781,41 @@ fn multipart_etag(parts: &[crate::multipart::Part]) -> S3Result<String> {
     Ok(format!("{hash}-{}", parts.len()))
 }
 
+fn completion_receipt(
+    session: &crate::multipart::Session,
+    attributes: &crate::attributes::ObjectAttributes,
+) -> S3Result<Option<(String, crate::attributes::Checksums)>> {
+    if attributes.completion_upload_id.as_deref() != Some(session.id.as_str()) {
+        return Ok(None);
+    }
+    let parts = crate::multipart::frozen_parts(session)
+        .map_err(multipart_error)?
+        .ok_or_else(|| s3_error!(InternalError))?;
+    let size = parts.iter().try_fold(0_u64, |total, part| {
+        total
+            .checked_add(part.size)
+            .ok_or_else(|| s3_error!(InternalError))
+    })?;
+    let etag = multipart_etag(&parts)?;
+    let mut expected = session.attributes.clone();
+    expected.etag_override = Some(etag.clone());
+    expected.completion_upload_id = Some(session.id.clone());
+    expected.logical_size = Some(size);
+    expected.checksums = attributes.checksums.clone();
+    expected.parts = parts
+        .iter()
+        .map(|part| crate::attributes::PartAttributes {
+            number: part.number,
+            size: part.size,
+            checksums: part.checksums.clone(),
+        })
+        .collect();
+    if !attributes.matches_pending(&expected, &etag, size) {
+        return Err(s3_error!(InternalError));
+    }
+    Ok(Some((etag, attributes.checksums.clone())))
+}
+
 fn now_seconds() -> S3Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4084,7 +4207,7 @@ mod tests {
         let loaded = crate::multipart::load(&repository, &session.id)
             .await
             .unwrap();
-        let (_, parts) = crate::multipart::freeze(
+        let (session, parts) = crate::multipart::freeze(
             &repository,
             loaded,
             &[(1, etag)],
@@ -4092,6 +4215,31 @@ mod tests {
         )
         .await
         .unwrap();
+        let receipt_etag = multipart_etag(&parts).unwrap();
+        let receipt_oid =
+            gix_hash::ObjectId::from_hex(b"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").unwrap();
+        let receipt_attributes = crate::attributes::ObjectAttributes::new(
+            receipt_oid,
+            receipt_etag.clone(),
+            body.len() as u64,
+            12,
+            crate::attributes::PutAttributes {
+                etag_override: Some(receipt_etag.clone()),
+                completion_upload_id: Some(session.id.clone()),
+                logical_size: Some(body.len() as u64),
+                parts: parts
+                    .iter()
+                    .map(|part| crate::attributes::PartAttributes {
+                        number: part.number,
+                        size: part.size,
+                        checksums: part.checksums.clone(),
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+        );
+        let receipt = completion_receipt(&session, &receipt_attributes).unwrap();
+        assert_eq!(receipt.map(|value| value.0), Some(receipt_etag));
         let mut digester = crate::content::Digester::new();
         digester.write(&body, u64::MAX).unwrap();
         let (size, digests) = digester.finish().unwrap();
@@ -4114,6 +4262,171 @@ mod tests {
             .unwrap();
         let actual = stream.try_collect::<Vec<_>>().await.unwrap().concat();
         assert_eq!(actual, body);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn published_frozen_multipart_recovers_without_a_client_retry() {
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let repository_config = RepositoryConfig {
+            name: "repo".to_owned(),
+            provider: StorageProviderKind::Local,
+            bucket: "memory".to_owned(),
+            prefix: "multipart-recovery-test".to_owned(),
+            default_branch: "main".to_owned(),
+            members: Vec::new(),
+            protected_branches: Vec::new(),
+            max_active_multipart_uploads: 1,
+            multipart_staging_bytes_per_upload: 50_000_000_000_000,
+            multipart_upload_ttl_seconds: 604_800,
+        };
+        let repository = Repository::new(repository_config, store).unwrap();
+        crab_write::initialize::initialize_repository(
+            &repository.store,
+            &repository.layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(secret.path(), "multipart-recovery-secret").unwrap();
+        let auth = GatewayAuth::load(&Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            endpoint_domain: None,
+            region: "us-east-1".to_owned(),
+            max_in_flight_requests: 8,
+            credentials: vec![crate::CredentialConfig {
+                access_key: "recovery-key".to_owned(),
+                secret_key_file: secret.path().to_owned(),
+                principal: "user".to_owned(),
+            }],
+            repositories: Vec::new(),
+        })
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let options = RepositoryOptions::default();
+        let gateway = Gateway {
+            repositories: Arc::new(BTreeMap::from([("repo".to_owned(), repository)])),
+            mutations: Arc::new(mutation::Coordinator::new(Arc::clone(&runtime), options)),
+            runtime,
+            options,
+            auth,
+            region: Arc::from("us-east-1"),
+            admission: Admission::new(8, cancellation.clone()),
+            cancellation,
+        };
+        let repository = &gateway.repositories["repo"];
+        let session = crate::multipart::create(
+            repository,
+            crate::multipart::Initiation {
+                bucket: "repo",
+                key: "main/object.bin",
+                branch: "refs/heads/main",
+                path: "object.bin",
+                principal: "user",
+                attributes: crate::attributes::PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 10,
+            },
+        )
+        .await
+        .unwrap();
+        let body = Bytes::from_static(b"published before multipart state completion");
+        let part_etag = md5_hex(&body);
+        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        writer.write(&body, u64::MAX).await.unwrap();
+        let spool = writer.finish().await.unwrap();
+        crate::multipart::register_part(
+            repository,
+            crate::multipart::load(repository, &session.id)
+                .await
+                .unwrap(),
+            1,
+            &spool,
+            part_etag.clone(),
+            crate::attributes::Checksums::default(),
+            11,
+            &gateway.cancellation,
+        )
+        .await
+        .unwrap();
+        let (session, parts) = crate::multipart::freeze(
+            repository,
+            crate::multipart::load(repository, &session.id)
+                .await
+                .unwrap(),
+            &[(1, part_etag.clone())],
+            crate::content::MAX_MULTIPART_OBJECT_BYTES,
+        )
+        .await
+        .unwrap();
+        let completion_etag = multipart_etag(&parts).unwrap();
+        let mut attributes = session.attributes.clone();
+        attributes.etag_override = Some(completion_etag.clone());
+        attributes.completion_upload_id = Some(session.id.clone());
+        attributes.logical_size = Some(body.len() as u64);
+        attributes.parts = parts
+            .iter()
+            .map(|part| crate::attributes::PartAttributes {
+                number: part.number,
+                size: part.size,
+                checksums: part.checksums.clone(),
+            })
+            .collect();
+        gateway
+            .mutations
+            .apply(
+                repository,
+                &session.branch,
+                &crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap(),
+                mutation::Change::Put {
+                    bytes: body,
+                    track_lfs: false,
+                    attributes: Box::new(attributes),
+                    condition: mutation::PutCondition::None,
+                },
+                "user",
+                &gateway.cancellation,
+            )
+            .await
+            .unwrap();
+
+        let recovered = gateway
+            .recover_published_multipart(
+                repository,
+                crate::multipart::load(repository, &session.id)
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let terminal = crate::multipart::load(repository, &session.id)
+            .await
+            .unwrap();
+        let replacement = crate::multipart::create(
+            repository,
+            crate::multipart::Initiation {
+                bucket: "repo",
+                key: "main/replacement.bin",
+                branch: "refs/heads/main",
+                path: "replacement.bin",
+                principal: "user",
+                attributes: crate::attributes::PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 13,
+            },
+        )
+        .await;
+
+        assert!(
+            recovered
+                && crate::multipart::completed_etag(&terminal.session, &[(1, part_etag)])
+                    .is_ok_and(|etag| etag == Some(completion_etag.as_str()))
+                && replacement.is_ok()
+        );
+        gateway.shutdown().await;
     }
 
     #[tokio::test]

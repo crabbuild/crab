@@ -731,6 +731,25 @@ pub(crate) fn completed_etag<'a>(
     Ok(session.completion_etag.as_deref())
 }
 
+pub(crate) fn frozen_parts(session: &Session) -> Result<Option<Vec<Part>>> {
+    if !matches!(session.state, State::Completing) {
+        return Ok(None);
+    }
+    let selected = session.selected_parts.as_ref().ok_or(Error::InvalidPart)?;
+    selected
+        .iter()
+        .map(|(number, etag)| {
+            session
+                .parts
+                .get(number)
+                .filter(|part| &part.etag == etag)
+                .cloned()
+                .ok_or(Error::InvalidPart)
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
 pub(crate) async fn abort(repository: &Repository, mut loaded: Loaded) -> Result<()> {
     if !matches!(loaded.session.state, State::Open) {
         return Err(Error::NotOpen);
@@ -828,6 +847,14 @@ pub(crate) struct SweepStats {
     pub(crate) expired: usize,
     pub(crate) terminal_cleanups: usize,
     pub(crate) missing_cleanups: usize,
+    pub(crate) published_recoveries: usize,
+    completing: Vec<Loaded>,
+}
+
+impl SweepStats {
+    pub(crate) fn take_completing(&mut self) -> Vec<Loaded> {
+        std::mem::take(&mut self.completing)
+    }
 }
 
 pub(crate) async fn sweep(repository: &Repository, now: u64) -> Result<SweepStats> {
@@ -846,10 +873,11 @@ pub(crate) async fn sweep(repository: &Repository, now: u64) -> Result<SweepStat
         .await;
     let stats = reconciled
         .into_iter()
-        .fold(SweepStats::default(), |mut total, item| {
+        .fold(SweepStats::default(), |mut total, mut item| {
             total.expired += item.expired;
             total.terminal_cleanups += item.terminal_cleanups;
             total.missing_cleanups += item.missing_cleanups;
+            total.completing.append(&mut item.completing);
             total
         });
     Ok(stats)
@@ -916,7 +944,11 @@ async fn reconcile_capacity_slot(
                         }
                     }
                 }
-                State::Open | State::Completing => SweepStats::default(),
+                State::Completing => SweepStats {
+                    completing: vec![loaded],
+                    ..SweepStats::default()
+                },
+                State::Open => SweepStats::default(),
             }
         }
         Err(Error::NoSuchUpload) if now >= owner.expires_seconds => {
@@ -1232,12 +1264,14 @@ mod tests {
         .await
         .unwrap();
 
-        let stats = sweep(&repository, 20).await.unwrap();
+        let mut stats = sweep(&repository, 20).await.unwrap();
+        let completing = stats.take_completing();
         let frozen = load(&repository, &session.id).await.unwrap();
         let saturated = create_session_at(&repository, "main/replacement.bin", 20).await;
 
         assert!(
             stats.expired == 0
+                && completing.len() == 1
                 && matches!(frozen.session.state, State::Completing)
                 && matches!(saturated, Err(Error::Capacity))
         );
