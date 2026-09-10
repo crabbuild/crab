@@ -1419,12 +1419,13 @@ Compose configurations, liveness/readiness contract, packaged-image RustFS
 smoke and Compose multipart recovery across container replacement. It also
 includes the canonical Helm chart, values schema, EKS example and CI validation
 against Kubernetes 1.29 schemas. The private management listener exports
-bounded-cardinality Prometheus HTTP, response-stream and admission-pressure
-metrics plus aggregate multipart-reconciliation health, with packaged-image
-qualification proving the scrape contract and that request or credential
-identities are absent. Live EKS, external TLS, independent Git-history proof,
-backend/scratch metrics, alert delivery, ECS and broader operations evidence
-remain requirements, not qualified deployment support.
+bounded-cardinality Prometheus HTTP, response-stream, admission-pressure,
+content-scratch and aggregate multipart-reconciliation metrics, with
+packaged-image qualification proving the scrape contract and that request or
+credential identities are absent. Live EKS, external TLS, independent
+Git-history proof, backend latency/error and filesystem-capacity metrics, alert
+delivery, ECS and broader operations evidence remain requirements, not
+qualified deployment support.
 
 Build a locked, multi-stage image with the executable as PID 1, non-root user,
 read-only root filesystem, explicit writable scratch/cache directories and

@@ -139,3 +139,39 @@ fn multipart_maintenance_exports_aggregate_health_without_identity_labels() {
     assert!(!body.contains("upload_id"));
     assert!(!healthy);
 }
+
+#[test]
+fn scratch_usage_remains_accounted_until_its_owner_drops() {
+    let (admission, metrics) = setup();
+    let mut usage = metrics.start_scratch(ScratchPurpose::ContentSpool);
+    usage.reserve(4096);
+    usage.record_written(4096);
+
+    let active = metrics.render(&admission);
+    assert!(active.contains("crab_s3_gateway_scratch_files{purpose=\"content_spool\"} 1"));
+    assert!(active.contains("crab_s3_gateway_scratch_bytes{purpose=\"content_spool\"} 4096"));
+    assert!(
+        active.contains(
+            "crab_s3_gateway_scratch_bytes_written_total{purpose=\"content_spool\"} 4096"
+        )
+    );
+
+    drop(usage);
+    let released = metrics.render(&admission);
+    assert!(released.contains("crab_s3_gateway_scratch_files{purpose=\"content_spool\"} 0"));
+    assert!(released.contains("crab_s3_gateway_scratch_bytes{purpose=\"content_spool\"} 0"));
+}
+
+#[test]
+fn scratch_failures_use_only_bounded_purpose_and_operation_labels() {
+    let (admission, metrics) = setup();
+    let usage = metrics.start_scratch(ScratchPurpose::XetReconstruction);
+    usage.record_failure(ScratchFailure::Read);
+    drop(usage);
+
+    let body = metrics.render(&admission);
+    assert!(body.contains(
+        "crab_s3_gateway_scratch_io_failures_total{purpose=\"xet_reconstruction\",operation=\"read\"} 1"
+    ));
+    assert!(!body.contains("path="));
+}

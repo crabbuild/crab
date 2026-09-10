@@ -73,6 +73,14 @@ persists for five minutes. The latter deliberately fires before the first clean
 cycle if maintenance never starts. Admission queue utilization and
 `overloaded`/`timeout` event increases should drive replica scaling or a lower
 client fanout before they become sustained `SlowDown` responses.
+Alert when
+`increase(crab_s3_gateway_scratch_io_failures_total[5m]) > 0`. Compare
+`sum by (pod) (crab_s3_gateway_scratch_bytes)` with the pod's scratch-volume
+capacity and alert before the configured headroom is exhausted; the application
+metric measures owned content files, while filesystem telemetry remains the
+authority for total volume usage. Use
+`rate(crab_s3_gateway_scratch_bytes_written_total[5m])` to distinguish sustained
+spool traffic from a leaked or slow request.
 
 The checked CI qualification also creates a multipart session, uploads a valid
 non-final part, force-recreates the gateway container, verifies the replacement

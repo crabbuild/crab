@@ -131,6 +131,7 @@ impl ReadContent {
         self,
         repository: &Repository,
         range: std::ops::Range<u64>,
+        metrics: &Metrics,
     ) -> S3Result<ContentStream> {
         use futures_util::{StreamExt as _, TryStreamExt as _};
         use tokio::io::AsyncReadExt as _;
@@ -160,9 +161,16 @@ impl ReadContent {
                 let PointerKind::Crab(pointer) = crab_git::classify(&pointer_bytes) else {
                     return Err(s3_error!(InvalidObjectState));
                 };
-                let directory = tempfile::tempdir().map_err(|error| gateway_error(error.into()))?;
+                let mut scratch =
+                    metrics.start_scratch(crate::metrics::ScratchPurpose::XetReconstruction);
+                let size = range.end - range.start;
+                scratch.reserve(size);
+                let directory = tempfile::tempdir().map_err(|error| {
+                    scratch.record_failure(crate::metrics::ScratchFailure::Create);
+                    gateway_error(error.into())
+                })?;
                 let path = directory.path().join("content");
-                if range.start == 0 && range.end == pointer.size {
+                let reconstruction = if range.start == 0 && range.end == pointer.size {
                     repository
                         .hydrator
                         .reconstruct_to_path(&pointer, &path)
@@ -172,18 +180,30 @@ impl ReadContent {
                         .hydrator
                         .reconstruct_range_to_path(&pointer, range.start, range.end, &path)
                         .await
+                };
+                if let Err(error) = reconstruction {
+                    if error.is_destination_io() {
+                        scratch.record_failure(crate::metrics::ScratchFailure::Write);
+                    }
+                    return Err(gateway_error(error.into()));
                 }
-                .map_err(|error| gateway_error(error.into()))?;
-                let file = tokio::fs::File::open(path)
-                    .await
-                    .map_err(|error| gateway_error(error.into()))?;
-                let reader = tokio_util::io::ReaderStream::new(file.take(range.end - range.start));
+                scratch.record_written(size);
+                let file = tokio::fs::File::open(path).await.map_err(|error| {
+                    scratch.record_failure(crate::metrics::ScratchFailure::Read);
+                    gateway_error(error.into())
+                })?;
+                let reader = tokio_util::io::ReaderStream::new(file.take(size));
+                // The response stream owns the directory and accounting lease so a
+                // disconnect removes the reconstructed bytes and releases the gauges.
                 let stream = futures_util::stream::try_unfold(
-                    (reader, directory),
-                    |(mut reader, directory)| async move {
+                    (reader, directory, scratch),
+                    |(mut reader, directory, scratch)| async move {
                         match reader.next().await {
-                            Some(Ok(bytes)) => Ok(Some((bytes, (reader, directory)))),
-                            Some(Err(error)) => Err(error),
+                            Some(Ok(bytes)) => Ok(Some((bytes, (reader, directory, scratch)))),
+                            Some(Err(error)) => {
+                                scratch.record_failure(crate::metrics::ScratchFailure::Read);
+                                Err(error)
+                            }
                             None => Ok(None),
                         }
                     },
@@ -199,11 +219,12 @@ impl ReadContent {
         repository: &Repository,
         range: std::ops::Range<u64>,
         max_bytes: u64,
+        metrics: &Metrics,
     ) -> S3Result<crate::content::Spool> {
         use futures_util::StreamExt as _;
 
-        let mut stream = self.stream(repository, range).await?;
-        let mut writer = crate::content::SpoolWriter::new()
+        let mut stream = self.stream(repository, range, metrics).await?;
+        let mut writer = crate::content::SpoolWriter::new(metrics)
             .await
             .map_err(content_error)?;
         while let Some(chunk) = stream.next().await {
@@ -596,7 +617,10 @@ impl Gateway {
                 None => match &content {
                     ReadContent::Ordinary(bytes) => md5_hex(bytes),
                     ReadContent::CrabPointer(_) | ReadContent::LfsPointer(_) => {
-                        let spool = content.clone().spool(repository, 0..size, u64::MAX).await?;
+                        let spool = content
+                            .clone()
+                            .spool(repository, 0..size, u64::MAX, &self.metrics)
+                            .await?;
                         crate::content::md5_hex(&spool.digests.md5)
                     }
                 },
@@ -666,7 +690,9 @@ impl Gateway {
             let etag = match &content {
                 ReadContent::Ordinary(bytes) => md5_hex(bytes),
                 ReadContent::CrabPointer(_) | ReadContent::LfsPointer(_) => {
-                    let spool = content.spool(repository, 0..size, u64::MAX).await?;
+                    let spool = content
+                        .spool(repository, 0..size, u64::MAX, &self.metrics)
+                        .await?;
                     crate::content::md5_hex(&spool.digests.md5)
                 }
             };
@@ -861,10 +887,10 @@ enum MultipartAssembly {
 }
 
 impl MultipartAssemblyWriter {
-    async fn new(size: u64) -> Result<Self, crate::content::Error> {
+    async fn new(size: u64, metrics: &Metrics) -> Result<Self, crate::content::Error> {
         if size <= crate::content::INLINE_GIT_BLOB_BYTES {
             Ok(Self::Inline(Box::new(
-                crate::content::SpoolWriter::new().await?,
+                crate::content::SpoolWriter::new(metrics).await?,
             )))
         } else {
             Ok(Self::Large(Box::new(crate::content::Digester::new())))
@@ -1104,7 +1130,13 @@ impl S3 for Gateway {
         let range = selection.range;
         let content_length =
             i64::try_from(range.end - range.start).map_err(|_| s3_error!(InternalError))?;
-        let body = hold_permit(object.content.stream(repository, range).await?, permit);
+        let body = hold_permit(
+            object
+                .content
+                .stream(repository, range, &self.metrics)
+                .await?,
+            permit,
+        );
         let body =
             http_body_util::StreamBody::new(body.map(|result| result.map(http_body::Frame::data)));
         let output = GetObjectOutput {
@@ -1286,6 +1318,7 @@ impl S3 for Gateway {
             } else {
                 crate::content::MAX_PUT_OBJECT_BYTES
             },
+            &self.metrics,
         )
         .await
         .map_err(content_error)?;
@@ -1727,6 +1760,7 @@ impl S3 for Gateway {
                 source_repository,
                 0..source_size,
                 crate::content::MAX_PUT_OBJECT_BYTES,
+                &self.metrics,
             )
             .await?;
         let (repository, address, principal) =
@@ -1925,6 +1959,7 @@ impl S3 for Gateway {
             req.input.body,
             content_length,
             crate::content::MAX_MULTIPART_PART_BYTES,
+            &self.metrics,
         )
         .await
         .map_err(content_error)?;
@@ -2017,6 +2052,7 @@ impl S3 for Gateway {
                 source_repository,
                 range,
                 crate::content::MAX_MULTIPART_PART_BYTES,
+                &self.metrics,
             )
             .await?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
@@ -2185,7 +2221,7 @@ impl S3 for Gateway {
                 .checked_add(part.size)
                 .ok_or_else(|| s3_error!(EntityTooLarge))
         })?;
-        let mut writer = MultipartAssemblyWriter::new(selected_size)
+        let mut writer = MultipartAssemblyWriter::new(selected_size, &self.metrics)
             .await
             .map_err(content_error)?;
         for part in &parts {
@@ -2638,7 +2674,9 @@ impl S3 for Gateway {
                             .await
                             .map_err(remote_error)?;
                         let (content, logical_size) = classify_blob(blob)?;
-                        let spool = content.spool(repository, 0..logical_size, u64::MAX).await?;
+                        let spool = content
+                            .spool(repository, 0..logical_size, u64::MAX, &self.metrics)
+                            .await?;
                         (crate::content::md5_hex(&spool.digests.md5), logical_size)
                     }
                 };
@@ -4264,7 +4302,8 @@ mod tests {
         )
         .unwrap();
         let content = b"content larger than the test inline limit";
-        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        let metrics = Metrics::new().unwrap();
+        let mut writer = crate::content::SpoolWriter::new(&metrics).await.unwrap();
         writer.write(content, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
 
@@ -4330,7 +4369,8 @@ mod tests {
         .unwrap();
         let body = Bytes::from_static(b"durable multipart bytes");
         let etag = md5_hex(&body);
-        let mut part_writer = crate::content::SpoolWriter::new().await.unwrap();
+        let metrics = Metrics::new().unwrap();
+        let mut part_writer = crate::content::SpoolWriter::new(&metrics).await.unwrap();
         part_writer.write(&body, u64::MAX).await.unwrap();
         let part_spool = part_writer.finish().await.unwrap();
         let loaded = crate::multipart::load(&repository, &session.id)
@@ -4481,7 +4521,9 @@ mod tests {
         .unwrap();
         let body = Bytes::from_static(b"published before multipart state completion");
         let part_etag = md5_hex(&body);
-        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        let mut writer = crate::content::SpoolWriter::new(&gateway.metrics)
+            .await
+            .unwrap();
         writer.write(&body, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
         crate::multipart::register_part(
@@ -4616,7 +4658,8 @@ mod tests {
 
         let body = b"123456789";
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        let metrics = Metrics::new().unwrap();
+        let mut writer = crate::content::SpoolWriter::new(&metrics).await.unwrap();
         writer.write(body, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
         for algorithm in [

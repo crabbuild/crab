@@ -16,6 +16,10 @@ use crate::{
     multipart::SweepStats,
 };
 
+mod scratch;
+
+pub(crate) use scratch::{ScratchFailure, ScratchPurpose, ScratchUsage};
+
 const METHOD_COUNT: usize = 6;
 const OUTCOME_COUNT: usize = 8;
 const DURATION_BUCKETS_SECONDS: [f64; 16] = [
@@ -65,6 +69,7 @@ struct MetricsInner {
     methods: [MethodMetrics; METHOD_COUNT],
     admission: [AdmissionMetrics; RequestClass::ALL.len()],
     multipart_maintenance: MultipartMaintenanceMetrics,
+    scratch: scratch::ScratchMetrics,
 }
 
 struct MethodMetrics {
@@ -131,12 +136,14 @@ impl Metrics {
         let admission =
             RequestClass::ALL.map(|class| AdmissionMetrics::new(&recorder, class.label()));
         let multipart_maintenance = MultipartMaintenanceMetrics::new(&recorder);
+        let scratch = scratch::ScratchMetrics::new(&recorder);
         Ok(Self {
             inner: Arc::new(MetricsInner {
                 handle: recorder.handle(),
                 methods,
                 admission,
                 multipart_maintenance,
+                scratch,
             }),
         })
     }
@@ -223,6 +230,10 @@ impl Metrics {
                 .last_success
                 .set(now_seconds as f64);
         }
+    }
+
+    pub(crate) fn start_scratch(&self, purpose: ScratchPurpose) -> ScratchUsage {
+        self.inner.scratch.start(purpose)
     }
 
     pub(crate) fn render(&self, admission: &Admission) -> String {

@@ -374,6 +374,12 @@ jobs:
             "${metrics_root}.txt"
           grep -Fq 'crab_s3_gateway_http_request_duration_seconds_bucket' \
             "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_bytes_written_total\{purpose="content_spool"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          test "$(grep -Ec '^crab_s3_gateway_scratch_(bytes|files)\{purpose="(content_spool|xet_reconstruction)"\} 0$' \
+            "${metrics_root}.txt")" = 4
+          test "$(grep -Ec '^crab_s3_gateway_scratch_io_failures_total\{purpose="(content_spool|xet_reconstruction)",operation="(create|write|flush|read)"\} 0$' \
+            "${metrics_root}.txt")" = 8
           if grep -Fq \
             -e "${GATEWAY_ACCESS_KEY}" \
             -e "${GATEWAY_SECRET_KEY}" \

@@ -5,6 +5,8 @@ use futures_util::StreamExt as _;
 use s3s::dto::StreamingBlob;
 use tokio::io::{AsyncWriteExt as _, BufWriter};
 
+use crate::metrics::{Metrics, ScratchFailure, ScratchPurpose, ScratchUsage};
+
 pub(crate) const MAX_PUT_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub(crate) const MAX_MULTIPART_OBJECT_BYTES: u64 = 50_000_000_000_000;
 pub(crate) const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
@@ -96,6 +98,9 @@ impl Digester {
 pub(crate) struct Spool {
     _directory: tempfile::TempDir,
     path: PathBuf,
+    // Accounting follows the temporary directory across writer-to-spool ownership.
+    // Dropping either side releases both the file and its metric charge.
+    scratch: ScratchUsage,
     pub(crate) size: u64,
     pub(crate) digests: Digests,
 }
@@ -106,7 +111,13 @@ impl Spool {
     }
 
     pub(crate) async fn bytes(&self) -> Result<Bytes, Error> {
-        Ok(Bytes::from(tokio::fs::read(&self.path).await?))
+        match tokio::fs::read(&self.path).await {
+            Ok(bytes) => Ok(Bytes::from(bytes)),
+            Err(error) => {
+                self.scratch.record_failure(ScratchFailure::Read);
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -115,24 +126,37 @@ pub(crate) struct SpoolWriter {
     path: PathBuf,
     file: BufWriter<tokio::fs::File>,
     digester: Digester,
+    scratch: ScratchUsage,
 }
 
 impl SpoolWriter {
-    pub(crate) async fn new() -> Result<Self, Error> {
-        let directory = tempfile::tempdir()?;
+    pub(crate) async fn new(metrics: &Metrics) -> Result<Self, Error> {
+        let scratch = metrics.start_scratch(ScratchPurpose::ContentSpool);
+        let directory = tempfile::tempdir().inspect_err(|_| {
+            scratch.record_failure(ScratchFailure::Create);
+        })?;
         let path = directory.path().join("content");
-        let file = BufWriter::new(tokio::fs::File::create(&path).await?);
+        let file = tokio::fs::File::create(&path).await.inspect_err(|_| {
+            scratch.record_failure(ScratchFailure::Create);
+        })?;
         Ok(Self {
             directory,
             path,
-            file,
+            file: BufWriter::new(file),
             digester: Digester::new(),
+            scratch,
         })
     }
 
     pub(crate) async fn write(&mut self, bytes: &[u8], max_bytes: u64) -> Result<(), Error> {
         self.digester.write(bytes, max_bytes)?;
-        self.file.write_all(bytes).await?;
+        let size = u64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
+        self.scratch.reserve(size);
+        if let Err(error) = self.file.write_all(bytes).await {
+            self.scratch.record_failure(ScratchFailure::Write);
+            return Err(error.into());
+        }
+        self.scratch.record_written(size);
         Ok(())
     }
 
@@ -141,12 +165,16 @@ impl SpoolWriter {
     }
 
     pub(crate) async fn finish(mut self) -> Result<Spool, Error> {
-        self.file.flush().await?;
+        if let Err(error) = self.file.flush().await {
+            self.scratch.record_failure(ScratchFailure::Flush);
+            return Err(error.into());
+        }
         drop(self.file);
         let (size, digests) = self.digester.finish()?;
         Ok(Spool {
             _directory: self.directory,
             path: self.path,
+            scratch: self.scratch,
             size,
             digests,
         })
@@ -157,6 +185,7 @@ pub(crate) async fn spool_body(
     body: Option<StreamingBlob>,
     declared: Option<i64>,
     max_bytes: u64,
+    metrics: &Metrics,
 ) -> Result<Spool, Error> {
     let declared = declared
         .map(|length| u64::try_from(length).map_err(|_| Error::Incomplete))
@@ -164,7 +193,7 @@ pub(crate) async fn spool_body(
     if declared.is_some_and(|length| length > max_bytes) {
         return Err(Error::TooLarge);
     }
-    let mut writer = SpoolWriter::new().await?;
+    let mut writer = SpoolWriter::new(metrics).await?;
     if let Some(mut body) = body {
         while let Some(chunk) = body.next().await {
             writer
@@ -222,7 +251,8 @@ mod tests {
     async fn spool_writer_hashes_chunks_and_enforces_limit() {
         use sha1::Digest as _;
 
-        let mut writer = SpoolWriter::new().await.unwrap();
+        let metrics = Metrics::new().unwrap();
+        let mut writer = SpoolWriter::new(&metrics).await.unwrap();
         writer.write(b"streamed ", 16).await.unwrap();
         writer.write(b"content", 16).await.unwrap();
         let spool = writer.finish().await.unwrap();
@@ -255,10 +285,32 @@ mod tests {
 
     #[tokio::test]
     async fn spool_writer_rejects_content_over_the_operation_limit() {
-        let mut writer = SpoolWriter::new().await.unwrap();
+        let metrics = Metrics::new().unwrap();
+        let mut writer = SpoolWriter::new(&metrics).await.unwrap();
         assert!(matches!(
             writer.write(b"too large", 8).await,
             Err(Error::TooLarge)
         ));
+    }
+
+    #[tokio::test]
+    async fn spool_metrics_follow_the_temporary_file_lifetime() {
+        let metrics = Metrics::new().unwrap();
+        let admission = crate::admission::Admission::new(
+            8,
+            tokio_util::sync::CancellationToken::new(),
+            metrics.clone(),
+        );
+        let mut writer = SpoolWriter::new(&metrics).await.unwrap();
+        writer.write(b"scratch", 16).await.unwrap();
+        let spool = writer.finish().await.unwrap();
+
+        let active = metrics.render(&admission);
+        assert!(active.contains("crab_s3_gateway_scratch_files{purpose=\"content_spool\"} 1"));
+        assert!(active.contains("crab_s3_gateway_scratch_bytes{purpose=\"content_spool\"} 7"));
+        drop(spool);
+        let released = metrics.render(&admission);
+        assert!(released.contains("crab_s3_gateway_scratch_files{purpose=\"content_spool\"} 0"));
+        assert!(released.contains("crab_s3_gateway_scratch_bytes{purpose=\"content_spool\"} 0"));
     }
 }

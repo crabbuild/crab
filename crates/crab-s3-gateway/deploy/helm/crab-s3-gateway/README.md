@@ -32,6 +32,10 @@ At minimum, alert on increasing
 `crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds` older
 than three minutes for five minutes. Alert on admission queue saturation before
 scaling pressure becomes sustained S3 `SlowDown` responses.
+Alert on any increase in `crab_s3_gateway_scratch_io_failures_total`, and compare
+the per-pod sum of `crab_s3_gateway_scratch_bytes` with `scratch.sizeLimit` plus
+the pod's filesystem telemetry. The application metric follows content-file
+ownership; the filesystem remains authoritative for all bytes on the volume.
 
 Before installation:
 

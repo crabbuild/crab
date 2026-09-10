@@ -164,7 +164,11 @@ admission capacity, queue pressure, and outcomes. It also reports aggregate
 multipart-maintenance cycles, completed lifecycle actions, failure reasons,
 cycle duration, and the last cycle in which every configured repository was
 healthy. Per-slot failures make that cycle degraded instead of disappearing
-into a successful sweep. Metric labels are fixed enums; they never contain
+into a successful sweep. Content-spool and Xet-reconstruction series expose
+currently owned temporary files and logical bytes, cumulative bytes written,
+and bounded create/write/flush/read failures. Ownership remains charged until
+the spool or response stream drops, including cancellation and disconnect.
+Metric labels are fixed enums; they never contain
 repository names, refs, keys, upload IDs, principals, access keys, or secrets.
 The corresponding CLI checks are suitable for container and orchestration
 probes. The metrics endpoint is unauthenticated by design; scrape it only over

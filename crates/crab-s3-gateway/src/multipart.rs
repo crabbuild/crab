@@ -1586,7 +1586,8 @@ mod tests {
     }
 
     async fn spool(bytes: &[u8]) -> crate::content::Spool {
-        let mut writer = crate::content::SpoolWriter::new().await.unwrap();
+        let metrics = crate::metrics::Metrics::new().unwrap();
+        let mut writer = crate::content::SpoolWriter::new(&metrics).await.unwrap();
         writer.write(bytes, u64::MAX).await.unwrap();
         writer.finish().await.unwrap()
     }
