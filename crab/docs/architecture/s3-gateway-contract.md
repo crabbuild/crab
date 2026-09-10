@@ -96,6 +96,8 @@ the selected protocol library, SigV2 headers, and SigV2 presigned queries.
 Unsigned requests return `AccessDenied`. Header-signed requests allow 15 minutes
 of clock skew. Presigned request expiry is verified by the protocol layer;
 operators should issue SigV4 URLs for no more than seven days.
+SigV4a, temporary STS session credentials, and browser POST-policy uploads are
+outside this frozen profile.
 
 Access-key lookup yields current HMAC verification material and one Crab
 principal. Unknown keys fail before repository authorization. Static key

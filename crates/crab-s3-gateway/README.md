@@ -5,9 +5,11 @@ S3 clients use their normal endpoint, region, access-key, and secret-key
 configuration. Object keys use `REF/path`, for example
 `s3://my-repository/main/data/model.bin`.
 
-The gateway accepts S3 SigV4 and SigV2 authentication through `s3s`. It maps
+The gateway accepts S3 SigV4 header signing and presigned-query URLs, plus
+legacy SigV2 header and presigned-query authentication, through `s3s`. It maps
 each access key to a Crab principal and authorizes that principal against the
-logical repository catalog. Gateway credentials are independent of the cloud
+logical repository catalog. Gateway credentials are static Crab credentials,
+not SigV4a or temporary STS credentials, and are independent of the cloud
 credentials used for the backing object store.
 
 The client-compatible surface includes bucket listing/head/location/versioning
