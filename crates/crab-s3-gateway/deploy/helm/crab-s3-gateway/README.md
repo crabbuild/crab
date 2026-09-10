@@ -40,7 +40,11 @@ available-to-total ratio crosses the deployment's headroom threshold. The
 application metric follows content-file ownership; the filesystem gauges cover
 all bytes visible on the mount. Kubelet ephemeral-storage telemetry remains
 authoritative for `scratch.sizeLimit` when the `emptyDir` policy cap is not
-represented as a filesystem quota by the node runtime.
+represented as a filesystem quota by the node runtime. Alert on increasing
+scratch-capacity rejections and nonzero pending reservations that do not drain.
+Each pod's `emptyDir` is intentionally private: the atomic pre-write gate is
+process-local and retains 10% of visible filesystem capacity, bounded to
+64 MiB–1 GiB.
 Alert on sustained backend `auth`, `throttled`, `transient`, or `error` outcomes
 and backend duration outside the service-level budget. Correlate backend
 in-flight calls with admission queues before scaling: one identifies provider

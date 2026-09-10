@@ -161,9 +161,12 @@ impl ReadContent {
                 let PointerKind::Crab(pointer) = crab_git::classify(&pointer_bytes) else {
                     return Err(s3_error!(InvalidObjectState));
                 };
+                let size = range.end - range.start;
+                let capacity = metrics
+                    .reserve_scratch(size)
+                    .map_err(scratch_capacity_error)?;
                 let mut scratch =
                     metrics.start_scratch(crate::metrics::ScratchPurpose::XetReconstruction);
-                let size = range.end - range.start;
                 scratch.reserve(size);
                 let directory = tempfile::tempdir().map_err(|error| {
                     scratch.record_failure(crate::metrics::ScratchFailure::Create);
@@ -187,6 +190,9 @@ impl ReadContent {
                     }
                     return Err(gateway_error(error.into()));
                 }
+                // The completed file is now reflected by statvfs, so future
+                // reservations no longer need its pre-write capacity claim.
+                drop(capacity);
                 scratch.record_written(size);
                 let file = tokio::fs::File::open(path).await.map_err(|error| {
                     scratch.record_failure(crate::metrics::ScratchFailure::Read);
@@ -223,8 +229,9 @@ impl ReadContent {
     ) -> S3Result<crate::content::Spool> {
         use futures_util::StreamExt as _;
 
+        let expected = range.end.saturating_sub(range.start);
         let mut stream = self.stream(repository, range, metrics).await?;
-        let mut writer = crate::content::SpoolWriter::new(metrics)
+        let mut writer = crate::content::SpoolWriter::new(metrics, Some(expected))
             .await
             .map_err(content_error)?;
         while let Some(chunk) = stream.next().await {
@@ -273,7 +280,11 @@ impl Gateway {
         );
         Ok(Self {
             repositories: Arc::new(repositories),
-            mutations: Arc::new(mutation::Coordinator::new(Arc::clone(&runtime), options)),
+            mutations: Arc::new(mutation::Coordinator::new(
+                Arc::clone(&runtime),
+                options,
+                metrics.clone(),
+            )),
             runtime,
             options,
             auth,
@@ -891,7 +902,7 @@ impl MultipartAssemblyWriter {
     async fn new(size: u64, metrics: &Metrics) -> Result<Self, crate::content::Error> {
         if size <= crate::content::INLINE_GIT_BLOB_BYTES {
             Ok(Self::Inline(Box::new(
-                crate::content::SpoolWriter::new(metrics).await?,
+                crate::content::SpoolWriter::new(metrics, Some(size)).await?,
             )))
         } else {
             Ok(Self::Large(Box::new(crate::content::Digester::new())))
@@ -3842,6 +3853,7 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
             s3_error!(RequestTimeout)
         }
         mutation::Error::Overloaded | mutation::Error::AdmissionTimeout => slow_down_error(),
+        mutation::Error::Capacity(error) => scratch_capacity_error(error),
         mutation::Error::PreconditionFailed => s3_error!(PreconditionFailed),
         mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => {
             s3_error!(
@@ -3898,6 +3910,7 @@ fn slow_down_error() -> s3s::S3Error {
 fn content_error(error: crate::content::Error) -> s3s::S3Error {
     match error {
         crate::content::Error::TooLarge => s3_error!(EntityTooLarge),
+        crate::content::Error::Capacity(error) => scratch_capacity_error(error),
         crate::content::Error::Incomplete | crate::content::Error::Body(_) => {
             tracing::warn!(%error, "S3 request body failed");
             s3_error!(IncompleteBody)
@@ -3907,6 +3920,11 @@ fn content_error(error: crate::content::Error) -> s3s::S3Error {
             s3_error!(InternalError)
         }
     }
+}
+
+fn scratch_capacity_error(error: crate::metrics::ScratchCapacityError) -> s3s::S3Error {
+    tracing::warn!(%error, "S3 scratch capacity rejected work");
+    slow_down_error()
 }
 
 pub(crate) fn md5_hex(bytes: &[u8]) -> String {
@@ -4304,7 +4322,9 @@ mod tests {
         .unwrap();
         let content = b"content larger than the test inline limit";
         let metrics = Metrics::new().unwrap();
-        let mut writer = crate::content::SpoolWriter::new(&metrics).await.unwrap();
+        let mut writer = crate::content::SpoolWriter::new(&metrics, None)
+            .await
+            .unwrap();
         writer.write(content, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
 
@@ -4371,7 +4391,9 @@ mod tests {
         let body = Bytes::from_static(b"durable multipart bytes");
         let etag = md5_hex(&body);
         let metrics = Metrics::new().unwrap();
-        let mut part_writer = crate::content::SpoolWriter::new(&metrics).await.unwrap();
+        let mut part_writer = crate::content::SpoolWriter::new(&metrics, None)
+            .await
+            .unwrap();
         part_writer.write(&body, u64::MAX).await.unwrap();
         let part_spool = part_writer.finish().await.unwrap();
         let loaded = crate::multipart::load(&repository, &session.id)
@@ -4494,7 +4516,11 @@ mod tests {
         let metrics = Metrics::new().unwrap();
         let gateway = Gateway {
             repositories: Arc::new(BTreeMap::from([("repo".to_owned(), repository)])),
-            mutations: Arc::new(mutation::Coordinator::new(Arc::clone(&runtime), options)),
+            mutations: Arc::new(mutation::Coordinator::new(
+                Arc::clone(&runtime),
+                options,
+                metrics.clone(),
+            )),
             runtime,
             options,
             auth,
@@ -4522,7 +4548,7 @@ mod tests {
         .unwrap();
         let body = Bytes::from_static(b"published before multipart state completion");
         let part_etag = md5_hex(&body);
-        let mut writer = crate::content::SpoolWriter::new(&gateway.metrics)
+        let mut writer = crate::content::SpoolWriter::new(&gateway.metrics, None)
             .await
             .unwrap();
         writer.write(&body, u64::MAX).await.unwrap();
@@ -4660,7 +4686,9 @@ mod tests {
         let body = b"123456789";
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let metrics = Metrics::new().unwrap();
-        let mut writer = crate::content::SpoolWriter::new(&metrics).await.unwrap();
+        let mut writer = crate::content::SpoolWriter::new(&metrics, None)
+            .await
+            .unwrap();
         writer.write(body, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
         for algorithm in [
@@ -4752,6 +4780,21 @@ mod tests {
     fn slow_down_tells_clients_when_to_retry() {
         let error = slow_down_error();
 
+        assert_eq!(
+            error
+                .headers()
+                .and_then(|headers| headers.get(http::header::RETRY_AFTER)),
+            Some(&http::HeaderValue::from_static("1"))
+        );
+    }
+
+    #[test]
+    fn scratch_capacity_pressure_is_a_retryable_s3_error() {
+        let error = content_error(crate::content::Error::Capacity(
+            crate::metrics::ScratchCapacityError::Exhausted,
+        ));
+
+        assert_eq!(error.code().as_str(), "SlowDown");
         assert_eq!(
             error
                 .headers()

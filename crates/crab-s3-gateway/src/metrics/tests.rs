@@ -128,6 +128,11 @@ fn renderer_exports_current_scratch_filesystem_capacity() {
     assert!(size > 0.0);
     assert!(free <= size);
     assert!(available <= free);
+    assert!(metric_value(&body, "crab_s3_gateway_scratch_headroom_bytes") > 0.0);
+    assert_eq!(
+        metric_value(&body, "crab_s3_gateway_scratch_pending_bytes"),
+        0.0
+    );
     assert_eq!(
         metric_value(&body, "crab_s3_gateway_scratch_filesystem_probe_success"),
         1.0
@@ -137,6 +142,78 @@ fn renderer_exports_current_scratch_filesystem_capacity() {
             &body,
             "crab_s3_gateway_scratch_filesystem_probe_failures_total"
         ),
+        0.0
+    );
+}
+
+#[test]
+fn scratch_reservation_is_visible_and_released_on_drop() {
+    let scratch = tempfile::tempdir().unwrap();
+    let metrics = Metrics::new_with_scratch_path(scratch.path().to_owned()).unwrap();
+    let admission = Admission::new(8, CancellationToken::new(), metrics.clone());
+    let reservation = metrics.reserve_scratch(4096).unwrap();
+
+    assert_eq!(
+        metric_value(
+            &metrics.render(&admission),
+            "crab_s3_gateway_scratch_pending_bytes"
+        ),
+        4096.0
+    );
+    drop(reservation);
+    assert_eq!(
+        metric_value(
+            &metrics.render(&admission),
+            "crab_s3_gateway_scratch_pending_bytes"
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn oversized_scratch_reservation_is_retryable_capacity_pressure() {
+    let scratch = tempfile::tempdir().unwrap();
+    let metrics = Metrics::new_with_scratch_path(scratch.path().to_owned()).unwrap();
+    let admission = Admission::new(8, CancellationToken::new(), metrics.clone());
+
+    assert!(matches!(
+        metrics.reserve_scratch(u64::MAX),
+        Err(ScratchCapacityError::Exhausted)
+    ));
+    let body = metrics.render(&admission);
+    assert_eq!(
+        metric_value(
+            &body,
+            "crab_s3_gateway_scratch_capacity_rejections_total{reason=\"exhausted\"}"
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(&body, "crab_s3_gateway_scratch_pending_bytes"),
+        0.0
+    );
+}
+
+#[test]
+fn unavailable_scratch_probe_rejects_reservation_without_leaking_capacity() {
+    let scratch = tempfile::tempdir().unwrap();
+    let metrics = Metrics::new_with_scratch_path(scratch.path().join("missing")).unwrap();
+    let admission = Admission::new(8, CancellationToken::new(), metrics.clone());
+
+    assert!(matches!(
+        metrics.reserve_scratch(1),
+        Err(ScratchCapacityError::Unavailable(_))
+    ));
+    let body = metrics.render(&admission);
+    assert_eq!(
+        metric_value(
+            &body,
+            "crab_s3_gateway_scratch_capacity_rejections_total{reason=\"probe_error\"}"
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_value(&body, "crab_s3_gateway_scratch_pending_bytes"),
         0.0
     );
 }

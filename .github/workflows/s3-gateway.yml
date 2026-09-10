@@ -351,6 +351,23 @@ jobs:
           aws --endpoint-url "${endpoint}" s3api delete-object \
             --bucket "${bucket}" --key "${key}" >/dev/null
 
+          oversized_key=main/qualification/scratch-capacity.bin
+          truncate --size 500M "${qualification_root}/oversized.bin"
+          if AWS_MAX_ATTEMPTS=1 aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket "${bucket}" --key "${oversized_key}" \
+            --body "${qualification_root}/oversized.bin" \
+            >"${qualification_root}/oversized.stdout" \
+            2>"${qualification_root}/oversized.stderr"; then
+            echo "oversized scratch reservation unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep -Fq 'SlowDown' "${qualification_root}/oversized.stderr"
+          if aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${oversized_key}" >/dev/null 2>&1; then
+            echo "scratch-rejected upload published an object" >&2
+            exit 1
+          fi
+
           metrics_root="${qualification_root}/metrics"
           maintenance_ready=false
           for _ in $(seq 1 30); do
@@ -382,9 +399,17 @@ jobs:
             "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_scratch_filesystem_available_bytes [1-9][0-9]*$' \
             "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_headroom_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_pending_bytes 0' \
+            "${metrics_root}.txt"
           grep -Fqx 'crab_s3_gateway_scratch_filesystem_probe_success 1' \
             "${metrics_root}.txt"
           grep -Fqx 'crab_s3_gateway_scratch_filesystem_probe_failures_total 0' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_capacity_rejections_total\{reason="exhausted"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_capacity_rejections_total{reason="probe_error"} 0' \
             "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_backend_requests_total\{operation="(get|head|range|put|list)",outcome="success"\} [1-9][0-9]*$' \
             "${metrics_root}.txt"
@@ -404,10 +429,10 @@ jobs:
               --output "${metrics_root}.txt"
           done
           test "${backend_idle}" = true
-          test "$(grep -Ec '^crab_s3_gateway_scratch_(bytes|files)\{purpose="(content_spool|xet_reconstruction)"\} 0$' \
-            "${metrics_root}.txt")" = 4
-          test "$(grep -Ec '^crab_s3_gateway_scratch_io_failures_total\{purpose="(content_spool|xet_reconstruction)",operation="(create|write|flush|read)"\} 0$' \
-            "${metrics_root}.txt")" = 8
+          test "$(grep -Ec '^crab_s3_gateway_scratch_(bytes|files)\{purpose="(content_spool|xet_reconstruction|git_pack)"\} 0$' \
+            "${metrics_root}.txt")" = 6
+          test "$(grep -Ec '^crab_s3_gateway_scratch_io_failures_total\{purpose="(content_spool|xet_reconstruction|git_pack)",operation="(create|write|flush|read)"\} 0$' \
+            "${metrics_root}.txt")" = 12
           if grep -Fq \
             -e "${GATEWAY_ACCESS_KEY}" \
             -e "${GATEWAY_SECRET_KEY}" \

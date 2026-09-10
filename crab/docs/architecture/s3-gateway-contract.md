@@ -288,6 +288,7 @@ boundary without credentials or request bodies.
 | Bad completion selection/order/size | `InvalidPart`, `InvalidPartOrder`, `EntityTooSmall` |
 | Bounded admission queue exhaustion or wait timeout | `SlowDown` |
 | Multipart active-session or persisted staging-byte capacity exhausted | `SlowDown` |
+| Scratch capacity exhausted or filesystem probe unavailable | `SlowDown` |
 | Corrupt/unavailable committed data | `InternalError` |
 
 Every gateway-generated `SlowDown` includes `Retry-After: 1`. Clients should
@@ -296,13 +297,19 @@ is a retry floor, not a promise that distributed capacity will be free after
 one second.
 
 Request bodies are streamed through bounded memory to temporary storage while
-checksums are computed. Multipart completion keeps objects through 64 MiB in a
-local spool; larger objects validate and hash the frozen durable parts, then
-replay them through size-and-SHA-verified LFS publication without assembling the
-logical object on local disk. Objects above the inline Git threshold are stored
-through Crab's verified LFS content path; the committed Git blob is the canonical
-LFS pointer and the S3 attribute record retains the logical size and ETag. That
-same Git commit appends an exact tracking rule to the nearest `.gitattributes`,
+checksums are computed. Declared request lengths reserve scratch before the body
+is consumed; unknown streams reserve bounded increments. Content spools, Xet
+range reconstruction, and generated Git packs share one atomic process-local
+gate. It retains 10% of visible capacity outside reservations, bounded to a
+64 MiB minimum and 1 GiB maximum. A failed capacity probe fails closed, and
+reservation pressure returns `SlowDown` without publishing partial state.
+Multipart completion keeps objects through 64 MiB in a local spool; larger
+objects validate and hash the frozen durable parts, then replay them through
+size-and-SHA-verified LFS publication without assembling the logical object on
+local disk. Objects above the inline Git threshold are stored through Crab's
+verified LFS content path; the committed Git blob is the canonical LFS pointer
+and the S3 attribute record retains the logical size and ETag. That same Git
+commit appends an exact tracking rule to the nearest `.gitattributes`,
 preserving any existing rules, so ordinary Git/LFS checkout interprets the
 pointer consistently. GET streams LFS content directly and reconstructs Crab
 pointers to temporary storage before opening the response. Successful writes are

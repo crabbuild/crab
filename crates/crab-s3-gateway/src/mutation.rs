@@ -18,10 +18,15 @@ use md5::Digest as _;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::{attributes, gateway::Repository};
+use crate::{
+    attributes,
+    gateway::Repository,
+    metrics::{Metrics, ScratchFailure, ScratchPurpose},
+};
 
 const LOCK_TTL: Duration = Duration::from_secs(300);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
+const PACK_SCRATCH_BASE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_QUEUED_WRITES_PER_REF: usize = 64;
 const WRITE_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REPREPARE_ATTEMPTS: usize = 8;
@@ -57,6 +62,8 @@ pub(crate) enum Error {
     Hash(#[from] gix_hash::hasher::Error),
     #[error("temporary pack I/O failed")]
     Io(#[from] std::io::Error),
+    #[error("temporary pack capacity is unavailable")]
+    Capacity(#[from] crate::metrics::ScratchCapacityError),
     #[error("generated pack validation failed")]
     Pack(#[from] crab_git::incoming_pack::IncomingPackError),
     #[error("generated pack preparation failed")]
@@ -122,17 +129,20 @@ pub(crate) struct Coordinator {
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
     admission: WriteAdmission,
+    metrics: Metrics,
 }
 
 impl Coordinator {
     pub(crate) fn new(
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
         options: crab_remote_git::RepositoryOptions,
+        metrics: Metrics,
     ) -> Self {
         Self {
             runtime,
             options,
             admission: WriteAdmission::default(),
+            metrics,
         }
     }
 
@@ -155,10 +165,14 @@ impl Coordinator {
                 repository,
                 Arc::clone(&self.runtime),
                 self.options,
-                branch,
-                path,
                 change,
-                principal,
+                ApplyRequest {
+                    branch,
+                    path,
+                    principal,
+                    plan_id: None,
+                    metrics: &self.metrics,
+                },
                 cancel,
             )
             .await
@@ -188,7 +202,7 @@ async fn apply(
     principal: &str,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
-    Coordinator::new(runtime, options)
+    Coordinator::new(runtime, options, Metrics::new().unwrap())
         .apply(repository, branch, path, change, principal, cancel)
         .await
 }
@@ -343,16 +357,15 @@ struct ApplyRequest<'a> {
     path: &'a crab_remote_git::GitPath,
     principal: &'a str,
     plan_id: Option<&'a str>,
+    metrics: &'a Metrics,
 }
 
 async fn apply_admitted(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    branch: &str,
-    path: &crab_remote_git::GitPath,
     change: Change,
-    principal: &str,
+    request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
     let completion_plan = match &change {
@@ -368,20 +381,7 @@ async fn apply_admitted(
         Change::Attributes { .. } | Change::Delete => None,
     };
     let Some(completion_plan) = completion_plan else {
-        return apply_with_gc_fences(
-            repository,
-            runtime,
-            options,
-            change,
-            ApplyRequest {
-                branch,
-                path,
-                principal,
-                plan_id: None,
-            },
-            cancel,
-        )
-        .await;
+        return apply_with_gc_fences(repository, runtime, options, change, request, cancel).await;
     };
     if let Some(outcome) = resolved_completion_plan(repository, &completion_plan).await? {
         return Ok(outcome);
@@ -400,10 +400,8 @@ async fn apply_admitted(
                 options,
                 change,
                 ApplyRequest {
-                    branch,
-                    path,
-                    principal,
                     plan_id: Some(&executing_plan_id),
+                    ..request
                 },
                 &scoped,
             )
@@ -503,10 +501,8 @@ async fn apply_with_fences(
             repository,
             Arc::clone(&runtime),
             options,
-            request.branch,
-            request.path,
             change.clone(),
-            request.principal,
+            request,
             cancel,
         )
         .await?;
@@ -563,10 +559,8 @@ async fn prepare_and_upload(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    branch: &str,
-    path: &crab_remote_git::GitPath,
     change: Change,
-    principal: &str,
+    request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Prepared> {
     let view = repository
@@ -576,7 +570,7 @@ async fn prepare_and_upload(
     let parent = view
         .remote()
         .refs()
-        .find(branch)
+        .find(request.branch)
         .map(|reference| reference.target);
     let operation = view
         .remote()
@@ -587,10 +581,10 @@ async fn prepare_and_upload(
             Some(parent) => Some(view.snapshot(&parent.to_string(), &operation).await?),
             None => None,
         };
-        let path_string = std::str::from_utf8(path.as_bytes())
+        let path_string = std::str::from_utf8(request.path.as_bytes())
             .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
         let current_attributes = match &snapshot {
-            Some(snapshot) => match snapshot.entry(path, &operation).await? {
+            Some(snapshot) => match snapshot.entry(request.path, &operation).await? {
                 Some(entry) if entry.kind == EntryKind::Blob => {
                     view.object_attributes(
                         repository,
@@ -608,9 +602,9 @@ async fn prepare_and_upload(
             view.remote(),
             &operation,
             parent,
-            path,
+            request.path,
             change,
-            principal,
+            request.principal,
             current_attributes.as_ref(),
         )
         .await
@@ -624,7 +618,7 @@ async fn prepare_and_upload(
         Build::Noop(outcome) => return Ok(Prepared::Noop(outcome)),
         Build::Commit(built) => *built,
     };
-    upload_built(repository, parent, built, cancel)
+    upload_built(repository, parent, built, cancel, request.metrics)
         .await
         .map(Prepared::Commit)
 }
@@ -634,8 +628,25 @@ async fn upload_built(
     parent: Option<ObjectId>,
     built: BuiltCommit,
     cancel: &CancellationToken,
+    metrics: &Metrics,
 ) -> Result<UploadedMutation> {
-    let (pack_owner, pack) = prepare_pack(built.objects.clone(), cancel).await?;
+    let scratch_bytes = pack_scratch_reservation(&built.objects);
+    let capacity = metrics.reserve_scratch(scratch_bytes)?;
+    let mut scratch = metrics.start_scratch(ScratchPurpose::GitPack);
+    scratch.reserve(scratch_bytes);
+    let prepared = prepare_pack(built.objects.clone(), cancel).await;
+    if matches!(
+        &prepared,
+        Err(Error::Io(_)
+            | Error::Pack(crab_git::incoming_pack::IncomingPackError::Io(_))
+            | Error::Prepare(crab_git::incoming_pack::PreparePackError::Io(_)))
+    ) {
+        scratch.record_failure(ScratchFailure::Write);
+    }
+    let (pack_owner, pack) = prepared?;
+    // The prepared files are now reflected by statvfs. Release their
+    // conservative pre-write claim while ownership metrics remain live.
+    drop(capacity);
     check_cancelled(cancel)?;
     let pack_id = pack.content_hash().to_hex().to_string();
     let visible_objects = built
@@ -731,7 +742,23 @@ async fn upload_built(
     };
     drop(pack);
     drop(pack_owner);
+    drop(scratch);
     Ok(uploaded)
+}
+
+fn pack_scratch_reservation(objects: &[(Kind, Vec<u8>)]) -> u64 {
+    let bytes = objects.iter().fold(0_u64, |total, (_, object)| {
+        total.saturating_add(object.len() as u64)
+    });
+    let sidecars = (objects.len() as u64).saturating_mul(64);
+    // Generated-pack preparation retains its source, quarantine pack,
+    // inflated/decoded spools, and two normalized packs at peak. The extra
+    // quarter plus fixed allowance covers zlib and index-sidecar overhead.
+    bytes
+        .saturating_mul(6)
+        .saturating_add(bytes / 4)
+        .saturating_add(sidecars)
+        .saturating_add(PACK_SCRATCH_BASE_BYTES)
 }
 
 async fn publish_prepared(
@@ -1344,6 +1371,20 @@ mod tests {
     use crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn generated_pack_reservation_covers_peak_temporary_copies() {
+        let objects = vec![
+            (Kind::Blob, vec![0; 64 * 1024]),
+            (Kind::Tree, vec![0; 1024]),
+        ];
+        let bytes = 64 * 1024 + 1024;
+
+        assert_eq!(
+            pack_scratch_reservation(&objects),
+            bytes * 6 + bytes / 4 + 2 * 64 + PACK_SCRATCH_BASE_BYTES
+        );
+    }
+
     async fn fixture() -> (
         Repository,
         Arc<crab_remote_git::RemoteGitRuntime>,
@@ -1902,6 +1943,7 @@ mod tests {
         let coordinator = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
         ));
         let mut writes = tokio::task::JoinSet::new();
         for index in 0..8 {
@@ -1978,6 +2020,7 @@ mod tests {
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
         );
         coordinated_put(
             &coordinator,

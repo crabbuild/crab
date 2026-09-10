@@ -81,8 +81,15 @@ capacity and alert before the configured headroom is exhausted. Alert when
 `crab_s3_gateway_scratch_filesystem_probe_failures_total`, and when
 `crab_s3_gateway_scratch_filesystem_available_bytes /
 crab_s3_gateway_scratch_filesystem_size_bytes` crosses the deployment's
-headroom threshold. The owned-byte metric attributes live gateway content;
-the filesystem gauges include every byte on the mount. Use
+headroom threshold. Alert on any increase in
+`crab_s3_gateway_scratch_capacity_rejections_total`; sustained `exhausted`
+means the replica needs more scratch or lower transfer concurrency, while
+`probe_error` means the mount is unsafe. The gateway reserves 10% of the
+filesystem, bounded to 64 MiB–1 GiB, and reports live pre-write claims through
+`crab_s3_gateway_scratch_pending_bytes`. The owned-byte metric attributes live
+gateway content; the filesystem gauges include every byte on the mount. Give
+each replica a private scratch mount because pending reservations coordinate
+within one process. Use
 `rate(crab_s3_gateway_scratch_bytes_written_total[5m])` to distinguish sustained
 spool traffic from a leaked or slow request.
 Alert on sustained increases in backend `auth`, `throttled`, `transient`, or

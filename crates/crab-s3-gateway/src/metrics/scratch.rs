@@ -2,7 +2,7 @@ use metrics::{Counter, Gauge, KeyName, Recorder, Unit};
 
 use super::{METADATA, describe_counter, describe_gauge, key};
 
-const PURPOSES: [&str; 2] = ["content_spool", "xet_reconstruction"];
+const PURPOSES: [&str; 3] = ["content_spool", "xet_reconstruction", "git_pack"];
 const FAILURES: [&str; 4] = ["create", "write", "flush", "read"];
 
 pub(super) struct ScratchMetrics {
@@ -20,6 +20,7 @@ struct PurposeMetrics {
 pub(crate) enum ScratchPurpose {
     ContentSpool,
     XetReconstruction,
+    GitPack,
 }
 
 #[derive(Clone, Copy)]

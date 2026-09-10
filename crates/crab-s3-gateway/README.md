@@ -110,8 +110,14 @@ PutObject, UploadPart, and copied source range uses a request-local temporary
 file. Large multipart completion rereads durable parts instead of creating an
 additional full-object spool, so its local scratch does not scale with the
 assembled object size. Deployments must still place `TMPDIR` on
-capacity-managed scratch storage sized for concurrent request bodies and reserve
-it independently from the request count budget.
+capacity-managed scratch storage sized for concurrent request bodies. The
+gateway atomically reserves declared bodies before reading them and reserves
+unknown streams in bounded increments. Xet reconstructions and generated Git
+packs share the same process-wide capacity gate. The gate retains 10% of the
+filesystem outside reservations, with a 64 MiB minimum and 1 GiB maximum, and
+returns retryable S3 `SlowDown` before admitted work can consume that headroom.
+Give each replica its own scratch mount; reservations are process-local while
+filesystem probes account for already materialized bytes from every writer.
 Registered multipart staging is bounded by the configured active-slot count
 times the per-upload byte budget. Transfers that have not registered yet add at
 most one 5 GiB payload per admitted transfer request; the transfer admission
@@ -164,10 +170,11 @@ admission capacity, queue pressure, and outcomes. It also reports aggregate
 multipart-maintenance cycles, completed lifecycle actions, failure reasons,
 cycle duration, and the last cycle in which every configured repository was
 healthy. Per-slot failures make that cycle degraded instead of disappearing
-into a successful sweep. Content-spool and Xet-reconstruction series expose
-currently owned temporary files and logical bytes, cumulative bytes written,
-and bounded create/write/flush/read failures. Ownership remains charged until
-the spool or response stream drops, including cancellation and disconnect.
+into a successful sweep. Content-spool, Xet-reconstruction, and generated-pack
+series expose currently owned temporary files and logical reserved bytes,
+cumulative bytes written, and bounded create/write/flush/read failures.
+Ownership remains charged until the spool, response stream, or pack upload
+drops, including cancellation and disconnect.
 Backend series cover the complete logical object-store call and response-stream
 lifetime for GET, HEAD, range, PUT, delete, list, copy, and multipart lifecycle
 operations. They expose fixed success/failure classes, active calls, duration,
@@ -178,6 +185,8 @@ the total, free, and process-available bytes seen at the configured process
 temporary directory on every scrape. A separate probe-success gauge and failure
 counter make mount loss distinguishable from genuine zero capacity; a failed
 probe clears all three capacity gauges rather than retaining stale values.
+Separate headroom, pending-reservation, and bounded rejection series expose
+capacity admission before the filesystem reports an I/O failure.
 Metric labels are fixed enums; they never contain
 repository names, refs, keys, upload IDs, principals, access keys, or secrets.
 The corresponding CLI checks are suitable for container and orchestration

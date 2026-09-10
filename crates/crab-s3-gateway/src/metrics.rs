@@ -20,6 +20,7 @@ mod backend;
 mod filesystem;
 mod scratch;
 
+pub(crate) use filesystem::{ScratchCapacityError, ScratchReservation};
 pub(crate) use scratch::{ScratchFailure, ScratchPurpose, ScratchUsage};
 
 const METHOD_COUNT: usize = 6;
@@ -248,6 +249,13 @@ impl Metrics {
 
     pub(crate) fn start_scratch(&self, purpose: ScratchPurpose) -> ScratchUsage {
         self.inner.scratch.start(purpose)
+    }
+
+    pub(crate) fn reserve_scratch(
+        &self,
+        bytes: u64,
+    ) -> Result<ScratchReservation, ScratchCapacityError> {
+        self.inner.filesystem.reserve(bytes)
     }
 
     pub(crate) fn storage_observer(&self) -> Arc<dyn crab_storage::StorageObserver> {

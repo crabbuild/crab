@@ -5,7 +5,9 @@ use futures_util::StreamExt as _;
 use s3s::dto::StreamingBlob;
 use tokio::io::{AsyncWriteExt as _, BufWriter};
 
-use crate::metrics::{Metrics, ScratchFailure, ScratchPurpose, ScratchUsage};
+use crate::metrics::{
+    Metrics, ScratchCapacityError, ScratchFailure, ScratchPurpose, ScratchReservation, ScratchUsage,
+};
 
 pub(crate) const MAX_PUT_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub(crate) const MAX_MULTIPART_OBJECT_BYTES: u64 = 50_000_000_000_000;
@@ -26,6 +28,8 @@ pub(crate) enum Error {
     Body(#[source] s3s::StdError),
     #[error("content spool I/O failed")]
     Io(#[from] std::io::Error),
+    #[error("content spool capacity is unavailable")]
+    Capacity(#[from] ScratchCapacityError),
 }
 
 pub(crate) struct Digests {
@@ -126,11 +130,13 @@ pub(crate) struct SpoolWriter {
     path: PathBuf,
     file: BufWriter<tokio::fs::File>,
     digester: Digester,
+    reservation: ScratchReservation,
     scratch: ScratchUsage,
 }
 
 impl SpoolWriter {
-    pub(crate) async fn new(metrics: &Metrics) -> Result<Self, Error> {
+    pub(crate) async fn new(metrics: &Metrics, expected_bytes: Option<u64>) -> Result<Self, Error> {
+        let reservation = metrics.reserve_scratch(expected_bytes.unwrap_or(0))?;
         let scratch = metrics.start_scratch(ScratchPurpose::ContentSpool);
         let directory = tempfile::tempdir().inspect_err(|_| {
             scratch.record_failure(ScratchFailure::Create);
@@ -144,6 +150,7 @@ impl SpoolWriter {
             path,
             file: BufWriter::new(file),
             digester: Digester::new(),
+            reservation,
             scratch,
         })
     }
@@ -151,12 +158,14 @@ impl SpoolWriter {
     pub(crate) async fn write(&mut self, bytes: &[u8], max_bytes: u64) -> Result<(), Error> {
         self.digester.write(bytes, max_bytes)?;
         let size = u64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
+        let capacity = self.reservation.reserve_write(size)?;
         self.scratch.reserve(size);
         if let Err(error) = self.file.write_all(bytes).await {
             self.scratch.record_failure(ScratchFailure::Write);
             return Err(error.into());
         }
         self.scratch.record_written(size);
+        drop(capacity);
         Ok(())
     }
 
@@ -193,7 +202,7 @@ pub(crate) async fn spool_body(
     if declared.is_some_and(|length| length > max_bytes) {
         return Err(Error::TooLarge);
     }
-    let mut writer = SpoolWriter::new(metrics).await?;
+    let mut writer = SpoolWriter::new(metrics, declared).await?;
     if let Some(mut body) = body {
         while let Some(chunk) = body.next().await {
             writer
@@ -252,7 +261,7 @@ mod tests {
         use sha1::Digest as _;
 
         let metrics = Metrics::new().unwrap();
-        let mut writer = SpoolWriter::new(&metrics).await.unwrap();
+        let mut writer = SpoolWriter::new(&metrics, None).await.unwrap();
         writer.write(b"streamed ", 16).await.unwrap();
         writer.write(b"content", 16).await.unwrap();
         let spool = writer.finish().await.unwrap();
@@ -286,10 +295,27 @@ mod tests {
     #[tokio::test]
     async fn spool_writer_rejects_content_over_the_operation_limit() {
         let metrics = Metrics::new().unwrap();
-        let mut writer = SpoolWriter::new(&metrics).await.unwrap();
+        let mut writer = SpoolWriter::new(&metrics, None).await.unwrap();
         assert!(matches!(
             writer.write(b"too large", 8).await,
             Err(Error::TooLarge)
+        ));
+    }
+
+    #[tokio::test]
+    async fn declared_body_reserves_capacity_before_polling_the_stream() {
+        let metrics = Metrics::new().unwrap();
+        let body = StreamingBlob::wrap(futures_util::stream::poll_fn(
+            |_| -> std::task::Poll<Option<std::result::Result<Bytes, std::io::Error>>> {
+                panic!("body must not be polled when its capacity reservation is rejected")
+            },
+        ));
+
+        let result = spool_body(Some(body), Some(i64::MAX), u64::MAX, &metrics).await;
+
+        assert!(matches!(
+            result,
+            Err(Error::Capacity(ScratchCapacityError::Exhausted))
         ));
     }
 
@@ -301,7 +327,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             metrics.clone(),
         );
-        let mut writer = SpoolWriter::new(&metrics).await.unwrap();
+        let mut writer = SpoolWriter::new(&metrics, None).await.unwrap();
         writer.write(b"scratch", 16).await.unwrap();
         let spool = writer.finish().await.unwrap();
 

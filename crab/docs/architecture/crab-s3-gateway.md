@@ -1425,10 +1425,14 @@ multipart-reconciliation metrics, with
 packaged-image qualification proving the scrape contract and that request or
 credential identities are absent. The same endpoint reports the process view
 of scratch-filesystem total, free, and available capacity, plus explicit probe
-health; failed probes clear stale capacity. Live EKS, external TLS, independent
-Git-history proof, provider wire-attempt metrics, Kubernetes policy-quota
-telemetry, alert delivery, ECS, and broader operations evidence remain
-requirements, not qualified deployment support. Provider-native or
+health; failed probes clear stale capacity. Request-body spools, Xet range
+reconstruction, and generated Git packs now share atomic pre-write capacity
+admission. Declared bodies reserve before consumption, unknown streams reserve
+in bounded increments, and a 10% headroom policy bounded to 64 MiB–1 GiB turns
+pressure or mount loss into retryable `SlowDown`. Live EKS, external TLS,
+independent Git-history proof, provider wire-attempt metrics, Kubernetes
+policy-quota telemetry, alert delivery, ECS, and broader operations evidence
+remain requirements, not qualified deployment support. Provider-native or
 load-balancer telemetry must cover wire attempts because the application
 metrics intentionally measure logical object-store calls across their complete
 response-stream lifetime. Kubelet telemetry remains authoritative for an
