@@ -273,9 +273,9 @@ Phase-owned artifacts:
   image against RustFS with an unchanged signed AWS client. Qualification-report
   production and validation remain planned.
 - Phase 9: the crate README, pinned image, example configuration, separate
-  management probes and container runtime smoke exist. Compose, Helm, ECS and
-  full operations assets below remain planned and are not yet supported
-  deployment profiles.
+  management probes, container runtime smoke and isolated Compose profile
+  exist. Helm, ECS and full operations assets below remain planned and are not
+  yet supported deployment profiles.
 
 Proposed runner interface, to implement in phase 2 and extend per phase:
 
@@ -1412,10 +1412,11 @@ Create `crates/crab-s3-gateway/deploy/` with:
 - `operations.md` covering monitoring, scaling, rotation, cleanup, incident
   response, backup/restore and upgrade/rollback for all three environments.
 
-Current implementation covers the locked `deploy/Dockerfile`,
-`deploy/gateway.example.toml`, liveness/readiness contract and packaged-image
-RustFS smoke. The remaining assets in this list are requirements, not existing
-or qualified deployment support.
+Current implementation covers the locked `deploy/Dockerfile`, example and
+Compose configurations, liveness/readiness contract, packaged-image RustFS
+smoke and Compose lifecycle smoke. The remaining Helm, ECS and operations
+assets in this list are requirements, not existing or qualified deployment
+support.
 
 Build a locked, multi-stage image with the executable as PID 1, non-root user,
 read-only root filesystem, explicit writable scratch/cache directories and

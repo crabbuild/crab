@@ -290,6 +290,59 @@ jobs:
           docker stop --time 35 crab-s3-gateway >/dev/null
           test "$(docker inspect crab-s3-gateway --format '{{.State.ExitCode}}')" = "0"
 
+      - name: Qualify Docker Compose asset
+        env:
+          CRAB_S3_GATEWAY_CONFIG: ${{ github.workspace }}/crates/crab-s3-gateway/deploy/compose.gateway.toml
+          CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
+          CRAB_S3_GATEWAY_MANAGEMENT_PORT: "18181"
+          CRAB_S3_GATEWAY_PORT: "18180"
+          CRAB_S3_GATEWAY_SCRATCH_SIZE: 128m
+          CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
+          RUSTFS_PORT: "19100"
+        run: |
+          set -euo pipefail
+          compose=crates/crab-s3-gateway/deploy/compose.yaml
+          docker compose -f "${compose}" config --quiet
+          docker compose -f "${compose}" up --detach rustfs
+          for attempt in $(seq 1 60); do
+            if AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+              AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              AWS_DEFAULT_REGION=us-east-1 \
+              aws --endpoint-url http://127.0.0.1:19100 s3api list-buckets >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "Compose RustFS did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 \
+            aws --endpoint-url http://127.0.0.1:19100 \
+            s3api create-bucket --bucket crab-s3-gateway-qualification >/dev/null
+          docker compose -f "${compose}" --profile initialize run --rm gateway-init
+          docker compose -f "${compose}" up --detach gateway
+          for attempt in $(seq 1 60); do
+            if docker compose -f "${compose}" exec --no-TTY gateway \
+              crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "Compose gateway did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 \
+            aws --endpoint-url http://127.0.0.1:18180 s3api list-buckets \
+              --query 'Buckets[?Name==`gateway-repository`].Name | [0]' \
+              --output text | grep -Fx gateway-repository
+          docker compose -f "${compose}" stop gateway
+
       - name: Print service logs after failure
         if: failure()
         run: |
@@ -298,7 +351,13 @@ jobs:
 
       - name: Clean up services
         if: always()
+        env:
+          CRAB_S3_GATEWAY_CONFIG: ${{ github.workspace }}/crates/crab-s3-gateway/deploy/compose.gateway.toml
+          CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
+          CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
         run: |
+          docker compose -f crates/crab-s3-gateway/deploy/compose.yaml \
+            down --volumes >/dev/null 2>&1 || true
           docker rm --force \
             crab-s3-gateway crab-s3-gateway-unready crab-s3-gateway-rustfs \
             >/dev/null 2>&1 || true

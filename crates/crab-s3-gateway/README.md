@@ -185,6 +185,8 @@ Build the checked image from the repository root with:
 docker build -f crates/crab-s3-gateway/deploy/Dockerfile -t crab-s3-gateway .
 ```
 
+The isolated Docker Compose qualification procedure is in `deploy/README.md`.
+
 Run it with a read-only root filesystem, a capacity-limited writable mount at
 `/var/lib/crab/tmp`, the configuration mounted at
 `/etc/crab/s3-gateway.toml`, and credential files mounted read-only for UID/GID
