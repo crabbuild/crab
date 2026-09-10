@@ -30,19 +30,12 @@ impl ClientBuilder {
         self
     }
 
-    /// Select exact Git and Crab executables for local repository workflows.
+    /// Configure exact tools and execution policy for local repository workflows.
     #[cfg(feature = "local")]
     #[must_use]
-    pub fn local_tools(mut self, tools: crate::LocalTools) -> Self {
-        self.local_tools = Some(tools);
-        self
-    }
-
-    /// Select whether local workflows may execute repository-provided code.
-    #[cfg(feature = "local")]
-    #[must_use]
-    pub fn local_execution_policy(mut self, policy: crate::LocalExecutionPolicy) -> Self {
-        self.local_execution_policy = policy;
+    pub fn local(mut self, options: crate::local::Options) -> Self {
+        self.local_tools = Some(options.tools);
+        self.local_execution_policy = options.execution_policy;
         self
     }
 

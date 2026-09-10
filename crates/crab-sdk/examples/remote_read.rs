@@ -1,4 +1,5 @@
-use crab_sdk::{Client, DirectStoreOptions, GitPath, RepositoryLocator, Revision};
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, GitPath, RepositoryLocator, Revision};
 use std::io::Write;
 
 #[tokio::main]
@@ -34,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder = Client::builder().direct_store(DirectStoreOptions::s3_from_env(bucket)?);
     #[cfg(feature = "content")]
     let builder = match cache {
-        [directory, rest @ ..] => builder.content_cache(crab_sdk::ContentCache::new(
+        [directory, rest @ ..] => builder.content_cache(crab_sdk::storage::ContentCache::new(
             std::path::Path::new(directory),
             rest.first()
                 .map(|value| value.parse::<u64>())
@@ -53,14 +54,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let client = builder.build()?;
     let result = async {
-        let repository = client.open_remote(locator).await?;
-        let snapshot = repository.snapshot(revision).await?;
+        let repository = client.open(crab_sdk::OpenOptions::remote(locator)).await?;
+        let snapshot = repository.remote()?.snapshot(revision).await?;
         let (size, hash) = if mode == "git" {
             let bytes = snapshot.read_blob(path).await?;
             (bytes.len() as u64, blake3::hash(&bytes))
         } else {
-            let options = crab_sdk::ReadOptions::default()
-                .with_limits(crab_sdk::ReadLimits {
+            let options = crab_sdk::operation::ReadOptions::default()
+                .with_limits(crab_sdk::operation::ReadLimits {
                     max_fetched_bytes: 4 * 1024 * 1024 * 1024,
                     ..Default::default()
                 })?

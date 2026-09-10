@@ -3,12 +3,15 @@ use std::path::{Path, PathBuf};
 
 use crate::{Client, Error, ErrorKind, OperationOptions, RepositoryLocator, Result};
 
+#[path = "local/edit.rs"]
 mod edit;
 pub use edit::{
     CheckoutOptions, ConflictState, HydrationState, IntegrationId, IntegrationKind,
     LocalCommitOptions, LocalStatus, PullMode, PullOptions, PullOutcome, StageOutcome, StatusEntry,
 };
+#[path = "local/fetch.rs"]
 mod fetch;
+#[path = "local/push.rs"]
 mod push;
 pub use push::{LocalPushOutcome, LocalPushRecoveryToken, PreparedPush, PushOptions, PushRefspec};
 
@@ -450,16 +453,7 @@ impl Client {
             .await
     }
 
-    /// Open an existing working tree without network access or mutation.
-    pub fn open_local(
-        &self,
-        path: impl AsRef<Path>,
-    ) -> crate::Request<'_, LocalRepository, OperationOptions> {
-        let path = path.as_ref().to_owned();
-        crate::Request::new(move |options| Box::pin(self.open_local_with_options(path, options)))
-    }
-
-    async fn open_local_with_options(
+    pub(crate) async fn open_local_with_options(
         &self,
         path: PathBuf,
         options: OperationOptions,
@@ -481,7 +475,7 @@ impl Client {
     }
 
     /// Clone through the selected tools into a collision-safe destination.
-    pub fn clone_repository(
+    pub(crate) fn clone_repository(
         &self,
         locator: RepositoryLocator,
         destination: impl AsRef<Path>,
@@ -922,7 +916,7 @@ async fn discover_locator(
                 return Ok(Some(RepositoryLocator::from_managed_owner(repository)));
             }
             Ok(crab_git::RepositoryLocator::Direct(_)) => {}
-            Err(source) => return Err(crate::managed::managed_repository_error(source)),
+            Err(source) => return Err(crate::managed_impl::managed_repository_error(source)),
         }
     }
     let Some(store) = client.0.local_store.as_ref() else {

@@ -1,6 +1,7 @@
 #![cfg(feature = "remote")]
 
-use crab_sdk::{Client, DirectStoreOptions, ErrorKind, RepositoryLocator, Revision};
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, ErrorKind, RepositoryLocator, Revision};
 use futures_util::TryStreamExt;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -10,7 +11,7 @@ async fn sdk_explicit_s3_ignores_conflicting_environment() {
     let endpoint = std::env::var("CRAB_SDK_TEST_S3_ENDPOINT").unwrap();
     let access = std::env::var("CRAB_SDK_TEST_S3_ACCESS_KEY_ID").unwrap();
     let secret = std::env::var("CRAB_SDK_TEST_S3_SECRET_ACCESS_KEY").unwrap();
-    let options = crab_sdk::S3Options::new(&bucket, "us-east-1", &access, &secret)
+    let options = crab_sdk::storage::S3Options::new(&bucket, "us-east-1", &access, &secret)
         .unwrap()
         .with_endpoint(&endpoint);
     if let Ok(prefix) = std::env::var("CRAB_SDK_EXPLICIT_CHILD_PREFIX") {
@@ -19,10 +20,12 @@ async fn sdk_explicit_s3_ignores_conflicting_environment() {
             .build()
             .unwrap();
         let repository = client
-            .open_remote(RepositoryLocator::new(&prefix).unwrap())
+            .open(crab_sdk::OpenOptions::remote(
+                RepositoryLocator::new(&prefix).unwrap(),
+            ))
             .await
             .unwrap();
-        let refs = repository.refs().await.unwrap();
+        let refs = repository.remote().unwrap().refs().await.unwrap();
         client.close().await.unwrap();
         assert_eq!(
             (refs.head(), refs.entries().len()),
@@ -141,11 +144,15 @@ async fn sdk_s3_read_preserves_empty_manifest() {
         .build()
         .unwrap();
     let repository = client
-        .open_remote(RepositoryLocator::new(&prefix).unwrap())
+        .open(crab_sdk::OpenOptions::remote(
+            RepositoryLocator::new(&prefix).unwrap(),
+        ))
         .await
         .unwrap();
-    let refs = repository.refs().await.unwrap();
+    let refs = repository.remote().unwrap().refs().await.unwrap();
     let missing = repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .err()

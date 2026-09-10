@@ -10,9 +10,9 @@ use crab_metadata::manifest_store::{
 use crab_metadata::manifests::{
     BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
 };
-use crab_sdk::{
-    Client, DirectStoreOptions, GitPath, RemoteRepository, RepositoryLocator, Revision, Snapshot,
-};
+use crab_sdk::remote::Snapshot;
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, GitPath, Repository, RepositoryLocator, Revision};
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use sha2::Digest as _;
@@ -22,7 +22,7 @@ use super::{copy_published_objects, git, publish_catalog};
 pub struct ReadFixture {
     pub directory: tempfile::TempDir,
     pub client: Client,
-    pub repository: RemoteRepository,
+    pub repository: Repository,
     pub snapshot: Snapshot,
     pub path: GitPath,
     pub original: Bytes,
@@ -203,10 +203,14 @@ impl ReadFixture {
             .build()
             .unwrap();
         let repository = client
-            .open_remote(RepositoryLocator::new("repository").unwrap())
+            .open(crab_sdk::OpenOptions::remote(
+                RepositoryLocator::new("repository").unwrap(),
+            ))
             .await
             .unwrap();
         let snapshot = repository
+            .remote()
+            .unwrap()
             .snapshot(Revision::branch("main").unwrap())
             .await
             .unwrap();
@@ -229,7 +233,7 @@ impl ReadFixture {
         }
     }
 
-    pub async fn advance(&mut self) -> RemoteRepository {
+    pub async fn advance(&mut self) -> Repository {
         let layout = StoreLayout::new(self.store.clone(), "repository".to_owned());
         let (_, etag) = read_manifest(&self.store, &layout).await.unwrap();
         self.manifest.generation += 1;
@@ -249,6 +253,6 @@ impl ReadFixture {
             &mut Default::default(),
         )
         .await;
-        self.repository.refresh().await.unwrap()
+        self.repository.remote().unwrap().refresh().await.unwrap()
     }
 }

@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use crab_sdk::{
-    Client, CommitIdentity, CommitOptions, ContentCache, DirectStoreOptions, EntryMode, FileEdit,
-    GitPath, MutationOutcome, OperationOptions, RefBatch, RefUpdate, RepositoryLocator, Revision,
+use crab_sdk::remote::EntryMode;
+use crab_sdk::remote::write::{
+    CommitIdentity, CommitOptions, FileEdit, MutationOutcome, RefBatch, RefUpdate,
 };
+use crab_sdk::storage::{ContentCache, DirectStoreOptions};
+use crab_sdk::{Client, GitPath, RepositoryLocator, Revision};
 use sha2::{Digest as _, Sha256};
 use tokio::io::AsyncReadExt as _;
 
@@ -65,8 +67,11 @@ async fn run(
     client
         .initialize_remote(locator.clone(), "refs/heads/main")
         .await?;
-    let repository = client.open_remote(locator.clone()).await?;
-    if !repository.refs().await?.entries().is_empty() {
+    let repository = client
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
+        .await?;
+    let remote = repository.remote()?;
+    if !remote.refs().await?.entries().is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "repository must have no refs",
@@ -78,7 +83,7 @@ async fn run(
     let text_size = tokio::fs::metadata(text).await?.len();
     let large_size = tokio::fs::metadata(large).await?.len();
     let large_digest = file_digest(large).await?;
-    let initial = repository
+    let initial = remote
         .prepare_commit(
             CommitOptions::initial(
                 "refs/heads/main",
@@ -107,29 +112,31 @@ async fn run(
                 )?,
             ],
             scratch.clone(),
-            OperationOptions::default(),
         )
         .await?;
     let first = initial
         .commit_id()
         .ok_or("prepared commit has no identity")?;
-    committed(initial.execute(OperationOptions::default()).await?)?;
+    committed(initial.execute().await?)?;
 
-    let tag = client
-        .open_remote(locator.clone())
-        .await?
+    let repository = client
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
+        .await?;
+    let tag = repository
+        .remote()?
         .prepare_ref_update(
             RefBatch::new(vec![RefUpdate::create("refs/tags/v1", first)?])?,
             scratch.clone(),
-            OperationOptions::default(),
         )
         .await?;
-    committed(tag.execute(OperationOptions::default()).await?)?;
+    committed(tag.execute().await?)?;
 
     let updated = b"updated remotely\n".to_vec();
-    let second = client
-        .open_remote(locator.clone())
-        .await?
+    let repository = client
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
+        .await?;
+    let second = repository
+        .remote()?
         .prepare_commit(
             CommitOptions::new(
                 first,
@@ -149,28 +156,28 @@ async fn run(
                 FileEdit::delete(GitPath::new("obsolete.txt")?)?,
             ],
             scratch.clone(),
-            OperationOptions::default(),
         )
         .await?;
     let second_id = second
         .commit_id()
         .ok_or("prepared commit has no identity")?;
-    committed(second.execute(OperationOptions::default()).await?)?;
+    committed(second.execute().await?)?;
 
-    let delete_tag = client
-        .open_remote(locator.clone())
-        .await?
+    let repository = client
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
+        .await?;
+    let delete_tag = repository
+        .remote()?
         .prepare_ref_update(
             RefBatch::new(vec![RefUpdate::delete("refs/tags/v1", first)?])?,
             scratch,
-            OperationOptions::default(),
         )
         .await?;
-    committed(delete_tag.execute(OperationOptions::default()).await?)?;
+    committed(delete_tag.execute().await?)?;
 
-    let snapshot = client
-        .open_remote(locator)
-        .await?
+    let repository = client.open(crab_sdk::OpenOptions::remote(locator)).await?;
+    let snapshot = repository
+        .remote()?
         .snapshot(Revision::commit(second_id))
         .await?;
     if snapshot

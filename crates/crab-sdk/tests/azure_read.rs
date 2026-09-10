@@ -1,11 +1,13 @@
 #![cfg(feature = "remote")]
 
-use crab_sdk::{AzureOptions, Client, DirectStoreOptions, ErrorKind, RepositoryLocator};
 #[cfg(feature = "write")]
-use crab_sdk::{
-    CommitIdentity, CommitOptions, EntryMode, FileEdit, GitPath, MutationOutcome, OperationOptions,
-    Revision,
-};
+use crab_sdk::remote::EntryMode;
+#[cfg(feature = "write")]
+use crab_sdk::remote::write::{CommitIdentity, CommitOptions, FileEdit, MutationOutcome};
+use crab_sdk::storage::{AzureOptions, DirectStoreOptions};
+use crab_sdk::{Client, ErrorKind, RepositoryLocator};
+#[cfg(feature = "write")]
+use crab_sdk::{GitPath, Revision};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -25,7 +27,9 @@ async fn explicit_azure_requests_ignore_environment_and_report_missing_repositor
             .build()
             .unwrap();
         let error = client
-            .open_remote(RepositoryLocator::new("missing").unwrap())
+            .open(crab_sdk::OpenOptions::remote(
+                RepositoryLocator::new("missing").unwrap(),
+            ))
             .await
             .err()
             .unwrap();
@@ -167,8 +171,10 @@ async fn live_azure_read_is_byte_exact_and_read_only() {
         CommitIdentity::new("SDK qualification", "sdk@example.invalid", 1_700_000_000, 0).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let prepared = seed
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_commit(
             CommitOptions::initial(
@@ -188,12 +194,11 @@ async fn live_azure_read_is_byte_exact_and_read_only() {
                 .unwrap(),
             ],
             scratch.path().to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     assert!(matches!(
-        prepared.execute(OperationOptions::default()).await.unwrap(),
+        prepared.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     seed.close().await.unwrap();
@@ -204,8 +209,13 @@ async fn live_azure_read_is_byte_exact_and_read_only() {
         ))
         .build()
         .unwrap();
-    let repository = client.open_remote(locator).await.unwrap();
+    let repository = client
+        .open(crab_sdk::OpenOptions::remote(locator))
+        .await
+        .unwrap();
     let read = repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap()

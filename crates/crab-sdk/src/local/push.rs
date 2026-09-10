@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{LocalRepository, ensure_supported_mutation, local_error};
 
+#[path = "push/content.rs"]
 mod content;
+#[path = "push/git.rs"]
 mod git;
 use crate::{
     Client, CommitReceipt, Error, ErrorKind, MutationOutcome, ObjectId, OperationOptions,
@@ -266,7 +268,11 @@ impl PreparedPush {
     }
 
     /// Execute this exact source OID and destination under its durable plan ID.
-    pub async fn execute(self, options: OperationOptions) -> Result<LocalPushOutcome> {
+    pub fn execute(self) -> crate::Request<'static, LocalPushOutcome, OperationOptions> {
+        crate::Request::new(move |options| Box::pin(self.execute_with_options(options)))
+    }
+
+    async fn execute_with_options(self, options: OperationOptions) -> Result<LocalPushOutcome> {
         let recovery = self.recovery;
         if recovery.0.dry_run {
             validate_push(&self.client, &recovery, options).await?;
@@ -287,7 +293,7 @@ impl PreparedPush {
                         "prepared local push lost its Crab mutation",
                     )
                 })?;
-                outcome(mutation.execute(options).await?, recovery)
+                outcome(mutation.execute().with_options(options).await?, recovery)
             }
             None => git::execute(&self.client, recovery, false, options).await,
         }
@@ -582,7 +588,7 @@ impl LocalRepository {
 
 impl Client {
     /// Resume an unattempted prepared push or reconcile its historical attempt.
-    pub async fn resume_push(
+    pub(crate) async fn resume_push(
         &self,
         recovery: LocalPushRecoveryToken,
         scratch: std::path::PathBuf,
@@ -598,7 +604,7 @@ impl Client {
     }
 
     /// Reconcile a restarted local push without replaying it.
-    pub async fn reconcile_push(
+    pub(crate) async fn reconcile_push(
         &self,
         recovery: LocalPushRecoveryToken,
         options: OperationOptions,
@@ -838,4 +844,5 @@ fn metadata_error(source: crab_metadata::error::MetadataError) -> Error {
 }
 
 #[cfg(all(test, unix))]
+#[path = "push/tests.rs"]
 mod tests;

@@ -55,7 +55,11 @@ impl PreparedMutation {
     ///
     /// Dropping the future cancels and drains the worker; retain the token to
     /// recover its outcome. Known commitment survives deadlines and cleanup.
-    pub async fn execute(self, options: OperationOptions) -> Result<MutationOutcome> {
+    pub fn execute(self) -> crate::Request<'static, MutationOutcome, OperationOptions> {
+        crate::Request::new(move |options| Box::pin(self.execute_with_options(options)))
+    }
+
+    async fn execute_with_options(self, options: OperationOptions) -> Result<MutationOutcome> {
         let Self {
             client,
             token,
@@ -260,7 +264,7 @@ async fn execute_managed(
                     &cancel,
                 )
                 .await
-                .map_err(crate::managed::managed_repository_error)?;
+                .map_err(crate::managed_impl::managed_repository_error)?;
             if resolved.store.target_identity() != Some(recovery.placement()) {
                 return Err(Error::new(
                     ErrorKind::Conflict,
@@ -292,7 +296,7 @@ async fn execute_managed(
                     })
                 }
                 Err(source) => {
-                    let error = crate::managed::managed_repository_error(source);
+                    let error = crate::managed_impl::managed_repository_error(source);
                     match error.kind() {
                         ErrorKind::Transport | ErrorKind::Timeout | ErrorKind::Cancelled => {
                             Ok(MutationOutcome::Indeterminate { recovery })
@@ -531,7 +535,7 @@ pub(super) async fn finish_preparation(
                 cancel,
             )
             .await
-            .map_err(crate::managed::managed_repository_error)?;
+            .map_err(crate::managed_impl::managed_repository_error)?;
         let staging = managed_push
             .prepared
             .staging_grant
@@ -976,7 +980,7 @@ impl Client {
     ///
     /// Prior attempts are reconciled without replay, including when reads are indexing.
     /// An unattempted plan is revalidated under its operation lease before execution.
-    pub async fn resume_mutation(
+    pub(crate) async fn resume_mutation(
         &self,
         token: RecoveryToken,
         scratch: PathBuf,
@@ -1046,7 +1050,7 @@ impl Client {
     ///
     /// Read-only lookup requires current storage credentials and matching placement.
     /// Missing proof remains indeterminate, including before any recorded attempt.
-    pub async fn reconcile(
+    pub(crate) async fn reconcile(
         &self,
         token: RecoveryToken,
         options: OperationOptions,

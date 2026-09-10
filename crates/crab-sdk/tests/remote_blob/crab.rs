@@ -1,5 +1,7 @@
 use bytes::Bytes;
-use crab_sdk::{GitPath, ReadOptions, Snapshot};
+use crab_sdk::GitPath;
+use crab_sdk::operation::ReadOptions;
+use crab_sdk::remote::Snapshot;
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use crab_xet::shard::{
@@ -77,7 +79,7 @@ impl Fixture {
     pub async fn verify_corruption(
         &self,
         storage: &Store,
-        options: crab_sdk::DirectStoreOptions,
+        options: crab_sdk::storage::DirectStoreOptions,
         layout: &StoreLayout<Store>,
         cache: &std::path::Path,
     ) {
@@ -91,12 +93,17 @@ impl Fixture {
         std::fs::create_dir(cache).unwrap();
         let client = crab_sdk::Client::builder()
             .direct_store(options)
-            .content_cache(crab_sdk::ContentCache::new(cache, 4 * 1024 * 1024).unwrap())
+            .content_cache(crab_sdk::storage::ContentCache::new(cache, 4 * 1024 * 1024).unwrap())
             .build()
             .unwrap();
-        let snapshot = client
-            .open_remote(crab_sdk::RepositoryLocator::new("repository").unwrap())
+        let repository = client
+            .open(crab_sdk::OpenOptions::remote(
+                crab_sdk::RepositoryLocator::new("repository").unwrap(),
+            ))
             .await
+            .unwrap();
+        let snapshot = repository
+            .remote()
             .unwrap()
             .snapshot(crab_sdk::Revision::branch("main").unwrap())
             .await
@@ -183,26 +190,34 @@ pub(super) async fn verify(snapshot: &Snapshot, original: &[u8]) {
     stream.close().await.unwrap();
 }
 
-pub(super) async fn verify_limits(options: crab_sdk::DirectStoreOptions, cache: &std::path::Path) {
+pub(super) async fn verify_limits(
+    options: crab_sdk::storage::DirectStoreOptions,
+    cache: &std::path::Path,
+) {
     std::fs::create_dir(cache).unwrap();
     let client = crab_sdk::Client::builder()
         .direct_store(options)
-        .content_cache(crab_sdk::ContentCache::new(cache, 4 * 1024 * 1024).unwrap())
+        .content_cache(crab_sdk::storage::ContentCache::new(cache, 4 * 1024 * 1024).unwrap())
         .build()
         .unwrap();
-    let snapshot = client
-        .open_remote(crab_sdk::RepositoryLocator::new("repository").unwrap())
+    let repository = client
+        .open(crab_sdk::OpenOptions::remote(
+            crab_sdk::RepositoryLocator::new("repository").unwrap(),
+        ))
         .await
+        .unwrap();
+    let snapshot = repository
+        .remote()
         .unwrap()
         .snapshot(crab_sdk::Revision::branch("main").unwrap())
         .await
         .unwrap();
     for limits in [
-        crab_sdk::ReadLimits {
+        crab_sdk::operation::ReadLimits {
             max_fetched_bytes: 1,
             ..Default::default()
         },
-        crab_sdk::ReadLimits {
+        crab_sdk::operation::ReadLimits {
             max_storage_requests: 1,
             ..Default::default()
         },

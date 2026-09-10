@@ -1,28 +1,49 @@
 # Managed repositories
 
-The `managed` feature resolves logical `crab://` repository URLs through the installed Crab profile and encrypted token cache. Read grants are scoped to reads. Local protected push obtains a separate server-authorized push session through the compatible Crab transport.
+The `managed` feature resolves logical `crab://` locators through the
+installed Crab profile and encrypted token cache. Remote reads receive
+read-scoped grants. Local protected push obtains a distinct authorized session.
 
 ```rust
-use crab_sdk::{Client, ManagedOptions, RepositoryLocator};
+use crab_sdk::managed::Options;
+use crab_sdk::{Client, OpenOptions, RepositoryLocator};
 
 let client = Client::builder()
-    .managed(ManagedOptions::new(token_cache_directory)?)
+    .managed(Options::new(token_cache_directory)?)
     .build()?;
-let repository = client
-    .open_remote(RepositoryLocator::managed(
-        "api.crab.build",
-        "organization",
-        "repository",
-    )?)
-    .await?;
+let locator = RepositoryLocator::managed(
+    "api.crab.build",
+    "organization",
+    "repository",
+)?;
+let repository = client.open(OpenOptions::remote(locator)).await?;
+let remote = repository.remote()?;
 ```
 
-Grant refresh and revocation follow the managed authentication owner. Cache namespaces include the client credential scope, logical repository, and physical placement identity, so one principal or placement cannot reuse another's cached authorization.
+A managed locator uses the same `Client::open` and `Client::clone_local`
+paths as other locators. The caller does not receive a third repository type.
+Grant refresh, revocation, placement changes, and cache isolation stay inside
+the managed authentication owner.
 
 ## Repository lifecycle
 
-`Client::managed_repositories()` validates service capabilities and returns the lifecycle client. It supports bounded cursor pagination plus create, rename, archive, and restore. Create requires a caller-persisted idempotency key. Rename, archive, and restore require the last observed repository revision.
+Administration is client-scoped because list and create do not act on an opened
+repository:
 
-Lifecycle results use the service's returned canonical URL. Applications should replace stored locators after a rename instead of constructing a new URL themselves.
+```rust
+let managed = client.managed().await?;
+let page = managed.list("organization", None, 100).await?;
+let created = managed
+    .create("organization", "models", persisted_idempotency_key)
+    .await?;
+```
 
-An explicit in-memory bearer token can serve remote SDK operations, but it cannot be delegated to local Crab filter processes. Use the encrypted token cache for managed local workflows.
+`managed::Managed` provides list, create, rename, archive, and restore as lazy
+request builders. Create requires a caller-persisted idempotency key. Rename,
+archive, and restore also require the last observed revision and an idempotency
+key.
+
+Lifecycle results use the service's canonical URL. Replace stored locators after
+a rename instead of constructing a new URL. An in-memory bearer token can serve
+remote operations, but it cannot be delegated to local Crab filter processes;
+use the encrypted token cache for managed local workflows.

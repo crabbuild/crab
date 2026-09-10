@@ -5,9 +5,9 @@ pub mod support;
 use std::future::IntoFuture;
 use std::time::Duration;
 
-use crab_sdk::{
-    Client, DirectStoreOptions, ErrorKind, OperationOptions, RepositoryLocator, S3Options,
-};
+use crab_sdk::operation::Options as OperationOptions;
+use crab_sdk::storage::{DirectStoreOptions, S3Options};
+use crab_sdk::{Client, ErrorKind, RepositoryLocator};
 use tokio::io::AsyncReadExt;
 
 async fn pending_store() -> (
@@ -45,7 +45,9 @@ async fn close_drains_dropped_operations() {
     let (client, started, server) = pending_store().await;
     let mut request = Box::pin(
         client
-            .open_remote(RepositoryLocator::new("repository").unwrap())
+            .open(crab_sdk::OpenOptions::remote(
+                RepositoryLocator::new("repository").unwrap(),
+            ))
             .into_future(),
     );
     tokio::select! {
@@ -71,7 +73,9 @@ async fn open_timeout_drains_pending_transport() {
         .unwrap();
     let mut request = Box::pin(
         client
-            .open_remote(RepositoryLocator::new("repository").unwrap())
+            .open(crab_sdk::OpenOptions::remote(
+                RepositoryLocator::new("repository").unwrap(),
+            ))
             .with_options(options)
             .into_future(),
     );
@@ -103,8 +107,8 @@ async fn warm_cache_respects_limits() {
             .unwrap(),
         fixture.original
     );
-    let options = crab_sdk::ReadOptions::default()
-        .with_limits(crab_sdk::ReadLimits {
+    let options = crab_sdk::operation::ReadOptions::default()
+        .with_limits(crab_sdk::operation::ReadLimits {
             max_response_bytes: 1,
             ..Default::default()
         })

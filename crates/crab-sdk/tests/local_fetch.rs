@@ -3,7 +3,8 @@
 use std::error::Error as _;
 use std::path::PathBuf;
 
-use crab_sdk::{CloneOptions, ErrorKind, FetchDepth, FetchOptions, RepositoryLocator};
+use crab_sdk::local::{CloneOptions, FetchDepth, FetchOptions};
+use crab_sdk::{ErrorKind, RepositoryLocator};
 
 #[path = "local_support/direct.rs"]
 mod direct_support;
@@ -32,10 +33,11 @@ async fn clone_uses_explicit_tools_without_helper_path() {
     let commit = &commits[0];
     let destination = scratch.path().join("checkout with spaces");
 
-    let local = sdk
-        .clone_repository(locator, &destination, CloneOptions::default())
+    let local_handle = sdk
+        .clone_local(locator, &destination, CloneOptions::default())
         .await
         .unwrap_or_else(|error| panic!("{}", failure(&error)));
+    let local = local_handle.local().unwrap();
 
     assert_eq!(
         run(&git_path(), &destination, &["rev-parse", "HEAD"]),
@@ -58,7 +60,7 @@ async fn clone_preserves_existing_destination() {
     std::fs::write(destination.join("marker"), b"unchanged").unwrap();
 
     let error = match sdk
-        .clone_repository(locator, &destination, CloneOptions::default())
+        .clone_local(locator, &destination, CloneOptions::default())
         .await
     {
         Ok(_) => panic!("clone replaced an existing destination"),
@@ -80,14 +82,15 @@ async fn unsupported_mutation_preserves_bytes(key: &str, value: &str, name: &str
     direct_remote(store.path(), "repository", 1).await;
     let sdk = client(store.path(), scratch.path());
     let destination = scratch.path().join(name);
-    let local = sdk
-        .clone_repository(
+    let local_handle = sdk
+        .clone_local(
             RepositoryLocator::new("repository").unwrap(),
             &destination,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = local_handle.local().unwrap();
     let git = git_path();
     run(&git, &destination, &["config", key, value]);
     std::fs::write(destination.join("retained.txt"), b"retained\n").unwrap();
@@ -141,13 +144,15 @@ async fn configure_local_uses_exact_crab_path() {
     .unwrap();
     commit(&git, &repository, "file.txt", "main");
     let sdk = client(store.path(), scratch.path());
-    let error = match sdk.open_local(&repository).await {
+    let error = match sdk.open(crab_sdk::OpenOptions::local(&repository)).await {
         Ok(_) => panic!("repository unexpectedly opened before filter setup"),
         Err(error) => error,
     };
     assert_eq!(error.kind(), crab_sdk::ErrorKind::LocalSetupRequired);
     sdk.configure_local(&repository).await.unwrap();
-    sdk.open_local(&repository).await.unwrap();
+    sdk.open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
     let process = run(
         &git,
         &repository,
@@ -180,7 +185,11 @@ async fn linked_worktree_preserves_sibling() {
         ],
     );
     let sdk = client(store.path(), scratch.path());
-    let local = sdk.open_local(&sibling).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&sibling))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     assert_eq!(local.path(), sibling.canonicalize().unwrap());
     assert_ne!(local.path(), repository.canonicalize().unwrap());
     assert_eq!(run(&git, &repository, &["rev-parse", "HEAD"]), main);
@@ -202,8 +211,8 @@ async fn fetch_recovers_each_metadata_boundary() {
     let after_fetch_head = format!("{}\t\tbranch 'main' of crab-sdk:repository\n", commits[3]);
     for boundary in 0..6 {
         let checkout = scratch.path().join(format!("checkout-{boundary}"));
-        let local = sdk
-            .clone_repository(
+        let local_handle = sdk
+            .clone_local(
                 RepositoryLocator::new("repository").unwrap(),
                 &checkout,
                 CloneOptions::default(),
@@ -266,11 +275,12 @@ async fn fetch_recovers_each_metadata_boundary() {
         if boundary >= 5 {
             std::fs::write(git_dir.join("FETCH_HEAD"), &after_fetch_head).unwrap();
         }
-        drop(local);
-        let local = sdk
-            .open_local(&checkout)
+        drop(local_handle);
+        let local_handle = sdk
+            .open(crab_sdk::OpenOptions::local(&checkout))
             .await
             .unwrap_or_else(|error| panic!("boundary {boundary}: {}", failure(&error)));
+        let local = local_handle.local().unwrap();
         assert_eq!(std::fs::read(&intent_path).unwrap(), intent_bytes);
         local
             .fetch(FetchOptions::default())
@@ -301,8 +311,8 @@ async fn open_rejects_missing_fetch_object_without_mutation() {
     let commits = direct_remote(store.path(), "repository", 1).await;
     let sdk = client(store.path(), scratch.path());
     let checkout = scratch.path().join("checkout");
-    let local = sdk
-        .clone_repository(
+    let local_handle = sdk
+        .clone_local(
             RepositoryLocator::new("repository").unwrap(),
             &checkout,
             CloneOptions::default(),
@@ -338,9 +348,9 @@ async fn open_rejects_missing_fetch_object_without_mutation() {
     .unwrap();
     let intent_path = git_dir.join("crab-sdk-fetch-intent-v1");
     std::fs::write(&intent_path, &intent).unwrap();
-    drop(local);
+    drop(local_handle);
 
-    let error = match sdk.open_local(&checkout).await {
+    let error = match sdk.open(crab_sdk::OpenOptions::local(&checkout)).await {
         Ok(_) => panic!("repository opened with a missing recovery object"),
         Err(error) => error,
     };
@@ -362,8 +372,8 @@ async fn shallow_deepen_unshallow_round_trip() {
     direct_remote(store.path(), "repository", 4).await;
     let checkout = scratch.path().join("checkout");
     let sdk = client(store.path(), scratch.path());
-    let local = sdk
-        .clone_repository(
+    let local_handle = sdk
+        .clone_local(
             RepositoryLocator::new("repository").unwrap(),
             &checkout,
             CloneOptions::default()
@@ -374,6 +384,7 @@ async fn shallow_deepen_unshallow_round_trip() {
         )
         .await
         .unwrap_or_else(|error| panic!("{}", failure(&error)));
+    let local = local_handle.local().unwrap();
     assert_eq!(run(&git, &checkout, &["rev-list", "--count", "HEAD"]), "1");
     let deepened = local
         .fetch(

@@ -1,9 +1,11 @@
 #![cfg(feature = "local")]
 
-use crab_sdk::{
-    CheckoutOptions, CommitIdentity, ErrorKind, LocalCommitOptions, LocalExecutionPolicy,
-    LocalPushOutcome, OperationOptions, PushOptions, RepositoryLocator,
+use crab_sdk::local::{
+    CheckoutOptions, CommitOptions as LocalCommitOptions, ExecutionPolicy as LocalExecutionPolicy,
+    PushOptions, PushOutcome as LocalPushOutcome,
 };
+use crab_sdk::remote::write::CommitIdentity;
+use crab_sdk::{ErrorKind, RepositoryLocator, RepositoryMode};
 
 mod local_support;
 use local_support::{client, client_with_policy, commit, git_path, run};
@@ -37,7 +39,18 @@ async fn dry_run_creates_no_remote_objects() {
         &["remote", "add", "origin", "crab-sdk:repository"],
     );
     commit(&git, &checkout, "next.txt", "next");
-    let local = sdk.open_local(&checkout).await.unwrap();
+    let repository = sdk
+        .open(crab_sdk::OpenOptions::local(&checkout))
+        .await
+        .unwrap();
+    assert_eq!(repository.mode(), RepositoryMode::Local);
+    let interface_inventory = directory_inventory(store.path());
+    assert_eq!(
+        repository.remote().err().unwrap().kind(),
+        ErrorKind::UnsupportedCapability
+    );
+    assert_eq!(directory_inventory(store.path()), interface_inventory);
+    let local = repository.local().unwrap();
     let before = directory_inventory(store.path());
 
     let prepared = local
@@ -49,7 +62,7 @@ async fn dry_run_creates_no_remote_objects() {
         )
         .await
         .unwrap();
-    let outcome = prepared.execute(OperationOptions::default()).await.unwrap();
+    let outcome = prepared.execute().await.unwrap();
 
     assert!(matches!(outcome, LocalPushOutcome::DryRun { .. }));
     assert_eq!(directory_inventory(store.path()), before);
@@ -93,7 +106,11 @@ async fn hydrated_status_is_clean() {
     run(&git, &repository, &["init", "-b", "main"]);
     commit(&git, &repository, "file.txt", "initial");
     let sdk = client(store.path(), scratch.path());
-    let local = sdk.open_local(&repository).await.unwrap();
+    let repository_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = repository_handle.local().unwrap();
     assert!(local.status().await.unwrap().is_clean());
     sdk.close().await.unwrap();
 }
@@ -111,7 +128,11 @@ async fn stage_commit_push_round_trip() {
     std::fs::write(repository.join("new file.txt"), b"new\n").unwrap();
 
     let sdk = client(store.path(), scratch.path());
-    let local = sdk.open_local(&repository).await.unwrap();
+    let repository_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = repository_handle.local().unwrap();
     let changed = local.status().await.unwrap();
     assert_eq!(changed.entries().len(), 2);
     assert!(changed.entries().iter().any(|entry| entry.is_untracked()));
@@ -157,7 +178,11 @@ async fn dirty_checkout_preserves_bytes() {
     std::fs::write(repository.join("file.txt"), b"user bytes\n").unwrap();
 
     let sdk = client(store.path(), scratch.path());
-    let local = sdk.open_local(&repository).await.unwrap();
+    let repository_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = repository_handle.local().unwrap();
     let error = local
         .checkout("other", CheckoutOptions::default())
         .await
@@ -187,7 +212,11 @@ async fn checkout_requires_explicit_hook_trust_and_reports_hook_failure() {
     run(&git, &repository, &["checkout", "main"]);
     install_failing_checkout_hook(&repository);
     let sdk = client(store.path(), scratch.path());
-    let local = sdk.open_local(&repository).await.unwrap();
+    let repository_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = repository_handle.local().unwrap();
 
     local
         .checkout("other", CheckoutOptions::default())
@@ -197,7 +226,11 @@ async fn checkout_requires_explicit_hook_trust_and_reports_hook_failure() {
     sdk.close().await.unwrap();
     let trusted_sdk =
         client_with_policy(store.path(), scratch.path(), LocalExecutionPolicy::Trusted);
-    let trusted = trusted_sdk.open_local(&repository).await.unwrap();
+    let trusted_handle = trusted_sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let trusted = trusted_handle.local().unwrap();
     let error = trusted
         .checkout("main", CheckoutOptions::default())
         .await
@@ -240,7 +273,11 @@ async fn stage_disables_unrecognized_executable_filters_without_changing_bytes()
     );
     std::fs::write(repository.join("payload.txt"), b"original bytes\n").unwrap();
     let sdk = client(store.path(), scratch.path());
-    let local = sdk.open_local(&repository).await.unwrap();
+    let repository_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = repository_handle.local().unwrap();
 
     local.stage(vec!["payload.txt".into()]).await.unwrap();
 
@@ -265,7 +302,11 @@ async fn cli_and_sdk_share_staging() {
     commit(&git, &repository, "file.txt", "initial");
     std::fs::write(repository.join("file.txt"), b"staged by SDK\n").unwrap();
     let sdk = client(store.path(), scratch.path());
-    let local = sdk.open_local(&repository).await.unwrap();
+    let repository_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = repository_handle.local().unwrap();
     local.stage(vec!["file.txt".into()]).await.unwrap();
     assert_eq!(
         run(&git, &repository, &["diff", "--cached", "--name-only"]),

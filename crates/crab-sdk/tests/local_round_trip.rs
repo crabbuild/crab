@@ -4,11 +4,14 @@ use std::error::Error as _;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use crab_sdk::{
-    Client, CloneOptions, CommitIdentity, CommitOptions, ContentCache, DirectStoreOptions,
-    EntryMode, FileEdit, GitPath, LocalCommitOptions, LocalPushOutcome, LocalTools,
-    MutationOutcome, OperationOptions, PushOptions, PushRefspec, RepositoryLocator, S3Options,
+use crab_sdk::local::{
+    CloneOptions, CommitOptions as LocalCommitOptions, Options as LocalOptions, PushOptions,
+    PushOutcome as LocalPushOutcome, PushRefspec, Tools as LocalTools,
 };
+use crab_sdk::remote::EntryMode;
+use crab_sdk::remote::write::{CommitIdentity, CommitOptions, FileEdit, MutationOutcome};
+use crab_sdk::storage::{ContentCache, DirectStoreOptions, S3Options};
+use crab_sdk::{Client, GitPath, RepositoryLocator};
 use futures_util::TryStreamExt as _;
 use object_store::ObjectStoreExt as _;
 use sha2::{Digest as _, Sha256};
@@ -44,13 +47,13 @@ fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
     let client = Client::builder()
         .direct_store(DirectStoreOptions::s3(options))
         .content_cache(ContentCache::new(&cache, 512 * 1024 * 1024).unwrap())
-        .local_tools(
+        .local(LocalOptions::new(
             LocalTools::new(
                 PathBuf::from(required("CRAB_SDK_TEST_GIT_BIN")),
                 PathBuf::from(required("CRAB_SDK_TEST_CRAB_BIN")),
             )
             .unwrap(),
-        )
+        ))
         .build()
         .unwrap();
     let prefix = format!("qualification/sdk-local-{}", uuid::Uuid::now_v7());
@@ -75,8 +78,10 @@ async fn initial_commit(client: &Client, locator: &RepositoryLocator, scratch: &
     )
     .into_bytes();
     let prepared = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_commit(
             CommitOptions::initial(
@@ -110,12 +115,11 @@ async fn initial_commit(client: &Client, locator: &RepositoryLocator, scratch: &
                 .unwrap(),
             ],
             scratch.to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     assert!(matches!(
-        prepared.execute(OperationOptions::default()).await.unwrap(),
+        prepared.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
 }
@@ -201,10 +205,11 @@ async fn stage_commit_push_round_trip() {
     initial_commit(&client, &locator, scratch.path()).await;
 
     let checkout = scratch.path().join("checkout");
-    let local = client
-        .clone_repository(locator.clone(), &checkout, CloneOptions::default())
+    let repository = client
+        .clone_local(locator.clone(), &checkout, CloneOptions::default())
         .await
         .unwrap_or_else(|error| panic!("{}", failure(&error)));
+    let local = repository.local().unwrap();
     let large_size = 1024 * 1024 * 1024;
     std::fs::write(checkout.join("README.md"), b"updated locally\n").unwrap();
     let large_digest = write_large_fixture(&checkout.join("large.bin"), large_size);
@@ -240,16 +245,15 @@ async fn stage_commit_push_round_trip() {
         .await
         .unwrap();
     let persisted = prepared.recovery_token().to_json().unwrap();
-    let pushed = prepared.execute(OperationOptions::default()).await.unwrap();
+    let pushed = prepared.execute().await.unwrap();
     assert!(
         matches!(pushed, LocalPushOutcome::Committed { .. }),
         "unexpected push outcome: {pushed:?}"
     );
     assert!(matches!(
         client
-            .reconcile_push(
-                crab_sdk::LocalPushRecoveryToken::from_json(&persisted).unwrap(),
-                OperationOptions::default(),
+            .reconcile_local_push(
+                crab_sdk::local::PushRecoveryToken::from_json(&persisted).unwrap(),
             )
             .await
             .unwrap(),
@@ -268,17 +272,18 @@ async fn stage_commit_push_round_trip() {
         .prepare_push(PushOptions::current_branch().dry_run(true))
         .await
         .unwrap()
-        .execute(OperationOptions::default())
+        .execute()
         .await
         .unwrap();
     assert!(matches!(dry_run, LocalPushOutcome::DryRun { .. }));
     assert_eq!(stored_objects(&locator).await, before_dry_run);
 
     let verified = scratch.path().join("verified");
-    let cloned = client
-        .clone_repository(locator.clone(), &verified, CloneOptions::default().eager())
+    let cloned_repository = client
+        .clone_local(locator.clone(), &verified, CloneOptions::default().eager())
         .await
         .unwrap();
+    let cloned = cloned_repository.local().unwrap();
     assert_eq!(
         std::fs::read(verified.join("README.md")).unwrap(),
         b"updated locally\n"
@@ -322,13 +327,15 @@ async fn stage_commit_push_round_trip() {
         )
         .await
         .unwrap()
-        .execute(OperationOptions::default())
+        .execute()
         .await
         .unwrap();
     assert!(matches!(deleted, LocalPushOutcome::Committed { .. }));
     let refs = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .refs()
         .await

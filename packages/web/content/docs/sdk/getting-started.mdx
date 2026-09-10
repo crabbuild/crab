@@ -1,18 +1,21 @@
 # Rust SDK quickstart
 
-`crab-sdk` is an asynchronous Rust client for reading and changing Crab repositories. It can work directly with cloud object storage, through a managed Crab service, or with a local Git working directory.
+`crab-sdk` is an asynchronous Rust client for remote Crab repositories and
+local Git worktrees. Every existing repository opens through one method and
+returns the same `Repository` facade.
 
 ## Features
 
-The crate has no default features. Select only the surfaces your application uses:
+The crate has no default features. Select only the task namespaces your
+application uses:
 
 | Feature | Adds |
 | --- | --- |
-| `remote` | Pinned remote Git reads |
+| `remote` | `Client`, unified open, pinned remote reads, and operation controls |
 | `content` | Verified Crab and Git LFS reconstruction |
 | `write` | Remote initialization, commits, ref updates, and recovery |
-| `local` | Git working-directory workflows; implies `write` and `content` |
-| `managed` | Managed-service grants and repository lifecycle APIs |
+| `local` | Local worktree workflows; implies `write` and `content` |
+| `managed` | Managed grants and repository lifecycle APIs |
 
 ```toml
 [dependencies]
@@ -20,12 +23,14 @@ crab-sdk = { version = "0.1", features = ["remote", "content"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-The package is in preview. Use the version supported by the matching Crab release.
+The package is in preview. Use the version shipped with the matching Crab
+release.
 
-## Open a direct repository
+## Open a direct remote
 
 ```rust
-use crab_sdk::{Client, DirectStoreOptions, RepositoryLocator, Revision, S3Options};
+use crab_sdk::storage::{DirectStoreOptions, S3Options};
+use crab_sdk::{Client, OpenOptions, RepositoryLocator, Revision};
 
 # async fn example() -> crab_sdk::Result<()> {
 let store = DirectStoreOptions::s3(S3Options::new(
@@ -36,33 +41,39 @@ let store = DirectStoreOptions::s3(S3Options::new(
 )?);
 let client = Client::builder().direct_store(store).build()?;
 let repository = client
-    .open_remote(RepositoryLocator::new("repositories/example")?)
+    .open(OpenOptions::remote(RepositoryLocator::new("repositories/example")?))
     .await?;
-let snapshot = repository.snapshot(Revision::branch("main")?).await?;
+let remote = repository.remote()?;
+let snapshot = remote.snapshot(Revision::branch("main")?).await?;
 println!("{}", snapshot.commit_id()?);
 client.close().await?;
 # Ok(())
 # }
 ```
 
-Every remote handle is pinned to a repository generation. Call `refresh()` to observe later branch movement. Call `Client::close().await` before destroying the Tokio runtime so abandoned streams and operations can finish cleanup.
+The repository mode is explicit in `OpenOptions`. A managed locator uses the
+same remote opening path. Local worktrees use `OpenOptions::local(path)` or
+`Client::clone_local`, then `repository.local()?`.
+
+Remote handles are pinned to one generation. Call `remote.refresh().await?` to
+receive a new `Repository` after refs move. Call `Client::close().await`
+before destroying Tokio so abandoned streams and operations can finish cleanup.
 
 ## Operation controls
 
-Requests start when awaited. Attach deadlines, cancellation, read limits, and progress before that point:
+Requests start when awaited. Attach deadlines, cancellation, limits, and
+progress before that point:
 
 ```rust
-use crab_sdk::{Cancellation, OperationOptions};
+use crab_sdk::operation::{Cancellation, Options};
 use std::time::Duration;
 
 let cancellation = Cancellation::default();
-let options = OperationOptions::default()
+let options = Options::default()
     .with_cancellation(cancellation.clone())
     .with_timeout(Duration::from_secs(30))?;
-let refs = repository.refs().with_options(options).await?;
+let refs = remote.refs().with_options(options).await?;
 ```
 
-Errors expose a stable `ErrorKind`, preserve their source chain, and carry the operation ID when work reached the SDK runtime.
-Storage request limits include Crab retries plus each cloud-provider HTTP retry
-and listing page. Fetched-byte limits charge streamed object and listing response
-chunks, and exhaustion stops before the next request or chunk is delivered.
+Errors expose stable `ErrorKind` values, preserve their source chain, and carry
+an operation ID after work reaches the SDK runtime.

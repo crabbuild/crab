@@ -13,10 +13,12 @@ use std::time::Duration;
 
 static HTTP_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-use crab_sdk::{
-    CloneOptions, CommitIdentity, ErrorKind, FetchDepth, FetchOptions, LocalCommitOptions,
-    LocalPushOutcome, PullOptions, PushOptions, PushRefspec, RepositoryLocator, WritePolicy,
+use crab_sdk::local::{
+    CloneOptions, CommitOptions as LocalCommitOptions, FetchDepth, FetchOptions, PullOptions,
+    PushOptions, PushOutcome as LocalPushOutcome, PushRefspec,
 };
+use crab_sdk::remote::write::CommitIdentity;
+use crab_sdk::{ErrorKind, RepositoryLocator, WritePolicy};
 use local_support::{client, commit, git_path, run};
 
 struct GitHttpServer {
@@ -309,14 +311,15 @@ async fn native_http_round_trip() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("checkout");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     assert_eq!(run(&git_path(), &checkout, &["rev-parse", "HEAD"]), first);
 
     let second = commit(&git_path(), &checkout, "file.txt", "second");
@@ -324,7 +327,7 @@ async fn native_http_round_trip() {
         .prepare_push(PushOptions::current_branch())
         .await
         .unwrap()
-        .execute(Default::default())
+        .execute()
         .await
         .unwrap();
     assert!(
@@ -368,7 +371,7 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
     let sdk = client(store.path(), fixture.path());
 
     let configured = fixture.path().join("configured-hydration");
-    sdk.clone_repository(
+    sdk.clone_local(
         RepositoryLocator::http(&server.url()).unwrap(),
         &configured,
         CloneOptions::default(),
@@ -382,7 +385,7 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
     );
 
     let overridden = fixture.path().join("explicit-hydration");
-    sdk.clone_repository(
+    sdk.clone_local(
         RepositoryLocator::http(&server.url()).unwrap(),
         &overridden,
         CloneOptions::default().lazy(),
@@ -414,7 +417,7 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
             &["push", remote.to_str().unwrap(), "main:main"],
         );
         let patterned = fixture.path().join("pattern-hydration");
-        sdk.clone_repository(
+        sdk.clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &patterned,
             CloneOptions::default(),
@@ -443,14 +446,15 @@ async fn server_force_rejection_is_typed() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("force-rejection");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     run(
         &git_path(),
         &checkout,
@@ -470,7 +474,7 @@ async fn server_force_rejection_is_typed() {
         )
         .await
         .unwrap()
-        .execute(Default::default())
+        .execute()
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Conflict);
@@ -486,14 +490,15 @@ async fn lost_acknowledgement_is_indeterminate() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("lost-ack");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     let target = commit(
         &git_path(),
         &checkout,
@@ -504,7 +509,7 @@ async fn lost_acknowledgement_is_indeterminate() {
         .prepare_push(PushOptions::current_branch())
         .await
         .unwrap()
-        .execute(Default::default())
+        .execute()
         .await
         .unwrap();
     assert!(matches!(outcome, LocalPushOutcome::Indeterminate { .. }));
@@ -534,7 +539,7 @@ async fn sha256_http_contract() {
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("sha256-checkout");
     let error = sdk
-        .clone_repository(
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
@@ -556,14 +561,15 @@ async fn local_edit_http_contract() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("local-edit");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     std::fs::write(checkout.join("file.txt"), b"edited through SDK\n").unwrap();
     assert!(!local.status().await.unwrap().is_clean());
     local.stage(vec!["file.txt".into()]).await.unwrap();
@@ -593,14 +599,15 @@ async fn fetch_http_contract() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("fetch");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     let second = commit(
         &git_path(),
         &fixture.path().join("seed"),
@@ -656,14 +663,15 @@ async fn shallow_http_contract() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("shallow");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default().with_depth(1).unwrap(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     assert_eq!(
         run(&git_path(), &checkout, &["rev-list", "--count", "HEAD"]),
         "1"
@@ -701,14 +709,15 @@ async fn pull_http_contract() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("pull");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     let seed = fixture.path().join("seed");
     let second = commit(&git_path(), &seed, "second.txt", "second");
     run(
@@ -737,14 +746,15 @@ async fn atomic_push_http_contract() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("atomic");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     let target = commit(&git_path(), &checkout, "atomic.txt", "atomic");
     run(&git_path(), &checkout, &["tag", "release"]);
     local
@@ -758,7 +768,7 @@ async fn atomic_push_http_contract() {
         )
         .await
         .unwrap()
-        .execute(Default::default())
+        .execute()
         .await
         .unwrap();
     for name in ["refs/heads/main", "refs/tags/release"] {
@@ -783,20 +793,21 @@ async fn dry_run_http_contract() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("dry-run");
-    let local = sdk
-        .clone_repository(
+    let repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = repository.local().unwrap();
     commit(&git_path(), &checkout, "dry.txt", "dry");
     let outcome = local
         .prepare_push(PushOptions::current_branch().dry_run(true))
         .await
         .unwrap()
-        .execute(Default::default())
+        .execute()
         .await
         .unwrap();
     assert!(matches!(outcome, LocalPushOutcome::DryRun { .. }));
@@ -820,21 +831,26 @@ async fn linked_worktree_http_contract() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("primary");
-    let primary = sdk
-        .clone_repository(
+    let primary_repository = sdk
+        .clone_local(
             RepositoryLocator::http(&server.url()).unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let primary = primary_repository.local().unwrap();
     let linked = fixture.path().join("linked");
     run(
         &git_path(),
         &checkout,
         &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
     );
-    let opened = sdk.open_local(&linked).await.unwrap();
+    let opened_repository = sdk
+        .open(crab_sdk::OpenOptions::local(&linked))
+        .await
+        .unwrap();
+    let opened = opened_repository.local().unwrap();
     std::fs::write(linked.join("linked.txt"), b"linked\n").unwrap();
     assert!(!opened.status().await.unwrap().is_clean());
     assert_eq!(opened.common_directory(), primary.common_directory());
@@ -851,7 +867,7 @@ async fn unsupported_http_extensions_remain_disabled() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
     let checkout = fixture.path().join("ordinary-clone");
-    sdk.clone_repository(
+    sdk.clone_local(
         RepositoryLocator::http(&server.url()).unwrap(),
         &checkout,
         CloneOptions::default(),

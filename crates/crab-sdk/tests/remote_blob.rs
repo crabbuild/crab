@@ -30,7 +30,9 @@ use crab_metadata::manifest_store::{
 use crab_metadata::manifests::{
     BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
 };
-use crab_sdk::{Client, DirectStoreOptions, GitPath, ReadOptions, RepositoryLocator, Revision};
+use crab_sdk::operation::ReadOptions;
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, GitPath, RepositoryLocator, Revision};
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use futures_util::TryStreamExt;
@@ -303,14 +305,19 @@ async fn verify_native_reads(bucket: Option<String>) {
     let builder = {
         let cache = directory.path().join("content-cache");
         std::fs::create_dir(&cache).unwrap();
-        builder.content_cache(crab_sdk::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap())
+        builder
+            .content_cache(crab_sdk::storage::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap())
     };
     let client = builder.build().unwrap();
     let repository = client
-        .open_remote(RepositoryLocator::new("repository").unwrap())
+        .open(crab_sdk::OpenOptions::remote(
+            RepositoryLocator::new("repository").unwrap(),
+        ))
         .await
         .unwrap();
     let snapshot = repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap();
@@ -323,7 +330,7 @@ async fn verify_native_reads(bucket: Option<String>) {
     let page = snapshot
         .tree(
             GitPath::root(),
-            crab_sdk::PageRequest::new(1, None).unwrap(),
+            crab_sdk::remote::PageRequest::new(1, None).unwrap(),
         )
         .await
         .unwrap();
@@ -332,7 +339,7 @@ async fn verify_native_reads(bucket: Option<String>) {
     let tail = snapshot
         .tree(
             GitPath::root(),
-            crab_sdk::PageRequest::new(1, Some(continuation)).unwrap(),
+            crab_sdk::remote::PageRequest::new(1, Some(continuation)).unwrap(),
         )
         .await
         .unwrap();
@@ -340,7 +347,7 @@ async fn verify_native_reads(bucket: Option<String>) {
     assert!(tail.next.is_none());
 
     assert_eq!(
-        repository.refs().await.unwrap().entries()[0]
+        repository.remote().unwrap().refs().await.unwrap().entries()[0]
             .target()
             .to_string(),
         first
@@ -348,6 +355,8 @@ async fn verify_native_reads(bucket: Option<String>) {
     let hidden_commit = Revision::commit(crab_sdk::ObjectId::from_hex(&second).unwrap());
     assert_eq!(
         repository
+            .remote()
+            .unwrap()
             .snapshot(hidden_commit)
             .await
             .err()
@@ -372,20 +381,22 @@ async fn verify_native_reads(bucket: Option<String>) {
     coverage.generation = 2;
     publish_catalog(&store, coverage, record, &entries).await;
     copy_published_objects(&store, &storage, cloud.as_ref(), &mut published).await;
-    let refreshed = repository.refresh().await.unwrap();
+    let refreshed = repository.remote().unwrap().refresh().await.unwrap();
     assert_eq!(
-        refreshed.refs().await.unwrap().entries()[0]
+        refreshed.remote().unwrap().refs().await.unwrap().entries()[0]
             .target()
             .to_string(),
         second
     );
     assert_eq!(
-        repository.refs().await.unwrap().entries()[0]
+        repository.remote().unwrap().refs().await.unwrap().entries()[0]
             .target()
             .to_string(),
         first
     );
     let current = refreshed
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap();
@@ -396,11 +407,17 @@ async fn verify_native_reads(bucket: Option<String>) {
     );
     let base = Revision::commit(crab_sdk::ObjectId::from_hex(&first).unwrap());
     let binary = current.diff(base.clone(), path.clone()).await.unwrap();
-    assert_eq!(binary.classification, crab_sdk::DiffClassification::Binary);
+    assert_eq!(
+        binary.classification,
+        crab_sdk::remote::DiffClassification::Binary
+    );
     assert!(binary.hunks.is_empty());
     let text_path = GitPath::new(b"second.txt".to_vec()).unwrap();
     let text = current.diff(base, text_path.clone()).await.unwrap();
-    assert_eq!(text.classification, crab_sdk::DiffClassification::Text);
+    assert_eq!(
+        text.classification,
+        crab_sdk::remote::DiffClassification::Text
+    );
     assert_eq!(text.hunks.len(), 1);
     let hunk = &text.hunks[0];
     assert_eq!(
@@ -456,7 +473,7 @@ async fn verify_native_reads(bucket: Option<String>) {
         snapshot.read_blob(path).await.unwrap().as_ref(),
         first_bytes
     );
-    let archived = archive::collect(&current, crab_sdk::ContentMode::Git).await;
+    let archived = archive::collect(&current, crab_sdk::remote::ContentMode::Git).await;
     assert_eq!(
         archived,
         vec![
@@ -478,7 +495,10 @@ async fn verify_native_reads(bucket: Option<String>) {
         ]
     );
     for advance in [false, true] {
-        let mut archive = current.archive(crab_sdk::ContentMode::Git).await.unwrap();
+        let mut archive = current
+            .archive(crab_sdk::remote::ContentMode::Git)
+            .await
+            .unwrap();
         if advance {
             assert!(archive.next().await.unwrap().is_some());
         }
@@ -490,7 +510,7 @@ async fn verify_native_reads(bucket: Option<String>) {
     #[cfg(not(feature = "content"))]
     assert_eq!(
         current
-            .archive(crab_sdk::ContentMode::Hydrated)
+            .archive(crab_sdk::remote::ContentMode::Hydrated)
             .await
             .err()
             .unwrap()
@@ -499,7 +519,7 @@ async fn verify_native_reads(bucket: Option<String>) {
     );
     #[cfg(feature = "content")]
     {
-        let hydrated = archive::collect(&current, crab_sdk::ContentMode::Hydrated).await;
+        let hydrated = archive::collect(&current, crab_sdk::remote::ContentMode::Hydrated).await;
         let expected = archived
             .into_iter()
             .map(|(path, bytes)| {
@@ -524,7 +544,7 @@ async fn verify_native_reads(bucket: Option<String>) {
     }
 
     let mut expired = current
-        .archive(crab_sdk::ContentMode::Git)
+        .archive(crab_sdk::remote::ContentMode::Git)
         .with_options(
             ReadOptions::default()
                 .with_timeout(std::time::Duration::from_millis(200))
@@ -625,8 +645,8 @@ async fn verify_native_reads(bucket: Option<String>) {
 
     let history = current
         .history(
-            crab_sdk::HistoryTraversal::AllParents,
-            crab_sdk::PageRequest::new(1, None).unwrap(),
+            crab_sdk::remote::HistoryTraversal::AllParents,
+            crab_sdk::remote::PageRequest::new(1, None).unwrap(),
         )
         .await
         .unwrap();
@@ -634,8 +654,8 @@ async fn verify_native_reads(bucket: Option<String>) {
     let cursor = history.next.unwrap();
     let parent = current
         .history(
-            crab_sdk::HistoryTraversal::AllParents,
-            crab_sdk::PageRequest::new(1, Some(cursor.clone())).unwrap(),
+            crab_sdk::remote::HistoryTraversal::AllParents,
+            crab_sdk::remote::PageRequest::new(1, Some(cursor.clone())).unwrap(),
         )
         .await
         .unwrap();
@@ -652,9 +672,9 @@ async fn verify_native_reads(bucket: Option<String>) {
     coverage.generation = 3;
     publish_catalog(&store, coverage, record, &entries).await;
     copy_published_objects(&store, &storage, cloud.as_ref(), &mut published).await;
+    let refreshed = refreshed.remote().unwrap().refresh().await.unwrap();
     let same_commit = refreshed
-        .refresh()
-        .await
+        .remote()
         .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
@@ -670,15 +690,21 @@ async fn verify_native_reads(bucket: Option<String>) {
     }
     let invalid = same_commit
         .history(
-            crab_sdk::HistoryTraversal::AllParents,
-            crab_sdk::PageRequest::new(1, Some(cursor)).unwrap(),
+            crab_sdk::remote::HistoryTraversal::AllParents,
+            crab_sdk::remote::PageRequest::new(1, Some(cursor)).unwrap(),
         )
         .await
         .unwrap_err();
     assert_eq!(invalid.kind(), crab_sdk::ErrorKind::InvalidInput);
-    let archive = current.archive(crab_sdk::ContentMode::Git).await.unwrap();
+    let archive = current
+        .archive(crab_sdk::remote::ContentMode::Git)
+        .await
+        .unwrap();
     drop(archive);
-    let archive = current.archive(crab_sdk::ContentMode::Git).await.unwrap();
+    let archive = current
+        .archive(crab_sdk::remote::ContentMode::Git)
+        .await
+        .unwrap();
     let content = current
         .open_file(GitPath::new(filename.clone()).unwrap())
         .await

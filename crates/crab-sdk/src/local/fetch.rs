@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{FetchDepth, FetchOptions, FetchOutcome, local_error, transfer_error};
 use crate::{Error, ErrorKind, RepositoryLocator, Result};
 
+#[path = "fetch/recovery.rs"]
 mod recovery;
 use recovery::{
     apply_file_edit, read_fetch_intent, read_optional_utf8, remove_fetch_intent, write_fetch_intent,

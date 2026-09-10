@@ -1,7 +1,7 @@
 # Crab SDK API overhaul
 
-Status: accepted design for follow-up implementation. The SDK behavior baseline
-landed in PR #160.
+Status: implemented. The SDK behavior baseline landed in PR #160; PR #169
+performs the single-cutover API migration and installs its permanent gates.
 
 This document is the plan of record for simplifying the public `crab-sdk` API.
 It changes API organization and naming while preserving the behavior, safety,
@@ -62,7 +62,7 @@ transport or authorization choices. They are not repository modes:
 - Local mode means an on-disk Git worktree. Its fetch, pull, and push operations
   may still use the network.
 
-Repository creation stays explicit. `initialize_remote`, `clone`, and
+Repository creation stays explicit. `initialize_remote`, `clone_local`, and
 `configure_local` create or change durable state, so they do not become variants
 of `open`.
 
@@ -297,7 +297,7 @@ impl Client {
     ) -> operation::Request<'_, local::Configuration, operation::Options>;
 
     #[cfg(feature = "local")]
-    pub fn clone(
+    pub fn clone_local(
         &self,
         source: RepositoryLocator,
         destination: impl Into<PathBuf>,
@@ -306,7 +306,7 @@ impl Client {
 }
 ```
 
-`initialize_remote` cannot accept an HTTP locator. `clone` may accept direct,
+`initialize_remote` cannot accept an HTTP locator. `clone_local` may accept direct,
 managed, or HTTP locators, subject to compiled features and advertised service
 capabilities. Each method validates unsupported combinations before durable
 mutation.
@@ -360,7 +360,7 @@ use crab_sdk::WritePolicy;
 
 let prepared = repository
     .remote()?
-    .prepare_commit(options, edits)
+    .prepare_commit(options, edits, scratch)
     .await?;
 persist(prepared.recovery_token().to_json()?)?;
 let outcome = prepared
@@ -383,7 +383,7 @@ describing on-disk state.
 let local = repository.local()?;
 let status = local.status().await?;
 local.stage(paths).await?;
-local.commit(local::CommitOptions::new(author, message)?).await?;
+local.commit(local::CommitOptions::new(author, committer, message)?).await?;
 local.pull(local::PullOptions::fast_forward_only()).await?;
 ```
 
@@ -427,7 +427,7 @@ repository records expose logical identity and state, never physical placement
 or credentials.
 
 A managed locator still opens through `Client::open(OpenOptions::remote(...))`
-or acts as the source for `Client::clone`. The caller does not receive a third
+or acts as the source for `Client::clone_local`. The caller does not receive a third
 managed repository handle.
 
 ## 9. Operation and recovery model
@@ -590,7 +590,7 @@ Registry publication remains a separate authorized release action.
 The overhaul is complete only when all of the following are true:
 
 - every existing SDK acceptance test enters through `Client::open`,
-  `Client::clone`, `Client::configure_local`, or `Client::initialize_remote`;
+  `Client::clone_local`, `Client::configure_local`, or `Client::initialize_remote`;
 - remote and local interface mismatch tests prove typed, synchronous, side-effect
   free failure;
 - direct, managed, and HTTP behavior retains every applicable cell in

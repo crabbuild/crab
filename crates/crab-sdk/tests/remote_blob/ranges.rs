@@ -1,7 +1,6 @@
-use crab_sdk::{
-    ContentMode, ErrorKind, GitPath, HistoryTraversal, PageRequest, ReadLimits, ReadOptions,
-    Revision, Snapshot,
-};
+use crab_sdk::operation::{ReadLimits, ReadOptions};
+use crab_sdk::remote::{ContentMode, HistoryTraversal, PageRequest, Snapshot};
+use crab_sdk::{ErrorKind, GitPath, Revision};
 
 fn invalid<T>(result: crab_sdk::Result<T>) {
     assert_eq!(result.err().unwrap().kind(), ErrorKind::InvalidInput);
@@ -194,7 +193,7 @@ pub(super) async fn verify_hydration_limit(
 }
 
 pub(super) async fn verify_controls(snapshot: &Snapshot, name: &[u8]) {
-    use crab_sdk::{Cancellation, OperationOptions};
+    use crab_sdk::operation::{Cancellation, Options as OperationOptions};
     let path = GitPath::new(name.to_vec()).unwrap();
     let cancellation = Cancellation::default();
     cancellation.cancel();
@@ -277,7 +276,9 @@ pub(super) async fn verify_controls(snapshot: &Snapshot, name: &[u8]) {
 }
 
 pub(super) async fn verify_progress(snapshot: &Snapshot, name: &[u8]) {
-    use crab_sdk::{OperationOptions, Progress, ProgressEvent, ProgressUpdate};
+    use crab_sdk::operation::{
+        Options as OperationOptions, Progress, ProgressEvent, ProgressUpdate,
+    };
     let (progress, mut receive) = Progress::channel();
     let options =
         ReadOptions::default().with_operation(OperationOptions::default().with_progress(progress));
@@ -313,7 +314,7 @@ pub(super) async fn verify_progress(snapshot: &Snapshot, name: &[u8]) {
     let id = stream.operation_id();
     let (mut bytes, mut items) = (0, 0);
     while let Some(entry) = stream.next().await.unwrap() {
-        if let crab_sdk::ArchiveEvent::Data(value) = entry {
+        if let crab_sdk::remote::ArchiveEvent::Data(value) = entry {
             bytes += value.len() as u64;
         }
         items += 1;

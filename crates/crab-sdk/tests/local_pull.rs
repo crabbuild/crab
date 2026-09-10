@@ -1,9 +1,9 @@
 #![cfg(feature = "local")]
 
-use crab_sdk::{
-    CloneOptions, ErrorKind, HydrationState, IntegrationId, IntegrationKind, PullOptions,
-    PullOutcome, RepositoryLocator,
+use crab_sdk::local::{
+    CloneOptions, HydrationState, IntegrationId, IntegrationKind, PullOptions, PullOutcome,
 };
+use crab_sdk::{ErrorKind, RepositoryLocator};
 
 #[path = "local_support/direct.rs"]
 mod direct_support;
@@ -33,14 +33,15 @@ async fn direct_pull_reuses_sdk_fetch_transport() {
     let commits = direct_remote(store.path(), "repository", 2).await;
     let sdk = client(store.path(), scratch.path());
     let checkout = scratch.path().join("checkout");
-    let local = sdk
-        .clone_repository(
+    let local_handle = sdk
+        .clone_local(
             RepositoryLocator::new("repository").unwrap(),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = local_handle.local().unwrap();
     let git = git_path();
     run(&git, &checkout, &["reset", "--hard", &commits[0]]);
     run(
@@ -80,7 +81,11 @@ async fn open_preserves_stale_integration_until_the_next_pull() {
     std::fs::write(&intent_path, &intent).unwrap();
     let sdk = client(fixture.store.path(), fixture.scratch.path());
 
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
 
     assert_eq!(std::fs::read(&intent_path).unwrap(), intent);
     assert!(matches!(
@@ -155,7 +160,11 @@ async fn ff_only_preserves_diverged_head() {
     commit(&fixture.git, &fixture.source, "remote.txt", "remote");
     run(&fixture.git, &fixture.source, &["push", "origin", "main"]);
     let sdk = client(fixture.store.path(), fixture.scratch.path());
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     let error = local
         .pull(PullOptions::fast_forward_only())
         .await
@@ -175,7 +184,11 @@ async fn merge_and_rebase_resume_conflicts() {
     commit(&fixture.git, &fixture.source, "shared.txt", "remote");
     run(&fixture.git, &fixture.source, &["push", "origin", "main"]);
     let sdk = client(fixture.store.path(), fixture.scratch.path());
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     let PullOutcome::Conflict(conflict) = local
         .pull(PullOptions::merge().hydrate(false))
         .await
@@ -202,10 +215,14 @@ async fn merge_and_rebase_resume_conflicts() {
         ErrorKind::Conflict
     );
     assert_eq!(std::fs::read(&intent_path).unwrap(), intent);
-    drop(local);
+    drop(local_handle);
     sdk.close().await.unwrap();
     let sdk = client(fixture.store.path(), fixture.scratch.path());
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     std::fs::write(fixture.checkout.join("shared.txt"), b"resolved\n").unwrap();
     local.stage(vec!["shared.txt".into()]).await.unwrap();
     let result = local
@@ -235,7 +252,11 @@ async fn merge_and_rebase_resume_conflicts() {
     commit(&fixture.git, &fixture.source, "shared.txt", "remote rebase");
     run(&fixture.git, &fixture.source, &["push", "origin", "main"]);
     let sdk = client(fixture.store.path(), fixture.scratch.path());
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     let PullOutcome::Conflict(conflict) = local
         .pull(PullOptions::rebase().hydrate(false))
         .await
@@ -272,7 +293,11 @@ async fn abort_preserves_later_user_edits() {
     run(&fixture.git, &fixture.source, &["push", "origin", "main"]);
     let before = run(&fixture.git, &fixture.checkout, &["rev-parse", "HEAD"]);
     let sdk = client(fixture.store.path(), fixture.scratch.path());
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     let PullOutcome::Conflict(conflict) = local
         .pull(PullOptions::rebase().hydrate(false))
         .await
@@ -301,7 +326,11 @@ async fn abort_rejects_later_tracked_edits_that_git_would_overwrite() {
     commit(&fixture.git, &fixture.source, "shared.txt", "remote");
     run(&fixture.git, &fixture.source, &["push", "origin", "main"]);
     let sdk = client(fixture.store.path(), fixture.scratch.path());
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     let PullOutcome::Conflict(conflict) = local
         .pull(PullOptions::rebase().hydrate(false))
         .await
@@ -331,7 +360,11 @@ async fn hydration_failure_reports_new_head() {
     )
     .unwrap();
     let sdk = client(fixture.store.path(), fixture.scratch.path());
-    let local = sdk.open_local(&fixture.checkout).await.unwrap();
+    let local_handle = sdk
+        .open(crab_sdk::OpenOptions::local(&fixture.checkout))
+        .await
+        .unwrap();
+    let local = local_handle.local().unwrap();
     let result = local.pull(PullOptions::fast_forward_only()).await.unwrap();
     assert!(
         matches!(

@@ -1,7 +1,5 @@
-use crab_sdk::{
-    AzureOptions, ClientBuilder, DirectStoreOptions, ErrorKind, GcsOptions, RepositoryLocator,
-    S3Options,
-};
+use crab_sdk::storage::{AzureOptions, DirectStoreOptions, GcsOptions, S3Options};
+use crab_sdk::{ClientBuilder, ErrorKind, RepositoryLocator};
 
 #[test]
 fn configuration_builders_need_no_provider_or_runtime() {
