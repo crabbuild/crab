@@ -102,6 +102,22 @@ results, transient decode buffers, and queued work need their own admission.
 client-authentication material. The `remote-client` feature is required when a
 remote service URL is configured; local caching remains available without it.
 
+### Cache observations
+
+`CachingStore::with_cache_observer` attaches an optional process-local observer
+to the canonical routing path. It reports one completed attempt as the fixed
+`memory`, `local`, or `service` source and `hit`, `miss`, or `failure` outcome,
+plus verified bytes returned by hits. It also reports best-effort local
+persistence failures separately because the verified origin or service result
+remains usable. Origin reads and writes are outside this observer; consumers
+should combine these events with the storage transport's own metrics.
+
+Observations contain no object path, repository, endpoint, or credential data.
+The default observer is a no-op, so library callers pay no metrics-backend
+dependency and can choose their own bounded aggregation. Errors intentionally
+collapsed by `LocalCache` into a safe miss retain that established contract;
+they remain visible in warning logs rather than being reclassified here.
+
 ## Construction and startup
 
 | Constructor | Remote service behavior | Failure result |

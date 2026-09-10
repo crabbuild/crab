@@ -8,7 +8,7 @@ use std::{
 use base64::Engine as _;
 use bytes::Bytes;
 use crab_cache::LocalCache;
-use crab_cache_store::{CacheConfig as StoreCacheConfig, CachingStore};
+use crab_cache_store::{CacheConfig as StoreCacheConfig, CacheObserver, CachingStore};
 use crab_git::pointer_detect::PointerKind;
 use crab_remote_git::{
     ContentClassification, EntryKind, OperationKind, RemoteGitRuntime, RepositoryIdentity,
@@ -39,17 +39,41 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
+    #[cfg(test)]
     pub(crate) fn new_with_cache(
         config: RepositoryConfig,
         store: Store,
         local_cache: Arc<LocalCache>,
     ) -> crate::Result<Self> {
-        let layout = StoreLayout::new(store.clone(), config.prefix.clone());
         let cache_config = StoreCacheConfig {
             max_bytes: local_cache.max_bytes(),
             ..StoreCacheConfig::default()
         };
         let caching = CachingStore::new_with_local_cache(store.clone(), cache_config, local_cache)?;
+        Self::new_with_caching_store(config, store, caching)
+    }
+
+    pub(crate) fn new_with_cache_observer(
+        config: RepositoryConfig,
+        store: Store,
+        local_cache: Arc<LocalCache>,
+        observer: Arc<dyn CacheObserver>,
+    ) -> crate::Result<Self> {
+        let cache_config = StoreCacheConfig {
+            max_bytes: local_cache.max_bytes(),
+            ..StoreCacheConfig::default()
+        };
+        let caching = CachingStore::new_with_local_cache(store.clone(), cache_config, local_cache)?
+            .with_cache_observer(observer);
+        Self::new_with_caching_store(config, store, caching)
+    }
+
+    fn new_with_caching_store(
+        config: RepositoryConfig,
+        store: Store,
+        caching: CachingStore,
+    ) -> crate::Result<Self> {
+        let layout = StoreLayout::new(store.clone(), config.prefix.clone());
         let read_layout = crab_read::ReadStoreLayout::with_global_prefix(
             store.clone(),
             layout.repo_prefix().to_owned(),
@@ -100,6 +124,7 @@ pub(crate) struct Gateway {
     region: Arc<str>,
     admission: Admission,
     metrics: Metrics,
+    local_cache: Arc<LocalCache>,
     cancellation: CancellationToken,
 }
 
@@ -294,8 +319,12 @@ impl Gateway {
                     store
                 }
             };
-            let repository =
-                Repository::new_with_cache(entry.clone(), store, Arc::clone(&local_cache))?;
+            let repository = Repository::new_with_cache_observer(
+                entry.clone(),
+                store,
+                Arc::clone(&local_cache),
+                metrics.cache_observer(),
+            )?;
             repositories.insert(entry.name.clone(), repository);
         }
         let runtime = Arc::new(RemoteGitRuntime::default());
@@ -318,6 +347,7 @@ impl Gateway {
             region,
             admission,
             metrics,
+            local_cache,
             cancellation,
         })
     }
@@ -542,7 +572,8 @@ impl Gateway {
         self.metrics.clone()
     }
 
-    pub(crate) fn render_metrics(&self) -> String {
+    pub(crate) async fn render_metrics(&self) -> String {
+        self.metrics.refresh_cache(&self.local_cache).await;
         self.metrics.render(&self.admission)
     }
 
@@ -4545,6 +4576,12 @@ mod tests {
         let runtime = Arc::new(RemoteGitRuntime::default());
         let options = RepositoryOptions::default();
         let metrics = Metrics::new().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let local_cache = Arc::new(LocalCache::with_limits(
+            cache_dir.path().join("cache"),
+            128 * 1024 * 1024,
+            Some(128 * 1024 * 1024),
+        ));
         let gateway = Gateway {
             repositories: Arc::new(BTreeMap::from([("repo".to_owned(), repository)])),
             mutations: Arc::new(mutation::Coordinator::new(
@@ -4558,6 +4595,7 @@ mod tests {
             region: Arc::from("us-east-1"),
             admission: Admission::new(8, cancellation.clone(), metrics.clone()),
             metrics,
+            local_cache,
             cancellation,
         };
         let repository = &gateway.repositories["repo"];

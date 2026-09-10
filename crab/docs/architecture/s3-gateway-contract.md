@@ -331,6 +331,15 @@ descriptor-relative probe. Deploy the cache on a private volume separate from
 scratch; cache loss may reduce performance but never removes acknowledged
 repository state.
 
+The private metrics listener reports cache attempts by the fixed
+memory/local/service and hit/miss/failure dimensions, verified hit bytes, local
+persistence failures, and aggregate catalog entry/byte accounting. Catalog
+gauges come from a coalesced read-only SQLite probe on each scrape; probe health
+and last-success time distinguish genuine zero usage from an unreadable
+catalog. No series includes a repository, ref, path, endpoint, principal, or
+credential label. Origin transport metrics remain the authority for fallback
+cost and provider failures.
+
 ## Repository extension API
 
 S3 methods are not repurposed for Git concepts. A separate authenticated

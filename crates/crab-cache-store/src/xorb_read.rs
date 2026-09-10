@@ -13,7 +13,7 @@ use crab_xet::xorb::parser::{
 };
 use object_store::path::Path;
 
-use crate::{CacheStoreError, CachingStore, Result};
+use crate::{CacheReadOutcome, CacheSource, CacheStoreError, CachingStore, Result};
 
 const XORB_READ_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const XORB_READ_CACHE_MAX_ENTRIES: usize = 4096;
@@ -56,9 +56,13 @@ impl CachingStore {
         let _fill_guard = self.xorb_reads.lock(xorb_hash).await;
         for source in [XorbSource::Local, XorbSource::Service, XorbSource::Origin] {
             match self.xorb_read_plan(path, xorb_hash, source).await {
-                Ok(Some(plan)) => return Ok(plan.chunks),
-                Ok(None) => {}
+                Ok(Some(plan)) => {
+                    self.observe_xorb_source(source, CacheReadOutcome::Hit, 0);
+                    return Ok(plan.chunks);
+                }
+                Ok(None) => self.observe_xorb_source(source, CacheReadOutcome::Miss, 0),
                 Err(error) => {
+                    self.observe_xorb_source(source, CacheReadOutcome::Failure, 0);
                     self.xorb_read_failed(path, xorb_hash, source, error)
                         .await?
                 }
@@ -82,11 +86,16 @@ impl CachingStore {
         }
         let key = XorbReadKey::new(*xorb_hash, ranges, install_full_xorb);
         if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
+            self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
             return Ok(result);
         }
         let _fill_guard = self.xorb_reads.lock(xorb_hash).await;
         if let Some(result) = key.as_ref().and_then(|key| self.xorb_reads.get(key)) {
+            self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Hit, result.0.len());
             return Ok(result);
+        }
+        if key.is_some() {
+            self.observe_cache_read(CacheSource::Memory, CacheReadOutcome::Miss, 0);
         }
 
         // An attempt never switches sources. A parser failure therefore has
@@ -97,13 +106,15 @@ impl CachingStore {
                 .await
             {
                 Ok(Some(result)) => {
+                    self.observe_xorb_source(source, CacheReadOutcome::Hit, result.0.len());
                     if let Some(key) = key {
                         self.xorb_reads.insert(key, &result);
                     }
                     return Ok(result);
                 }
-                Ok(None) => {}
+                Ok(None) => self.observe_xorb_source(source, CacheReadOutcome::Miss, 0),
                 Err(error) => {
+                    self.observe_xorb_source(source, CacheReadOutcome::Failure, 0);
                     self.xorb_read_failed(path, xorb_hash, source, error)
                         .await?
                 }
@@ -251,6 +262,7 @@ impl CachingStore {
             // A local write/index failure cannot change a verified read result.
             parser.verify_all_chunks().map_err(CacheError::from)?;
             if let Err(error) = self.local_cache.put_read_xorb(xorb_hash, data).await {
+                self.observe_local_write_failure();
                 tracing::warn!(
                     family = "xorb",
                     operation = "install",
@@ -262,6 +274,15 @@ impl CachingStore {
             }
         }
         Ok(Some(result))
+    }
+
+    fn observe_xorb_source(&self, source: XorbSource, outcome: CacheReadOutcome, bytes: usize) {
+        let source = match source {
+            XorbSource::Local => CacheSource::Local,
+            XorbSource::Service if self.cache_reads_enabled() => CacheSource::Service,
+            XorbSource::Service | XorbSource::Origin => return,
+        };
+        self.observe_cache_read(source, outcome, bytes);
     }
 
     async fn xorb_read_plan(

@@ -161,6 +161,112 @@ fn renderer_exports_configured_cache_limit() {
 }
 
 #[test]
+fn cache_observer_exports_fixed_source_outcomes_and_verified_bytes() {
+    let (admission, metrics) = setup();
+    let observer = metrics.cache_observer();
+    observer.read(crab_cache_store::CacheReadObservation {
+        source: crab_cache_store::CacheSource::Local,
+        outcome: crab_cache_store::CacheReadOutcome::Miss,
+        bytes: 0,
+    });
+    observer.read(crab_cache_store::CacheReadObservation {
+        source: crab_cache_store::CacheSource::Local,
+        outcome: crab_cache_store::CacheReadOutcome::Hit,
+        bytes: 4096,
+    });
+    observer.local_write_failure();
+
+    let body = metrics.render(&admission);
+    assert!(body.contains(
+        "crab_s3_gateway_cache_read_attempts_total{source=\"local\",outcome=\"miss\"} 1"
+    ));
+    assert!(
+        body.contains(
+            "crab_s3_gateway_cache_read_attempts_total{source=\"local\",outcome=\"hit\"} 1"
+        )
+    );
+    assert!(body.contains("crab_s3_gateway_cache_bytes_read_total{source=\"local\"} 4096"));
+    assert!(body.contains("crab_s3_gateway_cache_local_write_failures_total 1"));
+    assert_eq!(
+        body.lines()
+            .filter(|line| line.starts_with("crab_s3_gateway_cache_read_attempts_total{"))
+            .count(),
+        crab_cache_store::CacheSource::ALL.len() * crab_cache_store::CacheReadOutcome::ALL.len()
+    );
+    assert!(!body.contains("repository="));
+    assert!(!body.contains("path="));
+}
+
+#[tokio::test]
+async fn cache_catalog_probe_exports_current_retention_without_scanning_payloads() {
+    let (admission, metrics) = setup();
+    let tempdir = tempfile::tempdir().unwrap();
+    let cache = crab_cache::LocalCache::with_limits(
+        tempdir.path().join("cache"),
+        1024 * 1024,
+        Some(1024 * 1024),
+    );
+    cache.prepare().unwrap();
+    let body = Bytes::from_static(b"catalog-accounted-cache-body");
+    let hash = blake3::hash(&body);
+    cache
+        .put_bytes(&crab_cache::CacheKey::RefTransaction(hash), body.clone())
+        .await
+        .unwrap();
+
+    metrics.set_cache_limit(1024 * 1024);
+    metrics.refresh_cache(&cache).await;
+    let rendered = metrics.render(&admission);
+
+    assert_eq!(
+        metric_value(&rendered, "crab_s3_gateway_cache_retained_bytes"),
+        body.len() as f64,
+    );
+    assert_eq!(
+        metric_value(&rendered, "crab_s3_gateway_cache_entries"),
+        1.0,
+    );
+    assert_eq!(
+        metric_value(&rendered, "crab_s3_gateway_cache_reserved_bytes"),
+        0.0,
+    );
+    assert_eq!(
+        metric_value(&rendered, "crab_s3_gateway_cache_catalog_probe_success"),
+        1.0,
+    );
+    assert!(
+        metric_value(
+            &rendered,
+            "crab_s3_gateway_cache_catalog_last_success_timestamp_seconds"
+        ) > 0.0
+    );
+}
+
+#[tokio::test]
+async fn failed_cache_catalog_probe_is_visible_without_stale_health() {
+    let (admission, metrics) = setup();
+    let tempdir = tempfile::tempdir().unwrap();
+    let root = tempdir.path().join("not-a-directory");
+    std::fs::write(&root, b"file").unwrap();
+    let cache = crab_cache::LocalCache::new(root);
+
+    metrics.refresh_cache(&cache).await;
+    let rendered = metrics.render(&admission);
+
+    assert_eq!(
+        metric_value(&rendered, "crab_s3_gateway_cache_catalog_probe_success"),
+        0.0,
+    );
+    assert_eq!(
+        metric_value(
+            &rendered,
+            "crab_s3_gateway_cache_catalog_probe_failures_total"
+        ),
+        1.0,
+    );
+}
+
+#[test]
 fn scratch_reservation_is_visible_and_released_on_drop() {
     let scratch = tempfile::tempdir().unwrap();
     let metrics = Metrics::new_with_scratch_path(scratch.path().to_owned()).unwrap();

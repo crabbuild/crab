@@ -193,6 +193,13 @@ counter make mount loss distinguishable from genuine zero capacity; a failed
 probe clears all three capacity gauges rather than retaining stale values.
 Separate headroom, pending-reservation, and bounded rejection series expose
 capacity admission before the filesystem reports an I/O failure.
+Cache series report fixed memory/local/service read attempts by hit, miss, or
+failure; verified bytes returned by each cache layer; and best-effort local
+persistence failures. Per-scrape gauges read aggregate entry, retained,
+reserved, and temporary-byte totals from the existing SQLite catalog without
+walking payload files. Probe health, failures, and last-success time distinguish
+an empty cache from an unavailable or malformed catalog. Concurrent scrapes
+coalesce rather than queue catalog probes.
 Metric labels are fixed enums; they never contain
 repository names, refs, keys, upload IDs, principals, access keys, or secrets.
 The corresponding CLI checks are suitable for container and orchestration

@@ -131,7 +131,7 @@ async fn management_response(
     let response = match (request.method(), request.uri().path()) {
         (&Method::GET, "/livez") => json_response(StatusCode::OK, b"{\"status\":\"ok\"}"),
         (&Method::GET, "/readyz") => readiness_response(&gateway).await,
-        (&Method::GET, "/metrics") => metrics_response(gateway.render_metrics()),
+        (&Method::GET, "/metrics") => metrics_response(gateway.render_metrics().await),
         (_, "/livez" | "/readyz" | "/metrics") => {
             let mut response = json_response(
                 StatusCode::METHOD_NOT_ALLOWED,

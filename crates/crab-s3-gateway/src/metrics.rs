@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod backend;
+mod cache;
 mod filesystem;
 mod scratch;
 
@@ -73,9 +74,9 @@ struct MetricsInner {
     admission: [AdmissionMetrics; RequestClass::ALL.len()],
     multipart_maintenance: MultipartMaintenanceMetrics,
     backend: backend::BackendMetrics,
+    cache: cache::CacheMetrics,
     filesystem: filesystem::FilesystemMetrics,
     scratch: scratch::ScratchMetrics,
-    cache_limit: Gauge,
 }
 
 struct MethodMetrics {
@@ -149,12 +150,9 @@ impl Metrics {
             RequestClass::ALL.map(|class| AdmissionMetrics::new(&recorder, class.label()));
         let multipart_maintenance = MultipartMaintenanceMetrics::new(&recorder);
         let backend = backend::BackendMetrics::new(&recorder);
+        let cache = cache::CacheMetrics::new(&recorder);
         let filesystem = filesystem::FilesystemMetrics::new(&recorder, scratch_path);
         let scratch = scratch::ScratchMetrics::new(&recorder);
-        let cache_limit = recorder.register_gauge(
-            &Key::from_static_name("crab_s3_gateway_cache_limit_bytes"),
-            &METADATA,
-        );
         Ok(Self {
             inner: Arc::new(MetricsInner {
                 handle: recorder.handle(),
@@ -162,15 +160,23 @@ impl Metrics {
                 admission,
                 multipart_maintenance,
                 backend,
+                cache,
                 filesystem,
                 scratch,
-                cache_limit,
             }),
         })
     }
 
     pub(crate) fn set_cache_limit(&self, bytes: u64) {
-        self.inner.cache_limit.set(bytes as f64);
+        self.inner.cache.set_limit(bytes);
+    }
+
+    pub(crate) fn cache_observer(&self) -> Arc<dyn crab_cache_store::CacheObserver> {
+        self.inner.cache.observer()
+    }
+
+    pub(crate) async fn refresh_cache(&self, cache: &crab_cache::LocalCache) {
+        self.inner.cache.refresh(cache.root()).await;
     }
 
     pub(crate) fn start_request(&self, method: &Method) -> RequestObservation {
@@ -621,11 +627,6 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds",
         "Unix timestamp of the last cycle with no repository failures.",
-    );
-    describe_gauge(
-        recorder,
-        "crab_s3_gateway_cache_limit_bytes",
-        "Configured process-local cache retention ceiling.",
     );
 }
 

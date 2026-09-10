@@ -440,6 +440,22 @@ jobs:
             "${metrics_root}.txt"
           grep -Fqx 'crab_s3_gateway_cache_limit_bytes 134217728' \
             "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_cache_(retained|reserved|temporary)_bytes [0-9]+(\.[0-9]+)?$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_cache_entries [0-9]+(\.[0-9]+)?$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_catalog_probe_success 1' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_catalog_probe_failures_total 0' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_cache_catalog_last_success_timestamp_seconds [1-9][0-9]*(\.[0-9]+)?$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_local_write_failures_total 0' \
+            "${metrics_root}.txt"
+          test "$(grep -Ec '^crab_s3_gateway_cache_read_attempts_total\{source="(memory|local|service)",outcome="(hit|miss|failure)"\} [0-9]+$' \
+            "${metrics_root}.txt")" = 9
+          test "$(grep -Ec '^crab_s3_gateway_cache_bytes_read_total\{source="(memory|local|service)"\} [0-9]+$' \
+            "${metrics_root}.txt")" = 3
           grep -Eq '^crab_s3_gateway_backend_requests_total\{operation="(get|head|range|put|list)",outcome="success"\} [1-9][0-9]*$' \
             "${metrics_root}.txt"
           grep -Eq '^crab_s3_gateway_backend_bytes_read_total\{operation="(get|range)"\} [1-9][0-9]*$' \
