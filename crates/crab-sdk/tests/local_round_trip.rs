@@ -606,6 +606,20 @@ async fn conflict_continue_and_abort_round_trip() {
     let remote = remote_repository.local().unwrap();
     let merge = merge_repository.local().unwrap();
     let abort = abort_repository.local().unwrap();
+    let git = PathBuf::from(required("CRAB_SDK_TEST_GIT_BIN"));
+    for repository in [&merge_path, &abort_path] {
+        for (key, value) in [
+            ("user.name", "SDK qualification"),
+            ("user.email", "sdk@example.invalid"),
+        ] {
+            let status = std::process::Command::new(&git)
+                .current_dir(repository)
+                .args(["config", "--local", key, value])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+    }
 
     std::fs::write(merge_path.join("README.md"), b"local merge change\n").unwrap();
     merge.stage(vec!["README.md".into()]).await.unwrap();
@@ -671,7 +685,6 @@ async fn conflict_continue_and_abort_round_trip() {
             .unwrap(),
         PullOutcome::Updated { .. }
     ));
-    let git = PathBuf::from(required("CRAB_SDK_TEST_GIT_BIN"));
     let merge_parents = std::process::Command::new(&git)
         .current_dir(&merge_path)
         .args(["rev-list", "--parents", "-n", "1", "HEAD"])
