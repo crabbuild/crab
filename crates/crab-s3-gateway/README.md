@@ -41,6 +41,13 @@ and committed journal state. Ref snapshots, parsed Git trees, and S3 attributes
 are singleflight-cached inside that view. HEAD and attributed LIST requests use
 the committed size and ETag without opening blob payloads.
 
+The per-process `max_in_flight_requests` budget is split into reserved control,
+read, and transfer pools so large uploads cannot starve bucket discovery,
+metadata, or range reads. Each pool admits a bounded FIFO burst for up to 60
+seconds before returning S3 `SlowDown`; request bodies are not consumed while
+waiting. The default budget is 32 and should be tuned from measured CPU, memory,
+file-descriptor, and scratch usage rather than client fanout alone.
+
 Each mutation rewrites only the target path's ancestor trees and persists one
 path-local attribute delta. Immutable pack, index, visibility, and attribute
 artifacts are prepared and uploaded before the destination ref lease; the lease

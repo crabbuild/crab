@@ -1,5 +1,8 @@
 listen = "127.0.0.1:8080"
 region = "us-east-1"
+# Per-process active request budget. Queued bursts wait for bounded capacity;
+# tune from measured CPU, memory, file-descriptor, and scratch usage.
+max_in_flight_requests = 32
 # Set to the public host (and port, when non-default) to also accept
 # virtual-hosted requests such as repository.example.s3.crab.build.
 # endpoint_domain = "s3.crab.build"

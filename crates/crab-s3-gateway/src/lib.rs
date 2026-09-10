@@ -1,5 +1,6 @@
 //! S3 protocol composition for logical Crab repositories.
 
+mod admission;
 mod attributes;
 mod auth;
 mod config;

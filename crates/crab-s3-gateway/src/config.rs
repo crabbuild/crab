@@ -18,6 +18,9 @@ pub struct Config {
     pub endpoint_domain: Option<String>,
     #[serde(default = "default_region")]
     pub region: String,
+    /// Per-process active request budget. Capacity is reserved by operation class.
+    #[serde(default = "default_max_in_flight_requests")]
+    pub max_in_flight_requests: usize,
     pub credentials: Vec<CredentialConfig>,
     pub repositories: Vec<RepositoryConfig>,
 }
@@ -87,6 +90,11 @@ impl Config {
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         {
             return Err(Error::Config("region must be a non-empty AWS region name"));
+        }
+        if !(8..=4096).contains(&self.max_in_flight_requests) {
+            return Err(Error::Config(
+                "max_in_flight_requests must be between 8 and 4096",
+            ));
         }
         if let Some(domain) = self.endpoint_domain.as_deref() {
             s3s::host::SingleDomain::new(domain)?;
@@ -203,6 +211,10 @@ fn default_region() -> String {
     "us-east-1".to_owned()
 }
 
+fn default_max_in_flight_requests() -> usize {
+    32
+}
+
 fn default_provider() -> StorageProviderKind {
     StorageProviderKind::S3
 }
@@ -211,6 +223,32 @@ fn default_provider() -> StorageProviderKind {
 mod tests {
     use super::*;
 
+    fn valid_config(secret_key_file: PathBuf) -> Config {
+        Config {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            endpoint_domain: None,
+            region: default_region(),
+            max_in_flight_requests: default_max_in_flight_requests(),
+            credentials: vec![CredentialConfig {
+                access_key: "test-access-key".to_owned(),
+                secret_key_file,
+                principal: "test-principal".to_owned(),
+            }],
+            repositories: vec![RepositoryConfig {
+                name: "test-repository".to_owned(),
+                provider: StorageProviderKind::S3,
+                bucket: "test-storage".to_owned(),
+                prefix: "repositories/test".to_owned(),
+                default_branch: default_branch(),
+                members: vec![RepositoryMember {
+                    principal: "test-principal".to_owned(),
+                    access: RepositoryAccess::Write,
+                }],
+                protected_branches: Vec::new(),
+            }],
+        }
+    }
+
     #[test]
     fn logical_bucket_names_follow_the_frozen_profile() {
         for value in ["abc", "a-b.c9", &format!("a{}z", "b".repeat(61))] {
@@ -218,6 +256,27 @@ mod tests {
         }
         for value in ["ab", "UPPER", "-abc", "abc-", "a..b", "a_b"] {
             assert!(!valid_bucket_name(value));
+        }
+    }
+
+    #[test]
+    fn request_budget_rejects_unsafe_extremes() {
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(secret.path(), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut config = valid_config(secret.path().to_owned());
+        for value in [8, 32, 4096] {
+            config.max_in_flight_requests = value;
+            config.validate().unwrap();
+        }
+        for value in [0, 7, 4097, usize::MAX] {
+            config.max_in_flight_requests = value;
+            assert!(config.validate().is_err());
         }
     }
 

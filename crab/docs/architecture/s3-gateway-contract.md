@@ -60,6 +60,7 @@ Examples:
 `HeadBucket` addresses the repository. `ListObjects` and `ListObjectsV2` require
 a ref in `prefix`; listing with an empty prefix returns authorized branch
 prefixes only. Tag and commit namespaces are not synthesized at repository root.
+Listing beneath an unknown or unborn ref returns an empty page.
 The empty key, a ref without a trailing slash, and a ref root are prefixes, not
 objects. `GetObject`, `HeadObject`, and mutations require a non-empty repository
 path.
@@ -243,7 +244,7 @@ boundary without credentials or request bodies.
 | Branch contention or transient shared-state conflict | `OperationAborted` |
 | Missing/terminal multipart session | `NoSuchUpload` |
 | Bad completion selection/order/size | `InvalidPart`, `InvalidPartOrder`, `EntityTooSmall` |
-| Admission capacity limit | `SlowDown` |
+| Bounded admission queue exhaustion or wait timeout | `SlowDown` |
 | Corrupt/unavailable committed data | `InternalError` |
 
 Request bodies and multipart completion are streamed through bounded memory to

@@ -16,10 +16,14 @@ use crab_remote_git::{
 use crab_storage::{StorageProviderKind, Store, StoreLayout, build_static_env_store};
 use futures_util::StreamExt as _;
 use s3s::{S3, S3Request, S3Response, S3Result, dto::*, s3_error};
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Config, RepositoryAccess, RepositoryConfig, auth::GatewayAuth, mutation, namespace};
+use crate::{
+    Config, RepositoryAccess, RepositoryConfig,
+    admission::{Admission, RequestClass, RequestPermit},
+    auth::GatewayAuth,
+    mutation, namespace,
+};
 
 pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
@@ -74,7 +78,7 @@ pub(crate) struct Gateway {
     mutations: Arc<mutation::Coordinator>,
     auth: GatewayAuth,
     region: Arc<str>,
-    admission: Arc<Semaphore>,
+    admission: Admission,
     cancellation: CancellationToken,
 }
 
@@ -110,6 +114,15 @@ enum ReadContent {
 
 type ContentStream =
     Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, s3s::StdError>> + Send + 'static>>;
+
+fn hold_permit(stream: ContentStream, permit: RequestPermit) -> ContentStream {
+    Box::pin(futures_util::stream::unfold(
+        (stream, permit),
+        |(mut stream, permit)| async move {
+            stream.next().await.map(|result| (result, (stream, permit)))
+        },
+    ))
+}
 
 impl ReadContent {
     async fn stream(
@@ -228,6 +241,7 @@ impl Gateway {
         }
         let runtime = Arc::new(RemoteGitRuntime::default());
         let options = RepositoryOptions::default();
+        let admission = Admission::new(config.max_in_flight_requests, cancellation.clone());
         Ok(Self {
             repositories: Arc::new(repositories),
             mutations: Arc::new(mutation::Coordinator::new(Arc::clone(&runtime), options)),
@@ -235,7 +249,7 @@ impl Gateway {
             options,
             auth,
             region,
-            admission: Arc::new(Semaphore::new(32)),
+            admission,
             cancellation,
         })
     }
@@ -260,6 +274,10 @@ impl Gateway {
     pub(crate) async fn shutdown(&self) {
         self.cancellation.cancel();
         self.runtime.shutdown().await;
+    }
+
+    async fn admit(&self, class: RequestClass) -> S3Result<RequestPermit> {
+        self.admission.acquire(class).await.map_err(admission_error)
     }
 
     fn principal<'a, T>(&'a self, req: &S3Request<T>) -> S3Result<&'a str> {
@@ -608,10 +626,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<ListBucketsInput>,
     ) -> S3Result<S3Response<ListBucketsOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         if req
             .input
             .bucket_region
@@ -666,10 +681,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<HeadBucketInput>,
     ) -> S3Result<S3Response<HeadBucketOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let mut response = S3Response::new(HeadBucketOutput::default());
         response.headers.insert(
@@ -683,10 +695,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<GetBucketLocationInput>,
     ) -> S3Result<S3Response<GetBucketLocationOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         if req.input.expected_bucket_owner.is_some() {
             return Err(s3_error!(NotImplemented));
         }
@@ -701,10 +710,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<GetBucketVersioningInput>,
     ) -> S3Result<S3Response<GetBucketVersioningOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         if req.input.expected_bucket_owner.is_some() {
             return Err(s3_error!(NotImplemented));
         }
@@ -718,10 +724,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<GetObjectInput>,
     ) -> S3Result<S3Response<GetObjectOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let permit = self.admit(RequestClass::Read).await?;
         reject_get_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let object = self.read_object(repository, &req.input.key).await?;
@@ -747,7 +750,7 @@ impl S3 for Gateway {
         let range = selection.range;
         let content_length =
             i64::try_from(range.end - range.start).map_err(|_| s3_error!(InternalError))?;
-        let body = object.content.stream(repository, range).await?;
+        let body = hold_permit(object.content.stream(repository, range).await?, permit);
         let body =
             http_body_util::StreamBody::new(body.map(|result| result.map(http_body::Frame::data)));
         let output = GetObjectOutput {
@@ -817,10 +820,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<HeadObjectInput>,
     ) -> S3Result<S3Response<HeadObjectOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Read).await?;
         reject_head_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let object = self
@@ -905,10 +905,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<PutObjectInput>,
     ) -> S3Result<S3Response<PutObjectOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         reject_put_extensions(&req.input)?;
         let marker_address =
             namespace::directory_marker_address(&req.input.key).map_err(namespace_error)?;
@@ -1007,10 +1004,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<GetObjectAttributesInput>,
     ) -> S3Result<S3Response<GetObjectAttributesOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Read).await?;
         if req.input.expected_bucket_owner.is_some()
             || req.input.request_payer.is_some()
             || req.input.sse_customer_algorithm.is_some()
@@ -1080,10 +1074,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<GetObjectTaggingInput>,
     ) -> S3Result<S3Response<GetObjectTaggingOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Read).await?;
         if req.input.expected_bucket_owner.is_some()
             || req.input.request_payer.is_some()
             || req.input.version_id.is_some()
@@ -1114,10 +1105,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<PutObjectTaggingInput>,
     ) -> S3Result<S3Response<PutObjectTaggingOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         if req.input.expected_bucket_owner.is_some()
             || req.input.request_payer.is_some()
             || req.input.version_id.is_some()
@@ -1174,10 +1162,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<DeleteObjectTaggingInput>,
     ) -> S3Result<S3Response<DeleteObjectTaggingOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         if req.input.expected_bucket_owner.is_some() || req.input.version_id.is_some() {
             return Err(s3_error!(NotImplemented));
         }
@@ -1218,10 +1203,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<DeleteObjectInput>,
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         reject_delete_extensions(&req.input)?;
         let marker_address =
             namespace::directory_marker_address(&req.input.key).map_err(namespace_error)?;
@@ -1254,10 +1236,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<DeleteObjectsInput>,
     ) -> S3Result<S3Response<DeleteObjectsOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         if req.input.bypass_governance_retention.is_some()
             || req.input.expected_bucket_owner.is_some()
             || req.input.mfa.is_some()
@@ -1349,10 +1328,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<CopyObjectInput>,
     ) -> S3Result<S3Response<CopyObjectOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         reject_copy_extensions(&req.input)?;
         let (source_bucket, source_key) = match &req.input.copy_source {
             CopySource::Bucket {
@@ -1509,10 +1485,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<CreateMultipartUploadInput>,
     ) -> S3Result<S3Response<CreateMultipartUploadOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         reject_create_multipart_extensions(&req.input)?;
         let (checksum_algorithm, checksum_type) = multipart_checksum_profile(
             req.input.checksum_algorithm.as_ref(),
@@ -1573,10 +1546,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<UploadPartInput>,
     ) -> S3Result<S3Response<UploadPartOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         reject_upload_part_extensions(&req.input)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Write)?;
         let principal = self.principal(&req)?.to_owned();
@@ -1649,10 +1619,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<UploadPartCopyInput>,
     ) -> S3Result<S3Response<UploadPartCopyOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         if req.input.copy_source_sse_customer_algorithm.is_some()
             || req.input.copy_source_sse_customer_key.is_some()
             || req.input.copy_source_sse_customer_key_md5.is_some()
@@ -1747,10 +1714,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<CompleteMultipartUploadInput>,
     ) -> S3Result<S3Response<CompleteMultipartUploadOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Transfer).await?;
         reject_complete_multipart_extensions(&req.input)?;
         let if_match = req.input.if_match.clone();
         let if_none_match = req.input.if_none_match.clone();
@@ -1957,10 +1921,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<AbortMultipartUploadInput>,
     ) -> S3Result<S3Response<AbortMultipartUploadOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         if req.input.expected_bucket_owner.is_some()
             || req.input.if_match_initiated_time.is_some()
             || req.input.request_payer.is_some()
@@ -1989,10 +1950,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<ListPartsInput>,
     ) -> S3Result<S3Response<ListPartsOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         if req.input.expected_bucket_owner.is_some()
             || req.input.request_payer.is_some()
             || req.input.sse_customer_algorithm.is_some()
@@ -2077,10 +2035,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<ListMultipartUploadsInput>,
     ) -> S3Result<S3Response<ListMultipartUploadsOutput>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Control).await?;
         if req
             .input
             .delimiter
@@ -2232,10 +2187,7 @@ impl S3 for Gateway {
         &self,
         req: S3Request<ListObjectsV2Input>,
     ) -> S3Result<S3Response<ListObjectsV2Output>> {
-        let _permit = self
-            .admission
-            .try_acquire()
-            .map_err(|_| s3_error!(SlowDown))?;
+        let _permit = self.admit(RequestClass::Read).await?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let url_encode = list_url_encoding(req.input.encoding_type.as_ref())?;
         if req
@@ -2255,6 +2207,9 @@ impl S3 for Gateway {
             return self.list_refs(&req, repository).await;
         };
         let repo = self.open(repository).await?;
+        if repo.remote().refs().find(&reference).is_none() {
+            return empty_list_objects_response(&req, url_encode);
+        }
         let operation = repo
             .remote()
             .operation(OperationKind::Repository, &self.cancellation)
@@ -2411,6 +2366,28 @@ impl S3 for Gateway {
         .await;
         finish(operation, result).await
     }
+}
+
+fn empty_list_objects_response(
+    req: &S3Request<ListObjectsV2Input>,
+    url_encode: bool,
+) -> S3Result<S3Response<ListObjectsV2Output>> {
+    let max_keys = req.input.max_keys.unwrap_or(1000);
+    if max_keys < 0 {
+        return Err(s3_error!(InvalidArgument));
+    }
+    Ok(S3Response::new(ListObjectsV2Output {
+        name: Some(req.input.bucket.clone()),
+        prefix: encode_list_option(req.input.prefix.clone(), url_encode),
+        max_keys: Some(max_keys.min(1000)),
+        key_count: Some(0),
+        continuation_token: req.input.continuation_token.clone(),
+        is_truncated: Some(false),
+        delimiter: encode_list_option(req.input.delimiter.clone(), url_encode),
+        encoding_type: req.input.encoding_type.clone(),
+        start_after: encode_list_option(req.input.start_after.clone(), url_encode),
+        ..Default::default()
+    }))
 }
 
 fn verify_content_md5(actual: &[u8; 16], expected: Option<&str>) -> S3Result<()> {
@@ -3466,6 +3443,19 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
     }
 }
 
+fn admission_error(error: crate::admission::Error) -> s3s::S3Error {
+    match error {
+        crate::admission::Error::Cancelled => s3_error!(RequestTimeout),
+        crate::admission::Error::Overloaded | crate::admission::Error::AdmissionTimeout => {
+            s3_error!(SlowDown)
+        }
+        crate::admission::Error::AdmissionState => {
+            tracing::error!(%error, "S3 request admission failed");
+            s3_error!(InternalError)
+        }
+    }
+}
+
 fn gateway_error(error: crate::Error) -> s3s::S3Error {
     tracing::error!(error = ?error, "S3 gateway persistence failed");
     s3_error!(InternalError)
@@ -3532,6 +3522,7 @@ fn multipart_error(error: crate::multipart::Error) -> s3s::S3Error {
         crate::multipart::Error::InvalidPartOrder => s3_error!(InvalidPartOrder),
         crate::multipart::Error::EntityTooSmall => s3_error!(EntityTooSmall),
         crate::multipart::Error::EntityTooLarge => s3_error!(EntityTooLarge),
+        crate::multipart::Error::Cancelled => s3_error!(RequestTimeout),
         crate::multipart::Error::Conflict => s3_error!(OperationAborted),
         error => {
             tracing::error!(error = ?error, "S3 multipart state failed");
@@ -3543,6 +3534,75 @@ fn multipart_error(error: crate::multipart::Error) -> s3s::S3Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn list_request(input: ListObjectsV2Input) -> S3Request<ListObjectsV2Input> {
+        S3Request {
+            input,
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/repository"),
+            headers: http::HeaderMap::new(),
+            extensions: http::Extensions::new(),
+            credentials: None,
+            region: None,
+            service: None,
+            trailing_headers: None,
+        }
+    }
+
+    #[test]
+    fn unknown_or_unborn_ref_has_an_empty_list_response() {
+        let req = list_request(ListObjectsV2Input {
+            bucket: "repository".to_owned(),
+            prefix: Some("main/".to_owned()),
+            delimiter: Some("/".to_owned()),
+            max_keys: Some(100),
+            ..Default::default()
+        });
+
+        let output = empty_list_objects_response(&req, false).unwrap().output;
+
+        assert_eq!(
+            (output.key_count, output.is_truncated, output.contents),
+            (Some(0), Some(false), None)
+        );
+    }
+
+    #[test]
+    fn empty_list_response_rejects_negative_max_keys() {
+        let req = list_request(ListObjectsV2Input {
+            bucket: "repository".to_owned(),
+            max_keys: Some(-1),
+            ..Default::default()
+        });
+
+        assert!(empty_list_objects_response(&req, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn response_stream_holds_read_capacity_until_client_disconnects() {
+        let admission = Admission::new(8, CancellationToken::new());
+        let permit = admission.acquire(RequestClass::Read).await.unwrap();
+        let _second = admission.acquire(RequestClass::Read).await.unwrap();
+        let _third = admission.acquire(RequestClass::Read).await.unwrap();
+        let _fourth = admission.acquire(RequestClass::Read).await.unwrap();
+        let source: ContentStream = Box::pin(futures_util::stream::iter([Ok(Bytes::from_static(
+            b"payload",
+        ))]));
+        let mut response = hold_permit(source, permit);
+
+        assert_eq!(response.next().await.unwrap().unwrap(), b"payload"[..]);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                admission.acquire(RequestClass::Read),
+            )
+            .await
+            .is_err()
+        );
+
+        drop(response);
+        admission.acquire(RequestClass::Read).await.unwrap();
+    }
 
     #[test]
     fn url_encoded_list_values_round_trip_reserved_and_unicode_bytes() {

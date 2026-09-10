@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use bytes::Bytes;
 use crab_storage::ETag;
@@ -9,7 +10,10 @@ use crate::{attributes::PutAttributes, gateway::Repository};
 const VERSION: u32 = 1;
 const MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PARTS: usize = 10_000;
-const MAX_STATE_UPDATE_ATTEMPTS: usize = 16;
+// One admitted high-fanout part burst should converge in the gateway. Conflicts
+// beyond this bound remain retryable across independently scaled instances.
+const MAX_STATE_UPDATE_ATTEMPTS: usize = 64;
+const MAX_STATE_RETRY_EXPONENT: usize = 5;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -33,6 +37,8 @@ pub(crate) enum Error {
     EntityTooLarge,
     #[error("multipart state changed concurrently")]
     Conflict,
+    #[error("multipart state update was cancelled")]
+    Cancelled,
     #[error("multipart record is corrupt")]
     Decode(#[from] serde_json::Error),
     #[error("multipart storage failed")]
@@ -202,7 +208,7 @@ pub(crate) async fn register_part(
         checksums,
         path,
     };
-    for _ in 0..MAX_STATE_UPDATE_ATTEMPTS {
+    for attempt in 0..MAX_STATE_UPDATE_ATTEMPTS {
         if !matches!(loaded.session.state, State::Open) {
             return Err(Error::NotOpen);
         }
@@ -213,11 +219,31 @@ pub(crate) async fn register_part(
         loaded.session.revision = loaded.session.revision.saturating_add(1);
         match save(repository, &loaded).await {
             Ok(()) => return Ok(part),
-            Err(Error::Conflict) => loaded = load(repository, &loaded.session.id).await?,
+            Err(Error::Conflict) if attempt + 1 < MAX_STATE_UPDATE_ATTEMPTS => {
+                wait_for_state_retry(&loaded.session.id, number, attempt, cancel).await?;
+                loaded = load(repository, &loaded.session.id).await?;
+            }
             Err(error) => return Err(error),
         }
     }
     Err(Error::Conflict)
+}
+
+async fn wait_for_state_retry(
+    upload_id: &str,
+    part_number: i32,
+    attempt: usize,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    let base_ms = 1_u64 << attempt.min(MAX_STATE_RETRY_EXPONENT);
+    let seed = upload_id.bytes().fold(part_number as u64, |value, byte| {
+        value.rotate_left(5) ^ u64::from(byte)
+    });
+    let jitter_ms = seed.wrapping_add(attempt as u64) % (base_ms + 1);
+    tokio::select! {
+        () = cancel.cancelled() => Err(Error::Cancelled),
+        () = tokio::time::sleep(Duration::from_millis(base_ms + jitter_ms)) => Ok(()),
+    }
 }
 
 pub(crate) async fn part_stream(
@@ -454,6 +480,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_state_retry_stops_without_waiting() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        assert!(matches!(
+            wait_for_state_retry("01TESTUPLOAD00000000000000", 1, 5, &cancel).await,
+            Err(Error::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
     async fn parts_and_abort_survive_fresh_catalog_reads() {
         let repository = fixture().await;
         let session = create(
@@ -505,9 +542,9 @@ mod tests {
         assert!(matches!(terminal.session.state, State::Aborted));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn concurrent_distinct_parts_merge_into_the_session() {
-        let repository = fixture().await;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn high_fanout_distinct_parts_merge_without_client_retries() {
+        let repository = Arc::new(fixture().await);
         let session = create(
             &repository,
             Initiation {
@@ -524,44 +561,37 @@ mod tests {
         )
         .await
         .unwrap();
-        let first_loaded = load(&repository, &session.id).await.unwrap();
-        let second_loaded = load(&repository, &session.id).await.unwrap();
-        let first_body = Bytes::from_static(b"first part");
-        let second_body = Bytes::from_static(b"second part");
-        let first_spool = spool(&first_body).await;
-        let second_spool = spool(&second_body).await;
-        let first_cancel = tokio_util::sync::CancellationToken::new();
-        let second_cancel = tokio_util::sync::CancellationToken::new();
-
-        let (first, second) = tokio::join!(
-            register_part(
-                &repository,
-                first_loaded,
-                1,
-                &first_spool,
-                crate::gateway::md5_hex(&first_body),
-                crate::attributes::Checksums::default(),
-                11,
-                &first_cancel,
-            ),
-            register_part(
-                &repository,
-                second_loaded,
-                2,
-                &second_spool,
-                crate::gateway::md5_hex(&second_body),
-                crate::attributes::Checksums::default(),
-                12,
-                &second_cancel,
-            )
-        );
-
-        first.unwrap();
-        second.unwrap();
+        let barrier = Arc::new(tokio::sync::Barrier::new(64));
+        let mut writes = tokio::task::JoinSet::new();
+        for number in 1..=64 {
+            let repository = Arc::clone(&repository);
+            let upload_id = session.id.clone();
+            let barrier = Arc::clone(&barrier);
+            writes.spawn(async move {
+                let body = Bytes::from(format!("part-{number}"));
+                let spool = spool(&body).await;
+                let loaded = load(&repository, &upload_id).await.unwrap();
+                barrier.wait().await;
+                register_part(
+                    &repository,
+                    loaded,
+                    number,
+                    &spool,
+                    crate::gateway::md5_hex(&body),
+                    crate::attributes::Checksums::default(),
+                    10 + number as u64,
+                    &tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+            });
+        }
+        while let Some(result) = writes.join_next().await {
+            result.unwrap().unwrap();
+        }
         let reloaded = load(&repository, &session.id).await.unwrap();
         assert_eq!(
             reloaded.session.parts.keys().copied().collect::<Vec<_>>(),
-            vec![1, 2]
+            (1..=64).collect::<Vec<_>>()
         );
     }
 

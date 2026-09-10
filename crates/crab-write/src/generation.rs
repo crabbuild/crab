@@ -80,7 +80,9 @@ pub async fn ensure_readable(
         Err(CoordinationError::PushLockHeld { .. }) => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let result = crab_coordination::while_renewing(&mut owner, Some(cancel), async {
+    // Keep the full catalog and graph operation behind one heap indirection.
+    // Large committed bursts otherwise exhaust a default Tokio worker stack.
+    let maintenance = Box::pin(async {
         let global = WriterFence::acquire(store, layout.global_prefix(), ttl, cancel).await?;
         let repo = match WriterFence::acquire(store, layout.repo_prefix(), ttl, cancel).await {
             Ok(repo) => repo,
@@ -104,8 +106,8 @@ pub async fn ensure_readable(
             result = result.and(fence.release().await);
         }
         result
-    })
-    .await;
+    });
+    let result = crab_coordination::while_renewing(&mut owner, Some(cancel), maintenance).await;
     result.and(owner.release().await.map_err(Into::into))
 }
 
