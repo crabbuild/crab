@@ -112,6 +112,21 @@ crab push --jsonl
 For `git push`, set `CRAB_PROGRESS_FORMAT=jsonl` to receive the equivalent
 remote-helper event stream on stderr because Git owns helper stdout.
 
+## Progress for large pushes
+
+Text output reports each long-running phase as it starts, so initial pushes do
+not appear stalled while Crab walks a large history or runs Git pack
+compression. Once pack sizes are known, the Git-object upload shows completed
+bytes, pack count, and transfer rate. Crab-managed data packing/upload and
+metadata/ref publication remain separate phases, making CPU work, object-store
+transfer, and final publication distinguishable.
+
+JSONL output uses `discovering`, `preparing_git_objects`,
+`packing_git_objects`, `verifying_git_objects`, `uploading_git_objects`, and
+`publishing_git_metadata` operations for those phases. `finalizing_push`
+covers atomic repository metadata and ref publication. The upload event includes
+pack and byte totals when pack generation finishes.
+
 ## Related
 
 - [Managed Service Quickstart](/docs/cli/managed-service)

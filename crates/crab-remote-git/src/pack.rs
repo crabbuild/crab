@@ -6,6 +6,7 @@ use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crab_git::pack::VerifiedPackIdentity;
@@ -314,6 +315,19 @@ pub struct DownloadedPackInventory {
     packs: Vec<crab_git::repack::RepackSource>,
 }
 
+/// Aggregate progress while canonical Git packs are downloaded for local installation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackDownloadProgress {
+    /// Pack bodies and sidecars fully downloaded and verified.
+    pub packs_completed: u64,
+    /// Total canonical packs selected for download.
+    pub packs_total: u64,
+    /// Pack-body bytes written locally.
+    pub bytes_downloaded: u64,
+    /// Total pack-body bytes selected for download.
+    pub total_bytes: u64,
+}
+
 impl DownloadedPackInventory {
     /// Return the verified pack bodies and committed Git index sidecars.
     #[must_use]
@@ -409,6 +423,7 @@ impl RemoteGitRepository {
         object_ids: &[ObjectId],
         workspace_parent: &Path,
         cancellation: &CancellationToken,
+        progress: Option<&(dyn Fn(PackDownloadProgress) + Send + Sync)>,
     ) -> Result<Option<DownloadedPackInventory>> {
         let inventory = self.state.inventory.values().copied().collect::<Vec<_>>();
         let inventory_objects = inventory
@@ -432,8 +447,14 @@ impl RemoteGitRepository {
             let workspace = tempfile::tempdir_in(workspace_parent).map_err(io_error)?;
             let download_dir = workspace.path().join("source-packs");
             std::fs::create_dir_all(&download_dir).map_err(io_error)?;
-            let packs =
-                download_repack_sources(&operation, inventory, &download_dir, cancellation).await?;
+            let packs = download_repack_sources(
+                &operation,
+                inventory,
+                &download_dir,
+                cancellation,
+                progress,
+            )
+            .await?;
             let check_packs = packs.clone();
             let selected_oids = object_ids.to_vec();
             let covers = tokio::task::spawn_blocking(move || {
@@ -552,7 +573,8 @@ impl RemoteGitRepository {
             std::fs::create_dir_all(&download_dir).map_err(io_error)?;
             let source_download_started = Instant::now();
             let sources =
-                download_repack_sources(&operation, inventory, &download_dir, cancellation).await?;
+                download_repack_sources(&operation, inventory, &download_dir, cancellation, None)
+                    .await?;
             let source_download_ms = source_download_started.elapsed().as_millis() as u64;
             let wants = wants.to_vec();
             let common_haves = common_haves.to_vec();
@@ -797,7 +819,8 @@ impl RemoteGitRepository {
         std::fs::create_dir_all(&download_dir).map_err(io_error)?;
         let source_download_started = Instant::now();
         let sources =
-            download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
+            download_repack_sources(operation, inventory, &download_dir, cancellation, None)
+                .await?;
         let source_download_ms = source_download_started.elapsed().as_millis() as u64;
         let inventory_check_started = Instant::now();
         let check_sources = sources.clone();
@@ -961,7 +984,8 @@ impl RemoteGitRepository {
         std::fs::create_dir_all(&download_dir).map_err(io_error)?;
         let source_download_started = Instant::now();
         let sources =
-            download_repack_sources(operation, inventory, &download_dir, cancellation).await?;
+            download_repack_sources(operation, inventory, &download_dir, cancellation, None)
+                .await?;
         let source_download_ms = source_download_started.elapsed().as_millis() as u64;
         let selected_oids = object_ids.to_vec();
         let repacked = tokio::task::spawn_blocking(move || {
@@ -1228,37 +1252,84 @@ async fn download_repack_sources(
     inventory: Vec<GitPackInventoryEntry>,
     download_dir: &Path,
     cancellation: &CancellationToken,
+    progress: Option<&(dyn Fn(PackDownloadProgress) + Send + Sync)>,
 ) -> Result<Vec<crab_git::repack::RepackSource>> {
+    let packs_total = inventory.len() as u64;
+    let total_bytes = inventory
+        .iter()
+        .fold(0_u64, |total, pack| total.saturating_add(pack.pack_size));
+    let bytes_downloaded = AtomicU64::new(0);
+    let packs_completed = AtomicU64::new(0);
+    if let Some(progress) = progress {
+        progress(PackDownloadProgress {
+            packs_completed: 0,
+            packs_total,
+            bytes_downloaded: 0,
+            total_bytes,
+        });
+    }
     download_repack_sources_with(
         inventory,
         download_dir.to_owned(),
         cancellation,
         SOURCE_PACK_DOWNLOAD_CONCURRENCY,
-        |pack, path| async move {
-            let index_maximum =
-                crab_git::max_pack_index_size(pack.object_count).ok_or(Error::Corrupt {
-                    stage: crate::CorruptionStage::Inventory,
-                })?;
-            let reverse_maximum =
-                crab_git::pack_reverse_index_size(pack.object_count).ok_or(Error::Corrupt {
-                    stage: crate::CorruptionStage::Inventory,
-                })?;
-            let index_path = path.with_extension("idx");
-            let reverse_index_path = path.with_extension("rev");
-            // The body and its immutable sidecars are independent objects.
-            // Keep the pack-level fanout bounded by the surrounding stream,
-            // while overlapping their latency under the runtime origin
-            // semaphore.
-            let (verified_identity, (), ()) = tokio::try_join!(
-                operation.download_pack_to_path(pack.pack_id, pack.pack_size, &path),
-                operation.download_pack_index_to_path(pack.pack_id, index_maximum, &index_path,),
-                operation.download_pack_reverse_index_to_path(
-                    pack.pack_id,
-                    reverse_maximum,
-                    &reverse_index_path,
-                ),
-            )?;
-            Ok(Some(verified_identity))
+        |pack, path| {
+            let bytes_downloaded = &bytes_downloaded;
+            let packs_completed = &packs_completed;
+            async move {
+                let index_maximum =
+                    crab_git::max_pack_index_size(pack.object_count).ok_or(Error::Corrupt {
+                        stage: crate::CorruptionStage::Inventory,
+                    })?;
+                let reverse_maximum =
+                    crab_git::pack_reverse_index_size(pack.object_count).ok_or(Error::Corrupt {
+                        stage: crate::CorruptionStage::Inventory,
+                    })?;
+                let index_path = path.with_extension("idx");
+                let reverse_index_path = path.with_extension("rev");
+                let report_bytes = |bytes: u64| {
+                    let bytes_downloaded = bytes_downloaded
+                        .fetch_add(bytes, Ordering::Relaxed)
+                        .saturating_add(bytes);
+                    if let Some(progress) = progress {
+                        progress(PackDownloadProgress {
+                            packs_completed: packs_completed.load(Ordering::Relaxed),
+                            packs_total,
+                            bytes_downloaded,
+                            total_bytes,
+                        });
+                    }
+                };
+                // The body and its immutable sidecars are independent objects.
+                // Keep the pack-level fanout bounded by the surrounding stream,
+                // while overlapping their latency under the runtime origin
+                // semaphore.
+                let (verified_identity, (), ()) = tokio::try_join!(
+                    operation.download_pack_to_path(
+                        pack.pack_id,
+                        pack.pack_size,
+                        &path,
+                        Some(&report_bytes),
+                    ),
+                    operation
+                        .download_pack_index_to_path(pack.pack_id, index_maximum, &index_path,),
+                    operation.download_pack_reverse_index_to_path(
+                        pack.pack_id,
+                        reverse_maximum,
+                        &reverse_index_path,
+                    ),
+                )?;
+                let completed = packs_completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(progress) = progress {
+                    progress(PackDownloadProgress {
+                        packs_completed: completed,
+                        packs_total,
+                        bytes_downloaded: bytes_downloaded.load(Ordering::Relaxed),
+                        total_bytes,
+                    });
+                }
+                Ok(Some(verified_identity))
+            }
         },
     )
     .await
@@ -2274,7 +2345,7 @@ async fn try_reuse_single_pack(
     let file = NamedTempFile::new().map_err(io_error)?;
     let path = file.path().to_owned();
     let verified_identity = operation
-        .download_pack_to_path(inventory.pack_id, inventory.pack_size, file.path())
+        .download_pack_to_path(inventory.pack_id, inventory.pack_size, file.path(), None)
         .await?;
     if verified_identity.git_sha1 != expected_checksum {
         return Err(Error::Corrupt {

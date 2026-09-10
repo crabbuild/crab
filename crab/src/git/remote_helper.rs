@@ -1762,7 +1762,9 @@ fn native_push_config_for_helper(
     // helper protocol instead of user text.
     if progress_mode == OutputMode::Jsonl {
         native_config.output_mode = Some(progress_mode);
-        native_config.jsonl_stderr_stream = jsonl_stderr_stream.map(Arc::clone);
+        native_config.jsonl_progress_stream = jsonl_stderr_stream
+            .map(Arc::clone)
+            .map(crate::git::push_native::NativePushProgressStream::Stderr);
     }
     native_config.mirror_git_only =
         std::env::var_os(crate::git::push_native::MIRROR_GIT_ONLY_ENV).is_some();

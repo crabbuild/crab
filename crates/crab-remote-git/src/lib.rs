@@ -38,6 +38,7 @@ pub use pack::{
     DownloadedPackInventory, GENERATED_PACK_CACHE_VERSION, GeneratedPack, GeneratedPackCacheKey,
     GeneratedPackLease, GeneratedPackLeaseAttempt, GeneratedPackLeaseError,
     GeneratedPackLeaseProvider, GeneratedPackRequestCacheError, GeneratedPackRequestCacheKey,
+    PackDownloadProgress,
 };
 pub use path::GitPath;
 pub use reader::{RemoteGitObject, RemoteGitObjectMetadata};

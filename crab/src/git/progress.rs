@@ -14,7 +14,8 @@ use std::io::{Stderr, Stdout, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{
-    AtomicBool, AtomicU8, AtomicU64, Ordering::Acquire, Ordering::Relaxed, Ordering::Release,
+    AtomicBool, AtomicU8, AtomicU64, Ordering::AcqRel, Ordering::Acquire, Ordering::Relaxed,
+    Ordering::Release,
 };
 use std::time::Duration;
 
@@ -565,6 +566,7 @@ pub struct NativePushProgress {
 
     // Phase tracking
     phase: AtomicU8,
+    phase_started: Mutex<Instant>,
 
     // Packing counters
     pack_files_total: AtomicU64,
@@ -584,10 +586,20 @@ pub struct NativePushProgress {
     meta_total: AtomicU64,
     meta_done: AtomicU64,
 
+    // Git pack upload counters
+    git_packs_total: AtomicU64,
+    git_packs_done: AtomicU64,
+    git_pack_bodies_done: AtomicU64,
+    git_upload_started: AtomicBool,
+    git_objects_total: AtomicU64,
+    git_bytes_total: AtomicU64,
+    git_bytes_done: AtomicU64,
+
     /// EWMA-based smoothed transfer rate. Tracks `(bytes_completed,
     /// transfer_bytes_completed)` with a 3s half-life so the displayed
     /// MiB/s decays gracefully during stalls and isn't noisy on startup.
     speed_tracker: Mutex<SpeedTracker>,
+    git_speed_tracker: Mutex<SpeedTracker>,
     /// Shared group-progress backing the `CompletionTracker`. Lives here
     /// so the file-level completion aggregation survives across phases.
     group_progress: Arc<GroupProgress>,
@@ -608,9 +620,6 @@ impl NativePushProgress {
     /// Prefer [`NativePushProgress::with_mode`] for new call sites.
     #[must_use]
     pub fn new(enabled: bool, color: bool, verbose: bool) -> Self {
-        let upload_progress = UploadGroupProgress::new();
-        let group_progress = Arc::clone(&upload_progress.file_data);
-        let completion_tracker = Arc::new(CompletionTracker::new(upload_progress));
         let backend = if !enabled {
             ProgressBackend::Silent
         } else if is_tty() {
@@ -622,30 +631,7 @@ impl NativePushProgress {
                 stderr: std::io::stderr(),
             }
         };
-        Self {
-            enabled,
-            color,
-            verbose,
-            backend,
-            phase: AtomicU8::new(0),
-            pack_files_total: AtomicU64::new(0),
-            pack_files_done: AtomicU64::new(0),
-            pack_xorbs_produced: AtomicU64::new(0),
-            pack_bytes_total: AtomicU64::new(0),
-            pack_bytes_done: AtomicU64::new(0),
-            upload_xorbs_total: AtomicU64::new(0),
-            upload_xorbs_done: AtomicU64::new(0),
-            upload_bytes_total: AtomicU64::new(0),
-            upload_bytes_done: AtomicU64::new(0),
-            upload_totals_final: AtomicBool::new(false),
-            meta_total: AtomicU64::new(0),
-            meta_done: AtomicU64::new(0),
-            speed_tracker: Mutex::new(
-                SpeedTracker::new(Duration::from_secs(3)).with_min_observations(2),
-            ),
-            group_progress,
-            completion_tracker,
-        }
+        Self::with_backend(enabled, color, verbose, backend)
     }
 
     /// Create a progress tracker with output mode selection.
@@ -661,9 +647,6 @@ impl NativePushProgress {
         mode: OutputMode,
         stream: Option<Arc<Mutex<JsonlStream<Stdout>>>>,
     ) -> Self {
-        let upload_progress = UploadGroupProgress::new();
-        let group_progress = Arc::clone(&upload_progress.file_data);
-        let completion_tracker = Arc::new(CompletionTracker::new(upload_progress));
         let (enabled, backend) = match mode {
             OutputMode::Text => {
                 let backend = if is_tty() {
@@ -687,30 +670,7 @@ impl NativePushProgress {
             }
             OutputMode::Json => (false, ProgressBackend::Silent),
         };
-        Self {
-            enabled,
-            color,
-            verbose,
-            backend,
-            phase: AtomicU8::new(0),
-            pack_files_total: AtomicU64::new(0),
-            pack_files_done: AtomicU64::new(0),
-            pack_xorbs_produced: AtomicU64::new(0),
-            pack_bytes_total: AtomicU64::new(0),
-            pack_bytes_done: AtomicU64::new(0),
-            upload_xorbs_total: AtomicU64::new(0),
-            upload_xorbs_done: AtomicU64::new(0),
-            upload_bytes_total: AtomicU64::new(0),
-            upload_bytes_done: AtomicU64::new(0),
-            upload_totals_final: AtomicBool::new(false),
-            meta_total: AtomicU64::new(0),
-            meta_done: AtomicU64::new(0),
-            speed_tracker: Mutex::new(
-                SpeedTracker::new(Duration::from_secs(3)).with_min_observations(2),
-            ),
-            group_progress,
-            completion_tracker,
-        }
+        Self::with_backend(enabled, color, verbose, backend)
     }
 
     /// Create a progress tracker that emits JSONL to stderr.
@@ -725,9 +685,6 @@ impl NativePushProgress {
         mode: OutputMode,
         stream: Option<Arc<Mutex<JsonlStream<Stderr>>>>,
     ) -> Self {
-        let upload_progress = UploadGroupProgress::new();
-        let group_progress = Arc::clone(&upload_progress.file_data);
-        let completion_tracker = Arc::new(CompletionTracker::new(upload_progress));
         let (enabled, backend) = match mode {
             OutputMode::Text => {
                 let backend = if is_tty() {
@@ -750,12 +707,20 @@ impl NativePushProgress {
             }
             OutputMode::Json => (false, ProgressBackend::Silent),
         };
+        Self::with_backend(enabled, color, verbose, backend)
+    }
+
+    fn with_backend(enabled: bool, color: bool, verbose: bool, backend: ProgressBackend) -> Self {
+        let upload_progress = UploadGroupProgress::new();
+        let group_progress = Arc::clone(&upload_progress.file_data);
+        let completion_tracker = Arc::new(CompletionTracker::new(upload_progress));
         Self {
             enabled,
             color,
             verbose,
             backend,
             phase: AtomicU8::new(0),
+            phase_started: Mutex::new(Instant::now()),
             pack_files_total: AtomicU64::new(0),
             pack_files_done: AtomicU64::new(0),
             pack_xorbs_produced: AtomicU64::new(0),
@@ -768,7 +733,17 @@ impl NativePushProgress {
             upload_totals_final: AtomicBool::new(false),
             meta_total: AtomicU64::new(0),
             meta_done: AtomicU64::new(0),
+            git_packs_total: AtomicU64::new(0),
+            git_packs_done: AtomicU64::new(0),
+            git_pack_bodies_done: AtomicU64::new(0),
+            git_upload_started: AtomicBool::new(false),
+            git_objects_total: AtomicU64::new(0),
+            git_bytes_total: AtomicU64::new(0),
+            git_bytes_done: AtomicU64::new(0),
             speed_tracker: Mutex::new(
+                SpeedTracker::new(Duration::from_secs(3)).with_min_observations(2),
+            ),
+            git_speed_tracker: Mutex::new(
                 SpeedTracker::new(Duration::from_secs(3)).with_min_observations(2),
             ),
             group_progress,
@@ -1028,6 +1003,132 @@ impl NativePushProgress {
         self.meta_total.store(n, Relaxed);
     }
 
+    /// Start the repository discovery phase before totals are known.
+    pub fn begin_discovery(&self) {
+        self.set_phase(Self::PHASE_DISCOVERING);
+        if matches!(self.backend, ProgressBackend::Line { .. }) {
+            eprintln!("Discovering changes...");
+        }
+    }
+
+    /// Start Git pack generation before its object and byte totals are known.
+    pub fn begin_git_pack(&self) {
+        self.git_packs_total.store(0, Relaxed);
+        self.git_packs_done.store(0, Relaxed);
+        self.git_pack_bodies_done.store(0, Relaxed);
+        self.git_upload_started.store(false, Release);
+        self.git_objects_total.store(0, Relaxed);
+        self.git_bytes_total.store(0, Relaxed);
+        self.git_bytes_done.store(0, Relaxed);
+        self.set_phase(Self::PHASE_GIT_PACKING);
+        if matches!(self.backend, ProgressBackend::Line { .. }) {
+            eprintln!("Packing Git objects...");
+        }
+    }
+
+    /// Start concurrent data packing and Git reachability preparation.
+    pub fn begin_push_preparation(&self) {
+        self.set_phase(Self::PHASE_STREAMING);
+        if matches!(self.backend, ProgressBackend::Line { .. }) {
+            eprintln!("Preparing data and Git objects...");
+        }
+    }
+
+    /// Record generated Git pack totals and transition to transfer progress.
+    pub fn set_git_upload_totals(&self, packs: u64, objects: u64, bytes: u64) {
+        let pack_elapsed = self.phase_elapsed();
+        self.git_packs_total.store(packs, Relaxed);
+        self.git_objects_total.store(objects, Relaxed);
+        self.git_bytes_total.store(bytes, Relaxed);
+        if matches!(self.backend, ProgressBackend::Line { .. }) {
+            eprintln!(
+                "Packing Git objects: {objects} objects in {packs} packs ({})  {} {}",
+                format_bytes(bytes),
+                self.checkmark(),
+                Self::fmt_elapsed(pack_elapsed),
+            );
+            eprintln!("Verifying Git packs...");
+        }
+        self.set_phase(Self::PHASE_GIT_VERIFYING);
+    }
+
+    /// Start remote transfer after local pack verification succeeds.
+    pub fn begin_git_upload(&self) {
+        if self.git_upload_started.swap(true, AcqRel) {
+            return;
+        }
+        self.set_phase(Self::PHASE_GIT_UPLOADING);
+        if matches!(self.backend, ProgressBackend::Line { .. }) {
+            eprintln!("Uploading Git objects...");
+        }
+    }
+
+    /// Mark one pack body durable and advance to sidecar publication when ready.
+    pub fn finish_git_pack_body(&self) {
+        let done = self.git_pack_bodies_done.fetch_add(1, AcqRel) + 1;
+        if done != self.git_packs_total.load(Acquire) {
+            return;
+        }
+        self.set_phase(Self::PHASE_GIT_PUBLISHING);
+        if matches!(self.backend, ProgressBackend::Line { .. }) {
+            eprintln!("Publishing Git metadata...");
+        }
+    }
+
+    /// Add durable or already-present Git pack bytes to transfer progress.
+    pub fn add_git_upload_bytes(&self, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let total = self.git_bytes_done.fetch_add(bytes, Relaxed) + bytes;
+        if let Ok(mut tracker) = self.git_speed_tracker.lock() {
+            tracker.update(total, total);
+        }
+    }
+
+    /// Mark one generated Git pack as durably available on the remote.
+    pub fn inc_git_pack(&self) {
+        self.git_packs_done.fetch_add(1, Relaxed);
+    }
+
+    /// Complete Git-object publication and begin final ref publication.
+    pub fn finish_git_objects(&self) {
+        if !self.enabled {
+            return;
+        }
+        let packs = self.git_packs_done.load(Relaxed);
+        let objects = self.git_objects_total.load(Relaxed);
+        let bytes = self.git_bytes_done.load(Relaxed);
+        match &self.backend {
+            ProgressBackend::Line { .. } => {
+                eprintln!(
+                    "Git objects ready: {objects} objects in {packs} packs ({})  {}",
+                    format_bytes(bytes),
+                    self.checkmark(),
+                );
+            }
+            ProgressBackend::Jsonl { stream } => {
+                let payload = self.git_upload_payload();
+                if let Ok(mut stream) = stream.lock() {
+                    let output = stream.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
+                }
+            }
+            ProgressBackend::JsonlStderr { stream } => {
+                let payload = self.git_upload_payload();
+                if let Ok(mut stream) = stream.lock() {
+                    let output = stream.emit_progress(payload);
+                    crate::core::output::report_progress_output(output);
+                }
+            }
+            ProgressBackend::Tty { .. } | ProgressBackend::Silent => {}
+        }
+        self.set_phase(Self::PHASE_FINALIZING);
+        if matches!(self.backend, ProgressBackend::Line { .. }) {
+            eprintln!("Finalizing push...");
+        }
+    }
+
     /// Print dedup feedback line to stderr in yellow.
     ///
     /// Shows dedup ratio, skipped bytes/chunks, and optionally defrag-prevented bytes.
@@ -1244,21 +1345,85 @@ impl NativePushProgress {
 
     // -- Phase constants ----------------------------------------------------
 
+    /// Phase: discovering local changes and remote boundaries.
+    pub const PHASE_DISCOVERING: u8 = 1;
     /// Phase: packing files into xorbs.
-    pub const PHASE_PACKING: u8 = 1;
+    pub const PHASE_PACKING: u8 = 2;
     /// Phase: uploading xorbs to remote.
-    pub const PHASE_UPLOADING: u8 = 2;
+    pub const PHASE_UPLOADING: u8 = 3;
     /// Phase: both packing and uploading active (streaming pipeline).
-    pub const PHASE_STREAMING: u8 = 3;
+    pub const PHASE_STREAMING: u8 = 4;
     /// Phase: uploading metadata (shards + file-index).
-    pub const PHASE_METADATA: u8 = 4;
+    pub const PHASE_METADATA: u8 = 5;
+    /// Phase: generating ordinary Git pack files.
+    pub const PHASE_GIT_PACKING: u8 = 6;
+    /// Phase: verifying generated Git pack contents locally.
+    pub const PHASE_GIT_VERIFYING: u8 = 7;
+    /// Phase: uploading ordinary Git pack files.
+    pub const PHASE_GIT_UPLOADING: u8 = 8;
+    /// Phase: publishing Git pack indexes and locator metadata.
+    pub const PHASE_GIT_PUBLISHING: u8 = 9;
+    /// Phase: atomically publishing repository metadata and refs.
+    pub const PHASE_FINALIZING: u8 = 10;
 
     /// Set the current pipeline phase.
     pub fn set_phase(&self, phase: u8) {
+        if let Ok(mut started) = self.phase_started.lock() {
+            *started = Instant::now();
+        }
         self.phase.store(phase, Relaxed);
     }
 
     // -- Live progress rendering --------------------------------------------
+
+    fn phase_elapsed(&self) -> Duration {
+        self.phase_started
+            .lock()
+            .map(|started| started.elapsed())
+            .unwrap_or_default()
+    }
+
+    fn render_discovery_line(&self) -> String {
+        format!(
+            "Discovering changes: {:.1}s elapsed",
+            self.phase_elapsed().as_secs_f64()
+        )
+    }
+
+    fn render_git_pack_line(&self) -> String {
+        format!(
+            "Packing Git objects: {:.1}s elapsed",
+            self.phase_elapsed().as_secs_f64()
+        )
+    }
+
+    fn render_git_verify_line(&self) -> String {
+        format!(
+            "Verifying Git packs: {:.1}s elapsed",
+            self.phase_elapsed().as_secs_f64()
+        )
+    }
+
+    fn render_git_publish_line(&self) -> String {
+        format!(
+            "Publishing Git metadata: {:.1}s elapsed",
+            self.phase_elapsed().as_secs_f64()
+        )
+    }
+
+    fn render_git_prepare_line(&self) -> String {
+        format!(
+            "Preparing Git objects: {:.1}s elapsed",
+            self.phase_elapsed().as_secs_f64()
+        )
+    }
+
+    fn render_finalizing_line(&self) -> String {
+        format!(
+            "Finalizing push: {:.1}s elapsed",
+            self.phase_elapsed().as_secs_f64()
+        )
+    }
 
     /// Render the packing progress line.
     fn render_pack_line(&self) -> String {
@@ -1373,6 +1538,52 @@ impl NativePushProgress {
         format!("Uploading metadata: {bar} {pct:>3}%  {done}/{total} entries")
     }
 
+    fn render_git_upload_line(&self) -> String {
+        let done = self.git_pack_bodies_done.load(Relaxed);
+        let total = self.git_packs_total.load(Relaxed);
+        let bytes = self.git_bytes_done.load(Relaxed);
+        let total_bytes = self.git_bytes_total.load(Relaxed);
+        let fraction = if total_bytes > 0 {
+            bytes as f64 / total_bytes as f64
+        } else if total > 0 {
+            done as f64 / total as f64
+        } else {
+            0.0
+        };
+        let pct = (fraction * 100.0).min(100.0) as u64;
+        let bar = render_bar(fraction, 30, self.color);
+        let rate = self
+            .git_speed_tracker
+            .lock()
+            .ok()
+            .and_then(|tracker| tracker.rates().1)
+            .unwrap_or(0.0);
+        format!(
+            "Uploading Git objects: {bar} {pct:>3}%  {done}/{total} packs, {} / {} | {}",
+            format_bytes(bytes),
+            format_bytes(total_bytes),
+            format_rate(rate),
+        )
+    }
+
+    fn git_upload_payload(&self) -> ProgressPayload {
+        let rate = self
+            .git_speed_tracker
+            .lock()
+            .ok()
+            .and_then(|tracker| tracker.rates().1)
+            .unwrap_or(0.0);
+        ProgressPayload {
+            operation: "uploading_git_objects".to_owned(),
+            current: self.git_pack_bodies_done.load(Relaxed),
+            total: self.git_packs_total.load(Relaxed),
+            bytes: self.git_bytes_done.load(Relaxed),
+            total_bytes: self.git_bytes_total.load(Relaxed),
+            rate_bytes_per_sec: rate,
+            xorbs_produced: None,
+        }
+    }
+
     /// Render live progress to stderr (TTY mode) or emit JSONL progress events.
     ///
     /// In TTY mode, reads atomic counters, formats the appropriate progress
@@ -1425,6 +1636,15 @@ impl NativePushProgress {
     fn build_jsonl_progress_payload(&self) -> Option<ProgressPayload> {
         let phase = self.phase.load(Relaxed);
         let payload = match phase {
+            Self::PHASE_DISCOVERING => ProgressPayload {
+                operation: "discovering".to_owned(),
+                current: 0,
+                total: 0,
+                bytes: 0,
+                total_bytes: 0,
+                rate_bytes_per_sec: 0.0,
+                xorbs_produced: None,
+            },
             Self::PHASE_PACKING => {
                 let done = self.pack_files_done.load(Relaxed);
                 let total = self.pack_files_total.load(Relaxed);
@@ -1471,6 +1691,19 @@ impl NativePushProgress {
                 }
             }
             Self::PHASE_STREAMING => {
+                if self.pack_files_total.load(Relaxed) == 0
+                    && self.upload_xorbs_total.load(Relaxed) == 0
+                {
+                    return Some(ProgressPayload {
+                        operation: "preparing_git_objects".to_owned(),
+                        current: 0,
+                        total: 0,
+                        bytes: 0,
+                        total_bytes: 0,
+                        rate_bytes_per_sec: 0.0,
+                        xorbs_produced: None,
+                    });
+                }
                 // In streaming mode, report the upload progress (more useful
                 // than packing for consumers tracking overall throughput).
                 let done = self.upload_xorbs_done.load(Relaxed);
@@ -1516,6 +1749,43 @@ impl NativePushProgress {
                     xorbs_produced: None,
                 }
             }
+            Self::PHASE_GIT_PACKING => ProgressPayload {
+                operation: "packing_git_objects".to_owned(),
+                current: 0,
+                total: 0,
+                bytes: 0,
+                total_bytes: 0,
+                rate_bytes_per_sec: 0.0,
+                xorbs_produced: None,
+            },
+            Self::PHASE_GIT_VERIFYING => ProgressPayload {
+                operation: "verifying_git_objects".to_owned(),
+                current: 0,
+                total: self.git_packs_total.load(Relaxed),
+                bytes: 0,
+                total_bytes: self.git_bytes_total.load(Relaxed),
+                rate_bytes_per_sec: 0.0,
+                xorbs_produced: None,
+            },
+            Self::PHASE_GIT_UPLOADING => self.git_upload_payload(),
+            Self::PHASE_GIT_PUBLISHING => ProgressPayload {
+                operation: "publishing_git_metadata".to_owned(),
+                current: self.git_packs_done.load(Relaxed),
+                total: self.git_packs_total.load(Relaxed),
+                bytes: self.git_bytes_done.load(Relaxed),
+                total_bytes: self.git_bytes_total.load(Relaxed),
+                rate_bytes_per_sec: 0.0,
+                xorbs_produced: None,
+            },
+            Self::PHASE_FINALIZING => ProgressPayload {
+                operation: "finalizing_push".to_owned(),
+                current: 0,
+                total: 0,
+                bytes: 0,
+                total_bytes: 0,
+                rate_bytes_per_sec: 0.0,
+                xorbs_produced: None,
+            },
             _ => return None,
         };
         Some(payload)
@@ -1525,12 +1795,26 @@ impl NativePushProgress {
     fn render_live_tty(&self, prev_lines: &mut usize) {
         let phase = self.phase.load(Relaxed);
         let lines = match phase {
+            Self::PHASE_DISCOVERING => vec![self.render_discovery_line()],
             Self::PHASE_PACKING => vec![self.render_pack_line()],
             Self::PHASE_UPLOADING => vec![self.render_upload_line()],
             Self::PHASE_STREAMING => {
-                vec![self.render_pack_line(), self.render_streaming_upload_line()]
+                let mut lines = Vec::new();
+                if self.pack_files_total.load(Relaxed) > 0
+                    || self.upload_xorbs_total.load(Relaxed) > 0
+                {
+                    lines.push(self.render_pack_line());
+                    lines.push(self.render_streaming_upload_line());
+                }
+                lines.push(self.render_git_prepare_line());
+                lines
             }
             Self::PHASE_METADATA => vec![self.render_meta_line()],
+            Self::PHASE_GIT_PACKING => vec![self.render_git_pack_line()],
+            Self::PHASE_GIT_VERIFYING => vec![self.render_git_verify_line()],
+            Self::PHASE_GIT_UPLOADING => vec![self.render_git_upload_line()],
+            Self::PHASE_GIT_PUBLISHING => vec![self.render_git_publish_line()],
+            Self::PHASE_FINALIZING => vec![self.render_finalizing_line()],
             _ => Vec::new(),
         };
         render_tty_frame(&mut std::io::stderr().lock(), &lines, prev_lines);
@@ -1596,6 +1880,14 @@ impl NativePushProgress {
         });
 
         Some((handle, cancel))
+    }
+
+    /// Stop a live ticker and wait for its final frame to be written.
+    pub async fn finish_ticker(ticker: Option<(JoinHandle<()>, CancellationToken)>) {
+        if let Some((handle, cancel)) = ticker {
+            cancel.cancel();
+            let _ = handle.await;
+        }
     }
 }
 
@@ -1796,10 +2088,16 @@ mod tests {
     #[test]
     fn phase_constants_are_distinct() {
         let phases = [
+            NativePushProgress::PHASE_DISCOVERING,
             NativePushProgress::PHASE_PACKING,
             NativePushProgress::PHASE_UPLOADING,
             NativePushProgress::PHASE_STREAMING,
             NativePushProgress::PHASE_METADATA,
+            NativePushProgress::PHASE_GIT_PACKING,
+            NativePushProgress::PHASE_GIT_VERIFYING,
+            NativePushProgress::PHASE_GIT_UPLOADING,
+            NativePushProgress::PHASE_GIT_PUBLISHING,
+            NativePushProgress::PHASE_FINALIZING,
         ];
         for (i, a) in phases.iter().enumerate() {
             for (j, b) in phases.iter().enumerate() {
@@ -1808,6 +2106,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn discovery_phase_renders_before_totals_are_known() {
+        let p = NativePushProgress::new(true, false, false);
+        p.begin_discovery();
+
+        let line = p.render_discovery_line();
+
+        assert!(line.starts_with("Discovering changes:"));
+        assert!(line.contains("elapsed"));
+    }
+
+    #[test]
+    fn git_pack_phase_renders_while_pack_objects_is_running() {
+        let p = NativePushProgress::new(true, false, false);
+        p.begin_git_pack();
+
+        let line = p.render_git_pack_line();
+
+        assert!(line.starts_with("Packing Git objects:"));
+        assert!(line.contains("elapsed"));
+    }
+
+    #[test]
+    fn git_pack_lifecycle_distinguishes_local_and_remote_work() {
+        let p = NativePushProgress::new(true, false, false);
+        p.begin_git_pack();
+        assert_eq!(p.phase(), NativePushProgress::PHASE_GIT_PACKING);
+
+        p.set_git_upload_totals(1, 10, 2048);
+        assert_eq!(p.phase(), NativePushProgress::PHASE_GIT_VERIFYING);
+
+        p.begin_git_upload();
+        assert_eq!(p.phase(), NativePushProgress::PHASE_GIT_UPLOADING);
+
+        p.finish_git_pack_body();
+        assert_eq!(p.phase(), NativePushProgress::PHASE_GIT_PUBLISHING);
+
+        p.finish_git_objects();
+        assert_eq!(p.phase(), NativePushProgress::PHASE_FINALIZING);
+        let payload = p
+            .build_jsonl_progress_payload()
+            .expect("finalizing payload");
+        assert_eq!(payload.operation, "finalizing_push");
+    }
+
+    #[test]
+    fn git_upload_progress_tracks_pack_bytes_and_completion() {
+        let p = NativePushProgress::new(true, false, false);
+        p.set_git_upload_totals(2, 100, 1024);
+        p.begin_git_upload();
+        p.add_git_upload_bytes(512);
+        p.finish_git_pack_body();
+
+        let halfway = p.render_git_upload_line();
+        assert!(halfway.contains(" 50%"));
+        assert!(halfway.contains("1/2 packs"));
+        assert!(halfway.contains("512 B / 1.0 KiB"));
+
+        p.add_git_upload_bytes(512);
+        p.finish_git_pack_body();
+        let complete = p.render_git_upload_line();
+        assert!(complete.contains("100%"));
+        assert!(complete.contains("2/2 packs"));
+    }
+
+    #[test]
+    fn git_upload_jsonl_uses_distinct_operation() {
+        let p = NativePushProgress::new(true, false, false);
+        p.set_git_upload_totals(1, 10, 2048);
+        p.begin_git_upload();
+        p.add_git_upload_bytes(1024);
+
+        let payload = p
+            .build_jsonl_progress_payload()
+            .expect("Git upload payload");
+
+        assert_eq!(payload.operation, "uploading_git_objects");
+        assert_eq!(payload.current, 0);
+        assert_eq!(payload.total, 1);
+        assert_eq!(payload.bytes, 1024);
+        assert_eq!(payload.total_bytes, 2048);
     }
 
     // -- render_pack_line ----------------------------------------------------
