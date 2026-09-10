@@ -1865,7 +1865,9 @@ fn make_meta_key(object_type: ObjectType, hash: &[u8; 32]) -> [u8; META_KEY_LEN]
 
 fn storage_id_bytes(key: &ServerObjectKey) -> Option<[u8; 32]> {
     match key.object_type {
-        ObjectType::Xorb | ObjectType::Shard => parse_hash_hex(&key.hash),
+        ObjectType::Xorb | ObjectType::Shard | ObjectType::RefTransaction => {
+            parse_hash_hex(&key.hash)
+        }
         ObjectType::Pack | ObjectType::PackIndex => {
             let mut hasher = blake3::Hasher::new();
             hasher.update(&[key.object_type.as_u8()]);
@@ -1880,14 +1882,6 @@ fn storage_id_bytes(key: &ServerObjectKey) -> Option<[u8; 32]> {
             hasher.update(key.repo_path.as_bytes());
             hasher.update(b"\0");
             hasher.update(key.hash.as_bytes());
-            Some(*hasher.finalize().as_bytes())
-        }
-        ObjectType::RefTransaction => {
-            let hash = parse_hash_hex(&key.hash)?;
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&[key.object_type.as_u8()]);
-            hasher.update(b"\0");
-            hasher.update(&hash);
             Some(*hasher.finalize().as_bytes())
         }
     }
@@ -2070,6 +2064,22 @@ mod tests {
                 "xorbs/ab/abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
             )
         );
+    }
+
+    #[test]
+    fn ref_transaction_object_path_uses_content_identity() {
+        let store = test_store();
+        let hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let key = ServerObjectKey {
+            bucket: "test-bucket".to_owned(),
+            repo_path: "org/repo".to_owned(),
+            object_type: ObjectType::RefTransaction,
+            hash: hash.to_owned(),
+        };
+
+        let path = store.object_path(&key);
+
+        assert!(path.ends_with(Path::new("ref-transactions").join("ab").join(hash)));
     }
 
     #[test]
