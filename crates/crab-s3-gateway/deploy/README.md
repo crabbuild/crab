@@ -54,6 +54,12 @@ Use any unchanged S3 client at `http://127.0.0.1:18080` with access key
 `us-east-1`, and path-style addressing. The management listener is bound only
 to `127.0.0.1:18081`.
 
+The checked CI qualification also creates a multipart session, uploads a valid
+non-final part, force-recreates the gateway container, verifies the replacement
+process can list the durable part, uploads the final part, completes the object,
+and compares every assembled byte. RustFS retains the shared upload catalog and
+repository data; the gateway's scratch filesystem remains disposable.
+
 Stop containers without deleting repository data:
 
 ```sh

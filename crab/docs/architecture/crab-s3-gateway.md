@@ -1414,7 +1414,8 @@ Create `crates/crab-s3-gateway/deploy/` with:
 
 Current implementation covers the locked `deploy/Dockerfile`, example and
 Compose configurations, liveness/readiness contract, packaged-image RustFS
-smoke and Compose lifecycle smoke. The remaining Helm, ECS and operations
+smoke and Compose multipart recovery across container replacement. The
+remaining external TLS, independent Git-history proof, Helm, ECS and operations
 assets in this list are requirements, not existing or qualified deployment
 support.
 
