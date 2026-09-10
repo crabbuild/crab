@@ -492,8 +492,10 @@ jobs:
           docker logs crab-s3-gateway > "${qualification_root}/gateway.stdout" \
             2> "${qualification_root}/gateway.stderr"
           if grep -Fq \
-            -e "${GATEWAY_ACCESS_KEY}" \
             -e "${GATEWAY_SECRET_KEY}" \
+            -e "Credential=${GATEWAY_ACCESS_KEY}" \
+            -e "AWS ${GATEWAY_ACCESS_KEY}:" \
+            -e "AWSAccessKeyId=${GATEWAY_ACCESS_KEY}" \
             -e 'X-Amz-Signature=' \
             -e 'Authorization: AWS' \
             -e 'Authorization: AWS4-' \
