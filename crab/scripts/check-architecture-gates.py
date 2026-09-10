@@ -1883,7 +1883,8 @@ WORKSPACE_DEPENDENCY_POLICY = {
         },
     },
     # The S3 gateway is a product composition boundary for protocol, repository,
-    # read, write, coordination, LFS, cache, and storage behavior.
+    # remote publication, read, write, coordination, LFS, cache, and storage
+    # behavior.
     "crab-s3-gateway": {
         "normal": {
             "crab-cache-store",
@@ -1892,6 +1893,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-lfs",
             "crab-metadata",
             "crab-read",
+            "crab-remote",
             "crab-remote-git",
             "crab-storage",
             "crab-write",

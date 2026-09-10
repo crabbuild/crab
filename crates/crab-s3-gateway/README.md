@@ -34,14 +34,23 @@ same-part concurrency from deleting the winning bytes or accumulating every
 replaced version.
 Each repository has a bounded durable slot catalog shared by every gateway
 instance. `max_active_multipart_uploads` caps non-terminal sessions,
-`multipart_staging_bytes_per_upload` caps their registered temporary bytes, and
+`multipart_staging_bytes_per_upload` independently caps registered part bytes
+and the combined bytes of reserved in-flight transfers plus retired replacement
+payloads awaiting deletion, and
 `multipart_upload_ttl_seconds` persists the Open-session expiry chosen when the
 upload starts. The defaults are 1,024 sessions, S3's 50 TB object ceiling, and
 seven days. Every instance serving the same repository must use the same three
-values. A once-per-minute reconciler aborts expired Open sessions, retries terminal
-cleanup, and reclaims expired slots whose process died before writing the session
-record. For a frozen Completing session, it reads only the current object's
-Git-bound attributes or resolves its deterministic ref-journal publication plan,
+values. During a same-number replacement burst, physical temporary storage can
+therefore reach twice the configured per-upload budget, but a process crash
+cannot create unaccounted payloads. Transfers stop at the persisted session
+expiry. A once-per-minute reconciler aborts expired Open sessions, retries terminal
+cleanup, reclaims stalled transfer reservations after a ten-minute provider-drain
+grace period, and reclaims expired slots whose process died before writing the
+session record. A terminal session retains its distributed slot until every
+reserved transfer is cleaned, preventing a late backend write from escaping
+quota accounting. For a frozen Completing session, the reconciler reads only
+the current object's Git-bound attributes or resolves its deterministic
+ref-journal publication plan,
 then closes the session only when durable evidence proves that publication
 succeeded. Plan evidence remains valid after a later write replaces the object.
 A session without committed evidence remains fenced for an identical client

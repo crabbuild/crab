@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -18,6 +18,9 @@ const CATALOG_READ_CONCURRENCY: usize = 32;
 // beyond this bound remain retryable across independently scaled instances.
 const MAX_STATE_UPDATE_ATTEMPTS: usize = 64;
 const MAX_STATE_RETRY_EXPONENT: usize = 5;
+// Backend requests use a five-minute timeout. Keep a second timeout window
+// before maintenance treats an expired transfer as unable to publish bytes.
+const TRANSFER_RECLAIM_GRACE_SECONDS: u64 = 10 * 60;
 const COMPLETION_PLAN_CONTEXT: &str = "crab s3 multipart completion plan v1";
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
@@ -61,7 +64,7 @@ enum State {
     Aborted,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Part {
     pub(crate) number: i32,
@@ -99,10 +102,22 @@ pub(crate) struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checksum_type: Option<String>,
     pub(crate) parts: BTreeMap<i32, Part>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pending_transfers: BTreeMap<String, TransferReservation>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    retired_parts: BTreeMap<String, Part>,
     selected_parts: Option<Vec<(i32, String)>>,
     completion_etag: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completion_checksums: Option<crate::attributes::Checksums>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransferReservation {
+    number: i32,
+    size: u64,
+    path: String,
 }
 
 pub(crate) struct Loaded {
@@ -188,6 +203,8 @@ pub(crate) async fn create(repository: &Repository, initiation: Initiation<'_>) 
             checksum_algorithm: initiation.checksum_algorithm.clone(),
             checksum_type: initiation.checksum_type.clone(),
             parts: BTreeMap::new(),
+            pending_transfers: BTreeMap::new(),
+            retired_parts: BTreeMap::new(),
             selected_parts: None,
             completion_etag: None,
             completion_checksums: None,
@@ -248,7 +265,56 @@ pub(crate) async fn load(repository: &Repository, id: &str) -> Result<Loaded> {
             error => Error::Storage(error),
         })?;
     let session: Session = serde_json::from_slice(&bytes)?;
-    if session.version != VERSION || session.id != id {
+    let registered_bytes = registered_bytes(&session).ok();
+    let transient_bytes = transient_bytes(&session).ok();
+    let registered_paths = session
+        .parts
+        .values()
+        .map(|part| part.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let pending_paths = session
+        .pending_transfers
+        .values()
+        .map(|transfer| transfer.path.as_str())
+        .collect::<BTreeSet<_>>();
+    let retired_paths = session
+        .retired_parts
+        .values()
+        .map(|part| part.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if session.version != VERSION
+        || session.id != id
+        || session.parts.len() > MAX_PARTS
+        || session
+            .pending_transfers
+            .len()
+            .checked_add(session.retired_parts.len())
+            .is_none_or(|count| count > MAX_PARTS)
+        || session.parts.iter().any(|(number, part)| {
+            number != &part.number
+                || !(1..=10_000).contains(number)
+                || !valid_part_path(id, *number, &part.path)
+        })
+        || registered_paths.len() != session.parts.len()
+        || session
+            .pending_transfers
+            .iter()
+            .any(|(transfer_id, transfer)| {
+                validate_id(transfer_id).is_err()
+                    || !(1..=10_000).contains(&transfer.number)
+                    || transfer.path != transfer_path(id, transfer.number, transfer_id)
+            })
+        || session.retired_parts.iter().any(|(path, part)| {
+            path != &part.path
+                || !(1..=10_000).contains(&part.number)
+                || !valid_part_path(id, part.number, &part.path)
+        })
+        || !registered_paths.is_disjoint(&pending_paths)
+        || !registered_paths.is_disjoint(&retired_paths)
+        || !pending_paths.is_disjoint(&retired_paths)
+        || registered_bytes.is_none_or(|bytes| bytes > session.max_staged_bytes)
+        || transient_bytes.is_none_or(|bytes| bytes > session.max_staged_bytes)
+    {
         return Err(Error::Identity);
     }
     Ok(Loaded { session, etag })
@@ -436,7 +502,7 @@ fn capacity_path(repository: &Repository, number: u32) -> object_store::path::Pa
 
 pub(crate) async fn register_part(
     repository: &Repository,
-    mut loaded: Loaded,
+    loaded: Loaded,
     number: i32,
     spool: &crate::content::Spool,
     etag: String,
@@ -447,71 +513,94 @@ pub(crate) async fn register_part(
     if !(1..=10_000).contains(&number) {
         return Err(Error::PartNumber);
     }
-    if !matches!(loaded.session.state, State::Open) {
-        return Err(Error::NotOpen);
-    }
-    if now >= loaded.session.expires_seconds {
-        abort(repository, loaded).await?;
-        return Err(Error::NotOpen);
-    }
-    // A transfer-specific identity lets a losing registration delete only its
-    // own payload; content-derived paths let concurrent equal-ETag requests
-    // accidentally delete the winner's bytes.
-    let path = format!(
-        "s3/multipart/parts/{}/{number}/{etag}/{}",
-        loaded.session.id,
-        ulid::Ulid::new()
-    );
-    repository
-        .store
-        .put_multipart_file_retry(
-            &repository.layout.repo_path(&path),
-            spool.path(),
-            spool.size,
-            spool.digests.blake3,
-            8 * 1024 * 1024,
-            cancel,
-            None,
-        )
-        .await?;
+    let transfer_id = reserve_transfer(repository, loaded, number, spool.size, now, cancel).await?;
+    // The durable transfer identity owns this path before bytes move. A losing
+    // registration can therefore delete its payload without touching a winner.
     let part = Part {
         number,
         etag,
         size: spool.size,
         modified_seconds: now,
         checksums,
-        path,
+        path: transfer_id.reservation.path.clone(),
+    };
+    if let Err(error) = upload_reserved_part(repository, &transfer_id, spool, now, cancel).await {
+        cleanup_failed_transfer(repository, &transfer_id, &part).await;
+        return Err(error.into());
+    }
+    let mut loaded = match load(repository, &transfer_id.upload_id).await {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            cleanup_failed_transfer(repository, &transfer_id, &part).await;
+            return Err(error);
+        }
     };
     for attempt in 0..MAX_STATE_UPDATE_ATTEMPTS {
-        if !matches!(loaded.session.state, State::Open) {
-            cleanup_unreferenced_part(repository, &loaded.session, &part).await;
-            return Err(Error::NotOpen);
-        }
-        let replaced = loaded.session.parts.insert(number, part.clone());
-        if loaded.session.parts.len() > MAX_PARTS {
-            cleanup_part_object(repository, &loaded.session.id, &part).await;
-            return Err(Error::PartNumber);
-        }
-        let staged_bytes = loaded
+        if loaded
             .session
             .parts
-            .values()
-            .try_fold(0_u64, |total, registered| {
-                total.checked_add(registered.size).ok_or(Error::Capacity)
-            });
-        let Ok(staged_bytes) = staged_bytes else {
-            cleanup_part_object(repository, &loaded.session.id, &part).await;
-            return Err(Error::Capacity);
+            .get(&number)
+            .is_some_and(|registered| registered.path == part.path)
+            && !loaded
+                .session
+                .pending_transfers
+                .contains_key(&transfer_id.id)
+        {
+            return Ok(part);
+        }
+        if !matches!(loaded.session.state, State::Open) {
+            cleanup_failed_transfer(repository, &transfer_id, &part).await;
+            return Err(Error::NotOpen);
+        }
+        if loaded.session.pending_transfers.get(&transfer_id.id) != Some(&transfer_id.reservation) {
+            cleanup_failed_transfer(repository, &transfer_id, &part).await;
+            return Err(Error::Conflict);
+        }
+        let replaced = loaded.session.parts.insert(number, part.clone());
+        loaded.session.pending_transfers.remove(&transfer_id.id);
+        if let Some(replaced) = replaced.as_ref()
+            && replaced.path != part.path
+        {
+            loaded
+                .session
+                .retired_parts
+                .insert(replaced.path.clone(), replaced.clone());
+        }
+        if loaded.session.parts.len() > MAX_PARTS {
+            cleanup_failed_transfer(repository, &transfer_id, &part).await;
+            return Err(Error::PartNumber);
+        }
+        let staged_bytes = match registered_bytes(&loaded.session) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                cleanup_failed_transfer(repository, &transfer_id, &part).await;
+                return Err(error);
+            }
         };
         if staged_bytes > loaded.session.max_staged_bytes {
-            cleanup_part_object(repository, &loaded.session.id, &part).await;
+            cleanup_failed_transfer(repository, &transfer_id, &part).await;
             return Err(Error::Capacity);
+        }
+        let transient_bytes = match transient_bytes(&loaded.session) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                cleanup_failed_transfer(repository, &transfer_id, &part).await;
+                return Err(error);
+            }
+        };
+        if transient_bytes > loaded.session.max_staged_bytes {
+            cleanup_failed_transfer(repository, &transfer_id, &part).await;
+            return Err(Error::Capacity);
+        }
+        if cancel.is_cancelled() {
+            cleanup_failed_transfer(repository, &transfer_id, &part).await;
+            return Err(Error::Cancelled);
         }
         loaded.session.revision = loaded.session.revision.saturating_add(1);
         match save(repository, &loaded).await {
             Ok(()) => {
                 if let Some(replaced) = replaced {
-                    cleanup_unreferenced_part(repository, &loaded.session, &replaced).await;
+                    cleanup_retired_part(repository, &loaded.session.id, &replaced).await;
                 }
                 return Ok(part);
             }
@@ -522,13 +611,13 @@ pub(crate) async fn register_part(
                 if let Err(error) =
                     wait_for_state_retry(&loaded.session.id, number, attempt, cancel).await
                 {
-                    cleanup_part_object(repository, &loaded.session.id, &part).await;
+                    cleanup_failed_transfer(repository, &transfer_id, &part).await;
                     return Err(error);
                 }
                 loaded = match load(repository, &loaded.session.id).await {
                     Ok(loaded) => loaded,
                     Err(error) => {
-                        cleanup_part_object(repository, &loaded.session.id, &part).await;
+                        cleanup_failed_transfer(repository, &transfer_id, &part).await;
                         return Err(error);
                     }
                 };
@@ -546,17 +635,258 @@ pub(crate) async fn register_part(
                     .is_some_and(|registered| registered.path == part.path)
                 {
                     if let Some(replaced) = replaced {
-                        cleanup_unreferenced_part(repository, &current.session, &replaced).await;
+                        cleanup_retired_part(repository, &current.session.id, &replaced).await;
                     }
                     return Ok(part);
                 }
                 cleanup_unreferenced_part(repository, &current.session, &part).await;
+                release_transfer_reservation(repository, &transfer_id).await;
                 return Err(error);
             }
         }
     }
-    cleanup_part_object(repository, &loaded.session.id, &part).await;
+    cleanup_failed_transfer(repository, &transfer_id, &part).await;
     Err(Error::Conflict)
+}
+
+struct TransferId {
+    upload_id: String,
+    id: String,
+    expires_seconds: u64,
+    reservation: TransferReservation,
+}
+
+async fn reserve_transfer(
+    repository: &Repository,
+    mut loaded: Loaded,
+    number: i32,
+    size: u64,
+    now: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<TransferId> {
+    let id = ulid::Ulid::new().to_string();
+    let transfer = TransferId {
+        upload_id: loaded.session.id.clone(),
+        expires_seconds: loaded.session.expires_seconds,
+        reservation: TransferReservation {
+            number,
+            size,
+            path: transfer_path(&loaded.session.id, number, &id),
+        },
+        id,
+    };
+    for attempt in 0..MAX_STATE_UPDATE_ATTEMPTS {
+        if !matches!(loaded.session.state, State::Open) {
+            return Err(Error::NotOpen);
+        }
+        if now >= loaded.session.expires_seconds {
+            abort(repository, loaded).await?;
+            return Err(Error::NotOpen);
+        }
+        if loaded
+            .session
+            .pending_transfers
+            .len()
+            .checked_add(loaded.session.retired_parts.len())
+            .is_none_or(|count| count >= MAX_PARTS)
+        {
+            return Err(Error::Capacity);
+        }
+        let registered = registered_bytes(&loaded.session)?;
+        let replaced = loaded
+            .session
+            .parts
+            .get(&number)
+            .map_or(0, |part| part.size);
+        let projected = registered
+            .checked_sub(replaced)
+            .and_then(|bytes| bytes.checked_add(size))
+            .ok_or(Error::Capacity)?;
+        let transient = transient_bytes(&loaded.session)?
+            .checked_add(size)
+            .ok_or(Error::Capacity)?;
+        if projected > loaded.session.max_staged_bytes
+            || transient > loaded.session.max_staged_bytes
+        {
+            return Err(Error::Capacity);
+        }
+        loaded
+            .session
+            .pending_transfers
+            .insert(transfer.id.clone(), transfer.reservation.clone());
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        loaded.session.revision = loaded.session.revision.saturating_add(1);
+        match save(repository, &loaded).await {
+            Ok(()) => return Ok(transfer),
+            Err(Error::Conflict) if attempt + 1 < MAX_STATE_UPDATE_ATTEMPTS => {
+                wait_for_state_retry(&loaded.session.id, number, attempt, cancel).await?;
+                loaded = load(repository, &loaded.session.id).await?;
+            }
+            Err(Error::Conflict) => return Err(Error::Conflict),
+            Err(error) => {
+                let current = load(repository, &loaded.session.id).await;
+                if let Ok(current) = current
+                    && current.session.pending_transfers.get(&transfer.id)
+                        == Some(&transfer.reservation)
+                {
+                    if matches!(current.session.state, State::Open) {
+                        return Ok(transfer);
+                    }
+                    release_transfer_reservation(repository, &transfer).await;
+                    return Err(Error::NotOpen);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Err(Error::Conflict)
+}
+
+async fn upload_reserved_part(
+    repository: &Repository,
+    transfer: &TransferId,
+    spool: &crate::content::Spool,
+    now: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> std::result::Result<(), crab_storage::StorageError> {
+    let transfer_cancel = cancel.child_token();
+    let deadline = tokio::time::sleep(Duration::from_secs(
+        transfer.expires_seconds.saturating_sub(now),
+    ));
+    let path = repository.layout.repo_path(&transfer.reservation.path);
+    let upload = repository.store.put_multipart_file_retry(
+        &path,
+        spool.path(),
+        spool.size,
+        spool.digests.blake3,
+        8 * 1024 * 1024,
+        &transfer_cancel,
+        None,
+    );
+    tokio::pin!(deadline);
+    tokio::pin!(upload);
+    tokio::select! {
+        biased;
+        result = &mut upload => result,
+        () = &mut deadline => {
+            // Drain provider abort before returning so the grace window starts
+            // after this process can no longer publish the reserved payload.
+            transfer_cancel.cancel();
+            upload.await
+        }
+    }
+}
+
+fn transfer_path(upload_id: &str, number: i32, transfer_id: &str) -> String {
+    format!("s3/multipart/parts/{upload_id}/{number}/{transfer_id}")
+}
+
+fn valid_part_path(upload_id: &str, number: i32, path: &str) -> bool {
+    let prefix = format!("s3/multipart/parts/{upload_id}/{number}/");
+    path.strip_prefix(&prefix)
+        .is_some_and(|transfer_id| validate_id(transfer_id).is_ok())
+}
+
+fn registered_bytes(session: &Session) -> Result<u64> {
+    session
+        .parts
+        .values()
+        .try_fold(0_u64, |total, part| total.checked_add(part.size))
+        .ok_or(Error::Capacity)
+}
+
+fn pending_bytes(session: &Session) -> Result<u64> {
+    session
+        .pending_transfers
+        .values()
+        .try_fold(0_u64, |total, transfer| total.checked_add(transfer.size))
+        .ok_or(Error::Capacity)
+}
+
+fn retired_bytes(session: &Session) -> Result<u64> {
+    session
+        .retired_parts
+        .values()
+        .try_fold(0_u64, |total, part| total.checked_add(part.size))
+        .ok_or(Error::Capacity)
+}
+
+fn transient_bytes(session: &Session) -> Result<u64> {
+    pending_bytes(session)?
+        .checked_add(retired_bytes(session)?)
+        .ok_or(Error::Capacity)
+}
+
+async fn cleanup_failed_transfer(repository: &Repository, transfer: &TransferId, part: &Part) {
+    if cleanup_part_object(repository, &transfer.upload_id, part).await {
+        release_transfer_reservation(repository, transfer).await;
+    }
+}
+
+async fn release_transfer_reservation(repository: &Repository, transfer: &TransferId) {
+    for _ in 0..MAX_STATE_UPDATE_ATTEMPTS {
+        let mut loaded = match load(repository, &transfer.upload_id).await {
+            Ok(loaded) => loaded,
+            Err(Error::NoSuchUpload | Error::NotOpen) => return,
+            Err(error) => {
+                tracing::warn!(upload_id = %transfer.upload_id, %error, "multipart transfer reservation cleanup failed");
+                return;
+            }
+        };
+        if loaded.session.pending_transfers.get(&transfer.id) != Some(&transfer.reservation) {
+            return;
+        }
+        loaded.session.pending_transfers.remove(&transfer.id);
+        loaded.session.revision = loaded.session.revision.saturating_add(1);
+        match save(repository, &loaded).await {
+            Ok(()) => {
+                if matches!(loaded.session.state, State::Completed | State::Aborted)
+                    && let Err(error) = cleanup_terminal(repository, &loaded.session).await
+                {
+                    tracing::warn!(upload_id = %transfer.upload_id, %error, "terminal multipart cleanup failed after transfer release");
+                }
+                return;
+            }
+            Err(Error::Conflict) => tokio::task::yield_now().await,
+            Err(error) => {
+                tracing::warn!(upload_id = %transfer.upload_id, %error, "multipart transfer reservation cleanup failed");
+                return;
+            }
+        }
+    }
+    tracing::warn!(upload_id = %transfer.upload_id, "multipart transfer reservation cleanup conflicted");
+}
+
+async fn cleanup_retired_part(repository: &Repository, upload_id: &str, part: &Part) {
+    if !cleanup_part_object(repository, upload_id, part).await {
+        return;
+    }
+    for _ in 0..MAX_STATE_UPDATE_ATTEMPTS {
+        let mut loaded = match load(repository, upload_id).await {
+            Ok(loaded) => loaded,
+            Err(Error::NoSuchUpload) => return,
+            Err(error) => {
+                tracing::warn!(%upload_id, %error, "multipart retired-part record cleanup failed");
+                return;
+            }
+        };
+        if loaded.session.retired_parts.get(&part.path) != Some(part) {
+            return;
+        }
+        loaded.session.retired_parts.remove(&part.path);
+        loaded.session.revision = loaded.session.revision.saturating_add(1);
+        match save(repository, &loaded).await {
+            Ok(()) => return,
+            Err(Error::Conflict) => tokio::task::yield_now().await,
+            Err(error) => {
+                tracing::warn!(%upload_id, %error, "multipart retired-part record cleanup failed");
+                return;
+            }
+        }
+    }
+    tracing::warn!(%upload_id, "multipart retired-part record cleanup conflicted");
 }
 
 async fn cleanup_unreferenced_part(repository: &Repository, session: &Session, part: &Part) {
@@ -570,17 +900,27 @@ async fn cleanup_unreferenced_part(repository: &Repository, session: &Session, p
     cleanup_part_object(repository, &session.id, part).await;
 }
 
-async fn cleanup_part_object(repository: &Repository, upload_id: &str, part: &Part) {
-    let path = repository.layout.repo_path(&part.path);
+async fn cleanup_part_object(repository: &Repository, upload_id: &str, part: &Part) -> bool {
+    cleanup_transfer_object(repository, upload_id, part.number, &part.path).await
+}
+
+async fn cleanup_transfer_object(
+    repository: &Repository,
+    upload_id: &str,
+    part_number: i32,
+    path: &str,
+) -> bool {
+    let path = repository.layout.repo_path(path);
     match repository.store.delete(&path).await {
-        Ok(()) | Err(crab_storage::StorageError::NotFound { .. }) => {}
+        Ok(()) | Err(crab_storage::StorageError::NotFound { .. }) => true,
         Err(error) => {
             tracing::warn!(
                 %upload_id,
-                part_number = part.number,
+                part_number,
                 %error,
                 "multipart orphan cleanup failed"
             );
+            false
         }
     }
 }
@@ -685,6 +1025,8 @@ pub(crate) async fn freeze(
         parts.push(part.clone());
     }
     loaded.session.state = State::Completing;
+    // The state transition fences every transfer that has not registered yet.
+    // Retaining its reservation keeps late or crashed payloads quota-accounted.
     loaded.session.selected_parts = Some(selected.to_vec());
     loaded.session.revision = loaded.session.revision.saturating_add(1);
     save(repository, &loaded).await?;
@@ -836,7 +1178,12 @@ pub(crate) async fn abort(repository: &Repository, mut loaded: Loaded) -> Result
     Ok(())
 }
 
-async fn cleanup_terminal(repository: &Repository, session: &Session) -> Result<()> {
+async fn cleanup_terminal(repository: &Repository, session: &Session) -> Result<bool> {
+    // A live transfer can publish after the first prefix deletion. Keep the
+    // durable slot until every transfer has either cleaned itself or expired.
+    if !session.pending_transfers.is_empty() {
+        return Ok(false);
+    }
     cleanup_parts(repository, &session.id).await?;
     release_capacity(
         repository,
@@ -846,7 +1193,8 @@ async fn cleanup_terminal(repository: &Repository, session: &Session) -> Result<
             generation: session.capacity_generation,
         },
     )
-    .await
+    .await?;
+    Ok(true)
 }
 
 async fn cleanup_parts(repository: &Repository, id: &str) -> Result<()> {
@@ -855,6 +1203,92 @@ async fn cleanup_parts(repository: &Repository, id: &str) -> Result<()> {
         .repo_path(&format!("s3/multipart/parts/{id}/"));
     repository.store.delete_prefix(&prefix).await?;
     Ok(())
+}
+
+async fn reap_retired_parts(repository: &Repository, mut loaded: Loaded) -> Result<Loaded> {
+    use futures_util::StreamExt as _;
+
+    if loaded.session.retired_parts.is_empty() {
+        return Ok(loaded);
+    }
+    let retired = loaded
+        .session
+        .retired_parts
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let upload_id = loaded.session.id.clone();
+    let removed = futures_util::stream::iter(retired)
+        .map(|part| {
+            let upload_id = &upload_id;
+            async move {
+                cleanup_part_object(repository, upload_id, &part)
+                    .await
+                    .then_some(part)
+            }
+        })
+        .buffer_unordered(CATALOG_READ_CONCURRENCY)
+        .filter_map(std::future::ready)
+        .collect::<Vec<_>>()
+        .await;
+    if removed.is_empty() {
+        return Ok(loaded);
+    }
+    for part in removed {
+        if loaded.session.retired_parts.get(&part.path) == Some(&part) {
+            loaded.session.retired_parts.remove(&part.path);
+        }
+    }
+    loaded.session.revision = loaded.session.revision.saturating_add(1);
+    save(repository, &loaded).await?;
+    load(repository, &loaded.session.id).await
+}
+
+async fn reap_expired_transfers(
+    repository: &Repository,
+    mut loaded: Loaded,
+    now: u64,
+) -> Result<Loaded> {
+    use futures_util::StreamExt as _;
+
+    let reclaim_after = loaded
+        .session
+        .expires_seconds
+        .saturating_add(TRANSFER_RECLAIM_GRACE_SECONDS);
+    if now < reclaim_after || loaded.session.pending_transfers.is_empty() {
+        return Ok(loaded);
+    }
+    let transfers = loaded
+        .session
+        .pending_transfers
+        .iter()
+        .map(|(id, transfer)| (id.clone(), transfer.clone()))
+        .collect::<Vec<_>>();
+    let upload_id = loaded.session.id.clone();
+    let removed = futures_util::stream::iter(transfers)
+        .map(|(id, transfer)| {
+            let upload_id = &upload_id;
+            async move {
+                cleanup_transfer_object(repository, upload_id, transfer.number, &transfer.path)
+                    .await
+                    .then_some((id, transfer))
+            }
+        })
+        .buffer_unordered(CATALOG_READ_CONCURRENCY)
+        .filter_map(std::future::ready)
+        .collect::<Vec<_>>()
+        .await;
+    if removed.is_empty() {
+        return Ok(loaded);
+    }
+    for (id, transfer) in removed {
+        if loaded.session.pending_transfers.get(&id) == Some(&transfer) {
+            loaded.session.pending_transfers.remove(&id);
+        }
+    }
+    loaded.session.revision = loaded.session.revision.saturating_add(1);
+    save(repository, &loaded).await?;
+    load(repository, &loaded.session.id).await
 }
 
 pub(crate) async fn list(repository: &Repository, now: u64) -> Result<Vec<Session>> {
@@ -982,45 +1416,58 @@ async fn reconcile_capacity_slot(
                 tracing::warn!(upload_id = %owner.upload_id, "multipart capacity ownership mismatch");
                 return SweepStats::default();
             }
-            match loaded.session.state {
-                State::Open if now >= loaded.session.expires_seconds => {
-                    loaded.session.state = State::Aborted;
-                    loaded.session.revision = loaded.session.revision.saturating_add(1);
-                    match save(repository, &loaded).await {
-                        Ok(()) => {
-                            if let Err(error) = cleanup_terminal(repository, &loaded.session).await
-                            {
-                                tracing::warn!(upload_id = %owner.upload_id, %error, "expired multipart cleanup failed");
-                            }
-                            SweepStats {
-                                expired: 1,
-                                ..SweepStats::default()
-                            }
-                        }
-                        Err(Error::Conflict) => SweepStats::default(),
-                        Err(error) => {
-                            tracing::warn!(upload_id = %owner.upload_id, %error, "multipart expiry transition failed");
-                            SweepStats::default()
-                        }
-                    }
+            let mut stats = SweepStats::default();
+            loaded = match reap_retired_parts(repository, loaded).await {
+                Ok(loaded) => loaded,
+                Err(Error::Conflict) => return stats,
+                Err(error) => {
+                    tracing::warn!(upload_id = %owner.upload_id, %error, "retired multipart part cleanup failed");
+                    return stats;
                 }
-                State::Completed | State::Aborted => {
-                    if let Err(error) = cleanup_terminal(repository, &loaded.session).await {
-                        tracing::warn!(upload_id = %owner.upload_id, %error, "terminal multipart cleanup retry failed");
-                        SweepStats::default()
-                    } else {
-                        SweepStats {
-                            terminal_cleanups: 1,
-                            ..SweepStats::default()
-                        }
+            };
+            if matches!(loaded.session.state, State::Open) && now >= loaded.session.expires_seconds
+            {
+                loaded.session.state = State::Aborted;
+                loaded.session.revision = loaded.session.revision.saturating_add(1);
+                if let Err(error) = save(repository, &loaded).await {
+                    if !matches!(error, Error::Conflict) {
+                        tracing::warn!(upload_id = %owner.upload_id, %error, "multipart expiry transition failed");
                     }
+                    return stats;
                 }
-                State::Completing => SweepStats {
-                    completing: vec![loaded],
-                    ..SweepStats::default()
-                },
-                State::Open => SweepStats::default(),
+                stats.expired = 1;
+                loaded = match load(repository, &owner.upload_id).await {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        tracing::warn!(upload_id = %owner.upload_id, %error, "expired multipart reload failed");
+                        return stats;
+                    }
+                };
             }
+            if !matches!(loaded.session.state, State::Open) {
+                loaded = match reap_expired_transfers(repository, loaded, now).await {
+                    Ok(loaded) => loaded,
+                    Err(Error::Conflict) => return stats,
+                    Err(error) => {
+                        tracing::warn!(upload_id = %owner.upload_id, %error, "expired multipart transfer cleanup failed");
+                        return stats;
+                    }
+                };
+            }
+            match loaded.session.state {
+                State::Completed | State::Aborted => {
+                    match cleanup_terminal(repository, &loaded.session).await {
+                        Ok(true) => stats.terminal_cleanups = 1,
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(upload_id = %owner.upload_id, %error, "terminal multipart cleanup retry failed");
+                        }
+                    }
+                }
+                State::Completing => stats.completing.push(loaded),
+                State::Open => {}
+            }
+            stats
         }
         Err(Error::NoSuchUpload) if now >= owner.expires_seconds => {
             if let Err(error) = cleanup_parts(repository, &owner.upload_id).await {
@@ -1256,6 +1703,173 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_transfers_cannot_exceed_the_persisted_byte_budget() {
+        let repository = fixture_with_limits(1, 10, 100).await;
+        let session = create_session(&repository).await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        reserve_transfer(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            8,
+            11,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let result = reserve_transfer(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            2,
+            3,
+            12,
+            &cancel,
+        )
+        .await;
+        let reloaded = load(&repository, &session.id).await.unwrap();
+
+        assert!(
+            matches!(result, Err(Error::Capacity))
+                && reloaded.session.pending_transfers.len() == 1
+                && pending_bytes(&reloaded.session).unwrap() == 8
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_session_releases_capacity_after_late_transfer_cleanup() {
+        let repository = fixture_with_limits(1, 20, 100).await;
+        let session = create_session(&repository).await;
+        let selected_body = Bytes::from_static(b"ready");
+        let selected_spool = spool(&selected_body).await;
+        let selected_etag = crate::gateway::md5_hex(&selected_body);
+        register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            &selected_spool,
+            selected_etag.clone(),
+            crate::attributes::Checksums::default(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let transfer = reserve_transfer(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            2,
+            7,
+            12,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let payload = Bytes::from_static(b"pending");
+        repository
+            .store
+            .put_exact(
+                &repository.layout.repo_path(&transfer.reservation.path),
+                payload.clone(),
+            )
+            .await
+            .unwrap();
+        let (frozen, _) = freeze(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            &[(1, selected_etag)],
+            20,
+        )
+        .await
+        .unwrap();
+        assert_eq!(frozen.pending_transfers.len(), 1);
+        complete(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            "completed-etag".to_owned(),
+            crate::attributes::Checksums::default(),
+        )
+        .await
+        .unwrap();
+        let saturated = create_session_at(&repository, "main/saturated.bin", 13).await;
+        let part = Part {
+            number: transfer.reservation.number,
+            etag: crate::gateway::md5_hex(&payload),
+            size: transfer.reservation.size,
+            modified_seconds: 12,
+            checksums: crate::attributes::Checksums::default(),
+            path: transfer.reservation.path.clone(),
+        };
+
+        cleanup_failed_transfer(&repository, &transfer, &part).await;
+
+        let terminal = load(&repository, &session.id).await.unwrap();
+        let replacement = create_session_at(&repository, "main/replacement.bin", 14).await;
+        assert!(
+            matches!(saturated, Err(Error::Capacity))
+                && terminal.session.pending_transfers.is_empty()
+                && matches!(
+                    repository
+                        .store
+                        .head(&repository.layout.repo_path(&part.path))
+                        .await,
+                    Err(crab_storage::StorageError::NotFound { .. })
+                )
+                && replacement.is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_crashed_transfer_only_after_provider_grace() {
+        let repository = fixture_with_limits(1, 10, 10).await;
+        let session = create_session(&repository).await;
+        let transfer = reserve_transfer(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            7,
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let path = repository.layout.repo_path(&transfer.reservation.path);
+        repository
+            .store
+            .put_exact(&path, Bytes::from_static(b"pending"))
+            .await
+            .unwrap();
+        abort(&repository, load(&repository, &session.id).await.unwrap())
+            .await
+            .unwrap();
+
+        let before = sweep(
+            &repository,
+            session.expires_seconds + TRANSFER_RECLAIM_GRACE_SECONDS - 1,
+        )
+        .await
+        .unwrap();
+        let saturated = create_session_at(&repository, "main/saturated.bin", 21).await;
+        let after = sweep(
+            &repository,
+            session.expires_seconds + TRANSFER_RECLAIM_GRACE_SECONDS,
+        )
+        .await
+        .unwrap();
+        let replacement = create_session_at(&repository, "main/replacement.bin", 22).await;
+
+        assert!(
+            before.terminal_cleanups == 0
+                && matches!(saturated, Err(Error::Capacity))
+                && after.terminal_cleanups == 1
+                && matches!(
+                    repository.store.head(&path).await,
+                    Err(crab_storage::StorageError::NotFound { .. })
+                )
+                && replacement.is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn sweep_expires_open_upload_and_releases_its_capacity() {
         let repository = fixture_with_limits(1, 50_000_000_000_000, 10).await;
         let session = create_session(&repository).await;
@@ -1487,6 +2101,82 @@ mod tests {
                 new_exists,
             ),
             (true, true)
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_a_replacement_left_retired_by_process_exit() {
+        let repository = fixture_with_limits(1, 100, 100).await;
+        let session = create_session(&repository).await;
+        let old_body = Bytes::from_static(b"old payload");
+        let old_spool = spool(&old_body).await;
+        let old = register_part(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            &old_spool,
+            crate::gateway::md5_hex(&old_body),
+            crate::attributes::Checksums::default(),
+            11,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let new_body = Bytes::from_static(b"new payload");
+        let transfer = reserve_transfer(
+            &repository,
+            load(&repository, &session.id).await.unwrap(),
+            1,
+            new_body.len() as u64,
+            12,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        repository
+            .store
+            .put_exact(
+                &repository.layout.repo_path(&transfer.reservation.path),
+                new_body.clone(),
+            )
+            .await
+            .unwrap();
+        let new = Part {
+            number: 1,
+            etag: crate::gateway::md5_hex(&new_body),
+            size: new_body.len() as u64,
+            modified_seconds: 12,
+            checksums: crate::attributes::Checksums::default(),
+            path: transfer.reservation.path.clone(),
+        };
+        let mut registered = load(&repository, &session.id).await.unwrap();
+        registered.session.parts.insert(1, new.clone());
+        registered.session.pending_transfers.remove(&transfer.id);
+        registered
+            .session
+            .retired_parts
+            .insert(old.path.clone(), old.clone());
+        registered.session.revision = registered.session.revision.saturating_add(1);
+        save(&repository, &registered).await.unwrap();
+
+        sweep(&repository, 12).await.unwrap();
+
+        let reloaded = load(&repository, &session.id).await.unwrap();
+        assert!(
+            reloaded.session.parts[&1] == new
+                && reloaded.session.retired_parts.is_empty()
+                && matches!(
+                    repository
+                        .store
+                        .head(&repository.layout.repo_path(&old.path))
+                        .await,
+                    Err(crab_storage::StorageError::NotFound { .. })
+                )
+                && repository
+                    .store
+                    .head(&repository.layout.repo_path(&new.path))
+                    .await
+                    .is_ok()
         );
     }
 
