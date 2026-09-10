@@ -353,7 +353,7 @@ jobs:
 
           metrics_root="${qualification_root}/metrics"
           maintenance_ready=false
-          for attempt in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl --fail --silent --show-error --dump-header "${metrics_root}.headers" \
               http://127.0.0.1:18081/metrics --output "${metrics_root}.txt"
             if grep -Eq '^crab_s3_gateway_multipart_maintenance_cycles_total\{outcome="success"\} [1-9][0-9]*$' \
