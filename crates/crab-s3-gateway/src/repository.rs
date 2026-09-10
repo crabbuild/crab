@@ -276,7 +276,18 @@ pub(crate) fn schedule_readability(
         )
         .await
         {
-            tracing::warn!(%error, "S3 repository background read maintenance failed");
+            match error {
+                crab_write::WriteError::VisibilityUnavailable { generation } => {
+                    tracing::warn!(
+                        generation,
+                        recovery = "run `crab fsck --repair`, then `crab metadb owner --once`, against this repository",
+                        "S3 repository requires verified Git visibility repair"
+                    );
+                }
+                error => {
+                    tracing::warn!(%error, "S3 repository background read maintenance failed");
+                }
+            }
         }
     });
 }

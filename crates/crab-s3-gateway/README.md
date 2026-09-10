@@ -55,6 +55,16 @@ then closes the session only when durable evidence proves that publication
 succeeded. Plan evidence remains valid after a later write replaces the object.
 A session without committed evidence remains fenced for an identical client
 retry.
+
+Repositories written by older Crab builds may not have the verified Git
+visibility evidence required by current background readability maintenance. If
+the gateway reports that visibility repair is required, run `crab fsck
+--repair` against the same repository to backfill historical generations, then
+run `crab metadb owner --once` to fully verify and publish the current
+catalog-bound proof. The gateway deliberately does not infer this proof from
+unverified objects inside a request or background sweep. New gateway writes
+carry their own immutable visibility evidence and continue the repaired proof.
+
 Large payloads use bounded-memory request spools and Crab's verified LFS content
 path. Multipart completion keeps objects through 64 MiB in a local spool. Above
 that threshold it hashes and validates the durable selected parts, then replays
