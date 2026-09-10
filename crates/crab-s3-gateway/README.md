@@ -202,6 +202,10 @@ an empty cache from an unavailable or malformed catalog. Concurrent scrapes
 coalesce rather than queue catalog probes.
 Metric labels are fixed enums; they never contain
 repository names, refs, keys, upload IDs, principals, access keys, or secrets.
+The gateway also suppresses protocol-library debug/trace events that contain
+complete signed requests and malformed-body events that contain raw payloads.
+This credential boundary cannot be disabled through `RUST_LOG`; other gateway
+debug logging remains operator-configurable.
 The corresponding CLI checks are suitable for container and orchestration
 probes. The metrics endpoint is unauthenticated by design; scrape it only over
 the private management network and never publish that listener through the S3

@@ -105,6 +105,10 @@ rotation or revocation takes effect when the process reloads its configuration.
 Gateway keys are never backend cloud credentials. Secret values must come from
 protected files, never command-line arguments, logs, error bodies, persisted
 multipart records, or reports.
+Protocol dependency events containing complete signed requests, signature
+material, or raw malformed request bodies are suppressed even when application
+debug logging is enabled. Operators cannot weaken this credential boundary
+through `RUST_LOG`.
 
 Every request authorizes its logical repository, ref, path, and action after
 signature verification. Historical commit and tag reads require current

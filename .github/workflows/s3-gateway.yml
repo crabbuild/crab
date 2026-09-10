@@ -268,6 +268,7 @@ jobs:
             --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
             --env AWS_ALLOW_HTTP=true \
             --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            --env RUST_LOG=trace \
             --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
             crab-s3-gateway:test
@@ -486,6 +487,19 @@ jobs:
             -e 'service-account:qualification' \
             "${metrics_root}.txt"; then
             echo "metrics exposed request or credential identity" >&2
+            exit 1
+          fi
+          docker logs crab-s3-gateway > "${qualification_root}/gateway.stdout" \
+            2> "${qualification_root}/gateway.stderr"
+          if grep -Fq \
+            -e "${GATEWAY_ACCESS_KEY}" \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e 'X-Amz-Signature=' \
+            -e 'Authorization: AWS' \
+            -e 'Authorization: AWS4-' \
+            "${qualification_root}/gateway.stdout" \
+            "${qualification_root}/gateway.stderr"; then
+            echo "gateway logs exposed signed-request credentials" >&2
             exit 1
           fi
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
