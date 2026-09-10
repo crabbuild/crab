@@ -1,143 +1,277 @@
 # crab-sdk
 
-Preview Rust client for Crab repositories. Every existing repository opens
-through `Client::open(OpenOptions)`, which returns one `Repository`. Select its
-borrowed `remote()` or `local()` interface for the workflow you need.
+[![Rust SDK](https://github.com/crabbuild/crab/actions/workflows/sdk.yml/badge.svg)](https://github.com/crabbuild/crab/actions/workflows/sdk.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../../LICENSE)
 
-The implementation and qualification contract lives in
-`crab/docs/architecture/crab-sdk.md`. The package remains unpublished until all
-mandatory qualification gates pass. Registry publication is a separate release
-action.
+`crab-sdk` is the asynchronous Rust API for reading and changing Crab
+repositories. It provides one `Repository` facade for remote repositories and
+local Git worktrees, with task-specific APIs under `remote`, `local`, `managed`,
+`storage`, and `operation`.
 
-## Feature profiles
+> [!NOTE]
+> The SDK is not published on crates.io yet. Its API and qualification gates are
+> implemented in this repository. Registry publication is a separate release
+> action.
 
-The crate has no default features. The default surface contains validated core
-values, errors, storage configuration, and `ClientBuilder` without a runtime.
+## Requirements
 
-- `remote` adds `Client`, unified open, pinned remote reads, and `operation`.
-- `content` adds verified Crab and Git LFS reconstruction. It implies `remote`.
-- `write` adds remote initialization, commits, atomic ref updates, and recovery.
-  It implies `remote`.
-- `local` adds local tool configuration, open, clone, fetch, edit, integration,
-  hydration, and push workflows. It implies `write` and `content`.
-- `managed` adds managed resolution and repository administration. It implies
-  `remote` and can be combined with `local`.
+- Rust 1.91 or newer
+- Tokio for asynchronous applications
+- Storage credentials for direct S3, GCS, or Azure access
+- Absolute paths to compatible `git` and `crab` executables for local workflows
 
-Rust 1.91.1 is the minimum supported version. CI compiles every supported
-profile and verifies that disabled task namespaces and their dependencies do
-not leak into smaller profiles.
+Remote object-store operations do not require local tools.
 
-## Open a remote repository
+## Installation
 
-Direct storage configuration lives under `storage`. A remote-only application
-does not configure Git or Crab executables.
+Until the first registry release, depend on the Git repository. Pin `rev` to an
+audited commit for reproducible application builds.
 
-```rust,no_run
-use crab_sdk::storage::{DirectStoreOptions, S3Options};
-use crab_sdk::{Client, OpenOptions, RepositoryLocator, Revision};
-
-# async fn read() -> crab_sdk::Result<()> {
-let store = DirectStoreOptions::s3(S3Options::new(
-    "bucket",
-    "us-west-2",
-    "access-key",
-    "secret-key",
-)?);
-let client = Client::builder().direct_store(store).build()?;
-let repository = client
-    .open(OpenOptions::remote(RepositoryLocator::new("repositories/example")?))
-    .await?;
-let snapshot = repository
-    .remote()?
-    .snapshot(Revision::branch("main")?)
-    .await?;
-println!("{}", snapshot.commit_id()?);
-client.close().await?;
-# Ok(())
-# }
+```toml
+[dependencies]
+crab-sdk = { git = "https://github.com/crabbuild/crab", branch = "main", default-features = false, features = ["remote"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Remote handles capture an immutable generation. Existing snapshots stay pinned
-when refs move; `remote.refresh()` returns a new `Repository`. `read_blob`
-returns exact Git bytes, including Crab and LFS pointers. With `content`,
-`open_file` reconstructs logical content in bounded frames and verifies it at
-successful EOF.
+For development inside this repository, use the workspace dependency:
 
-With `write`, `remote.prepare_commit` accepts exact-size ordinary or hydrated
-streams without a checkout or Git executable. `remote.prepare_ref_update`
-prepares an atomic branch and tag batch. Persist the prepared operation's
-recovery token before calling `execute()`.
+```toml
+[dependencies]
+crab-sdk = { workspace = true, features = ["remote"] }
+```
 
-## Open or clone a local repository
+## Features
 
-Local workflows require exact absolute paths to compatible Git and Crab
-executables. Configuration is grouped under `local::Options`.
+The crate has no default features. Enable only the workflows your application
+uses.
 
-```rust,no_run
+| Feature | Adds | Implies |
+| --- | --- | --- |
+| `remote` | `Client`, remote repositories, immutable snapshots, Git reads, and operation controls | — |
+| `content` | Verified Crab and Git LFS content reconstruction and content caching | `remote` |
+| `write` | Remote initialization, commit creation, atomic ref updates, and recovery | `remote` |
+| `local` | Local open/clone/fetch/edit/pull/hydration/push workflows | `write`, `content` |
+| `managed` | Managed repository resolution and lifecycle administration | `remote` |
+
+Common profiles:
+
+```toml
+# Remote metadata and raw Git objects
+features = ["remote"]
+
+# Remote logical file content
+features = ["content"]
+
+# Remote reads and writes
+features = ["content", "write"]
+
+# Complete local workflows
+features = ["local"]
+
+# Managed remote and local repositories
+features = ["local", "managed"]
+```
+
+## Quick start: remote read
+
+This example uses the standard AWS credential environment variables. The
+repository locator is the repository prefix inside the selected bucket.
+
+```rust
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, OpenOptions, RepositoryLocator, Revision};
+
+#[tokio::main]
+async fn main() -> crab_sdk::Result<()> {
+    let client = Client::builder()
+        .direct_store(DirectStoreOptions::s3_from_env("my-bucket")?)
+        .build()?;
+
+    let result = async {
+        let locator = RepositoryLocator::new("repositories/example")?;
+        let repository = client.open(OpenOptions::remote(locator)).await?;
+        let snapshot = repository
+            .remote()?
+            .snapshot(Revision::branch("main")?)
+            .await?;
+
+        println!("{}", snapshot.commit_id()?);
+        Ok::<(), crab_sdk::Error>(())
+    }
+    .await;
+
+    let cleanup = client.close().await;
+    result?;
+    cleanup
+}
+```
+
+An opened remote repository captures an immutable generation. Existing
+snapshots stay pinned when refs move. Call `repository.remote()?.refresh()` to
+obtain a new `Repository` at the latest visible generation.
+
+`Snapshot::read_blob` returns exact Git bytes. Enable `content` and use
+`Snapshot::open_file` to reconstruct logical Crab or Git LFS content with
+bounded memory and integrity verification.
+
+## Local worktrees
+
+Local workflows require the `local` feature and explicit absolute paths to the
+Git and Crab executables.
+
+```rust
 use crab_sdk::local::{Options, Tools};
 use crab_sdk::storage::DirectStoreOptions;
 use crab_sdk::{Client, OpenOptions};
 
-# async fn local() -> crab_sdk::Result<()> {
-let tools = Tools::new("/usr/bin/git", "/usr/local/bin/crab")?;
-let client = Client::builder()
-    .direct_store(DirectStoreOptions::s3_from_env("bucket")?)
-    .local(Options::new(tools))
-    .build()?;
-let repository = client.open(OpenOptions::local("/work/models")).await?;
-let status = repository.local()?.status().await?;
-println!("clean={}", status.is_clean());
-client.close().await?;
-# Ok(())
-# }
+#[tokio::main]
+async fn main() -> crab_sdk::Result<()> {
+    let tools = Tools::new("/usr/bin/git", "/usr/local/bin/crab")?;
+    let client = Client::builder()
+        .direct_store(DirectStoreOptions::s3_from_env("my-bucket")?)
+        .local(Options::new(tools))
+        .build()?;
+
+    let result = async {
+        let repository = client
+            .open(OpenOptions::local("/absolute/path/to/worktree"))
+            .await?;
+        let status = repository.local()?.status().await?;
+
+        println!("clean={}", status.is_clean());
+        Ok::<(), crab_sdk::Error>(())
+    }
+    .await;
+
+    let cleanup = client.close().await;
+    result?;
+    cleanup
+}
 ```
 
-Use `Client::clone_local` when the destination does not exist. Local operations
-include fetch, status, stage, commit, checkout, pull, conflict continue or abort,
-hydrate, dehydrate, prefetch, and prepared push. Direct and managed Crab clones
-use shared Rust transfer services; HTTP locators use native Git smart HTTP.
-Hooks and unrecognized executable Git drivers are disabled by default. Select
-`local::ExecutionPolicy::Trusted` only for repositories whose executable
-configuration the application intends to run.
+Use `Client::clone_local` to create a worktree. The local interface provides
+fetch, status, stage, commit, checkout, pull, conflict continue/abort, hydrate,
+dehydrate, prefetch, and prepared push operations. Hooks and unrecognized
+executable Git drivers are disabled by default. Use
+`local::ExecutionPolicy::Trusted` only when the application intends to run the
+repository's executable configuration.
 
 ## Managed repositories
 
-Configure managed authentication with `managed::Options`. A managed locator
-still opens through `Client::open`, and it can be the source for
-`Client::clone_local`. Repository administration is client-scoped:
+Enable `managed` to resolve managed locators and administer repositories. The
+administration API is client-scoped because list and create operations do not
+belong to one opened repository.
 
-```rust,no_run
+```rust
 use crab_sdk::managed::Options;
 use crab_sdk::Client;
 
-# async fn list() -> crab_sdk::Result<()> {
-let client = Client::builder()
-    .managed(Options::new("/absolute/token-cache")?)
-    .build()?;
-let managed = client.managed().await?;
-let page = managed.list("organization", None, 100).await?;
-for repository in page.repositories() {
-    println!("{}", repository.canonical_url());
+#[tokio::main]
+async fn main() -> crab_sdk::Result<()> {
+    let client = Client::builder()
+        .managed(Options::new("/absolute/path/to/token-cache")?)
+        .build()?;
+
+    let result = async {
+        let managed = client.managed().await?;
+        let page = managed.list("organization", None, 100).await?;
+
+        for repository in page.repositories() {
+            println!("{}", repository.canonical_url());
+        }
+        Ok::<(), crab_sdk::Error>(())
+    }
+    .await;
+
+    let cleanup = client.close().await;
+    result?;
+    cleanup
 }
-client.close().await?;
-# Ok(())
-# }
 ```
 
-## Requests, recovery, and shutdown
+`managed::Managed` also provides create, rename, archive, and restore. Managed
+locators open through `Client::open(OpenOptions::remote(...))` and can be passed
+to `Client::clone_local`.
 
-Asynchronous SDK operations return lazy `operation::Request` builders. Apply
-`operation::Options` with `with_options` before awaiting. Remote reads that need
-range or read-specific controls use `operation::ReadOptions`.
+## API overview
+
+| Task | API |
+| --- | --- |
+| Build shared configuration | `Client::builder()` |
+| Open a remote repository | `client.open(OpenOptions::remote(locator))` |
+| Open a local worktree | `client.open(OpenOptions::local(path))` |
+| Initialize remote state | `client.initialize_remote(locator, head)` |
+| Clone a worktree | `client.clone_local(locator, destination, options)` |
+| Configure a worktree | `client.configure_local(path)` |
+| Read remote state | `repository.remote()?` |
+| Work with local state | `repository.local()?` |
+| Administer managed repositories | `client.managed()` |
+| Close workers and resources | `client.close().await` |
+
+The public namespaces are:
+
+- `remote` for refs, snapshots, reads, archives, and remote publication
+- `remote::write` for commit, ref-update, outcome, and recovery types
+- `local` for tool policy and local worktree workflows
+- `managed` for service configuration and repository administration
+- `storage` for direct providers and the content cache
+- `operation` for timeouts, cancellation, progress, read limits, and requests
+
+## Requests and recovery
+
+Asynchronous operations return lazy `operation::Request` values. Apply
+operation policy before awaiting:
+
+```rust
+use std::time::Duration;
+
+use crab_sdk::operation;
+use crab_sdk::{Client, OpenOptions, RepositoryLocator};
+
+async fn open_with_timeout(client: &Client) -> crab_sdk::Result<()> {
+    let options = operation::Options::default()
+        .with_timeout(Duration::from_secs(30))?;
+    let locator = RepositoryLocator::new("repositories/example")?;
+    let repository = client
+        .open(OpenOptions::remote(locator))
+        .with_options(options)
+        .await?;
+
+    println!("{:?}", repository.mode());
+    Ok(())
+}
+```
 
 Remote publication returns `remote::write::MutationOutcome`; local push returns
-`local::PushOutcome`. An indeterminate result is never guessed or replayed.
-Use `Client::reconcile_remote`, `Client::resume_remote`,
-`Client::reconcile_local_push`, or `Client::resume_local_push` with the persisted
-family-specific recovery token.
+`local::PushOutcome`. Persist a prepared operation's recovery token before
+execution. Recover uncertain outcomes with the matching client method:
 
-Call `Client::close().await` before destroying Tokio. Streams must reach EOF or
-be closed explicitly to observe finalization errors. `ErrorKind` supplies stable
-categories while `Error` preserves source and cleanup failures.
+- `Client::resume_remote` or `Client::reconcile_remote`
+- `Client::resume_local_push` or `Client::reconcile_local_push`
 
-The public guide is served at <https://crab.build/docs/sdk>.
+The SDK never guesses an indeterminate result from current refs and never
+replays it implicitly.
+
+## Shutdown and errors
+
+Call `Client::close().await` before destroying the Tokio runtime. Closing stops
+new operation admission, cancels and drains workers, closes metadata owners, and
+reports unobserved cleanup failures.
+
+Streams must reach successful EOF to prove complete integrity. Close a stream
+explicitly when stopping early so its worker and operation state are drained.
+
+All public operations return `crab_sdk::Result<T>`. `ErrorKind` provides stable
+categories, while `Error` retains the source, operation identity, redacted
+context, and cleanup failures.
+
+## Documentation
+
+- [SDK guide](https://crab.build/docs/sdk)
+- [Public API specification](../../crab/docs/architecture/crab-sdk-api.md)
+- [Delivery and qualification plan](../../crab/docs/architecture/crab-sdk.md)
+- [Runnable examples](examples)
+
+## License
+
+Licensed under the [Apache License 2.0](../../LICENSE).
