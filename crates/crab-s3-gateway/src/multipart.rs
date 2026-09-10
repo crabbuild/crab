@@ -1353,12 +1353,26 @@ pub(crate) struct SweepStats {
     pub(crate) terminal_cleanups: usize,
     pub(crate) missing_cleanups: usize,
     pub(crate) published_recoveries: usize,
+    pub(crate) reconciliation_failures: usize,
+    pub(crate) publication_recovery_failures: usize,
+    pub(crate) unresolved_completions: usize,
     completing: Vec<Loaded>,
 }
 
 impl SweepStats {
     pub(crate) fn take_completing(&mut self) -> Vec<Loaded> {
         std::mem::take(&mut self.completing)
+    }
+
+    fn failed() -> Self {
+        Self {
+            reconciliation_failures: 1,
+            ..Self::default()
+        }
+    }
+
+    fn record_failure(&mut self) {
+        self.reconciliation_failures = self.reconciliation_failures.saturating_add(1);
     }
 }
 
@@ -1382,6 +1396,7 @@ pub(crate) async fn sweep(repository: &Repository, now: u64) -> Result<SweepStat
             total.expired += item.expired;
             total.terminal_cleanups += item.terminal_cleanups;
             total.missing_cleanups += item.missing_cleanups;
+            total.reconciliation_failures += item.reconciliation_failures;
             total.completing.append(&mut item.completing);
             total
         });
@@ -1397,7 +1412,7 @@ async fn reconcile_capacity_slot(
         Ok(slot) => slot,
         Err(error) => {
             tracing::warn!(%path, %error, "multipart capacity record reconciliation failed");
-            return SweepStats::default();
+            return SweepStats::failed();
         }
     };
     let Some(owner) = loaded_slot.slot.owner.clone() else {
@@ -1414,7 +1429,7 @@ async fn reconcile_capacity_slot(
                 || loaded.session.expires_seconds != owner.expires_seconds
             {
                 tracing::warn!(upload_id = %owner.upload_id, "multipart capacity ownership mismatch");
-                return SweepStats::default();
+                return SweepStats::failed();
             }
             let mut stats = SweepStats::default();
             loaded = match reap_retired_parts(repository, loaded).await {
@@ -1422,6 +1437,7 @@ async fn reconcile_capacity_slot(
                 Err(Error::Conflict) => return stats,
                 Err(error) => {
                     tracing::warn!(upload_id = %owner.upload_id, %error, "retired multipart part cleanup failed");
+                    stats.record_failure();
                     return stats;
                 }
             };
@@ -1432,6 +1448,7 @@ async fn reconcile_capacity_slot(
                 if let Err(error) = save(repository, &loaded).await {
                     if !matches!(error, Error::Conflict) {
                         tracing::warn!(upload_id = %owner.upload_id, %error, "multipart expiry transition failed");
+                        stats.record_failure();
                     }
                     return stats;
                 }
@@ -1440,6 +1457,7 @@ async fn reconcile_capacity_slot(
                     Ok(loaded) => loaded,
                     Err(error) => {
                         tracing::warn!(upload_id = %owner.upload_id, %error, "expired multipart reload failed");
+                        stats.record_failure();
                         return stats;
                     }
                 };
@@ -1450,6 +1468,7 @@ async fn reconcile_capacity_slot(
                     Err(Error::Conflict) => return stats,
                     Err(error) => {
                         tracing::warn!(upload_id = %owner.upload_id, %error, "expired multipart transfer cleanup failed");
+                        stats.record_failure();
                         return stats;
                     }
                 };
@@ -1461,6 +1480,7 @@ async fn reconcile_capacity_slot(
                         Ok(false) => {}
                         Err(error) => {
                             tracing::warn!(upload_id = %owner.upload_id, %error, "terminal multipart cleanup retry failed");
+                            stats.record_failure();
                         }
                     }
                 }
@@ -1472,7 +1492,7 @@ async fn reconcile_capacity_slot(
         Err(Error::NoSuchUpload) if now >= owner.expires_seconds => {
             if let Err(error) = cleanup_parts(repository, &owner.upload_id).await {
                 tracing::warn!(upload_id = %owner.upload_id, %error, "unregistered multipart cleanup failed");
-                return SweepStats::default();
+                return SweepStats::failed();
             }
             match release_capacity(repository, &owner.upload_id, &reservation).await {
                 Ok(()) => SweepStats {
@@ -1481,14 +1501,14 @@ async fn reconcile_capacity_slot(
                 },
                 Err(error) => {
                     tracing::warn!(upload_id = %owner.upload_id, %error, "unregistered multipart capacity release failed");
-                    SweepStats::default()
+                    SweepStats::failed()
                 }
             }
         }
         Err(Error::NoSuchUpload) => SweepStats::default(),
         Err(error) => {
             tracing::warn!(upload_id = %owner.upload_id, %error, "multipart state reconciliation failed");
-            SweepStats::default()
+            SweepStats::failed()
         }
     }
 }
@@ -1907,6 +1927,23 @@ mod tests {
                     .is_empty()
                 && replacement.is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn sweep_reports_a_corrupt_capacity_record_as_a_failure() {
+        let repository = fixture_with_limits(1, 50_000_000_000_000, 10).await;
+        create_session(&repository).await;
+        let path = capacity_path(&repository, 0);
+        let (_, etag) = repository.store.get_with_etag(&path).await.unwrap();
+        repository
+            .store
+            .update(&path, Bytes::from_static(b"not-json"), etag)
+            .await
+            .unwrap();
+
+        let stats = sweep(&repository, 20).await.unwrap();
+
+        assert_eq!(stats.reconciliation_failures, 1);
     }
 
     #[tokio::test]

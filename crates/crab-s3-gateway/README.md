@@ -160,12 +160,16 @@ immutable view; it returns `503 Service Unavailable` with `Retry-After: 5` when
 any repository is unsafe to serve. `GET /metrics` returns Prometheus 0.0.4 text
 for bounded HTTP method/outcome counts, full response-stream duration and
 in-flight requests, response-body errors/aborts, and control/read/transfer
-admission capacity, queue pressure, and outcomes. Metric labels are fixed enums;
-they never contain repository names, refs, keys, upload IDs, principals, access
-keys, or secrets. The corresponding CLI checks are suitable for container and
-orchestration probes. The metrics endpoint is unauthenticated by design; scrape
-it only over the private management network and never publish that listener
-through the S3 ingress.
+admission capacity, queue pressure, and outcomes. It also reports aggregate
+multipart-maintenance cycles, completed lifecycle actions, failure reasons,
+cycle duration, and the last cycle in which every configured repository was
+healthy. Per-slot failures make that cycle degraded instead of disappearing
+into a successful sweep. Metric labels are fixed enums; they never contain
+repository names, refs, keys, upload IDs, principals, access keys, or secrets.
+The corresponding CLI checks are suitable for container and orchestration
+probes. The metrics endpoint is unauthenticated by design; scrape it only over
+the private management network and never publish that listener through the S3
+ingress.
 
 The backing provider uses Crab's existing environment credential chain. Set
 the usual AWS, GCP, or Azure credentials for the selected provider. For an

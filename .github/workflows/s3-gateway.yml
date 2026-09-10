@@ -352,8 +352,20 @@ jobs:
             --bucket "${bucket}" --key "${key}" >/dev/null
 
           metrics_root="${qualification_root}/metrics"
-          curl --fail --silent --show-error --dump-header "${metrics_root}.headers" \
-            http://127.0.0.1:18081/metrics --output "${metrics_root}.txt"
+          maintenance_ready=false
+          for attempt in $(seq 1 30); do
+            curl --fail --silent --show-error --dump-header "${metrics_root}.headers" \
+              http://127.0.0.1:18081/metrics --output "${metrics_root}.txt"
+            if grep -Eq '^crab_s3_gateway_multipart_maintenance_cycles_total\{outcome="success"\} [1-9][0-9]*$' \
+              "${metrics_root}.txt" && \
+              grep -Eq '^crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds [1-9][0-9]*$' \
+              "${metrics_root}.txt"; then
+              maintenance_ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "${maintenance_ready}" = true
           grep -Eiq '^content-type: text/plain; version=0\.0\.4; charset=utf-8' \
             "${metrics_root}.headers"
           grep -Eq '^crab_s3_gateway_http_requests_total\{method="(get|put|delete)",outcome="2xx"\} [1-9][0-9]*$' \

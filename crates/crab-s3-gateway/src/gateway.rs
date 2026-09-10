@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     pin::Pin,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
@@ -22,7 +22,7 @@ use crate::{
     Config, RepositoryAccess, RepositoryConfig,
     admission::{Admission, RequestClass, RequestPermit},
     auth::GatewayAuth,
-    metrics::Metrics,
+    metrics::{MaintenanceCycleOutcome, MaintenanceFailure, Metrics},
     mutation, namespace,
 };
 
@@ -298,6 +298,7 @@ impl Gateway {
         let cancellation = self.cancellation.clone();
         tokio::spawn(async move {
             loop {
+                let started = Instant::now();
                 let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
                     Ok(duration) => duration.as_secs(),
                     Err(error) => {
@@ -334,35 +335,68 @@ impl Gateway {
                         () = cancellation.cancelled() => break,
                         results = maintenance => results,
                     };
+                    let mut healthy = true;
                     for (repository, result) in results {
                         match result {
                             None => {
+                                healthy = false;
+                                gateway.metrics.record_maintenance_failure(
+                                    MaintenanceFailure::RepositoryMissing,
+                                    1,
+                                );
                                 tracing::warn!(%repository, "multipart repository disappeared");
                             }
                             Some(Err(_)) => {
+                                healthy = false;
+                                gateway
+                                    .metrics
+                                    .record_maintenance_failure(MaintenanceFailure::Timeout, 1);
                                 tracing::warn!(%repository, "multipart maintenance timed out");
                             }
-                            Some(Ok(Ok(stats)))
+                            Some(Ok(Ok(stats))) => {
+                                healthy &= gateway.metrics.record_maintenance_result(&stats);
                                 if stats.expired != 0
                                     || stats.terminal_cleanups != 0
                                     || stats.missing_cleanups != 0
-                                    || stats.published_recoveries != 0 =>
-                            {
-                                tracing::info!(
-                                    %repository,
-                                    expired = stats.expired,
-                                    terminal_cleanups = stats.terminal_cleanups,
-                                    missing_cleanups = stats.missing_cleanups,
-                                    published_recoveries = stats.published_recoveries,
-                                    "multipart maintenance completed"
-                                );
+                                    || stats.published_recoveries != 0
+                                {
+                                    tracing::info!(
+                                        %repository,
+                                        expired = stats.expired,
+                                        terminal_cleanups = stats.terminal_cleanups,
+                                        missing_cleanups = stats.missing_cleanups,
+                                        published_recoveries = stats.published_recoveries,
+                                        "multipart maintenance completed"
+                                    );
+                                }
                             }
-                            Some(Ok(Ok(_))) => {}
                             Some(Ok(Err(error))) => {
+                                healthy = false;
+                                gateway
+                                    .metrics
+                                    .record_maintenance_failure(MaintenanceFailure::Sweep, 1);
                                 tracing::warn!(%repository, %error, "multipart maintenance failed");
                             }
                         }
                     }
+                    gateway.metrics.record_maintenance_cycle(
+                        if healthy {
+                            MaintenanceCycleOutcome::Success
+                        } else {
+                            MaintenanceCycleOutcome::Degraded
+                        },
+                        started,
+                        now,
+                    );
+                } else {
+                    gateway
+                        .metrics
+                        .record_maintenance_failure(MaintenanceFailure::Clock, 1);
+                    gateway.metrics.record_maintenance_cycle(
+                        MaintenanceCycleOutcome::ClockError,
+                        started,
+                        now,
+                    );
                 }
                 tokio::select! {
                     () = cancellation.cancelled() => break,
@@ -390,8 +424,12 @@ impl Gateway {
         for (upload_id, result) in recoveries {
             match result {
                 Ok(true) => stats.published_recoveries += 1,
-                Ok(false) => {}
+                Ok(false) => {
+                    stats.unresolved_completions = stats.unresolved_completions.saturating_add(1);
+                }
                 Err(error) => {
+                    stats.publication_recovery_failures =
+                        stats.publication_recovery_failures.saturating_add(1);
                     tracing::warn!(%upload_id, %error, "multipart publication recovery failed");
                 }
             }

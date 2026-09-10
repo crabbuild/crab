@@ -11,12 +11,16 @@ use http_body::{Body as _, Frame, SizeHint};
 use metrics::{Counter, Gauge, Histogram, Key, KeyName, Label, Level, Metadata, Recorder, Unit};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
-use crate::admission::{Admission, AdmissionOutcome, RequestClass};
+use crate::{
+    admission::{Admission, AdmissionOutcome, RequestClass},
+    multipart::SweepStats,
+};
 
 const METHOD_COUNT: usize = 6;
 const OUTCOME_COUNT: usize = 8;
-const DURATION_BUCKETS_SECONDS: [f64; 13] = [
-    0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+const DURATION_BUCKETS_SECONDS: [f64; 16] = [
+    0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+    600.0,
 ];
 const METHOD_LABELS: [&str; METHOD_COUNT] = ["get", "head", "put", "post", "delete", "other"];
 const OUTCOME_LABELS: [&str; OUTCOME_COUNT] = [
@@ -28,6 +32,22 @@ const OUTCOME_LABELS: [&str; OUTCOME_COUNT] = [
     "other",
     "transport_error",
     "cancelled",
+];
+const MAINTENANCE_CYCLE_OUTCOMES: [&str; 3] = ["success", "degraded", "clock_error"];
+const MAINTENANCE_ACTIONS: [&str; 4] = [
+    "expired_upload",
+    "terminal_cleanup",
+    "missing_session_cleanup",
+    "published_recovery",
+];
+const MAINTENANCE_FAILURES: [&str; 7] = [
+    "timeout",
+    "sweep_error",
+    "repository_missing",
+    "reconciliation_error",
+    "publication_recovery_error",
+    "publication_unresolved",
+    "clock_error",
 ];
 const METADATA: Metadata<'static> = Metadata::new(
     "crab_s3_gateway",
@@ -44,6 +64,7 @@ struct MetricsInner {
     handle: PrometheusHandle,
     methods: [MethodMetrics; METHOD_COUNT],
     admission: [AdmissionMetrics; RequestClass::ALL.len()],
+    multipart_maintenance: MultipartMaintenanceMetrics,
 }
 
 struct MethodMetrics {
@@ -62,6 +83,44 @@ struct AdmissionMetrics {
     events: [Counter; AdmissionOutcome::COUNT],
 }
 
+struct MultipartMaintenanceMetrics {
+    cycles: [Counter; MAINTENANCE_CYCLE_OUTCOMES.len()],
+    actions: [Counter; MAINTENANCE_ACTIONS.len()],
+    failures: [Counter; MAINTENANCE_FAILURES.len()],
+    duration: Histogram,
+    last_success: Gauge,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum MaintenanceFailure {
+    Timeout,
+    Sweep,
+    RepositoryMissing,
+    Reconciliation,
+    PublicationRecovery,
+    PublicationUnresolved,
+    Clock,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MaintenanceCycleOutcome {
+    Success,
+    Degraded,
+    ClockError,
+}
+
+impl MaintenanceCycleOutcome {
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+impl MaintenanceFailure {
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 impl Metrics {
     pub(crate) fn new() -> Result<Self, metrics_exporter_prometheus::BuildError> {
         let recorder = PrometheusBuilder::new()
@@ -71,11 +130,13 @@ impl Metrics {
         let methods = METHOD_LABELS.map(|method| MethodMetrics::new(&recorder, method));
         let admission =
             RequestClass::ALL.map(|class| AdmissionMetrics::new(&recorder, class.label()));
+        let multipart_maintenance = MultipartMaintenanceMetrics::new(&recorder);
         Ok(Self {
             inner: Arc::new(MetricsInner {
                 handle: recorder.handle(),
                 methods,
                 admission,
+                multipart_maintenance,
             }),
         })
     }
@@ -94,6 +155,74 @@ impl Metrics {
 
     pub(crate) fn record_admission(&self, class: RequestClass, outcome: AdmissionOutcome) {
         self.inner.admission[class.index()].events[outcome.index()].increment(1);
+    }
+
+    pub(crate) fn record_maintenance_failure(&self, failure: MaintenanceFailure, count: usize) {
+        self.inner.multipart_maintenance.failures[failure.index()].increment(saturating_u64(count));
+    }
+
+    pub(crate) fn record_maintenance_result(&self, stats: &SweepStats) -> bool {
+        self.record_maintenance_actions(
+            stats.expired,
+            stats.terminal_cleanups,
+            stats.missing_cleanups,
+            stats.published_recoveries,
+        );
+        for (failure, count) in [
+            (
+                MaintenanceFailure::Reconciliation,
+                stats.reconciliation_failures,
+            ),
+            (
+                MaintenanceFailure::PublicationRecovery,
+                stats.publication_recovery_failures,
+            ),
+            (
+                MaintenanceFailure::PublicationUnresolved,
+                stats.unresolved_completions,
+            ),
+        ] {
+            self.record_maintenance_failure(failure, count);
+        }
+        stats.reconciliation_failures == 0
+            && stats.publication_recovery_failures == 0
+            && stats.unresolved_completions == 0
+    }
+
+    fn record_maintenance_actions(
+        &self,
+        expired: usize,
+        terminal_cleanups: usize,
+        missing_cleanups: usize,
+        published_recoveries: usize,
+    ) {
+        for (counter, count) in self.inner.multipart_maintenance.actions.iter().zip([
+            expired,
+            terminal_cleanups,
+            missing_cleanups,
+            published_recoveries,
+        ]) {
+            counter.increment(saturating_u64(count));
+        }
+    }
+
+    pub(crate) fn record_maintenance_cycle(
+        &self,
+        outcome: MaintenanceCycleOutcome,
+        started: Instant,
+        now_seconds: u64,
+    ) {
+        self.inner.multipart_maintenance.cycles[outcome.index()].increment(1);
+        self.inner
+            .multipart_maintenance
+            .duration
+            .record(started.elapsed().as_secs_f64());
+        if outcome == MaintenanceCycleOutcome::Success {
+            self.inner
+                .multipart_maintenance
+                .last_success
+                .set(now_seconds as f64);
+        }
     }
 
     pub(crate) fn render(&self, admission: &Admission) -> String {
@@ -200,6 +329,43 @@ impl AdmissionMetrics {
                     &METADATA,
                 )
             }),
+        }
+    }
+}
+
+impl MultipartMaintenanceMetrics {
+    fn new(recorder: &impl Recorder) -> Self {
+        Self {
+            cycles: labeled_counters(
+                recorder,
+                "crab_s3_gateway_multipart_maintenance_cycles_total",
+                "outcome",
+                MAINTENANCE_CYCLE_OUTCOMES,
+            ),
+            actions: labeled_counters(
+                recorder,
+                "crab_s3_gateway_multipart_maintenance_actions_total",
+                "action",
+                MAINTENANCE_ACTIONS,
+            ),
+            failures: labeled_counters(
+                recorder,
+                "crab_s3_gateway_multipart_maintenance_failures_total",
+                "reason",
+                MAINTENANCE_FAILURES,
+            ),
+            duration: recorder.register_histogram(
+                &Key::from_static_name(
+                    "crab_s3_gateway_multipart_maintenance_cycle_duration_seconds",
+                ),
+                &METADATA,
+            ),
+            last_success: recorder.register_gauge(
+                &Key::from_static_name(
+                    "crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds",
+                ),
+                &METADATA,
+            ),
         }
     }
 }
@@ -383,6 +549,31 @@ fn describe_metrics(recorder: &impl Recorder) {
         "crab_s3_gateway_admission_events_total",
         "Admission decisions by request class and bounded outcome.",
     );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_multipart_maintenance_cycles_total",
+        "Multipart maintenance cycles by aggregate outcome.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_multipart_maintenance_actions_total",
+        "Multipart lifecycle actions completed by background maintenance.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_multipart_maintenance_failures_total",
+        "Multipart maintenance failures by bounded reason.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_s3_gateway_multipart_maintenance_cycle_duration_seconds"),
+        Some(Unit::Seconds),
+        "Full multipart maintenance cycle duration.".into(),
+    );
+    describe_gauge(
+        recorder,
+        "crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds",
+        "Unix timestamp of the last cycle with no repository failures.",
+    );
 }
 
 fn describe_counter(recorder: &impl Recorder, name: &'static str, description: &'static str) {
@@ -401,6 +592,19 @@ fn key(name: &'static str, labels: &[(&'static str, &'static str)]) -> Key {
             .map(|(name, value)| Label::from_static_parts(name, value))
             .collect::<Vec<_>>(),
     )
+}
+
+fn labeled_counters<const N: usize>(
+    recorder: &impl Recorder,
+    metric: &'static str,
+    label: &'static str,
+    values: [&'static str; N],
+) -> [Counter; N] {
+    values.map(|value| recorder.register_counter(&key(metric, &[(label, value)]), &METADATA))
+}
+
+fn saturating_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn method_index(method: &Method) -> usize {
@@ -426,119 +630,4 @@ fn status_outcome(status: StatusCode) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use http_body_util::BodyExt as _;
-    use tokio_util::sync::CancellationToken;
-
-    fn setup() -> (Admission, Metrics) {
-        let metrics = Metrics::new().unwrap();
-        let admission = Admission::new(8, CancellationToken::new(), metrics.clone());
-        (admission, metrics)
-    }
-
-    #[test]
-    fn completed_request_exports_bounded_prometheus_series() {
-        let (admission, metrics) = setup();
-        let mut observation = metrics
-            .start_request(&Method::GET)
-            .response(StatusCode::PARTIAL_CONTENT);
-        observation.finish();
-
-        let body = metrics.render(&admission);
-        assert!(
-            body.contains("crab_s3_gateway_http_requests_total{method=\"get\",outcome=\"2xx\"} 1")
-        );
-        assert!(body.contains("crab_s3_gateway_http_in_flight_requests{method=\"get\"} 0"));
-        assert!(
-            body.contains("crab_s3_gateway_http_request_duration_seconds_count{method=\"get\"} 1")
-        );
-        assert!(body.contains("crab_s3_gateway_admission_capacity{class=\"transfer\"} 2"));
-        assert!(!body.contains("repository"));
-    }
-
-    #[test]
-    fn request_cancelled_before_response_is_counted_and_released() {
-        let (admission, metrics) = setup();
-        drop(metrics.start_request(&Method::PUT));
-
-        let body = metrics.render(&admission);
-        assert!(body.contains(
-            "crab_s3_gateway_http_requests_total{method=\"put\",outcome=\"cancelled\"} 1"
-        ));
-        assert!(body.contains("crab_s3_gateway_http_in_flight_requests{method=\"put\"} 0"));
-    }
-
-    #[tokio::test]
-    async fn response_observation_lives_until_the_body_completes() {
-        let (admission, metrics) = setup();
-        let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
-        let mut body = ObservedBody::new(
-            s3s::Body::from(Bytes::from_static(b"response")),
-            observation,
-        );
-
-        assert!(
-            metrics
-                .render(&admission)
-                .contains("crab_s3_gateway_http_in_flight_requests{method=\"get\"} 1")
-        );
-        assert_eq!(
-            body.frame().await.unwrap().unwrap().into_data().unwrap(),
-            b"response"[..]
-        );
-        let rendered = metrics.render(&admission);
-        assert!(rendered.contains("crab_s3_gateway_http_in_flight_requests{method=\"get\"} 0"));
-        assert!(
-            rendered.contains("crab_s3_gateway_http_response_body_aborts_total{method=\"get\"} 0")
-        );
-    }
-
-    #[test]
-    fn dropped_response_body_records_client_abort() {
-        let (admission, metrics) = setup();
-        let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
-        drop(ObservedBody::new(
-            s3s::Body::from(Bytes::from_static(b"response")),
-            observation,
-        ));
-
-        let rendered = metrics.render(&admission);
-        assert!(
-            rendered.contains("crab_s3_gateway_http_response_body_aborts_total{method=\"get\"} 1")
-        );
-        assert!(rendered.contains("crab_s3_gateway_http_in_flight_requests{method=\"get\"} 0"));
-    }
-
-    #[tokio::test]
-    async fn failed_response_body_records_stream_error() {
-        let (admission, metrics) = setup();
-        let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
-        let stream = futures_util::stream::iter([Err::<Frame<Bytes>, _>(std::io::Error::other(
-            "stream failed",
-        ))]);
-        let source = http_body_util::StreamBody::new(stream);
-        let mut body = ObservedBody::new(s3s::Body::http_body_unsync(source), observation);
-
-        assert!(body.frame().await.unwrap().is_err());
-        let rendered = metrics.render(&admission);
-        assert!(
-            rendered.contains("crab_s3_gateway_http_response_body_errors_total{method=\"get\"} 1")
-        );
-        assert!(rendered.contains("crab_s3_gateway_http_in_flight_requests{method=\"get\"} 0"));
-    }
-
-    #[test]
-    fn renderer_emits_the_configured_cumulative_histogram() {
-        let (admission, metrics) = setup();
-        let mut observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
-        observation.finish();
-
-        let body = metrics.render(&admission);
-        for bound in ["0.005", "0.01", "0.025", "60", "+Inf"] {
-            assert!(body.contains(&format!(
-                "crab_s3_gateway_http_request_duration_seconds_bucket{{method=\"get\",le=\"{bound}\"}}"
-            )));
-        }
-    }
-}
+mod tests;

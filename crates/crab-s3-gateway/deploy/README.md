@@ -66,6 +66,14 @@ The endpoint contains only fixed method, outcome, and admission-class labels.
 Treat a repository name, ref, key, upload ID, principal, access key, or secret in
 that response as a security defect.
 
+Alert when `increase(crab_s3_gateway_multipart_maintenance_failures_total[5m])
+> 0`, or when `time() -
+crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds > 180`
+persists for five minutes. The latter deliberately fires before the first clean
+cycle if maintenance never starts. Admission queue utilization and
+`overloaded`/`timeout` event increases should drive replica scaling or a lower
+client fanout before they become sustained `SlowDown` responses.
+
 The checked CI qualification also creates a multipart session, uploads a valid
 non-final part, force-recreates the gateway container, verifies the replacement
 process can list the durable part, uploads the final part, completes the object,

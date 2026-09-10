@@ -27,6 +27,12 @@ kubectl port-forward --namespace crab-s3-gateway "pod/${pod}" 18081:8081
 curl --fail --silent --show-error http://127.0.0.1:18081/metrics
 ```
 
+At minimum, alert on increasing
+`crab_s3_gateway_multipart_maintenance_failures_total` and on a
+`crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds` older
+than three minutes for five minutes. Alert on admission queue saturation before
+scaling pressure becomes sustained S3 `SlowDown` responses.
+
 Before installation:
 
 - Initialize every configured Crab repository using the same image, backend
