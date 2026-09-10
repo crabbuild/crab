@@ -36,6 +36,63 @@ pub(crate) struct Digests {
     pub(crate) blake3: [u8; 32],
 }
 
+pub(crate) struct Digester {
+    size: u64,
+    md5: md5::Md5,
+    sha1: sha1::Sha1,
+    sha256: sha2::Sha256,
+    crc32: crc_fast::Digest,
+    crc32c: crc_fast::Digest,
+    crc64nvme: crc_fast::Digest,
+    blake3: blake3::Hasher,
+}
+
+impl Digester {
+    pub(crate) fn new() -> Self {
+        Self {
+            size: 0,
+            md5: md5::Md5::default(),
+            sha1: sha1::Sha1::default(),
+            sha256: sha2::Sha256::default(),
+            crc32: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32IsoHdlc),
+            crc32c: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi),
+            crc64nvme: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64Nvme),
+            blake3: blake3::Hasher::new(),
+        }
+    }
+
+    pub(crate) fn write(&mut self, bytes: &[u8], max_bytes: u64) -> Result<(), Error> {
+        let chunk_size = u64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
+        self.size = self.size.checked_add(chunk_size).ok_or(Error::TooLarge)?;
+        if self.size > max_bytes {
+            return Err(Error::TooLarge);
+        }
+        md5::Digest::update(&mut self.md5, bytes);
+        sha1::Digest::update(&mut self.sha1, bytes);
+        sha2::Digest::update(&mut self.sha256, bytes);
+        self.crc32.update(bytes);
+        self.crc32c.update(bytes);
+        self.crc64nvme.update(bytes);
+        self.blake3.update(bytes);
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> Result<(u64, Digests), Error> {
+        Ok((
+            self.size,
+            Digests {
+                md5: md5::Digest::finalize(self.md5).into(),
+                sha1: sha1::Digest::finalize(self.sha1).into(),
+                sha256: sha2::Digest::finalize(self.sha256).into(),
+                crc32: u32::try_from(self.crc32.finalize()).map_err(|_| Error::TooLarge)?,
+                crc32c: u32::try_from(self.crc32c.finalize()).map_err(|_| Error::TooLarge)?,
+                crc64nvme: self.crc64nvme.finalize(),
+                blake3: *self.blake3.finalize().as_bytes(),
+            },
+        ))
+    }
+}
+
 pub(crate) struct Spool {
     _directory: tempfile::TempDir,
     path: PathBuf,
@@ -57,14 +114,7 @@ pub(crate) struct SpoolWriter {
     directory: tempfile::TempDir,
     path: PathBuf,
     file: BufWriter<tokio::fs::File>,
-    size: u64,
-    md5: md5::Md5,
-    sha1: sha1::Sha1,
-    sha256: sha2::Sha256,
-    crc32: crc_fast::Digest,
-    crc32c: crc_fast::Digest,
-    crc64nvme: crc_fast::Digest,
-    blake3: blake3::Hasher,
+    digester: Digester,
 }
 
 impl SpoolWriter {
@@ -76,50 +126,29 @@ impl SpoolWriter {
             directory,
             path,
             file,
-            size: 0,
-            md5: md5::Md5::default(),
-            sha1: sha1::Sha1::default(),
-            sha256: sha2::Sha256::default(),
-            crc32: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32IsoHdlc),
-            crc32c: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi),
-            crc64nvme: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc64Nvme),
-            blake3: blake3::Hasher::new(),
+            digester: Digester::new(),
         })
     }
 
     pub(crate) async fn write(&mut self, bytes: &[u8], max_bytes: u64) -> Result<(), Error> {
-        let chunk_size = u64::try_from(bytes.len()).map_err(|_| Error::TooLarge)?;
-        self.size = self.size.checked_add(chunk_size).ok_or(Error::TooLarge)?;
-        if self.size > max_bytes {
-            return Err(Error::TooLarge);
-        }
+        self.digester.write(bytes, max_bytes)?;
         self.file.write_all(bytes).await?;
-        md5::Digest::update(&mut self.md5, bytes);
-        sha1::Digest::update(&mut self.sha1, bytes);
-        sha2::Digest::update(&mut self.sha256, bytes);
-        self.crc32.update(bytes);
-        self.crc32c.update(bytes);
-        self.crc64nvme.update(bytes);
-        self.blake3.update(bytes);
         Ok(())
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.digester.size
     }
 
     pub(crate) async fn finish(mut self) -> Result<Spool, Error> {
         self.file.flush().await?;
         drop(self.file);
+        let (size, digests) = self.digester.finish()?;
         Ok(Spool {
             _directory: self.directory,
             path: self.path,
-            size: self.size,
-            digests: Digests {
-                md5: md5::Digest::finalize(self.md5).into(),
-                sha1: sha1::Digest::finalize(self.sha1).into(),
-                sha256: sha2::Digest::finalize(self.sha256).into(),
-                crc32: u32::try_from(self.crc32.finalize()).map_err(|_| Error::TooLarge)?,
-                crc32c: u32::try_from(self.crc32c.finalize()).map_err(|_| Error::TooLarge)?,
-                crc64nvme: self.crc64nvme.finalize(),
-                blake3: *self.blake3.finalize().as_bytes(),
-            },
+            size,
+            digests,
         })
     }
 }
@@ -143,7 +172,7 @@ pub(crate) async fn spool_body(
                 .await?;
         }
     }
-    if declared.is_some_and(|length| length != writer.size) {
+    if declared.is_some_and(|length| length != writer.size()) {
         return Err(Error::Incomplete);
     }
     writer.finish().await
@@ -209,6 +238,19 @@ mod tests {
             ),
             (16, expected_md5, expected_sha1, expected_sha256)
         );
+    }
+
+    #[test]
+    fn digester_hashes_without_creating_a_spool() {
+        let mut digester = Digester::new();
+        digester.write(b"streamed ", 16).unwrap();
+        digester.write(b"content", 16).unwrap();
+        let (size, digests) = digester.finish().unwrap();
+        let expected_sha256: [u8; 32] =
+            <sha2::Sha256 as sha2::Digest>::digest(b"streamed content").into();
+
+        assert_eq!(size, 16);
+        assert_eq!(digests.sha256, expected_sha256);
     }
 
     #[tokio::test]

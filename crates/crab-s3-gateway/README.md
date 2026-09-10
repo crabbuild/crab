@@ -25,7 +25,10 @@ multipart parts support up to 5 GiB, and multipart completion supports S3's
 requests are treated as validated virtual directory hints for filesystem
 clients; they do not create marker blobs because Git trees represent
 directories.
-Large payloads use bounded-memory spooling and Crab's verified LFS content path.
+Large payloads use bounded-memory request spools and Crab's verified LFS content
+path. Multipart completion keeps objects through 64 MiB in a local spool. Above
+that threshold it hashes and validates the durable selected parts, then replays
+them directly into LFS without assembling the logical object on local disk.
 The pointer commit atomically adds an exact, same-directory LFS tracking rule,
 so Git clones materialize gateway-authored large objects without local attribute
 workarounds. LFS publication chooses an aligned backend part size from the final
@@ -57,11 +60,13 @@ read, and transfer pools so large uploads cannot starve bucket discovery,
 metadata, or range reads. Each pool admits a bounded FIFO burst for up to 60
 seconds before returning S3 `SlowDown`; request bodies are not consumed while
 waiting. The default budget is 32 and should be tuned from measured CPU, memory,
-file-descriptor, and scratch usage rather than client fanout alone.
-Ingress bodies and multipart completion currently require temporary disk space
-proportional to the assembled logical object. Deployments must place `TMPDIR` on
-capacity-managed scratch storage and reserve it independently from the request
-count budget.
+file-descriptor, and scratch usage rather than client fanout alone. Each
+PutObject, UploadPart, and copied source range uses a request-local temporary
+file. Large multipart completion rereads durable parts instead of creating an
+additional full-object spool, so its local scratch does not scale with the
+assembled object size. Deployments must still place `TMPDIR` on
+capacity-managed scratch storage sized for concurrent request bodies and reserve
+it independently from the request count budget.
 
 Each mutation rewrites only the target path's ancestor trees and persists one
 path-local attribute delta. Immutable pack, index, visibility, and attribute

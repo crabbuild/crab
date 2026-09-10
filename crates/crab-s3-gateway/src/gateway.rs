@@ -595,6 +595,78 @@ struct MutationContent {
     track_lfs: bool,
 }
 
+enum MultipartAssemblyWriter {
+    Inline(Box<crate::content::SpoolWriter>),
+    Large(Box<crate::content::Digester>),
+}
+
+enum MultipartAssembly {
+    Inline(crate::content::Spool),
+    Large {
+        size: u64,
+        digests: crate::content::Digests,
+    },
+}
+
+impl MultipartAssemblyWriter {
+    async fn new(size: u64) -> Result<Self, crate::content::Error> {
+        if size <= crate::content::INLINE_GIT_BLOB_BYTES {
+            Ok(Self::Inline(Box::new(
+                crate::content::SpoolWriter::new().await?,
+            )))
+        } else {
+            Ok(Self::Large(Box::new(crate::content::Digester::new())))
+        }
+    }
+
+    async fn write(&mut self, bytes: &[u8], max_bytes: u64) -> Result<(), crate::content::Error> {
+        match self {
+            Self::Inline(writer) => writer.write(bytes, max_bytes).await,
+            Self::Large(digester) => digester.write(bytes, max_bytes),
+        }
+    }
+
+    async fn finish(self) -> Result<MultipartAssembly, crate::content::Error> {
+        match self {
+            Self::Inline(writer) => writer.finish().await.map(MultipartAssembly::Inline),
+            Self::Large(digester) => {
+                let (size, digests) = digester.finish()?;
+                Ok(MultipartAssembly::Large { size, digests })
+            }
+        }
+    }
+}
+
+impl MultipartAssembly {
+    fn size(&self) -> u64 {
+        match self {
+            Self::Inline(spool) => spool.size,
+            Self::Large { size, .. } => *size,
+        }
+    }
+
+    fn digests(&self) -> &crate::content::Digests {
+        match self {
+            Self::Inline(spool) => &spool.digests,
+            Self::Large { digests, .. } => digests,
+        }
+    }
+}
+
+fn lfs_pointer_content(oid: [u8; 32], size: u64) -> MutationContent {
+    MutationContent {
+        bytes: Bytes::from(
+            crab_git::LfsPointer {
+                oid,
+                size,
+                extensions: Vec::new(),
+            }
+            .serialize(),
+        ),
+        track_lfs: true,
+    }
+}
+
 async fn mutation_bytes(
     repository: &Repository,
     spool: &crate::content::Spool,
@@ -621,17 +693,33 @@ async fn mutation_bytes_with_inline_limit(
         .put_stream_with_size(&spool.digests.sha256, Some(spool.size), spool.path())
         .await
         .map_err(|error| gateway_error(error.into()))?;
-    Ok(MutationContent {
-        bytes: Bytes::from(
-            crab_git::LfsPointer {
-                oid: spool.digests.sha256,
-                size: spool.size,
-                extensions: Vec::new(),
-            }
-            .serialize(),
-        ),
-        track_lfs: true,
-    })
+    Ok(lfs_pointer_content(spool.digests.sha256, spool.size))
+}
+
+async fn mutation_multipart_bytes(
+    repository: &Repository,
+    parts: &[crate::multipart::Part],
+    assembly: MultipartAssembly,
+) -> S3Result<MutationContent> {
+    let (size, digests) = match assembly {
+        MultipartAssembly::Inline(spool) => return mutation_bytes(repository, &spool).await,
+        MultipartAssembly::Large { size, digests } => (size, digests),
+    };
+    use futures_util::TryStreamExt as _;
+
+    // Completion has already verified every durable part and the aggregate
+    // digest. Replay those parts into LFS so large objects never need an
+    // assembled local spool; LFS rechecks both size and SHA-256 before publish.
+    let source =
+        crate::multipart::parts_stream(repository, parts).map_err(|error| crab_lfs::LfsError::Io {
+            source: std::io::Error::other(error),
+        });
+    repository
+        .lfs
+        .put_byte_stream_with_size(&digests.sha256, size, source)
+        .await
+        .map_err(|error| gateway_error(error.into()))?;
+    Ok(lfs_pointer_content(digests.sha256, size))
 }
 
 #[async_trait::async_trait]
@@ -1831,7 +1919,12 @@ impl S3 for Gateway {
             crate::multipart::freeze(repository, loaded, &selected, max_object_bytes)
                 .await
                 .map_err(multipart_error)?;
-        let mut writer = crate::content::SpoolWriter::new()
+        let selected_size = parts.iter().try_fold(0_u64, |total, part| {
+            total
+                .checked_add(part.size)
+                .ok_or_else(|| s3_error!(EntityTooLarge))
+        })?;
+        let mut writer = MultipartAssemblyWriter::new(selected_size)
             .await
             .map_err(content_error)?;
         for part in &parts {
@@ -1863,8 +1956,8 @@ impl S3 for Gateway {
                 return Err(s3_error!(InvalidPart));
             }
         }
-        let spool = writer.finish().await.map_err(content_error)?;
-        let actual_size = i64::try_from(spool.size).map_err(|_| s3_error!(EntityTooLarge))?;
+        let assembly = writer.finish().await.map_err(content_error)?;
+        let actual_size = i64::try_from(assembly.size()).map_err(|_| s3_error!(EntityTooLarge))?;
         if expected_size.is_some_and(|expected| expected != actual_size) {
             return Err(s3_error!(InvalidRequest, "Multipart object size mismatch"));
         }
@@ -1876,15 +1969,15 @@ impl S3 for Gateway {
             }
             calculated
         } else {
-            completion_checksums.verify_values(&spool.digests)?;
+            completion_checksums.verify_values(assembly.digests())?;
             completion_checksums
-                .stored_for_algorithm(&spool.digests, session.checksum_algorithm.as_deref())?
+                .stored_for_algorithm(assembly.digests(), session.checksum_algorithm.as_deref())?
         };
         let etag = multipart_etag(&parts)?;
         let mut attributes = session.attributes.clone();
         attributes.etag_override = Some(etag.clone());
         attributes.completion_upload_id = Some(session.id.clone());
-        attributes.logical_size = Some(spool.size);
+        attributes.logical_size = Some(assembly.size());
         attributes.checksums = stored_checksums.clone();
         attributes.parts = parts
             .iter()
@@ -1895,7 +1988,7 @@ impl S3 for Gateway {
             })
             .collect();
         let address = namespace::object_address(&session.key).map_err(namespace_error)?;
-        let content = mutation_bytes(repository, &spool).await?;
+        let content = mutation_multipart_bytes(repository, &parts, assembly).await?;
         self.mutations
             .apply(
                 repository,
@@ -3846,6 +3939,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(actual, content);
+    }
+
+    #[tokio::test]
+    async fn multipart_assembly_above_inline_threshold_hashes_without_a_spool() {
+        let mut writer = MultipartAssemblyWriter::new(crate::content::INLINE_GIT_BLOB_BYTES + 1)
+            .await
+            .unwrap();
+        writer.write(b"large object", u64::MAX).await.unwrap();
+        let assembly = writer.finish().await.unwrap();
+
+        let MultipartAssembly::Large { size, digests } = assembly else {
+            panic!("large multipart completion must not allocate an assembled spool");
+        };
+        assert_eq!(size, 12);
+        assert_eq!(
+            digests.sha256,
+            <sha2::Sha256 as sha2::Digest>::digest(b"large object").as_slice()
+        );
     }
 
     #[tokio::test]

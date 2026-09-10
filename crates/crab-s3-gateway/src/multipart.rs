@@ -264,6 +264,18 @@ pub(crate) async fn part_stream(
     Ok(stream)
 }
 
+pub(crate) fn parts_stream<'a>(
+    repository: &'a Repository,
+    parts: &'a [Part],
+) -> impl futures_util::Stream<Item = Result<Bytes>> + Send + 'a {
+    use futures_util::{StreamExt as _, TryStreamExt as _};
+
+    futures_util::stream::iter(parts)
+        .then(move |part| part_stream(repository, part))
+        .map_ok(|stream| stream.map_err(Error::Storage))
+        .try_flatten()
+}
+
 pub(crate) async fn freeze(
     repository: &Repository,
     mut loaded: Loaded,
@@ -540,6 +552,53 @@ mod tests {
         assert!(list(&repository).await.unwrap().is_empty());
         let terminal = load(&repository, &session.id).await.unwrap();
         assert!(matches!(terminal.session.state, State::Aborted));
+    }
+
+    #[tokio::test]
+    async fn parts_stream_replays_selected_parts_in_order() {
+        use futures_util::TryStreamExt as _;
+
+        let repository = fixture().await;
+        let session = create(
+            &repository,
+            Initiation {
+                bucket: "repo",
+                key: "main/file.bin",
+                branch: "refs/heads/main",
+                path: "file.bin",
+                principal: "user",
+                attributes: PutAttributes::default(),
+                checksum_algorithm: None,
+                checksum_type: None,
+                now: 10,
+            },
+        )
+        .await
+        .unwrap();
+        for (number, body) in [(1, b"first ".as_slice()), (2, b"second".as_slice())] {
+            let loaded = load(&repository, &session.id).await.unwrap();
+            let spool = spool(body).await;
+            register_part(
+                &repository,
+                loaded,
+                number,
+                &spool,
+                crate::gateway::md5_hex(body),
+                crate::attributes::Checksums::default(),
+                10 + number as u64,
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+        let loaded = load(&repository, &session.id).await.unwrap();
+        let parts = loaded.session.parts.into_values().collect::<Vec<_>>();
+        let chunks = parts_stream(&repository, &parts)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(chunks.concat(), b"first second");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

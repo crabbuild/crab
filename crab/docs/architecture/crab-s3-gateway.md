@@ -244,10 +244,16 @@ writers need fencing or a grace-and-recheck protocol so cleanup cannot delete a
 part immediately before registration. Fault tests must prove both eventual
 reclamation and preservation of every reachable object.
 
-This design adds temporary storage and a full selected-part read during
-completion. Record those bytes explicitly in benchmarks. A future zero-copy
-recipe path requires equivalent chunking, checksum, reconstruction and GC proof;
-it is not a shortcut in the initial implementation.
+The implementation adds durable temporary part storage and, for newly published
+large content, two full selected-part reads during completion. The first pass
+validates every part and computes full-object digests. The second streams the
+same frozen parts into verified LFS publication; LFS rechecks the byte count and
+SHA-256 before completing its backend upload. Objects through 64 MiB retain the
+single-pass local-spool path, while larger objects do not create a local spool
+proportional to the assembled size. An already verified LFS object may skip the
+second read. Record staging and replay bytes explicitly in benchmarks. A future
+single-pass content-addressed recipe path requires equivalent chunking,
+checksum, reconstruction and GC proof.
 
 ## Execution rules and evidence
 

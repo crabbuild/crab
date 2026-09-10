@@ -95,6 +95,14 @@ struct UploadPlan {
     max_pending_parts: usize,
 }
 
+enum UploadSource<'a> {
+    File {
+        file: &'a mut tokio::fs::File,
+        path: &'a StdPath,
+    },
+    Bytes(Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'a>>),
+}
+
 struct VerificationReceipt {
     oid: [u8; 32],
     size: u64,
@@ -365,14 +373,7 @@ impl LfsObjectStore {
     ) -> Result<()> {
         let path = self.object_path(oid);
 
-        if let ExistingObject::Valid(meta) = self.inspect_existing(&path, oid).await? {
-            if expected_size.is_some_and(|expected| expected != meta.size) {
-                return Err(LfsError::ObjectCorrupt {
-                    oid: hex_encode(oid),
-                });
-            }
-            Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta)
-                .await;
+        if self.accept_existing(&path, oid, expected_size).await? {
             return Ok(());
         }
 
@@ -384,9 +385,78 @@ impl LfsObjectStore {
             .await
             .map_err(|error| annotate_io_error(error, file_path))?
             .len();
+        self.publish_streaming(
+            oid,
+            expected_size.unwrap_or(file_size),
+            file_size,
+            UploadSource::File {
+                file: &mut file,
+                path: file_path,
+            },
+        )
+        .await
+    }
+
+    /// Uploads and verifies a backpressured byte stream as an LFS object.
+    ///
+    /// The stream is consumed once and never buffered in full. Its exact byte
+    /// count and SHA-256 must match `expected_size` and `oid`; otherwise the
+    /// multipart upload is aborted before completion.
+    pub async fn put_byte_stream_with_size(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        source: impl Stream<Item = Result<Bytes>> + Send,
+    ) -> Result<()> {
+        let path = self.object_path(oid);
+        if self
+            .accept_existing(&path, oid, Some(expected_size))
+            .await?
+        {
+            return Ok(());
+        }
+        self.publish_streaming(
+            oid,
+            expected_size,
+            expected_size,
+            UploadSource::Bytes(Box::pin(source)),
+        )
+        .await
+    }
+
+    async fn accept_existing(
+        &self,
+        path: &Path,
+        oid: &[u8; 32],
+        expected_size: Option<u64>,
+    ) -> Result<bool> {
+        let ExistingObject::Valid(meta) = self.inspect_existing(path, oid).await? else {
+            return Ok(false);
+        };
+        if expected_size.is_some_and(|expected| expected != meta.size) {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(oid),
+            });
+        }
+        Self::record_verification_receipt_with_meta(&self.store, &self.prefix, oid, &meta).await;
+        Ok(true)
+    }
+
+    async fn publish_streaming(
+        &self,
+        oid: &[u8; 32],
+        expected_size: u64,
+        planned_size: u64,
+        source: UploadSource<'_>,
+    ) -> Result<()> {
+        let path = self.object_path(oid);
         let limits = crab_storage::multipart::upload_limits(self.store.bucket_identity().cloud);
-        let upload_plan =
-            upload_plan(file_size, limits).map_err(|error| annotate_io_error(error, file_path))?;
+        let upload_plan = upload_plan(planned_size, limits).map_err(|error| match &source {
+            UploadSource::File {
+                path: file_path, ..
+            } => annotate_io_error(error, file_path),
+            UploadSource::Bytes(_) => LfsError::Io { source: error },
+        })?;
 
         // Begin the multipart upload. A failure here short-circuits
         // before we read any file bytes, so there's nothing to clean
@@ -402,19 +472,37 @@ impl LfsObjectStore {
         // The hasher runs on the read side, inline with the buffer
         // accumulation, so the whole pipeline is one pass over the
         // file bytes.
-        let hash_result = stream_file_parts(
-            &mut file,
-            &mut *upload,
-            oid,
-            expected_size,
-            file_path,
-            &path,
-            upload_plan,
-        )
-        .await;
+        let hash_result = match source {
+            UploadSource::File {
+                file,
+                path: file_path,
+            } => {
+                stream_file_parts(
+                    file,
+                    &mut *upload,
+                    oid,
+                    Some(expected_size),
+                    file_path,
+                    &path,
+                    upload_plan,
+                )
+                .await
+            }
+            UploadSource::Bytes(stream) => {
+                stream_byte_parts(
+                    stream,
+                    &mut *upload,
+                    oid,
+                    Some(expected_size),
+                    &path,
+                    upload_plan,
+                )
+                .await
+            }
+        };
 
         match hash_result {
-            Ok(()) => {
+            Ok(actual_size) => {
                 let result =
                     crab_storage::multipart::complete_upload_with_result(&mut *upload, &path)
                         .await?;
@@ -422,7 +510,7 @@ impl LfsObjectStore {
                     &self.store,
                     &self.prefix,
                     oid,
-                    file_size,
+                    actual_size,
                     result.e_tag,
                     result.version,
                 )
@@ -1175,14 +1263,116 @@ fn upload_plan(
     })
 }
 
-/// Read `file` in [`FILE_READ_BUF`]-sized chunks, accumulate into
-/// size-aware parts, and push each part to `upload` under the plan's retained
-/// payload bound. Every byte is fed to a SHA-256 hasher as it leaves the file;
-/// the final digest is compared against `oid` before returning success.
-///
-/// This function owns the read loop and the in-flight part queue
-/// exclusively so the surrounding put_stream can abort the upload on
-/// any error without fighting the borrow checker for &mut MultipartUpload.
+struct StreamingUpload<'a> {
+    upload: &'a mut dyn MultipartUpload,
+    remote_path: &'a Path,
+    plan: UploadPlan,
+    hasher: Sha256,
+    pending: futures_util::stream::FuturesUnordered<object_store::UploadPart>,
+    part: PutPayloadMut,
+    total_bytes: u64,
+    expected_size: Option<u64>,
+}
+
+impl<'a> StreamingUpload<'a> {
+    fn new(
+        upload: &'a mut dyn MultipartUpload,
+        remote_path: &'a Path,
+        plan: UploadPlan,
+        expected_size: Option<u64>,
+    ) -> Self {
+        Self {
+            upload,
+            remote_path,
+            plan,
+            hasher: Sha256::new(),
+            pending: futures_util::stream::FuturesUnordered::new(),
+            part: PutPayloadMut::new().with_block_size(FILE_READ_BUF),
+            total_bytes: 0,
+            expected_size,
+        }
+    }
+
+    async fn write(&mut self, bytes: &[u8], expected_oid: &[u8; 32]) -> Result<()> {
+        let total_bytes = self
+            .total_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| LfsError::ObjectCorrupt {
+                oid: hex_encode(expected_oid),
+            })?;
+        if self
+            .expected_size
+            .is_some_and(|expected_size| total_bytes > expected_size)
+        {
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(expected_oid),
+            });
+        }
+        self.total_bytes = total_bytes;
+        self.hasher.update(bytes);
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let remaining = self.plan.part_size - self.part.content_length();
+            let take = remaining.min(bytes.len() - offset);
+            self.part.extend_from_slice(&bytes[offset..offset + take]);
+            offset += take;
+            if self.part.content_length() == self.plan.part_size {
+                dispatch_part(
+                    self.upload,
+                    std::mem::take(&mut self.part).freeze(),
+                    &mut self.pending,
+                    self.remote_path,
+                    self.plan.max_pending_parts,
+                )
+                .await?;
+                self.part = PutPayloadMut::new().with_block_size(FILE_READ_BUF);
+            }
+        }
+        Ok(())
+    }
+
+    async fn finish(mut self, expected_oid: &[u8; 32]) -> Result<u64> {
+        if !self.part.is_empty() {
+            dispatch_part(
+                self.upload,
+                std::mem::take(&mut self.part).freeze(),
+                &mut self.pending,
+                self.remote_path,
+                self.plan.max_pending_parts,
+            )
+            .await?;
+        }
+        while let Some(result) = self.pending.next().await {
+            result.map_err(|error| {
+                LfsError::from(crab_storage::map_object_store_error(
+                    error,
+                    self.remote_path.as_ref(),
+                ))
+            })?;
+        }
+        if self
+            .expected_size
+            .is_some_and(|expected_size| expected_size != self.total_bytes)
+            || self.hasher.finalize().as_slice() != expected_oid
+        {
+            tracing::warn!(
+                path = %self.remote_path,
+                bytes_read = self.total_bytes,
+                "LFS streaming upload: computed SHA-256 or size differs from the declaration"
+            );
+            return Err(LfsError::ObjectCorrupt {
+                oid: hex_encode(expected_oid),
+            });
+        }
+        tracing::debug!(
+            path = %self.remote_path,
+            bytes = self.total_bytes,
+            "LFS streaming upload: hash verified, ready to complete"
+        );
+        Ok(self.total_bytes)
+    }
+}
+
 async fn stream_file_parts(
     file: &mut tokio::fs::File,
     upload: &mut dyn MultipartUpload,
@@ -1191,94 +1381,35 @@ async fn stream_file_parts(
     file_path: &StdPath,
     remote_path: &Path,
     plan: UploadPlan,
-) -> Result<()> {
-    use futures_util::stream::{FuturesUnordered, StreamExt};
-
-    let mut hasher = Sha256::new();
-    let mut pending: FuturesUnordered<object_store::UploadPart> = FuturesUnordered::new();
-
-    let mut part = PutPayloadMut::new().with_block_size(FILE_READ_BUF);
+) -> Result<u64> {
+    let mut upload = StreamingUpload::new(upload, remote_path, plan, expected_size);
     let mut read_buf = vec![0u8; FILE_READ_BUF];
-    let mut total_bytes_read: u64 = 0;
-
     loop {
         let n = file
             .read(&mut read_buf)
             .await
             .map_err(|e| annotate_io_error(e, file_path))?;
-
         if n == 0 {
-            if !part.is_empty() {
-                dispatch_part(
-                    upload,
-                    std::mem::take(&mut part).freeze(),
-                    &mut pending,
-                    remote_path,
-                    plan.max_pending_parts,
-                )
-                .await?;
-            }
             break;
         }
-
-        total_bytes_read += n as u64;
-        hasher.update(&read_buf[..n]);
-        let mut offset = 0;
-        while offset < n {
-            let remaining = plan.part_size - part.content_length();
-            let take = remaining.min(n - offset);
-            part.extend_from_slice(&read_buf[offset..offset + take]);
-            offset += take;
-            if part.content_length() == plan.part_size {
-                dispatch_part(
-                    upload,
-                    std::mem::take(&mut part).freeze(),
-                    &mut pending,
-                    remote_path,
-                    plan.max_pending_parts,
-                )
-                .await?;
-                part = PutPayloadMut::new().with_block_size(FILE_READ_BUF);
-            }
-        }
+        upload.write(&read_buf[..n], expected_oid).await?;
     }
+    upload.finish(expected_oid).await
+}
 
-    // Drain remaining in-flight parts. Any failure aborts the whole
-    // upload — the caller will call MultipartUpload::abort.
-    while let Some(result) = pending.next().await {
-        result.map_err(|e| {
-            LfsError::from(crab_storage::map_object_store_error(
-                e,
-                remote_path.as_ref(),
-            ))
-        })?;
+async fn stream_byte_parts(
+    mut source: Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + '_>>,
+    upload: &mut dyn MultipartUpload,
+    expected_oid: &[u8; 32],
+    expected_size: Option<u64>,
+    remote_path: &Path,
+    plan: UploadPlan,
+) -> Result<u64> {
+    let mut upload = StreamingUpload::new(upload, remote_path, plan, expected_size);
+    while let Some(chunk) = source.next().await {
+        upload.write(&chunk?, expected_oid).await?;
     }
-
-    // SHA-256 verification runs AFTER all parts have been accepted by
-    // the remote but BEFORE CompleteMultipartUpload. A mismatch here
-    // surfaces as an aborted multipart — never a live, hash-mismatched
-    // object on S3.
-    let actual = hasher.finalize();
-    if expected_size.is_some_and(|expected| expected != total_bytes_read)
-        || actual.as_slice() != expected_oid
-    {
-        tracing::warn!(
-            path = %remote_path,
-            bytes_read = total_bytes_read,
-            "LFS streaming upload: computed SHA-256 differs from declared OID"
-        );
-        return Err(LfsError::ObjectCorrupt {
-            oid: hex_encode(expected_oid),
-        });
-    }
-
-    tracing::debug!(
-        path = %remote_path,
-        bytes = total_bytes_read,
-        "LFS streaming upload: hash verified, ready to complete"
-    );
-
-    Ok(())
+    upload.finish(expected_oid).await
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1853,6 +1984,64 @@ mod tests {
         // Full hash verification on the round-trip — proves bytes survived
         // the split/assemble across multiple parts unchanged.
         assert_eq!(Sha256::digest(&got).as_slice(), oid.as_slice());
+    }
+
+    #[tokio::test]
+    async fn put_byte_stream_round_trip_across_source_and_upload_parts() {
+        let store = test_store();
+        let chunks = vec![
+            Bytes::from(vec![0x11; MIN_STREAM_PART_SIZE - 1]),
+            Bytes::from(vec![0x22; MIN_STREAM_PART_SIZE + 2]),
+            Bytes::from_static(b"tail"),
+        ];
+        let expected = chunks.concat();
+        let oid = sha256_oid(&expected);
+        let source = futures_util::stream::iter(chunks.into_iter().map(Ok::<_, LfsError>));
+
+        store
+            .put_byte_stream_with_size(&oid, expected.len() as u64, source)
+            .await
+            .unwrap();
+
+        assert_eq!(store.get(&oid).await.unwrap(), expected);
+    }
+
+    #[tokio::test]
+    async fn put_byte_stream_detects_corruption_and_aborts() {
+        let store = test_store();
+        let fake_oid = [0x11; 32];
+        let source = futures_util::stream::iter([
+            Ok::<_, LfsError>(Bytes::from(vec![0x33; MIN_STREAM_PART_SIZE])),
+            Ok(Bytes::from_static(b"tail")),
+        ]);
+
+        let error = store
+            .put_byte_stream_with_size(&fake_oid, (MIN_STREAM_PART_SIZE + 4) as u64, source)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, LfsError::ObjectCorrupt { .. }));
+        assert!(!store.exists(&fake_oid).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn put_byte_stream_aborts_when_source_fails() {
+        let store = test_store();
+        let oid = [0x22; 32];
+        let source = futures_util::stream::iter([
+            Ok(Bytes::from(vec![0x33; MIN_STREAM_PART_SIZE])),
+            Err(LfsError::Io {
+                source: std::io::Error::other("source failed"),
+            }),
+        ]);
+
+        let error = store
+            .put_byte_stream_with_size(&oid, MIN_STREAM_PART_SIZE as u64, source)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, LfsError::Io { .. }));
+        assert!(!store.exists(&oid).await.unwrap());
     }
 
     #[tokio::test]
