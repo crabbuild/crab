@@ -1,19 +1,40 @@
 # Mutation recovery
 
-Network loss after a publication request can hide whether refs changed. Crab returns an indeterminate outcome instead of guessing or replaying the mutation.
+Network loss after publication can hide whether refs changed. Crab returns an
+indeterminate outcome instead of guessing or replaying the mutation.
 
 ## Durable identity
 
-Persist `PreparedMutation::recovery_token()` or `PreparedPush::recovery_token()` before execution. Tokens contain the repository placement, expected refs, immutable artifact bindings, and plan identity. They contain no cloud or managed-service credentials.
+Persist `remote::write::PreparedMutation::recovery_token()` or
+`local::PreparedPush::recovery_token()` before execution. Tokens bind the
+repository, expected refs, immutable artifacts, and plan identity without
+containing credentials.
 
-`RecoveryToken::to_json` and `LocalPushRecoveryToken::to_json` produce bounded, versioned documents. Decode untrusted input with the corresponding `from_json` constructor; it revalidates the complete request.
+`remote::write::RecoveryToken::to_json` and
+`local::PushRecoveryToken::to_json` produce bounded, versioned documents.
+Decode untrusted input with the corresponding `from_json` constructor.
 
 ## Reconcile before replay
 
-Use `Client::reconcile` for remote mutations and `Client::reconcile_push` for local pushes. Reconciliation reads durable evidence and never writes or replays.
+Use the family-specific client operations:
 
-If a direct plan was admitted but never attempted, `resume_mutation` can reconstruct its staged pack and execute the original request. A plan with unresolved attempt evidence is never automatically replayed. Git transport recovery also rechecks the repository path, a digest of its remote URL, local source object IDs, and every expected remote ref.
+```rust
+let remote_outcome = client.reconcile_remote(remote_token).await?;
+let push_outcome = client.reconcile_local_push(push_token).await?;
+```
+
+Reconciliation reads durable evidence and never writes or replays. An
+unattempted direct remote plan can resume through
+`Client::resume_remote(token, scratch)`. An eligible local push can resume
+through `Client::resume_local_push(token, scratch)`. A plan with unresolved
+attempt evidence is never replayed automatically.
+
+An opened remote interface also provides `remote.reconcile(token)`, which
+checks that the token belongs to that opened repository.
 
 ## Readiness
 
-A committed mutation can return `Readiness::Pending` when the durable ref update succeeded but derived read indexes did not become visible within the operation budget. The commit remains successful. Refresh or retry the read later; do not republish the mutation.
+A committed mutation can return `remote::write::Readiness::Pending` when the
+durable ref update succeeded but derived read indexes did not become visible
+within the request budget. The commit remains successful. Refresh or retry the
+read later; do not republish the mutation.

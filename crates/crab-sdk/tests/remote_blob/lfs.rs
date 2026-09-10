@@ -1,4 +1,6 @@
-use crab_sdk::{ErrorKind, GitPath, ReadOptions, Snapshot};
+use crab_sdk::operation::ReadOptions;
+use crab_sdk::remote::Snapshot;
+use crab_sdk::{ErrorKind, GitPath};
 use futures_util::TryStreamExt;
 
 pub(super) async fn verify(
@@ -24,11 +26,11 @@ pub(super) async fn verify(
         stream.close().await.unwrap();
     }
     for limits in [
-        crab_sdk::ReadLimits {
+        crab_sdk::operation::ReadLimits {
             max_fetched_bytes: 1,
             ..Default::default()
         },
-        crab_sdk::ReadLimits {
+        crab_sdk::operation::ReadLimits {
             max_storage_requests: 1,
             ..Default::default()
         },

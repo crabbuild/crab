@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use crab_sdk::{Client, DirectStoreOptions, IntegrationId, LocalTools, PullOutcome};
+use crab_sdk::Client;
+use crab_sdk::local::{IntegrationId, Options, PullOutcome, Tools as LocalTools};
+use crab_sdk::storage::DirectStoreOptions;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,12 +26,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let integration = IntegrationId::from_string(integration)?;
     let client = Client::builder()
         .direct_store(DirectStoreOptions::filesystem(&store)?)
-        .local_tools(tools)
+        .local(Options::new(tools))
         .build()?;
     let result = async {
-        let repository = client.open_local(checkout).await?;
+        let repository = client.open(crab_sdk::OpenOptions::local(checkout)).await?;
+        let local = repository.local()?;
         match action.to_str() {
-            Some("continue") => match repository.continue_integration(integration).await? {
+            Some("continue") => match local.continue_integration(integration).await? {
                 PullOutcome::Updated { head, .. } | PullOutcome::UpToDate { head, .. } => {
                     println!("integration completed at {head}");
                 }
@@ -39,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => return Err("SDK returned an unsupported pull outcome".into()),
             },
             Some("abort") => {
-                let head = repository.abort_integration(integration).await?;
+                let head = local.abort_integration(integration).await?;
                 println!("integration aborted at {head}");
             }
             _ => return Err("ACTION must be continue or abort".into()),

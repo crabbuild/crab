@@ -1,60 +1,79 @@
 # Local workflows
 
-The `local` feature controls an ordinary Git working directory. It requires absolute paths to compatible Git and Crab executables. The SDK validates their versions and capabilities before changing repository state.
+The `local` feature controls an ordinary Git worktree. It requires absolute
+paths to compatible Git and Crab executables. The SDK validates their versions
+and capabilities before changing repository state.
 
 ```rust
-use crab_sdk::{Client, DirectStoreOptions, LocalTools};
+use crab_sdk::local::{Options, Tools};
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, OpenOptions};
 
-let tools = LocalTools::new("/usr/bin/git", "/usr/local/bin/crab")?;
+let tools = Tools::new("/usr/bin/git", "/usr/local/bin/crab")?;
 let client = Client::builder()
     .direct_store(DirectStoreOptions::s3_from_env("bucket")?)
-    .local_tools(tools)
+    .local(Options::new(tools))
     .build()?;
 let configuration = client.configure_local("./checkout").await?;
-println!("Git {} / Crab {}", configuration.git_version(), configuration.crab_version());
+let repository = client.open(OpenOptions::local("./checkout")).await?;
+let local = repository.local()?;
 ```
 
-Configuration is repository-local. Child processes receive the selected executables and credentials without changing the application process environment or global Git configuration.
+Configuration is repository-local. Child processes receive the selected tools
+and credentials without changing the application environment, current
+directory, or global Git configuration.
 
 ## Clone and fetch
 
-`clone_repository` publishes its destination only after packs, refs, shallow state, `FETCH_HEAD`, filters, and checkout succeed. Direct and managed Crab clones transfer packs through shared Rust services. `RepositoryLocator::http` selects native Git smart HTTP.
+`Client::clone_local` publishes its destination only after packs, refs,
+shallow state, `FETCH_HEAD`, filters, and checkout succeed. Direct and managed
+Crab clones use shared Rust transfer services. `RepositoryLocator::http`
+selects native Git smart HTTP.
 
-The selected revision's committed `crab.toml` controls the first checkout's hydration mode and automatic patterns. `CloneOptions::lazy()` and `CloneOptions::eager()` are explicit overrides. `CloneOptions::default()` uses the committed policy when present and otherwise performs a lazy checkout.
+`local::CloneOptions` controls the branch, depth, and hydration override.
+`local::FetchOptions` supports pruning, tags, depth, deepen, and unshallow.
+Fetch does not integrate `HEAD`. Linked worktrees share their common object
+directory while retaining separate `HEAD` and index state.
 
-`FetchOptions` supports pruning, tag policy, depth, deepen, and unshallow. Fetch does not integrate `HEAD`. Linked worktrees share the common object directory while retaining separate `HEAD` and index state.
-
-`open_local` is read-only. It validates any durable fetch or integration intent left by an interrupted process without changing repository state. The next serialized `fetch` or `pull` completes the corresponding recovery before starting new work.
+Opening a local repository validates durable fetch or integration state without
+changing it. The next serialized fetch or pull completes eligible recovery
+before starting new work.
 
 ## Edit and integrate
 
-`LocalRepository` provides `status`, `stage`, `commit`, `checkout`, `pull`, `hydrate`, `dehydrate`, and `prefetch_content`. Pull supports fast-forward-only, merge, and rebase modes. Conflicts return an `IntegrationId` and exact paths; pass that ID to `continue_integration` or `abort_integration`. Persist `IntegrationId::as_str()` before shutdown and reconstruct it with `IntegrationId::from_string` when recovery crosses a process boundary.
+`local::Local` provides `status`, `stage`, `commit`, `checkout`,
+`pull`, `hydrate`, `dehydrate`, and `prefetch_content`. Pull supports
+fast-forward-only, merge, and rebase. Conflicts return an `IntegrationId` and
+exact paths for `continue_integration` or `abort_integration`.
 
-The default `LocalExecutionPolicy::Untrusted` disables repository hooks and unrecognized executable Git drivers while preserving Crab's validated filter. Select `LocalExecutionPolicy::Trusted` on `ClientBuilder` only for repositories whose executable configuration you intend to run:
+The default `local::ExecutionPolicy::Untrusted` disables repository hooks and
+unrecognized executable Git drivers. Enable trusted execution only for a
+repository whose executable configuration should run:
 
 ```rust
-use crab_sdk::LocalExecutionPolicy;
+use crab_sdk::local::{ExecutionPolicy, Options};
 
-let client = Client::builder()
-    .direct_store(DirectStoreOptions::s3_from_env("bucket")?)
-    .local_tools(tools)
-    .local_execution_policy(LocalExecutionPolicy::Trusted)
-    .build()?;
+let options = Options::new(tools)
+    .with_execution_policy(ExecutionPolicy::Trusted);
+let client = Client::builder().local(options).build()?;
 ```
 
 ## Prepared push
 
 ```rust
-use crab_sdk::{LocalPushOutcome, PushOptions};
+use crab_sdk::local::{PushOptions, PushOutcome};
 
 let prepared = local.prepare_push(PushOptions::current_branch()).await?;
 persist(prepared.recovery_token().to_json()?);
-match prepared.execute(Default::default()).await? {
-    LocalPushOutcome::Committed { readiness, .. } => record(readiness),
-    LocalPushOutcome::TransportCommitted { destinations } => record(destinations),
-    LocalPushOutcome::Indeterminate { recovery } => persist(recovery.to_json()?),
-    LocalPushOutcome::DryRun { .. } => unreachable!(),
+match prepared.execute().await? {
+    PushOutcome::Committed { readiness, .. } => record(readiness),
+    PushOutcome::TransportCommitted { destinations } => record(destinations),
+    PushOutcome::Indeterminate { recovery } => persist(recovery.to_json()?),
+    PushOutcome::DryRun { .. } => unreachable!(),
+    _ => {}
 }
 ```
 
-Direct Crab push uploads its generated pack and verified large-file dependencies through the Rust publication path. Managed and HTTP working directories use their protected Git transport. Every destination is guarded by the exact remote value observed during preparation.
+Direct Crab push uses the shared Rust publication path. Managed and HTTP
+worktrees use protected or native Git transport. Every destination is guarded by
+the exact remote value observed during preparation.

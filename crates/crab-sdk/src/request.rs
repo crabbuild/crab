@@ -33,6 +33,18 @@ impl<T, O> Request<'_, T, O> {
     }
 }
 
+impl<'a, T: 'a, O: 'a> Request<'a, T, O> {
+    pub(crate) fn map<U: 'a>(self, map: impl FnOnce(T) -> U + Send + 'a) -> Request<'a, U, O> {
+        Request {
+            options: self.options,
+            start: Box::new(move |options| {
+                let future = (self.start)(options);
+                Box::pin(async move { future.await.map(map) })
+            }),
+        }
+    }
+}
+
 impl<'a, T, O> IntoFuture for Request<'a, T, O> {
     type Output = Result<T>;
     type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
@@ -67,5 +79,25 @@ mod tests {
         assert_eq!(entered.load(Ordering::SeqCst), 0);
         let selected = request().with_options(1).with_options(2).await.unwrap();
         assert_eq!((selected, entered.load(Ordering::SeqCst)), (2, 1));
+    }
+
+    #[tokio::test]
+    async fn mapped_requests_remain_lazy_and_preserve_options() {
+        let entered = Arc::new(AtomicUsize::new(0));
+        let request = {
+            let entered = entered.clone();
+            Request::new(move |options: usize| {
+                Box::pin(async move {
+                    entered.fetch_add(1, Ordering::SeqCst);
+                    Ok(options)
+                })
+            })
+            .map(|value| value + 1)
+        };
+        assert_eq!(entered.load(Ordering::SeqCst), 0);
+
+        let selected = request.with_options(4).await.unwrap();
+
+        assert_eq!((selected, entered.load(Ordering::SeqCst)), (5, 1));
     }
 }

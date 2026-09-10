@@ -144,22 +144,22 @@ async fn direct_push_publishes_generated_pack_without_remote_helper() {
             }
             panic!("{message}")
         });
-    let result = prepared
-        .execute(OperationOptions::default())
-        .await
-        .unwrap_or_else(|error| {
-            let mut message = error.to_string();
-            let mut source = std::error::Error::source(&error);
-            while let Some(error) = source {
-                message.push_str(": ");
-                message.push_str(&error.to_string());
-                source = error.source();
-            }
-            panic!("{message}")
-        });
+    let result = prepared.execute().await.unwrap_or_else(|error| {
+        let mut message = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(error) = source {
+            message.push_str(": ");
+            message.push_str(&error.to_string());
+            source = error.source();
+        }
+        panic!("{message}")
+    });
 
     assert!(matches!(result, LocalPushOutcome::Committed { .. }));
-    let remote = client.open_remote(locator).await.unwrap();
+    let remote = client
+        .open_remote_with_options(locator, OperationOptions::default())
+        .await
+        .unwrap();
     let refs = remote.refs().await.unwrap();
     assert_eq!(
         refs.entries()
@@ -250,22 +250,22 @@ async fn direct_push_publishes_staged_pointer_dependencies_first() {
             }
             panic!("{message}")
         });
-    let result = prepared
-        .execute(OperationOptions::default())
-        .await
-        .unwrap_or_else(|error| {
-            let mut message = error.to_string();
-            let mut source = std::error::Error::source(&error);
-            while let Some(error) = source {
-                message.push_str(": ");
-                message.push_str(&error.to_string());
-                source = error.source();
-            }
-            panic!("{message}")
-        });
+    let result = prepared.execute().await.unwrap_or_else(|error| {
+        let mut message = error.to_string();
+        let mut source = std::error::Error::source(&error);
+        while let Some(error) = source {
+            message.push_str(": ");
+            message.push_str(&error.to_string());
+            source = error.source();
+        }
+        panic!("{message}")
+    });
 
     assert!(matches!(result, LocalPushOutcome::Committed { .. }));
-    let remote = client.open_remote(locator).await.unwrap();
+    let remote = client
+        .open_remote_with_options(locator, OperationOptions::default())
+        .await
+        .unwrap();
     let snapshot = remote
         .snapshot(crate::Revision::branch("main").unwrap())
         .await

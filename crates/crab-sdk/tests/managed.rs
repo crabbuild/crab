@@ -4,12 +4,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crab_sdk::{
-    CloneOptions, CommitIdentity, CommitOptions, EntryMode, ErrorKind, FetchDepth, FetchOptions,
-    FileEdit, GitPath, LocalCommitOptions, LocalPushOutcome, ManagedOptions,
-    ManagedRepositoryState, MutationOutcome, OperationOptions, PullOptions, PushOptions,
-    PushRefspec, RepositoryLocator, Revision, WritePolicy,
+use crab_sdk::local::{
+    CloneOptions, CommitOptions as LocalCommitOptions, FetchDepth, FetchOptions, PullOptions,
+    PushOptions, PushOutcome as LocalPushOutcome, PushRefspec,
 };
+use crab_sdk::managed::{
+    Managed, Options as ManagedOptions, RepositoryInfo as ManagedRepository,
+    RepositoryState as ManagedRepositoryState,
+};
+use crab_sdk::remote::EntryMode;
+use crab_sdk::remote::write::{CommitIdentity, CommitOptions, FileEdit, MutationOutcome};
+use crab_sdk::{ErrorKind, GitPath, Repository, RepositoryLocator, Revision, WritePolicy};
 
 const CONTROL: &str = "CRAB_SDK_MANAGED_FIXTURE_CONTROL";
 
@@ -67,9 +72,12 @@ impl LiveManaged {
                     .with_authority(&self.authority)
                     .unwrap(),
             )
-            .local_tools(crab_sdk::LocalTools::new(git_path(), &self.crab).unwrap())
+            .local(crab_sdk::local::Options::new(
+                crab_sdk::local::Tools::new(git_path(), &self.crab).unwrap(),
+            ))
             .content_cache(
-                crab_sdk::ContentCache::new(&scratch.join("cache"), 256 * 1024 * 1024).unwrap(),
+                crab_sdk::storage::ContentCache::new(&scratch.join("cache"), 256 * 1024 * 1024)
+                    .unwrap(),
             )
             .build()
             .unwrap()
@@ -121,11 +129,14 @@ async fn wait_until_active(
     live: &LiveManaged,
     client: &crab_sdk::Client,
     repository: &str,
-) -> crab_sdk::RemoteRepository {
+) -> Repository {
     let locator = live.locator(repository);
     let mut last = None;
     for _ in 0..60 {
-        match client.open_remote(locator.clone()).await {
+        match client
+            .open(crab_sdk::OpenOptions::remote(locator.clone()))
+            .await
+        {
             Ok(repository) => return repository,
             Err(error) if matches!(error.kind(), ErrorKind::Conflict | ErrorKind::NotFound) => {
                 last = Some(error);
@@ -137,15 +148,8 @@ async fn wait_until_active(
     panic!("managed repository did not become active: {last:?}")
 }
 
-async fn managed_entity(
-    management: &crab_sdk::ManagedRepositories,
-    organization: &str,
-    name: &str,
-) -> crab_sdk::ManagedRepository {
-    let page = management
-        .list(organization, None, 100, OperationOptions::default())
-        .await
-        .unwrap();
+async fn managed_entity(management: &Managed, organization: &str, name: &str) -> ManagedRepository {
+    let page = management.list(organization, None, 100).await.unwrap();
     page.repositories()
         .iter()
         .find(|repository| repository.canonical_url().ends_with(&format!("/{name}")))
@@ -154,11 +158,13 @@ async fn managed_entity(
 }
 
 async fn initial_commit(
-    repository: &crab_sdk::RemoteRepository,
+    repository: &Repository,
     scratch: &Path,
     content: &[u8],
 ) -> crab_sdk::ObjectId {
     let prepared = repository
+        .remote()
+        .unwrap()
         .prepare_commit(
             CommitOptions::initial(
                 "refs/heads/main",
@@ -177,13 +183,12 @@ async fn initial_commit(
                 .unwrap(),
             ],
             scratch.to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     let commit = prepared.commit_id().unwrap();
     assert!(matches!(
-        prepared.execute(OperationOptions::default()).await.unwrap(),
+        prepared.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     commit
@@ -197,13 +202,12 @@ async fn managed_lifecycle_round_trip() {
     let first_name = unique_slug("lifecycle");
     let second_name = format!("{first_name}-renamed");
     let client = live.client(scratch.path());
-    let management = client.managed_repositories().await.unwrap();
+    let management = client.managed().await.unwrap();
     let created = management
         .create(
             &live.organization,
             &first_name,
             &format!("create-{first_name}"),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
@@ -218,14 +222,15 @@ async fn managed_lifecycle_round_trip() {
 
     let client = live.client(scratch.path());
     let checkout = scratch.path().join("checkout");
-    let local = client
-        .clone_repository(
+    let local_repository = client
+        .clone_local(
             live.locator(&first_name),
             &checkout,
             CloneOptions::default(),
         )
         .await
         .unwrap();
+    let local = local_repository.local().unwrap();
     assert_eq!(
         run(&git_path(), &checkout, &["rev-parse", "HEAD"]),
         first.to_string()
@@ -243,7 +248,7 @@ async fn managed_lifecycle_round_trip() {
         .prepare_push(PushOptions::current_branch().dry_run(true))
         .await
         .unwrap()
-        .execute(OperationOptions::default())
+        .execute()
         .await
         .unwrap();
     assert!(matches!(dry_run, LocalPushOutcome::DryRun { .. }));
@@ -251,7 +256,7 @@ async fn managed_lifecycle_round_trip() {
         .prepare_push(PushOptions::current_branch())
         .await
         .unwrap()
-        .execute(OperationOptions::default())
+        .execute()
         .await
         .unwrap();
     assert!(matches!(pushed, LocalPushOutcome::Committed { .. }));
@@ -260,6 +265,8 @@ async fn managed_lifecycle_round_trip() {
     let client = live.client(scratch.path());
     let repository = wait_until_active(&live, &client, &first_name).await;
     let snapshot = repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap();
@@ -271,7 +278,7 @@ async fn managed_lifecycle_round_trip() {
             .unwrap(),
         b"managed second\n".as_slice()
     );
-    let management = client.managed_repositories().await.unwrap();
+    let management = client.managed().await.unwrap();
     let current = managed_entity(&management, &live.organization, &first_name).await;
     let renamed = management
         .rename(
@@ -280,7 +287,6 @@ async fn managed_lifecycle_round_trip() {
             &second_name,
             current.revision(),
             &format!("rename-{first_name}"),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
@@ -293,7 +299,7 @@ async fn managed_lifecycle_round_trip() {
 
     let client = live.client(scratch.path());
     wait_until_active(&live, &client, &second_name).await;
-    let management = client.managed_repositories().await.unwrap();
+    let management = client.managed().await.unwrap();
     let current = managed_entity(&management, &live.organization, &second_name).await;
     let archived = management
         .archive(
@@ -301,7 +307,6 @@ async fn managed_lifecycle_round_trip() {
             &second_name,
             current.revision(),
             &format!("archive-{first_name}"),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
@@ -309,7 +314,7 @@ async fn managed_lifecycle_round_trip() {
     client.close().await.unwrap();
 
     let client = live.client(scratch.path());
-    let management = client.managed_repositories().await.unwrap();
+    let management = client.managed().await.unwrap();
     let observed = managed_entity(&management, &live.organization, &second_name).await;
     assert_eq!(observed.state(), ManagedRepositoryState::Archived);
     let deleted = live.fixture("delete", &first_name, Some(&second_name));
@@ -317,14 +322,13 @@ async fn managed_lifecycle_round_trip() {
     client.close().await.unwrap();
 
     let client = live.client(scratch.path());
-    let management = client.managed_repositories().await.unwrap();
+    let management = client.managed().await.unwrap();
     let restored = management
         .restore(
             &live.organization,
             &second_name,
             deleted_revision,
             &format!("restore-{first_name}"),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
@@ -352,10 +356,11 @@ async fn revoked_push_never_commits() {
     let scratch = tempfile::tempdir().unwrap();
     let client = live.client(scratch.path());
     let checkout = scratch.path().join("checkout");
-    let local = client
-        .clone_repository(live.locator(&name), &checkout, CloneOptions::default())
+    let local_repository = client
+        .clone_local(live.locator(&name), &checkout, CloneOptions::default())
         .await
         .unwrap();
+    let local = local_repository.local().unwrap();
     std::fs::write(checkout.join("revoked.txt"), b"must not commit\n").unwrap();
     local.stage(vec!["revoked.txt".into()]).await.unwrap();
     local
@@ -367,18 +372,17 @@ async fn revoked_push_never_commits() {
         .await
         .unwrap();
     live.fixture("arm", "reject-next-finalize", Some(&name));
-    let error = prepared
-        .execute(OperationOptions::default())
-        .await
-        .unwrap_err();
+    let error = prepared.execute().await.unwrap_err();
     assert!(matches!(
         error.kind(),
         ErrorKind::Authorization | ErrorKind::Conflict
     ));
     client.close().await.unwrap();
     let client = live.client(scratch.path());
-    let snapshot = wait_until_active(&live, &client, &name)
-        .await
+    let repository = wait_until_active(&live, &client, &name).await;
+    let snapshot = repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap();
@@ -395,10 +399,11 @@ async fn lost_finalize_reuses_push_id() {
     let scratch = tempfile::tempdir().unwrap();
     let client = live.client(scratch.path());
     let checkout = scratch.path().join("checkout");
-    let local = client
-        .clone_repository(live.locator(&name), &checkout, CloneOptions::default())
+    let local_repository = client
+        .clone_local(live.locator(&name), &checkout, CloneOptions::default())
         .await
         .unwrap();
+    let local = local_repository.local().unwrap();
     std::fs::write(checkout.join("lost.txt"), b"lost response\n").unwrap();
     local.stage(vec!["lost.txt".into()]).await.unwrap();
     local
@@ -411,16 +416,13 @@ async fn lost_finalize_reuses_push_id() {
         .unwrap();
     let token = prepared.recovery_token().to_json().unwrap();
     live.fixture("arm", "drop-next-finalize-response", Some(&name));
-    let outcome = prepared.execute(OperationOptions::default()).await.unwrap();
+    let outcome = prepared.execute().await.unwrap();
     assert!(matches!(outcome, LocalPushOutcome::Indeterminate { .. }));
     client.close().await.unwrap();
 
     let client = live.client(scratch.path());
-    let recovery = crab_sdk::LocalPushRecoveryToken::from_json(&token).unwrap();
-    let outcome = client
-        .reconcile_push(recovery, OperationOptions::default())
-        .await
-        .unwrap();
+    let recovery = crab_sdk::local::PushRecoveryToken::from_json(&token).unwrap();
+    let outcome = client.reconcile_local_push(recovery).await.unwrap();
     assert!(matches!(outcome, LocalPushOutcome::Committed { .. }));
     client.close().await.unwrap();
     let report = live.fixture("inspect", "lost-finalize", Some(&name));
@@ -437,6 +439,8 @@ async fn placement_change_invalidates_cached_access() {
     let client = live.client(scratch.path());
     let repository = wait_until_active(&live, &client, &name).await;
     let before = repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap()
@@ -451,8 +455,10 @@ async fn placement_change_invalidates_cached_access() {
 
     let migrated = live.fixture("arm", "move-placement", Some(&name));
     let client = live.client(scratch.path());
-    let after = wait_until_active(&live, &client, &name)
-        .await
+    let repository = wait_until_active(&live, &client, &name).await;
+    let after = repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap()
@@ -476,11 +482,18 @@ async fn expired_grant_succeeds_on_a_new_operation() {
     live.fixture("arm", "expire-next-transfer-grant", Some(&name));
     let scratch = tempfile::tempdir().unwrap();
     let client = live.client(scratch.path());
-    let error = client.open_remote(live.locator(&name)).await.err().unwrap();
-    assert_eq!(error.kind(), ErrorKind::Authentication);
-    let bytes = client
-        .open_remote(live.locator(&name))
+    let error = client
+        .open(crab_sdk::OpenOptions::remote(live.locator(&name)))
         .await
+        .err()
+        .unwrap();
+    assert_eq!(error.kind(), ErrorKind::Authentication);
+    let repository = client
+        .open(crab_sdk::OpenOptions::remote(live.locator(&name)))
+        .await
+        .unwrap();
+    let bytes = repository
+        .remote()
         .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
@@ -505,8 +518,10 @@ async fn denied_principal_cannot_reuse_another_clients_cache() {
     let (name, _) = prepared_fixture(&live, "principal-isolation");
     let scratch = tempfile::tempdir().unwrap();
     let client = live.client(scratch.path());
-    wait_until_active(&live, &client, &name)
-        .await
+    let repository = wait_until_active(&live, &client, &name).await;
+    repository
+        .remote()
+        .unwrap()
         .snapshot(Revision::branch("main").unwrap())
         .await
         .unwrap()
@@ -517,7 +532,11 @@ async fn denied_principal_cannot_reuse_another_clients_cache() {
 
     live.fixture("arm", "deny-current-principal", Some(&name));
     let denied = live.client(scratch.path());
-    let error = denied.open_remote(live.locator(&name)).await.err().unwrap();
+    let error = denied
+        .open(crab_sdk::OpenOptions::remote(live.locator(&name)))
+        .await
+        .err()
+        .unwrap();
     assert_eq!(error.kind(), ErrorKind::Authorization);
     denied.close().await.unwrap();
     live.fixture("cleanup", "principal-isolation", Some(&name));
@@ -531,14 +550,15 @@ async fn managed_local_matrix_contract() {
     let scratch = tempfile::tempdir().unwrap();
     let client = live.client(scratch.path());
     let checkout = scratch.path().join("checkout");
-    let local = client
-        .clone_repository(
+    let local_repository = client
+        .clone_local(
             live.locator(&name),
             &checkout,
             CloneOptions::default().with_depth(1).unwrap(),
         )
         .await
         .unwrap();
+    let local = local_repository.local().unwrap();
     assert_eq!(
         run(&git_path(), &checkout, &["rev-list", "--count", "HEAD"]),
         "1"
@@ -582,10 +602,12 @@ async fn managed_local_matrix_contract() {
         &checkout,
         &["worktree", "add", "-b", "linked", linked.to_str().unwrap()],
     );
-    let sibling = client.open_local(&linked).await.unwrap();
+    let sibling_repository = client
+        .open(crab_sdk::OpenOptions::local(&linked))
+        .await
+        .unwrap();
+    let sibling = sibling_repository.local().unwrap();
     assert_eq!(sibling.common_directory(), local.common_directory());
-    drop(sibling);
-
     std::fs::write(checkout.join("matrix.txt"), b"managed matrix\n").unwrap();
     local.stage(vec!["matrix.txt".into()]).await.unwrap();
     local
@@ -604,17 +626,12 @@ async fn managed_local_matrix_contract() {
             .prepare_push(options.clone().dry_run(true))
             .await
             .unwrap()
-            .execute(OperationOptions::default())
+            .execute()
             .await
             .unwrap(),
         LocalPushOutcome::DryRun { .. }
     ));
-    let atomic = local
-        .prepare_push(options)
-        .await
-        .unwrap()
-        .execute(OperationOptions::default())
-        .await;
+    let atomic = local.prepare_push(options).await.unwrap().execute().await;
     match atomic {
         Ok(LocalPushOutcome::Committed { .. }) => {}
         Err(error) if matches!(error.kind(), ErrorKind::UnsupportedCapability) => {}
@@ -641,7 +658,7 @@ async fn managed_local_matrix_contract() {
         .prepare_push(PushOptions::current_branch().with_policy(WritePolicy::ForceWithLease))
         .await
         .unwrap()
-        .execute(OperationOptions::default())
+        .execute()
         .await;
     match forced {
         Ok(LocalPushOutcome::Committed { .. }) => {}
@@ -669,7 +686,11 @@ async fn managed_local_matrix_contract() {
         &["init", "--initial-branch=main", "--object-format=sha256"],
     );
     std::fs::write(sha256.join("retained.txt"), b"retained\n").unwrap();
-    let error = client.open_local(&sha256).await.err().unwrap();
+    let error = client
+        .open(crab_sdk::OpenOptions::local(&sha256))
+        .await
+        .err()
+        .unwrap();
     assert_eq!(error.kind(), ErrorKind::UnsupportedCapability);
     assert_eq!(
         std::fs::read(sha256.join("retained.txt")).unwrap(),

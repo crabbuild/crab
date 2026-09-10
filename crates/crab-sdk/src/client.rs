@@ -41,7 +41,7 @@ impl ClientBuilder {
         #[cfg(feature = "managed")]
         let managed = self
             .managed
-            .map(crate::managed::ManagedState::new)
+            .map(crate::managed_impl::ManagedState::new)
             .transpose()?;
         let git = RemoteGitRuntime::new(RuntimeOptions::default(), Arc::new(NoopMetrics))
             .map_err(remote_error)?;
@@ -80,7 +80,7 @@ pub(crate) struct ClientState {
     #[cfg(feature = "local")]
     pub(crate) local_execution_policy: crate::LocalExecutionPolicy,
     #[cfg(feature = "managed")]
-    pub(crate) managed: Option<crate::managed::ManagedState>,
+    pub(crate) managed: Option<crate::managed_impl::ManagedState>,
 }
 
 pub(crate) struct ResolvedRepository {
@@ -113,7 +113,7 @@ impl ClientState {
                     _cancel,
                 )
                 .await
-                .map_err(crate::managed::managed_repository_error)?;
+                .map_err(crate::managed_impl::managed_repository_error)?;
             let identity = resolved.store.target_identity().ok_or_else(|| {
                 Error::new(
                     ErrorKind::Corruption,
@@ -215,17 +215,7 @@ impl Client {
         ClientBuilder::default()
     }
 
-    /// Open a pinned repository generation without publishing metadata.
-    pub fn open_remote(
-        &self,
-        locator: RepositoryLocator,
-    ) -> crate::Request<'_, RemoteRepository, OperationOptions> {
-        crate::Request::new(move |options| {
-            Box::pin(self.open_remote_with_options(locator, options))
-        })
-    }
-
-    async fn open_remote_with_options(
+    pub(crate) async fn open_remote_with_options(
         &self,
         locator: RepositoryLocator,
         options: OperationOptions,

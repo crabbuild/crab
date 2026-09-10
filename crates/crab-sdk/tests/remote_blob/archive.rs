@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use crab_sdk::{ArchiveEvent, ContentMode, Snapshot};
+use crab_sdk::remote::{ArchiveEvent, ContentMode, Snapshot};
 
 pub(super) async fn collect(snapshot: &Snapshot, mode: ContentMode) -> Vec<(Vec<u8>, Bytes)> {
     let mut stream = snapshot.archive(mode).await.unwrap();
@@ -33,8 +33,8 @@ pub(super) async fn collect(snapshot: &Snapshot, mode: ContentMode) -> Vec<(Vec<
 
 #[cfg(feature = "content")]
 pub(super) async fn logical_limit(snapshot: &Snapshot, first_size: usize) {
-    let options = crab_sdk::ReadOptions::default()
-        .with_limits(crab_sdk::ReadLimits {
+    let options = crab_sdk::operation::ReadOptions::default()
+        .with_limits(crab_sdk::operation::ReadLimits {
             max_archive_bytes: first_size as u64 + 1024,
             ..Default::default()
         })
@@ -95,9 +95,9 @@ pub(super) async fn close_during_hydration(snapshot: &Snapshot) {
         (b"z-crab".as_slice(), true),
         (b"z-lfs".as_slice(), true),
     ] {
-        let cancellation = crab_sdk::Cancellation::default();
-        let options = crab_sdk::ReadOptions::default().with_operation(
-            crab_sdk::OperationOptions::default().with_cancellation(cancellation.clone()),
+        let cancellation = crab_sdk::operation::Cancellation::default();
+        let options = crab_sdk::operation::ReadOptions::default().with_operation(
+            crab_sdk::operation::Options::default().with_cancellation(cancellation.clone()),
         );
         let mut stream = snapshot
             .archive(ContentMode::Hydrated)

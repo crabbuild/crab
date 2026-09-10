@@ -11,7 +11,8 @@ use crab_metadata::manifest_store::{create_manifest, upload_segmented_bulk};
 use crab_metadata::manifests::{
     BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
 };
-use crab_sdk::{Client, DirectStoreOptions, ErrorKind, RepositoryLocator};
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, ErrorKind, RepositoryLocator};
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use futures_util::TryStreamExt as _;
@@ -124,7 +125,9 @@ async fn read_only_open_never_repairs() {
             .build()
             .unwrap();
         let error = client
-            .open_remote(RepositoryLocator::new("repository").unwrap())
+            .open(crab_sdk::OpenOptions::remote(
+                RepositoryLocator::new("repository").unwrap(),
+            ))
             .await
             .err()
             .unwrap();
@@ -146,25 +149,29 @@ async fn locator_acquisition_obeys_operation_limits() {
         .build()
         .unwrap();
     let repository = client
-        .open_remote(RepositoryLocator::new("repository").unwrap())
+        .open(crab_sdk::OpenOptions::remote(
+            RepositoryLocator::new("repository").unwrap(),
+        ))
         .await
         .unwrap();
     for limits in [
-        crab_sdk::ReadLimits {
+        crab_sdk::operation::ReadLimits {
             max_storage_requests: 1,
             ..Default::default()
         },
-        crab_sdk::ReadLimits {
+        crab_sdk::operation::ReadLimits {
             max_fetched_bytes: 1,
             ..Default::default()
         },
     ] {
-        let options = crab_sdk::OperationOptions::default()
+        let options = crab_sdk::operation::Options::default()
             .with_limits(limits)
             .unwrap()
             .with_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         let error = repository
+            .remote()
+            .unwrap()
             .snapshot(crab_sdk::Revision::branch("main").unwrap())
             .with_options(options)
             .await
@@ -193,6 +200,8 @@ async fn snapshot_stays_pinned() {
     let old_commit = fixture.snapshot.commit().await.unwrap().id;
     let refreshed = fixture.advance().await;
     let current = refreshed
+        .remote()
+        .unwrap()
         .snapshot(crab_sdk::Revision::branch("main").unwrap())
         .await
         .unwrap();
@@ -238,7 +247,7 @@ async fn byte_paths_round_trip() {
         .snapshot
         .tree(
             crab_sdk::GitPath::root(),
-            crab_sdk::PageRequest::new(10, None).unwrap(),
+            crab_sdk::remote::PageRequest::new(10, None).unwrap(),
         )
         .await
         .unwrap();
@@ -269,8 +278,10 @@ async fn lfs_extensions_never_deliver_untransformed_hydrated_bytes() {
         1
     );
     for options in [
-        crab_sdk::ReadOptions::default(),
-        crab_sdk::ReadOptions::default().with_range(0..1).unwrap(),
+        crab_sdk::operation::ReadOptions::default(),
+        crab_sdk::operation::ReadOptions::default()
+            .with_range(0..1)
+            .unwrap(),
     ] {
         let error = match fixture
             .snapshot
@@ -285,16 +296,18 @@ async fn lfs_extensions_never_deliver_untransformed_hydrated_bytes() {
     }
     let mut archive = fixture
         .snapshot
-        .archive(crab_sdk::ContentMode::Hydrated)
+        .archive(crab_sdk::remote::ContentMode::Hydrated)
         .await
         .unwrap();
     let mut extension_entry = false;
     let error = loop {
         match archive.next().await {
-            Ok(Some(crab_sdk::ArchiveEvent::Entry { entry, .. })) => {
+            Ok(Some(crab_sdk::remote::ArchiveEvent::Entry { entry, .. })) => {
                 extension_entry = entry.path == path;
             }
-            Ok(Some(crab_sdk::ArchiveEvent::Data(_) | crab_sdk::ArchiveEvent::EndEntry)) => {
+            Ok(Some(
+                crab_sdk::remote::ArchiveEvent::Data(_) | crab_sdk::remote::ArchiveEvent::EndEntry,
+            )) => {
                 assert!(
                     !extension_entry,
                     "extension entry delivered hydrated content"

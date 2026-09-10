@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crab_sdk::{Client, DirectStoreOptions, LocalExecutionPolicy, LocalTools};
+use crab_sdk::Client;
+use crab_sdk::local::{ExecutionPolicy as LocalExecutionPolicy, Options, Tools as LocalTools};
+use crab_sdk::storage::DirectStoreOptions;
 
 pub fn run(git: &Path, directory: &Path, args: &[&str]) -> String {
     let output = Command::new(git)
@@ -62,8 +64,10 @@ pub fn client(root: &Path, scratch: &Path) -> Client {
 pub fn client_with_policy(root: &Path, scratch: &Path, policy: LocalExecutionPolicy) -> Client {
     Client::builder()
         .direct_store(DirectStoreOptions::filesystem(root).unwrap())
-        .local_tools(LocalTools::new(git_path(), fake_crab(scratch)).unwrap())
-        .local_execution_policy(policy)
+        .local(
+            Options::new(LocalTools::new(git_path(), fake_crab(scratch)).unwrap())
+                .with_execution_policy(policy),
+        )
         .build()
         .unwrap()
 }

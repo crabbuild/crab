@@ -1,6 +1,7 @@
 # Crab Rust SDK: technical design and delivery plan
 
-Status: implementation complete on PR #160; release qualification in progress.
+Status: behavior implementation merged in PR #160; the API simplification is
+implemented in PR #169.
 Baseline: `ebd0e40d14ca862cefa5366c1f856847e2401660` (2026-09-06).
 Public package: `crab-sdk`; Rust import: `crab_sdk`.
 Implementation location: `crates/crab-sdk/`.
@@ -9,6 +10,10 @@ Delivery evidence: [capability inventory](sdk-capabilities.md) and
 [qualification inputs and phase-0 record](sdk-qualification.md).
 Phases 0 through 8 are implemented. Backend support is declared only after the
 mandatory credentialed, platform, fault, package, and performance cells pass.
+The [Crab SDK API](crab-sdk-api.md) is the plan of record for public
+names, namespaces, unified opening, and repository handle shape. The behavior,
+safety, recovery, performance, and qualification contracts in this document
+remain authoritative.
 
 ## 1. Outcome and scope
 
@@ -84,13 +89,16 @@ below enters through the new public SDK API where that API exists.
 
 ## 3. Architecture and ownership
 
-The public client exposes two concrete repository handles. Backend dispatch is
-private and uses the existing `RepositoryLocator` classification. Avoid a public
-generic `Repository<B>` or a trait containing unsupported worktree methods.
+The public client exposes one concrete `Repository` facade with borrowed remote
+and local interfaces. Backend dispatch is private and uses the existing
+`RepositoryLocator` classification. Avoid a public generic `Repository<B>`, a
+public backend trait, or one oversized method set containing unsupported local
+and remote operations. The exact public shape is defined by the
+[Crab SDK API](crab-sdk-api.md).
 
 ```text
 Rust application
-  crab-sdk: Client, RemoteRepository, LocalRepository, ManagedRepositories
+  crab-sdk: Client, Repository, remote::Remote, local::Local, managed::Managed
     remote reads -> crab-remote-git + crab-read
     direct writes / transfers / local workflow -> crab-remote (new)
     managed resolution / publication / management -> crab-auth + crab-auth-store
@@ -127,47 +135,51 @@ The CLI consumes shared services directly; it need not depend on the public SDK.
 Remove extracted implementations from their old locations in the same change.
 Keep only argument/config projection and output mapping at CLI entry points.
 
-## 4. Public API contract
+## 4. Behavioral contract and public API
 
-The names and semantics below define the implemented contract. The public guide
-and package examples compile against this surface.
+The behavior, names, and semantics below define the implemented contract. The
+namespace and repository-facade decisions are detailed in the
+[Crab SDK API](crab-sdk-api.md).
 
 ```rust,ignore
 let client = Client::builder()
     .direct_store(store_options)
     .build()?;
 
-let remote = client.open_remote(locator).await?;
+let repository = client.open(OpenOptions::remote(locator)).await?;
+let remote = repository.remote()?;
 let snapshot = remote.snapshot(Revision::branch("main")?).await?;
 let raw = snapshot.read_blob(path.clone()).await?;
 let mut content = snapshot.open_file(path).await?;
 
 let local_client = Client::builder()
     .direct_store(store_options)
-    .local_tools(LocalTools::new(git_path, crab_path))
+    .local(local::Options::new(local::Tools::new(git_path, crab_path)?))
     .build()?;
-let local = local_client
-    .clone_repository(locator, destination, CloneOptions::default())
+let repository = local_client
+    .clone_local(locator, destination, local::CloneOptions::default())
     .await?;
-local.fetch(FetchOptions::default()).await?;
-local.pull(PullOptions::fast_forward_only()).await?;
-let push = local.prepare_push(PushOptions::current_branch()).await?;
+let local = repository.local()?;
+local.fetch(local::FetchOptions::default()).await?;
+local.pull(local::PullOptions::fast_forward_only()).await?;
+let push = local.prepare_push(local::PushOptions::current_branch()).await?;
 persist(push.recovery_token())?;
-let outcome = push.execute(OperationOptions::default()).await?;
+let outcome = push.execute().await?;
 ```
 
 | Public surface | Required methods and results |
 | --- | --- |
-| `Client` | `open_remote`, `configure_local`, `open_local`, `clone_repository`, `initialize_remote`, `managed_repositories`, `reconcile`, `close` |
-| `RemoteRepository` | `refs`, `snapshot`, `refresh` returning a new handle, `capabilities`, `prepare_commit`, `prepare_ref_update`, `reconcile` |
-| `Snapshot` | `commit`, paginated `tree`/`history`, `diff`, `blame`, `read_blob`, `open_file`, `archive` |
-| `LocalRepository` | `status`, `snapshot`, `fetch`, `stage`, `commit`, `checkout`, `pull`, `prepare_push`, `hydrate`, `dehydrate`, `prefetch_content`, `continue_integration`, `abort_integration` |
-| `ManagedRepositories` | paginated `list`, `create`, `rename`, `archive`, `restore`; all use the existing managed service |
-| `PreparedMutation` | stable `recovery_token`, `execute`; owns prepared data and operation lifetime |
+| `Client` | `open`, `configure_local`, `clone_local`, `initialize_remote`, `managed`, family-specific recovery methods, `close` |
+| `Repository` | `mode`, synchronous `remote` and `local` interface selection |
+| `remote::Remote` | `refs`, `snapshot`, `refresh` returning a new repository, `capabilities`, `prepare_commit`, `prepare_ref_update`, `reconcile` |
+| `remote::Snapshot` | `commit`, paginated `tree`/`history`, `diff`, `blame`, `read_blob`, `open_file`, `archive` |
+| `local::Local` | `status`, `snapshot`, `fetch`, `stage`, `commit`, `checkout`, `pull`, `prepare_push`, `hydrate`, `dehydrate`, `prefetch_content`, `continue_integration`, `abort_integration` |
+| `managed::Managed` | paginated `list`, `create`, `rename`, `archive`, `restore`; all use the existing managed service |
+| `remote::write::PreparedMutation` | stable `recovery_token`, request-building `execute`; owns prepared data and operation lifetime |
 
-`RemoteRepository::capabilities` is a synchronous metadata query with no I/O.
+`remote::Remote::capabilities` is a synchronous metadata query with no I/O.
 It reports implemented operation families through the non-exhaustive
-`RepositoryCapability` enum; it does not promise authorization or backend
+`remote::Capability` enum; it does not promise authorization or backend
 qualification. The current read SDK reports `ReadGit`, plus `ReadContent` when
 the `content` feature is enabled. `UpdateRefs` is implemented with `write` on
 conditional-write cloud stores; filesystem stores reject publication before
@@ -256,7 +268,7 @@ this plan. Full live GCS/Azure qualification remains outstanding.
 
 ### Resources, limits, and errors
 
-Operations carry `OperationOptions` with a cancellation handle, optional
+Operations carry `operation::Options` with a cancellation handle, optional
 deadline, and limits. Defaults use the existing validated owner-crate limits;
 phase 1 records their numeric values in generated API documentation and tests
 that defaults stay aligned. No implicit unlimited buffer or repository scan.
@@ -375,8 +387,9 @@ Add a read-only receipt lookup beside the existing repairing resolver. Missing
 evidence, a compacted marker, moved refs, or equal current OIDs never proves
 rejection or historical success by itself. Return `Indeterminate` when proof is
 insufficient; never infer rejection from `Option::None` in today's resolver.
-`Client::reconcile` also accepts the saved token directly: restarted clients
-must not need a readable repository handle when `open_remote` returns `Indexing`.
+`Client::reconcile_remote` also accepts the saved token directly: restarted
+clients must not need a readable repository handle when remote `Client::open`
+returns `Indexing`.
 The repository method additionally verifies the handle's repository binding.
 Preserve intents, receipts, and their proof roots under the existing GC contract;
 phase 2 must prove retention across compaction, restart, and GC before writes ship.
@@ -416,11 +429,11 @@ Pass argv without a shell, explicitly set repository paths, bound diagnostics,
 own the process tree, and drain it on cancellation. Git filter configuration is
 a command string interpreted by Git: reuse and test the CLI quoting rules,
 including spaces, quotes and non-ASCII executable paths on Windows and Unix.
-Git hooks/external drivers require `LocalExecutionPolicy::Trusted`; the default
+Git hooks/external drivers require `local::ExecutionPolicy::Trusted`; the default
 disables hooks and unrecognized executable drivers. Crab's validated filter
 remains enabled. This policy is explicit in the builder and documented.
 
-`open_local` discovers ordinary and linked worktrees and validates configuration
+`Client::open(OpenOptions::local(...))` discovers ordinary and linked worktrees and validates configuration
 without modifying it. A repository needing filter setup returns
 `LocalSetupRequired`; `configure_local` is the explicit setup method on `Client`.
 Clone performs that setup as part of creating the new repository. Configure
@@ -497,7 +510,7 @@ not implicitly fetch, merge, rebase, stage, or commit.
 is adopted according to that owner contract; incompatible/nonempty prefixes
 fail without destructive conversion. It never creates a bucket.
 
-`ManagedRepositories` wraps `crab_auth::managed::client` methods with SDK-owned
+`managed::Managed` wraps `crab_auth::managed::client` methods with SDK-owned
 inputs/results. Require service capabilities and authorization on each request.
 Preserve service pagination, concurrency tokens and idempotency keys wherever
 the corresponding endpoint defines them. Do not invent client-only CAS or
@@ -594,7 +607,7 @@ Context: remote-git already supplies bounded pinned reads, but callers manually
 manage resources. Prerequisite: phase 0.
 
 Work: add the workspace package, SDK errors/value types, features, Client,
-RemoteRepository, Snapshot, direct provider configuration, cancellation, bounded
+`Repository`, `remote::Remote`, `remote::Snapshot`, direct provider configuration, cancellation, bounded
 progress and `close`. Implement all section 4 read methods; add `content` for
 Crab/LFS reconstruction. Create compiling examples `remote_read.rs` and
 `remote_archive.rs`. Add owner-default and feature-closure checks.

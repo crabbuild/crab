@@ -16,7 +16,10 @@ async fn filesystem_initialization_needs_only_conditional_create_support() {
         .initialize_remote(locator.clone(), "refs/heads/main")
         .await
         .unwrap();
-    let repo = client.open_remote(locator).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator, OperationOptions::default())
+        .await
+        .unwrap();
     assert_eq!(repo.refs().await.unwrap().head(), Some("refs/heads/main"));
     assert!(
         !repo
@@ -53,7 +56,7 @@ async fn initialization_is_lazy_and_adopts_roots_without_changing_head() {
         .await
         .unwrap();
     let refs = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .refs()
@@ -147,7 +150,7 @@ async fn initialization_adopts_an_interrupted_descriptor_create() {
         .await
         .unwrap();
     let refs = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .refs()

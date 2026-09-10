@@ -2,11 +2,12 @@
 
 use std::{io::Write as _, path::PathBuf};
 
-use crab_sdk::{
-    Client, CommitIdentity, CommitOptions, ContentCache, DirectStoreOptions, EntryMode, ErrorKind,
-    FileEdit, GitPath, MutationOutcome, OperationOptions, PageRequest, RefBatch, RefUpdate,
-    RepositoryLocator, Revision, WritePolicy,
+use crab_sdk::remote::write::{
+    CommitIdentity, CommitOptions, FileEdit, MutationOutcome, RefBatch, RefUpdate,
 };
+use crab_sdk::remote::{EntryMode, PageRequest};
+use crab_sdk::storage::{ContentCache, DirectStoreOptions};
+use crab_sdk::{Client, ErrorKind, GitPath, RepositoryLocator, Revision, WritePolicy};
 use futures_util::TryStreamExt as _;
 use object_store::ObjectStoreExt as _;
 use sha2::{Digest as _, Sha256};
@@ -59,8 +60,10 @@ async fn initial_commit(
         .unwrap();
     let content = b"remote SDK\n".to_vec();
     let prepared = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_commit(
             CommitOptions::initial(
@@ -80,13 +83,12 @@ async fn initial_commit(
                 .unwrap(),
             ],
             scratch,
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     let commit = prepared.commit_id().unwrap();
     let outcome = prepared
-        .execute(OperationOptions::default())
+        .execute()
         .await
         .unwrap_or_else(|error| panic!("{}", error_chain(&error)));
     assert!(matches!(outcome, MutationOutcome::Committed { .. }));
@@ -135,8 +137,10 @@ async fn remote_edit_round_trip_without_git() {
     let large_size = 65 * 1024 * 1024;
     let large_digest = write_large_fixture(&large_path, large_size);
     let prepared = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_commit(
             CommitOptions::new(
@@ -159,50 +163,53 @@ async fn remote_edit_round_trip_without_git() {
                 .unwrap(),
             ],
             scratch.path().to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     let second = prepared.commit_id().unwrap();
     let outcome = prepared
-        .execute(OperationOptions::default())
+        .execute()
         .await
         .unwrap_or_else(|error| panic!("{}", error_chain(&error)));
     assert!(matches!(outcome, MutationOutcome::Committed { .. }));
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
+        .await
+        .unwrap();
     let tag = repo
+        .remote()
+        .unwrap()
         .prepare_ref_update(
             RefBatch::new(vec![RefUpdate::create("refs/tags/v1", second).unwrap()]).unwrap(),
             scratch.path().to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     assert!(matches!(
-        tag.execute(OperationOptions::default()).await.unwrap(),
+        tag.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     let delete_tag = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_ref_update(
             RefBatch::new(vec![RefUpdate::delete("refs/tags/v1", second).unwrap()]).unwrap(),
             scratch.path().to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     assert!(matches!(
-        delete_tag
-            .execute(OperationOptions::default())
-            .await
-            .unwrap(),
+        delete_tag.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     let snapshot = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .snapshot(Revision::commit(second))
         .await
@@ -347,8 +354,10 @@ async fn stale_ref_batch_changes_no_refs() {
     let first = initial_commit(&client, &locator, scratch.path().to_owned()).await;
     let next = b"next\n".to_vec();
     let prepared = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_commit(
             CommitOptions::new(
@@ -370,17 +379,18 @@ async fn stale_ref_batch_changes_no_refs() {
                 .unwrap(),
             ],
             scratch.path().to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     assert!(matches!(
-        prepared.execute(OperationOptions::default()).await.unwrap(),
+        prepared.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     let current = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .refs()
         .await
@@ -391,8 +401,10 @@ async fn stale_ref_batch_changes_no_refs() {
         .unwrap()
         .target();
     let stale = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_ref_update(
             RefBatch::new(vec![
@@ -402,14 +414,15 @@ async fn stale_ref_batch_changes_no_refs() {
             .unwrap()
             .with_policy(WritePolicy::ForceWithLease),
             scratch.path().to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     let competitor_content = b"competitor\n".to_vec();
     let competitor = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .prepare_commit(
             CommitOptions::new(
@@ -431,22 +444,20 @@ async fn stale_ref_batch_changes_no_refs() {
                 .unwrap(),
             ],
             scratch.path().to_owned(),
-            OperationOptions::default(),
         )
         .await
         .unwrap();
     assert!(matches!(
-        competitor
-            .execute(OperationOptions::default())
-            .await
-            .unwrap(),
+        competitor.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
-    let outcome = stale.execute(OperationOptions::default()).await.unwrap();
+    let outcome = stale.execute().await.unwrap();
     assert!(matches!(outcome, MutationOutcome::Rejected { .. }));
     let refs = client
-        .open_remote(locator.clone())
+        .open(crab_sdk::OpenOptions::remote(locator.clone()))
         .await
+        .unwrap()
+        .remote()
         .unwrap()
         .refs()
         .await

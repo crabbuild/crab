@@ -285,7 +285,10 @@ async fn atomic_ref_edits_preserve_recovery_after_refs_change() {
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (first, second) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let batch = RefBatch::new(vec![RefUpdate::create("refs/tags/v1", second).unwrap()]).unwrap();
     let prepared = repo
         .prepare_ref_update(
@@ -303,8 +306,7 @@ async fn atomic_ref_edits_preserve_recovery_after_refs_change() {
             .unwrap(),
         MutationOutcome::Indeterminate { .. }
     ));
-    let MutationOutcome::Committed { receipt, readiness } =
-        prepared.execute(OperationOptions::default()).await.unwrap()
+    let MutationOutcome::Committed { receipt, readiness } = prepared.execute().await.unwrap()
     else {
         panic!("expected commitment")
     };
@@ -324,7 +326,7 @@ async fn atomic_ref_edits_preserve_recovery_after_refs_change() {
         .await
         .unwrap();
     assert!(matches!(
-        changed.execute(OperationOptions::default()).await.unwrap(),
+        changed.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     let MutationOutcome::Committed { receipt, .. } = client
@@ -335,7 +337,10 @@ async fn atomic_ref_edits_preserve_recovery_after_refs_change() {
         panic!("historical proof was lost")
     };
     assert_eq!(receipt.transaction_id(), transaction);
-    let current = client.open_remote(locator).await.unwrap();
+    let current = client
+        .open_remote_with_options(locator, OperationOptions::default())
+        .await
+        .unwrap();
     let content = current
         .snapshot(Revision::branch("main").unwrap())
         .await
@@ -353,7 +358,10 @@ async fn competing_writer_rejects_the_whole_prepared_batch() {
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (first, second) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let first_batch = RefBatch::new(vec![
         RefUpdate::create("refs/tags/stale", second).unwrap(),
         RefUpdate::update("refs/heads/main", second, first).unwrap(),
@@ -381,18 +389,15 @@ async fn competing_writer_rejects_the_whole_prepared_batch() {
         .await
         .unwrap();
     assert!(matches!(
-        competitor
-            .execute(OperationOptions::default())
-            .await
-            .unwrap(),
+        competitor.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     assert!(matches!(
-        prepared.execute(OperationOptions::default()).await.unwrap(),
+        prepared.execute().await.unwrap(),
         MutationOutcome::Rejected { .. }
     ));
     let refs = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .refs()
@@ -413,7 +418,10 @@ async fn prepared_commit_retains_its_pack_and_executes_directly() {
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (_, base) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let identity =
         crate::CommitIdentity::new("SDK author", "sdk@example.invalid", 1_700_000_000, 0).unwrap();
     let content = b"direct execution\n".to_vec();
@@ -450,14 +458,14 @@ async fn prepared_commit_retains_its_pack_and_executes_directly() {
             .all(|directory| directory.path().exists())
     );
     assert!(matches!(
-        prepared.execute(OperationOptions::default()).await.unwrap(),
+        prepared.execute().await.unwrap(),
         MutationOutcome::Committed {
             readiness: Readiness::Ready { .. },
             ..
         }
     ));
     let snapshot = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .snapshot(Revision::commit(commit))
@@ -483,7 +491,10 @@ async fn initial_commit_bootstraps_an_initialized_repository() {
         .initialize_remote(locator.clone(), "refs/heads/main")
         .await
         .unwrap();
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let identity =
         crate::CommitIdentity::new("SDK author", "sdk@example.invalid", 1_700_000_000, 0).unwrap();
     let content = b"first content\n".to_vec();
@@ -512,11 +523,11 @@ async fn initial_commit_bootstraps_an_initialized_repository() {
         .unwrap();
     let commit = prepared.commit_id().unwrap();
     assert!(matches!(
-        prepared.execute(OperationOptions::default()).await.unwrap(),
+        prepared.execute().await.unwrap(),
         MutationOutcome::Committed { .. }
     ));
     let snapshot = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .snapshot(Revision::commit(commit))
@@ -541,7 +552,10 @@ async fn remote_commit_rejects_mis_sized_streams_before_publication() {
         let locator = RepositoryLocator::new("repository").unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let (_, base) = fixture(&client, &locator, scratch.path()).await;
-        let repo = client.open_remote(locator.clone()).await.unwrap();
+        let repo = client
+            .open_remote_with_options(locator.clone(), OperationOptions::default())
+            .await
+            .unwrap();
         let identity =
             crate::CommitIdentity::new("SDK author", "sdk@example.invalid", 1, 0).unwrap();
         let result = repo
@@ -573,7 +587,7 @@ async fn remote_commit_rejects_mis_sized_streams_before_publication() {
         };
         assert_eq!(error.kind(), ErrorKind::InvalidInput);
         let refs = client
-            .open_remote(locator)
+            .open_remote_with_options(locator, OperationOptions::default())
             .await
             .unwrap()
             .refs()
@@ -602,7 +616,10 @@ async fn remote_commit_streams_git_and_hydrated_content_and_resumes_from_its_pac
     Arc::get_mut(&mut client.0).unwrap().cache =
         Some(crate::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap());
     let (_, base) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let identity =
         crate::CommitIdentity::new("SDK author", "sdk@example.invalid", 1_700_000_000, -420)
             .unwrap();
@@ -664,7 +681,10 @@ async fn remote_commit_streams_git_and_hydrated_content_and_resumes_from_its_pac
             ..
         }
     ));
-    let current = client.open_remote(locator).await.unwrap();
+    let current = client
+        .open_remote_with_options(locator, OperationOptions::default())
+        .await
+        .unwrap();
     let snapshot = current.snapshot(Revision::commit(commit)).await.unwrap();
     let actual_text = snapshot
         .read_blob(GitPath::new("README.md").unwrap())
@@ -700,7 +720,10 @@ async fn recovered_hydrated_content_rejects_a_changed_xorb_without_moving_refs()
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (_, base) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let identity = crate::CommitIdentity::new("SDK author", "sdk@example.invalid", 1, 0).unwrap();
     let prepared = prepared_or_panic(
         repo.prepare_commit(
@@ -756,7 +779,7 @@ async fn recovered_hydrated_content_rejects_a_changed_xorb_without_moving_refs()
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Corruption);
     let refs = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .refs()
@@ -779,7 +802,10 @@ async fn resume_never_replays_an_unresolved_prior_intent() {
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (_, tip) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let prepared = repo
         .prepare_ref_update(
             RefBatch::new(vec![RefUpdate::create("refs/tags/uncertain", tip).unwrap()]).unwrap(),
@@ -822,7 +848,7 @@ async fn resume_never_replays_an_unresolved_prior_intent() {
         .await
         .unwrap();
     let refs = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .refs()
@@ -846,7 +872,10 @@ async fn saved_ref_plan_resumes_after_preparation_is_dropped() {
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (_, tip) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator, OperationOptions::default())
+        .await
+        .unwrap();
     let prepared = repo
         .prepare_ref_update(
             RefBatch::new(vec![RefUpdate::create("refs/tags/resumed", tip).unwrap()]).unwrap(),
@@ -891,7 +920,10 @@ async fn concurrent_execution_of_one_token_never_replays() {
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (_, tip) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator, OperationOptions::default())
+        .await
+        .unwrap();
     let batch = RefBatch::new(vec![
         RefUpdate::create("refs/tags/shared-plan", tip).unwrap(),
     ])
@@ -906,7 +938,7 @@ async fn concurrent_execution_of_one_token_never_replays() {
         .unwrap();
     let token = RecoveryToken::from_json(&first.recovery_token().to_json().unwrap()).unwrap();
     let (first, second) = tokio::join!(
-        first.execute(OperationOptions::default()),
+        first.execute(),
         client.resume_mutation(
             token.clone(),
             scratch.path().to_owned(),
@@ -943,7 +975,10 @@ async fn readiness_respects_selected_read_limits_without_losing_commitment() {
         let locator = RepositoryLocator::new("repository").unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let (_, tip) = fixture(&client, &locator, scratch.path()).await;
-        let repo = client.open_remote(locator).await.unwrap();
+        let repo = client
+            .open_remote_with_options(locator, OperationOptions::default())
+            .await
+            .unwrap();
         let prepared = repo
             .prepare_ref_update(
                 RefBatch::new(vec![RefUpdate::create("refs/tags/budget", tip).unwrap()]).unwrap(),
@@ -960,10 +995,10 @@ async fn readiness_respects_selected_read_limits_without_losing_commitment() {
             })
             .unwrap();
         let outcome = if during_execution {
-            prepared.execute(limited).await.unwrap()
+            prepared.execute().with_options(limited).await.unwrap()
         } else {
             assert!(matches!(
-                prepared.execute(OperationOptions::default()).await.unwrap(),
+                prepared.execute().await.unwrap(),
                 MutationOutcome::Committed {
                     readiness: Readiness::Ready { .. },
                     ..
@@ -996,7 +1031,10 @@ async fn rewind_requires_explicit_force_with_lease() {
     let locator = RepositoryLocator::new("repository").unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let (first, second) = fixture(&client, &locator, scratch.path()).await;
-    let repo = client.open_remote(locator.clone()).await.unwrap();
+    let repo = client
+        .open_remote_with_options(locator.clone(), OperationOptions::default())
+        .await
+        .unwrap();
     let batch = RefBatch::new(vec![
         RefUpdate::update("refs/heads/main", second, first).unwrap(),
     ])
@@ -1012,7 +1050,7 @@ async fn rewind_requires_explicit_force_with_lease() {
         .unwrap();
     assert_eq!(error.kind(), ErrorKind::Conflict);
     let refs = client
-        .open_remote(locator)
+        .open_remote_with_options(locator, OperationOptions::default())
         .await
         .unwrap()
         .refs()
@@ -1051,7 +1089,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 .await
                 .unwrap();
             let refs = client
-                .open_remote(locator)
+                .open_remote_with_options(locator, OperationOptions::default())
                 .await
                 .unwrap()
                 .refs()
@@ -1060,7 +1098,10 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             assert_eq!(refs.head(), Some("refs/heads/main"));
             assert!(refs.entries().is_empty());
         } else if phase == "prepare" {
-            let repo = client.open_remote(locator.clone()).await.unwrap();
+            let repo = client
+                .open_remote_with_options(locator.clone(), OperationOptions::default())
+                .await
+                .unwrap();
             let tip = repo
                 .refs()
                 .await
@@ -1096,7 +1137,10 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             assert_eq!(readiness, Readiness::Pending);
             std::fs::write(scratch.join("transaction"), receipt.transaction_id()).unwrap();
         } else if phase == "advance" {
-            let repo = client.open_remote(locator.clone()).await.unwrap();
+            let repo = client
+                .open_remote_with_options(locator.clone(), OperationOptions::default())
+                .await
+                .unwrap();
             let tip = repo
                 .refs()
                 .await
@@ -1116,7 +1160,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 .await
                 .unwrap();
             assert!(matches!(
-                prepared.execute(OperationOptions::default()).await.unwrap(),
+                prepared.execute().await.unwrap(),
                 MutationOutcome::Committed {
                     readiness: Readiness::Ready { .. },
                     ..
@@ -1126,7 +1170,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             if phase == "pending" {
                 assert_eq!(
                     client
-                        .open_remote(locator.clone())
+                        .open_remote_with_options(locator.clone(), OperationOptions::default())
                         .await
                         .err()
                         .unwrap()
@@ -1135,7 +1179,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 );
             } else {
                 let refs = client
-                    .open_remote(locator.clone())
+                    .open_remote_with_options(locator.clone(), OperationOptions::default())
                     .await
                     .unwrap()
                     .refs()

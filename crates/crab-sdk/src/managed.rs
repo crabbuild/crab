@@ -174,7 +174,7 @@ pub struct ManagedRepositories {
 
 impl Client {
     /// Connect to the selected managed service and validate discovery/capabilities.
-    pub fn managed_repositories(
+    pub(crate) fn managed_repositories(
         &self,
     ) -> crate::Request<'_, ManagedRepositories, OperationOptions> {
         crate::Request::new(move |operation| {
@@ -214,15 +214,28 @@ impl Client {
 
 impl ManagedRepositories {
     /// List one validated cursor page for an organization.
-    pub async fn list(
+    pub fn list(
         &self,
         organization: &str,
         cursor: Option<&str>,
         limit: u16,
+    ) -> crate::Request<'_, ManagedPage, OperationOptions> {
+        let organization = organization.to_owned();
+        let cursor = cursor.map(str::to_owned);
+        crate::Request::new(move |operation| {
+            Box::pin(self.list_with_options(organization, cursor, limit, operation))
+        })
+    }
+
+    async fn list_with_options(
+        &self,
+        organization: String,
+        cursor: Option<String>,
+        limit: u16,
         operation: OperationOptions,
     ) -> Result<ManagedPage> {
-        let organization = organization.to_owned();
         let cursor = cursor
+            .as_deref()
             .map(PageCursor::new)
             .transpose()
             .map_err(auth_contract_error)?;
@@ -244,16 +257,28 @@ impl ManagedRepositories {
     }
 
     /// Create a repository using a caller-persisted idempotency key.
-    pub async fn create(
+    pub fn create(
         &self,
         organization: &str,
         repository: &str,
         idempotency_key: &str,
-        operation: OperationOptions,
-    ) -> Result<ManagedRepository> {
+    ) -> crate::Request<'_, ManagedRepository, OperationOptions> {
         let organization = organization.to_owned();
         let repository = repository.to_owned();
-        let key = IdempotencyKey::new(idempotency_key).map_err(auth_contract_error)?;
+        let idempotency_key = idempotency_key.to_owned();
+        crate::Request::new(move |operation| {
+            Box::pin(self.create_with_options(organization, repository, idempotency_key, operation))
+        })
+    }
+
+    async fn create_with_options(
+        &self,
+        organization: String,
+        repository: String,
+        idempotency_key: String,
+        operation: OperationOptions,
+    ) -> Result<ManagedRepository> {
+        let key = IdempotencyKey::new(&idempotency_key).map_err(auth_contract_error)?;
         let owner = self.owner.clone();
         self.client
             .0
@@ -269,77 +294,95 @@ impl ManagedRepositories {
     }
 
     /// Rename a repository using the caller's last observed positive revision.
-    pub async fn rename(
+    pub fn rename(
         &self,
         organization: &str,
         repository: &str,
         slug: &str,
         revision: u64,
         idempotency_key: &str,
-        operation: OperationOptions,
-    ) -> Result<ManagedRepository> {
+    ) -> crate::Request<'_, ManagedRepository, OperationOptions> {
+        let organization = organization.to_owned();
+        let repository = repository.to_owned();
         let slug = slug.to_owned();
-        self.update(
-            organization,
-            repository,
-            revision,
-            idempotency_key,
-            operation,
-            move |owner, organization, repository, etag, key| async move {
-                owner
-                    .rename_repository(&organization, &repository, &slug, &etag, &key)
-                    .await
-            },
-        )
-        .await
+        let idempotency_key = idempotency_key.to_owned();
+        crate::Request::new(move |operation| {
+            Box::pin(async move {
+                self.update(
+                    &organization,
+                    &repository,
+                    revision,
+                    &idempotency_key,
+                    operation,
+                    move |owner, organization, repository, etag, key| async move {
+                        owner
+                            .rename_repository(&organization, &repository, &slug, &etag, &key)
+                            .await
+                    },
+                )
+                .await
+            })
+        })
     }
 
     /// Archive a repository using the caller's last observed positive revision.
-    pub async fn archive(
+    pub fn archive(
         &self,
         organization: &str,
         repository: &str,
         revision: u64,
         idempotency_key: &str,
-        operation: OperationOptions,
-    ) -> Result<ManagedRepository> {
-        self.update(
-            organization,
-            repository,
-            revision,
-            idempotency_key,
-            operation,
-            |owner, organization, repository, etag, key| async move {
-                owner
-                    .archive_repository(&organization, &repository, &etag, &key)
-                    .await
-            },
-        )
-        .await
+    ) -> crate::Request<'_, ManagedRepository, OperationOptions> {
+        let organization = organization.to_owned();
+        let repository = repository.to_owned();
+        let idempotency_key = idempotency_key.to_owned();
+        crate::Request::new(move |operation| {
+            Box::pin(async move {
+                self.update(
+                    &organization,
+                    &repository,
+                    revision,
+                    &idempotency_key,
+                    operation,
+                    |owner, organization, repository, etag, key| async move {
+                        owner
+                            .archive_repository(&organization, &repository, &etag, &key)
+                            .await
+                    },
+                )
+                .await
+            })
+        })
     }
 
     /// Restore a soft-deleted repository using its deletion revision.
-    pub async fn restore(
+    pub fn restore(
         &self,
         organization: &str,
         repository: &str,
         revision: u64,
         idempotency_key: &str,
-        operation: OperationOptions,
-    ) -> Result<ManagedRepository> {
-        self.update(
-            organization,
-            repository,
-            revision,
-            idempotency_key,
-            operation,
-            |owner, organization, repository, etag, key| async move {
-                owner
-                    .restore_repository(&organization, &repository, &etag, &key)
-                    .await
-            },
-        )
-        .await
+    ) -> crate::Request<'_, ManagedRepository, OperationOptions> {
+        let organization = organization.to_owned();
+        let repository = repository.to_owned();
+        let idempotency_key = idempotency_key.to_owned();
+        crate::Request::new(move |operation| {
+            Box::pin(async move {
+                self.update(
+                    &organization,
+                    &repository,
+                    revision,
+                    &idempotency_key,
+                    operation,
+                    |owner, organization, repository, etag, key| async move {
+                        owner
+                            .restore_repository(&organization, &repository, &etag, &key)
+                            .await
+                    },
+                )
+                .await
+            })
+        })
     }
 
     async fn update<F, Fut>(

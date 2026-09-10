@@ -1,29 +1,54 @@
 # API reference
 
-The Rust API is organized around validated values and concrete repository handles.
+The SDK exposes one client, one repository facade, and task-specific namespaces.
 
-| Type | Purpose |
+| Path | Purpose |
 | --- | --- |
-| `ClientBuilder` | Select direct storage, managed authentication, local tools, and content cache |
-| `Client` | Open, clone, initialize, recover, and close repositories |
-| `RemoteRepository` | Read a pinned generation and prepare remote mutations |
-| `Snapshot` | Read commits, trees, history, diffs, blame, blobs, files, and archives |
-| `LocalRepository` | Worktree status, stage, commit, checkout, pull, content, fetch, and push |
-| `ManagedRepositories` | List, create, rename, archive, and restore managed repositories |
-| `OperationOptions` | Cancellation, deadline, limits, and progress |
-| `Error` / `ErrorKind` | Stable classification with source and cleanup errors |
+| crate root | Client construction, repository selection, core identifiers, errors, and shared write policy |
+| `remote` | Pinned refs, snapshots, Git reads, content streams, and archives |
+| `remote::write` | Streamed commits, atomic ref batches, outcomes, and recovery tokens |
+| `local` | Tool policy, local worktree reads, edits, integration, hydration, and push |
+| `managed` | Managed service configuration and repository administration |
+| `operation` | Lazy requests, cancellation, deadlines, limits, progress, and operation identity |
+| `storage` | Direct S3, GCS, Azure, filesystem, and content cache configuration |
 
-## Locators and revisions
+## Repository lifecycle
+
+`Client::open(OpenOptions)` opens every existing repository and returns
+`Repository`. Use `OpenOptions::remote(locator)` for an object-store or
+managed remote. Use `OpenOptions::local(path)` for an existing Git worktree.
+
+`Repository::remote()` returns `remote::Remote`; `Repository::local()`
+returns `local::Local`. Both accessors are synchronous and perform no I/O.
+Selecting an interface that does not match `Repository::mode()` returns
+`ErrorKind::UnsupportedCapability`.
+
+Creation stays explicit:
+
+- `Client::initialize_remote` creates empty direct remote state.
+- `Client::clone_local` creates a local worktree and returns `Repository`.
+- `Client::configure_local` configures an existing worktree.
+
+## Core values
 
 - `RepositoryLocator::new` validates a direct storage prefix.
 - `RepositoryLocator::managed` validates an authority, organization, and repository.
-- `RepositoryLocator::http` validates an HTTP(S) URL for local Git workflows.
+- `RepositoryLocator::http` validates an HTTP(S) source for local workflows.
 - `Revision::branch`, `Revision::tag`, and `Revision::commit` avoid ambiguous names.
-- `GitPath` stores repository-relative bytes and rejects absolute, empty, NUL, and parent components.
-- `ObjectId` accepts complete SHA-1 IDs and rejects SHA-256 input explicitly.
+- `GitPath` stores validated repository-relative bytes.
+- `ObjectId` accepts complete SHA-1 object IDs.
 
-## Outcomes
+## Requests and outcomes
 
-Remote mutations return `MutationOutcome::{Committed, Rejected, Indeterminate}`. Local push adds `DryRun` and a transport acknowledgement outcome. Local pull distinguishes updated, already-current, conflict, and committed-with-pending-hydration states.
+SDK operations return awaitable `operation::Request` values. Apply
+`operation::Options` with `with_options`. Remote reads that support ranges and
+read limits use `operation::ReadOptions`.
 
-Use the generated rustdoc for every constructor, option, limit, and error condition. Public enums are non-exhaustive; include a fallback arm when matching them outside this crate.
+Remote mutations return
+`remote::write::MutationOutcome::{Committed, Rejected, Indeterminate}`. Local
+push uses `local::PushOutcome`, including dry-run and transport outcomes.
+Local pull distinguishes updated, current, conflict, and pending-hydration
+states.
+
+Use generated rustdoc for constructor and error details. Public enums are
+non-exhaustive, so external matches need a fallback arm.

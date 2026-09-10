@@ -1,6 +1,6 @@
-use crab_sdk::{
-    ArchiveEvent, Client, ContentMode, DirectStoreOptions, RepositoryLocator, Revision,
-};
+use crab_sdk::remote::{ArchiveEvent, ContentMode};
+use crab_sdk::storage::DirectStoreOptions;
+use crab_sdk::{Client, RepositoryLocator, Revision};
 use std::io::Write;
 
 #[tokio::main]
@@ -26,8 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .direct_store(DirectStoreOptions::s3_from_env(bucket)?)
         .build()?;
     let result = async {
-        let repository = client.open_remote(locator).await?;
-        let snapshot = repository.snapshot(revision).await?;
+        let repository = client.open(crab_sdk::OpenOptions::remote(locator)).await?;
+        let snapshot = repository.remote()?.snapshot(revision).await?;
         let mut archive = snapshot.archive(ContentMode::Git).await?;
         // EOF includes verification and finalization. A dropped/erroring stream
         // is still drained by the client close below.

@@ -24,6 +24,38 @@ CLOSURE = [
     "crab-write", "crab-remote", "crab-staging", "crab-sdk",
 ]
 PROFILES = ["minimal", "remote-content", "local", "managed"]
+COMPILE_FAIL_PROBES = [
+    (
+        "minimal-hides-runtime",
+        "minimal",
+        "fn main() { let _ = crab_sdk::Client::builder(); }\n",
+        "could not find `Client` in `crab_sdk`",
+    ),
+    (
+        "remote-hides-local",
+        "remote-content",
+        "fn main() { let _ = crab_sdk::local::CloneOptions::default(); }\n",
+        "could not find `local` in `crab_sdk`",
+    ),
+    (
+        "local-hides-managed",
+        "local",
+        "fn main() { let _ = crab_sdk::managed::RepositoryState::Active; }\n",
+        "could not find `managed` in `crab_sdk`",
+    ),
+    (
+        "old-root-export-is-absent",
+        "local",
+        "fn main() { let _ = crab_sdk::LocalTools::new(\"git\", \"crab\"); }\n",
+        "struct `LocalTools` is private",
+    ),
+    (
+        "old-open-method-is-absent",
+        "remote-content",
+        "fn check(client: &crab_sdk::Client, locator: crab_sdk::RepositoryLocator) { let _ = client.open_remote(locator); }\nfn main() {}\n",
+        "no method named `open_remote`",
+    ),
+]
 
 
 def run(command: list[str], *, cwd: Path, env: dict[str, str]) -> str:
@@ -32,6 +64,18 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str]) -> str:
     if completed.returncode != 0:
         print(completed.stdout, file=sys.stderr, end="")
         completed.check_returncode()
+    return completed.stdout
+
+
+def run_failure(command: list[str], *, cwd: Path, env: dict[str, str], expected: str) -> str:
+    completed = subprocess.run(command, cwd=cwd, env=env, check=False, text=True,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if completed.returncode == 0:
+        raise RuntimeError(f"compile-fail probe unexpectedly passed: {' '.join(command)}")
+    if expected not in completed.stdout:
+        raise RuntimeError(
+            f"compile-fail probe did not report {expected!r}:\n{completed.stdout}"
+        )
     return completed.stdout
 
 
@@ -132,6 +176,32 @@ def main() -> None:
                                 "elapsed_seconds": round(time.monotonic() - before, 3),
                                 "terminal_state": "passed", "log": log_path.name})
 
+    compile_fail_results = []
+    for name, profile, source, expected in COMPILE_FAIL_PROBES:
+        source_path = consumer / profile / "src/main.rs"
+        original = source_path.read_text()
+        before = time.monotonic()
+        try:
+            source_path.write_text(source)
+            log = run_failure(
+                ["cargo", f"+{args.toolchain}", "check", "--manifest-path",
+                 str(consumer / profile / "Cargo.toml")],
+                cwd=consumer,
+                env=env,
+                expected=expected,
+            )
+        finally:
+            source_path.write_text(original)
+        log_path = output / f"compile-fail-{name}.log"
+        log_path.write_text(log)
+        compile_fail_results.append({
+            "probe": name,
+            "profile": profile,
+            "elapsed_seconds": round(time.monotonic() - before, 3),
+            "terminal_state": "failed-as-required",
+            "log": log_path.name,
+        })
+
     report = {
         "schema": "crab.sdk-package-qualification", "version": 1,
         "source_sha": run(["git", "rev-parse", "HEAD"], cwd=ROOT, env=env).strip(),
@@ -139,6 +209,7 @@ def main() -> None:
         "cargo": run(["cargo", f"+{args.toolchain}", "--version"], cwd=ROOT, env=env).strip(),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "packages": packages, "profiles": profile_results,
+        "compile_fail_probes": compile_fail_results,
         "terminal_state": "passed",
     }
     (output / "package.log").write_text(package_log)

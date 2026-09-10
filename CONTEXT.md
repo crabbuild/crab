@@ -12,6 +12,22 @@ _Avoid_: Checkout, workspace
 The checked-out files on disk inside a worktree.
 _Avoid_: Worktree, when referring only to files
 
+**Repository handle**:
+The Crab SDK handle for one opened repository in remote or local mode. It owns
+the repository lifetime but does not itself imply an immutable generation.
+_Avoid_: Repository read view, when referring to the mutable or mode-neutral handle
+
+**Remote interface**:
+The Crab SDK interface for repository operations that do not require a local
+worktree. Direct storage and managed-service access are backend choices within
+this interface.
+_Avoid_: Direct interface, managed interface
+
+**Local interface**:
+The Crab SDK interface for operations on one local Git worktree. Local describes
+the presence of the worktree; fetch, pull, and push may use the network.
+_Avoid_: Worktree interface, Git interface
+
 **Main worktree**:
 The original non-bare worktree created by `git init` or `git clone`.
 _Avoid_: Primary checkout, root checkout
