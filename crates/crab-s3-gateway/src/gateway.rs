@@ -28,6 +28,8 @@ use crate::{
     mutation, namespace,
 };
 
+const MAX_BUCKETS_PER_PAGE: usize = 10_000;
+
 pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
@@ -1211,36 +1213,35 @@ impl S3 for Gateway {
             return Err(s3_error!(InvalidRequest));
         }
         let principal = self.principal(&req)?;
-        let mut buckets = self
-            .repositories
-            .values()
-            .filter(|repository| repository.access(principal).is_some())
-            .filter(|repository| {
-                req.input
-                    .prefix
-                    .as_deref()
-                    .is_none_or(|prefix| repository.config.name.starts_with(prefix))
-            })
-            .filter(|repository| {
-                req.input
-                    .continuation_token
-                    .as_deref()
-                    .is_none_or(|token| repository.config.name.as_str() > token)
-            })
-            .map(|repository| Bucket {
-                name: Some(repository.config.name.clone()),
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
         let limit = match req.input.max_buckets {
             Some(value) if (1..=10_000).contains(&value) => {
                 usize::try_from(value).map_err(|_| s3_error!(InvalidArgument))?
             }
             Some(_) => return Err(s3_error!(InvalidArgument)),
-            None => usize::MAX,
+            None => MAX_BUCKETS_PER_PAGE,
         };
-        let truncated = buckets.len() > limit;
-        buckets.truncate(limit);
+        let (buckets, truncated) = bounded_page(
+            self.repositories
+                .values()
+                .filter(|repository| repository.access(principal).is_some())
+                .filter(|repository| {
+                    req.input
+                        .prefix
+                        .as_deref()
+                        .is_none_or(|prefix| repository.config.name.starts_with(prefix))
+                })
+                .filter(|repository| {
+                    req.input
+                        .continuation_token
+                        .as_deref()
+                        .is_none_or(|token| repository.config.name.as_str() > token)
+                })
+                .map(|repository| Bucket {
+                    name: Some(repository.config.name.clone()),
+                    ..Default::default()
+                }),
+            limit,
+        );
         let continuation_token = truncated
             .then(|| buckets.last().and_then(|bucket| bucket.name.clone()))
             .flatten();
@@ -4135,6 +4136,16 @@ fn repository_batch_names<V>(
     }
 }
 
+fn bounded_page<T>(items: impl IntoIterator<Item = T>, limit: usize) -> (Vec<T>, bool) {
+    let mut items = items
+        .into_iter()
+        .take(limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let truncated = items.len() > limit;
+    items.truncate(limit);
+    (items, truncated)
+}
+
 fn remote_error(error: crab_remote_git::Error) -> s3s::S3Error {
     match error {
         crab_remote_git::Error::PathNotFound => s3_error!(NoSuchKey),
@@ -5649,5 +5660,23 @@ mod tests {
         )];
 
         assert!(supported_list_attributes(Some(&values)));
+    }
+
+    #[test]
+    fn bounded_pages_keep_only_one_lookahead_item() {
+        let (page, truncated) = bounded_page(0..10_001, MAX_BUCKETS_PER_PAGE);
+
+        assert!(truncated);
+        assert_eq!(page.len(), MAX_BUCKETS_PER_PAGE);
+        assert_eq!(page[0], 0);
+        assert_eq!(page[MAX_BUCKETS_PER_PAGE - 1], MAX_BUCKETS_PER_PAGE - 1);
+    }
+
+    #[test]
+    fn bounded_pages_report_complete_short_inputs() {
+        let (page, truncated) = bounded_page(0..3, MAX_BUCKETS_PER_PAGE);
+
+        assert!(!truncated);
+        assert_eq!(page, [0, 1, 2]);
     }
 }

@@ -216,6 +216,11 @@ handled. Like V1 markers, they resume against the branch state current for that
 request; listings are not snapshot-pinned. `encoding-type=url` percent-encodes
 the S3-defined response fields but does not transform the continuation token.
 
+`ListBuckets` uses the S3 general-purpose default page size of 10,000 when
+`max-buckets` is omitted. The gateway scans only that page plus one lookahead,
+so a large authorized repository catalog cannot force a response-sized
+allocation before pagination is applied.
+
 ## Multipart durability
 
 Gateway multipart state is provider-neutral and separate from native provider
