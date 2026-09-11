@@ -122,6 +122,9 @@ seek from the requested prefix and continuation in canonical complete-path byte
 order, visit only enough tree entries for `MaxKeys` plus one lookahead, and
 collapse delimiter subtrees before descent. Page cost therefore does not scale
 with every preceding or following object in the repository.
+Multipart-upload listings scan the bounded durable slot catalog with bounded
+concurrency and retain only the metadata needed for the current S3 page; the
+recorded part payload map is released before the next listing decision.
 
 The per-process `max_in_flight_requests` budget is split into reserved control,
 read, and transfer pools so large uploads cannot starve bucket discovery,

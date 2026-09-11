@@ -112,6 +112,29 @@ pub(crate) struct Session {
     pub(crate) completion_checksums: Option<crate::attributes::Checksums>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListedUpload {
+    pub(crate) id: String,
+    pub(crate) key: String,
+    pub(crate) principal: String,
+    pub(crate) created_seconds: u64,
+    pub(crate) checksum_algorithm: Option<String>,
+    pub(crate) checksum_type: Option<String>,
+}
+
+impl From<Session> for ListedUpload {
+    fn from(session: Session) -> Self {
+        Self {
+            id: session.id,
+            key: session.key,
+            principal: session.principal,
+            created_seconds: session.created_seconds,
+            checksum_algorithm: session.checksum_algorithm,
+            checksum_type: session.checksum_type,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TransferReservation {
@@ -1291,7 +1314,7 @@ async fn reap_expired_transfers(
     load(repository, &loaded.session.id).await
 }
 
-pub(crate) async fn list(repository: &Repository, now: u64) -> Result<Vec<Session>> {
+pub(crate) async fn list(repository: &Repository, now: u64) -> Result<Vec<ListedUpload>> {
     use futures_util::StreamExt as _;
 
     let prefix = repository.layout.repo_path("s3/multipart/capacity/");
@@ -1319,7 +1342,7 @@ async fn list_session_for_slot(
     repository: &Repository,
     path: object_store::path::Path,
     now: u64,
-) -> Result<Option<Session>> {
+) -> Result<Option<ListedUpload>> {
     let slot = load_capacity_path(repository, &path).await?.slot;
     let Some(owner) = slot.owner else {
         return Ok(None);
@@ -1344,7 +1367,7 @@ async fn list_session_for_slot(
             Err(error) => Err(error),
         };
     }
-    Ok(Some(loaded.session))
+    Ok(Some(loaded.session.into()))
 }
 
 #[derive(Default)]
@@ -2075,7 +2098,19 @@ mod tests {
                 .unwrap(),
             body
         );
-        assert_eq!(list(&repository, 11).await.unwrap().len(), 1);
+        let listed = list(&repository, 11).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0],
+            ListedUpload {
+                id: session.id.clone(),
+                key: session.key.clone(),
+                principal: "user".to_owned(),
+                created_seconds: session.created_seconds,
+                checksum_algorithm: None,
+                checksum_type: None,
+            }
+        );
 
         abort(&repository, reloaded).await.unwrap();
         assert!(list(&repository, 12).await.unwrap().is_empty());
