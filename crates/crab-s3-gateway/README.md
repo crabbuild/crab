@@ -313,10 +313,14 @@ a range that crosses a persisted part boundary against the source SHA-256.
 Multipart registration is measured with equal one-part upload counts at 8 MiB
 and 64 MiB: the durable control records must remain within 64 KiB, differ by no
 more than 64 bytes, and leave no staged payload after abort.
-The packaged-image gate also kills the gateway with live, frozen, and eligible
-orphaned multipart payloads on RustFS. A restarted process must reclaim only the
-orphan within two completed scans, release its capacity slot, preserve the live
-and frozen payloads, and leave no fixture payloads after explicit cleanup.
+The packaged-image gate also runs two Compose gateway instances with independent
+caches against one RustFS-backed repository. It replaces the primary during a
+multipart upload, continues and completes that upload through the standby, and
+verifies the completed bytes through both instances. It then kills a gateway with
+live, frozen, and eligible orphaned multipart payloads on RustFS. A restarted
+process must reclaim only the orphan within two completed scans, release its
+capacity slot, preserve the live and frozen payloads, and leave no fixture
+payloads after explicit cleanup.
 Stale, dirty, incomplete, skipped, unmeasured, or identity-bearing reports fail
 the evidence gate.
 The statically validated Kubernetes workload and EKS values are in
