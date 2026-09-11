@@ -410,6 +410,11 @@ jobs:
               for index in range(16):
                   (directory / f"item-{index:02}.pointer").write_bytes(pointer)
           PY
+            aws s3api create-bucket \
+              --bucket crab-s3-gateway-listing-baseline >/dev/null
+            aws s3 cp qualification/listing \
+              s3://crab-s3-gateway-listing-baseline/main/qualification/listing/ \
+              --recursive --only-show-errors --no-progress
             git add crab.toml .gitattributes qualification/listing
             git commit -q -m 'add Xet range qualification fixture'
             "${crab_bin}" push --upload-concurrency 0 \
@@ -598,6 +603,48 @@ jobs:
               awk '$1 ~ /^crab_s3_gateway_backend_bytes_read_total\{/ {sum += $2} END {print int(sum)}'
           }
           listing_prefix=main/qualification/listing/
+          baseline_keys="${qualification_root}/listing-baseline-keys"
+          : > "${baseline_keys}"
+          baseline_started_ms="$(date +%s%3N)"
+          baseline_token=
+          baseline_pages=0
+          baseline_objects=0
+          while true; do
+            baseline_pages=$((baseline_pages + 1))
+            page="${qualification_root}/listing-baseline-page-${baseline_pages}.json"
+            baseline_command=(
+              aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2
+              --bucket crab-s3-gateway-listing-baseline
+              --prefix "${listing_prefix}" --max-keys 1000
+              --no-paginate --output json
+            )
+            if test -n "${baseline_token}"; then
+              baseline_command+=(--continuation-token "${baseline_token}")
+            fi
+            AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              "${baseline_command[@]}" > "${page}"
+            page_count="$(jq -r '.KeyCount' "${page}")"
+            test "${page_count}" -gt 0
+            test "${page_count}" -le 1000
+            jq -e '.KeyCount == ((.Contents // []) | length)' \
+              "${page}" >/dev/null
+            jq -r '.Contents[]?.Key' "${page}" >> "${baseline_keys}"
+            baseline_objects=$((baseline_objects + page_count))
+            baseline_token="$(jq -r '.NextContinuationToken // empty' "${page}")"
+            truncated="$(jq -r '.IsTruncated' "${page}")"
+            if test "${truncated}" = false; then
+              test -z "${baseline_token}"
+              break
+            fi
+            test "${truncated}" = true
+            test -n "${baseline_token}"
+            test "${baseline_pages}" -lt 12
+          done
+          baseline_elapsed_ms=$(( $(date +%s%3N) - baseline_started_ms ))
+          test "${baseline_objects}" = 10032
+          test "${baseline_pages}" = 11
+          test "${baseline_elapsed_ms}" -gt 0
           listing_keys="${qualification_root}/listing-keys"
           : > "${listing_keys}"
           listing_scratch_before="$(xet_written)"
@@ -643,11 +690,16 @@ jobs:
           test "${listing_pages}" = 11
           test "${listing_elapsed_ms}" -gt 0
           test "${listing_elapsed_ms}" -le 120000
-          LISTING_KEYS="${listing_keys}" python3 - <<'PY'
+          test $((listing_elapsed_ms * 100)) -le $((baseline_elapsed_ms * 125))
+          LISTING_KEYS="${listing_keys}" \
+          BASELINE_KEYS="${baseline_keys}" python3 - <<'PY'
           import os
           from pathlib import Path
 
           actual = Path(os.environ["LISTING_KEYS"]).read_text(encoding="utf-8").splitlines()
+          baseline = Path(os.environ["BASELINE_KEYS"]).read_text(
+              encoding="utf-8"
+          ).splitlines()
           root = "main/qualification/listing/"
           expected = [f"{root}flat-{index:05}.pointer" for index in range(10_000)]
           expected.extend(
@@ -659,6 +711,8 @@ jobs:
               raise SystemExit("large-list traversal was incomplete or out of order")
           if len(actual) != len(set(actual)):
               raise SystemExit("large-list traversal returned duplicate keys")
+          if baseline != expected or len(baseline) != len(set(baseline)):
+              raise SystemExit("direct listing baseline was incomplete or out of order")
           PY
 
           late_prefix="${listing_prefix}flat-0999"
@@ -733,6 +787,9 @@ jobs:
           LISTING_OBJECTS="${listing_objects}" \
           LISTING_PAGES="${listing_pages}" \
           LISTING_ELAPSED_MS="${listing_elapsed_ms}" \
+          BASELINE_OBJECTS="${baseline_objects}" \
+          BASELINE_PAGES="${baseline_pages}" \
+          BASELINE_ELAPSED_MS="${baseline_elapsed_ms}" \
           LISTING_SCRATCH_DELTA="${listing_scratch_delta}" \
           LISTING_REQUESTS_DELTA="${listing_requests_delta}" \
           LISTING_BYTES_DELTA="${listing_bytes_delta}" \
@@ -759,7 +816,15 @@ jobs:
               "backend_requests_delta": int(os.environ["LISTING_REQUESTS_DELTA"]),
               "backend_bytes_read_delta": int(os.environ["LISTING_BYTES_DELTA"]),
               "elapsed_ms": int(os.environ["LISTING_ELAPSED_MS"]),
+              "direct_baseline_objects": int(os.environ["BASELINE_OBJECTS"]),
+              "direct_baseline_pages": int(os.environ["BASELINE_PAGES"]),
+              "direct_baseline_elapsed_ms": int(os.environ["BASELINE_ELAPSED_MS"]),
           }
+          proof["gateway_to_direct_baseline_millis"] = (
+              proof["elapsed_ms"] * 1_000
+              + proof["direct_baseline_elapsed_ms"]
+              - 1
+          ) // proof["direct_baseline_elapsed_ms"]
           with open(os.environ["LISTING_PROOF"], "w", encoding="utf-8") as output:
               json.dump(proof, output, sort_keys=True)
               output.write("\n")

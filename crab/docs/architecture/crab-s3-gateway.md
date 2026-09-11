@@ -280,7 +280,8 @@ Phase-owned artifacts:
   The same commit contains 10,032 logical 64 MiB keys backed by one pointer blob;
   unchanged AWS CLI traffic traverses eleven bounded pages, seeks a late prefix,
   groups delimiter subtrees, and proves exact order, uniqueness, a two-minute
-  absolute ceiling, positive backend accounting, and zero Xet hydration scratch.
+  absolute ceiling, no more than 125% of an equivalent direct RustFS traversal,
+  positive backend accounting, and zero Xet hydration scratch.
   The job retains and validates a versioned qualification report bound to the
   exact source, image, backend, client versions, both fixtures, measurements, and
   complete assertion inventory.

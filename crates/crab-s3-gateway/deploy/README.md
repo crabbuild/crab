@@ -100,8 +100,9 @@ inventory, backend and client versions, fixture digest, request/byte/latency
 measurements, container resident working-set memory, disk usage, and terminal
 state, but no endpoint, repository, object, or credential identity. A 10,032-key
 deduplicated Xet namespace must traverse in eleven 1,000-key pages within two
-minutes, remain byte-ordered and duplicate-free, resume a late prefix exactly,
-collapse delimiter subtrees, and write no Xet reconstruction scratch.
+minutes and 125% of an equivalent direct RustFS traversal, remain byte-ordered
+and duplicate-free, resume a late prefix exactly, collapse delimiter subtrees,
+and write no Xet reconstruction scratch.
 
 Stop containers without deleting repository data:
 

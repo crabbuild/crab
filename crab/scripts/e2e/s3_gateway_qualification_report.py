@@ -16,7 +16,7 @@ from typing import Any
 
 
 SCHEMA = "crab.s3-gateway-evidence"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SUITE = "deployment"
 BACKEND_IMAGE = "rustfs/rustfs:1.0.0-beta.8-glibc"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -239,6 +239,10 @@ def _listing_qualification(proof_path: Path) -> dict[str, Any]:
         "backend_requests_delta",
         "backend_bytes_read_delta",
         "elapsed_ms",
+        "direct_baseline_objects",
+        "direct_baseline_pages",
+        "direct_baseline_elapsed_ms",
+        "gateway_to_direct_baseline_millis",
     )
     return {name: proof.get(name) for name in fields}
 
@@ -358,7 +362,7 @@ def verify_report(
     report: dict[str, Any], *, source_sha: str, run_id: str, run_attempt: str
 ) -> dict[str, Any]:
     if report.get("schema") != SCHEMA or report.get("schema_version") != SCHEMA_VERSION:
-        raise EvidenceError("report is not the canonical S3 gateway qualification v3 schema")
+        raise EvidenceError("report is not the canonical S3 gateway qualification v4 schema")
     if report.get("status") != "passed" or report.get("terminal_state") != "exited-zero":
         raise EvidenceError("qualification did not reach a successful terminal state")
     if report.get("suite") != SUITE or report.get("skipped") != []:
@@ -468,6 +472,19 @@ def verify_report(
             raise EvidenceError(f"large-list measurement {name} must be positive")
     if listing["elapsed_ms"] > 120_000:
         raise EvidenceError("large-list traversal exceeded the frozen time budget")
+    if (
+        listing.get("direct_baseline_objects"),
+        listing.get("direct_baseline_pages"),
+    ) != (10_032, 11):
+        raise EvidenceError("direct large-list baseline is incomplete")
+    baseline_elapsed = listing.get("direct_baseline_elapsed_ms")
+    if type(baseline_elapsed) is not int or baseline_elapsed <= 0:
+        raise EvidenceError("direct large-list baseline timing must be positive")
+    ratio_millis = (listing["elapsed_ms"] * 1_000 + baseline_elapsed - 1) // baseline_elapsed
+    if listing.get("gateway_to_direct_baseline_millis") != ratio_millis:
+        raise EvidenceError("large-list baseline ratio is inconsistent")
+    if listing["elapsed_ms"] * 100 > baseline_elapsed * 125:
+        raise EvidenceError("large-list traversal exceeded 125% of the direct baseline")
 
     checks = report.get("checks")
     if not isinstance(checks, list):
@@ -527,6 +544,8 @@ def verify_report(
         "backend_bytes_written": measurements["backend_bytes_written"],
         "large_list_objects": listing["objects"],
         "large_list_elapsed_ms": listing["elapsed_ms"],
+        "large_list_direct_baseline_elapsed_ms": baseline_elapsed,
+        "large_list_gateway_to_direct_baseline_millis": ratio_millis,
     }
 
 

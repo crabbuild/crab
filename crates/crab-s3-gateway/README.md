@@ -263,9 +263,9 @@ machine-verified report for 90 days. The report includes a real duplicated
 proof that metadata and range delivery used no Xet reconstruction scratch. It
 also traverses 10,032 logical 64 MiB objects in 1,000-key pages, verifies exact
 ordering and uniqueness, late-prefix continuation and delimiter groups, and
-enforces a two-minute absolute traversal budget without Xet hydration. The
-fixture's 627 GiB logical namespace shares one Git pointer blob and one deduped
-Xet object.
+enforces both a two-minute absolute traversal budget and a 125% ceiling against
+an equivalent direct RustFS listing without Xet hydration. The fixture's 627 GiB
+logical namespace shares one Git pointer blob and one deduped Xet object.
 Stale, dirty, incomplete, skipped, unmeasured, or identity-bearing reports fail
 the evidence gate.
 The statically validated Kubernetes workload and EKS values are in

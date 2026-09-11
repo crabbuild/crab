@@ -85,6 +85,10 @@ def valid_report() -> dict[str, Any]:
             "backend_requests_delta": 30,
             "backend_bytes_read_delta": 1_000_000,
             "elapsed_ms": 2_000,
+            "direct_baseline_objects": 10_032,
+            "direct_baseline_pages": 11,
+            "direct_baseline_elapsed_ms": 2_000,
+            "gateway_to_direct_baseline_millis": 1_000,
         },
         "assertion_count": len(checks),
         "passed_assertions": len(checks),
@@ -112,11 +116,12 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             report, source_sha="a" * 40, run_id="123", run_attempt="2"
         )
 
-    def test_accepts_complete_v3_report(self) -> None:
+    def test_accepts_complete_v4_report(self) -> None:
         result = self.verify(valid_report())
         self.assertEqual(result["status"], "verified")
         self.assertEqual(result["checks"], len(REPORT.REQUIRED_CHECKS))
         self.assertEqual(result["large_list_objects"], 10_032)
+        self.assertEqual(result["large_list_gateway_to_direct_baseline_millis"], 1_000)
 
     def test_rejects_stale_or_dirty_source(self) -> None:
         for field, value in (
@@ -200,6 +205,10 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             ("backend_requests_delta", 0),
             ("backend_bytes_read_delta", 0),
             ("elapsed_ms", 120_001),
+            ("direct_baseline_objects", 10_031),
+            ("direct_baseline_pages", 10),
+            ("direct_baseline_elapsed_ms", 0),
+            ("gateway_to_direct_baseline_millis", 999),
         ):
             with self.subTest(field=field):
                 report = valid_report()
@@ -209,6 +218,13 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
                     "large-list|hydrated Xet",
                 ):
                     self.verify(report)
+
+    def test_rejects_large_listing_slower_than_direct_baseline(self) -> None:
+        report = valid_report()
+        report["listing_qualification"]["elapsed_ms"] = 2_501
+        report["listing_qualification"]["gateway_to_direct_baseline_millis"] = 1_251
+        with self.assertRaisesRegex(REPORT.EvidenceError, "125%"):
+            self.verify(report)
 
     def test_rejects_identity_and_secret_fields(self) -> None:
         for field in REPORT.SENSITIVE_KEYS:
