@@ -175,6 +175,7 @@ jobs:
             required_parameters.each do |name|
               abort "missing parameter #{name}" unless template.fetch("Parameters").key?(name)
             end
+            abort "missing Fargate size rule" unless template.fetch("Rules").key?("FargateCpuMemory")
             resources = template.fetch("Resources")
             %w[
               ImageRepository GatewayLogGroup ExecutionRole BackendRole

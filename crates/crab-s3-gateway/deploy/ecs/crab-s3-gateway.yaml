@@ -109,6 +109,31 @@ Conditions:
   HasSecretsKmsKey: !Not [!Equals [!Ref SecretsKmsKeyArn, '']]
   HasBackendKmsKey: !Not [!Equals [!Ref BackendKmsKeyArn, '']]
 
+Rules:
+  FargateCpuMemory:
+    Assertions:
+      - Assert:
+          !Or
+            - !And
+              - !Equals [!Ref TaskCpu, '1024']
+              - !Or
+                - !Equals [!Ref TaskMemory, '2048']
+                - !Equals [!Ref TaskMemory, '4096']
+                - !Equals [!Ref TaskMemory, '8192']
+            - !And
+              - !Equals [!Ref TaskCpu, '2048']
+              - !Or
+                - !Equals [!Ref TaskMemory, '4096']
+                - !Equals [!Ref TaskMemory, '8192']
+                - !Equals [!Ref TaskMemory, '16384']
+            - !And
+              - !Equals [!Ref TaskCpu, '4096']
+              - !Or
+                - !Equals [!Ref TaskMemory, '8192']
+                - !Equals [!Ref TaskMemory, '16384']
+                - !Equals [!Ref TaskMemory, '30720']
+        AssertDescription: TaskMemory must be a valid Fargate size for TaskCpu.
+
 Resources:
   ImageRepository:
     Type: AWS::ECR::Repository
