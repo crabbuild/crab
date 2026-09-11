@@ -196,8 +196,11 @@ and `CompleteMultipartUpload` support atomic strong `If-Match` and
 
 Keys are ordered by their complete UTF-8 byte representation, including the
 encoded ref prefix. `delimiter=/` groups each subtree once and counts a common
-prefix against `MaxKeys`. V1 markers are visible keys and each page resolves the
-current branch according to S3's non-snapshot behavior.
+prefix against `MaxKeys`. Each page seeks from its prefix and exclusive marker
+inside the raw Git trees, stops after `MaxKeys` plus one lookahead, and reads
+blob metadata only for emitted objects. It does not hydrate logical payloads or
+walk every preceding/following object. V1 markers are visible keys and each page
+resolves the current branch according to S3's non-snapshot behavior.
 
 V2 continuation tokens are the last emitted raw key or common prefix. They are
 portable across gateway nodes and are reauthorized when the next request is

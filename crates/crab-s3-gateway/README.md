@@ -113,7 +113,11 @@ contract linked below.
 Requests share immutable repository read views keyed by the compacted generation
 and committed journal state. Ref snapshots, parsed Git trees, and S3 attributes
 are singleflight-cached inside that view. HEAD and attributed LIST requests use
-the committed size and ETag without opening blob payloads.
+the committed size and ETag without opening blob payloads. Object LIST pages
+seek from the requested prefix and continuation in canonical complete-path byte
+order, visit only enough tree entries for `MaxKeys` plus one lookahead, and
+collapse delimiter subtrees before descent. Page cost therefore does not scale
+with every preceding or following object in the repository.
 
 The per-process `max_in_flight_requests` budget is split into reserved control,
 read, and transfer pools so large uploads cannot starve bucket discovery,

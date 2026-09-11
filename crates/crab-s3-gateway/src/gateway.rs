@@ -2700,13 +2700,22 @@ impl S3 for Gateway {
             return Err(s3_error!(NotImplemented));
         }
         let prefix = req.input.prefix.as_deref().unwrap_or("");
-        let Some((reference, _path_prefix)) =
+        let Some((reference, path_prefix)) =
             namespace::listing_reference(prefix).map_err(namespace_error)?
         else {
             return self.list_refs(&req, repository).await;
         };
+        let max_keys = req.input.max_keys.unwrap_or(1000);
+        if max_keys < 0 {
+            return Err(s3_error!(InvalidArgument));
+        }
+        let max_keys = max_keys.min(1000);
+        let limit = usize::try_from(max_keys).map_err(|_| s3_error!(InvalidArgument))?;
         let repo = self.open(repository).await?;
         if repo.remote().refs().find(&reference).is_none() {
+            return empty_list_objects_response(&req, url_encode);
+        }
+        if limit == 0 {
             return empty_list_objects_response(&req, url_encode);
         }
         let operation = repo
@@ -2721,120 +2730,105 @@ impl S3 for Gateway {
                 .map_err(gateway_error)?;
             let commit = snapshot.commit(&operation).await.map_err(remote_error)?;
             let commit_modified = timestamp(commit.committer.seconds)?;
-            let attribute_manifest = repo
-                .attributes(repository, snapshot.commit_oid())
-                .await
-                .map_err(gateway_error)?;
             let encoded_ref = prefix
                 .split_once('/')
                 .map(|(value, _)| value)
                 .unwrap_or_default();
-            let mut keys = Vec::new();
-            for entry in snapshot
-                .list_tree_recursive(&operation)
-                .await
-                .map_err(remote_error)?
-            {
-                if entry.kind != EntryKind::Blob {
-                    continue;
-                }
-                let path = std::str::from_utf8(entry.path.as_bytes())
-                    .map_err(|_| s3_error!(InvalidObjectState))?;
-                let key = format!("{encoded_ref}/{path}");
-                if !key.starts_with(prefix) {
-                    continue;
-                }
-                let attributes = attribute_manifest.object(path, entry.oid);
-                let modified = match attributes {
-                    Some(attributes) => timestamp(
-                        i64::try_from(attributes.modified_seconds)
-                            .map_err(|_| s3_error!(InternalError))?,
-                    )?,
-                    None => commit_modified.clone(),
-                };
-                let (etag, logical_size) = match attributes {
-                    Some(attributes) => (attributes.etag.clone(), attributes.size),
-                    None => {
-                        let blob = snapshot
-                            .read_blob(&entry.path, &operation)
-                            .await
-                            .map_err(remote_error)?;
-                        let (content, logical_size) = classify_blob(blob)?;
-                        (content.projected_etag()?, logical_size)
-                    }
-                };
-                keys.push((key, etag, Some(logical_size), modified));
-            }
-            keys.sort_by(|left, right| left.0.cmp(&right.0));
-            let max_keys = req.input.max_keys.unwrap_or(1000);
-            if max_keys < 0 {
-                return Err(s3_error!(InvalidArgument));
-            }
-            let max_keys = max_keys.min(1000);
-            let limit = usize::try_from(max_keys).map_err(|_| s3_error!(InvalidArgument))?;
-            let delimiter = req.input.delimiter.as_deref();
-            let mut values = Vec::new();
-            let mut groups = std::collections::BTreeSet::new();
-            for (key, etag, size, modified) in keys {
-                if let Some(delimiter) = delimiter
-                    && let Some(relative) = key.strip_prefix(prefix)
-                    && let Some(position) = relative.find(delimiter)
-                {
-                    groups.insert(format!("{}{}", prefix, &relative[..=position]));
-                    continue;
-                }
-                values.push((key, etag, size, modified));
-            }
-            let mut projected = values
-                .into_iter()
-                .map(|(key, etag, size, modified)| {
-                    (
-                        key.clone(),
-                        Some(Object {
-                            key: Some(key),
-                            e_tag: Some(ETag::Strong(etag)),
-                            last_modified: Some(modified),
-                            size: size.and_then(|size| i64::try_from(size).ok()),
-                            storage_class: Some(ObjectStorageClass::from_static("STANDARD")),
-                            ..Default::default()
-                        }),
-                        None,
-                    )
-                })
-                .chain(groups.into_iter().map(|prefix| {
-                    (
-                        prefix.clone(),
-                        None,
-                        Some(CommonPrefix {
-                            prefix: Some(prefix),
-                        }),
-                    )
-                }))
-                .collect::<Vec<_>>();
-            projected.sort_by(|left, right| left.0.cmp(&right.0));
+            let ref_prefix = format!("{encoded_ref}/");
             let after = req
                 .input
                 .continuation_token
                 .as_deref()
                 .or(req.input.start_after.as_deref());
-            if let Some(after) = after {
-                projected.retain(|(key, _, _)| key.as_str() > after);
+            let after = match after {
+                Some(after) => match after.strip_prefix(&ref_prefix) {
+                    Some(path) => Some(Bytes::copy_from_slice(path.as_bytes())),
+                    None if after < ref_prefix.as_str() => None,
+                    None => return empty_list_objects_response(&req, url_encode),
+                },
+                None => None,
+            };
+            let listing = snapshot
+                .list_tree_blobs(
+                    &crab_remote_git::TreeListingRequest::new(
+                        Bytes::copy_from_slice(path_prefix.as_bytes()),
+                        after,
+                        req.input.delimiter.as_deref().map(|_| b'/'),
+                        limit,
+                    )
+                    .map_err(remote_error)?,
+                    &operation,
+                )
+                .await
+                .map_err(remote_error)?;
+            let paths = listing
+                .items
+                .iter()
+                .map(|item| {
+                    std::str::from_utf8(item.path())
+                        .map(str::to_owned)
+                        .map_err(|_| s3_error!(InvalidObjectState))
+                })
+                .collect::<S3Result<Vec<_>>>()?;
+            let page_objects = listing
+                .items
+                .iter()
+                .zip(&paths)
+                .filter_map(|(item, path)| match item {
+                    crab_remote_git::TreeListingItem::Blob(entry) => {
+                        Some((path.clone(), entry.oid))
+                    }
+                    crab_remote_git::TreeListingItem::CommonPrefix(_) => None,
+                })
+                .collect::<Vec<_>>();
+            let page_attributes =
+                crate::attributes::load_objects(repository, snapshot.commit_oid(), &page_objects)
+                    .await
+                    .map_err(gateway_error)?;
+            let mut contents = Vec::new();
+            let mut common_prefixes = Vec::new();
+            let mut next = None;
+            for (item, path) in listing.items.into_iter().zip(paths) {
+                let key = format!("{encoded_ref}/{path}");
+                next = Some(key.clone());
+                match item {
+                    crab_remote_git::TreeListingItem::CommonPrefix(_) => {
+                        common_prefixes.push(CommonPrefix { prefix: Some(key) });
+                    }
+                    crab_remote_git::TreeListingItem::Blob(entry) => {
+                        let attributes = page_attributes.get(&path);
+                        let modified = match attributes {
+                            Some(attributes) => timestamp(
+                                i64::try_from(attributes.modified_seconds)
+                                    .map_err(|_| s3_error!(InternalError))?,
+                            )?,
+                            None => commit_modified.clone(),
+                        };
+                        let (etag, logical_size) = match attributes {
+                            Some(attributes) => (attributes.etag.clone(), attributes.size),
+                            None => {
+                                let blob = snapshot
+                                    .read_blob(&entry.path, &operation)
+                                    .await
+                                    .map_err(remote_error)?;
+                                let (content, logical_size) = classify_blob(blob)?;
+                                (content.projected_etag()?, logical_size)
+                            }
+                        };
+                        contents.push(Object {
+                            key: Some(key),
+                            e_tag: Some(ETag::Strong(etag)),
+                            last_modified: Some(modified),
+                            size: i64::try_from(logical_size).ok(),
+                            storage_class: Some(ObjectStorageClass::from_static("STANDARD")),
+                            ..Default::default()
+                        });
+                    }
+                }
             }
-            let truncated = limit != 0 && projected.len() > limit;
-            projected.truncate(limit);
-            let next = truncated
-                .then(|| projected.last().map(|item| item.0.clone()))
-                .flatten();
-            let contents = projected
-                .iter_mut()
-                .filter_map(|item| item.1.take())
-                .collect::<Vec<_>>();
-            let common_prefixes = projected
-                .iter_mut()
-                .filter_map(|item| item.2.take())
-                .collect::<Vec<_>>();
-            let mut contents = contents;
-            let mut common_prefixes = common_prefixes;
+            let truncated = listing.has_more;
+            let next = truncated.then_some(next).flatten();
+            let key_count = contents.len().saturating_add(common_prefixes.len());
             if url_encode {
                 for object in &mut contents {
                     object.key = encode_list_option(object.key.take(), true);
@@ -2847,9 +2841,7 @@ impl S3 for Gateway {
                 name: Some(req.input.bucket.clone()),
                 prefix: encode_list_option(req.input.prefix.clone(), url_encode),
                 max_keys: Some(max_keys),
-                key_count: Some(
-                    i32::try_from(projected.len()).map_err(|_| s3_error!(InternalError))?,
-                ),
+                key_count: Some(i32::try_from(key_count).map_err(|_| s3_error!(InternalError))?),
                 continuation_token: req.input.continuation_token.clone(),
                 next_continuation_token: next,
                 is_truncated: Some(truncated),
@@ -4140,7 +4132,10 @@ mod tests {
             uri: http::Uri::from_static("/repository"),
             headers: http::HeaderMap::new(),
             extensions: http::Extensions::new(),
-            credentials: None,
+            credentials: Some(s3s::auth::Credentials {
+                access_key: "listing-key".to_owned(),
+                secret_key: "listing-secret".into(),
+            }),
             region: None,
             service: None,
             trailing_headers: None,
@@ -4202,6 +4197,211 @@ mod tests {
         });
 
         assert!(empty_list_objects_response(&req, false).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn object_listing_pages_merge_blobs_and_prefixes_in_complete_key_order() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let cache = tempfile::tempdir().unwrap();
+        let local_cache = Arc::new(LocalCache::with_limits(
+            cache.path().join("cache"),
+            128 * 1024 * 1024,
+            Some(128 * 1024 * 1024),
+        ));
+        let repository = Repository::new_with_cache(
+            RepositoryConfig {
+                name: "repo".to_owned(),
+                provider: StorageProviderKind::Local,
+                bucket: "memory".to_owned(),
+                prefix: "listing-page-test".to_owned(),
+                default_branch: "main".to_owned(),
+                members: vec![crate::RepositoryMember {
+                    principal: "user".to_owned(),
+                    access: RepositoryAccess::Write,
+                }],
+                protected_branches: Vec::new(),
+                max_active_multipart_uploads: 16,
+                multipart_staging_bytes_per_upload: 50_000_000_000_000,
+                multipart_upload_ttl_seconds: 604_800,
+            },
+            store,
+            Arc::clone(&local_cache),
+        )
+        .unwrap();
+        crab_write::initialize::initialize_repository(
+            &repository.store,
+            &repository.layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(secret.path(), "listing-secret-value").unwrap();
+        let auth = GatewayAuth::load(&Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            management_listen: "127.0.0.1:1".parse().unwrap(),
+            endpoint_domain: None,
+            region: "us-east-1".to_owned(),
+            max_in_flight_requests: 8,
+            cache: crate::LocalCacheConfig {
+                directory: cache.path().join("auth-cache"),
+                max_bytes: 128 * 1024 * 1024,
+            },
+            credentials: vec![crate::CredentialConfig {
+                access_key: "listing-key".to_owned(),
+                secret_key_file: secret.path().to_owned(),
+                session_token_file: None,
+                expires_at: None,
+                principal: "user".to_owned(),
+            }],
+            repositories: Vec::new(),
+        })
+        .unwrap();
+        let cancellation = CancellationToken::new();
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let options = RepositoryOptions::default();
+        let metrics = Metrics::new().unwrap();
+        let gateway = Gateway {
+            repositories: Arc::new(BTreeMap::from([("repo".to_owned(), repository)])),
+            mutations: Arc::new(mutation::Coordinator::new(
+                Arc::clone(&runtime),
+                options,
+                metrics.clone(),
+            )),
+            runtime,
+            options,
+            auth,
+            region: Arc::from("us-east-1"),
+            admission: Admission::new(8, cancellation.clone(), metrics.clone()),
+            metrics,
+            local_cache,
+            cancellation,
+        };
+        let repository = &gateway.repositories["repo"];
+        for path in [
+            "prefix/a-1",
+            "prefix/a/item",
+            "prefix/a0",
+            "prefix/b/item",
+            "prefix/c",
+        ] {
+            let attributes = crate::attributes::PutAttributes {
+                etag_override: (path == "prefix/a-1").then(|| "listed-etag".to_owned()),
+                ..Default::default()
+            };
+            gateway
+                .mutations
+                .apply(
+                    repository,
+                    "refs/heads/main",
+                    &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+                    mutation::Change::Put {
+                        bytes: Bytes::from_static(b"value"),
+                        track_lfs: false,
+                        attributes: Box::new(attributes),
+                        condition: mutation::PutCondition::None,
+                    },
+                    "user",
+                    &gateway.cancellation,
+                )
+                .await
+                .unwrap();
+        }
+
+        let first = gateway
+            .list_objects_v2(list_request(ListObjectsV2Input {
+                bucket: "repo".to_owned(),
+                prefix: Some("main/prefix/".to_owned()),
+                delimiter: Some("/".to_owned()),
+                max_keys: Some(2),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(
+            (
+                first
+                    .contents
+                    .as_ref()
+                    .and_then(|objects| objects.first())
+                    .and_then(|object| object.key.as_deref()),
+                first
+                    .common_prefixes
+                    .as_ref()
+                    .and_then(|prefixes| prefixes.first())
+                    .and_then(|prefix| prefix.prefix.as_deref()),
+                first
+                    .contents
+                    .as_ref()
+                    .and_then(|objects| objects.first())
+                    .and_then(|object| object.e_tag.clone()),
+                first.key_count,
+                first.is_truncated,
+            ),
+            (
+                Some("main/prefix/a-1"),
+                Some("main/prefix/a/"),
+                Some(ETag::Strong("listed-etag".to_owned())),
+                Some(2),
+                Some(true),
+            )
+        );
+        let second = gateway
+            .list_objects_v2(list_request(ListObjectsV2Input {
+                bucket: "repo".to_owned(),
+                prefix: Some("main/prefix/".to_owned()),
+                delimiter: Some("/".to_owned()),
+                continuation_token: first.next_continuation_token,
+                max_keys: Some(2),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(
+            (
+                second
+                    .contents
+                    .as_ref()
+                    .and_then(|objects| objects.first())
+                    .and_then(|object| object.key.as_deref()),
+                second
+                    .common_prefixes
+                    .as_ref()
+                    .and_then(|prefixes| prefixes.first())
+                    .and_then(|prefix| prefix.prefix.as_deref()),
+                second.next_continuation_token.as_deref(),
+            ),
+            (
+                Some("main/prefix/a0"),
+                Some("main/prefix/b/"),
+                Some("main/prefix/b/"),
+            )
+        );
+        let last = gateway
+            .list_objects_v2(list_request(ListObjectsV2Input {
+                bucket: "repo".to_owned(),
+                prefix: Some("main/prefix/".to_owned()),
+                delimiter: Some("/".to_owned()),
+                continuation_token: second.next_continuation_token,
+                max_keys: Some(2),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(
+            (
+                last.contents
+                    .and_then(|objects| objects.into_iter().next().and_then(|object| object.key)),
+                last.key_count,
+                last.is_truncated,
+                last.next_continuation_token,
+            ),
+            (Some("main/prefix/c".to_owned()), Some(1), Some(false), None)
+        );
+        gateway.shutdown().await;
     }
 
     #[tokio::test]

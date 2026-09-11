@@ -631,7 +631,10 @@ Use the full visible S3 key, including encoded ref prefix, as the ordering and
 marker domain. Git tree order or naive recursive depth-first traversal is not
 proof of S3 lexical order. Establish a bounded traversal/seek algorithm with
 ordering tests for names such as `a-1`, directory `a/`, and `a0`; do not load and
-sort the entire repository for every page.
+sort the entire repository for every page. The gateway implementation projects
+the ref prefix into that full-key domain, binary-seeks each visited raw Git tree,
+and stops after `MaxKeys` plus one lookahead. Only blobs on the returned page may
+require metadata fallback; listing must never hydrate Crab/Xet or LFS payloads.
 
 For delimiter `/`, emit one CommonPrefix for the grouped subtree and advance
 past the group. Page accounting includes emitted groups as specified by S3.

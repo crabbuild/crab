@@ -362,7 +362,12 @@ pub(crate) fn find_tree_entry(
     Ok((None, comparisons))
 }
 
-fn tree_name_cmp(left: &[u8], left_is_tree: bool, right: &[u8], right_is_tree: bool) -> Ordering {
+pub(crate) fn tree_name_cmp(
+    left: &[u8],
+    left_is_tree: bool,
+    right: &[u8],
+    right_is_tree: bool,
+) -> Ordering {
     let compared = left.len().min(right.len());
     let ordering = left[..compared].cmp(&right[..compared]);
     if ordering != Ordering::Equal {

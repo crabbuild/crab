@@ -43,9 +43,9 @@ The supported entry points are:
 - `RemoteGitRepository::{generate_pack,generate_pack_cached,generate_pack_request_cached}`:
   verified response packs, with immutable reuse after selection or before an
   exact request is planned;
-- `RemoteGitSnapshot::{entry,list_directory,list_tree_recursive,blob_metadata,read_blob}`:
-  browser navigation, bounded metadata-only tree traversal, and Git-representation
-  content;
+- `RemoteGitSnapshot::{entry,list_directory,list_tree_blobs,list_tree_recursive,blob_metadata,read_blob}`:
+  browser navigation, bounded metadata-only tree traversal, seekable recursive
+  blob pages, and Git-representation content;
 - `RemoteGitSnapshot::{history,path_history,compare,diff,blame}`: bounded Git
   semantics without a checkout;
 - `RemoteGitSnapshot::{archive,archive_stream}`: bounded traversal, with the
@@ -170,11 +170,16 @@ place.
 
 ### Trees and history
 
-Directory listing reads only the selected tree. Recursive listing batches tree
-reads and returns metadata without reading blob bodies. Child sizes are absent
-unless the caller requests bounded page-only metadata. Directory cursors resume
-after an exact entry in the pinned tree, preserving Git order when files and
-directories share a name prefix. Comparison prunes equal tree IDs. History,
+Directory listing reads only the selected tree. `list_tree_blobs` binary-seeks
+each visited Git tree from an exact byte prefix and exclusive continuation,
+emits at most one lookahead beyond the requested page, and can collapse a
+delimiter subtree into one common prefix. Its canonical depth-first order is
+the bytewise order of complete paths, including the implicit `/` after a tree
+name. It never reads blob bodies. `list_tree_recursive` remains the exhaustive
+metadata traversal for callers that need the complete tree. Child sizes are
+absent unless the caller requests bounded page-only metadata. Directory cursors
+resume after an exact entry in the pinned tree, preserving Git order when files
+and directories share a name prefix. Comparison prunes equal tree IDs. History,
 diff, blame, archive, storage, inflation, and response work have independent
 aggregate limits.
 

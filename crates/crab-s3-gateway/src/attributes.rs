@@ -248,6 +248,53 @@ pub(crate) async fn load_object(
     Err(crate::Error::Config("S3 attribute delta chain is too deep"))
 }
 
+pub(crate) async fn load_objects(
+    repository: &Repository,
+    commit: ObjectId,
+    objects: &[(String, ObjectId)],
+) -> crate::Result<BTreeMap<String, ObjectAttributes>> {
+    let mut unresolved = objects.iter().cloned().collect::<BTreeMap<_, _>>();
+    let mut resolved = BTreeMap::new();
+    let mut current = Some(commit);
+    for _ in 0..MAX_DELTA_DEPTH {
+        if unresolved.is_empty() {
+            return Ok(resolved);
+        }
+        let Some(commit) = current else {
+            return Ok(resolved);
+        };
+        match load_stored(repository, commit).await? {
+            None => return Ok(resolved),
+            Some(Stored::Legacy(legacy)) => {
+                for (path, oid) in unresolved {
+                    if let Some(attributes) = legacy
+                        .objects
+                        .get(&path)
+                        .filter(|attributes| attributes.blob_oid == oid.to_string())
+                    {
+                        resolved.insert(path, attributes.clone());
+                    }
+                }
+                return Ok(resolved);
+            }
+            Some(Stored::Delta(delta)) => {
+                current = parse_parent(delta.parent.as_deref())?;
+                for (path, attributes) in delta.changes {
+                    let Some(oid) = unresolved.remove(&path) else {
+                        continue;
+                    };
+                    if let Some(attributes) =
+                        attributes.filter(|attributes| attributes.blob_oid == oid.to_string())
+                    {
+                        resolved.insert(path, attributes);
+                    }
+                }
+            }
+        }
+    }
+    Err(crate::Error::Config("S3 attribute delta chain is too deep"))
+}
+
 pub(crate) async fn save_delta(
     repository: &Repository,
     commit: ObjectId,

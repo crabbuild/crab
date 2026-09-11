@@ -17,6 +17,7 @@ mod runtime;
 mod snapshot;
 mod state;
 mod traversal;
+mod tree_listing;
 mod visibility;
 
 pub use budget::BudgetDimension;
@@ -53,3 +54,4 @@ pub use traversal::{
     DiffClassification, DiffHunk, DirectoryMetadata, HistoryTraversal, Page, PageCursor,
     PageRequest, PathHistoryEntry, Submodule, Symlink, TreeChange,
 };
+pub use tree_listing::{TreeListingItem, TreeListingPage, TreeListingRequest};
