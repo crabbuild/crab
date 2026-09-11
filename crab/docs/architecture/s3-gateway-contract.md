@@ -322,11 +322,14 @@ one second.
 
 Request bodies are streamed through bounded memory to temporary storage while
 checksums are computed. Declared request lengths reserve scratch before the body
-is consumed; unknown streams reserve bounded increments. Content spools, Xet
-range reconstruction, and generated Git packs share one atomic process-local
-gate. It retains 10% of visible capacity outside reservations, bounded to a
-64 MiB minimum and 1 GiB maximum. A failed capacity probe fails closed, and
-reservation pressure returns `SlowDown` without publishing partial state.
+is consumed; unknown streams reserve bounded increments. PutObject and UploadPart
+abort with `RequestTimeout` after 60 seconds without an incoming body frame; this
+is an idle timeout, not a total-transfer deadline, so large clients may continue
+for as long as they keep sending data. Content spools, Xet range reconstruction,
+and generated Git packs share one atomic process-local gate. It retains 10% of
+visible capacity outside reservations, bounded to a 64 MiB minimum and 1 GiB
+maximum. A failed capacity probe fails closed, and reservation pressure returns
+`SlowDown` without publishing partial state.
 Multipart completion keeps objects through 64 MiB in a local spool; larger
 objects validate and hash the frozen durable parts, then replay them through
 size-and-SHA-verified LFS publication without assembling the logical object on
