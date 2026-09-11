@@ -140,11 +140,12 @@ caller still owns the generation-owner election and any required GC fences.
 For journal commit, callers also own write authorization, individual ref-name/policy and
 graph/dependency validation, immutable uploads, visibility proof, and ref leases.
 After a failed marker write, the metadata journal attempts bounded exact readback.
-Matching marker bytes confirm commit and allow head cleanup to continue. If the
-marker is absent, different, oversized or unreadable, `RefJournalCommitUncertain`
-retains the transaction ID, original write error and any readback error. Absence
-does not prove rejection: a compactor may already have published the generation
-and removed the active marker. No prepared-head rollback follows a marker attempt.
+Matching marker bytes confirm commit and allow head cleanup to continue. An
+absent marker is confirmed only when every edited ref's immutable compaction
+frontier descends from the exact transaction ID. If neither proof succeeds, or
+the marker is different, oversized or unreadable, `RefJournalCommitUncertain`
+retains the transaction ID, original write error and any readback error. No
+prepared-head rollback follows a marker attempt.
 Callers must reconcile an uncertain outcome before reporting failure. Successful journal commit
 means refs are durable, not that the derived catalog is ready for reads.
 Current ref values alone cannot establish the historical transaction outcome;

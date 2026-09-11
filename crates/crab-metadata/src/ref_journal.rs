@@ -209,9 +209,9 @@ pub async fn read_ref_head(
 ///
 /// Each head first points at invisible prepared state. The immutable commit
 /// marker makes every edit visible together; later head promotion is cleanup.
-/// A failed marker write is confirmed by bounded exact readback when possible.
-/// Otherwise `RefJournalCommitUncertain` retains its identity and both failures;
-/// missing markers cannot prove rejection because compaction removes them.
+/// A failed marker write is confirmed by bounded exact readback or by an exact
+/// immutable compaction-frontier ancestry proof. Otherwise
+/// `RefJournalCommitUncertain` retains its identity and both failures.
 /// Cancellation before the marker rolls back prepared heads; after attempting
 /// the marker, the operation finishes outcome recovery and returns its result.
 pub async fn commit_ref_transaction(
@@ -321,8 +321,9 @@ async fn commit_ref_transaction_inner(
         )
         .await
     {
-        // A lost write response is not a rejected transaction. Confirm only the
-        // exact marker; never roll back prepared heads after attempting commit.
+        // A lost write response is not a rejected transaction. Confirm only
+        // exact marker bytes or exact compacted ancestry; current refs are not
+        // proof. Never roll back prepared heads after attempting commit.
         let verification = match marker_store
             .get_with_etag_bounded_with_timeout(
                 &marker_path,
@@ -336,7 +337,20 @@ async fn commit_ref_transaction_inner(
                 path: marker_path.to_string(),
                 reason: "commit marker differs from the submitted transaction".to_owned(),
             })),
-            Err(StorageError::NotFound { .. }) => Err(None),
+            Err(StorageError::NotFound { .. }) => {
+                match transaction_is_compacted(store, router, &transaction_id, transaction).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(None),
+                    Err(error) => {
+                        warn!(
+                            %transaction_id,
+                            %error,
+                            "could not verify ref transaction through the compaction frontier"
+                        );
+                        Err(None)
+                    }
+                }
+            }
             Err(error) => Err(Some(error)),
         };
         if let Err(verification) = verification {
@@ -496,6 +510,43 @@ pub async fn transaction_is_active(
         "ref journal active marker",
     )?;
     active_marker_exists(store, router, transaction_id).await
+}
+
+async fn transaction_is_compacted(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    transaction_id: &str,
+    transaction: &RefJournalTransaction,
+) -> Result<bool> {
+    let (manifest, _) = crate::manifest_store::read_manifest(store, router).await?;
+    let Some(frontier) = read_ref_journal_frontier(store, router, &manifest).await? else {
+        return Ok(false);
+    };
+    for edit in &transaction.edits {
+        let Some(mut current) = frontier.heads.get(&edit.ref_name).cloned() else {
+            return Ok(false);
+        };
+        let mut visited = BTreeSet::new();
+        loop {
+            if current == transaction_id {
+                break;
+            }
+            if !visited.insert(current.clone()) || visited.len() > MAX_REF_HEADS {
+                return Err(corrupt_object(
+                    router
+                        .ref_journal_frontier_path(&manifest.git_validation_digest)
+                        .as_ref(),
+                    "ref journal frontier ancestry is cyclic or exceeds its bound",
+                ));
+            }
+            let ancestor = read_transaction(store, router, &current).await?;
+            let Some(parent) = ancestor.parents.get(&edit.ref_name).cloned().flatten() else {
+                return Ok(false);
+            };
+            current = parent;
+        }
+    }
+    Ok(true)
 }
 
 /// Repair compacted head promotion before removing its visibility marker.

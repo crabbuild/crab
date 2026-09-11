@@ -76,7 +76,7 @@ pub enum MetadataError {
     )]
     PlanAlreadyAttempted { plan_id: String },
 
-    /// The commit marker write failed and its exact bytes could not be confirmed.
+    /// The commit marker write failed without exact marker or compaction-frontier proof.
     #[cfg(feature = "storage")]
     #[error(
         "ref journal transaction {transaction_id} may have committed; reconcile durable commit evidence before retrying; current refs alone cannot prove the outcome"

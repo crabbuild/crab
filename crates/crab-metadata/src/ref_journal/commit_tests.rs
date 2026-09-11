@@ -298,18 +298,12 @@ async fn unconfirmed_marker_preserves_identity_and_typed_failure() {
 }
 
 #[tokio::test]
-async fn missing_marker_after_compaction_is_not_reported_as_rejection() {
+async fn missing_marker_after_compaction_is_confirmed_by_the_frontier() {
     let (store, layout, origin, transaction, heads) = fixture(Fault::CompactedBeforeRead).await;
-    let error = commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
+    let committed = commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        MetadataError::RefJournalCommitUncertain {
-            verification: None,
-            ..
-        }
-    ));
+        .expect("compaction frontier proves the exact committed transaction");
+    assert_eq!(committed.transaction_id, transaction.id().unwrap());
     let (manifest, _) = manifest_store::read_manifest(&origin, &layout)
         .await
         .unwrap();
@@ -319,5 +313,77 @@ async fn missing_marker_after_compaction_is_not_reported_as_rejection() {
             ("refs/heads/dev".to_owned(), "a".repeat(40)),
             ("refs/heads/main".to_owned(), "a".repeat(40)),
         ])
+    );
+}
+
+#[tokio::test]
+async fn matching_compacted_ref_values_do_not_confirm_another_transaction() {
+    let (store, layout, origin, transaction, heads) = fixture(Fault::CompactedBeforeRead).await;
+    commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
+        .await
+        .expect("committed transaction is compacted during marker recovery");
+    let lookalike = RefJournalTransaction::new(
+        transaction.parents.clone(),
+        transaction.edits.clone(),
+        Some("refs/heads/main".to_owned()),
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let lookalike_id = lookalike.id().unwrap();
+
+    assert_ne!(lookalike_id, transaction.id().unwrap());
+    assert!(
+        !transaction_is_compacted(&origin, &layout, &lookalike_id, &lookalike)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn later_frontier_descendant_confirms_the_compacted_transaction() {
+    let (store, layout, origin, transaction, heads) = fixture(Fault::CompactedBeforeRead).await;
+    let committed = commit_ref_transaction(&store, &layout, &transaction, &heads, || false)
+        .await
+        .expect("first transaction is compacted during marker recovery");
+    let main = read_ref_head(&origin, &layout, "refs/heads/main")
+        .await
+        .unwrap();
+    let next = RefJournalTransaction::new(
+        BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            main.visible_transaction.clone(),
+        )]),
+        vec![RefJournalEdit {
+            ref_name: "refs/heads/main".to_owned(),
+            old_oid: Some("a".repeat(40)),
+            new_oid: Some("b".repeat(40)),
+            peeled_oid: None,
+            lock_holder: None,
+            visibility_evidence_hash: None,
+        }],
+        None,
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    commit_ref_transaction(&origin, &layout, &next, &[main], || false)
+        .await
+        .unwrap();
+    manifest_store::compact_ref_journal(
+        &origin,
+        &layout,
+        "2026-09-04T00:00:01.000Z".to_owned(),
+        None,
+        "later-compactor".to_owned(),
+    )
+    .await
+    .unwrap()
+    .expect("later transaction compacted");
+
+    assert!(
+        transaction_is_compacted(&origin, &layout, &committed.transaction_id, &transaction)
+            .await
+            .unwrap()
     );
 }

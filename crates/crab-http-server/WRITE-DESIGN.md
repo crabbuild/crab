@@ -381,10 +381,10 @@ generation under the manifest owner lease. `crab-remote-git` deliberately return
 The CLI now uses `crab-write::journal::commit_edits`, which checks the whole batch
 against a snapshot captured under retained ref leases, obtains causal parents
 and commits through the same metadata marker. A failed marker write is confirmed
-only by bounded readback of the exact expected bytes. Otherwise the typed
-`RefJournalCommitUncertain` preserves the transaction ID and write/readback errors.
-An absent marker is not a rejected push: generation compaction removes committed
-markers. HTTP receive must reconcile this outcome or fail the transport without
+by bounded readback of the exact expected bytes or an immutable compaction
+frontier proving that every edited ref descends from the exact transaction.
+Otherwise the typed `RefJournalCommitUncertain` preserves the transaction ID and
+write/readback errors. HTTP receive must reconcile this outcome or fail the transport without
 inventing an unchanged-ref result; Git's [report-status contract](https://git-scm.com/docs/pack-protocol#_report_status)
 reports the actual outcome for each requested ref. Prepared heads are never
 rolled back after a marker write is attempted.
