@@ -4227,6 +4227,7 @@ fn content_error(error: crate::content::Error) -> s3s::S3Error {
     match error {
         crate::content::Error::TooLarge => s3_error!(EntityTooLarge),
         crate::content::Error::Capacity(error) => scratch_capacity_error(error),
+        crate::content::Error::BodyTimeout => s3_error!(RequestTimeout),
         crate::content::Error::Incomplete | crate::content::Error::Body(_) => {
             tracing::warn!(%error, "S3 request body failed");
             s3_error!(IncompleteBody)

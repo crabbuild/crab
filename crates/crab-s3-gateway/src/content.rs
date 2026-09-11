@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -13,6 +16,7 @@ pub(crate) const MAX_PUT_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub(crate) const MAX_MULTIPART_OBJECT_BYTES: u64 = 50_000_000_000_000;
 pub(crate) const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub(crate) const INLINE_GIT_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) fn max_multipart_object_bytes(provider: crab_storage::StorageProviderKind) -> u64 {
     MAX_MULTIPART_OBJECT_BYTES.min(crab_storage::multipart::upload_limits(provider).max_object_size)
@@ -26,6 +30,8 @@ pub(crate) enum Error {
     Incomplete,
     #[error("request body stream failed")]
     Body(#[source] s3s::StdError),
+    #[error("request body was idle for too long")]
+    BodyTimeout,
     #[error("content spool I/O failed")]
     Io(#[from] std::io::Error),
     #[error("content spool capacity is unavailable")]
@@ -196,6 +202,16 @@ pub(crate) async fn spool_body(
     max_bytes: u64,
     metrics: &Metrics,
 ) -> Result<Spool, Error> {
+    spool_body_with_timeout(body, declared, max_bytes, metrics, BODY_IDLE_TIMEOUT).await
+}
+
+async fn spool_body_with_timeout(
+    body: Option<StreamingBlob>,
+    declared: Option<i64>,
+    max_bytes: u64,
+    metrics: &Metrics,
+    idle_timeout: Duration,
+) -> Result<Spool, Error> {
     let declared = declared
         .map(|length| u64::try_from(length).map_err(|_| Error::Incomplete))
         .transpose()?;
@@ -204,7 +220,10 @@ pub(crate) async fn spool_body(
     }
     let mut writer = SpoolWriter::new(metrics, declared).await?;
     if let Some(mut body) = body {
-        while let Some(chunk) = body.next().await {
+        while let Some(chunk) = tokio::time::timeout(idle_timeout, body.next())
+            .await
+            .map_err(|_| Error::BodyTimeout)?
+        {
             writer
                 .write(&chunk.map_err(Error::Body)?, max_bytes)
                 .await?;
@@ -317,6 +336,34 @@ mod tests {
             result,
             Err(Error::Capacity(ScratchCapacityError::Exhausted))
         ));
+    }
+
+    #[tokio::test]
+    async fn idle_body_timeout_releases_the_spool() {
+        let metrics = Metrics::new().unwrap();
+        let body = StreamingBlob::wrap(futures_util::stream::pending::<
+            std::result::Result<Bytes, std::io::Error>,
+        >());
+
+        let result = spool_body_with_timeout(
+            Some(body),
+            None,
+            u64::MAX,
+            &metrics,
+            std::time::Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::BodyTimeout)));
+        assert!(
+            metrics
+                .render(&crate::admission::Admission::new(
+                    8,
+                    tokio_util::sync::CancellationToken::new(),
+                    metrics.clone(),
+                ))
+                .contains("crab_s3_gateway_scratch_files{purpose=\"content_spool\"} 0")
+        );
     }
 
     #[tokio::test]
