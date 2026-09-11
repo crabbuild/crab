@@ -166,10 +166,9 @@ jobs:
 
       - name: Verify qualification evidence contract
         run: |
-          python3 -m py_compile \
-            crab/scripts/e2e/run_s3_gateway_orphan_cleanup.py \
-            crab/scripts/e2e/s3_gateway_qualification_report.py
-          python3 -m unittest \
+          python3 -B crab/scripts/e2e/run_s3_gateway_orphan_cleanup.py \
+            --help >/dev/null
+          python3 -B -m unittest \
             crab/scripts/e2e/test_s3_gateway_qualification_report.py
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
