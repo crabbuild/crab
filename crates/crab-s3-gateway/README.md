@@ -157,6 +157,9 @@ connections are closed before spawning a task. The transport parser accepts at
 most 128 HTTP/1 headers with a 128 KiB buffer and a 30-second header-read
 deadline; HTTP/2 is limited to 64 concurrent streams and a 128 KiB header list,
 with a 30-second keep-alive ping and a 10-second acknowledgement deadline. Each
+XML operation that `s3s` buffers, including multipart completion, is also bounded
+by the 60-second request-body idle timeout; streamed object and part uploads keep
+their existing body timeout and backpressure path.
 PutObject, UploadPart, and copied source range uses a request-local temporary
 file. Large multipart completion rereads durable parts instead of creating an
 additional full-object spool, so its local scratch does not scale with the

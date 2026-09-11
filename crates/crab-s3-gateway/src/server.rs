@@ -276,24 +276,70 @@ async fn observed_s3_response(
 fn request_body_with_digest(request: Request<Incoming>) -> Request<s3s::Body> {
     let needs_digest = needs_xml_body_digest(&request);
     let (parts, body) = request.into_parts();
-    if needs_digest {
+    if needs_xml_body_timeout_parts(&parts.method, &parts.uri, &parts.headers) {
         // `s3s` buffers XML mutation requests before dispatch; bound that body at
         // the transport boundary so a client cannot hold a connection forever.
         let body = body_with_idle_timeout(body, BODY_IDLE_TIMEOUT);
-        let digest = RequestBodyDigest::new();
-        let digest_for_body = digest.clone();
-        let body = body.map_frame(move |frame| {
-            if let Some(data) = frame.data_ref() {
-                digest_for_body.update(data.as_ref());
-            }
-            frame
-        });
-        let mut request = Request::from_parts(parts, s3s::Body::http_body_unsync(body));
-        request.extensions_mut().insert(digest);
-        request
+        if needs_digest {
+            let digest = RequestBodyDigest::new();
+            let digest_for_body = digest.clone();
+            let body = body.map_frame(move |frame| {
+                if let Some(data) = frame.data_ref() {
+                    digest_for_body.update(data.as_ref());
+                }
+                frame
+            });
+            let mut request = Request::from_parts(parts, s3s::Body::http_body_unsync(body));
+            request.extensions_mut().insert(digest);
+            request
+        } else {
+            Request::from_parts(parts, s3s::Body::http_body_unsync(body))
+        }
     } else {
         Request::from_parts(parts, s3s::Body::from(body))
     }
+}
+
+fn needs_xml_body_timeout_parts(
+    method: &Method,
+    uri: &http::Uri,
+    headers: &http::HeaderMap,
+) -> bool {
+    match *method {
+        Method::POST => !is_multipart_form(headers),
+        Method::PUT => {
+            let upload_part = has_query_flag(uri, "partNumber")
+                && has_query_flag(uri, "uploadId")
+                && !headers.contains_key("x-amz-copy-source");
+            !upload_part && uri.query().is_some_and(|query| !query.is_empty())
+        }
+        _ => false,
+    }
+}
+
+fn is_multipart_form(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("multipart/form-data"))
+}
+
+fn needs_xml_body_digest(request: &Request<Incoming>) -> bool {
+    match *request.method() {
+        Method::POST => has_query_flag(request.uri(), "delete"),
+        Method::PUT => has_query_flag(request.uri(), "tagging"),
+        _ => false,
+    }
+}
+
+fn has_query_flag(uri: &http::Uri, flag: &str) -> bool {
+    uri.query().is_some_and(|query| {
+        query.split('&').any(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            key == flag
+        })
+    })
 }
 
 fn body_with_idle_timeout<B>(
@@ -328,23 +374,6 @@ where
         }
     });
     http_body_util::StreamBody::new(stream)
-}
-
-fn needs_xml_body_digest(request: &Request<Incoming>) -> bool {
-    match *request.method() {
-        Method::POST => has_query_flag(request.uri(), "delete"),
-        Method::PUT => has_query_flag(request.uri(), "tagging"),
-        _ => false,
-    }
-}
-
-fn has_query_flag(uri: &http::Uri, flag: &str) -> bool {
-    uri.query().is_some_and(|query| {
-        query.split('&').any(|pair| {
-            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
-            key == flag
-        })
-    })
 }
 
 async fn readiness_response(gateway: &Gateway) -> Response<Full<Bytes>> {
@@ -496,6 +525,47 @@ mod tests {
         assert!(!has_query_flag(
             &"/repo?delete-marker".parse().unwrap(),
             "delete"
+        ));
+    }
+
+    #[test]
+    fn buffered_xml_operations_get_idle_bounds_without_wrapping_streamed_uploads() {
+        let headers = http::HeaderMap::new();
+        assert!(needs_xml_body_timeout_parts(
+            &Method::POST,
+            &"/repo/key?uploadId=upload".parse().unwrap(),
+            &headers,
+        ));
+        assert!(needs_xml_body_timeout_parts(
+            &Method::PUT,
+            &"/repo/key?tagging".parse().unwrap(),
+            &headers,
+        ));
+        assert!(needs_xml_body_timeout_parts(
+            &Method::POST,
+            &"/repo?delete".parse().unwrap(),
+            &headers,
+        ));
+        assert!(!needs_xml_body_timeout_parts(
+            &Method::PUT,
+            &"/repo/key".parse().unwrap(),
+            &headers,
+        ));
+        assert!(!needs_xml_body_timeout_parts(
+            &Method::PUT,
+            &"/repo/key?partNumber=1&uploadId=upload".parse().unwrap(),
+            &headers,
+        ));
+
+        let mut form_headers = http::HeaderMap::new();
+        form_headers.insert(
+            header::CONTENT_TYPE,
+            "multipart/form-data; boundary=test".parse().unwrap(),
+        );
+        assert!(!needs_xml_body_timeout_parts(
+            &Method::POST,
+            &"/repo".parse().unwrap(),
+            &form_headers,
         ));
     }
 
