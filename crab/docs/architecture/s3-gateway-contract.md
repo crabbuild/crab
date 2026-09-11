@@ -352,8 +352,12 @@ abort with `RequestTimeout` after 60 seconds without an incoming body frame; thi
 is an idle timeout, not a total-transfer deadline, so large clients may continue
 for as long as they keep sending data. XML operations that `s3s` buffers,
 including multipart completion, use the same 60-second body-idle bound; streamed
-multipart form uploads remain on their streaming path. Content spools, Xet range reconstruction,
-and generated Git packs share one atomic process-local gate. It retains 10% of
+multipart form uploads remain on their streaming path. Response streams use the
+same 60-second per-frame idle bound, releasing read admission and dropping the
+underlying provider or Xet stream on timeout; this is not a total-transfer
+deadline, so large downloads may continue while bytes keep arriving. Content
+spools, Xet range reconstruction, and generated Git packs share one atomic
+process-local gate. It retains 10% of
 visible capacity outside reservations, bounded to a 64 MiB minimum and 1 GiB
 maximum. A failed capacity probe fails closed, and reservation pressure returns
 `SlowDown` without publishing partial state.

@@ -159,7 +159,10 @@ deadline; HTTP/2 is limited to 64 concurrent streams and a 128 KiB header list,
 with a 30-second keep-alive ping and a 10-second acknowledgement deadline. Each
 XML operation that `s3s` buffers, including multipart completion, is also bounded
 by the 60-second request-body idle timeout; streamed object and part uploads keep
-their existing body timeout and backpressure path.
+their existing body timeout and backpressure path. Object response streams also
+use a 60-second per-frame idle timeout: a stalled provider or Xet reconstruction
+releases read admission and is dropped, while a continuously producing large
+download has no total-transfer deadline.
 PutObject, UploadPart, and copied source range uses a request-local temporary
 file. Large multipart completion rereads durable parts instead of creating an
 additional full-object spool, so its local scratch does not scale with the
