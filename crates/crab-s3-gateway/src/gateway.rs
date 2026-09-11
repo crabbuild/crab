@@ -1586,6 +1586,7 @@ impl S3 for Gateway {
             &req,
             req.input.content_md5.as_deref(),
             req.input.checksum_algorithm.as_ref(),
+            true,
         )?;
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
@@ -1719,7 +1720,7 @@ impl S3 for Gateway {
         {
             return Err(s3_error!(NotImplemented));
         }
-        verify_xml_request_integrity(&req, None, req.input.checksum_algorithm.as_ref())?;
+        verify_xml_request_integrity(&req, None, req.input.checksum_algorithm.as_ref(), true)?;
         if req.input.delete.objects.len() > 1000 {
             return Err(s3_error!(
                 MalformedXML,
@@ -2887,6 +2888,7 @@ fn verify_xml_request_integrity<T>(
     req: &S3Request<T>,
     content_md5: Option<&str>,
     checksum_algorithm: Option<&ChecksumAlgorithm>,
+    require_md5: bool,
 ) -> S3Result<()> {
     let header_md5 = req
         .headers
@@ -2894,6 +2896,9 @@ fn verify_xml_request_integrity<T>(
         .map(|value| value.to_str().map_err(|_| s3_error!(InvalidDigest)))
         .transpose()?;
     let expected_md5 = content_md5.or(header_md5);
+    if require_md5 && expected_md5.is_none() {
+        return Err(s3_error!(InvalidDigest));
+    }
     let has_checksum_header = [
         "x-amz-checksum-crc32",
         "x-amz-checksum-crc32c",
@@ -5198,7 +5203,7 @@ mod tests {
         };
         req.extensions.insert(digest);
         let md5 = base64::engine::general_purpose::STANDARD.encode(md5::Md5::digest(body));
-        verify_xml_request_integrity(&req, Some(&md5), None).unwrap();
+        verify_xml_request_integrity(&req, Some(&md5), None, true).unwrap();
 
         let digest = crate::server::RequestBodyDigest::new();
         digest.update(body);
@@ -5220,8 +5225,17 @@ mod tests {
             &req,
             None,
             Some(&ChecksumAlgorithm::from_static(ChecksumAlgorithm::CRC32)),
+            false,
         )
         .unwrap();
+
+        let digest = crate::server::RequestBodyDigest::new();
+        digest.update(body);
+        req.extensions = http::Extensions::new();
+        req.extensions.insert(digest);
+        req.headers.clear();
+        let error = verify_xml_request_integrity(&req, None, None, true).unwrap_err();
+        assert_eq!(error.code().as_str(), "InvalidDigest");
 
         let digest = crate::server::RequestBodyDigest::new();
         digest.update(body);
@@ -5234,7 +5248,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        let error = verify_xml_request_integrity(&req, None, None).unwrap_err();
+        let error = verify_xml_request_integrity(&req, None, None, false).unwrap_err();
         assert_eq!(error.code().as_str(), "BadDigest");
     }
 
