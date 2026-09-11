@@ -125,6 +125,9 @@ seek from the requested prefix and continuation in canonical complete-path byte
 order, visit only enough tree entries for `MaxKeys` plus one lookahead, and
 collapse delimiter subtrees before descent. Page cost therefore does not scale
 with every preceding or following object in the repository.
+The in-memory singleflight maps clear at bounded entry counts, so a long-lived
+read generation cannot grow with the number of distinct refs and object paths
+served through it.
 The attribute loader projects each emitted object to ETag, size, and modification
 time before retaining the page, so multipart part/checksum metadata cannot make a
 large object listing grow with historical upload detail.

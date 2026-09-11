@@ -106,21 +106,33 @@ fn request_session_token(headers: &HeaderMap, uri: &Uri) -> S3Result<Option<(Str
     let mut header_values = headers.get_all("x-amz-security-token").iter();
     let header_token = header_values
         .next()
-        .map(|value| value.to_str().map(str::to_owned))
-        .transpose()
-        .map_err(|_| s3s::s3_error!(InvalidToken))?;
+        .map(|value| {
+            let value = value.to_str().map_err(|_| s3s::s3_error!(InvalidToken))?;
+            if value.len() > MAX_SESSION_TOKEN_BYTES {
+                return Err(s3s::s3_error!(InvalidToken));
+            }
+            Ok(value.to_owned())
+        })
+        .transpose()?;
     if header_values.next().is_some() {
         return Err(s3s::s3_error!(InvalidToken));
     }
 
-    let mut query_tokens = uri
+    let mut query_token = None;
+    for (name, value) in uri
         .query()
         .into_iter()
         .flat_map(|query| url::form_urlencoded::parse(query.as_bytes()))
-        .filter(|(name, _)| name == "X-Amz-Security-Token")
-        .map(|(_, value)| value.into_owned());
-    let query_token = query_tokens.next();
-    if query_tokens.next().is_some() || (header_token.is_some() && query_token.is_some()) {
+    {
+        if name != "X-Amz-Security-Token" {
+            continue;
+        }
+        if value.len() > MAX_SESSION_TOKEN_BYTES || query_token.is_some() {
+            return Err(s3s::s3_error!(InvalidToken));
+        }
+        query_token = Some(value.into_owned());
+    }
+    if header_token.is_some() && query_token.is_some() {
         return Err(s3s::s3_error!(InvalidToken));
     }
     Ok(header_token

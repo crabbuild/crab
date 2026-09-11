@@ -357,6 +357,9 @@ the cache owner can safely create, publish, sync, and remove a
 descriptor-relative probe. Deploy the cache on a private volume separate from
 scratch; cache loss may reduce performance but never removes acknowledged
 repository state.
+In-memory singleflight maps inside each immutable read view are independently
+bounded; eviction may repeat a cold lookup but cannot invalidate a view or
+remove acknowledged state.
 
 The private metrics listener reports cache attempts by the fixed
 memory/local/service and hit/miss/failure dimensions, verified hit bytes, local
