@@ -6964,11 +6964,6 @@ impl PushPipeline {
             return Ok(());
         }
 
-        if self.base_snapshot.lock().await.is_some() {
-            debug!("read_base_manifest: reusing snapshot captured under push locks");
-            return Ok(());
-        }
-
         let Some(store) = &self.store else {
             debug!("read_base_manifest: no store, skipping");
             return Ok(());
@@ -7000,6 +6995,15 @@ impl PushPipeline {
         }
 
         Ok(())
+    }
+
+    /// Establish the pipeline's initial base without rereading a locked snapshot.
+    async fn ensure_initial_base_manifest(&self) -> Result<()> {
+        if self.base_snapshot.lock().await.is_some() {
+            debug!("reusing initial snapshot captured under push locks");
+            return Ok(());
+        }
+        self.read_base_manifest().await
     }
 
     async fn base_manifest(&self) -> Option<Manifest> {
@@ -16047,7 +16051,7 @@ impl PushPipeline {
         // This establishes the base state for `build_manifest` later.
         self.at_stage(
             PushFailureStage::RemoteState,
-            self.read_base_manifest().await,
+            self.ensure_initial_base_manifest().await,
         )?;
 
         // Resolve policy and ref preconditions before dependency discovery or
@@ -35654,7 +35658,7 @@ mod tests {
             .await;
 
         pipeline
-            .read_base_manifest()
+            .ensure_initial_base_manifest()
             .await
             .expect("reuse locked snapshot");
 
