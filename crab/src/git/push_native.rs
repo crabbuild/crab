@@ -19,7 +19,7 @@ use crate::core::perf_phase::PerfPhaseSink;
 use crate::git::discover;
 use crate::git::progress::NativePushProgress;
 use crate::git::push::{
-    PrePopulatedWalk, PushConfig, PushFailureStage, PushLockLease, PushResult,
+    LockedPushHandoff, PrePopulatedWalk, PushConfig, PushFailureStage, PushLockLease, PushResult,
     acquire_push_lock_leases, duplicate_destination_result, release_push_lock_leases,
     run_push_batch_with_locks,
 };
@@ -365,6 +365,24 @@ async fn run_native_push_inner(
     // ── Phase 1: Discover ──────────────────────────────────────────
     release_native_locks_on_error(check_cancelled(&cancel), &mut pre_acquired_locks).await?;
     let phase_start = Instant::now();
+    if pre_acquired_locks.is_none() && !config.followtags && config.push.protected_push.is_none() {
+        match acquire_push_lock_leases(&store, router.repo_prefix(), specs, &config.push, &cancel)
+            .await
+        {
+            Ok(leases) => {
+                debug!(
+                    lock_count = leases.len(),
+                    "native push: acquired push locks before repository snapshot"
+                );
+                pre_acquired_locks = Some(leases);
+            }
+            Err(e) => {
+                warn!(error = %e, "native push: failed to acquire push lock before discovery");
+                return Ok(push_lock_rejection_result(specs, &e));
+            }
+        }
+    }
+    let mut locked_base_snapshot = None;
     let remote_refs_for_discovery = if let Some(session) = config.push.protected_push.as_ref() {
         // Prepare returns refs from the caller's filtered view. Those OIDs are
         // the only safe and locally resolvable frontier for a path-scoped
@@ -378,7 +396,14 @@ async fn run_native_push_inner(
         )
         .await
         {
-            Ok(snapshot) => Some(snapshot.journal.refs),
+            Ok(snapshot) => {
+                let snapshot = Arc::new(snapshot);
+                let refs = snapshot.journal.refs.clone();
+                if pre_acquired_locks.is_some() && !config.followtags {
+                    locked_base_snapshot = Some(snapshot);
+                }
+                Some(refs)
+            }
             Err(CrabError::NotFound { path })
                 if config.followtags && path == router.manifest_path().as_ref() =>
             {
@@ -394,23 +419,6 @@ async fn run_native_push_inner(
             }
         }
     };
-    if pre_acquired_locks.is_none() && !config.followtags && config.push.protected_push.is_none() {
-        match acquire_push_lock_leases(&store, router.repo_prefix(), specs, &config.push, &cancel)
-            .await
-        {
-            Ok(leases) => {
-                debug!(
-                    lock_count = leases.len(),
-                    "native push: acquired push locks before discovery"
-                );
-                pre_acquired_locks = Some(leases);
-            }
-            Err(e) => {
-                warn!(error = %e, "native push: failed to acquire push lock before discovery");
-                return Ok(push_lock_rejection_result(specs, &e));
-            }
-        }
-    }
     progress.begin_discovery();
     let discovery_ticker = progress.start_ticker();
     let discovery = if config.mirror_git_only {
@@ -611,6 +619,7 @@ async fn run_native_push_inner(
                     commit_entries.clone(),
                     sha_map.clone(),
                     remote_name,
+                    locked_base_snapshot.clone(),
                 )
                 .await
             }
@@ -640,6 +649,7 @@ async fn run_native_push_inner(
                             commit_entries.clone(),
                             sha_map.clone(),
                             remote_name,
+                            None,
                         )
                         .await
                     }
@@ -725,6 +735,7 @@ async fn run_native_push_with_locks(
     commit_entries: Vec<crab_metadata::commit_graph::CommitEntry>,
     sha_map: HashMap<String, String>,
     remote_name: &str,
+    locked_base_snapshot: Option<Arc<crate::metadata::manifest::RepositorySnapshot>>,
 ) -> PushResult {
     let prepopulated = PrePopulatedWalk {
         pointers,
@@ -732,6 +743,10 @@ async fn run_native_push_with_locks(
         resolved_shas: sha_map,
         remote_alias: remote_name.to_owned(),
     };
+    let mut handoff = LockedPushHandoff::new(leases, Some(prepopulated));
+    if let Some(snapshot) = locked_base_snapshot {
+        handoff = handoff.with_locked_base_snapshot(snapshot);
+    }
     Box::pin(run_push_batch_with_locks(
         specs,
         delegated_push,
@@ -742,8 +757,7 @@ async fn run_native_push_with_locks(
         metrics,
         cancel,
         Some(progress),
-        leases,
-        Some(prepopulated),
+        handoff,
     ))
     .await
 }
@@ -1358,6 +1372,101 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct GatedReadStore {
+        inner: Arc<object_store::memory::InMemory>,
+        target: object_store::path::Path,
+        started: Arc<tokio::sync::Semaphore>,
+        release: Arc<tokio::sync::Semaphore>,
+        gate_once: std::sync::atomic::AtomicBool,
+    }
+
+    impl std::fmt::Display for GatedReadStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("GatedReadStore")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for GatedReadStore {
+        async fn put_opts(
+            &self,
+            location: &object_store::path::Path,
+            payload: object_store::PutPayload,
+            options: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &object_store::path::Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            if !options.head
+                && location == &self.target
+                && self
+                    .gate_once
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.started.add_permits(1);
+                let permit =
+                    self.release
+                        .acquire()
+                        .await
+                        .map_err(|error| object_store::Error::Generic {
+                            store: "gated-read",
+                            source: Box::new(error),
+                        })?;
+                permit.forget();
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures_util::stream::BoxStream<
+                'static,
+                object_store::Result<object_store::path::Path>,
+            >,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+        {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&object_store::path::Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &object_store::path::Path,
+            to: &object_store::path::Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
     struct TinyGitFixture {
         _git_env: crate::test::git_repo::CleanGitEnvGuard,
         _dir: tempfile::TempDir,
@@ -1754,6 +1863,81 @@ mod tests {
                 "{case}: cleanup must complete before returning to the caller"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_push_acquires_ref_lease_before_snapshot_read() {
+        let fixture = TinyGitFixture::new();
+        let tip = fixture.commit_text("readme.txt", "locked snapshot ordering");
+        let backing = Arc::new(object_store::memory::InMemory::new());
+        let setup_store = Store::new(backing.clone());
+        let prefix = "locked-snapshot-ordering";
+        let setup_router = StoreLayout::new(setup_store.clone(), prefix.to_owned());
+        crate::core::remote_layout::initialize(&setup_store, &setup_router)
+            .await
+            .unwrap();
+        crate::cmd::init::create_initial_manifest(&setup_store, &setup_router, "refs/heads/main")
+            .await
+            .unwrap();
+
+        let gated = Arc::new(GatedReadStore {
+            inner: backing,
+            target: setup_router.layout_descriptor_path(),
+            started: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            gate_once: std::sync::atomic::AtomicBool::new(true),
+        });
+        let store = Store::new(gated.clone());
+        let router = StoreLayout::new(store.clone(), prefix.to_owned());
+        let mut config = NativePushConfig::new(PushConfig {
+            git_dir: Some(fixture.git_dir.clone()),
+            ..PushConfig::default()
+        });
+        config.progress = false;
+        config.emit_summary = false;
+        let specs = vec![main_push_spec()];
+        let mut state = PushState::default();
+        let mut push = Box::pin(run_native_push(
+            &config,
+            &specs,
+            NativePushInputs::new(
+                Some(store),
+                None,
+                PushStaging::Missing,
+                router,
+                &mut state,
+                "origin",
+                "crab://bucket/locked-snapshot-ordering",
+                None,
+                CancellationToken::new(),
+            ),
+        ));
+
+        tokio::select! {
+            permit = gated.started.acquire() => permit.unwrap().forget(),
+            result = &mut push => panic!("push finished before its snapshot read was gated: {result:?}"),
+        }
+        assert!(
+            crab_coordination::PushLock::ref_lease_is_claimed(
+                setup_store.inner(),
+                prefix,
+                "refs/heads/main",
+            )
+            .await
+            .unwrap(),
+            "the destination-ref lease must precede the first snapshot read"
+        );
+
+        gated.release.add_permits(1);
+        let result = push
+            .await
+            .expect("native push after releasing snapshot read");
+        assert!(result.all_ok());
+        let snapshot =
+            crate::metadata::manifest::read_repository_snapshot(&setup_store, &setup_router)
+                .await
+                .unwrap();
+        assert_eq!(snapshot.journal.refs.get("refs/heads/main"), Some(&tip));
     }
 
     #[tokio::test]

@@ -56,8 +56,13 @@ planning and again after closing the writer. A superseded sample returns `None`;
 a current sample returns advancement and catalog/sweep statistics. The CLI owner
 reports superseded samples before writing a generation receipt or running later
 maintenance. Its continuous loop retries immediately; a one-shot run reports the
-superseded sample and exits. The shared anchor parser also serves native push, repack and history
-recovery; malformed index hashes retain their source errors.
+superseded sample and exits. After ref-journal compaction, the CLI's continuous
+owner instead requires a clean elapsed quiet window of at least one polling interval
+and five seconds before it starts repository-sized derived maintenance. Once that
+work is complete, unchanged manifest identity uses
+the last verified maintenance snapshot until the periodic revalidation. The shared
+anchor parser also serves native push, repack and history recovery; malformed index
+hashes retain their source errors.
 
 `generation::maintain_commit_graph` derives a missing generation-bound split
 commit graph through bounded `crab-remote-git` batches after catalog readiness.
@@ -135,11 +140,12 @@ caller still owns the generation-owner election and any required GC fences.
 For journal commit, callers also own write authorization, individual ref-name/policy and
 graph/dependency validation, immutable uploads, visibility proof, and ref leases.
 After a failed marker write, the metadata journal attempts bounded exact readback.
-Matching marker bytes confirm commit and allow head cleanup to continue. If the
-marker is absent, different, oversized or unreadable, `RefJournalCommitUncertain`
-retains the transaction ID, original write error and any readback error. Absence
-does not prove rejection: a compactor may already have published the generation
-and removed the active marker. No prepared-head rollback follows a marker attempt.
+Matching marker bytes confirm commit and allow head cleanup to continue. An
+absent marker is confirmed only when every edited ref's immutable compaction
+frontier descends from the exact transaction ID. If neither proof succeeds, or
+the marker is different, oversized or unreadable, `RefJournalCommitUncertain`
+retains the transaction ID, original write error and any readback error. No
+prepared-head rollback follows a marker attempt.
 Callers must reconcile an uncertain outcome before reporting failure. Successful journal commit
 means refs are durable, not that the derived catalog is ready for reads.
 Current ref values alone cannot establish the historical transaction outcome;

@@ -64,9 +64,15 @@ crab metadb owner --interval 30 --jsonl
 
 It reuses one exclusive locator writer across generations and publishes
 immutable read checkpoints before visibility repair. Push clients only pay an
-owner-lease probe and do not each rebuild the shared locator. If the owner is
-between generations or unavailable, complete-pack fetch remains available and
-a client can resume the canonical repair path after the lease expires.
+owner-lease probe and do not each rebuild the shared locator. During sustained
+pushes, the owner drains ref-journal transactions before derived maintenance and
+requires an elapsed quiet window of at least one polling interval and five seconds
+before starting repository-sized catalog, commit-graph, or repack work. Once
+maintenance converges, unchanged manifest
+identity reports the last verified inventory snapshot without rescanning the
+repository on every poll. If the owner is between generations or unavailable,
+complete-pack fetch remains available and a client can resume the canonical
+repair path after the lease expires.
 
 ## Rebuilding from Shards
 

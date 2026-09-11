@@ -356,8 +356,10 @@ fn build_metadb(
     MetaDb::new(store, repo_prefix, metadb_config)
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct GenerationOwnerSample {
+    #[serde(skip)]
+    identity: GenerationOwnerIdentity,
     generation: u64,
     action: &'static str,
     maintenance_reason: &'static str,
@@ -378,6 +380,31 @@ struct GenerationOwnerSample {
     elapsed_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationOwnerIdentity {
+    generation: u64,
+    pack_index_hash: String,
+    git_validation_digest: String,
+    commit_graph_hash: Option<String>,
+}
+
+impl From<&crab_metadata::manifests::Manifest> for GenerationOwnerIdentity {
+    fn from(manifest: &crab_metadata::manifests::Manifest) -> Self {
+        Self {
+            generation: manifest.generation,
+            pack_index_hash: manifest.pack_index_hash.clone(),
+            git_validation_digest: manifest.git_validation_digest.clone(),
+            commit_graph_hash: manifest.commit_graph_hash.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CompletedGenerationOwnerWork {
+    sample: GenerationOwnerSample,
+    completed_at: std::time::Instant,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CommitGraphMaintenance {
     action: &'static str,
@@ -390,6 +417,13 @@ struct CommitGraphMaintenance {
 const GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const GENERATION_OWNER_ONCE_RETRY_LIMIT: u32 = 3;
 const GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS: u64 = 2;
+const GENERATION_OWNER_MIN_QUIESCENCE: std::time::Duration = std::time::Duration::from_secs(5);
+const GENERATION_OWNER_STABLE_REVALIDATION: std::time::Duration =
+    std::time::Duration::from_mins(10);
+
+fn generation_owner_quiescence(interval_secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(interval_secs).max(GENERATION_OWNER_MIN_QUIESCENCE)
+}
 
 async fn run_generation_owner(
     once: bool,
@@ -452,6 +486,11 @@ async fn generation_owner_loop(
 ) -> Result<()> {
     let mut consecutive_errors = 0_u32;
     let mut once_errors = 0_u32;
+    // Continuous owners require an elapsed quiet window before starting
+    // repository-sized derived work. One-shot runs remain explicitly eager.
+    let quiescence = generation_owner_quiescence(interval_secs);
+    let mut derived_work_after = (!once).then(|| std::time::Instant::now() + quiescence);
+    let mut completed_work = None;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
@@ -462,6 +501,9 @@ async fn generation_owner_loop(
             lock_ttl,
             interval_secs,
             config,
+            once || derived_work_after
+                .is_none_or(|eligible_at| std::time::Instant::now() >= eligible_at),
+            completed_work.as_ref(),
             cancel,
         ))
         .await
@@ -476,7 +518,24 @@ async fn generation_owner_loop(
                 if once {
                     return Ok(());
                 }
-                if sample.superseded {
+                match sample.action {
+                    "ref_journal_compaction" => {
+                        derived_work_after = Some(std::time::Instant::now() + quiescence);
+                        completed_work = None;
+                    }
+                    "quiescence_wait" => {}
+                    "none" => {
+                        completed_work = Some(CompletedGenerationOwnerWork {
+                            sample: sample.clone(),
+                            completed_at: std::time::Instant::now(),
+                        });
+                    }
+                    "idle" => {}
+                    _ => completed_work = None,
+                }
+                // A compaction restarts the elapsed quiet window instead of
+                // immediately opening the large catalog/repack path.
+                if sample.superseded && sample.action != "ref_journal_compaction" {
                     continue;
                 }
             }
@@ -533,10 +592,13 @@ async fn generation_owner_sample(
     lock_ttl: std::time::Duration,
     interval_secs: u64,
     config: &Config,
+    derived_work_ready: bool,
+    completed_work: Option<&CompletedGenerationOwnerWork>,
     cancel: &CancellationToken,
 ) -> Result<GenerationOwnerSample> {
     let started = std::time::Instant::now();
     let (manifest, _) = crate::metadata::manifest::read_manifest(store, router).await?;
+    let identity = GenerationOwnerIdentity::from(&manifest);
     let generation = manifest.generation;
     if crate::git::push::compact_ref_journal_for_owner(
         store,
@@ -547,11 +609,30 @@ async fn generation_owner_sample(
     )
     .await?
     {
-        return Ok(superseded_owner_sample(
+        return Ok(empty_owner_sample(
+            identity,
             generation,
             "ref_journal_compaction",
+            interval_secs,
+            true,
             started,
         ));
+    }
+    if !derived_work_ready {
+        return Ok(empty_owner_sample(
+            identity,
+            generation,
+            "quiescence_wait",
+            interval_secs,
+            false,
+            started,
+        ));
+    }
+    if let Some(completed) = completed_work
+        && completed.sample.identity == identity
+        && completed.completed_at.elapsed() < GENERATION_OWNER_STABLE_REVALIDATION
+    {
+        return Ok(idle_owner_sample(completed, interval_secs, started));
     }
     let packs = if manifest.pack_index_hash.is_empty() {
         Vec::new()
@@ -582,7 +663,14 @@ async fn generation_owner_sample(
         sweep: locator_sweep,
     }) = maintenance
     else {
-        return Ok(superseded_owner_sample(generation, "superseded", started));
+        return Ok(empty_owner_sample(
+            identity,
+            generation,
+            "superseded",
+            0,
+            true,
+            started,
+        ));
     };
     // The owner is also the repair path for imports and Git-only pushes that
     // had no post-CAS MetaDb writer. Once locator coverage is current, publish
@@ -604,6 +692,7 @@ async fn generation_owner_sample(
     }
     if locator_advanced {
         return Ok(GenerationOwnerSample {
+            identity,
             generation,
             action: "catalog_advance",
             maintenance_reason: generation_owner_reason("catalog_advance"),
@@ -659,6 +748,7 @@ async fn generation_owner_sample(
             "visibility_repair"
         };
         return Ok(GenerationOwnerSample {
+            identity,
             generation,
             action,
             maintenance_reason: generation_owner_reason(action),
@@ -748,6 +838,7 @@ async fn generation_owner_sample(
         }
     }
     Ok(GenerationOwnerSample {
+        identity,
         generation,
         action: graph.action,
         maintenance_reason: generation_owner_reason(graph.action),
@@ -769,16 +860,38 @@ async fn generation_owner_sample(
     })
 }
 
-fn superseded_owner_sample(
+fn idle_owner_sample(
+    completed: &CompletedGenerationOwnerWork,
+    interval_secs: u64,
+    started: std::time::Instant,
+) -> GenerationOwnerSample {
+    let mut sample = completed.sample.clone();
+    sample.action = "idle";
+    sample.maintenance_reason = generation_owner_reason(sample.action);
+    sample.next_eligibility_secs = interval_secs;
+    sample.locator_advanced = false;
+    sample.locator_sweep = crab_metadata::git_object_locator::LocatorSweepStats::default();
+    sample.maintenance_bytes_read = 0;
+    sample.maintenance_bytes_written = 0;
+    sample.superseded = false;
+    sample.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    sample
+}
+
+fn empty_owner_sample(
+    identity: GenerationOwnerIdentity,
     generation: u64,
     action: &'static str,
+    next_eligibility_secs: u64,
+    superseded: bool,
     started: std::time::Instant,
 ) -> GenerationOwnerSample {
     GenerationOwnerSample {
+        identity,
         generation,
         action,
         maintenance_reason: generation_owner_reason(action),
-        next_eligibility_secs: 0,
+        next_eligibility_secs,
         locator_advanced: false,
         visibility: "deferred",
         active_packs: 0,
@@ -786,12 +899,12 @@ fn superseded_owner_sample(
         geometric_repack_packs: 0,
         catalog_layers: 0,
         catalog_bytes: 0,
-        locator_sweep: Default::default(),
+        locator_sweep: crab_metadata::git_object_locator::LocatorSweepStats::default(),
         commit_graph_layers: 0,
         commit_graph_bytes: 0,
         maintenance_bytes_read: 0,
         maintenance_bytes_written: 0,
-        superseded: true,
+        superseded,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     }
 }
@@ -799,6 +912,8 @@ fn superseded_owner_sample(
 fn generation_owner_reason(action: &str) -> &'static str {
     match action {
         "ref_journal_compaction" => "active_ref_journal",
+        "quiescence_wait" => "repository_activity_quieting",
+        "idle" => "repository_identity_unchanged",
         "catalog_advance" => "catalog_coverage_stale",
         "catalog_visibility_handoff" => "catalog_proof_handoff",
         "visibility_repair" => "visibility_missing_or_stale",
@@ -3828,6 +3943,8 @@ mod tests {
     fn generation_owner_reason_is_stable_for_each_action() {
         let reasons = [
             ("ref_journal_compaction", "active_ref_journal"),
+            ("quiescence_wait", "repository_activity_quieting"),
+            ("idle", "repository_identity_unchanged"),
             ("catalog_advance", "catalog_coverage_stale"),
             ("visibility_repair", "visibility_missing_or_stale"),
             (
@@ -3847,6 +3964,27 @@ mod tests {
         for (action, reason) in reasons {
             assert_eq!(generation_owner_reason(action), reason);
         }
+    }
+
+    #[test]
+    fn generation_owner_identity_tracks_commit_graph_publication() {
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        let before = GenerationOwnerIdentity::from(&manifest);
+        manifest.commit_graph_hash = Some("a".repeat(64));
+
+        assert_ne!(GenerationOwnerIdentity::from(&manifest), before);
+    }
+
+    #[test]
+    fn generation_owner_quiescence_has_a_real_time_floor() {
+        assert_eq!(
+            generation_owner_quiescence(1),
+            GENERATION_OWNER_MIN_QUIESCENCE
+        );
+        assert_eq!(
+            generation_owner_quiescence(30),
+            std::time::Duration::from_secs(30)
+        );
     }
 
     #[test]
@@ -3914,6 +4052,8 @@ mod tests {
             std::time::Duration::from_secs(60),
             60,
             &Config::default(),
+            true,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -3925,6 +4065,135 @@ mod tests {
         assert_eq!(sample.next_eligibility_secs, 60);
         assert!(!sample.locator_advanced);
         assert_eq!(sample.visibility, "published");
+        assert!(!sample.superseded);
+    }
+
+    #[tokio::test]
+    async fn continuous_owner_skips_completed_repository_identity() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = crate::storage::store::Store::new(inner);
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::metadata::manifest::create_manifest_with_etag(
+            &store,
+            &router,
+            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create manifest");
+        let first = generation_owner_sample(
+            &store,
+            &router,
+            std::time::Duration::from_secs(60),
+            60,
+            &Config::default(),
+            true,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("complete derived maintenance");
+        assert_eq!(first.action, "none");
+        let completed = CompletedGenerationOwnerWork {
+            sample: first,
+            completed_at: std::time::Instant::now(),
+        };
+
+        let idle = generation_owner_sample(
+            &store,
+            &router,
+            std::time::Duration::from_secs(60),
+            60,
+            &Config::default(),
+            true,
+            Some(&completed),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("skip unchanged derived maintenance");
+
+        assert_eq!(idle.action, "idle");
+        assert_eq!(idle.maintenance_reason, "repository_identity_unchanged");
+        assert_eq!(idle.visibility, "published");
+        assert!(!idle.superseded);
+    }
+
+    #[tokio::test]
+    async fn continuous_owner_revalidates_expired_repository_identity() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = crate::storage::store::Store::new(inner);
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::metadata::manifest::create_manifest_with_etag(
+            &store,
+            &router,
+            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create manifest");
+        let first = generation_owner_sample(
+            &store,
+            &router,
+            std::time::Duration::from_secs(60),
+            60,
+            &Config::default(),
+            true,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("complete derived maintenance");
+        let completed = CompletedGenerationOwnerWork {
+            sample: first,
+            completed_at: std::time::Instant::now()
+                .checked_sub(GENERATION_OWNER_STABLE_REVALIDATION)
+                .expect("revalidation interval fits monotonic clock"),
+        };
+
+        let revalidated = generation_owner_sample(
+            &store,
+            &router,
+            std::time::Duration::from_secs(60),
+            60,
+            &Config::default(),
+            true,
+            Some(&completed),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("revalidate expired derived maintenance");
+
+        assert_eq!(revalidated.action, "none");
+        assert_eq!(revalidated.maintenance_reason, "no_maintenance_due");
+    }
+
+    #[tokio::test]
+    async fn continuous_owner_requires_a_quiet_probe_before_derived_work() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = crate::storage::store::Store::new(inner);
+        let router = crate::storage::StoreLayout::new(store.clone(), "org/repo".to_owned());
+        crate::metadata::manifest::create_manifest_with_etag(
+            &store,
+            &router,
+            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("create manifest");
+
+        let sample = generation_owner_sample(
+            &store,
+            &router,
+            std::time::Duration::from_secs(60),
+            60,
+            &Config::default(),
+            false,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("owner should defer derived maintenance until a quiet probe");
+
+        assert_eq!(sample.action, "quiescence_wait");
+        assert_eq!(sample.maintenance_reason, "repository_activity_quieting");
+        assert_eq!(sample.next_eligibility_secs, 60);
         assert!(!sample.superseded);
     }
 
@@ -3980,6 +4249,8 @@ mod tests {
             std::time::Duration::from_secs(60),
             60,
             &Config::default(),
+            false,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -3987,7 +4258,7 @@ mod tests {
 
         assert_eq!(sample.action, "ref_journal_compaction");
         assert_eq!(sample.maintenance_reason, "active_ref_journal");
-        assert_eq!(sample.next_eligibility_secs, 0);
+        assert_eq!(sample.next_eligibility_secs, 60);
         assert!(sample.superseded);
         let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
