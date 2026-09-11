@@ -406,9 +406,11 @@ memory/local/service and hit/miss/failure dimensions, verified hit bytes, local
 persistence failures, and aggregate catalog entry/byte accounting. Catalog
 gauges come from a coalesced read-only SQLite probe on each scrape; probe health
 and last-success time distinguish genuine zero usage from an unreadable
-catalog. No series includes a repository, ref, path, endpoint, principal, or
-credential label. Origin transport metrics remain the authority for fallback
-cost and provider failures.
+catalog. Response-body failures after headers are exposed separately from
+request status outcomes; `crab_s3_gateway_http_response_body_timeouts_total`
+identifies the bounded response-idle-timeout subset. No series includes a
+repository, ref, path, endpoint, principal, or credential label. Origin
+transport metrics remain the authority for fallback cost and provider failures.
 
 The canonical Helm chart can optionally install a release-scoped PodMonitor and
 PrometheusRule. Both are opt-in because their CRDs belong to the Prometheus

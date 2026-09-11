@@ -188,10 +188,7 @@ fn hold_permit_with_timeout(
                 Ok(None) => None,
                 Err(_) => {
                     drop(permit);
-                    let error: s3s::StdError = Box::new(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "response body was idle for too long",
-                    ));
+                    let error: s3s::StdError = Box::new(crate::content::ResponseIdleTimeout);
                     Some((Err(error), None))
                 }
             }
