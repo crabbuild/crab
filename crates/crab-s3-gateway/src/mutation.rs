@@ -109,7 +109,9 @@ pub(crate) enum Change {
         expected: ObjectId,
         attributes: Box<attributes::PutAttributes>,
     },
-    Delete,
+    Delete {
+        condition: DeleteCondition,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -118,6 +120,19 @@ pub(crate) enum PutCondition {
     None,
     IfNoneMatchAny,
     IfMatch(ObjectId),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum DeleteCondition {
+    #[default]
+    None,
+    IfMatchAny,
+    IfMatchMissing,
+    IfMatch {
+        object: ObjectId,
+        etag: String,
+        attributes_present: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -378,7 +393,7 @@ async fn apply_admitted(
                     etag: attributes.etag_override.clone(),
                 })
         }
-        Change::Attributes { .. } | Change::Delete => None,
+        Change::Attributes { .. } | Change::Delete { .. } => None,
     };
     let Some(completion_plan) = completion_plan else {
         return apply_with_gc_fences(repository, runtime, options, change, request, cancel).await;
@@ -905,8 +920,13 @@ async fn build_commit(
             )
             .await?
         }
-        Change::Put { .. } | Change::Attributes { .. } | Change::Delete => None,
+        Change::Put { .. } | Change::Attributes { .. } | Change::Delete { .. } => None,
     };
+    if let Change::Delete { condition } = &change
+        && !delete_condition_matches(condition, old.as_ref(), current_attributes)
+    {
+        return Err(Error::PreconditionFailed);
+    }
     let (etag, changed, pending_attributes) = match change {
         Change::Put {
             bytes,
@@ -976,7 +996,7 @@ async fn build_commit(
             }
             (Some(etag), None, Some((expected, attributes, logical_size)))
         }
-        Change::Delete => {
+        Change::Delete { .. } => {
             if old.is_none() {
                 return Ok(Build::Noop(Outcome { etag: None }));
             }
@@ -1053,6 +1073,30 @@ async fn build_commit(
         path: path_string.to_owned(),
         attributes: object_attributes,
     })))
+}
+
+fn delete_condition_matches(
+    condition: &DeleteCondition,
+    old: Option<&(ObjectId, EntryMode)>,
+    current_attributes: Option<&attributes::ObjectAttributes>,
+) -> bool {
+    match condition {
+        DeleteCondition::None => true,
+        DeleteCondition::IfMatchAny => old.is_some(),
+        DeleteCondition::IfMatchMissing => old.is_none(),
+        DeleteCondition::IfMatch {
+            object,
+            etag,
+            attributes_present,
+        } => {
+            old.is_some_and(|(oid, _)| oid == object)
+                && match (attributes_present, current_attributes) {
+                    (_, Some(value)) => value.etag == *etag,
+                    (true, None) => false,
+                    (false, None) => true,
+                }
+        }
+    }
 }
 
 struct LfsAttributesChange {
@@ -1539,7 +1583,9 @@ mod tests {
             crab_remote_git::RepositoryOptions::default(),
             "refs/heads/main",
             &crab_remote_git::GitPath::new(b"a.txt".to_vec()).unwrap(),
-            Change::Delete,
+            Change::Delete {
+                condition: DeleteCondition::default(),
+            },
             "user",
             &cancel,
         )
@@ -1933,6 +1979,90 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
             "first"
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conditional_delete_rejects_a_replaced_object() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"first"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let first = object_id(Kind::Blob, b"first").unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"second"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let stale = apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Delete {
+                condition: DeleteCondition::IfMatch {
+                    object: first,
+                    etag: crate::gateway::md5_hex(b"first"),
+                    attributes_present: false,
+                },
+            },
+            "user",
+            &cancel,
+        )
+        .await;
+        assert!(matches!(stale, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
+            "second"
+        );
+
+        let second = object_id(Kind::Blob, b"second").unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Delete {
+                condition: DeleteCondition::IfMatch {
+                    object: second,
+                    etag: crate::gateway::md5_hex(b"second"),
+                    attributes_present: false,
+                },
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
         runtime.shutdown().await;
     }
 

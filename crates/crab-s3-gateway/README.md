@@ -21,8 +21,9 @@ object metadata, matching S3; any accompanying application encoding remains.
 The client-compatible surface includes bucket listing/head/location/versioning
 discovery, object GET/HEAD/PUT/DELETE/COPY/attributes/tagging, V1/V2 object
 listing, multi-delete, and durable multipart create/upload/copy/list/abort/complete.
-GET/HEAD support conditions, checksum mode, and a single byte range. PUT and
-multipart completion support atomic `If-Match` and `If-None-Match: *` writes.
+GET/HEAD support conditions, checksum mode, and a single byte range. PUT,
+single-object DELETE, and multipart completion support atomic strong `If-Match`;
+PUT and multipart completion also support `If-None-Match: *` writes.
 Content-MD5 and modeled S3 checksum headers are validated and persisted;
 multipart full-object and composite checksum profiles are returned by object
 and part inspection APIs. Path-style addressing is always available. Set

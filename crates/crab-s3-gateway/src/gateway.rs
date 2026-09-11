@@ -912,6 +912,38 @@ impl Gateway {
             Some(ETagCondition::ETag(_)) => Err(s3_error!(InvalidRequest)),
         }
     }
+
+    async fn delete_condition(
+        &self,
+        repository: &Repository,
+        key: &str,
+        if_match: Option<&ETagCondition>,
+    ) -> S3Result<mutation::DeleteCondition> {
+        let Some(if_match) = if_match else {
+            return Ok(mutation::DeleteCondition::None);
+        };
+        match if_match {
+            ETagCondition::Any => Ok(mutation::DeleteCondition::IfMatchAny),
+            ETagCondition::ETag(ETag::Weak(_)) => Err(s3_error!(InvalidRequest)),
+            ETagCondition::ETag(ETag::Strong(expected)) => {
+                let object = match self.read_object_metadata(repository, key).await {
+                    Ok(object) => object,
+                    Err(error) if error.code().as_str() == "NoSuchKey" => {
+                        return Ok(mutation::DeleteCondition::IfMatchMissing);
+                    }
+                    Err(error) => return Err(error),
+                };
+                if object.etag != *expected {
+                    return Err(s3_error!(PreconditionFailed));
+                }
+                Ok(mutation::DeleteCondition::IfMatch {
+                    object: object.blob_oid,
+                    etag: expected.clone(),
+                    attributes_present: object.attributes.is_some(),
+                })
+            }
+        }
+    }
 }
 
 fn build_store(entry: &RepositoryConfig) -> crate::Result<Store> {
@@ -1707,8 +1739,14 @@ impl S3 for Gateway {
             None => self.writable_address(&req, &req.input.bucket, &req.input.key)?,
         };
         if is_directory_marker {
+            if req.input.if_match.is_some() {
+                return Err(s3_error!(PreconditionFailed));
+            }
             return Ok(S3Response::new(DeleteObjectOutput::default()));
         }
+        let condition = self
+            .delete_condition(repository, &req.input.key, req.input.if_match.as_ref())
+            .await?;
         self.mutations
             .apply(
                 repository,
@@ -1717,7 +1755,7 @@ impl S3 for Gateway {
                     .as_deref()
                     .ok_or_else(|| s3_error!(MethodNotAllowed))?,
                 &address.path,
-                mutation::Change::Delete,
+                mutation::Change::Delete { condition },
                 &principal,
                 &self.cancellation,
             )
@@ -1784,7 +1822,9 @@ impl S3 for Gateway {
                         repository,
                         branch,
                         &address.path,
-                        mutation::Change::Delete,
+                        mutation::Change::Delete {
+                            condition: mutation::DeleteCondition::default(),
+                        },
                         &principal,
                         &self.cancellation,
                     )
@@ -3622,7 +3662,6 @@ fn verify_base64_checksum(expected: Option<&str>, actual: &[u8]) -> S3Result<()>
 fn reject_delete_extensions(input: &DeleteObjectInput) -> S3Result<()> {
     if input.bypass_governance_retention.is_some()
         || input.expected_bucket_owner.is_some()
-        || input.if_match.is_some()
         || input.if_match_last_modified_time.is_some()
         || input.if_match_size.is_some()
         || input.mfa.is_some()
@@ -5213,6 +5252,21 @@ mod tests {
 
         let error = reject_list_extensions(&ListObjectsV2Input {
             fetch_owner: Some(true),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code().as_str(), "NotImplemented");
+    }
+
+    #[test]
+    fn delete_if_match_is_supported_but_directory_only_conditions_are_not() {
+        reject_delete_extensions(&DeleteObjectInput {
+            if_match: Some(ETagCondition::Any),
+            ..Default::default()
+        })
+        .unwrap();
+        let error = reject_delete_extensions(&DeleteObjectInput {
+            if_match_size: Some(1),
             ..Default::default()
         })
         .unwrap_err();
