@@ -282,6 +282,9 @@ Phase-owned artifacts:
   groups delimiter subtrees, and proves exact order, uniqueness, a two-minute
   absolute ceiling, no more than 125% of an equivalent direct RustFS traversal,
   positive backend accounting, and zero Xet hydration scratch.
+  Two one-part uploads then compare 8 MiB and 64 MiB payload registration on the
+  real backend: each durable state record stays within 64 KiB, their sizes differ
+  by at most 64 bytes, and abort reclaims both staged payloads.
   The job retains and validates a versioned qualification report bound to the
   exact source, image, backend, client versions, both fixtures, measurements, and
   complete assertion inventory.

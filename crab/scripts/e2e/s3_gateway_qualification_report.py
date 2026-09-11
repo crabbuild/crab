@@ -16,7 +16,7 @@ from typing import Any
 
 
 SCHEMA = "crab.s3-gateway-evidence"
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SUITE = "deployment"
 BACKEND_IMAGE = "rustfs/rustfs:1.0.0-beta.8-glibc"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -42,6 +42,7 @@ CHECK_OWNERS = {
     "xet_metadata_projection": "traffic",
     "xet_range_stream": "traffic",
     "large_list_pagination": "traffic",
+    "multipart_registration_scaling": "traffic",
     "streaming_sigv4": "traffic",
     "streaming_rejection_atomicity": "traffic",
     "static_presigned_get": "traffic",
@@ -247,6 +248,26 @@ def _listing_qualification(proof_path: Path) -> dict[str, Any]:
     return {name: proof.get(name) for name in fields}
 
 
+def _multipart_registration_qualification(proof_path: Path) -> dict[str, Any]:
+    try:
+        proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        proof = {}
+    if not isinstance(proof, dict):
+        proof = {}
+    fields = (
+        "parts_per_upload",
+        "small_part_bytes",
+        "large_part_bytes",
+        "small_state_bytes",
+        "large_state_bytes",
+        "state_bytes_delta",
+        "maximum_state_bytes",
+        "part_payloads_reclaimed",
+    )
+    return {name: proof.get(name) for name in fields}
+
+
 def build_report(
     *,
     source: dict[str, Any],
@@ -255,6 +276,7 @@ def build_report(
     fixture: dict[str, Any],
     xet_qualification: dict[str, Any],
     listing_qualification: dict[str, Any],
+    multipart_registration_qualification: dict[str, Any],
     resident_memory_bytes: int | None,
     container_writable_bytes: int | None,
     started_unix_ms: int,
@@ -307,6 +329,7 @@ def build_report(
         "fixture": fixture,
         "xet_qualification": xet_qualification,
         "listing_qualification": listing_qualification,
+        "multipart_registration_qualification": multipart_registration_qualification,
         "assertion_count": len(checks),
         "passed_assertions": passed_assertions,
         "skipped": [],
@@ -362,7 +385,7 @@ def verify_report(
     report: dict[str, Any], *, source_sha: str, run_id: str, run_attempt: str
 ) -> dict[str, Any]:
     if report.get("schema") != SCHEMA or report.get("schema_version") != SCHEMA_VERSION:
-        raise EvidenceError("report is not the canonical S3 gateway qualification v4 schema")
+        raise EvidenceError("report is not the canonical S3 gateway qualification v5 schema")
     if report.get("status") != "passed" or report.get("terminal_state") != "exited-zero":
         raise EvidenceError("qualification did not reach a successful terminal state")
     if report.get("suite") != SUITE or report.get("skipped") != []:
@@ -486,6 +509,29 @@ def verify_report(
     if listing["elapsed_ms"] * 100 > baseline_elapsed * 125:
         raise EvidenceError("large-list traversal exceeded 125% of the direct baseline")
 
+    registration = report.get("multipart_registration_qualification")
+    if not isinstance(registration, dict):
+        raise EvidenceError("multipart registration scaling evidence is missing")
+    if (
+        registration.get("parts_per_upload"),
+        registration.get("small_part_bytes"),
+        registration.get("large_part_bytes"),
+        registration.get("maximum_state_bytes"),
+    ) != (1, 8 * 1024 * 1024, 64 * 1024 * 1024, 64 * 1024):
+        raise EvidenceError("multipart registration fixture or bound is wrong")
+    small_state = registration.get("small_state_bytes")
+    large_state = registration.get("large_state_bytes")
+    state_delta = registration.get("state_bytes_delta")
+    if not all(type(value) is int and value > 0 for value in (small_state, large_state)):
+        raise EvidenceError("multipart registration state measurements are missing")
+    if small_state > 64 * 1024 or large_state > 64 * 1024:
+        raise EvidenceError("multipart registration state exceeded its fixed bound")
+    expected_delta = abs(large_state - small_state)
+    if state_delta != expected_delta or expected_delta > 64:
+        raise EvidenceError("multipart registration state scaled with part payload bytes")
+    if registration.get("part_payloads_reclaimed") is not True:
+        raise EvidenceError("multipart registration fixtures retained staged payloads")
+
     checks = report.get("checks")
     if not isinstance(checks, list):
         raise EvidenceError("checks must be a list")
@@ -546,6 +592,7 @@ def verify_report(
         "large_list_elapsed_ms": listing["elapsed_ms"],
         "large_list_direct_baseline_elapsed_ms": baseline_elapsed,
         "large_list_gateway_to_direct_baseline_millis": ratio_millis,
+        "multipart_registration_state_bytes_delta": state_delta,
     }
 
 
@@ -572,6 +619,9 @@ def produce(args: argparse.Namespace) -> int:
                 args.xet_fixture, args.xet_range, args.xet_proof
             ),
             listing_qualification=_listing_qualification(args.listing_proof),
+            multipart_registration_qualification=_multipart_registration_qualification(
+                args.multipart_registration_proof
+            ),
             resident_memory_bytes=read_resident_memory(args.resident_memory),
             container_writable_bytes=_read_nonnegative_integer(args.container_writable),
             started_unix_ms=started_unix_ms,
@@ -625,6 +675,7 @@ def parser() -> argparse.ArgumentParser:
     producer.add_argument("--xet-range", type=Path, required=True)
     producer.add_argument("--xet-proof", type=Path, required=True)
     producer.add_argument("--listing-proof", type=Path, required=True)
+    producer.add_argument("--multipart-registration-proof", type=Path, required=True)
     producer.add_argument("--resident-memory", type=Path, required=True)
     producer.add_argument("--container-writable", type=Path, required=True)
     producer.add_argument("--started", type=Path, required=True)

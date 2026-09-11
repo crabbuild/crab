@@ -103,6 +103,9 @@ deduplicated Xet namespace must traverse in eleven 1,000-key pages within two
 minutes and 125% of an equivalent direct RustFS traversal, remain byte-ordered
 and duplicate-free, resume a late prefix exactly, collapse delimiter subtrees,
 and write no Xet reconstruction scratch.
+It also registers one 8 MiB and one 64 MiB multipart part, requires each durable
+state record to stay within 64 KiB and their sizes to differ by at most 64 bytes,
+then aborts both uploads and proves their staged payloads are gone.
 
 Stop containers without deleting repository data:
 

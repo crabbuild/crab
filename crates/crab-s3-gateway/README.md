@@ -266,6 +266,9 @@ ordering and uniqueness, late-prefix continuation and delimiter groups, and
 enforces both a two-minute absolute traversal budget and a 125% ceiling against
 an equivalent direct RustFS listing without Xet hydration. The fixture's 627 GiB
 logical namespace shares one Git pointer blob and one deduped Xet object.
+Multipart registration is measured with equal one-part upload counts at 8 MiB
+and 64 MiB: the durable control records must remain within 64 KiB, differ by no
+more than 64 bytes, and leave no staged payload after abort.
 Stale, dirty, incomplete, skipped, unmeasured, or identity-bearing reports fail
 the evidence gate.
 The statically validated Kubernetes workload and EKS values are in

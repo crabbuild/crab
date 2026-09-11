@@ -90,6 +90,16 @@ def valid_report() -> dict[str, Any]:
             "direct_baseline_elapsed_ms": 2_000,
             "gateway_to_direct_baseline_millis": 1_000,
         },
+        "multipart_registration_qualification": {
+            "parts_per_upload": 1,
+            "small_part_bytes": 8 * 1024 * 1024,
+            "large_part_bytes": 64 * 1024 * 1024,
+            "small_state_bytes": 800,
+            "large_state_bytes": 801,
+            "state_bytes_delta": 1,
+            "maximum_state_bytes": 64 * 1024,
+            "part_payloads_reclaimed": True,
+        },
         "assertion_count": len(checks),
         "passed_assertions": len(checks),
         "skipped": [],
@@ -116,12 +126,13 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             report, source_sha="a" * 40, run_id="123", run_attempt="2"
         )
 
-    def test_accepts_complete_v4_report(self) -> None:
+    def test_accepts_complete_v5_report(self) -> None:
         result = self.verify(valid_report())
         self.assertEqual(result["status"], "verified")
         self.assertEqual(result["checks"], len(REPORT.REQUIRED_CHECKS))
         self.assertEqual(result["large_list_objects"], 10_032)
         self.assertEqual(result["large_list_gateway_to_direct_baseline_millis"], 1_000)
+        self.assertEqual(result["multipart_registration_state_bytes_delta"], 1)
 
     def test_rejects_stale_or_dirty_source(self) -> None:
         for field, value in (
@@ -226,6 +237,26 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
         with self.assertRaisesRegex(REPORT.EvidenceError, "125%"):
             self.verify(report)
 
+    def test_rejects_payload_scaled_multipart_registration_state(self) -> None:
+        for field, value in (
+            ("parts_per_upload", 2),
+            ("small_part_bytes", 1),
+            ("large_part_bytes", 1),
+            ("small_state_bytes", 0),
+            ("large_state_bytes", 65 * 1024),
+            ("state_bytes_delta", 0),
+            ("maximum_state_bytes", 1),
+            ("part_payloads_reclaimed", False),
+        ):
+            with self.subTest(field=field):
+                report = valid_report()
+                report["multipart_registration_qualification"][field] = value
+                with self.assertRaisesRegex(
+                    REPORT.EvidenceError,
+                    "multipart registration",
+                ):
+                    self.verify(report)
+
     def test_rejects_identity_and_secret_fields(self) -> None:
         for field in REPORT.SENSITIVE_KEYS:
             with self.subTest(field=field):
@@ -302,6 +333,9 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             fixture=report["fixture"],
             xet_qualification=report["xet_qualification"],
             listing_qualification=report["listing_qualification"],
+            multipart_registration_qualification=report[
+                "multipart_registration_qualification"
+            ],
             resident_memory_bytes=1_000_000,
             container_writable_bytes=0,
             started_unix_ms=100,
@@ -328,6 +362,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             fixture={"bytes": None, "sha256": None},
             xet_qualification={},
             listing_qualification={},
+            multipart_registration_qualification={},
             resident_memory_bytes=None,
             container_writable_bytes=None,
             started_unix_ms=100,

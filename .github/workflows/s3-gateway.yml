@@ -830,6 +830,95 @@ jobs:
               output.write("\n")
           PY
 
+          head -c 8388608 /dev/zero > "${qualification_root}/registration-08.bin"
+          head -c 67108864 /dev/zero > "${qualification_root}/registration-64.bin"
+          registration_small_id="$(aws --endpoint-url "${endpoint}" \
+            s3api create-multipart-upload --bucket "${bucket}" \
+            --key main/qualification/registration-08.bin \
+            --query UploadId --output text)"
+          registration_large_id="$(aws --endpoint-url "${endpoint}" \
+            s3api create-multipart-upload --bucket "${bucket}" \
+            --key main/qualification/registration-64.bin \
+            --query UploadId --output text)"
+          aws --endpoint-url "${endpoint}" s3api upload-part \
+            --bucket "${bucket}" --key main/qualification/registration-08.bin \
+            --upload-id "${registration_small_id}" --part-number 1 \
+            --body "${qualification_root}/registration-08.bin" >/dev/null
+          aws --endpoint-url "${endpoint}" s3api upload-part \
+            --bucket "${bucket}" --key main/qualification/registration-64.bin \
+            --upload-id "${registration_large_id}" --part-number 1 \
+            --body "${qualification_root}/registration-64.bin" >/dev/null
+          test "$(aws --endpoint-url "${endpoint}" s3api list-parts \
+            --bucket "${bucket}" --key main/qualification/registration-08.bin \
+            --upload-id "${registration_small_id}" \
+            --query 'Parts[0].Size' --output text)" = 8388608
+          test "$(aws --endpoint-url "${endpoint}" s3api list-parts \
+            --bucket "${bucket}" --key main/qualification/registration-64.bin \
+            --upload-id "${registration_large_id}" \
+            --query 'Parts[0].Size' --output text)" = 67108864
+          registration_prefix=repositories/qualification/s3/multipart
+          registration_small_state="${registration_prefix}/uploads/${registration_small_id}/state.json"
+          registration_large_state="${registration_prefix}/uploads/${registration_large_id}/state.json"
+          registration_small_state_bytes="$(AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            aws --endpoint-url http://127.0.0.1:19000 s3api head-object \
+            --bucket crab-s3-gateway-qualification \
+            --key "${registration_small_state}" --query ContentLength --output text)"
+          registration_large_state_bytes="$(AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            aws --endpoint-url http://127.0.0.1:19000 s3api head-object \
+            --bucket crab-s3-gateway-qualification \
+            --key "${registration_large_state}" --query ContentLength --output text)"
+          test "${registration_small_state_bytes}" -gt 0
+          test "${registration_small_state_bytes}" -le 65536
+          test "${registration_large_state_bytes}" -gt 0
+          test "${registration_large_state_bytes}" -le 65536
+          if test "${registration_large_state_bytes}" -ge "${registration_small_state_bytes}"; then
+            registration_state_delta=$((registration_large_state_bytes - registration_small_state_bytes))
+          else
+            registration_state_delta=$((registration_small_state_bytes - registration_large_state_bytes))
+          fi
+          test "${registration_state_delta}" -le 64
+          aws --endpoint-url "${endpoint}" s3api abort-multipart-upload \
+            --bucket "${bucket}" --key main/qualification/registration-08.bin \
+            --upload-id "${registration_small_id}"
+          aws --endpoint-url "${endpoint}" s3api abort-multipart-upload \
+            --bucket "${bucket}" --key main/qualification/registration-64.bin \
+            --upload-id "${registration_large_id}"
+          for registration_id in "${registration_small_id}" "${registration_large_id}"; do
+            registration_parts="${qualification_root}/registration-parts.json"
+            AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+              AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2 \
+              --bucket crab-s3-gateway-qualification \
+              --prefix "${registration_prefix}/parts/${registration_id}/" \
+              --output json > "${registration_parts}"
+            test "$(jq '(.Contents // []) | length' "${registration_parts}")" = 0
+          done
+          MULTIPART_REGISTRATION_PROOF="${qualification_root}/multipart-registration-proof.json" \
+          REGISTRATION_SMALL_STATE_BYTES="${registration_small_state_bytes}" \
+          REGISTRATION_LARGE_STATE_BYTES="${registration_large_state_bytes}" \
+          REGISTRATION_STATE_DELTA="${registration_state_delta}" python3 - <<'PY'
+          import json
+          import os
+
+          proof = {
+              "parts_per_upload": 1,
+              "small_part_bytes": 8 * 1024 * 1024,
+              "large_part_bytes": 64 * 1024 * 1024,
+              "small_state_bytes": int(os.environ["REGISTRATION_SMALL_STATE_BYTES"]),
+              "large_state_bytes": int(os.environ["REGISTRATION_LARGE_STATE_BYTES"]),
+              "state_bytes_delta": int(os.environ["REGISTRATION_STATE_DELTA"]),
+              "maximum_state_bytes": 64 * 1024,
+              "part_payloads_reclaimed": True,
+          }
+          with open(
+              os.environ["MULTIPART_REGISTRATION_PROOF"], "w", encoding="utf-8"
+          ) as output:
+              json.dump(proof, output, sort_keys=True)
+              output.write("\n")
+          PY
+
           # JMESPath backticks are literals inside this single-quoted query.
           # shellcheck disable=SC2016
           aws --endpoint-url "${endpoint}" s3api list-buckets \
@@ -1281,6 +1370,8 @@ jobs:
             --xet-range "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-range.bin" \
             --xet-proof "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-proof.json" \
             --listing-proof "${qualification_root}/listing-proof.json" \
+            --multipart-registration-proof \
+              "${qualification_root}/multipart-registration-proof.json" \
             --resident-memory "${qualification_root}/resident-memory" \
             --container-writable \
               "${qualification_root}/container-writable-bytes" \
