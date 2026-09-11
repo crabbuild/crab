@@ -131,3 +131,35 @@ docker compose -f crates/crab-s3-gateway/deploy/compose.yaml down --volumes
 
 Never use `down --volumes` for a production deployment or a stack whose RustFS
 volume contains data that must be retained.
+
+## Sustained-write qualification runner
+
+The repository includes a dependency-free signed-request workload runner for a
+dedicated gateway and direct S3-compatible baseline. It sends deterministic
+4 KiB `PutObject` requests from 16 concurrent writers, paginates the resulting
+keys, and records p50/p95 latency, throughput, failed requests, duplicate
+listing entries, missing acknowledged keys, and unexpected keys. Credentials
+are read only from the environment; they are never command-line arguments or
+written to the report:
+
+```sh
+export S3_GATEWAY_WORKLOAD_ACCESS_KEY=...
+export S3_GATEWAY_WORKLOAD_SECRET_KEY=...
+export S3_BASELINE_WORKLOAD_ACCESS_KEY=...
+export S3_BASELINE_WORKLOAD_SECRET_KEY=...
+python3 -B crab/scripts/e2e/s3_gateway_workload.py \
+  --gateway-endpoint https://gateway.example.invalid \
+  --gateway-bucket logical-repository \
+  --baseline-endpoint https://s3.example.invalid \
+  --baseline-bucket isolated-baseline \
+  --duration-seconds 300 \
+  --report <external-workspace>/s3-gateway-workload.json
+```
+
+Use an isolated prefix and bucket for every run. The direct endpoint is a
+transport/SDK baseline; it is not a substitute for a direct Crab SDK
+committed-write baseline, so this runner does not by itself close the Phase-8
+committed-write performance gate. The report is identity-free and the command
+returns nonzero on any failed request, lost acknowledged key, unexpected key,
+duplicate listing entry, throughput regression below 90% of baseline, or p95
+latency above 125% of baseline.

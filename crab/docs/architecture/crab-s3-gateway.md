@@ -268,7 +268,12 @@ Phase-owned artifacts:
 - Phase 0: `crab/docs/architecture/s3-gateway-contract.md`, the exact protocol,
   semantic decisions, supported feature cells and error mapping.
 - Phase 2: `crates/crab-s3-gateway/` exists; integration tests under `tests/`
-  and `crab/scripts/e2e/qualify_s3_gateway.py` remain planned.
+  and the complete multi-suite `crab/scripts/e2e/qualify_s3_gateway.py` runner
+  remain planned. The dependency-free
+  `crab/scripts/e2e/s3_gateway_workload.py` runner is available now for signed
+  4 KiB/16-writer contention checks, paginated acknowledgement verification,
+  and direct S3 transport comparison; it is not a retained Phase-8
+  committed-write proof until a direct Crab SDK baseline is supplied.
 - Phase 8: `.github/workflows/s3-gateway.yml` builds and qualifies the packaged
   image against RustFS with an unchanged signed AWS client. It separately
   exercises chained SigV4 streaming signatures, S3-compatible transport metadata,
