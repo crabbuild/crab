@@ -1,0 +1,28 @@
+listen = "0.0.0.0:8080"
+management_listen = "0.0.0.0:8081"
+region = "us-east-1"
+max_in_flight_requests = 32
+
+[cache]
+directory = "/var/lib/crab/cache-volume/cache"
+max_bytes = 536870912
+
+[[credentials]]
+# Synthetic credential for this isolated Compose smoke only.
+access_key = "gateway-qualification"
+secret_key_file = "/run/secrets/crab-s3-secret"
+principal = "service-account:qualification"
+
+[[repositories]]
+name = "gateway-repository"
+provider = "s3"
+bucket = "crab-s3-gateway-qualification"
+prefix = "repositories/qualification"
+default_branch = "main"
+max_active_multipart_uploads = 16
+multipart_staging_bytes_per_upload = 5368709120
+multipart_upload_ttl_seconds = 3600
+
+[[repositories.members]]
+principal = "service-account:qualification"
+access = "write"

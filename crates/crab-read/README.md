@@ -51,6 +51,10 @@ session. It checks range bounds before I/O and verifies chunk integrity and
 the exact output length without allocating a range-sized result. The caller
 must bound the writer and unblock it on cancellation. The existing in-memory
 range API retains its clamping behavior and delegates to this writer path.
+`reconstruct_range_stream` owns a one-chunk asynchronous backpressure channel
+for protocol adapters that do not need a file-index lookup session. Dropping
+the stream cancels pending source work; successful completion still requires
+consuming it through EOF, where late source and integrity errors surface.
 Range verification does not establish the whole-file BLAKE3 hash.
 The operation token also reaches download admission, availability checks and
 chunk transport. Xet waits for source futures during its final writer join;

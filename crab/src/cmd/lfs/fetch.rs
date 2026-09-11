@@ -385,14 +385,19 @@ fn run_fetch_prune(dry_run: bool, cancel: &CancellationToken) -> Result<()> {
 /// Fetches missing LFS objects then replaces LFS pointers in the working
 /// tree with the actual file content.
 pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Result<()> {
+    let repo_dir = std::env::current_dir()?;
+    super::block_on_runtime(run_lfs_pull_in(&repo_dir, options, cancel))
+}
+
+pub(crate) async fn run_lfs_pull_in(
+    repo_dir: &Path,
+    options: LfsPullOptions,
+    cancel: &CancellationToken,
+) -> Result<()> {
     check_cancelled(cancel)?;
-    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
-        "pull",
-        options.remote.as_deref(),
-        Path::new("."),
-        cancel,
-    ))?;
-    let entries = collect_lfs_pointers(Path::new("."), false, false, &[], cancel)?;
+    let ctx =
+        resolve_lfs_remote_context("pull", options.remote.as_deref(), repo_dir, cancel).await?;
+    let entries = collect_lfs_pointers(repo_dir, false, false, &[], cancel)?;
     check_cancelled(cancel)?;
 
     if entries.is_empty() {
@@ -406,23 +411,18 @@ pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Resu
         options.exclude.as_deref(),
     )?;
 
-    super::block_on_runtime(async {
-        let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
+    let resolver = BatchResolver::new(ctx.store, ctx.local_lfs_dir, ctx.config, cancel);
 
-        let missing =
-            resolver.find_missing_for_fetch(&entries, inc_filter.as_ref(), exc_filter.as_ref())?;
+    let missing =
+        resolver.find_missing_for_fetch(&entries, inc_filter.as_ref(), exc_filter.as_ref())?;
 
-        if !missing.is_empty() {
-            eprintln!("pull: downloading {} object(s)", missing.len());
-            let progress =
-                super::progress::TransferProgress::new("Downloading", missing.len() as u64);
-            resolver.download_missing(&missing).await?;
-            progress.finish();
-            super::logs::log_transfer_event("pull", missing.len() as u64, progress.elapsed_secs());
-        }
-
-        Ok::<(), CrabError>(())
-    })?;
+    if !missing.is_empty() {
+        eprintln!("pull: downloading {} object(s)", missing.len());
+        let progress = super::progress::TransferProgress::new("Downloading", missing.len() as u64);
+        resolver.download_missing(&missing).await?;
+        progress.finish();
+        super::logs::log_transfer_event("pull", missing.len() as u64, progress.elapsed_secs());
+    }
 
     let checkout_paths =
         checkout_paths_for_pull(&entries, inc_filter.as_ref(), exc_filter.as_ref());
@@ -433,10 +433,13 @@ pub fn run_lfs_pull(options: LfsPullOptions, cancel: &CancellationToken) -> Resu
         return Ok(());
     }
 
-    super::checkout::run_lfs_checkout(super::checkout::LfsCheckoutOptions {
-        paths: checkout_paths,
-        ..super::checkout::LfsCheckoutOptions::default()
-    })?;
+    super::checkout::run_lfs_checkout_in(
+        repo_dir,
+        super::checkout::LfsCheckoutOptions {
+            paths: checkout_paths,
+            ..super::checkout::LfsCheckoutOptions::default()
+        },
+    )?;
     check_cancelled(cancel)?;
     Ok(())
 }

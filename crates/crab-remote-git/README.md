@@ -32,7 +32,7 @@ open, but selecting a snapshot returns `EmptyRepository`.
 | Open a committed journal view | `RemoteGitRepository::from_snapshot` | Caller supplies a validated snapshot, retention, and freshness policy; no catalog required |
 | Reuse a handle | `is_current` | Checks manifest identity; journal freshness can require reopening |
 | Select a revision | `refs`, `resolve`, `snapshot` | Selection stays within pinned visible refs |
-| Browse content | `entry`, `list_directory`, `list_tree_recursive`, `read_blob` | Paths are opaque `GitPath` bytes; blob reads return Git representation |
+| Browse content | `entry`, `list_directory`, `list_tree_blobs`, `list_tree_recursive`, `read_blob` | Paths are opaque `GitPath` bytes; bounded blob pages seek by prefix/continuation without reading bodies |
 | Inspect changes | `history`, `path_history`, `compare`, `diff`, `blame` | Aggregate work limits apply, including cache hits |
 | Stream an archive | `archive_stream` | Transfers operation cleanup ownership to the stream |
 | Generate a response pack | `generate_pack` and cached variants | Verified output; reuse requires matching identity and request policy |

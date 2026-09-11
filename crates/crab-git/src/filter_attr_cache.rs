@@ -11,6 +11,8 @@
 use std::path::Path;
 use std::time::SystemTime;
 
+use bstr::{BStr, ByteSlice as _};
+
 /// The filter handler to use for a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterKind {
@@ -40,6 +42,7 @@ pub struct FilterEntry {
 pub struct FilterAttrCache {
     /// Compiled entries in `.gitattributes` file order.
     entries: Vec<FilterEntry>,
+    compiled_patterns: Vec<Option<gix_glob::Pattern>>,
     /// Mtime of the root `.gitattributes` when last parsed.
     root_mtime: Option<SystemTime>,
 }
@@ -52,10 +55,7 @@ impl FilterAttrCache {
     /// also needs raw entries, avoiding duplicate index scans and file reads.
     pub fn from_repo_root(repo_root: &Path) -> Self {
         let (entries, root_mtime) = collect_all_entries(repo_root);
-        Self {
-            entries,
-            root_mtime,
-        }
+        Self::from_entries(entries, root_mtime)
     }
 
     /// Build a cache from pre-collected entries.
@@ -63,8 +63,13 @@ impl FilterAttrCache {
     /// Use [`collect_all_entries`] to share the input with other consumers,
     /// such as LFS pattern extraction, without rereading attribute files.
     pub fn from_entries(entries: Vec<FilterEntry>, root_mtime: Option<SystemTime>) -> Self {
+        let compiled_patterns = entries
+            .iter()
+            .map(|entry| gix_glob::Pattern::from_bytes(entry.pattern.as_bytes()))
+            .collect();
         Self {
             entries,
+            compiled_patterns,
             root_mtime,
         }
     }
@@ -98,8 +103,11 @@ impl FilterAttrCache {
     pub fn resolve_filter(&self, pathname: &str) -> Option<FilterKind> {
         let mut winner: Option<FilterKind> = None;
 
-        for entry in &self.entries {
-            if entry_matches(entry, pathname) && entry.filter.is_some() {
+        for (entry, pattern) in self.entries.iter().zip(&self.compiled_patterns) {
+            if pattern
+                .as_ref()
+                .is_some_and(|pattern| entry_matches(pattern, pathname))
+            {
                 winner = entry.filter;
             }
         }
@@ -218,80 +226,68 @@ fn parent_dir_as_prefix(ga_rel: &str) -> String {
 
 /// Collect filter entries from a single `.gitattributes` file.
 fn collect_entries(ga_path: &Path, entries: &mut Vec<FilterEntry>) {
-    let Ok(content) = std::fs::read_to_string(ga_path) else {
+    let Ok(content) = std::fs::read(ga_path) else {
         return;
     };
-
-    for (line_num, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let filter = if trimmed.contains("filter=lfs") {
-            Some(FilterKind::Lfs)
-        } else if trimmed.contains("filter=crab") {
-            Some(FilterKind::Crab)
-        } else {
-            // Not a filter line we care about.
-            continue;
-        };
-
-        let Some(pattern) = trimmed.split_whitespace().next() else {
-            continue;
-        };
-        let pattern = pattern.to_owned();
-
-        entries.push(FilterEntry {
-            has_path_separator: pattern.contains('/'),
-            pattern,
-            filter,
-            line_number: (line_num + 1) as u32,
-        });
-    }
+    collect_parsed_entries(&content, "", entries);
 }
 
 /// Collect filter entries from a nested `.gitattributes`, prefixing
 /// patterns with the subdirectory path.
 fn collect_entries_with_prefix(ga_path: &Path, prefix: &str, entries: &mut Vec<FilterEntry>) {
-    let Ok(content) = std::fs::read_to_string(ga_path) else {
+    let Ok(content) = std::fs::read(ga_path) else {
         return;
     };
+    collect_parsed_entries(&content, prefix, entries);
+}
 
-    let start_line = entries.last().map_or(0, |e| e.line_number);
-
-    for (offset, line) in content.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+fn collect_parsed_entries(content: &[u8], prefix: &str, entries: &mut Vec<FilterEntry>) {
+    for parsed in gix_attributes::parse(content).filter_map(Result::ok) {
+        let (gix_attributes::parse::Kind::Pattern(pattern), assignments, line_number) = parsed
+        else {
             continue;
-        }
-
-        let filter = if trimmed.contains("filter=lfs") {
-            Some(FilterKind::Lfs)
-        } else if trimmed.contains("filter=crab") {
-            Some(FilterKind::Crab)
+        };
+        let Some(filter) = filter_assignment(assignments) else {
+            continue;
+        };
+        let raw_pattern = pattern.to_string();
+        let pattern = if prefix.is_empty() {
+            raw_pattern
         } else {
-            continue;
+            format!("{prefix}/{}", raw_pattern.trim_start_matches('/'))
         };
-
-        let Some(raw_pattern) = trimmed.split_whitespace().next() else {
-            continue;
-        };
-
-        // Prefix the pattern with the subdirectory path for nested .gitattributes.
-        let full_pattern = if prefix.is_empty() {
-            raw_pattern.to_owned()
-        } else {
-            format!("{prefix}/{raw_pattern}")
-        };
-
         entries.push(FilterEntry {
-            has_path_separator: full_pattern.contains('/'),
-            pattern: full_pattern,
+            has_path_separator: pattern.contains('/'),
+            pattern,
             filter,
-            line_number: (start_line + offset as u32 + 1),
+            line_number: u32::try_from(line_number).unwrap_or(u32::MAX),
         });
     }
+}
+
+fn filter_assignment<'a>(
+    assignments: impl Iterator<
+        Item = Result<gix_attributes::AssignmentRef<'a>, gix_attributes::name::Error>,
+    >,
+) -> Option<Option<FilterKind>> {
+    let mut filter = None;
+    for assignment in assignments.filter_map(Result::ok) {
+        if assignment.name.as_str() != "filter" {
+            continue;
+        }
+        filter = Some(
+            match assignment
+                .state
+                .as_bstr()
+                .map(<BStr as AsRef<[u8]>>::as_ref)
+            {
+                Some(b"lfs") => Some(FilterKind::Lfs),
+                Some(b"crab") => Some(FilterKind::Crab),
+                Some(_) | None => None,
+            },
+        );
+    }
+    filter
 }
 
 // Pattern matching.
@@ -301,76 +297,15 @@ fn collect_entries_with_prefix(ga_path: &Path, prefix: &str, entries: &mut Vec<F
 /// Follows git wildmatch semantics:
 /// - Patterns without `/` match the basename (by prepending `**/` before matching).
 /// - Patterns with `/` match the full path.
-fn entry_matches(entry: &FilterEntry, pathname: &str) -> bool {
-    if entry.has_path_separator {
-        glob_matches(&entry.pattern, pathname)
-    } else {
-        // Basename-only pattern: match against `**/<pattern>` so it
-        // matches the file in any directory (git semantics).
-        let expanded = format!("**/{pat}", pat = entry.pattern);
-        glob_matches(&expanded, pathname)
-    }
-}
-
-/// Simple glob matching for `.gitattributes` patterns.
-///
-/// Supports `*` (matches any sequence except `/`), `**` (matches any
-/// sequence including `/`), `?` (matches any single character except `/`),
-/// and literal character comparison.
-fn glob_matches(pattern: &str, path: &str) -> bool {
-    glob_match_impl(pattern.as_bytes(), path.as_bytes())
-}
-
-/// Recursive glob matcher operating on byte slices.
-fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
-
-    while ti < text.len() {
-        if pi < pattern.len() && pattern[pi] == b'*' {
-            // Check for `**` (matches path separators too).
-            if pi + 1 < pattern.len() && pattern[pi + 1] == b'*' {
-                let rest = &pattern[pi + 2..];
-                let rest = if rest.first() == Some(&b'/') {
-                    &rest[1..]
-                } else {
-                    rest
-                };
-                for i in ti..=text.len() {
-                    if glob_match_impl(rest, &text[i..]) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            // Single `*` — matches anything except `/`.
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if pi < pattern.len()
-            && (pattern[pi] == b'?' && text[ti] != b'/' || pattern[pi] == text[ti])
-        {
-            pi += 1;
-            ti += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            if text[star_ti - 1] == b'/' {
-                return false;
-            }
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == pattern.len()
+fn entry_matches(pattern: &gix_glob::Pattern, pathname: &str) -> bool {
+    let path = pathname.as_bytes().as_bstr();
+    pattern.matches_repo_relative_path(
+        path,
+        path.rfind_byte(b'/').map(|position| position + 1),
+        Some(false),
+        gix_glob::pattern::Case::Sensitive,
+        gix_glob::wildmatch::Mode::NO_MATCH_SLASH_LITERAL,
+    )
 }
 
 #[cfg(test)]
@@ -444,6 +379,47 @@ mod tests {
             Some(FilterKind::Lfs)
         );
         assert_eq!(cache.resolve_filter("models/other.bin"), None);
+        assert_eq!(cache.resolve_filter("special.bin"), None);
+    }
+
+    #[test]
+    fn quoted_literal_filename_matches_git_attribute_syntax() {
+        let dir = temp_git_repo();
+        let nested = dir.path().join("team");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(
+            nested.join(".gitattributes"),
+            r#""/large gateway \\[v1\\] #\\*\\?.bin" filter=lfs diff=lfs merge=lfs -text
+"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new("git")
+            .args(["add", "team/.gitattributes"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let cache = FilterAttrCache::from_repo_root(dir.path());
+
+        assert_eq!(
+            cache.resolve_filter("team/large gateway [v1] #*?.bin"),
+            Some(FilterKind::Lfs)
+        );
+        assert_eq!(
+            cache.resolve_filter("team/large gateway av1] #xx.bin"),
+            None
+        );
+        assert_eq!(
+            cache.resolve_filter("team/deeper/large gateway [v1] #*?.bin"),
+            None
+        );
+    }
+
+    #[test]
+    fn unset_filter_clears_an_earlier_match() {
+        let cache = cache_from_str("*.bin filter=lfs\nspecial.bin -filter\n");
+
+        assert_eq!(cache.resolve_filter("ordinary.bin"), Some(FilterKind::Lfs));
         assert_eq!(cache.resolve_filter("special.bin"), None);
     }
 

@@ -731,7 +731,7 @@ mod tests {
     }
 
     fn committed_receipt(chunk_hash: MerkleHash, xorb_ref: XorbRef) -> CommittedChunkReceipt {
-        CommittedChunkReceipt {
+        let mut receipt = CommittedChunkReceipt {
             schema_version: crab_metadata::receipts::RECEIPT_SCHEMA_VERSION,
             chunk_hash: chunk_hash.into(),
             xorb_hash: xorb_ref.xorb_hash.into(),
@@ -752,7 +752,10 @@ mod tests {
             committed_generation: 1,
             shard_index_hash: hash_from_seed(88_002).into(),
             gc_registry_generation: 1,
-        }
+        };
+        // Thousands of fixture receipts must share one proof across second boundaries.
+        receipt.origin.proven_at_unix_secs = 1;
+        receipt
     }
 
     struct TestCtx {

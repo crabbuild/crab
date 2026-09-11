@@ -1,0 +1,1593 @@
+name: S3 gateway
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/s3-gateway.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crab/**"
+      - "crates/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s3-gateway-container-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+  RUSTFS_ACCESS_KEY: rustfs-qualification
+  RUSTFS_SECRET_KEY: rustfs-qualification-secret
+  GATEWAY_ACCESS_KEY: gateway-qualification
+  GATEWAY_SECRET_KEY: gateway-qualification-secret
+  GATEWAY_SESSION_ACCESS_KEY: gateway-session-qualification
+  GATEWAY_SESSION_SECRET_KEY: gateway-session-qualification-secret
+  GATEWAY_SESSION_TOKEN: gateway-session-qualification-token
+
+jobs:
+  helm:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Lint, render, and validate Kubernetes resources
+        run: |
+          set -euo pipefail
+          chart=crates/crab-s3-gateway/deploy/helm/crab-s3-gateway
+          values="${chart}/eks-values.example.yaml"
+          helm_image=alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9
+          kubeconform_image=ghcr.io/yannh/kubeconform:v0.7.0@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c
+          prometheus_image=prom/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" lint --strict "${chart}" >/dev/null 2>&1; then
+            echo "chart accepted mutable or missing deployment inputs" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" lint --strict "${chart}" --values "${values}" \
+              --set serviceAccount.automountServiceAccountToken=true \
+              >/dev/null 2>&1; then
+            echo "chart accepted automatic Kubernetes API credentials" >&2
+            exit 1
+          fi
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" lint --strict "${chart}" --values "${values}"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              > "${RUNNER_TEMP}/crab-s3-gateway.yaml"
+          docker run --rm \
+            --volume "${RUNNER_TEMP}/crab-s3-gateway.yaml:/manifests/gateway.yaml:ro" \
+            "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
+              /manifests/gateway.yaml
+          if grep -Eq '^kind: (PodMonitor|PrometheusRule)$' \
+            "${RUNNER_TEMP}/crab-s3-gateway.yaml"; then
+            echo "monitoring CRDs were rendered without explicit enablement" >&2
+            exit 1
+          fi
+
+          rules="${chart}/monitoring"
+          docker run --rm --volume "${PWD}/${rules}:/monitoring:ro" \
+            --entrypoint /bin/promtool "${prometheus_image}" \
+            check rules /monitoring/prometheus-rules.yaml
+          docker run --rm --volume "${PWD}/${rules}:/monitoring:ro" \
+            --workdir /monitoring --entrypoint /bin/promtool \
+            "${prometheus_image}" test rules prometheus-rules.test.yaml
+          runbook=crates/crab-s3-gateway/deploy/operations.md
+          test "$(grep -c 'runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#' \
+            "${rules}/prometheus-rules.yaml")" = 14
+          for invariant in \
+            '## Availability and publication' \
+            '## Credential and backend authentication' \
+            '## Admission and scratch pressure' \
+            '## Cache degradation' \
+            '## Backend degradation'; do
+            grep -Fq "${invariant}" "${runbook}"
+          done
+          for anchor in \
+            availability-and-publication \
+            credential-and-backend-authentication \
+            admission-and-scratch-pressure \
+            cache-degradation \
+            backend-degradation; do
+            grep -Fq "operations.md#${anchor}" \
+              "${rules}/prometheus-rules.yaml"
+          done
+
+          monitoring="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              --set monitoring.podMonitor.enabled=true \
+              --set monitoring.prometheusRule.enabled=true \
+              --set monitoring.labels.release=kube-prometheus-stack \
+              --show-only templates/podmonitor.yaml \
+              --show-only templates/prometheusrule.yaml)"
+          for invariant in \
+            'kind: PodMonitor' \
+            'kind: PrometheusRule' \
+            'release: kube-prometheus-stack' \
+            'port: management' \
+            'path: /metrics'; do
+            grep -Fq "${invariant}" <<< "${monitoring}"
+          done
+          test "$(grep -Ec '^[[:space:]]+- alert: CrabS3Gateway' \
+            <<< "${monitoring}")" = 14
+
+          service="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              --show-only templates/service.yaml)"
+          grep -Fq 'name: s3' <<< "${service}"
+          if grep -Fq 'management' <<< "${service}"; then
+            echo "management port was exposed through the S3 Service" >&2
+            exit 1
+          fi
+          deployment="$(docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab-s3-gateway --values "${values}" \
+              --show-only templates/deployment.yaml)"
+          for invariant in \
+            'automountServiceAccountToken: false' \
+            'enableServiceLinks: false' \
+            'runAsNonRoot: true' \
+            'runAsUser: 10001' \
+            'runAsGroup: 10001' \
+            'fsGroup: 10001' \
+            'allowPrivilegeEscalation: false' \
+            'readOnlyRootFilesystem: true' \
+            'mountPath: /var/lib/crab/cache-volume' \
+            'minDomains: 2' \
+            'defaultMode: 0400'; do
+            grep -Fq "${invariant}" <<< "${deployment}"
+          done
+
+  ecs:
+    name: Validate ECS Fargate template
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install pinned CloudFormation linter
+        run: python3 -m pip install --disable-pip-version-check --quiet cfn-lint==1.41.0
+
+      - name: Parse and check deployment contract
+        run: |
+          cfn-lint --info crates/crab-s3-gateway/deploy/ecs/crab-s3-gateway.yaml
+          ruby -ryaml -rjson -e '
+            path = "crates/crab-s3-gateway/deploy/ecs/crab-s3-gateway.yaml"
+            template = YAML.load_file(path)
+            required_parameters = %w[
+              ClusterArn VpcId LoadBalancerSubnets ServiceSubnets
+              LoadBalancerSecurityGroupId TaskSecurityGroupIds CertificateArn
+              ImageRepositoryName ImageDigest ConfigSecretArn
+              GatewayCredentialSecretArn BackendBucketName BackendPrefix
+            ]
+            required_parameters.each do |name|
+              abort "missing parameter #{name}" unless template.fetch("Parameters").key?(name)
+            end
+            abort "missing Fargate size rule" unless template.fetch("Rules").key?("FargateCpuMemory")
+            resources = template.fetch("Resources")
+            %w[
+              ImageRepository GatewayLogGroup ExecutionRole BackendRole
+              GatewayTaskDefinition GatewayLoadBalancer GatewayTargetGroup
+              GatewayListener GatewayService
+            ].each do |name|
+              abort "missing resource #{name}" unless resources.key?(name)
+            end
+            task = resources.fetch("GatewayTaskDefinition").fetch("Properties")
+            container = task.fetch("ContainerDefinitions").fetch(0)
+            abort "task is not Fargate" unless task.fetch("RequiresCompatibilities").include?("FARGATE")
+            abort "task is not non-root" unless container.fetch("User") == "10001:10001"
+            abort "task root is writable" unless container.fetch("ReadonlyRootFilesystem")
+            abort "task retains Linux capabilities" unless container.fetch("LinuxParameters").fetch("Capabilities").fetch("Drop") == ["ALL"]
+            abort "task is privileged" unless container.fetch("Privileged") == false
+            abort "task has no scratch volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-scratch" }
+            abort "task has no cache volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-cache" }
+            abort "task image is not digest-pinned" unless container.fetch("Image").to_s.include?("@\x24{ImageDigest}")
+            command = container.fetch("Command").join(" ")
+            abort "task retains secret environment variables" unless command.include?("unset CRAB_GATEWAY_CONFIG CRAB_GATEWAY_SECRET")
+            service = resources.fetch("GatewayService").fetch("Properties")
+            deployment = service.fetch("DeploymentConfiguration")
+            abort "rolling deployment can drop all tasks" unless deployment.fetch("MinimumHealthyPercent") == 100
+            abort "deployment rollback is disabled" unless deployment.fetch("DeploymentCircuitBreaker").fetch("Rollback")
+            target = resources.fetch("GatewayTargetGroup").fetch("Properties")
+            abort "target readiness path changed" unless target.fetch("HealthCheckPath") == "/readyz"
+            abort "target readiness port changed" unless target.fetch("HealthCheckPort") == "8081"
+            parameters = JSON.parse(File.read("crates/crab-s3-gateway/deploy/ecs/parameters.example.json"))
+            example_keys = parameters.map { |parameter| parameter.fetch("ParameterKey") }
+            required_parameters.each do |name|
+              abort "example omits #{name}" unless example_keys.include?(name)
+            end
+            abort "template contains a credential fixture" if File.read(path).match?(/AKIA|wJalr|gateway-qualification-secret/)
+            puts "ECS template contract passed"
+          '
+
+  image:
+    name: Build and qualify image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install pinned Boto3 qualification client
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/crab-s3-gateway-boto3"
+          "${RUNNER_TEMP}/crab-s3-gateway-boto3/bin/pip" install \
+            --disable-pip-version-check --no-cache-dir --quiet boto3==1.36.4
+          echo "${RUNNER_TEMP}/crab-s3-gateway-boto3/bin" >> "${GITHUB_PATH}"
+
+      - name: Record qualification start
+        run: |
+          install -d "${RUNNER_TEMP}/crab-s3-gateway-evidence"
+          date +%s%3N > "${RUNNER_TEMP}/crab-s3-gateway-evidence/started-unix-ms"
+
+      - name: Verify qualification evidence contract
+        run: |
+          python3 -B crab/scripts/e2e/run_s3_gateway_orphan_cleanup.py \
+            --help >/dev/null
+          python3 -B -m unittest \
+            crab/scripts/e2e/test_s3_gateway_qualification_report.py \
+            crab/scripts/e2e/test_s3_gateway_workload.py
+          python3 -B crab/scripts/e2e/s3_gateway_boto3.py --help >/dev/null
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.93.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-s3-gateway-publisher-target
+        with:
+          shared-key: s3-gateway-xet-publisher
+
+      - name: Build minimal Crab fixture publisher
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-s3-gateway-publisher-target
+        run: >-
+          cargo build --release --locked -p crab --bin crab
+          --no-default-features --features simd-accel,gix-pathmatch
+
+      - name: Build locked gateway image
+        id: build
+        run: >-
+          docker build
+          --file crates/crab-s3-gateway/deploy/Dockerfile
+          --tag crab-s3-gateway:test
+          .
+
+      - name: Verify runtime contract
+        id: runtime
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect crab-s3-gateway:test --format '{{.Config.User}}')" = "crab:crab"
+          test "$(docker image inspect crab-s3-gateway:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
+          docker image inspect crab-s3-gateway:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"--healthcheck"'
+          test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -u)" = "10001"
+          test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -g)" = "10001"
+          docker run --rm crab-s3-gateway:test --help | grep -F -- "--healthcheck"
+          docker run --rm crab-s3-gateway:test --help | grep -F -- "--readiness-check"
+
+      - name: Start RustFS and initialize repository
+        id: initialize
+        run: |
+          set -euo pipefail
+          docker network create crab-s3-gateway-qualification
+          docker run --detach \
+            --name crab-s3-gateway-rustfs \
+            --network crab-s3-gateway-qualification \
+            --publish 19000:9000 \
+            --env RUSTFS_ACCESS_KEY \
+            --env RUSTFS_SECRET_KEY \
+            "${RUSTFS_IMAGE}" /data
+
+          for attempt in $(seq 1 60); do
+            if AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+              AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              AWS_DEFAULT_REGION=us-east-1 \
+              aws --endpoint-url http://127.0.0.1:19000 s3api list-buckets >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "RustFS did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 \
+            aws --endpoint-url http://127.0.0.1:19000 \
+            s3api create-bucket --bucket crab-s3-gateway-qualification >/dev/null
+
+          config_root="${RUNNER_TEMP}/crab-s3-gateway"
+          install -d "${config_root}"
+          printf '%s' "${GATEWAY_SECRET_KEY}" > "${config_root}/gateway-secret"
+          printf '%s' "${GATEWAY_SESSION_SECRET_KEY}" > "${config_root}/gateway-session-secret"
+          printf '%s' "${GATEWAY_SESSION_TOKEN}" > "${config_root}/gateway-session-token"
+          chmod 0440 "${config_root}/gateway-secret" \
+            "${config_root}/gateway-session-secret" \
+            "${config_root}/gateway-session-token"
+          sudo chown 0:10001 "${config_root}/gateway-secret" \
+            "${config_root}/gateway-session-secret" \
+            "${config_root}/gateway-session-token"
+          session_expiry="$(date --utc --date='+1 hour' '+%Y-%m-%dT%H:%M:%SZ')"
+          printf '%s\n' \
+            'listen = "0.0.0.0:8080"' \
+            'management_listen = "0.0.0.0:8081"' \
+            'region = "us-east-1"' \
+            'max_in_flight_requests = 32' \
+            '' \
+            '[cache]' \
+            'directory = "/var/lib/crab/cache-volume/cache"' \
+            'max_bytes = 134217728' \
+            '' \
+            '[[credentials]]' \
+            "access_key = \"${GATEWAY_ACCESS_KEY}\"" \
+            'secret_key_file = "/run/secrets/crab-s3-secret"' \
+            'principal = "service-account:qualification"' \
+            '' \
+            '[[credentials]]' \
+            "access_key = \"${GATEWAY_SESSION_ACCESS_KEY}\"" \
+            'secret_key_file = "/run/secrets/crab-s3-session-secret"' \
+            'session_token_file = "/run/secrets/crab-s3-session-token"' \
+            "expires_at = \"${session_expiry}\"" \
+            'principal = "service-account:qualification"' \
+            '' \
+            '[[repositories]]' \
+            'name = "gateway-repository"' \
+            'provider = "s3"' \
+            'bucket = "crab-s3-gateway-qualification"' \
+            'prefix = "repositories/qualification"' \
+            'default_branch = "main"' \
+            'max_active_multipart_uploads = 16' \
+            'multipart_staging_bytes_per_upload = 5368709120' \
+            'multipart_upload_ttl_seconds = 3600' \
+            '' \
+            '[[repositories.members]]' \
+            'principal = "service-account:qualification"' \
+            'access = "write"' \
+            > "${config_root}/gateway.toml"
+
+          if docker run --rm \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
+            crab-s3-gateway:test \
+            --config /etc/crab/s3-gateway.toml --initialize \
+            >"${config_root}/missing-cache.stdout" \
+            2>"${config_root}/missing-cache.stderr"; then
+            echo "gateway unexpectedly started without its writable cache volume" >&2
+            exit 1
+          fi
+          grep -Fq 'LocalCache' \
+            "${config_root}/missing-cache.stderr"
+
+          docker run --detach \
+            --name crab-s3-gateway-unready \
+            --network crab-s3-gateway-qualification \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/crab/cache-volume:rw,noexec,nosuid,nodev,size=160m,uid=10001,gid=10001,mode=0700 \
+            --publish 127.0.0.1:18081:8081 \
+            --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            --env AWS_DEFAULT_REGION=us-east-1 \
+            --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
+            --env AWS_ALLOW_HTTP=true \
+            --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
+            crab-s3-gateway:test
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18081/livez >/dev/null; then
+              break
+            fi
+            if [[ "${attempt}" == 30 ]]; then
+              echo "uninitialized gateway liveness did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          readiness_headers="$(curl --silent --show-error --dump-header - \
+            --output /dev/null http://127.0.0.1:18081/readyz)"
+          grep -Fq '503 Service Unavailable' <<< "${readiness_headers}"
+          grep -Eiq '^retry-after: 5' <<< "${readiness_headers}"
+          docker stop --time 35 crab-s3-gateway-unready >/dev/null
+          docker rm crab-s3-gateway-unready >/dev/null
+
+          docker run --rm \
+            --network crab-s3-gateway-qualification \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/crab/cache-volume:rw,noexec,nosuid,nodev,size=160m,uid=10001,gid=10001,mode=0700 \
+            --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            --env AWS_DEFAULT_REGION=us-east-1 \
+            --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
+            --env AWS_ALLOW_HTTP=true \
+            --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
+            crab-s3-gateway:test \
+            --config /etc/crab/s3-gateway.toml --initialize
+
+          xet_root="${RUNNER_TEMP}/crab-s3-gateway-xet"
+          source_root="${xet_root}/source"
+          install -d "${source_root}/qualification" "${xet_root}/publisher-cache"
+          XET_FIXTURE="${source_root}/qualification/xet-large.bin" python3 - <<'PY'
+          import os
+          import random
+          from pathlib import Path
+
+          output = Path(os.environ["XET_FIXTURE"])
+          source = random.Random(0xC2AB53)
+          with output.open("wb") as stream:
+              for _ in range(64):
+                  stream.write(source.randbytes(1024 * 1024))
+          PY
+          cp "${source_root}/qualification/xet-large.bin" \
+            "${source_root}/qualification/xet-duplicate.bin"
+          git -C "${source_root}" init -q -b main
+          git -C "${source_root}" config user.name 'S3 Xet qualification'
+          git -C "${source_root}" config user.email 'qualification@example.invalid'
+          export AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}"
+          export AWS_DEFAULT_REGION=us-east-1
+          export AWS_REGION=us-east-1
+          export AWS_ENDPOINT_URL=http://127.0.0.1:19000
+          export AWS_ENDPOINT_URL_S3=http://127.0.0.1:19000
+          export AWS_ALLOW_HTTP=true
+          export AWS_EC2_METADATA_DISABLED=true
+          export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
+          export CRAB_CACHE_DIR="${xet_root}/publisher-cache"
+          crab_bin="${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release/crab"
+          (
+            cd "${source_root}"
+            "${crab_bin}" init --storage-provider s3 \
+              crab://crab-s3-gateway-qualification/repositories/qualification
+            "${crab_bin}" track '*.bin'
+            "${crab_bin}" add qualification/xet-large.bin \
+              qualification/xet-duplicate.bin
+            git show :qualification/xet-large.bin > "${xet_root}/xet-pointer-staged"
+            LISTING_ROOT="${source_root}/qualification/listing" \
+            XET_POINTER="${xet_root}/xet-pointer-staged" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["LISTING_ROOT"])
+          pointer = Path(os.environ["XET_POINTER"]).read_bytes()
+          root.mkdir(parents=True)
+          for index in range(10_000):
+              (root / f"flat-{index:05}.pointer").write_bytes(pointer)
+          for group in ("group-a", "group-b"):
+              directory = root / group
+              directory.mkdir()
+              for index in range(16):
+                  (directory / f"item-{index:02}.pointer").write_bytes(pointer)
+          PY
+            aws s3api create-bucket \
+              --bucket crab-s3-gateway-listing-baseline >/dev/null
+            aws s3 cp qualification/listing \
+              s3://crab-s3-gateway-listing-baseline/main/qualification/listing/ \
+              --recursive --only-show-errors --no-progress
+            git add crab.toml .gitattributes qualification/listing
+            git commit -q -m 'add Xet range qualification fixture'
+            "${crab_bin}" push --upload-concurrency 0 \
+              origin HEAD:refs/heads/main
+            git show HEAD:qualification/xet-large.bin > "${xet_root}/xet-pointer"
+            git show HEAD:qualification/xet-duplicate.bin \
+              > "${xet_root}/xet-duplicate-pointer"
+          )
+          grep -Eq '^version https://crab.build/spec/v1$' \
+            "${xet_root}/xet-pointer"
+          grep -Fx 'size 67108864' "${xet_root}/xet-pointer"
+          test "$(sed -n 's/^file-hash //p' "${xet_root}/xet-pointer")" = \
+            "$(sed -n 's/^file-hash //p' "${xet_root}/xet-duplicate-pointer")"
+          git -C "${source_root}" ls-tree -r --name-only HEAD \
+            qualification/listing | wc -l | tr -d ' ' \
+            > "${xet_root}/listing-object-count"
+          test "$(cat "${xet_root}/listing-object-count")" = 10032
+          git -C "${source_root}" ls-tree -r HEAD qualification/listing | \
+            awk '{print $3}' | sort -u | wc -l | tr -d ' ' \
+            > "${xet_root}/listing-blob-count"
+          test "$(cat "${xet_root}/listing-blob-count")" = 1
+          aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2 \
+            --bucket crab-s3-gateway-qualification --prefix .crab/xorbs/ \
+            --query 'length(Contents)' --output text > "${xet_root}/xorb-count"
+          test "$(cat "${xet_root}/xorb-count")" -gt 0
+
+      - name: Start constrained gateway
+        id: gateway
+        run: |
+          set -euo pipefail
+          config_root="${RUNNER_TEMP}/crab-s3-gateway"
+          docker run --detach \
+            --name crab-s3-gateway \
+            --network crab-s3-gateway-qualification \
+            --read-only \
+            --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700 \
+            --tmpfs /var/lib/crab/cache-volume:rw,noexec,nosuid,nodev,size=160m,uid=10001,gid=10001,mode=0700 \
+            --publish 18080:8080 \
+            --publish 127.0.0.1:18081:8081 \
+            --env AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            --env AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            --env AWS_DEFAULT_REGION=us-east-1 \
+            --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
+            --env AWS_ALLOW_HTTP=true \
+            --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
+            --env RUST_LOG=trace \
+            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
+            crab-s3-gateway:test
+
+          for attempt in $(seq 1 60); do
+            if docker exec crab-s3-gateway \
+              crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "gateway did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec crab-s3-gateway \
+            crab-s3-gateway --config /etc/crab/s3-gateway.toml --healthcheck
+          test "$(docker exec crab-s3-gateway stat --format '%u:%g %a' \
+            /var/lib/crab/cache-volume/cache)" = '10001:10001 700'
+          for attempt in $(seq 1 60); do
+            health="$(docker inspect crab-s3-gateway --format '{{.State.Health.Status}}')"
+            if [[ "${health}" == healthy ]]; then
+              break
+            fi
+            if [[ "${health}" == unhealthy || "${attempt}" == 60 ]]; then
+              echo "container healthcheck failed with status ${health}" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Verify signed S3 traffic and range reads
+        id: traffic
+        run: |
+          set -euo pipefail
+          qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
+          install -d "${qualification_root}"
+          printf '%s\n' \
+            '[default]' \
+            'region = us-east-1' \
+            's3 =' \
+            '    signature_version = s3v4' \
+            > "${qualification_root}/aws-config"
+          head -c 2097152 /dev/zero > "${qualification_root}/input.bin"
+
+          export AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}"
+          export AWS_DEFAULT_REGION=us-east-1
+          export AWS_CONFIG_FILE="${qualification_root}/aws-config"
+          endpoint=http://127.0.0.1:18080
+          bucket=gateway-repository
+          key=main/qualification/signed.bin
+          xet_root="${RUNNER_TEMP}/crab-s3-gateway-xet"
+          xet_key=main/qualification/xet-large.bin
+          duplicate_key=main/qualification/xet-duplicate.bin
+
+          xet_written() {
+            curl --fail --silent http://127.0.0.1:18081/metrics | \
+              awk '$1 == "crab_s3_gateway_scratch_bytes_written_total{purpose=\"xet_reconstruction\"}" {print int($2)}'
+          }
+          xet_written_before_metadata="$(xet_written)"
+          expected_etag="$(sed -n 's/^file-hash //p' "${xet_root}/xet-pointer")"
+          head_etag="$(aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${xet_key}" --query ETag --output text | tr -d '"')"
+          duplicate_etag="$(aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${duplicate_key}" --query ETag --output text | tr -d '"')"
+          list_etag="$(aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" --prefix "${xet_key}" \
+            --query 'Contents[0].ETag' --output text | tr -d '"')"
+          test "${head_etag}" = "${expected_etag}"
+          test "${duplicate_etag}" = "${expected_etag}"
+          test "${list_etag}" = "${expected_etag}"
+          xet_written_after_metadata="$(xet_written)"
+          metadata_scratch_delta=$((xet_written_after_metadata - xet_written_before_metadata))
+          test "${metadata_scratch_delta}" = 0
+
+          xet_presigned_url="$(aws --endpoint-url "${endpoint}" s3 presign \
+            "s3://${bucket}/${xet_key}" --expires-in 120)"
+          curl --fail --silent --show-error --limit-rate 4m \
+            --header 'Range: bytes=16777216-33554431' "${xet_presigned_url}" \
+            --output "${xet_root}/xet-range.bin" &
+          xet_curl_pid=$!
+          peak_xet_scratch=0
+          while kill -0 "${xet_curl_pid}" 2>/dev/null; do
+            active_xet_scratch="$(curl --fail --silent \
+              http://127.0.0.1:18081/metrics | \
+              awk '$1 == "crab_s3_gateway_scratch_bytes{purpose=\"xet_reconstruction\"}" {print int($2)}')"
+            if test "${active_xet_scratch}" -gt "${peak_xet_scratch}"; then
+              peak_xet_scratch="${active_xet_scratch}"
+            fi
+            sleep 0.1
+          done
+          wait "${xet_curl_pid}"
+          xet_written_after_range="$(xet_written)"
+          range_scratch_delta=$((xet_written_after_range - xet_written_after_metadata))
+          test "${peak_xet_scratch}" = 0
+          test "${range_scratch_delta}" = 0
+          XET_ROOT="${xet_root}" \
+          PROJECTED_ETAG="${head_etag}" \
+          DUPLICATE_ETAG="${duplicate_etag}" \
+          XORB_OBJECTS="$(cat "${xet_root}/xorb-count")" \
+          METADATA_SCRATCH_DELTA="${metadata_scratch_delta}" \
+          RANGE_SCRATCH_PEAK="${peak_xet_scratch}" \
+          RANGE_SCRATCH_DELTA="${range_scratch_delta}" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["XET_ROOT"])
+          with (root / "xet-proof.json").open("w", encoding="utf-8") as output:
+              json.dump(
+                  {
+                      "range_start": 16 * 1024 * 1024,
+                      "range_end": 32 * 1024 * 1024,
+                      "projected_etag": os.environ["PROJECTED_ETAG"],
+                      "duplicate_etag": os.environ["DUPLICATE_ETAG"],
+                      "xorb_objects": int(os.environ["XORB_OBJECTS"]),
+                      "metadata_scratch_bytes_written_delta": int(
+                          os.environ["METADATA_SCRATCH_DELTA"]
+                      ),
+                      "range_scratch_peak_bytes": int(os.environ["RANGE_SCRATCH_PEAK"]),
+                      "range_scratch_bytes_written_delta": int(
+                          os.environ["RANGE_SCRATCH_DELTA"]
+                      ),
+                  },
+                  output,
+                  sort_keys=True,
+              )
+              output.write("\n")
+          PY
+
+          backend_requests() {
+            curl --fail --silent http://127.0.0.1:18081/metrics | \
+              awk '$1 ~ /^crab_s3_gateway_backend_requests_total\{/ {sum += $2} END {print int(sum)}'
+          }
+          backend_bytes_read() {
+            curl --fail --silent http://127.0.0.1:18081/metrics | \
+              awk '$1 ~ /^crab_s3_gateway_backend_bytes_read_total\{/ {sum += $2} END {print int(sum)}'
+          }
+          listing_prefix=main/qualification/listing/
+          baseline_keys="${qualification_root}/listing-baseline-keys"
+          : > "${baseline_keys}"
+          baseline_started_ms="$(date +%s%3N)"
+          baseline_token=
+          baseline_pages=0
+          baseline_objects=0
+          while true; do
+            baseline_pages=$((baseline_pages + 1))
+            page="${qualification_root}/listing-baseline-page-${baseline_pages}.json"
+            baseline_command=(
+              aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2
+              --bucket crab-s3-gateway-listing-baseline
+              --prefix "${listing_prefix}" --max-keys 1000
+              --no-paginate --output json
+            )
+            if test -n "${baseline_token}"; then
+              baseline_command+=(--continuation-token "${baseline_token}")
+            fi
+            AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              "${baseline_command[@]}" > "${page}"
+            page_count="$(jq -r '.KeyCount' "${page}")"
+            test "${page_count}" -gt 0
+            test "${page_count}" -le 1000
+            jq -e '.KeyCount == ((.Contents // []) | length)' \
+              "${page}" >/dev/null
+            jq -r '.Contents[]?.Key' "${page}" >> "${baseline_keys}"
+            baseline_objects=$((baseline_objects + page_count))
+            baseline_token="$(jq -r '.NextContinuationToken // empty' "${page}")"
+            truncated="$(jq -r '.IsTruncated' "${page}")"
+            if test "${truncated}" = false; then
+              test -z "${baseline_token}"
+              break
+            fi
+            test "${truncated}" = true
+            test -n "${baseline_token}"
+            test "${baseline_pages}" -lt 12
+          done
+          baseline_elapsed_ms=$(( $(date +%s%3N) - baseline_started_ms ))
+          test "${baseline_objects}" = 10032
+          test "${baseline_pages}" = 11
+          test "${baseline_elapsed_ms}" -gt 0
+          listing_keys="${qualification_root}/listing-keys"
+          : > "${listing_keys}"
+          listing_scratch_before="$(xet_written)"
+          listing_requests_before="$(backend_requests)"
+          listing_bytes_before="$(backend_bytes_read)"
+          listing_started_ms="$(date +%s%3N)"
+          listing_token=
+          listing_pages=0
+          listing_objects=0
+          while true; do
+            listing_pages=$((listing_pages + 1))
+            page="${qualification_root}/listing-page-${listing_pages}.json"
+            list_command=(
+              aws --endpoint-url "${endpoint}" s3api list-objects-v2
+              --bucket "${bucket}" --prefix "${listing_prefix}"
+              --max-keys 1000 --no-paginate --output json
+            )
+            if test -n "${listing_token}"; then
+              list_command+=(--continuation-token "${listing_token}")
+            fi
+            "${list_command[@]}" > "${page}"
+            page_count="$(jq -r '.KeyCount' "${page}")"
+            test "${page_count}" -gt 0
+            test "${page_count}" -le 1000
+            jq -e '.KeyCount == ((.Contents // []) | length)' \
+              "${page}" >/dev/null
+            jq -e '(.Contents // []) | all(.[]; .Size == 67108864)' \
+              "${page}" >/dev/null
+            jq -r '.Contents[]?.Key' "${page}" >> "${listing_keys}"
+            listing_objects=$((listing_objects + page_count))
+            listing_token="$(jq -r '.NextContinuationToken // empty' "${page}")"
+            truncated="$(jq -r '.IsTruncated' "${page}")"
+            if test "${truncated}" = false; then
+              test -z "${listing_token}"
+              break
+            fi
+            test "${truncated}" = true
+            test -n "${listing_token}"
+            test "${listing_pages}" -lt 12
+          done
+          listing_elapsed_ms=$(( $(date +%s%3N) - listing_started_ms ))
+          test "${listing_objects}" = 10032
+          test "${listing_pages}" = 11
+          test "${listing_elapsed_ms}" -gt 0
+          test "${listing_elapsed_ms}" -le 120000
+          test $((listing_elapsed_ms * 100)) -le $((baseline_elapsed_ms * 125))
+          LISTING_KEYS="${listing_keys}" \
+          BASELINE_KEYS="${baseline_keys}" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          actual = Path(os.environ["LISTING_KEYS"]).read_text(encoding="utf-8").splitlines()
+          baseline = Path(os.environ["BASELINE_KEYS"]).read_text(
+              encoding="utf-8"
+          ).splitlines()
+          root = "main/qualification/listing/"
+          expected = [f"{root}flat-{index:05}.pointer" for index in range(10_000)]
+          expected.extend(
+              f"{root}{group}/item-{index:02}.pointer"
+              for group in ("group-a", "group-b")
+              for index in range(16)
+          )
+          if actual != expected:
+              raise SystemExit("large-list traversal was incomplete or out of order")
+          if len(actual) != len(set(actual)):
+              raise SystemExit("large-list traversal returned duplicate keys")
+          if baseline != expected or len(baseline) != len(set(baseline)):
+              raise SystemExit("direct listing baseline was incomplete or out of order")
+          PY
+
+          late_prefix="${listing_prefix}flat-0999"
+          aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" --prefix "${late_prefix}" --max-keys 7 \
+            --no-paginate --output json \
+            > "${qualification_root}/listing-late-1.json"
+          test "$(jq -r '.KeyCount' \
+            "${qualification_root}/listing-late-1.json")" = 7
+          test "$(jq -r '.IsTruncated' \
+            "${qualification_root}/listing-late-1.json")" = true
+          late_token="$(jq -r '.NextContinuationToken' \
+            "${qualification_root}/listing-late-1.json")"
+          test -n "${late_token}"
+          aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" --prefix "${late_prefix}" --max-keys 7 \
+            --continuation-token "${late_token}" --no-paginate --output json \
+            > "${qualification_root}/listing-late-2.json"
+          test "$(jq -r '.KeyCount' \
+            "${qualification_root}/listing-late-2.json")" = 3
+          test "$(jq -r '.IsTruncated' \
+            "${qualification_root}/listing-late-2.json")" = false
+          jq -r '.Contents[].Key' \
+            "${qualification_root}/listing-late-1.json" \
+            "${qualification_root}/listing-late-2.json" \
+            > "${qualification_root}/listing-late-keys"
+          LISTING_LATE_KEYS="${qualification_root}/listing-late-keys" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          actual = Path(os.environ["LISTING_LATE_KEYS"]).read_text(
+              encoding="utf-8"
+          ).splitlines()
+          expected = [
+              f"main/qualification/listing/flat-{index:05}.pointer"
+              for index in range(9_990, 10_000)
+          ]
+          if actual != expected:
+              raise SystemExit("late-prefix listing did not seek to the exact ordered page")
+          PY
+
+          aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" \
+            --prefix "${listing_prefix}group-" --delimiter / --max-keys 10 \
+            --no-paginate --output json \
+            > "${qualification_root}/listing-groups.json"
+          LISTING_GROUPS="${qualification_root}/listing-groups.json" python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["LISTING_GROUPS"], encoding="utf-8") as source:
+              response = json.load(source)
+          expected = [
+              "main/qualification/listing/group-a/",
+              "main/qualification/listing/group-b/",
+          ]
+          actual = [value["Prefix"] for value in response.get("CommonPrefixes", [])]
+          if response.get("KeyCount") != 2 or response.get("Contents") or actual != expected:
+              raise SystemExit("delimiter listing did not collapse the two subtrees exactly")
+          PY
+
+          listing_scratch_after="$(xet_written)"
+          listing_requests_after="$(backend_requests)"
+          listing_bytes_after="$(backend_bytes_read)"
+          listing_scratch_delta=$((listing_scratch_after - listing_scratch_before))
+          listing_requests_delta=$((listing_requests_after - listing_requests_before))
+          listing_bytes_delta=$((listing_bytes_after - listing_bytes_before))
+          test "${listing_scratch_delta}" = 0
+          test "${listing_requests_delta}" -gt 0
+          test "${listing_bytes_delta}" -gt 0
+          LISTING_PROOF="${qualification_root}/listing-proof.json" \
+          LISTING_OBJECTS="${listing_objects}" \
+          LISTING_PAGES="${listing_pages}" \
+          LISTING_ELAPSED_MS="${listing_elapsed_ms}" \
+          BASELINE_OBJECTS="${baseline_objects}" \
+          BASELINE_PAGES="${baseline_pages}" \
+          BASELINE_ELAPSED_MS="${baseline_elapsed_ms}" \
+          LISTING_SCRATCH_DELTA="${listing_scratch_delta}" \
+          LISTING_REQUESTS_DELTA="${listing_requests_delta}" \
+          LISTING_BYTES_DELTA="${listing_bytes_delta}" \
+          LISTING_GIT_BLOBS="$(cat "${xet_root}/listing-blob-count")" python3 - <<'PY'
+          import json
+          import os
+
+          proof = {
+              "objects": int(os.environ["LISTING_OBJECTS"]),
+              "flat_objects": 10_000,
+              "git_blob_oids": int(os.environ["LISTING_GIT_BLOBS"]),
+              "pages": int(os.environ["LISTING_PAGES"]),
+              "max_keys": 1_000,
+              "logical_size_bytes": 64 * 1024 * 1024,
+              "logical_bytes": int(os.environ["LISTING_OBJECTS"]) * 64 * 1024 * 1024,
+              "ordered": True,
+              "unique": True,
+              "late_prefix_objects": 10,
+              "late_prefix_pages": 2,
+              "delimiter_common_prefixes": 2,
+              "metadata_scratch_bytes_written_delta": int(
+                  os.environ["LISTING_SCRATCH_DELTA"]
+              ),
+              "backend_requests_delta": int(os.environ["LISTING_REQUESTS_DELTA"]),
+              "backend_bytes_read_delta": int(os.environ["LISTING_BYTES_DELTA"]),
+              "elapsed_ms": int(os.environ["LISTING_ELAPSED_MS"]),
+              "direct_baseline_objects": int(os.environ["BASELINE_OBJECTS"]),
+              "direct_baseline_pages": int(os.environ["BASELINE_PAGES"]),
+              "direct_baseline_elapsed_ms": int(os.environ["BASELINE_ELAPSED_MS"]),
+          }
+          proof["gateway_to_direct_baseline_millis"] = (
+              proof["elapsed_ms"] * 1_000
+              + proof["direct_baseline_elapsed_ms"]
+              - 1
+          ) // proof["direct_baseline_elapsed_ms"]
+          with open(os.environ["LISTING_PROOF"], "w", encoding="utf-8") as output:
+              json.dump(proof, output, sort_keys=True)
+              output.write("\n")
+          PY
+
+          head -c 8388608 /dev/zero > "${qualification_root}/registration-08.bin"
+          head -c 67108864 /dev/zero > "${qualification_root}/registration-64.bin"
+          registration_small_id="$(aws --endpoint-url "${endpoint}" \
+            s3api create-multipart-upload --bucket "${bucket}" \
+            --key main/qualification/registration-08.bin \
+            --query UploadId --output text)"
+          registration_large_id="$(aws --endpoint-url "${endpoint}" \
+            s3api create-multipart-upload --bucket "${bucket}" \
+            --key main/qualification/registration-64.bin \
+            --query UploadId --output text)"
+          aws --endpoint-url "${endpoint}" s3api upload-part \
+            --bucket "${bucket}" --key main/qualification/registration-08.bin \
+            --upload-id "${registration_small_id}" --part-number 1 \
+            --body "${qualification_root}/registration-08.bin" >/dev/null
+          aws --endpoint-url "${endpoint}" s3api upload-part \
+            --bucket "${bucket}" --key main/qualification/registration-64.bin \
+            --upload-id "${registration_large_id}" --part-number 1 \
+            --body "${qualification_root}/registration-64.bin" >/dev/null
+          test "$(aws --endpoint-url "${endpoint}" s3api list-parts \
+            --bucket "${bucket}" --key main/qualification/registration-08.bin \
+            --upload-id "${registration_small_id}" \
+            --query 'Parts[0].Size' --output text)" = 8388608
+          test "$(aws --endpoint-url "${endpoint}" s3api list-parts \
+            --bucket "${bucket}" --key main/qualification/registration-64.bin \
+            --upload-id "${registration_large_id}" \
+            --query 'Parts[0].Size' --output text)" = 67108864
+          registration_prefix=repositories/qualification/s3/multipart
+          registration_small_state="${registration_prefix}/uploads/${registration_small_id}/state.json"
+          registration_large_state="${registration_prefix}/uploads/${registration_large_id}/state.json"
+          registration_small_state_bytes="$(AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            aws --endpoint-url http://127.0.0.1:19000 s3api head-object \
+            --bucket crab-s3-gateway-qualification \
+            --key "${registration_small_state}" --query ContentLength --output text)"
+          registration_large_state_bytes="$(AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            aws --endpoint-url http://127.0.0.1:19000 s3api head-object \
+            --bucket crab-s3-gateway-qualification \
+            --key "${registration_large_state}" --query ContentLength --output text)"
+          test "${registration_small_state_bytes}" -gt 0
+          test "${registration_small_state_bytes}" -le 65536
+          test "${registration_large_state_bytes}" -gt 0
+          test "${registration_large_state_bytes}" -le 65536
+          if test "${registration_large_state_bytes}" -ge "${registration_small_state_bytes}"; then
+            registration_state_delta=$((registration_large_state_bytes - registration_small_state_bytes))
+          else
+            registration_state_delta=$((registration_small_state_bytes - registration_large_state_bytes))
+          fi
+          test "${registration_state_delta}" -le 64
+          aws --endpoint-url "${endpoint}" s3api abort-multipart-upload \
+            --bucket "${bucket}" --key main/qualification/registration-08.bin \
+            --upload-id "${registration_small_id}"
+          aws --endpoint-url "${endpoint}" s3api abort-multipart-upload \
+            --bucket "${bucket}" --key main/qualification/registration-64.bin \
+            --upload-id "${registration_large_id}"
+          for registration_id in "${registration_small_id}" "${registration_large_id}"; do
+            registration_parts="${qualification_root}/registration-parts.json"
+            AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+              AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2 \
+              --bucket crab-s3-gateway-qualification \
+              --prefix "${registration_prefix}/parts/${registration_id}/" \
+              --output json > "${registration_parts}"
+            test "$(jq '(.Contents // []) | length' "${registration_parts}")" = 0
+          done
+          MULTIPART_REGISTRATION_PROOF="${qualification_root}/multipart-registration-proof.json" \
+          REGISTRATION_SMALL_STATE_BYTES="${registration_small_state_bytes}" \
+          REGISTRATION_LARGE_STATE_BYTES="${registration_large_state_bytes}" \
+          REGISTRATION_STATE_DELTA="${registration_state_delta}" python3 - <<'PY'
+          import json
+          import os
+
+          proof = {
+              "parts_per_upload": 1,
+              "small_part_bytes": 8 * 1024 * 1024,
+              "large_part_bytes": 64 * 1024 * 1024,
+              "small_state_bytes": int(os.environ["REGISTRATION_SMALL_STATE_BYTES"]),
+              "large_state_bytes": int(os.environ["REGISTRATION_LARGE_STATE_BYTES"]),
+              "state_bytes_delta": int(os.environ["REGISTRATION_STATE_DELTA"]),
+              "maximum_state_bytes": 64 * 1024,
+              "part_payloads_reclaimed": True,
+          }
+          with open(
+              os.environ["MULTIPART_REGISTRATION_PROOF"], "w", encoding="utf-8"
+          ) as output:
+              json.dump(proof, output, sort_keys=True)
+              output.write("\n")
+          PY
+
+          # JMESPath backticks are literals inside this single-quoted query.
+          # shellcheck disable=SC2016
+          aws --endpoint-url "${endpoint}" s3api list-buckets \
+            --query 'Buckets[?Name==`gateway-repository`].Name | [0]' \
+            --output text | grep -Fx gateway-repository
+          aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket "${bucket}" --key "${key}" \
+            --body "${qualification_root}/input.bin" >/dev/null
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket "${bucket}" --key "${key}" \
+            "${qualification_root}/output.bin" >/dev/null
+          cmp "${qualification_root}/input.bin" "${qualification_root}/output.bin"
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket "${bucket}" --key "${key}" \
+            --range bytes=1048576-1114111 \
+            "${qualification_root}/range.bin" >/dev/null
+          test "$(wc -c < "${qualification_root}/range.bin" | tr -d ' ')" = 65536
+
+          python3 -m unittest crab/scripts/e2e/test_s3_sigv4_streaming.py
+          streaming_key=main/qualification/streaming-signed.bin
+          python3 crab/scripts/e2e/s3_sigv4_streaming.py \
+            --endpoint "${endpoint}" --bucket "${bucket}" \
+            --key "${streaming_key}" --input "${qualification_root}/input.bin"
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket "${bucket}" --key "${streaming_key}" \
+            "${qualification_root}/streaming-output.bin" >/dev/null
+          cmp "${qualification_root}/input.bin" \
+            "${qualification_root}/streaming-output.bin"
+          aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${streaming_key}" \
+            --output json > "${qualification_root}/streaming-head.json"
+          STREAMING_HEAD="${qualification_root}/streaming-head.json" python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["STREAMING_HEAD"], encoding="utf-8") as response:
+              head = json.load(response)
+          if "ContentEncoding" in head:
+              raise SystemExit("aws-chunked transport encoding leaked into object metadata")
+          PY
+          aws --endpoint-url "${endpoint}" s3api delete-object \
+            --bucket "${bucket}" --key "${streaming_key}" >/dev/null
+
+          tampered_key=main/qualification/streaming-tampered.bin
+          head -c 8192 /dev/zero > "${qualification_root}/tampered-input.bin"
+          python3 crab/scripts/e2e/s3_sigv4_streaming.py \
+            --endpoint "${endpoint}" --bucket "${bucket}" \
+            --key "${tampered_key}" \
+            --input "${qualification_root}/tampered-input.bin" \
+            --tamper-first-chunk --expect-rejection
+          if AWS_MAX_ATTEMPTS=1 aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${tampered_key}" \
+            >"${qualification_root}/tampered-head.stdout" \
+            2>"${qualification_root}/tampered-head.stderr"; then
+            echo "streaming request with a bad chunk signature published an object" >&2
+            exit 1
+          fi
+          grep -Eq '(404|Not Found)' "${qualification_root}/tampered-head.stderr"
+          curl --fail --silent --show-error http://127.0.0.1:18081/readyz >/dev/null
+
+          presigned_url="$(aws --endpoint-url "${endpoint}" s3 presign \
+            "s3://${bucket}/${key}" --expires-in 60)"
+          grep -Fq 'X-Amz-Signature=' <<< "${presigned_url}"
+          curl --fail --silent --show-error "${presigned_url}" \
+            --output "${qualification_root}/presigned.bin"
+          cmp "${qualification_root}/input.bin" "${qualification_root}/presigned.bin"
+
+          export AWS_ACCESS_KEY_ID="${GATEWAY_SESSION_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${GATEWAY_SESSION_SECRET_KEY}"
+          export AWS_SESSION_TOKEN="${GATEWAY_SESSION_TOKEN}"
+          aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${key}" >/dev/null
+          session_presigned_url="$(aws --endpoint-url "${endpoint}" s3 presign \
+            "s3://${bucket}/${key}" --expires-in 60)"
+          grep -Fq 'X-Amz-Security-Token=' <<< "${session_presigned_url}"
+          curl --fail --silent --show-error "${session_presigned_url}" \
+            --output "${qualification_root}/session-presigned.bin"
+          cmp "${qualification_root}/input.bin" \
+            "${qualification_root}/session-presigned.bin"
+          if AWS_MAX_ATTEMPTS=1 AWS_SESSION_TOKEN=wrong-session-token \
+            aws --endpoint-url "${endpoint}" s3api list-buckets \
+              >"${qualification_root}/wrong-session.stdout" \
+              2>"${qualification_root}/wrong-session.stderr"; then
+            echo "incorrect session token was accepted" >&2
+            exit 1
+          fi
+          grep -Fq 'InvalidToken' "${qualification_root}/wrong-session.stderr"
+          if env -u AWS_SESSION_TOKEN AWS_MAX_ATTEMPTS=1 \
+            AWS_ACCESS_KEY_ID="${GATEWAY_SESSION_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${GATEWAY_SESSION_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 AWS_CONFIG_FILE="${AWS_CONFIG_FILE}" \
+            aws --endpoint-url "${endpoint}" s3api list-buckets \
+              >"${qualification_root}/missing-session.stdout" \
+              2>"${qualification_root}/missing-session.stderr"; then
+            echo "session credential without its token was accepted" >&2
+            exit 1
+          fi
+          grep -Fq 'InvalidToken' "${qualification_root}/missing-session.stderr"
+          export AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}"
+          unset AWS_SESSION_TOKEN
+
+          PRESIGNED_URL="${presigned_url}" python3 - <<'PY'
+          import os
+          import urllib.error
+          import urllib.request
+
+          url = os.environ["PRESIGNED_URL"]
+          marker = "X-Amz-Signature="
+          prefix, remainder = url.split(marker, 1)
+          signature, separator, suffix = remainder.partition("&")
+          replacement = "0" if signature[-1] != "0" else "1"
+          tampered = prefix + marker + signature[:-1] + replacement
+          if separator:
+              tampered += separator + suffix
+          try:
+              urllib.request.urlopen(tampered, timeout=10)
+          except urllib.error.HTTPError as error:
+              if error.code == 403:
+                  raise SystemExit(0)
+              raise
+          raise SystemExit("tampered signature was accepted")
+          PY
+
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            "${endpoint}/${bucket}/${key}")" = 403
+          if AWS_SECRET_ACCESS_KEY=wrong-qualification-secret \
+            aws --endpoint-url "${endpoint}" s3api head-object \
+              --bucket "${bucket}" --key "${key}" >/dev/null 2>&1; then
+            echo "incorrect signing secret was accepted" >&2
+            exit 1
+          fi
+          aws --endpoint-url "${endpoint}" s3api delete-object \
+            --bucket "${bucket}" --key "${key}" >/dev/null
+
+          S3_GATEWAY_BOTO3_ACCESS_KEY="${GATEWAY_ACCESS_KEY}" \
+          S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
+          python3 crab/scripts/e2e/s3_gateway_boto3.py \
+            --endpoint "${endpoint}" --bucket "${bucket}" \
+            --large-object-bytes $((512 * 1024 * 1024)) \
+            --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
+
+          oversized_key=main/qualification/scratch-capacity.bin
+          truncate --size 500M "${qualification_root}/oversized.bin"
+          if AWS_MAX_ATTEMPTS=1 aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket "${bucket}" --key "${oversized_key}" \
+            --body "${qualification_root}/oversized.bin" \
+            >"${qualification_root}/oversized.stdout" \
+            2>"${qualification_root}/oversized.stderr"; then
+            echo "oversized scratch reservation unexpectedly succeeded" >&2
+            exit 1
+          fi
+          grep -Fq 'SlowDown' "${qualification_root}/oversized.stderr"
+          if aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${oversized_key}" >/dev/null 2>&1; then
+            echo "scratch-rejected upload published an object" >&2
+            exit 1
+          fi
+
+          metrics_root="${qualification_root}/metrics"
+          maintenance_ready=false
+          for _ in $(seq 1 30); do
+            curl --fail --silent --show-error --dump-header "${metrics_root}.headers" \
+              http://127.0.0.1:18081/metrics --output "${metrics_root}.txt"
+            if grep -Eq '^crab_s3_gateway_multipart_maintenance_cycles_total\{outcome="success"\} [1-9][0-9]*$' \
+              "${metrics_root}.txt" && \
+              grep -Eq '^crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds [1-9][0-9]*$' \
+              "${metrics_root}.txt"; then
+              maintenance_ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "${maintenance_ready}" = true
+          grep -Eiq '^content-type: text/plain; version=0\.0\.4; charset=utf-8' \
+            "${metrics_root}.headers"
+          grep -Eq '^crab_s3_gateway_http_requests_total\{method="(get|put|delete)",outcome="2xx"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_admission_events_total\{class="(read|transfer)",outcome="admitted_immediate"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Fq 'crab_s3_gateway_http_request_duration_seconds_bucket' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_bytes_written_total\{purpose="content_spool"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_filesystem_size_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_filesystem_free_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_filesystem_available_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_headroom_bytes [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_pending_bytes 0' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_filesystem_probe_success 1' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_filesystem_probe_failures_total 0' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_scratch_capacity_rejections_total\{reason="exhausted"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_scratch_capacity_rejections_total{reason="probe_error"} 0' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_limit_bytes 134217728' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_cache_(retained|reserved|temporary)_bytes [0-9]+(\.[0-9]+)?$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_cache_entries [0-9]+(\.[0-9]+)?$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_catalog_probe_success 1' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_catalog_probe_failures_total 0' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_cache_catalog_last_success_timestamp_seconds [1-9][0-9]*(\.[0-9]+)?$' \
+            "${metrics_root}.txt"
+          grep -Fqx 'crab_s3_gateway_cache_local_write_failures_total 0' \
+            "${metrics_root}.txt"
+          test "$(grep -Ec '^crab_s3_gateway_cache_read_attempts_total\{source="(memory|local|service)",outcome="(hit|miss|failure)"\} [0-9]+$' \
+            "${metrics_root}.txt")" = 9
+          test "$(grep -Ec '^crab_s3_gateway_cache_bytes_read_total\{source="(memory|local|service)"\} [0-9]+$' \
+            "${metrics_root}.txt")" = 3
+          grep -Eq '^crab_s3_gateway_backend_requests_total\{operation="(get|head|range|put|list)",outcome="success"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_backend_bytes_read_total\{operation="(get|range)"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          grep -Eq '^crab_s3_gateway_backend_bytes_written_total\{operation="(put|multipart_part)"\} [1-9][0-9]*$' \
+            "${metrics_root}.txt"
+          backend_idle=false
+          for _ in $(seq 1 30); do
+            if test "$(grep -Ec '^crab_s3_gateway_backend_in_flight_requests\{operation="(get|head|range|put|delete|list|copy|multipart_start|multipart_part|multipart_complete|multipart_abort)"\} 0$' \
+              "${metrics_root}.txt")" = 11; then
+              backend_idle=true
+              break
+            fi
+            sleep 1
+            curl --fail --silent --show-error http://127.0.0.1:18081/metrics \
+              --output "${metrics_root}.txt"
+          done
+          test "${backend_idle}" = true
+          test "$(grep -Ec '^crab_s3_gateway_scratch_(bytes|files)\{purpose="(content_spool|xet_reconstruction|git_pack)"\} 0$' \
+            "${metrics_root}.txt")" = 6
+          test "$(grep -Ec '^crab_s3_gateway_scratch_io_failures_total\{purpose="(content_spool|xet_reconstruction|git_pack)",operation="(create|write|flush|read)"\} 0$' \
+            "${metrics_root}.txt")" = 12
+          if grep -Fq \
+            -e "${GATEWAY_ACCESS_KEY}" \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_ACCESS_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
+            -e "${bucket}" \
+            -e "${key}" \
+            -e 'service-account:qualification' \
+            "${metrics_root}.txt"; then
+            echo "metrics exposed request or credential identity" >&2
+            exit 1
+          fi
+          docker logs crab-s3-gateway > "${qualification_root}/gateway.stdout" \
+            2> "${qualification_root}/gateway.stderr"
+          if grep -Fq \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
+            -e "Credential=${GATEWAY_ACCESS_KEY}" \
+            -e "Credential=${GATEWAY_SESSION_ACCESS_KEY}" \
+            -e "AWS ${GATEWAY_ACCESS_KEY}:" \
+            -e "AWSAccessKeyId=${GATEWAY_ACCESS_KEY}" \
+            -e 'X-Amz-Signature=' \
+            -e 'Authorization: AWS' \
+            -e 'Authorization: AWS4-' \
+            "${qualification_root}/gateway.stdout" \
+            "${qualification_root}/gateway.stderr"; then
+            echo "gateway logs exposed signed-request credentials" >&2
+            exit 1
+          fi
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --request POST http://127.0.0.1:18081/metrics)" = 405
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://127.0.0.1:18080/metrics)" = 403
+
+      - name: Verify multipart orphan cleanup after process kill
+        id: cleanup
+        run: >-
+          python3 -B crab/scripts/e2e/run_s3_gateway_orphan_cleanup.py
+          --qualification-root "${RUNNER_TEMP}/crab-s3-gateway-client"
+          --part-file "${RUNNER_TEMP}/crab-s3-gateway-client/registration-08.bin"
+          --proof "${RUNNER_TEMP}/crab-s3-gateway-client/multipart-cleanup-proof.json"
+
+      - name: Capture runtime measurements
+        id: measurements
+        run: |
+          set -euo pipefail
+          qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
+          docker stats --no-stream --format '{{.MemUsage}}' crab-s3-gateway \
+            > "${qualification_root}/resident-memory"
+          grep -Eq '^[0-9]+([.][0-9]+)?([KMGT]i)?B / ' \
+            "${qualification_root}/resident-memory"
+          docker inspect --size crab-s3-gateway --format '{{.SizeRw}}' \
+            > "${qualification_root}/container-writable-bytes"
+          grep -Eq '^[0-9]+$' \
+            "${qualification_root}/container-writable-bytes"
+
+      - name: Verify graceful termination
+        id: graceful
+        run: |
+          set -euo pipefail
+          docker stop --time 35 crab-s3-gateway >/dev/null
+          test "$(docker inspect crab-s3-gateway --format '{{.State.ExitCode}}')" = "0"
+
+      - name: Qualify Docker Compose asset
+        id: compose
+        env:
+          CRAB_S3_GATEWAY_CONFIG: ${{ github.workspace }}/crates/crab-s3-gateway/deploy/compose.gateway.toml
+          CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
+          CRAB_S3_GATEWAY_MANAGEMENT_PORT: "18181"
+          CRAB_S3_GATEWAY_PORT: "18180"
+          CRAB_S3_GATEWAY_SCRATCH_SIZE: 128m
+          CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
+          RUSTFS_PORT: "19100"
+        run: |
+          set -euo pipefail
+          compose=crates/crab-s3-gateway/deploy/compose.yaml
+          docker compose -f "${compose}" config --quiet
+          docker compose -f "${compose}" up --detach rustfs
+          for attempt in $(seq 1 60); do
+            if AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+              AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+              AWS_DEFAULT_REGION=us-east-1 \
+              aws --endpoint-url http://127.0.0.1:19100 s3api list-buckets >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "Compose RustFS did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 \
+            aws --endpoint-url http://127.0.0.1:19100 \
+            s3api create-bucket --bucket crab-s3-gateway-qualification >/dev/null
+          docker compose -f "${compose}" --profile initialize run --rm gateway-init
+          docker compose -f "${compose}" up --detach gateway
+          for attempt in $(seq 1 60); do
+            if docker compose -f "${compose}" exec --no-TTY gateway \
+              crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "Compose gateway did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          # JMESPath backticks are literals inside this single-quoted query.
+          # shellcheck disable=SC2016
+          AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 \
+            aws --endpoint-url http://127.0.0.1:18180 s3api list-buckets \
+              --query 'Buckets[?Name==`gateway-repository`].Name | [0]' \
+              --output text | grep -Fx gateway-repository
+
+          compose_client="${RUNNER_TEMP}/crab-s3-gateway-compose-client"
+          install -d "${compose_client}"
+          head -c 6291456 /dev/zero > "${compose_client}/part-1.bin"
+          head -c 1048576 /dev/zero > "${compose_client}/part-2.bin"
+          compose_endpoint=http://127.0.0.1:18180
+          compose_bucket=gateway-repository
+          compose_key=main/qualification/compose-restart.bin
+          export AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}"
+          export AWS_DEFAULT_REGION=us-east-1
+          compose_upload_id="$(aws --endpoint-url "${compose_endpoint}" \
+            s3api create-multipart-upload --bucket "${compose_bucket}" \
+            --key "${compose_key}" --query UploadId --output text)"
+          aws --endpoint-url "${compose_endpoint}" s3api upload-part \
+            --bucket "${compose_bucket}" --key "${compose_key}" \
+            --upload-id "${compose_upload_id}" --part-number 1 \
+            --body "${compose_client}/part-1.bin" >/dev/null
+
+          docker compose -f "${compose}" up --detach --force-recreate --no-deps gateway
+          for attempt in $(seq 1 60); do
+            if docker compose -f "${compose}" exec --no-TTY gateway \
+              crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check; then
+              break
+            fi
+            if [[ "${attempt}" == 60 ]]; then
+              echo "replacement Compose gateway did not become ready" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(aws --endpoint-url "${compose_endpoint}" s3api list-parts \
+            --bucket "${compose_bucket}" --key "${compose_key}" \
+            --upload-id "${compose_upload_id}" --query 'length(Parts)' --output text)" = 1
+          aws --endpoint-url "${compose_endpoint}" s3api upload-part \
+            --bucket "${compose_bucket}" --key "${compose_key}" \
+            --upload-id "${compose_upload_id}" --part-number 2 \
+            --body "${compose_client}/part-2.bin" >/dev/null
+          aws --endpoint-url "${compose_endpoint}" s3api list-parts \
+            --bucket "${compose_bucket}" --key "${compose_key}" \
+            --upload-id "${compose_upload_id}" \
+            --query '{Parts: Parts[].{ETag: ETag, PartNumber: PartNumber}}' \
+            > "${compose_client}/completion.json"
+          aws --endpoint-url "${compose_endpoint}" s3api complete-multipart-upload \
+            --bucket "${compose_bucket}" --key "${compose_key}" \
+            --upload-id "${compose_upload_id}" \
+            --multipart-upload "file://${compose_client}/completion.json" >/dev/null
+          aws --endpoint-url "${compose_endpoint}" s3api get-object \
+            --bucket "${compose_bucket}" --key "${compose_key}" \
+            "${compose_client}/result.bin" >/dev/null
+          cmp <(cat "${compose_client}/part-1.bin" "${compose_client}/part-2.bin") \
+            "${compose_client}/result.bin"
+          aws --endpoint-url "${compose_endpoint}" s3api delete-object \
+            --bucket "${compose_bucket}" --key "${compose_key}" >/dev/null
+          docker compose -f "${compose}" stop gateway
+
+      - name: Print service logs after failure
+        if: failure()
+        run: |
+          docker logs crab-s3-gateway 2>&1 || true
+          docker logs crab-s3-gateway-rustfs 2>&1 || true
+
+      - name: Clean up services
+        if: always()
+        env:
+          CRAB_S3_GATEWAY_CONFIG: ${{ github.workspace }}/crates/crab-s3-gateway/deploy/compose.gateway.toml
+          CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
+          CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
+        run: |
+          docker compose -f crates/crab-s3-gateway/deploy/compose.yaml \
+            down --volumes >/dev/null 2>&1 || true
+          docker rm --force \
+            crab-s3-gateway crab-s3-gateway-unready crab-s3-gateway-rustfs \
+            >/dev/null 2>&1 || true
+          docker network rm crab-s3-gateway-qualification >/dev/null 2>&1 || true
+
+      - name: Produce retained qualification report
+        id: report
+        if: always()
+        env:
+          STEP_BUILD: ${{ steps.build.outcome }}
+          STEP_RUNTIME: ${{ steps.runtime.outcome }}
+          STEP_INITIALIZE: ${{ steps.initialize.outcome }}
+          STEP_GATEWAY: ${{ steps.gateway.outcome }}
+          STEP_TRAFFIC: ${{ steps.traffic.outcome }}
+          STEP_CLEANUP: ${{ steps.cleanup.outcome }}
+          STEP_MEASUREMENTS: ${{ steps.measurements.outcome }}
+          STEP_GRACEFUL: ${{ steps.graceful.outcome }}
+          STEP_COMPOSE: ${{ steps.compose.outcome }}
+        run: |
+          set -euo pipefail
+          report_root="${RUNNER_TEMP}/crab-s3-gateway-evidence"
+          qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
+          gateway_image_id="$(docker image inspect crab-s3-gateway:test \
+            --format '{{.Id}}' 2>/dev/null || printf unavailable)"
+          python3 crab/scripts/e2e/s3_gateway_qualification_report.py produce \
+            --report "${report_root}/report.json" \
+            --repository "${GITHUB_WORKSPACE}" \
+            --metrics "${qualification_root}/metrics.txt" \
+            --fixture "${qualification_root}/input.bin" \
+            --xet-fixture \
+              "${RUNNER_TEMP}/crab-s3-gateway-xet/source/qualification/xet-large.bin" \
+            --xet-range "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-range.bin" \
+            --xet-proof "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-proof.json" \
+            --listing-proof "${qualification_root}/listing-proof.json" \
+            --multipart-registration-proof \
+              "${qualification_root}/multipart-registration-proof.json" \
+            --multipart-cleanup-proof \
+              "${qualification_root}/multipart-cleanup-proof.json" \
+            --resident-memory "${qualification_root}/resident-memory" \
+            --container-writable \
+              "${qualification_root}/container-writable-bytes" \
+            --started "${report_root}/started-unix-ms" \
+            --source-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --gateway-image-id "${gateway_image_id}" \
+            --aws-cli-version "$(aws --version 2>&1)" \
+            --curl-version "$(curl --version | head -n 1)" \
+            --platform "$(uname -srm)" \
+            --step "build=${STEP_BUILD}" \
+            --step "runtime=${STEP_RUNTIME}" \
+            --step "initialize=${STEP_INITIALIZE}" \
+            --step "gateway=${STEP_GATEWAY}" \
+            --step "traffic=${STEP_TRAFFIC}" \
+            --step "cleanup=${STEP_CLEANUP}" \
+            --step "measurements=${STEP_MEASUREMENTS}" \
+            --step "graceful=${STEP_GRACEFUL}" \
+            --step "compose=${STEP_COMPOSE}"
+
+      - name: Verify retained qualification report
+        if: >-
+          ${{ !cancelled() &&
+              steps.build.outcome == 'success' &&
+              steps.runtime.outcome == 'success' &&
+              steps.initialize.outcome == 'success' &&
+              steps.gateway.outcome == 'success' &&
+              steps.traffic.outcome == 'success' &&
+              steps.cleanup.outcome == 'success' &&
+              steps.measurements.outcome == 'success' &&
+              steps.graceful.outcome == 'success' &&
+              steps.compose.outcome == 'success' &&
+              steps.report.outcome == 'success' }}
+        run: |
+          report="${RUNNER_TEMP}/crab-s3-gateway-evidence/report.json"
+          if grep -Fq \
+            -e "${RUSTFS_ACCESS_KEY}" \
+            -e "${RUSTFS_SECRET_KEY}" \
+            -e "${GATEWAY_ACCESS_KEY}" \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_ACCESS_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
+            "${report}"; then
+            echo "qualification report exposed credential material" >&2
+            exit 1
+          fi
+          python3 crab/scripts/e2e/s3_gateway_qualification_report.py verify \
+            --report "${report}" \
+            --source-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          boto3_report="${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
+          if grep -Fq \
+            -e "${RUSTFS_ACCESS_KEY}" \
+            -e "${RUSTFS_SECRET_KEY}" \
+            -e "${GATEWAY_ACCESS_KEY}" \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_ACCESS_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
+            "${boto3_report}"; then
+            echo "Boto3 qualification report exposed credential material" >&2
+            exit 1
+          fi
+          python3 - "${boto3_report}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          if report.get("schema") != "crab.s3-gateway-boto3-smoke":
+              raise SystemExit("unexpected Boto3 qualification report schema")
+          if report.get("status") != "passed":
+              raise SystemExit("Boto3 qualification report is not passed")
+          checks = report.get("checks")
+          if not isinstance(checks, dict) or not checks or not all(checks.values()):
+              raise SystemExit("Boto3 qualification report contains a failed check")
+          large = report.get("large_object")
+          if not isinstance(large, dict):
+              raise SystemExit("Boto3 large-object evidence is missing")
+          if (
+              large.get("bytes"),
+              large.get("part_bytes"),
+              large.get("parts"),
+              large.get("range_start"),
+              large.get("range_bytes"),
+          ) != (
+              512 * 1024 * 1024,
+              64 * 1024 * 1024,
+              8,
+              64 * 1024 * 1024 - 4096,
+              64 * 1024 * 1024 + 8192,
+          ):
+              raise SystemExit("Boto3 large-object fixture shape is wrong")
+          if (
+              large.get("range_exact") is not True
+              or large.get("range_sha256") != large.get("range_source_sha256")
+              or large.get("source_sha256") != large.get("full_get_sha256")
+          ):
+              raise SystemExit("Boto3 large-object bytes were not exact")
+          for name in (
+              "source_sha256",
+              "full_get_sha256",
+              "range_sha256",
+              "range_source_sha256",
+          ):
+              value = large.get(name)
+              if not isinstance(value, str) or len(value) != 64:
+                  raise SystemExit(f"Boto3 large-object {name} is missing")
+          for name in ("upload_elapsed_ms", "full_get_elapsed_ms", "range_get_elapsed_ms"):
+              value = large.get(name)
+              if type(value) is not int or value <= 0:
+                  raise SystemExit(f"Boto3 large-object {name} is missing")
+          PY
+
+      - name: Upload retained qualification report
+        if: always() && steps.report.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: s3-gateway-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/crab-s3-gateway-evidence/report.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-proof.json
+          if-no-files-found: error
+          retention-days: 90

@@ -188,6 +188,33 @@ async fn full_and_range_streams_never_write_receipts() {
 }
 
 #[tokio::test]
+async fn streamed_upload_receipt_avoids_full_reverification_for_ranges() {
+    let oid = Sha256::digest(b"verified").into();
+    let store = Arc::new(DeliveryStore {
+        inner: InMemory::new(),
+        object_path: LfsObjectStore::object_path_for_prefix("stream", &oid),
+        fault: Fault::None,
+        bodies: AtomicUsize::new(0),
+        delivery_read: AtomicUsize::new(1),
+        reads: AtomicUsize::new(0),
+        writes: AtomicUsize::new(0),
+    });
+    let lfs = LfsObjectStore::new(Store::new(store.clone()), "stream");
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), b"verified").unwrap();
+
+    lfs.put_stream_with_size(&oid, Some(8), file.path())
+        .await
+        .unwrap();
+    let result = collect(&lfs, &oid, Some(1..4)).await.unwrap();
+
+    assert_eq!(
+        (result, store.bodies.load(Ordering::Relaxed)),
+        (b"eri".to_vec(), 1)
+    );
+}
+
+#[tokio::test]
 async fn changed_range_delivery_version_is_a_conflict_before_bytes_are_exposed() {
     for range in [Some(1..4), Some(0..7)] {
         let (lfs, store, oid) = fixture(Fault::ChangedVersion).await;

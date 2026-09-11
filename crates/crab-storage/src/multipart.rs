@@ -7,6 +7,44 @@
 
 use std::time::Duration;
 
+use crate::StorageProviderKind;
+
+/// Physical multipart-upload limits enforced by a storage provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultipartUploadLimits {
+    /// Maximum completed object size in bytes.
+    pub max_object_size: u64,
+    /// Maximum individual provider part size in bytes.
+    pub max_part_size: u64,
+    /// Maximum number of provider parts in one object.
+    pub max_parts: u64,
+}
+
+/// Returns the provider's multipart-upload limits.
+///
+/// Local and generic test stores use the conservative S3 profile so callers
+/// exercise the same planning boundaries as the default production backend.
+#[must_use]
+pub const fn upload_limits(provider: StorageProviderKind) -> MultipartUploadLimits {
+    match provider {
+        StorageProviderKind::S3 | StorageProviderKind::Local => MultipartUploadLimits {
+            max_object_size: 50_000_000_000_000,
+            max_part_size: 5 * 1024 * 1024 * 1024,
+            max_parts: 10_000,
+        },
+        StorageProviderKind::Gcs => MultipartUploadLimits {
+            max_object_size: 5 * 1024 * 1024 * 1024 * 1024,
+            max_part_size: 5 * 1024 * 1024 * 1024,
+            max_parts: 10_000,
+        },
+        StorageProviderKind::Azure => MultipartUploadLimits {
+            max_object_size: 4_000 * 1024 * 1024 * 50_000,
+            max_part_size: 4_000 * 1024 * 1024,
+            max_parts: 50_000,
+        },
+    }
+}
+
 /// Completes a non-resumable upload, aborting it if completion fails.
 ///
 /// All part futures must have finished successfully before this call. An abort
@@ -17,15 +55,29 @@ pub async fn complete_upload(
     upload: &mut dyn object_store::MultipartUpload,
     path: &object_store::path::Path,
 ) -> crate::Result<()> {
-    if let Err(error) = upload.complete().await {
-        // S3/GCS cannot reclaim parts on drop. Keep the completion failure as
-        // the retry decision even when the best-effort cleanup also fails.
-        if let Err(abort_error) = upload.abort().await {
-            tracing::warn!(path = %path, error = %abort_error, "multipart abort after completion failure also failed");
+    complete_upload_with_result(upload, path).await.map(drop)
+}
+
+/// Completes a non-resumable upload and returns its exact provider validator.
+///
+/// This has the same abort-on-failure contract as [`complete_upload`]. Callers
+/// use the result when later reads must bind verified bytes to the completed
+/// provider object without downloading the body again.
+pub async fn complete_upload_with_result(
+    upload: &mut dyn object_store::MultipartUpload,
+    path: &object_store::path::Path,
+) -> crate::Result<object_store::PutResult> {
+    match upload.complete().await {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            // S3/GCS cannot reclaim parts on drop. Keep the completion failure as
+            // the retry decision even when the best-effort cleanup also fails.
+            if let Err(abort_error) = upload.abort().await {
+                tracing::warn!(path = %path, error = %abort_error, "multipart abort after completion failure also failed");
+            }
+            Err(crate::map_object_store_error(error, path.as_ref()))
         }
-        return Err(crate::map_object_store_error(error, path.as_ref()));
     }
-    Ok(())
 }
 
 /// Error returned by a multipart journal implementation.
@@ -193,6 +245,24 @@ pub(crate) fn compatible_parts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_limits_match_provider_boundaries() {
+        let s3 = upload_limits(StorageProviderKind::S3);
+        assert_eq!(s3.max_object_size, 50_000_000_000_000);
+        assert_eq!(s3.max_parts, 10_000);
+        assert!(s3.max_object_size.div_ceil(s3.max_parts) <= s3.max_part_size);
+
+        let gcs = upload_limits(StorageProviderKind::Gcs);
+        assert_eq!(gcs.max_object_size, 5 * 1024_u64.pow(4));
+        assert_eq!(gcs.max_parts, 10_000);
+        assert!(gcs.max_object_size.div_ceil(gcs.max_parts) <= gcs.max_part_size);
+
+        let azure = upload_limits(StorageProviderKind::Azure);
+        assert_eq!(azure.max_part_size, 4_000 * 1024 * 1024);
+        assert_eq!(azure.max_parts, 50_000);
+        assert_eq!(azure.max_object_size, azure.max_part_size * azure.max_parts);
+    }
 
     fn claim(parts: Vec<JournalPart>) -> JournalClaim {
         JournalClaim {

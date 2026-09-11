@@ -44,7 +44,10 @@ use crab_storage::{ETag, StorageError, Store};
 use crab_xet::hash::MerkleHash;
 use crab_xet::xorb::format::MAX_XORB_SIZE;
 
+mod observation;
 mod xorb_read;
+use observation::NoopCacheObserver;
+pub use observation::{CacheObserver, CacheReadObservation, CacheReadOutcome, CacheSource};
 use xorb_read::XorbReadState;
 
 /// Result alias for cache/storage adapter operations.
@@ -136,6 +139,7 @@ pub struct CachingStore {
     mode: CacheServiceMode,
     push_warming: bool,
     xorb_reads: Arc<XorbReadState>,
+    observer: Arc<dyn CacheObserver>,
     #[cfg(feature = "remote-client")]
     max_push_warming_object_bytes: Option<u64>,
 }
@@ -216,6 +220,7 @@ impl CachingStore {
             mode: cache_config.service_mode,
             push_warming: cache_config.push_warming,
             xorb_reads: Arc::new(XorbReadState::new()),
+            observer: Arc::new(NoopCacheObserver),
             #[cfg(feature = "remote-client")]
             max_push_warming_object_bytes: None,
         })
@@ -295,6 +300,29 @@ impl CachingStore {
     /// Borrow the local disk cache.
     pub fn local_cache(&self) -> &Arc<LocalCache> {
         &self.local_cache
+    }
+
+    /// Observe bounded cache routing without exposing object identities.
+    #[must_use]
+    pub fn with_cache_observer(mut self, observer: Arc<dyn CacheObserver>) -> Self {
+        self.observer = observer;
+        self
+    }
+
+    fn observe_cache_read(&self, source: CacheSource, outcome: CacheReadOutcome, bytes: usize) {
+        self.observe_cache_read_bytes(source, outcome, u64::try_from(bytes).unwrap_or(u64::MAX));
+    }
+
+    fn observe_cache_read_bytes(&self, source: CacheSource, outcome: CacheReadOutcome, bytes: u64) {
+        self.observer.read(CacheReadObservation {
+            source,
+            outcome,
+            bytes,
+        });
+    }
+
+    fn observe_local_write_failure(&self) {
+        self.observer.local_write_failure();
     }
 
     /// Whether a cache service is configured (regardless of mode).
@@ -378,8 +406,8 @@ impl CachingStore {
 
         if is_immutable {
             // Try local disk cache first.
-            if let Some(key) = cache_key_for_path(path.as_ref())
-                && let Ok(data) = self
+            if let Some(key) = cache_key_for_path(path.as_ref()) {
+                match self
                     .local_cache
                     .get_or_fetch_with(&key, || async {
                         Err(CacheStoreError::Storage(StorageError::NotFound {
@@ -387,25 +415,46 @@ impl CachingStore {
                         }))
                     })
                     .await
-            {
-                let etag = ETag {
-                    e_tag: None,
-                    version: None,
-                };
-                return Ok((data, etag));
+                {
+                    Ok(data) => {
+                        self.observe_cache_read(
+                            CacheSource::Local,
+                            CacheReadOutcome::Hit,
+                            data.len(),
+                        );
+                        let etag = ETag {
+                            e_tag: None,
+                            version: None,
+                        };
+                        return Ok((data, etag));
+                    }
+                    Err(_) => {
+                        self.observe_cache_read(CacheSource::Local, CacheReadOutcome::Miss, 0)
+                    }
+                }
             }
 
             // Try remote cache service.
             match self.get_cache_service_object(path).await {
                 Ok(Some(data)) => {
+                    self.observe_cache_read(
+                        CacheSource::Service,
+                        CacheReadOutcome::Hit,
+                        data.len(),
+                    );
                     let etag = ETag {
                         e_tag: None,
                         version: None,
                     };
                     return Ok((data, etag));
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    if self.cache_reads_enabled() {
+                        self.observe_cache_read(CacheSource::Service, CacheReadOutcome::Miss, 0);
+                    }
+                }
                 Err(e) => {
+                    self.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
                     tracing::warn!(
                         path = %path,
                         error = %e,
@@ -423,6 +472,7 @@ impl CachingStore {
             && let Some(key) = cache_key_for_path(path.as_ref())
             && let Err(e) = self.local_cache.put_bytes(&key, result.0.clone()).await
         {
+            self.observe_local_write_failure();
             if cache_integrity_error(&e) {
                 return Err(e.into());
             }
@@ -446,7 +496,7 @@ impl CachingStore {
         let is_immutable = classify_path(path.as_ref()) == PathClass::Immutable;
 
         if is_immutable && let Some(key) = cache_key_for_path(path.as_ref()) {
-            if let Ok(data) = self
+            match self
                 .local_cache
                 .get_or_fetch_bounded_with(&key, max_bytes, || async {
                     Err::<Bytes, CacheStoreError>(CacheStoreError::Storage(
@@ -457,19 +507,8 @@ impl CachingStore {
                 })
                 .await
             {
-                return Ok((
-                    data,
-                    ETag {
-                        e_tag: None,
-                        version: None,
-                    },
-                ));
-            }
-
-            // The HTTP client bounds both advertised and streamed body bytes.
-            // Size rejection is a cache failure, so it must reach origin fallback.
-            match self.get_cache_service_object_bounded(path, max_bytes).await {
-                Ok(Some(data)) => {
+                Ok(data) => {
+                    self.observe_cache_read(CacheSource::Local, CacheReadOutcome::Hit, data.len());
                     return Ok((
                         data,
                         ETag {
@@ -478,15 +517,42 @@ impl CachingStore {
                         },
                     ));
                 }
-                Ok(None) => {}
-                Err(error) => tracing::warn!(
-                    family = "remote-object",
-                    operation = "bounded-read",
-                    path = %path,
-                    recovery = "use-bounded-origin",
-                    error = %error,
-                    "cache service bounded read failed"
-                ),
+                Err(_) => self.observe_cache_read(CacheSource::Local, CacheReadOutcome::Miss, 0),
+            }
+
+            // The HTTP client bounds both advertised and streamed body bytes.
+            // Size rejection is a cache failure, so it must reach origin fallback.
+            match self.get_cache_service_object_bounded(path, max_bytes).await {
+                Ok(Some(data)) => {
+                    self.observe_cache_read(
+                        CacheSource::Service,
+                        CacheReadOutcome::Hit,
+                        data.len(),
+                    );
+                    return Ok((
+                        data,
+                        ETag {
+                            e_tag: None,
+                            version: None,
+                        },
+                    ));
+                }
+                Ok(None) => {
+                    if self.cache_reads_enabled() {
+                        self.observe_cache_read(CacheSource::Service, CacheReadOutcome::Miss, 0);
+                    }
+                }
+                Err(error) => {
+                    self.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
+                    tracing::warn!(
+                        family = "remote-object",
+                        operation = "bounded-read",
+                        path = %path,
+                        recovery = "use-bounded-origin",
+                        error = %error,
+                        "cache service bounded read failed"
+                    );
+                }
             }
         }
 
@@ -495,6 +561,7 @@ impl CachingStore {
             && let Some(key) = cache_key_for_path(path.as_ref())
             && let Err(error) = self.local_cache.put_bytes(&key, result.0.clone()).await
         {
+            self.observe_local_write_failure();
             if cache_integrity_error(&error) {
                 return Err(error.into());
             }
@@ -725,8 +792,12 @@ impl CachingStore {
         };
         match self.local_cache.put_bytes(&key, data.clone()).await {
             Ok(()) => Ok(()),
-            Err(e) if cache_integrity_error(&e) => Err(e.into()),
+            Err(e) if cache_integrity_error(&e) => {
+                self.observe_local_write_failure();
+                Err(e.into())
+            }
             Err(e) => {
+                self.observe_local_write_failure();
                 tracing::warn!(
                     path = %path,
                     error = %e,
@@ -743,12 +814,15 @@ impl CachingStore {
     pub async fn range_get(&self, path: &Path, range: Range<u64>) -> Result<Bytes> {
         let is_immutable = classify_path(path.as_ref()) == PathClass::Immutable;
 
-        if is_immutable
-            && let Some((data, _, _)) = self
+        if is_immutable {
+            if let Some((data, _, _)) = self
                 .local_cached_range_with_size(path, &GetRange::Bounded(range.clone()))
                 .await
-        {
-            return Ok(data);
+            {
+                self.observe_cache_read(CacheSource::Local, CacheReadOutcome::Hit, data.len());
+                return Ok(data);
+            }
+            self.observe_cache_read(CacheSource::Local, CacheReadOutcome::Miss, 0);
         }
 
         if is_immutable {
@@ -757,8 +831,16 @@ impl CachingStore {
                 && let Some(client) = &self.cache_client
             {
                 match client.get_range(path.as_ref(), range.clone()).await {
-                    Ok(data) => return Ok(data),
+                    Ok(data) => {
+                        self.observe_cache_read(
+                            CacheSource::Service,
+                            CacheReadOutcome::Hit,
+                            data.len(),
+                        );
+                        return Ok(data);
+                    }
                     Err(e) => {
+                        self.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
                         tracing::warn!(
                             path = %path,
                             error = %e,
@@ -828,8 +910,12 @@ impl CachingStore {
         if let Some(key) = &cache_key {
             match self.local_cache.put_bytes(key, bytes.clone()).await {
                 Ok(()) => {}
-                Err(e) if cache_integrity_error(&e) => return Err(e.into()),
+                Err(e) if cache_integrity_error(&e) => {
+                    self.observe_local_write_failure();
+                    return Err(e.into());
+                }
                 Err(e) => {
+                    self.observe_local_write_failure();
                     tracing::warn!(
                         path = %path,
                         error = %e,
@@ -877,11 +963,20 @@ impl CachingStore {
                     .download_to_path_bounded(path.as_ref(), dest, max_bytes)
                     .await
                 {
-                    Ok(Some(bytes)) => return Ok(bytes),
+                    Ok(Some(bytes)) => {
+                        self.observe_cache_read_bytes(
+                            CacheSource::Service,
+                            CacheReadOutcome::Hit,
+                            bytes,
+                        );
+                        return Ok(bytes);
+                    }
                     Ok(None) => {
+                        self.observe_cache_read(CacheSource::Service, CacheReadOutcome::Miss, 0);
                         tracing::debug!(path = %path, "cache service stream miss, using origin")
                     }
                     Err(error) => {
+                        self.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
                         tracing::warn!(
                             path = %path,
                             error = %error,
@@ -1289,9 +1384,29 @@ impl ObjectStore for CacheAwareObjectStore {
             #[cfg(feature = "remote-client")]
             if cache_key_for_path(location.as_ref()).is_none() {
                 match self.store.get_cache_service_stream(location).await {
-                    Ok(Some(result)) => return Ok(result),
-                    Ok(None) => {}
+                    Ok(Some(result)) => {
+                        self.store.observe_cache_read(
+                            CacheSource::Service,
+                            CacheReadOutcome::Hit,
+                            0,
+                        );
+                        return Ok(result);
+                    }
+                    Ok(None) => {
+                        if self.store.cache_reads_enabled() {
+                            self.store.observe_cache_read(
+                                CacheSource::Service,
+                                CacheReadOutcome::Miss,
+                                0,
+                            );
+                        }
+                    }
                     Err(error) => {
+                        self.store.observe_cache_read(
+                            CacheSource::Service,
+                            CacheReadOutcome::Failure,
+                            0,
+                        );
                         tracing::warn!(
                             path = %location,
                             error = %error,
@@ -1384,17 +1499,33 @@ async fn cached_object_range(
         .local_cached_range_with_size(location, &requested)
         .await
     {
+        store.observe_cache_read(CacheSource::Local, CacheReadOutcome::Hit, result.0.len());
         return Ok(result);
     }
+    store.observe_cache_read(CacheSource::Local, CacheReadOutcome::Miss, 0);
     if let GetRange::Bounded(range) = &requested {
         match store
             .range_get_cache_service_object(location, range.clone())
             .await
         {
-            Ok(Some(range)) => return Ok((range.data, range.range, range.total_size)),
-            Ok(None) => {}
-            Err(error) => tracing::warn!(path = %location, error = %error,
-                "cache service bounded range read failed, falling back to resolved range"),
+            Ok(Some(range)) => {
+                store.observe_cache_read(
+                    CacheSource::Service,
+                    CacheReadOutcome::Hit,
+                    range.data.len(),
+                );
+                return Ok((range.data, range.range, range.total_size));
+            }
+            Ok(None) => {
+                if store.cache_reads_enabled() {
+                    store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Miss, 0);
+                }
+            }
+            Err(error) => {
+                store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
+                tracing::warn!(path = %location, error = %error,
+                    "cache service bounded range read failed, falling back to resolved range");
+            }
         }
     }
     let (range, object_size) = resolve_cache_range(store, location, requested).await?;
@@ -1426,6 +1557,7 @@ async fn head_immutable_object(
 ) -> object_store::Result<ObjectMeta> {
     match store.head_cache_service_object(location).await {
         Ok(Some(head)) => {
+            store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Hit, 0);
             return Ok(ObjectMeta {
                 location: location.clone(),
                 last_modified: SystemTime::now().into(),
@@ -1434,8 +1566,13 @@ async fn head_immutable_object(
                 version: None,
             });
         }
-        Ok(None) => {}
+        Ok(None) => {
+            if store.cache_reads_enabled() {
+                store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Miss, 0);
+            }
+        }
         Err(e) => {
+            store.observe_cache_read(CacheSource::Service, CacheReadOutcome::Failure, 0);
             tracing::warn!(
                 path = %location,
                 error = %e,
@@ -1605,6 +1742,25 @@ mod tests {
     const TEST_PSK: &str = "test-psk-key";
     #[cfg(feature = "remote-client")]
     const TEST_MAX_CACHE_BYTES: u64 = 1_048_576;
+
+    #[derive(Default)]
+    struct RecordingCacheObserver {
+        reads: std::sync::Mutex<Vec<(CacheSource, CacheReadOutcome, u64)>>,
+        local_write_failures: AtomicUsize,
+    }
+
+    impl CacheObserver for RecordingCacheObserver {
+        fn read(&self, observation: CacheReadObservation) {
+            self.reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((observation.source, observation.outcome, observation.bytes));
+        }
+
+        fn local_write_failure(&self) {
+            self.local_write_failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[derive(Debug)]
     struct CountingStore {
@@ -1989,9 +2145,11 @@ mod tests {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
         let cache = Arc::new(LocalCache::new(root));
         let key = CacheKey::Shard(hash);
+        let observer = Arc::new(RecordingCacheObserver::default());
         let store =
             CachingStore::new_with_local_cache(origin, no_cache_config(), Arc::clone(&cache))
-                .unwrap();
+                .unwrap()
+                .with_cache_observer(Arc::clone(&observer) as Arc<dyn CacheObserver>);
 
         let (got, _) = store
             .get_with_etag_bounded(&path, good_body.len() as u64)
@@ -2001,6 +2159,7 @@ mod tests {
         assert_eq!(got, good_body);
         assert_eq!(counting_origin.counts().body_requests(), 1);
         assert!(!cache.contains(&key).await);
+        assert_eq!(observer.local_write_failures.load(Ordering::Relaxed), 1);
     }
 
     #[cfg(unix)]
@@ -2400,6 +2559,41 @@ mod tests {
         let cs = CachingStore::new(origin, no_cache_config()).unwrap();
         let (got, _etag) = cs.get_with_etag(&path).await.unwrap();
         assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn observer_distinguishes_cold_local_miss_from_warm_hit() {
+        let body = Bytes::from_static(b"cache observation body");
+        let hash = crab_xet::hash::compute_data_hash(&body);
+        let path = content_path("shards", &hash.hex());
+        let origin = origin_store();
+        origin.put(&path, body.clone()).await.unwrap();
+        let tempdir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(LocalCache::new(tempdir.path().join("cache")));
+        let observer = Arc::new(RecordingCacheObserver::default());
+        let store = CachingStore::new_with_local_cache(origin, no_cache_config(), cache)
+            .unwrap()
+            .with_cache_observer(Arc::clone(&observer) as Arc<dyn CacheObserver>);
+
+        for _ in 0..2 {
+            let (actual, _) = store
+                .get_with_etag_bounded(&path, body.len() as u64)
+                .await
+                .unwrap();
+            assert_eq!(actual, body);
+        }
+
+        assert_eq!(
+            *observer
+                .reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                (CacheSource::Local, CacheReadOutcome::Miss, 0),
+                (CacheSource::Local, CacheReadOutcome::Hit, body.len() as u64,),
+            ]
+        );
+        assert_eq!(observer.local_write_failures.load(Ordering::Relaxed), 0);
     }
 
     #[cfg(not(feature = "remote-client"))]
@@ -3410,6 +3604,7 @@ mod tests {
         let direct_origin = Store::new(Arc::new(InMemory::new()));
         let warm_cache = Arc::new(LocalCache::new(server._tempdir.path().join("warm-client")));
         let range_cache = Arc::new(LocalCache::new(server._tempdir.path().join("range-client")));
+        let observer = Arc::new(RecordingCacheObserver::default());
 
         let warmer = CachingStore::new_with_local_cache(
             direct_origin.clone(),
@@ -3421,14 +3616,25 @@ mod tests {
         assert_eq!(got, body);
         assert_eq!(server.origin_get_count.load(Ordering::Relaxed), 1);
 
-        let range_reader =
-            CachingStore::new_with_local_cache(direct_origin, &config, range_cache).unwrap();
+        let range_reader = CachingStore::new_with_local_cache(direct_origin, &config, range_cache)
+            .unwrap()
+            .with_cache_observer(Arc::clone(&observer) as Arc<dyn CacheObserver>);
         let slice = range_reader.range_get(&path, 10..20).await.unwrap();
         assert_eq!(slice, body.slice(10..20));
         assert_eq!(
             server.origin_get_count.load(Ordering::Relaxed),
             1,
             "fresh Crab-side range reader should hit cache server without origin GET"
+        );
+        assert_eq!(
+            *observer
+                .reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                (CacheSource::Local, CacheReadOutcome::Miss, 0),
+                (CacheSource::Service, CacheReadOutcome::Hit, 10),
+            ]
         );
     }
 

@@ -244,10 +244,16 @@ writers need fencing or a grace-and-recheck protocol so cleanup cannot delete a
 part immediately before registration. Fault tests must prove both eventual
 reclamation and preservation of every reachable object.
 
-This design adds temporary storage and a full selected-part read during
-completion. Record those bytes explicitly in benchmarks. A future zero-copy
-recipe path requires equivalent chunking, checksum, reconstruction and GC proof;
-it is not a shortcut in the initial implementation.
+The implementation adds durable temporary part storage and, for newly published
+large content, two full selected-part reads during completion. The first pass
+validates every part and computes full-object digests. The second streams the
+same frozen parts into verified LFS publication; LFS rechecks the byte count and
+SHA-256 before completing its backend upload. Objects through 64 MiB retain the
+single-pass local-spool path, while larger objects do not create a local spool
+proportional to the assembled size. An already verified LFS object may skip the
+second read. Record staging and replay bytes explicitly in benchmarks. A future
+single-pass content-addressed recipe path requires equivalent chunking,
+checksum, reconstruction and GC proof.
 
 ## Execution rules and evidence
 
@@ -257,15 +263,53 @@ A phase is complete only when every acceptance criterion has evidence at the
 same commit. Compilation and mocked unit tests alone cannot close a phase that
 introduces an externally visible operation.
 
-Planned artifacts (create them in the indicated phases; they do not exist yet):
+Phase-owned artifacts:
 
 - Phase 0: `crab/docs/architecture/s3-gateway-contract.md`, the exact protocol,
   semantic decisions, supported feature cells and error mapping.
-- Phase 2: `crates/crab-s3-gateway/`, with integration tests under `tests/`,
-  plus `crab/scripts/e2e/qualify_s3_gateway.py`.
-- Phase 8: `.github/workflows/s3-gateway.yml`, client/backend test jobs and
-  validation of qualification reports.
-- Phase 9: crate README, deployment assets and product documentation.
+- Phase 2: `crates/crab-s3-gateway/` exists; integration tests under `tests/`
+  and the complete multi-suite `crab/scripts/e2e/qualify_s3_gateway.py` runner
+  remain planned. The dependency-free
+  `crab/scripts/e2e/s3_gateway_workload.py` runner is available now for signed
+  4 KiB/16-writer contention checks, paginated acknowledgement verification,
+  and direct S3 transport comparison; it is not a retained Phase-8
+  committed-write proof until a direct Crab SDK baseline is supplied.
+- Phase 8: `.github/workflows/s3-gateway.yml` builds and qualifies the packaged
+  image against RustFS with an unchanged signed AWS client. It separately
+  exercises chained SigV4 streaming signatures, S3-compatible transport metadata,
+  rejection atomicity for a corrupted chunk signature, and configured temporary
+  SigV4 credentials through header and presigned-query requests. A minimal Crab
+  release binary publishes a real 64 MiB Xet fixture and an identical duplicate;
+  signed HEAD, list, and throttled range traffic proves deterministic projected
+  ETags, exact range bytes, deduplication, and zero response-sized Xet scratch.
+  The same commit contains 10,032 logical 64 MiB keys backed by one pointer blob;
+  unchanged AWS CLI traffic traverses eleven bounded pages, seeks a late prefix,
+  groups delimiter subtrees, and proves exact order, uniqueness, a two-minute
+  absolute ceiling, no more than 125% of an equivalent direct RustFS traversal,
+  positive backend accounting, and zero Xet hydration scratch.
+  Two one-part uploads then compare 8 MiB and 64 MiB payload registration on the
+  real backend: each durable state record stays within 64 KiB, their sizes differ
+  by at most 64 bytes, and abort reclaims both staged payloads.
+  The pinned Boto3 client also uploads a deterministic 512 MiB object as eight
+  sequential 64 MiB parts, verifies a complete GET, and verifies a range that
+  crosses a persisted part boundary against the source digest.
+  A forced process exit then leaves one live session, one synthetically frozen
+  completion, and one eligible missing-session orphan on the same durable
+  backend. The replacement process must reclaim the orphan within two completed
+  maintenance scans, preserve both protected payloads and their lifecycle state,
+  release the orphan's capacity slot, and reclaim the fixture payloads afterward.
+  The job retains and validates a versioned qualification report bound to the
+  exact source, image, backend, client versions, both fixtures, measurements, and
+  complete assertion inventory.
+- Phase 9: the crate README, pinned image, example configuration, separate
+  management probes, container runtime smoke and isolated Compose profile
+  exist. The canonical Helm chart is schema-checked, rendered and validated as
+  Kubernetes 1.29 resources in CI, but has no live EKS evidence. The ECS
+  CloudFormation template and parameter example are cfn-lint checked and
+  contract-checked in CI, but have no live Fargate evidence. The operations
+  runbook and alert mappings exist, but live Prometheus and Alertmanager
+  delivery remain unqualified. Neither EKS nor ECS is qualified production
+  deployment support yet.
 
 Proposed runner interface, to implement in phase 2 and extend per phase:
 
@@ -569,11 +613,12 @@ For Crab/Xet pointers, a partial GET or copy-source range uses the shared Xet
 range reconstructor and prunes the reconstruction recipe to chunks overlapping
 the selected logical byte interval. Cold, low-coverage reads fetch bounded xorb
 ranges; the cache may fetch and retain a complete verified xorb when the
-selected chunks cover most of it. The selected bytes are streamed from bounded
-temporary storage, so the gateway does not hydrate the complete logical file or
-retain the requested range in memory. A complete GET continues through
-whole-file reconstruction so the pointer hash and declared size are both
-verified.
+selected chunks cover most of it. The selected bytes stream through one bounded
+backpressure slot, so the gateway does not hydrate the complete logical file,
+retain the requested range in memory, or reserve scratch proportional to the
+response. Dropping the response cancels reconstruction. A complete GET continues
+through the same bounded reconstruction stream; its terminal chunk is withheld
+until the pointer hash and declared size are verified before successful EOF.
 
 ### 3.2 Headers, conditions and ranges
 
@@ -609,7 +654,10 @@ Use the full visible S3 key, including encoded ref prefix, as the ordering and
 marker domain. Git tree order or naive recursive depth-first traversal is not
 proof of S3 lexical order. Establish a bounded traversal/seek algorithm with
 ordering tests for names such as `a-1`, directory `a/`, and `a0`; do not load and
-sort the entire repository for every page.
+sort the entire repository for every page. The gateway implementation projects
+the ref prefix into that full-key domain, binary-seeks each visited raw Git tree,
+and stops after `MaxKeys` plus one lookahead. Only blobs on the returned page may
+require metadata fallback; listing must never hydrate Crab/Xet or LFS payloads.
 
 For delimiter `/`, emit one CommonPrefix for the grouped subtree and advance
 past the group. Page accounting includes emitted groups as specified by S3.
@@ -1401,6 +1449,47 @@ Create `crates/crab-s3-gateway/deploy/` with:
   a second data store.
 - `operations.md` covering monitoring, scaling, rotation, cleanup, incident
   response, backup/restore and upgrade/rollback for all three environments.
+
+Current implementation covers the locked `deploy/Dockerfile`, example and
+Compose configurations, liveness/readiness contract, packaged-image RustFS
+smoke and Compose multipart recovery across container replacement. It also
+includes the canonical Helm chart, values schema, EKS example and CI validation
+against Kubernetes 1.29 schemas, plus `deploy/ecs/crab-s3-gateway.yaml` and its
+parameter example for an immutable-image, two-task Fargate service with Secrets
+Manager references, least-privilege backend access, bounded scratch, and an
+internal TLS ALB. The ECS template passes cfn-lint and checked contract
+invariants; live Fargate deployment and replacement evidence remain separate.
+The private management listener exports
+bounded-cardinality Prometheus HTTP, response-stream, admission-pressure,
+content-scratch, logical object-store latency/outcome/byte, and aggregate
+multipart-reconciliation metrics, with
+packaged-image qualification proving the scrape contract and that request or
+credential identities are absent. The same endpoint reports the process view
+of scratch-filesystem total, free, and available capacity, plus explicit probe
+health; failed probes clear stale capacity. Request-body spools, Xet range
+reconstruction, and generated Git packs now share atomic pre-write capacity
+admission. Declared bodies reserve before consumption, unknown streams reserve
+in bounded increments, and a 10% headroom policy bounded to 64 MiB–1 GiB turns
+pressure or mount loss into retryable `SlowDown`. Cache usage and failure
+telemetry are implemented with fixed cache-layer/outcome counters,
+verified-hit byte counters, local-persistence failures, and coalesced read-only
+catalog usage/health probes. The Helm chart now includes opt-in, release-scoped
+PodMonitor and PrometheusRule resources backed by syntax validation and healthy
+and faulting rule tests. Live Prometheus selection, Alertmanager receiver
+delivery, Kubernetes policy-quota telemetry, live EKS, external TLS, independent
+Git-history proof, provider wire-attempt metrics, and live ECS remain
+requirements, not qualified deployment support. The checked operations runbook
+now binds every
+alert to a trigger, bounded diagnosis/action, and recovery proof, and covers
+scaling, credential rotation, repository maintenance, backup/restore, and
+upgrade/rollback without claiming unqualified platforms. One explicitly
+placed, startup-probed, byte-bounded local cache is shared across every
+repository in a process and mounted separately from scratch. Provider-native
+or load-balancer telemetry must cover wire attempts because the application
+metrics intentionally measure logical object-store calls across their complete
+response-stream lifetime. Kubelet telemetry remains authoritative for an
+`emptyDir.sizeLimit` that the node runtime does not expose as a filesystem
+quota.
 
 Build a locked, multi-stage image with the executable as PID 1, non-root user,
 read-only root filesystem, explicit writable scratch/cache directories and

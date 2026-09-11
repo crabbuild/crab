@@ -230,12 +230,40 @@ impl ReadError {
             source: Box::new(error),
         }
     }
+
+    /// Return whether reconstruction failed while creating, writing, or flushing its destination.
+    #[must_use]
+    pub fn is_destination_io(&self) -> bool {
+        matches!(self, Self::Io(_))
+            || matches!(
+                self,
+                Self::Reconstruction { source, .. } if source.has_writer_error()
+            )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn destination_io_classification_excludes_read_failures() {
+        let direct = ReadError::Io(std::io::Error::other("create failed"));
+        let reconstruction = ReadError::Reconstruction {
+            file_hash: "hash".to_owned(),
+            source: ReconstructionError::from(FileReconstructionError::from(
+                std::io::Error::other("write failed"),
+            )),
+        };
+        let read = ReadError::NotFound {
+            path: "xorb".to_owned(),
+        };
+
+        assert!(direct.is_destination_io());
+        assert!(reconstruction.is_destination_io());
+        assert!(!read.is_destination_io());
+    }
 
     #[test]
     fn observed_read_retains_typed_cause_when_xet_reports_a_secondary_failure() {

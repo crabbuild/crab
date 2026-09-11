@@ -18,7 +18,7 @@ pub use error::{ReadError, ReconstructionError, Result};
 pub use fetch_admission::{
     FetchAdmissionPolicy, FetchAdmissionReject, FetchWant, validate_fetch_wants_with_manifest,
 };
-pub use hydrator::{ReadRuntimeBuilder, ReadStoreLayout, ShardHydrator};
+pub use hydrator::{ReadRuntimeBuilder, ReadStoreLayout, ReconstructionStream, ShardHydrator};
 pub use integrity::verify_origin_recipe;
 pub use ref_advertisement::{
     ManifestRefAdvertisement, ManifestRefEntry, manifest_ref_advertisement,

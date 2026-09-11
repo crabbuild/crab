@@ -57,7 +57,7 @@ toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 sha2 = "0.10"
-tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "test-util", "time", "macros"] }
 tempfile = { workspace = true }
 crab-git = { workspace = true }
 crab-xet = { workspace = true }

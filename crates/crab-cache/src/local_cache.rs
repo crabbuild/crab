@@ -17,6 +17,7 @@
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -52,6 +53,7 @@ const XORB_INDEX_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 const XORB_INDEX_OPEN_RETRY_DELAYS_MS: [u64; 4] = [5, 20, 50, 100];
 const CACHE_FILL_LOCK_STRIPES: usize = 256;
 const REF_TRANSACTION_TOUCH_INTERVAL: Duration = Duration::from_secs(60);
+static CACHE_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub const XORB_INDEX_SCHEMA_VERSION: i64 = 1;
 
 fn new_fill_locks() -> Box<[tokio::sync::Mutex<()>]> {
@@ -231,6 +233,28 @@ impl LocalCache {
     #[must_use]
     pub fn max_bytes(&self) -> Option<u64> {
         self.catalog.max_bytes()
+    }
+
+    /// Prepare the private root, catalog, and payload publication boundary.
+    ///
+    /// Services should call this during startup when local-cache persistence is a required
+    /// deployment contract. Catalog initialization completes before the write probe so
+    /// read-only service health cannot race the first cache fill. The probe uses the same
+    /// pinned, descriptor-relative filesystem operations as cache payloads and leaves no
+    /// payload entry behind on success.
+    pub fn prepare(&self) -> Result<()> {
+        crate::ensure_private_cache_directory(&self.root)?;
+        let root = crate::private_fs::PinnedRoot::create(&self.root)?;
+        // Establish the catalog before service metrics can race the first cache fill.
+        // Read-only health probes must keep treating incomplete schemas as failures.
+        self.catalog.prepare_at(&root)?;
+        let sequence = CACHE_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let relative = PathBuf::from(format!(".write-probe-{}-{sequence}", std::process::id()));
+        let pending = root.pending_file(&relative)?;
+        pending.write_body_sync(&[])?;
+        pending.commit_sync()?;
+        root.remove_file(&relative)?;
+        Ok(())
     }
 
     /// Read advisory clean-filter bloom bytes without creating a missing cache.
@@ -1798,6 +1822,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = LocalCache::new(dir.path().join("cache"));
         (dir, cache)
+    }
+
+    #[test]
+    fn prepare_proves_private_cache_writes_and_catalog_readiness() {
+        let (_dir, cache) = temp_cache();
+
+        cache.prepare().unwrap();
+
+        assert!(cache.root().is_dir());
+        assert!(cache.root().join(".catalog.sqlite").is_file());
+        assert_eq!(
+            crate::CacheCatalog::read_only_stats(cache.root()).unwrap(),
+            crate::CacheCatalogStats::default()
+        );
+        assert!(std::fs::read_dir(cache.root()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".write-probe-")
+        }));
     }
 
     #[tokio::test]

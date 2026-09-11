@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    hash::Hash,
     sync::{
         Arc, Mutex as StdMutex, MutexGuard,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -18,6 +19,9 @@ use tokio_util::sync::CancellationToken;
 use crate::gateway::Repository;
 
 const MAINTENANCE_TTL: Duration = Duration::from_secs(60);
+const MAX_CACHED_SNAPSHOTS: usize = 64;
+const MAX_CACHED_MANIFESTS: usize = 16;
+const MAX_CACHED_OBJECT_ATTRIBUTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadViewKey {
@@ -54,11 +58,7 @@ impl ReadView {
     ) -> crate::Result<RemoteGitSnapshot> {
         let cell = {
             let mut snapshots = self.snapshots.lock().await;
-            Arc::clone(
-                snapshots
-                    .entry(revision.to_owned())
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            bounded_cell(&mut snapshots, revision.to_owned(), MAX_CACHED_SNAPSHOTS)
         };
         cell.get_or_try_init(|| async {
             self.remote
@@ -77,11 +77,7 @@ impl ReadView {
     ) -> crate::Result<Arc<crate::attributes::Manifest>> {
         let cell = {
             let mut manifests = self.manifests.lock().await;
-            Arc::clone(
-                manifests
-                    .entry(commit)
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            bounded_cell(&mut manifests, commit, MAX_CACHED_MANIFESTS)
         };
         cell.get_or_try_init(|| async {
             crate::attributes::load(repository, commit)
@@ -102,16 +98,30 @@ impl ReadView {
         let key = (commit, path.to_owned(), oid);
         let cell = {
             let mut objects = self.objects.lock().await;
-            Arc::clone(
-                objects
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            bounded_cell(&mut objects, key, MAX_CACHED_OBJECT_ATTRIBUTES)
         };
         cell.get_or_try_init(|| crate::attributes::load_object(repository, commit, path, oid))
             .await
             .cloned()
     }
+}
+
+fn bounded_cell<K, V>(
+    cache: &mut HashMap<K, Arc<OnceCell<V>>>,
+    key: K,
+    capacity: usize,
+) -> Arc<OnceCell<V>>
+where
+    K: Eq + Hash,
+{
+    if !cache.contains_key(&key) && cache.len() >= capacity {
+        cache.clear();
+    }
+    Arc::clone(
+        cache
+            .entry(key)
+            .or_insert_with(|| Arc::new(OnceCell::new())),
+    )
 }
 
 /// Singleflight refresh and immutable generation reuse for one repository.
@@ -124,7 +134,12 @@ pub(crate) struct ReadViewCache {
 pub(crate) struct WriteMaintenance {
     epoch: AtomicU64,
     active: AtomicUsize,
-    cancellation: StdMutex<CancellationToken>,
+    state: StdMutex<MaintenanceState>,
+}
+
+struct MaintenanceState {
+    scheduled: CancellationToken,
+    running: bool,
 }
 
 impl WriteMaintenance {
@@ -132,14 +147,17 @@ impl WriteMaintenance {
         Self {
             epoch: AtomicU64::new(0),
             active: AtomicUsize::new(0),
-            cancellation: StdMutex::new(CancellationToken::new()),
+            state: StdMutex::new(MaintenanceState {
+                scheduled: CancellationToken::new(),
+                running: false,
+            }),
         }
     }
 
     pub(crate) fn begin(&self) {
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.active.fetch_add(1, Ordering::AcqRel);
-        self.cancellation().cancel();
+        self.state().scheduled.cancel();
     }
 
     pub(crate) fn finish(&self, parent: &CancellationToken) -> Option<(u64, CancellationToken)> {
@@ -147,22 +165,47 @@ impl WriteMaintenance {
             return None;
         }
         let epoch = self.epoch.load(Ordering::Acquire);
-        let mut cancellation = self.cancellation();
         if !self.is_idle_at(epoch) {
             return None;
         }
         let token = parent.child_token();
-        *cancellation = token.clone();
+        self.state().scheduled = token.clone();
         Some((epoch, token))
+    }
+
+    fn start(&self, epoch: u64) -> bool {
+        let mut state = self.state();
+        if state.running || state.scheduled.is_cancelled() || !self.is_idle_at(epoch) {
+            return false;
+        }
+        state.running = true;
+        state.scheduled = CancellationToken::new();
+        true
+    }
+
+    fn complete_pass(&self, epoch: u64) -> Option<u64> {
+        let mut state = self.state();
+        let next = self.epoch.load(Ordering::Acquire);
+        if next != epoch && self.is_idle_at(next) {
+            state.scheduled.cancel();
+            state.scheduled = CancellationToken::new();
+            return Some(next);
+        }
+        state.running = false;
+        None
+    }
+
+    fn stop(&self) {
+        self.state().running = false;
     }
 
     fn is_idle_at(&self, epoch: u64) -> bool {
         self.active.load(Ordering::Acquire) == 0 && self.epoch.load(Ordering::Acquire) == epoch
     }
 
-    fn cancellation(&self) -> MutexGuard<'_, CancellationToken> {
-        match self.cancellation.lock() {
-            Ok(cancellation) => cancellation,
+    fn state(&self) -> MutexGuard<'_, MaintenanceState> {
+        match self.state.lock() {
+            Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         }
     }
@@ -256,29 +299,61 @@ pub(crate) fn schedule_readability(
     let identity = repository.identity.clone();
     let maintenance = Arc::clone(&repository.maintenance);
     tokio::spawn(async move {
-        // Let a short write burst accumulate in the journal so one owner can
-        // compact it, instead of racing every acknowledgement with maintenance.
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            () = tokio::time::sleep(Duration::from_millis(100)) => {}
-        }
-        if !maintenance.is_idle_at(epoch) {
+        let mut epoch = epoch;
+        if !wait_for_idle(&maintenance, &cancel, epoch).await || !maintenance.start(epoch) {
             return;
         }
-        if let Err(error) = crab_write::generation::ensure_readable(
-            &store,
-            &layout,
-            &identity,
-            runtime,
-            options,
-            MAINTENANCE_TTL,
-            &cancel,
-        )
-        .await
-        {
-            tracing::warn!(%error, "S3 repository background read maintenance failed");
+        loop {
+            let result = crab_write::generation::ensure_readable(
+                &store,
+                &layout,
+                &identity,
+                Arc::clone(&runtime),
+                options,
+                MAINTENANCE_TTL,
+                &cancel,
+            )
+            .await;
+            if let Err(error) = result {
+                maintenance.stop();
+                match error {
+                    crab_write::WriteError::VisibilityUnavailable { generation } => {
+                        tracing::warn!(
+                            generation,
+                            recovery = "run `crab fsck --repair`, then `crab metadb owner --once`, against this repository",
+                            "S3 repository requires verified Git visibility repair"
+                        );
+                    }
+                    crab_write::WriteError::Cancelled if cancel.is_cancelled() => {}
+                    error => {
+                        tracing::warn!(%error, "S3 repository background read maintenance failed");
+                    }
+                }
+                return;
+            }
+            let Some(next) = maintenance.complete_pass(epoch) else {
+                return;
+            };
+            epoch = next;
+            if !wait_for_idle(&maintenance, &cancel, epoch).await {
+                maintenance.stop();
+                return;
+            }
         }
     });
+}
+
+async fn wait_for_idle(
+    maintenance: &WriteMaintenance,
+    cancel: &CancellationToken,
+    epoch: u64,
+) -> bool {
+    // Let a short write burst accumulate in the journal so one owner can
+    // compact it, instead of racing every acknowledgement with maintenance.
+    tokio::select! {
+        () = cancel.cancelled() => false,
+        () = tokio::time::sleep(Duration::from_millis(100)) => maintenance.is_idle_at(epoch),
+    }
 }
 
 #[cfg(test)]
@@ -287,23 +362,49 @@ mod tests {
     use crate::{RepositoryAccess, RepositoryConfig};
 
     #[test]
-    fn foreground_write_cancels_scheduled_maintenance() {
+    fn foreground_write_cancels_only_maintenance_that_has_not_started() {
         let parent = CancellationToken::new();
         let maintenance = WriteMaintenance::new();
         maintenance.begin();
-        let (_, first) = maintenance
+        let (first_epoch, first) = maintenance
             .finish(&parent)
             .expect("idle repository schedules maintenance");
 
         maintenance.begin();
         assert!(first.is_cancelled());
-        let (_, second) = maintenance
+        let (second_epoch, second) = maintenance
             .finish(&parent)
             .expect("new idle epoch schedules replacement maintenance");
+        assert!(second_epoch > first_epoch && maintenance.start(second_epoch));
+
+        maintenance.begin();
         assert!(!second.is_cancelled());
+        let (third_epoch, third) = maintenance
+            .finish(&parent)
+            .expect("a write during maintenance schedules a follow-up pass");
+        assert_eq!(maintenance.complete_pass(second_epoch), Some(third_epoch));
+        assert!(third.is_cancelled());
+        assert_eq!(maintenance.complete_pass(third_epoch), None);
 
         parent.cancel();
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn read_view_cells_evict_before_inserting_past_capacity() {
+        let mut cache: HashMap<String, Arc<OnceCell<()>>> = HashMap::new();
+        let first = bounded_cell(&mut cache, "first".to_owned(), 2);
+        let _second = bounded_cell(&mut cache, "second".to_owned(), 2);
+        assert_eq!(cache.len(), 2);
+
+        let third = bounded_cell(&mut cache, "third".to_owned(), 2);
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.contains_key("first"));
+        assert!(Arc::ptr_eq(
+            &third,
+            cache.get("third").expect("third cell is cached")
+        ));
+        assert_eq!(Arc::strong_count(&first), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -326,6 +427,9 @@ mod tests {
                         access: RepositoryAccess::Read,
                     }],
                     protected_branches: Vec::new(),
+                    max_active_multipart_uploads: 16,
+                    multipart_staging_bytes_per_upload: 50_000_000_000_000,
+                    multipart_upload_ttl_seconds: 604_800,
                 },
                 store,
             )

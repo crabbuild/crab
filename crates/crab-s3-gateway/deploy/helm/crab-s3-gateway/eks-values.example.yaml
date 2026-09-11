@@ -1,0 +1,23 @@
+image:
+  repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/crab-s3-gateway
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+config:
+  existingConfigMap: crab-s3-gateway-config
+
+credentials:
+  existingSecret: crab-s3-gateway-credentials
+
+service:
+  type: LoadBalancer
+  port: 80
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+
+extraEnv:
+  - name: AWS_REGION
+    value: us-east-1
+  - name: AWS_DEFAULT_REGION
+    value: us-east-1

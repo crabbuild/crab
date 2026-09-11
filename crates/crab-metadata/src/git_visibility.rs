@@ -2817,7 +2817,7 @@ mod storage {
     ) -> Result<GitVisibilityRead> {
         validate_hash(git_validation_digest, "Git validation digest")?;
         #[cfg(feature = "remote-index")]
-        match read_catalog_bound(
+        let missing_checkpoint = match read_catalog_bound(
             store,
             router,
             generation,
@@ -2829,18 +2829,32 @@ mod storage {
             Ok((index, format)) => return Ok(GitVisibilityRead { index, format }),
             Err(crate::error::MetadataError::Storage {
                 source: StorageError::NotFound { .. },
-            }) => {}
+            }) => None,
+            Err(error @ crate::error::MetadataError::GitCatalogCheckpointMissing { .. }) => {
+                Some(error)
+            }
             Err(error) => return Err(error),
-        }
-        let (index, format) = read_digest_bound(
+        };
+        // Catalog checkpoints have bounded retention. The independently
+        // validated digest proof keeps older manifest integrity readable.
+        match read_digest_bound(
             store,
             router,
             generation,
             pack_index_hash,
             git_validation_digest,
         )
-        .await?;
-        Ok(GitVisibilityRead { index, format })
+        .await
+        {
+            Ok((index, format)) => Ok(GitVisibilityRead { index, format }),
+            #[cfg(feature = "remote-index")]
+            Err(
+                error @ crate::error::MetadataError::Storage {
+                    source: StorageError::NotFound { .. },
+                },
+            ) => Err(missing_checkpoint.unwrap_or(error)),
+            Err(error) => Err(error),
+        }
     }
 
     /// Read a catalog-bound v1 proof without materializing its OID dictionary.
@@ -4581,6 +4595,84 @@ mod tests {
                 .await
                 .expect("uploaded proof is available")
         );
+    }
+
+    #[cfg(all(feature = "storage", feature = "remote-index"))]
+    #[tokio::test]
+    async fn digest_fallback_requires_missing_catalog_dependency() {
+        use std::sync::Arc;
+
+        use bytes::Bytes;
+        use crab_storage::{Store, StoreLayout};
+        use object_store::memory::InMemory;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
+        let index = GitVisibilityIndex::new(
+            7,
+            "a".repeat(64),
+            "b".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["1".repeat(40)])]),
+        )
+        .expect("valid visibility index");
+        upload_digest_bound_if_absent(&store, &router, &index)
+            .await
+            .expect("upload independent digest proof");
+        let catalog_path = router.git_visibility_catalog_path(&index.git_validation_digest);
+        let catalog = serde_json::json!({
+            "version": GIT_VISIBILITY_INDEX_VERSION,
+            "generation": index.generation,
+            "pack_index_hash": index.pack_index_hash,
+            "git_validation_digest": index.git_validation_digest,
+            "catalog_digest": "f".repeat(64),
+            "object_count": 0,
+            "refs": {},
+            "transitions": {},
+            "incremental_history": {},
+        });
+        store
+            .put(
+                &catalog_path,
+                Bytes::from(serde_json::to_vec(&catalog).expect("encode catalog proof")),
+            )
+            .await
+            .expect("upload proof for retired checkpoint");
+
+        let recovered = read_with_format(
+            &store,
+            &router,
+            index.generation,
+            &index.pack_index_hash,
+            &index.git_validation_digest,
+        )
+        .await
+        .expect("read independent digest proof");
+
+        assert_eq!(recovered.format, GitVisibilityFormat::DigestV1);
+        assert_eq!(recovered.index, index);
+        store
+            .delete(&catalog_path)
+            .await
+            .expect("remove retired catalog proof");
+        store
+            .put(&catalog_path, Bytes::from_static(b"not-json"))
+            .await
+            .expect("upload corrupt catalog proof");
+
+        let error = read_with_format(
+            &store,
+            &router,
+            index.generation,
+            &index.pack_index_hash,
+            &index.git_validation_digest,
+        )
+        .await
+        .expect_err("corrupt catalog must fail closed");
+
+        assert!(matches!(
+            error,
+            crate::error::MetadataError::CorruptObject { .. }
+        ));
     }
 
     #[cfg(all(feature = "storage", feature = "remote-index"))]

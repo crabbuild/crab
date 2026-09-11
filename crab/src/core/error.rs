@@ -2030,6 +2030,12 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             }
             crab_metadata::error::MetadataError::Storage { source } => Self::from(source),
             crab_metadata::error::MetadataError::ObjectStore { source } => Self::Storage(source),
+            crab_metadata::error::MetadataError::GitCatalogCheckpointMissing { catalog_digest } => {
+                Self::CorruptObject {
+                    path: "git_object_catalog_db:checkpoint".to_owned(),
+                    reason: format!("published Git catalog checkpoint {catalog_digest} is missing"),
+                }
+            }
             crab_metadata::error::MetadataError::SlateDbOpen { db, path, source } => {
                 Self::MetaDb(MetaDbError::Open { db, path, source })
             }

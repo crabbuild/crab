@@ -22,9 +22,11 @@ bytes = { workspace = true }
 crab-types = { workspace = true }
 flate2 = { workspace = true }
 gix = { workspace = true, optional = true }
+gix-attributes = { workspace = true }
 gix-discover = { workspace = true }
 gix-features = { workspace = true, features = ["progress"] }
 gix-hash = { workspace = true, features = ["sha1"] }
+gix-glob = { workspace = true }
 gix-object = { workspace = true }
 gix-odb = { workspace = true, features = ["sha1"] }
 gix-pack = { workspace = true, features = ["sha1"] }

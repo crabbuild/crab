@@ -63,14 +63,16 @@ pub(crate) fn listing_reference(prefix: &str) -> Result<Option<(String, String)>
         .decode_utf8()
         .map_err(|_| NamespaceError::InvalidReference)?;
     let (reference, _) = resolve_reference(&reference)?;
-    if prefix.len() > MAX_KEY_BYTES
-        || path_prefix.as_bytes().contains(&0)
-        || path_prefix.starts_with('/')
-        || path_prefix.contains("//")
-    {
+    if prefix.len() > MAX_KEY_BYTES {
         return Err(NamespaceError::InvalidPath);
     }
+    validate_listing_path_prefix(path_prefix)?;
     Ok(Some((reference, path_prefix.to_owned())))
+}
+
+pub(crate) fn listable_path(path: &[u8]) -> bool {
+    let path = path.strip_suffix(b"/").unwrap_or(path);
+    std::str::from_utf8(path).is_ok_and(|path| validate_path(path).is_ok())
 }
 
 fn resolve_reference(value: &str) -> Result<(String, Option<String>), NamespaceError> {
@@ -127,6 +129,31 @@ fn validate_path(path: &str) -> Result<(), NamespaceError> {
     Ok(())
 }
 
+fn validate_listing_path_prefix(path: &str) -> Result<(), NamespaceError> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.len() > MAX_KEY_BYTES
+        || path.starts_with('/')
+        || path.contains("//")
+        || path
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control())
+    {
+        return Err(NamespaceError::InvalidPath);
+    }
+    let path_without_marker = path.strip_suffix('/').unwrap_or(path);
+    if path_without_marker.split('/').any(|component| {
+        component.is_empty()
+            || component.len() > 255
+            || matches!(component, "." | "..")
+            || component.eq_ignore_ascii_case(".git")
+    }) {
+        return Err(NamespaceError::InvalidPath);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +194,29 @@ mod tests {
     #[test]
     fn ordinary_keys_are_not_directory_markers() {
         assert_eq!(directory_marker_address("main/path").unwrap(), None);
+    }
+
+    #[test]
+    fn listing_rejects_paths_outside_the_object_namespace() {
+        for prefix in ["main/a//", "main/../", "main/.git/", "main/a\0"] {
+            assert!(listing_reference(prefix).is_err(), "{prefix:?}");
+        }
+        assert!(listing_reference("main/prefix/").is_ok());
+        assert!(listing_reference("main/prefix/part").is_ok());
+    }
+
+    #[test]
+    fn legacy_tree_paths_are_only_listed_when_they_are_readable_keys() {
+        for path in [
+            b"prefix/.git/config".as_slice(),
+            b"prefix/../escape".as_slice(),
+            b"prefix/a//b".as_slice(),
+            b"prefix/\xff".as_slice(),
+        ] {
+            assert!(!listable_path(path), "{path:?}");
+        }
+        for path in [b"prefix/file".as_slice(), b"prefix/directory/".as_slice()] {
+            assert!(listable_path(path), "{path:?}");
+        }
     }
 }

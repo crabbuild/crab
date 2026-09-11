@@ -1,0 +1,92 @@
+replicaCount: 2
+
+image:
+  repository: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+config:
+  existingConfigMap: ""
+  key: s3-gateway.toml
+
+credentials:
+  existingSecret: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+  loadBalancerSourceRanges: []
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+    ephemeral-storage: 1Gi
+  limits:
+    cpu: "2"
+    memory: 4Gi
+    ephemeral-storage: 16Gi
+
+scratch:
+  sizeLimit: 8Gi
+
+cache:
+  sizeLimit: 3Gi
+
+startupProbe:
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 60
+
+readinessProbe:
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+livenessProbe:
+  periodSeconds: 15
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+terminationGracePeriodSeconds: 45
+minReadySeconds: 10
+revisionHistoryLimit: 3
+
+podAnnotations: {}
+podLabels: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+monitoring:
+  labels: {}
+  podMonitor:
+    enabled: false
+  prometheusRule:
+    enabled: false
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    minDomains: 2
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+extraEnv: []

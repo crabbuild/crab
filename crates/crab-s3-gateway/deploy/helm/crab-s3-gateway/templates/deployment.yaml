@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "crab-s3-gateway.fullname" . }}
+  labels:
+    {{- include "crab-s3-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  minReadySeconds: {{ .Values.minReadySeconds }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "crab-s3-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "crab-s3-gateway.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "crab-s3-gateway.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: crab-s3-gateway
+          image: {{ include "crab-s3-gateway.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/crab/s3-gateway/s3-gateway.toml"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: s3
+              containerPort: 8080
+              protocol: TCP
+            - name: management
+              containerPort: 8081
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: management
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: management
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: management
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/crab/s3-gateway
+              readOnly: true
+            - name: credentials
+              mountPath: /run/secrets/crab-s3
+              readOnly: true
+            - name: scratch
+              mountPath: /var/lib/crab/tmp
+            - name: cache
+              mountPath: /var/lib/crab/cache-volume
+      topologySpreadConstraints:
+        {{- range .Values.topologySpreadConstraints }}
+        - maxSkew: {{ .maxSkew }}
+          {{- with .minDomains }}
+          minDomains: {{ . }}
+          {{- end }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "crab-s3-gateway.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ required "config.existingConfigMap is required" .Values.config.existingConfigMap }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.config.key }}
+                path: s3-gateway.toml
+        - name: credentials
+          secret:
+            secretName: {{ required "credentials.existingSecret is required" .Values.credentials.existingSecret }}
+            defaultMode: 0400
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ .Values.scratch.sizeLimit }}
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.cache.sizeLimit }}

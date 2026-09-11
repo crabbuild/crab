@@ -8,6 +8,7 @@ pub mod head_batch;
 pub mod identity;
 pub mod layout;
 pub mod multipart;
+mod observation;
 pub mod provider_options;
 pub mod provider_store;
 mod read_admission;
@@ -42,6 +43,7 @@ pub use layout::{
     global_content_path, global_content_prefix, repo_pack_index_path, repo_pack_kind_metadata_path,
     repo_pack_metadata_path, repo_pack_path, repo_pack_reverse_index_path,
 };
+pub use observation::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
 pub use provider_options::{
     apply_s3_env_overrides, default_client_options, parse_sas_query_pairs, s3_endpoint_from_env,
     s3_virtual_hosted_style_from_env,

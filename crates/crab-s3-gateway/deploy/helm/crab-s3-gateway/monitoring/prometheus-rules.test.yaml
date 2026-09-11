@@ -1,0 +1,285 @@
+rule_files:
+  - prometheus-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: production faults raise every gateway alert
+    interval: 1m
+    input_series:
+      - series: 'crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds{namespace="crab",pod="gateway-0"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_multipart_maintenance_failures_total{namespace="crab",pod="gateway-0",reason="reconciliation_error"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_backend_requests_total{namespace="crab",pod="gateway-0",operation="get",outcome="auth"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_backend_requests_total{namespace="crab",pod="gateway-0",operation="range",outcome="throttled"}'
+        values: '0+10x20'
+      - series: 'crab_s3_gateway_http_response_body_errors_total{namespace="crab",pod="gateway-0",method="get"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_http_requests_total{namespace="crab",pod="gateway-0",method="get",outcome="5xx"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_admission_events_total{namespace="crab",pod="gateway-0",class="transfer",outcome="overloaded"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_scratch_filesystem_probe_success{namespace="crab",pod="gateway-0"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_scratch_capacity_rejections_total{namespace="crab",pod="gateway-0",reason="exhausted"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_scratch_io_failures_total{namespace="crab",pod="gateway-0",purpose="content_spool",operation="write"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_scratch_filesystem_available_bytes{namespace="crab",pod="gateway-1"}'
+        values: '10+0x20'
+      - series: 'crab_s3_gateway_scratch_filesystem_size_bytes{namespace="crab",pod="gateway-1"}'
+        values: '100+0x20'
+      - series: 'crab_s3_gateway_scratch_filesystem_probe_success{namespace="crab",pod="gateway-1"}'
+        values: '1+0x20'
+      - series: 'crab_s3_gateway_cache_catalog_probe_success{namespace="crab",pod="gateway-0"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_cache_local_write_failures_total{namespace="crab",pod="gateway-0"}'
+        values: '0+1x20'
+      - series: 'crab_s3_gateway_cache_retained_bytes{namespace="crab",pod="gateway-1"}'
+        values: '95+0x20'
+      - series: 'crab_s3_gateway_cache_reserved_bytes{namespace="crab",pod="gateway-1"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_cache_temporary_bytes{namespace="crab",pod="gateway-1"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_cache_limit_bytes{namespace="crab",pod="gateway-1"}'
+        values: '100+0x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CrabS3GatewayMultipartMaintenanceStalled
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: critical
+            exp_annotations:
+              summary: Crab S3 gateway multipart maintenance is stale
+              description: The gateway has not completed a fully healthy multipart reconciliation cycle in more than three minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#availability-and-publication
+      - eval_time: 20m
+        alertname: CrabS3GatewayMultipartMaintenanceFailures
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway multipart maintenance failed
+              description: Multipart reconciliation reported at least one bounded failure during the last ten minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#availability-and-publication
+      - eval_time: 20m
+        alertname: CrabS3GatewayBackendAuthorizationFailures
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: critical
+            exp_annotations:
+              summary: Crab S3 gateway backend authorization failed
+              description: The gateway cannot authorize at least one logical request to its backing object store.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#credential-and-backend-authentication
+      - eval_time: 20m
+        alertname: CrabS3GatewayResponseBodyErrors
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway response streaming failed
+              description: At least one response body failed after its S3 response headers were sent.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#availability-and-publication
+      - eval_time: 20m
+        alertname: CrabS3GatewayAdmissionPressure
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway admission queues are saturated
+              description: Requests have been rejected or timed out at bounded admission for five minutes; scale replicas or reduce client fanout.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#admission-and-scratch-pressure
+      - eval_time: 20m
+        alertname: CrabS3GatewayServerErrors
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway is returning server errors
+              description: S3 requests have returned server-side failures for five minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#availability-and-publication
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchProbeFailed
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: critical
+            exp_annotations:
+              summary: Crab S3 gateway scratch filesystem is unavailable
+              description: The gateway cannot verify writable scratch capacity and will reject work rather than risk disk exhaustion.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#admission-and-scratch-pressure
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchCapacityRejected
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway scratch admission is rejecting requests
+              description: Scratch capacity or its safety probe has rejected requests for five minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#admission-and-scratch-pressure
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchLow
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-1
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway scratch capacity is low
+              description: Less than 15% of the scratch filesystem remains available on a healthy probe.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#admission-and-scratch-pressure
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchIoFailures
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: critical
+            exp_annotations:
+              summary: Crab S3 gateway scratch I/O failed
+              description: A scratch create, write, flush, or read operation failed during the last ten minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#admission-and-scratch-pressure
+      - eval_time: 20m
+        alertname: CrabS3GatewayCacheCatalogUnavailable
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway cache catalog is unavailable
+              description: The disposable cache catalog has not produced a healthy accounting probe for five minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#cache-degradation
+      - eval_time: 20m
+        alertname: CrabS3GatewayCachePersistenceFailures
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway cache persistence is failing
+              description: Immutable cache publications failed during the last ten minutes; origin reads remain authoritative.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#cache-degradation
+      - eval_time: 20m
+        alertname: CrabS3GatewayCacheNearLimit
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-1
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway cache is near its byte limit
+              description: Retained, reserved, and temporary cache bytes have exceeded 90% of the configured process limit for fifteen minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#cache-degradation
+      - eval_time: 20m
+        alertname: CrabS3GatewayBackendPressure
+        exp_alerts:
+          - exp_labels:
+              namespace: crab
+              pod: gateway-0
+              severity: warning
+            exp_annotations:
+              summary: Crab S3 gateway backing object store is degraded
+              description: Throttled, transient, or unclassified backend failures exceed 0.1 logical requests per second for ten minutes.
+              runbook_url: https://github.com/crabbuild/crab/blob/main/crates/crab-s3-gateway/deploy/operations.md#backend-degradation
+
+  - name: healthy gateway does not raise production alerts
+    interval: 1m
+    input_series:
+      - series: 'crab_s3_gateway_multipart_maintenance_last_success_timestamp_seconds{namespace="crab",pod="gateway-0"}'
+        values: '0+60x20'
+      - series: 'crab_s3_gateway_multipart_maintenance_failures_total{namespace="crab",pod="gateway-0",reason="reconciliation_error"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_backend_requests_total{namespace="crab",pod="gateway-0",operation="get",outcome="auth"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_backend_requests_total{namespace="crab",pod="gateway-0",operation="range",outcome="throttled"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_http_response_body_errors_total{namespace="crab",pod="gateway-0",method="get"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_http_requests_total{namespace="crab",pod="gateway-0",method="get",outcome="5xx"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_admission_events_total{namespace="crab",pod="gateway-0",class="transfer",outcome="overloaded"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_scratch_filesystem_probe_success{namespace="crab",pod="gateway-0"}'
+        values: '1+0x20'
+      - series: 'crab_s3_gateway_scratch_capacity_rejections_total{namespace="crab",pod="gateway-0",reason="exhausted"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_scratch_io_failures_total{namespace="crab",pod="gateway-0",purpose="content_spool",operation="write"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_scratch_filesystem_available_bytes{namespace="crab",pod="gateway-0"}'
+        values: '50+0x20'
+      - series: 'crab_s3_gateway_scratch_filesystem_size_bytes{namespace="crab",pod="gateway-0"}'
+        values: '100+0x20'
+      - series: 'crab_s3_gateway_cache_catalog_probe_success{namespace="crab",pod="gateway-0"}'
+        values: '1+0x20'
+      - series: 'crab_s3_gateway_cache_local_write_failures_total{namespace="crab",pod="gateway-0"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_cache_retained_bytes{namespace="crab",pod="gateway-0"}'
+        values: '50+0x20'
+      - series: 'crab_s3_gateway_cache_reserved_bytes{namespace="crab",pod="gateway-0"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_cache_temporary_bytes{namespace="crab",pod="gateway-0"}'
+        values: '0+0x20'
+      - series: 'crab_s3_gateway_cache_limit_bytes{namespace="crab",pod="gateway-0"}'
+        values: '100+0x20'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: CrabS3GatewayMultipartMaintenanceStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayMultipartMaintenanceFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayBackendAuthorizationFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayResponseBodyErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayServerErrors
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayAdmissionPressure
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchProbeFailed
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchCapacityRejected
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchIoFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayScratchLow
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayCacheCatalogUnavailable
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayCachePersistenceFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayCacheNearLimit
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrabS3GatewayBackendPressure
+        exp_alerts: []

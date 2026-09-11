@@ -26,7 +26,7 @@ use crab_remote_git::{
     DirectoryMetadata, EntryKind, EntryMode, Error, GeneratedPackLease, GeneratedPackLeaseAttempt,
     GeneratedPackLeaseError, GeneratedPackLeaseProvider, GitPath, HistoryTraversal, ObjectLimits,
     OperationKind, OperationLimits, PageCursor, PageRequest, RemoteGitRepository, RemoteGitRuntime,
-    RepositoryOptions, Revision, RuntimeOptions,
+    RepositoryOptions, Revision, RuntimeOptions, TreeListingItem, TreeListingRequest,
 };
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
@@ -2367,6 +2367,131 @@ async fn recursive_tree_listing_reads_metadata_without_blob_bodies() {
     }
     .await;
     operation.finish(result).await.expect("finish operation");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bounded_tree_listing_seeks_late_prefixes_without_a_full_tree_scan() {
+    let options = RepositoryOptions::new(
+        ObjectLimits::default(),
+        OperationLimits {
+            max_entries: 64,
+            ..OperationLimits::default()
+        },
+    )
+    .expect("repository options");
+    let fixture = publish(DeltaKind::Ref, false, options).await;
+    let cancellation = CancellationToken::new();
+    let exhaustive = fixture
+        .repository
+        .operation(OperationKind::Tree, &cancellation)
+        .await
+        .expect("exhaustive operation");
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &exhaustive)
+        .await
+        .expect("snapshot");
+    let result = snapshot.list_tree_recursive(&exhaustive).await;
+    let error = exhaustive
+        .finish(result)
+        .await
+        .expect_err("full traversal must exhaust the deliberately small budget");
+    assert!(matches!(
+        error,
+        Error::LimitExceeded {
+            limit: "entries",
+            ..
+        }
+    ));
+
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Tree, &cancellation)
+        .await
+        .expect("bounded operation");
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &operation)
+        .await
+        .expect("snapshot");
+    let first = snapshot
+        .list_tree_blobs(
+            &TreeListingRequest::new(Bytes::from_static(b"flat-09"), None, None, 7)
+                .expect("first request"),
+            &operation,
+        )
+        .await
+        .expect("first page");
+    assert!(first.has_more);
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|item| item.path().to_vec())
+            .collect::<Vec<_>>(),
+        (900..907)
+            .map(|index| format!("flat-{index:04}.txt"))
+            .map(String::into_bytes)
+            .collect::<Vec<_>>()
+    );
+    let after = Bytes::copy_from_slice(first.items.last().expect("last item").path());
+    let second = snapshot
+        .list_tree_blobs(
+            &TreeListingRequest::new(Bytes::from_static(b"flat-09"), Some(after), None, 7)
+                .expect("second request"),
+            &operation,
+        )
+        .await
+        .expect("second page");
+    assert!(second.has_more);
+    assert_eq!(
+        second
+            .items
+            .iter()
+            .map(|item| item.path().to_vec())
+            .collect::<Vec<_>>(),
+        (907..914)
+            .map(|index| format!("flat-{index:04}.txt"))
+            .map(String::into_bytes)
+            .collect::<Vec<_>>()
+    );
+    operation.finish(Ok(())).await.expect("finish operation");
+
+    let grouped = fixture
+        .repository
+        .operation(OperationKind::Tree, &cancellation)
+        .await
+        .expect("grouped operation");
+    let snapshot = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &grouped)
+        .await
+        .expect("snapshot");
+    let page = snapshot
+        .list_tree_blobs(
+            &TreeListingRequest::new(Bytes::from_static(b"ordered/"), None, Some(b'/'), 10)
+                .expect("grouped request"),
+            &grouped,
+        )
+        .await
+        .expect("grouped page");
+    assert!(!page.has_more);
+    assert_eq!(
+        page.items
+            .iter()
+            .map(TreeListingItem::path)
+            .collect::<Vec<_>>(),
+        vec![
+            b"ordered/item.ext".as_slice(),
+            b"ordered/item/".as_slice(),
+            b"ordered/item0".as_slice(),
+            b"ordered/\xfe.ext".as_slice(),
+            b"ordered/\xfe/".as_slice(),
+            b"ordered/\xfe0".as_slice(),
+        ]
+    );
+    grouped.finish(Ok(())).await.expect("finish operation");
     fixture.runtime.shutdown().await;
 }
 

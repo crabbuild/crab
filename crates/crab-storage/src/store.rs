@@ -116,7 +116,7 @@ struct ReadRoute {
 struct StagingWriteState {
     prefix: String,
     write_inner: Option<Arc<dyn ObjectStore>>,
-    writes: Mutex<Vec<StagedWrite>>,
+    writes: Arc<Mutex<Vec<StagedWrite>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +305,51 @@ impl Store {
         self
     }
 
+    /// Observes all logical backend calls made through this store.
+    ///
+    /// Apply after configuring read routes and staging-write stores. Applying it
+    /// again nests observers. The observer receives only fixed operation/outcome
+    /// classes, durations, and byte counts; object paths, endpoints, and
+    /// credentials never cross this boundary.
+    #[must_use]
+    pub fn with_storage_observer(mut self, observer: Arc<dyn crate::StorageObserver>) -> Self {
+        let wrap = |inner: Arc<dyn ObjectStore>| -> Arc<dyn ObjectStore> {
+            Arc::new(crate::observation::ObservedObjectStore::new(
+                inner,
+                Arc::clone(&observer),
+            ))
+        };
+        self.inner = wrap(self.inner);
+        self.read_routes = self.read_routes.map(|routes| {
+            Arc::new(
+                routes
+                    .iter()
+                    .map(|route| ReadRoute {
+                        prefix: route.prefix.clone(),
+                        inner: wrap(Arc::clone(&route.inner)),
+                    })
+                    .collect(),
+            )
+        });
+        self.staging_writes = self.staging_writes.map(|state| {
+            Arc::new(StagingWriteState {
+                prefix: state.prefix.clone(),
+                write_inner: state
+                    .write_inner
+                    .as_ref()
+                    .map(|inner| wrap(Arc::clone(inner))),
+                writes: Arc::clone(&state.writes),
+            })
+        });
+        self.multipart = self.multipart.map(|multipart| {
+            Arc::new(crate::observation::ObservedMultipartStore::new(
+                multipart,
+                Arc::clone(&observer),
+            )) as Arc<dyn object_store::multipart::MultipartStore>
+        });
+        self
+    }
+
     #[must_use]
     pub fn with_read_byte_observer(mut self, observer: Arc<dyn Fn(u64) + Send + Sync>) -> Self {
         self.read_byte_observer = Some(observer);
@@ -330,7 +375,7 @@ impl Store {
         self.staging_writes = Some(Arc::new(StagingWriteState {
             prefix,
             write_inner: None,
-            writes: Mutex::new(Vec::new()),
+            writes: Arc::new(Mutex::new(Vec::new())),
         }));
         self
     }
@@ -345,7 +390,7 @@ impl Store {
         self.staging_writes = Some(Arc::new(StagingWriteState {
             prefix,
             write_inner: Some(write_inner),
-            writes: Mutex::new(Vec::new()),
+            writes: Arc::new(Mutex::new(Vec::new())),
         }));
         self
     }

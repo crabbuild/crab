@@ -1,0 +1,10 @@
+apiVersion: v2
+name: crab-s3-gateway
+description: S3 protocol gateway for Crab repositories
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.29.0-0"
+home: https://crab.build
+sources:
+  - https://github.com/crabbuild/crab

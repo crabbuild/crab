@@ -895,7 +895,10 @@ impl OperationContext {
         Ok(found)
     }
 
-    async fn read_raw_tree(&self, oid: gix_hash::ObjectId) -> Result<Arc<Vec<RawTreeEntry>>> {
+    pub(crate) async fn read_raw_tree(
+        &self,
+        oid: gix_hash::ObjectId,
+    ) -> Result<Arc<Vec<RawTreeEntry>>> {
         let key =
             crate::runtime::ObjectCacheKey::new(&self.state.identity, self.state.generation, oid);
         let maximum = self.state.options.object_limits().max_object_bytes;

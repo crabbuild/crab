@@ -12,8 +12,9 @@ Owns bounded filesystem-free Git reads from committed manifests, catalogs, and i
 1. `crates/crab-remote-git/src/lib.rs` — supported public API.
 2. `crates/crab-remote-git/src/repository.rs` — `RemoteGitRepository::open / RepositoryIdentity`: identity and opening handshake.
 3. `crates/crab-remote-git/src/snapshot.rs` — `RemoteGitSnapshot`: pinned commit/tree operations.
-4. `crates/crab-remote-git/src/operation.rs` — `OperationContext::finish`: budgets, cancellation, and explicit finish.
-5. `crates/crab-remote-git/src/reader.rs` — `RemoteGitReader::read_with_session`: object lookup and verified decoding.
+4. `crates/crab-remote-git/src/tree_listing.rs` — bounded prefix/continuation blob pages in canonical Git path order.
+5. `crates/crab-remote-git/src/operation.rs` — `OperationContext::finish`: budgets, cancellation, and explicit finish.
+6. `crates/crab-remote-git/src/reader.rs` — `RemoteGitReader::read_with_session`: object lookup and verified decoding.
 
 Trace one path: HTTP repository opening in `crates/crab-http-server/src/server.rs`
 → `RemoteGitRepository::open` in `crates/crab-remote-git/src/repository.rs`
@@ -26,6 +27,7 @@ and `crates/crab-metadata/src/git_object_locator`.
 | --- | --- | --- |
 | Repository consistency | `crates/crab-remote-git/src/repository.rs` | `crates/crab-http-server/src/server.rs` |
 | Object range/decode | `crates/crab-remote-git/src/reader.rs` | `crates/crab-remote-git/src/pack.rs` |
+| Bounded recursive listing | `crates/crab-remote-git/src/tree_listing.rs` | `crates/crab-s3-gateway/src/gateway.rs` |
 | Operation lifetime | `crates/crab-remote-git/src/operation.rs` | `crates/crab-remote-git/src/runtime.rs` |
 
 ## Invariants
@@ -36,6 +38,8 @@ and `crates/crab-metadata/src/git_object_locator`.
   Source: `crates/crab-remote-git/src/operation.rs`.
 - Preserve operation work budgets and cancellation through object lookup/decode, including cache hits; individual request limits do not bound aggregate work.
   Source: `crates/crab-remote-git/src/operation.rs`.
+- Preserve complete-path byte ordering and exclusive continuation when seeking recursive blob pages; an S3-sized page must not traverse or hydrate the complete repository.
+  Source: `crates/crab-remote-git/src/tree_listing.rs`.
 
 - Range coalescing limits merging, not individual entry admission. Keep per-entry ReaderLimits and aggregate OperationBudget checks before fetching; do not split or truncate a valid larger pack entry to fit the merge threshold.
   Source: `crates/crab-remote-git/src/reader.rs`.

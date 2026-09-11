@@ -18,10 +18,15 @@ use md5::Digest as _;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-use crate::{attributes, gateway::Repository};
+use crate::{
+    attributes,
+    gateway::Repository,
+    metrics::{Metrics, ScratchFailure, ScratchPurpose},
+};
 
 const LOCK_TTL: Duration = Duration::from_secs(300);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
+const PACK_SCRATCH_BASE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_QUEUED_WRITES_PER_REF: usize = 64;
 const WRITE_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REPREPARE_ATTEMPTS: usize = 8;
@@ -35,6 +40,8 @@ pub(crate) enum Error {
     NotDirectory,
     #[error("object path names a directory")]
     IsDirectory,
+    #[error("the nearest .gitattributes entry cannot carry an LFS tracking rule")]
+    InvalidAttributes,
     #[error("object write precondition failed")]
     PreconditionFailed,
     #[error("repository mutation was cancelled")]
@@ -55,6 +62,8 @@ pub(crate) enum Error {
     Hash(#[from] gix_hash::hasher::Error),
     #[error("temporary pack I/O failed")]
     Io(#[from] std::io::Error),
+    #[error("temporary pack capacity is unavailable")]
+    Capacity(#[from] crate::metrics::ScratchCapacityError),
     #[error("generated pack validation failed")]
     Pack(#[from] crab_git::incoming_pack::IncomingPackError),
     #[error("generated pack preparation failed")]
@@ -65,6 +74,8 @@ pub(crate) enum Error {
     Metadata(#[from] crab_metadata::error::MetadataError),
     #[error("repository coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("repository publication admission failed")]
+    Publication(#[from] crab_remote::publication::Error),
     #[error("repository publication failed")]
     Write(#[from] crab_write::WriteError),
     #[error("mutation worker failed")]
@@ -88,6 +99,9 @@ impl From<crate::Error> for Error {
 pub(crate) enum Change {
     Put {
         bytes: Bytes,
+        // Large S3 bodies are committed as LFS pointers. The same commit must
+        // teach Git how to materialize that pointer for ordinary clones.
+        track_lfs: bool,
         attributes: Box<attributes::PutAttributes>,
         condition: PutCondition,
     },
@@ -95,7 +109,9 @@ pub(crate) enum Change {
         expected: ObjectId,
         attributes: Box<attributes::PutAttributes>,
     },
-    Delete,
+    Delete {
+        condition: DeleteCondition,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -104,6 +120,18 @@ pub(crate) enum PutCondition {
     None,
     IfNoneMatchAny,
     IfMatch(ObjectId),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) enum DeleteCondition {
+    #[default]
+    None,
+    IfMatchAny,
+    IfMatch {
+        object: ObjectId,
+        etag: String,
+        attributes_present: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -115,17 +143,20 @@ pub(crate) struct Coordinator {
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
     admission: WriteAdmission,
+    metrics: Metrics,
 }
 
 impl Coordinator {
     pub(crate) fn new(
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
         options: crab_remote_git::RepositoryOptions,
+        metrics: Metrics,
     ) -> Self {
         Self {
             runtime,
             options,
             admission: WriteAdmission::default(),
+            metrics,
         }
     }
 
@@ -148,10 +179,14 @@ impl Coordinator {
                 repository,
                 Arc::clone(&self.runtime),
                 self.options,
-                branch,
-                path,
                 change,
-                principal,
+                ApplyRequest {
+                    branch,
+                    path,
+                    principal,
+                    plan_id: None,
+                    metrics: &self.metrics,
+                },
                 cancel,
             )
             .await
@@ -181,7 +216,7 @@ async fn apply(
     principal: &str,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
-    Coordinator::new(runtime, options)
+    Coordinator::new(runtime, options, Metrics::new().unwrap())
         .apply(repository, branch, path, change, principal, cancel)
         .await
 }
@@ -330,14 +365,105 @@ impl RefLease {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ApplyRequest<'a> {
+    branch: &'a str,
+    path: &'a crab_remote_git::GitPath,
+    principal: &'a str,
+    plan_id: Option<&'a str>,
+    metrics: &'a Metrics,
+}
+
 async fn apply_admitted(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    branch: &str,
-    path: &crab_remote_git::GitPath,
     change: Change,
-    principal: &str,
+    request: ApplyRequest<'_>,
+    cancel: &CancellationToken,
+) -> Result<Outcome> {
+    let completion_plan = match &change {
+        Change::Put { attributes, .. } => {
+            attributes
+                .completion_upload_id
+                .as_deref()
+                .map(|id| CompletionPlan {
+                    id: crate::multipart::publication_plan_id(id),
+                    etag: attributes.etag_override.clone(),
+                })
+        }
+        Change::Attributes { .. } | Change::Delete { .. } => None,
+    };
+    let Some(completion_plan) = completion_plan else {
+        return apply_with_gc_fences(repository, runtime, options, change, request, cancel).await;
+    };
+    if let Some(outcome) = resolved_completion_plan(repository, &completion_plan).await? {
+        return Ok(outcome);
+    }
+    let executing_plan_id = completion_plan.id.clone();
+    let result = crab_remote::publication::with_plan(
+        &repository.store,
+        &repository.layout,
+        &completion_plan.id,
+        LOCK_TTL,
+        cancel,
+        |scoped| async move {
+            apply_with_gc_fences(
+                repository,
+                runtime,
+                options,
+                change,
+                ApplyRequest {
+                    plan_id: Some(&executing_plan_id),
+                    ..request
+                },
+                &scoped,
+            )
+            .await
+        },
+    )
+    .await;
+    match result {
+        Err(
+            error @ Error::Metadata(crab_metadata::error::MetadataError::PlanAlreadyAttempted {
+                ..
+            }),
+        ) => resolved_completion_plan(repository, &completion_plan)
+            .await?
+            .ok_or(error),
+        result => result,
+    }
+}
+
+struct CompletionPlan {
+    id: String,
+    etag: Option<String>,
+}
+
+async fn resolved_completion_plan(
+    repository: &Repository,
+    plan: &CompletionPlan,
+) -> Result<Option<Outcome>> {
+    crab_metadata::plan_receipt::resolve_plan_receipt(
+        &repository.store,
+        &repository.layout,
+        &plan.id,
+    )
+    .await
+    .map(|receipt| {
+        receipt.map(|_| Outcome {
+            etag: plan.etag.clone(),
+        })
+    })
+    .map_err(Into::into)
+}
+
+async fn apply_with_gc_fences(
+    repository: &Repository,
+    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    options: crab_remote_git::RepositoryOptions,
+    change: Change,
+    request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
     let mut fences = Vec::new();
@@ -356,10 +482,8 @@ async fn apply_admitted(
             repository,
             Arc::clone(&runtime),
             options,
-            branch,
-            path,
             change,
-            principal,
+            request,
             cancel,
         ))
         .await
@@ -381,10 +505,8 @@ async fn apply_with_fences(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    branch: &str,
-    path: &crab_remote_git::GitPath,
     change: Change,
-    principal: &str,
+    request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
     for _ in 0..MAX_REPREPARE_ATTEMPTS {
@@ -393,10 +515,8 @@ async fn apply_with_fences(
             repository,
             Arc::clone(&runtime),
             options,
-            branch,
-            path,
             change.clone(),
-            principal,
+            request,
             cancel,
         )
         .await?;
@@ -404,9 +524,16 @@ async fn apply_with_fences(
             Prepared::Noop(outcome) => return Ok(outcome),
             Prepared::Commit(prepared) => prepared,
         };
-        let lease = RefLease::acquire(repository, branch, cancel).await?;
-        let published =
-            publish_prepared(repository, branch, &lease.holder, &prepared, cancel).await;
+        let lease = RefLease::acquire(repository, request.branch, cancel).await?;
+        let published = publish_prepared(
+            repository,
+            request.branch,
+            &lease.holder,
+            &prepared,
+            request.plan_id,
+            cancel,
+        )
+        .await;
         lease.release().await;
         match published? {
             Publish::Committed => {
@@ -418,7 +545,7 @@ async fn apply_with_fences(
         }
     }
     Err(crab_write::WriteError::RefChanged {
-        ref_name: branch.to_owned(),
+        ref_name: request.branch.to_owned(),
         path: repository.layout.repo_prefix().to_owned(),
     }
     .into())
@@ -446,10 +573,8 @@ async fn prepare_and_upload(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    branch: &str,
-    path: &crab_remote_git::GitPath,
     change: Change,
-    principal: &str,
+    request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Prepared> {
     let view = repository
@@ -459,7 +584,7 @@ async fn prepare_and_upload(
     let parent = view
         .remote()
         .refs()
-        .find(branch)
+        .find(request.branch)
         .map(|reference| reference.target);
     let operation = view
         .remote()
@@ -470,10 +595,10 @@ async fn prepare_and_upload(
             Some(parent) => Some(view.snapshot(&parent.to_string(), &operation).await?),
             None => None,
         };
-        let path_string = std::str::from_utf8(path.as_bytes())
+        let path_string = std::str::from_utf8(request.path.as_bytes())
             .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
         let current_attributes = match &snapshot {
-            Some(snapshot) => match snapshot.entry(path, &operation).await? {
+            Some(snapshot) => match snapshot.entry(request.path, &operation).await? {
                 Some(entry) if entry.kind == EntryKind::Blob => {
                     view.object_attributes(
                         repository,
@@ -491,9 +616,9 @@ async fn prepare_and_upload(
             view.remote(),
             &operation,
             parent,
-            path,
+            request.path,
             change,
-            principal,
+            request.principal,
             current_attributes.as_ref(),
         )
         .await
@@ -507,7 +632,7 @@ async fn prepare_and_upload(
         Build::Noop(outcome) => return Ok(Prepared::Noop(outcome)),
         Build::Commit(built) => *built,
     };
-    upload_built(repository, parent, built, cancel)
+    upload_built(repository, parent, built, cancel, request.metrics)
         .await
         .map(Prepared::Commit)
 }
@@ -517,8 +642,25 @@ async fn upload_built(
     parent: Option<ObjectId>,
     built: BuiltCommit,
     cancel: &CancellationToken,
+    metrics: &Metrics,
 ) -> Result<UploadedMutation> {
-    let (pack_owner, pack) = prepare_pack(built.objects.clone(), cancel).await?;
+    let scratch_bytes = pack_scratch_reservation(&built.objects);
+    let capacity = metrics.reserve_scratch(scratch_bytes)?;
+    let mut scratch = metrics.start_scratch(ScratchPurpose::GitPack);
+    scratch.reserve(scratch_bytes);
+    let prepared = prepare_pack(built.objects.clone(), cancel).await;
+    if matches!(
+        &prepared,
+        Err(Error::Io(_)
+            | Error::Pack(crab_git::incoming_pack::IncomingPackError::Io(_))
+            | Error::Prepare(crab_git::incoming_pack::PreparePackError::Io(_)))
+    ) {
+        scratch.record_failure(ScratchFailure::Write);
+    }
+    let (pack_owner, pack) = prepared?;
+    // The prepared files are now reflected by statvfs. Release their
+    // conservative pre-write claim while ownership metrics remain live.
+    drop(capacity);
     check_cancelled(cancel)?;
     let pack_id = pack.content_hash().to_hex().to_string();
     let visible_objects = built
@@ -614,7 +756,23 @@ async fn upload_built(
     };
     drop(pack);
     drop(pack_owner);
+    drop(scratch);
     Ok(uploaded)
+}
+
+fn pack_scratch_reservation(objects: &[(Kind, Vec<u8>)]) -> u64 {
+    let bytes = objects.iter().fold(0_u64, |total, (_, object)| {
+        total.saturating_add(object.len() as u64)
+    });
+    let sidecars = (objects.len() as u64).saturating_mul(64);
+    // Generated-pack preparation retains its source, quarantine pack,
+    // inflated/decoded spools, and two normalized packs at peak. The extra
+    // quarter plus fixed allowance covers zlib and index-sidecar overhead.
+    bytes
+        .saturating_mul(6)
+        .saturating_add(bytes / 4)
+        .saturating_add(sidecars)
+        .saturating_add(PACK_SCRATCH_BASE_BYTES)
 }
 
 async fn publish_prepared(
@@ -622,6 +780,7 @@ async fn publish_prepared(
     branch: &str,
     holder: &str,
     prepared: &UploadedMutation,
+    plan_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<Publish> {
     check_cancelled(cancel)?;
@@ -640,6 +799,11 @@ async fn publish_prepared(
     if current != prepared.parent {
         return Ok(Publish::Reprepare);
     }
+    let options = crab_write::journal::CommitOptions::new(LOCK_TTL, cancel);
+    let options = match plan_id {
+        Some(plan_id) => options.with_plan(plan_id),
+        None => options,
+    };
     crab_write::journal::commit_edits(
         &repository.store,
         &repository.layout,
@@ -655,7 +819,7 @@ async fn publish_prepared(
         prepared.parent.is_none().then(|| branch.to_owned()),
         vec![prepared.pack.clone()],
         vec![],
-        crab_write::journal::CommitOptions::new(LOCK_TTL, cancel),
+        options,
     )
     .await?;
     Ok(Publish::Committed)
@@ -739,9 +903,33 @@ async fn build_commit(
     };
     let path_string = std::str::from_utf8(path.as_bytes())
         .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
+    let lfs_attributes = match &change {
+        Change::Put {
+            track_lfs: true, ..
+        } if name.as_slice() == b".gitattributes" => return Err(Error::InvalidAttributes),
+        Change::Put {
+            track_lfs: true, ..
+        } => {
+            prepare_lfs_attributes(
+                snapshot.as_ref(),
+                &directory_path,
+                leaf_entries,
+                name,
+                operation,
+            )
+            .await?
+        }
+        Change::Put { .. } | Change::Attributes { .. } | Change::Delete { .. } => None,
+    };
+    if let Change::Delete { condition } = &change
+        && !delete_condition_matches(condition, old.as_ref(), current_attributes)
+    {
+        return Err(Error::PreconditionFailed);
+    }
     let (etag, changed, pending_attributes) = match change {
         Change::Put {
             bytes,
+            track_lfs: _,
             attributes,
             condition,
         } => {
@@ -766,6 +954,7 @@ async fn build_commit(
                 && old.is_some_and(|(old_oid, mode)| old_oid == oid && mode == EntryMode::Regular)
                 && current_attributes
                     .is_some_and(|stored| stored.matches_pending(&attributes, &etag, logical_size))
+                && lfs_attributes.is_none()
             {
                 return Ok(Build::Noop(Outcome { etag: Some(etag) }));
             }
@@ -806,7 +995,7 @@ async fn build_commit(
             }
             (Some(etag), None, Some((expected, attributes, logical_size)))
         }
-        Change::Delete => {
+        Change::Delete { .. } => {
             if old.is_none() {
                 return Ok(Build::Noop(Outcome { etag: None }));
             }
@@ -817,6 +1006,18 @@ async fn build_commit(
     let mut objects = Vec::new();
     if let Some(bytes) = changed {
         objects.push((Kind::Blob, bytes));
+    }
+    if let Some(attributes) = lfs_attributes {
+        replace_entry(
+            leaf_entries,
+            b".gitattributes",
+            Some(tree::Entry {
+                mode: attributes.mode,
+                filename: BString::from(b".gitattributes".to_vec()),
+                oid: attributes.oid,
+            }),
+        );
+        objects.push((Kind::Blob, attributes.bytes));
     }
     let mut tree_oid = None;
     for depth in (0..frames.len()).rev() {
@@ -871,6 +1072,121 @@ async fn build_commit(
         path: path_string.to_owned(),
         attributes: object_attributes,
     })))
+}
+
+fn delete_condition_matches(
+    condition: &DeleteCondition,
+    old: Option<&(ObjectId, EntryMode)>,
+    current_attributes: Option<&attributes::ObjectAttributes>,
+) -> bool {
+    match condition {
+        DeleteCondition::None => true,
+        DeleteCondition::IfMatchAny => old.is_some(),
+        DeleteCondition::IfMatch {
+            object,
+            etag,
+            attributes_present,
+        } => {
+            old.is_some_and(|(oid, _)| oid == object)
+                && match (attributes_present, current_attributes) {
+                    (_, Some(value)) => value.etag == *etag,
+                    (true, None) => false,
+                    (false, None) => true,
+                }
+        }
+    }
+}
+
+struct LfsAttributesChange {
+    oid: ObjectId,
+    mode: gix_object::tree::EntryMode,
+    bytes: Vec<u8>,
+}
+
+async fn prepare_lfs_attributes(
+    snapshot: Option<&crab_remote_git::RemoteGitSnapshot>,
+    directory: &crab_remote_git::GitPath,
+    entries: &[tree::Entry],
+    filename: &[u8],
+    operation: &crab_remote_git::OperationContext,
+) -> Result<Option<LfsAttributesChange>> {
+    let attributes_entry = find_entry(entries, b".gitattributes");
+    let (mut bytes, mode, old_oid) = match (snapshot, attributes_entry) {
+        (Some(snapshot), Some(entry)) => {
+            let mode = entry_mode(entry.mode)?;
+            if !matches!(mode, EntryMode::Regular | EntryMode::Executable) {
+                return Err(Error::InvalidAttributes);
+            }
+            let path = push_component(directory, b".gitattributes")?;
+            let blob = snapshot.read_blob(&path, operation).await?;
+            if !matches!(
+                crab_git::classify(&blob.bytes),
+                crab_git::PointerKind::NotAPointer
+            ) {
+                return Err(Error::InvalidAttributes);
+            }
+            (blob.bytes.to_vec(), entry.mode, Some(entry.oid))
+        }
+        (_, None) => (Vec::new(), tree::EntryKind::Blob.into(), None),
+        (None, Some(_)) => {
+            return Err(
+                std::io::Error::other("empty repository contains a .gitattributes entry").into(),
+            );
+        }
+    };
+    let line = lfs_attributes_line(filename);
+    if bytes
+        .split(|byte| *byte == b'\n')
+        .any(|existing| existing.strip_suffix(b"\r").unwrap_or(existing) == line.as_bytes())
+    {
+        return Ok(None);
+    }
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    let oid = object_id(Kind::Blob, &bytes)?;
+    if old_oid == Some(oid) {
+        return Ok(None);
+    }
+    Ok(Some(LfsAttributesChange { oid, mode, bytes }))
+}
+
+fn lfs_attributes_line(filename: &[u8]) -> String {
+    format!(
+        "{} filter=lfs diff=lfs merge=lfs -text",
+        quote_literal_attribute_pattern(filename)
+    )
+}
+
+fn quote_literal_attribute_pattern(filename: &[u8]) -> String {
+    let mut pattern = Vec::with_capacity(filename.len() + 1);
+    pattern.push(b'/');
+    for byte in filename {
+        if matches!(byte, b'\\' | b'*' | b'?' | b'[' | b']') {
+            pattern.push(b'\\');
+        }
+        pattern.push(*byte);
+    }
+
+    let mut quoted = String::with_capacity(pattern.len() + 2);
+    quoted.push('"');
+    for byte in pattern {
+        match byte {
+            b'"' => quoted.push_str("\\\""),
+            b'\\' => quoted.push_str("\\\\"),
+            0x20..=0x7e => quoted.push(char::from(byte)),
+            _ => {
+                quoted.push('\\');
+                quoted.push(char::from(b'0' + ((byte >> 6) & 0o7)));
+                quoted.push(char::from(b'0' + ((byte >> 3) & 0o7)));
+                quoted.push(char::from(b'0' + (byte & 0o7)));
+            }
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 async fn load_directory(
@@ -1094,7 +1410,22 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
 mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
+    use crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn generated_pack_reservation_covers_peak_temporary_copies() {
+        let objects = vec![
+            (Kind::Blob, vec![0; 64 * 1024]),
+            (Kind::Tree, vec![0; 1024]),
+        ];
+        let bytes = 64 * 1024 + 1024;
+
+        assert_eq!(
+            pack_scratch_reservation(&objects),
+            bytes * 6 + bytes / 4 + 2 * 64 + PACK_SCRATCH_BASE_BYTES
+        );
+    }
 
     async fn fixture() -> (
         Repository,
@@ -1118,6 +1449,9 @@ mod tests {
                     access: RepositoryAccess::Write,
                 }],
                 protected_branches: vec![],
+                max_active_multipart_uploads: 16,
+                multipart_staging_bytes_per_upload: 50_000_000_000_000,
+                multipart_upload_ttl_seconds: 604_800,
             },
             store,
         )
@@ -1186,6 +1520,31 @@ mod tests {
             .target
     }
 
+    async fn coordinated_put(
+        coordinator: &Coordinator,
+        repository: &Repository,
+        cancel: &CancellationToken,
+        path: &str,
+        body: &'static [u8],
+    ) {
+        coordinator
+            .apply(
+                repository,
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+                Change::Put {
+                    bytes: Bytes::from_static(body),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
+                },
+                "user",
+                cancel,
+            )
+            .await
+            .unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn writes_initialize_branch_and_preserve_unrelated_files() {
         let (repository, runtime, cancel) = fixture().await;
@@ -1198,6 +1557,7 @@ mod tests {
                 &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
                 Change::Put {
                     bytes: Bytes::copy_from_slice(body.as_bytes()),
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition: PutCondition::None,
                 },
@@ -1221,7 +1581,9 @@ mod tests {
             crab_remote_git::RepositoryOptions::default(),
             "refs/heads/main",
             &crab_remote_git::GitPath::new(b"a.txt".to_vec()).unwrap(),
-            Change::Delete,
+            Change::Delete {
+                condition: DeleteCondition::default(),
+            },
             "user",
             &cancel,
         )
@@ -1234,12 +1596,199 @@ mod tests {
         runtime.shutdown().await;
     }
 
+    #[test]
+    fn literal_lfs_attribute_pattern_matches_only_the_exact_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(directory.path())
+            .status()
+            .unwrap();
+        let filename = "model [v1] #*?.bin";
+        std::fs::write(
+            directory.path().join(".gitattributes"),
+            format!("{}\n", lfs_attributes_line(filename.as_bytes())),
+        )
+        .unwrap();
+
+        let exact = std::process::Command::new("git")
+            .args(["check-attr", "filter", "--", filename])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        let similar = std::process::Command::new("git")
+            .args(["check-attr", "filter", "--", "model av1] #xx.bin"])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+        let descendant = std::process::Command::new("git")
+            .args(["check-attr", "filter", "--", &format!("deeper/{filename}")])
+            .current_dir(directory.path())
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8(exact.stdout).unwrap(),
+            format!("{filename}: filter: lfs\n")
+        );
+        assert_eq!(
+            String::from_utf8(similar.stdout).unwrap(),
+            "model av1] #xx.bin: filter: unspecified\n"
+        );
+        assert_eq!(
+            String::from_utf8(descendant.stdout).unwrap(),
+            format!("deeper/{filename}: filter: unspecified\n")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lfs_put_commits_a_same_directory_tracking_rule() {
+        let (repository, runtime, cancel) = fixture().await;
+        let attributes_path =
+            crab_remote_git::GitPath::new(b"nested/.gitattributes".to_vec()).unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &attributes_path,
+            Change::Put {
+                bytes: Bytes::from_static(b"README.md text\n"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let filename = "model [v1] #*?.bin";
+        let path =
+            crab_remote_git::GitPath::new(format!("nested/{filename}").into_bytes()).unwrap();
+        let pointer = crab_git::LfsPointer {
+            oid: [7; 32],
+            size: 10 * 1024 * 1024,
+            extensions: Vec::new(),
+        }
+        .serialize();
+        let change = Change::Put {
+            bytes: Bytes::from(pointer.clone()),
+            track_lfs: true,
+            attributes: Box::new(attributes::PutAttributes {
+                logical_size: Some(10 * 1024 * 1024),
+                ..Default::default()
+            }),
+            condition: PutCondition::None,
+        };
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            change.clone(),
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            change,
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read(
+                &repository,
+                Arc::clone(&runtime),
+                &cancel,
+                "nested/.gitattributes",
+            )
+            .await,
+            format!(
+                "README.md text\n{}\n",
+                lfs_attributes_line(filename.as_bytes())
+            )
+        );
+        assert_eq!(
+            read(
+                &repository,
+                Arc::clone(&runtime),
+                &cancel,
+                &format!("nested/{filename}"),
+            )
+            .await,
+            pointer
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lfs_put_rejects_pointer_backed_attributes() {
+        let (repository, runtime, cancel) = fixture().await;
+        let attributes_path =
+            crab_remote_git::GitPath::new(b"nested/.gitattributes".to_vec()).unwrap();
+        let attributes_pointer = crab_git::LfsPointer {
+            oid: [3; 32],
+            size: 1,
+            extensions: Vec::new(),
+        }
+        .serialize();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &attributes_path,
+            Change::Put {
+                bytes: Bytes::from(attributes_pointer),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        let result = apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &crab_remote_git::GitPath::new(b"nested/object.bin".to_vec()).unwrap(),
+            Change::Put {
+                bytes: Bytes::from_static(b"pointer"),
+                track_lfs: true,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::InvalidAttributes)));
+        runtime.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn multipart_completion_token_makes_publication_retry_idempotent() {
         let (repository, runtime, cancel) = fixture().await;
         let path = crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap();
         let change = Change::Put {
             bytes: Bytes::from_static(b"multipart content"),
+            track_lfs: false,
             attributes: Box::new(attributes::PutAttributes {
                 etag_override: Some("multipart-etag-1".to_owned()),
                 completion_upload_id: Some("upload-id".to_owned()),
@@ -1266,14 +1815,32 @@ mod tests {
             crab_remote_git::RepositoryOptions::default(),
             "refs/heads/main",
             &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"newer content"),
+                track_lfs: false,
+                attributes: Box::default(),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let overwritten = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
             change,
             "user",
             &cancel,
         )
         .await
         .unwrap();
-        let second = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        assert_eq!(first, second);
+        let recovered = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        assert!(first != overwritten && recovered == overwritten);
         runtime.shutdown().await;
     }
 
@@ -1290,6 +1857,7 @@ mod tests {
             &path,
             Change::Put {
                 bytes: bytes.clone(),
+                track_lfs: false,
                 attributes: Box::new(attributes::PutAttributes::default()),
                 condition: PutCondition::None,
             },
@@ -1342,6 +1910,7 @@ mod tests {
                 &path,
                 Change::Put {
                     bytes,
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition,
                 },
@@ -1386,6 +1955,7 @@ mod tests {
                 &path,
                 Change::Put {
                     bytes,
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition,
                 },
@@ -1410,6 +1980,116 @@ mod tests {
         runtime.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conditional_delete_rejects_a_missing_object() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"missing".to_vec()).unwrap();
+        let result = apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Delete {
+                condition: DeleteCondition::IfMatch {
+                    object: object_id(Kind::Blob, b"missing").unwrap(),
+                    etag: crate::gateway::md5_hex(b"missing"),
+                    attributes_present: false,
+                },
+            },
+            "user",
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::PreconditionFailed)));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conditional_delete_rejects_a_replaced_object() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"first"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let first = object_id(Kind::Blob, b"first").unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"second"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let stale = apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Delete {
+                condition: DeleteCondition::IfMatch {
+                    object: first,
+                    etag: crate::gateway::md5_hex(b"first"),
+                    attributes_present: false,
+                },
+            },
+            "user",
+            &cancel,
+        )
+        .await;
+        assert!(matches!(stale, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
+            "second"
+        );
+
+        let second = object_id(Kind::Blob, b"second").unwrap();
+        apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Delete {
+                condition: DeleteCondition::IfMatch {
+                    object: second,
+                    etag: crate::gateway::md5_hex(b"second"),
+                    attributes_present: false,
+                },
+            },
+            "user",
+            &cancel,
+        )
+        .await
+        .unwrap();
+        runtime.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn same_ref_writes_queue_and_all_commit() {
         let (repository, runtime, cancel) = fixture().await;
@@ -1417,6 +2097,7 @@ mod tests {
         let coordinator = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
         ));
         let mut writes = tokio::task::JoinSet::new();
         for index in 0..8 {
@@ -1432,6 +2113,7 @@ mod tests {
                         &crab_remote_git::GitPath::new(path.into_bytes()).unwrap(),
                         Change::Put {
                             bytes: Bytes::from(format!("value-{index}")),
+                            track_lfs: false,
                             attributes: Box::new(attributes::PutAttributes::default()),
                             condition: PutCondition::None,
                         },
@@ -1486,6 +2168,89 @@ mod tests {
         runtime.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn write_during_canonical_maintenance_retains_visibility_proof() {
+        let (repository, runtime, cancel) = fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(
+            &coordinator,
+            &repository,
+            &cancel,
+            "baseline.txt",
+            b"baseline",
+        )
+        .await;
+        let baseline = wait_for_visibility(&repository).await;
+        let blocker = loop {
+            match PushLock::acquire_internal(
+                repository.store.inner(),
+                repository.layout.repo_prefix(),
+                GIT_OBJECT_LOCATOR_RESOURCE,
+                LOCK_TTL,
+            )
+            .await
+            {
+                Ok(blocker) => break blocker,
+                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("failed to acquire catalog blocker: {error}"),
+            }
+        };
+
+        coordinated_put(&coordinator, &repository, &cancel, "first.txt", b"first").await;
+        wait_for_generation_after(&repository, baseline).await;
+        coordinated_put(&coordinator, &repository, &cancel, "second.txt", b"second").await;
+        blocker.release().await.unwrap();
+        let final_generation = wait_for_visibility(&repository).await;
+
+        assert!(final_generation > baseline);
+        runtime.shutdown().await;
+    }
+
+    async fn wait_for_generation_after(repository: &Repository, generation: u64) {
+        for _ in 0..500 {
+            let (manifest, _) =
+                crab_metadata::manifest_store::read_manifest(&repository.store, &repository.layout)
+                    .await
+                    .unwrap();
+            if manifest.generation > generation {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("background maintenance did not advance the manifest");
+    }
+
+    async fn wait_for_visibility(repository: &Repository) -> u64 {
+        for _ in 0..500 {
+            let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+                &repository.store,
+                &repository.layout,
+            )
+            .await
+            .unwrap();
+            if snapshot.journal.transactions.is_empty()
+                && crab_metadata::git_visibility::read_for_manifest(
+                    &repository.store,
+                    &repository.layout,
+                    &snapshot.manifest,
+                )
+                .await
+                .unwrap()
+                .is_some()
+            {
+                return snapshot.manifest.generation;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("background maintenance did not publish a visibility proof");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn each_commit_persists_only_its_path_attribute_delta() {
         let (repository, runtime, cancel) = fixture().await;
@@ -1498,6 +2263,7 @@ mod tests {
                 &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
                 Change::Put {
                     bytes: Bytes::from(path.to_owned()),
+                    track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition: PutCondition::None,
                 },

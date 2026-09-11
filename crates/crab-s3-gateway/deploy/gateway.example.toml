@@ -1,0 +1,43 @@
+listen = "0.0.0.0:8080"
+# Keep this management listener private to the workload network. It serves
+# unauthenticated process liveness and repository readiness probes only.
+management_listen = "0.0.0.0:8081"
+region = "us-east-1"
+# Per-process active request budget. Queued bursts wait for bounded capacity;
+# tune from measured CPU, memory, file-descriptor, and scratch usage.
+max_in_flight_requests = 32
+
+# Keep the cache on a writable volume separate from request scratch. The
+# application cap remains authoritative even when the volume exposes more space.
+[cache]
+directory = "/var/lib/crab/cache-volume/cache"
+max_bytes = 2147483648
+# Set to the public host (and port, when non-default) to also accept
+# virtual-hosted requests such as repository.example.s3.crab.build.
+# endpoint_domain = "s3.crab.build"
+
+[[credentials]]
+access_key = "replace-with-issued-access-key"
+secret_key_file = "/run/secrets/crab-s3-secret"
+# For a temporary SigV4 credential, configure both fields and roll every
+# gateway replica before the expiry. The gateway does not issue or refresh it.
+# session_token_file = "/run/secrets/crab-s3-session-token"
+# expires_at = "2099-01-01T00:00:00Z"
+principal = "service-account:analytics"
+
+[[repositories]]
+name = "analytics-repository"
+provider = "s3"
+bucket = "physical-storage-bucket"
+prefix = "repositories/analytics"
+default_branch = "main"
+protected_branches = ["release"]
+# These persisted limits bound durable multipart staging across every gateway
+# instance serving this repository. Open uploads expire after seven days.
+max_active_multipart_uploads = 1024
+multipart_staging_bytes_per_upload = 50000000000000
+multipart_upload_ttl_seconds = 604800
+
+[[repositories.members]]
+principal = "service-account:analytics"
+access = "write"

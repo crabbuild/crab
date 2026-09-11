@@ -69,7 +69,7 @@ async fn close_drains_dropped_operations() {
 async fn open_timeout_drains_pending_transport() {
     let (client, started, server) = pending_store().await;
     let options = OperationOptions::default()
-        .with_timeout(Duration::from_millis(100))
+        .with_timeout(Duration::from_secs(30))
         .unwrap();
     let mut request = Box::pin(
         client
@@ -83,6 +83,10 @@ async fn open_timeout_drains_pending_transport() {
         result = &mut request => panic!("request unexpectedly completed: {:?}", result.err()),
         started = tokio::time::timeout(Duration::from_secs(2), started) => started.unwrap().unwrap(),
     }
+    // Advance the deadline only after the transport is known to be pending, or
+    // loaded runners can spend the whole short timeout reaching this barrier.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
     let error = tokio::time::timeout(Duration::from_secs(2), request)
         .await
         .unwrap()
