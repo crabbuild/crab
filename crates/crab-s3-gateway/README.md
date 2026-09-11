@@ -145,7 +145,10 @@ seconds before returning S3 `SlowDown` with `Retry-After: 1`; request bodies are
 not consumed while waiting. Standard S3 SDK retry policies handle this response;
 custom clients should retry with exponential backoff and jitter. The default
 budget is 32 and should be tuned from measured CPU, memory, file-descriptor, and
-scratch usage rather than client fanout alone. Each
+scratch usage rather than client fanout alone. The S3 listener also caps live
+TCP connections at four times this request budget, while a separate 16-connection
+management reserve keeps probes available during S3 connection pressure; excess
+connections are closed before spawning a task. Each
 PutObject, UploadPart, and copied source range uses a request-local temporary
 file. Large multipart completion rereads durable parts instead of creating an
 additional full-object spool, so its local scratch does not scale with the

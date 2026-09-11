@@ -18,6 +18,7 @@ use s3s::{
     service::{S3Service, S3ServiceBuilder},
 };
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -26,6 +27,9 @@ use crate::{
     gateway::Gateway,
     metrics::{Metrics, ObservedBody},
 };
+
+const CONNECTIONS_PER_REQUEST: usize = 4;
+const MANAGEMENT_CONNECTIONS: usize = 16;
 
 #[derive(Clone)]
 pub(crate) struct RequestBodyDigest {
@@ -62,11 +66,16 @@ impl RequestBodyDigest {
 pub async fn serve(config: Config) -> Result<()> {
     config.validate()?;
     let endpoint_domain = config.endpoint_domain.clone();
+    let max_in_flight_requests = config.max_in_flight_requests;
     let listener = TcpListener::bind(config.listen).await?;
     let management_listener = TcpListener::bind(config.management_listen).await?;
+    let listen_address = listener.local_addr()?;
+    let management_address = management_listener.local_addr()?;
     let cancellation = CancellationToken::new();
     let gateway = Gateway::new(config, cancellation.clone())?;
     let multipart_maintenance = gateway.start_multipart_maintenance();
+    let s3_connections = Arc::new(Semaphore::new(connection_capacity(max_in_flight_requests)));
+    let management_connections = Arc::new(Semaphore::new(MANAGEMENT_CONNECTIONS));
     let mut builder = S3ServiceBuilder::new(gateway.clone());
     let auth = gateway.auth();
     builder.set_auth(auth.clone());
@@ -77,15 +86,27 @@ pub async fn serve(config: Config) -> Result<()> {
     let service = builder.build();
     let connections = ConnectionBuilder::new(TokioExecutor::new());
     let graceful = GracefulShutdown::new();
-    tracing::info!(address = %listener.local_addr()?, "Crab S3 gateway listening");
-    tracing::info!(address = %management_listener.local_addr()?, "Crab S3 gateway management listener ready");
+    tracing::info!(address = %listen_address, "Crab S3 gateway listening");
+    tracing::info!(address = %management_address, "Crab S3 gateway management listener ready");
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
+    let mut accept_error = None;
 
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (socket, peer) = accepted?;
+                let (socket, peer) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::error!(%error, "S3 listener accept failed; draining existing connections");
+                        accept_error = Some(error);
+                        break;
+                    }
+                };
+                let Ok(connection_permit) = Arc::clone(&s3_connections).try_acquire_owned() else {
+                    tracing::debug!(%peer, "S3 connection capacity exhausted");
+                    continue;
+                };
                 let s3_service = service.clone();
                 let metrics = gateway.metrics();
                 let service = service_fn(move |request| {
@@ -94,18 +115,31 @@ pub async fn serve(config: Config) -> Result<()> {
                 let connection = connections.serve_connection(TokioIo::new(socket), service);
                 let connection = graceful.watch(connection.into_owned());
                 tokio::spawn(async move {
+                    let _connection_permit = connection_permit;
                     if let Err(error) = connection.await {
                         tracing::warn!(%peer, %error, "S3 connection failed");
                     }
                 });
             }
             accepted = management_listener.accept() => {
-                let (socket, peer) = accepted?;
+                let (socket, peer) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        tracing::error!(%error, "management listener accept failed; draining existing connections");
+                        accept_error = Some(error);
+                        break;
+                    }
+                };
+                let Ok(connection_permit) = Arc::clone(&management_connections).try_acquire_owned() else {
+                    tracing::debug!(%peer, "management connection capacity exhausted");
+                    continue;
+                };
                 let gateway = gateway.clone();
                 let service = service_fn(move |request| management_response(gateway.clone(), request));
                 let connection = connections.serve_connection(TokioIo::new(socket), service);
                 let connection = graceful.watch(connection.into_owned());
                 tokio::spawn(async move {
+                    let _connection_permit = connection_permit;
                     if let Err(error) = connection.await {
                         tracing::warn!(%peer, %error, "management connection failed");
                     }
@@ -124,7 +158,16 @@ pub async fn serve(config: Config) -> Result<()> {
     }
     gateway.shutdown().await;
     multipart_maintenance.await?;
+    if let Some(error) = accept_error {
+        return Err(error.into());
+    }
     Ok(())
+}
+
+fn connection_capacity(max_in_flight_requests: usize) -> usize {
+    max_in_flight_requests
+        .saturating_mul(CONNECTIONS_PER_REQUEST)
+        .max(MANAGEMENT_CONNECTIONS)
 }
 
 /// Check the running process without accessing repository storage.
@@ -349,6 +392,12 @@ mod tests {
     fn explicit_probe_address_is_preserved() {
         let address = "192.0.2.10:8081".parse().unwrap();
         assert_eq!(probe_address(address), address);
+    }
+
+    #[test]
+    fn connection_capacity_scales_without_exceeding_the_request_budget_multiplier() {
+        assert_eq!(connection_capacity(8), 32);
+        assert_eq!(connection_capacity(4096), 16_384);
     }
 
     #[test]

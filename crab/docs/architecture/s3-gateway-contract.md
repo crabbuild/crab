@@ -325,6 +325,12 @@ still apply their normal S3 exponential-backoff policy with jitter; the header
 is a retry floor, not a promise that distributed capacity will be free after
 one second.
 
+The process bounds live S3 TCP connections to four times
+`max_in_flight_requests` and reserves 16 management connections for health and
+metrics probes. A connection rejected at that boundary is closed before a
+connection task is spawned; request-level admission remains the source of S3
+`SlowDown` responses for accepted connections.
+
 Request bodies are streamed through bounded memory to temporary storage while
 checksums are computed. Declared request lengths reserve scratch before the body
 is consumed; unknown streams reserve bounded increments. PutObject and UploadPart
