@@ -170,6 +170,72 @@ fn hold_permit(stream: ContentStream, permit: RequestPermit) -> ContentStream {
     ))
 }
 
+fn verified_crab_stream(
+    stream: crab_read::ReconstructionStream,
+    expected_size: u64,
+    expected_hash: [u8; 32],
+) -> crab_read::ReconstructionStream {
+    use futures_util::StreamExt as _;
+
+    let expected_hash_hex = blake3::Hash::from_bytes(expected_hash).to_hex().to_string();
+    Box::pin(futures_util::stream::try_unfold(
+        (stream, blake3::Hasher::new(), 0_u64, None::<Bytes>, false),
+        move |(mut stream, mut hasher, mut received, mut pending, finished)| {
+            let expected_hash_hex = expected_hash_hex.clone();
+            async move {
+                if finished {
+                    return Ok(None);
+                }
+                loop {
+                    match stream.next().await {
+                        Some(Ok(chunk)) if chunk.is_empty() => {}
+                        Some(Ok(chunk)) => {
+                            received = received
+                                .checked_add(chunk.len() as u64)
+                                .filter(|size| *size <= expected_size)
+                                .ok_or_else(|| crab_read::ReadError::CorruptObject {
+                                    path: expected_hash_hex.clone(),
+                                    reason: format!(
+                                        "reconstruction exceeded declared size {expected_size}"
+                                    ),
+                                })?;
+                            hasher.update(&chunk);
+                            if let Some(previous) = pending.replace(chunk) {
+                                return Ok(Some((
+                                    previous,
+                                    (stream, hasher, received, pending, false),
+                                )));
+                            }
+                        }
+                        Some(Err(error)) => return Err(error),
+                        None => {
+                            if received != expected_size {
+                                return Err(crab_read::ReadError::CorruptObject {
+                                    path: expected_hash_hex.clone(),
+                                    reason: format!(
+                                        "reconstruction size mismatch: expected {expected_size}, got {received}"
+                                    ),
+                                });
+                            }
+                            let actual = hasher.clone().finalize();
+                            if actual.as_bytes() != &expected_hash {
+                                return Err(crab_read::ReadError::HashMismatch {
+                                    requested: expected_hash_hex,
+                                    actual: actual.to_hex().to_string(),
+                                });
+                            }
+                            if let Some(last) = pending.take() {
+                                return Ok(Some((last, (stream, hasher, received, pending, true))));
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        },
+    ))
+}
+
 impl ReadContent {
     async fn stream(
         self,
@@ -206,12 +272,18 @@ impl ReadContent {
                 let PointerKind::Crab(pointer) = crab_git::classify(&pointer_bytes) else {
                     return Err(s3_error!(InvalidObjectState));
                 };
-                if direct_range {
+                let full = range.start == 0 && range.end == pointer.size;
+                if direct_range || full {
                     let stream = repository
                         .hydrator
                         .reconstruct_range_stream(&pointer, range)
-                        .map_err(|error| gateway_error(error.into()))?
-                        .map_err(|error| Box::new(error) as s3s::StdError);
+                        .map_err(|error| gateway_error(error.into()))?;
+                    let stream = (if full {
+                        verified_crab_stream(stream, pointer.size, pointer.file_hash)
+                    } else {
+                        stream
+                    })
+                    .map_err(|error| Box::new(error) as s3s::StdError);
                     return Ok(Box::pin(stream));
                 }
                 let size = range.end - range.start;
@@ -4296,6 +4368,48 @@ mod tests {
                 "02".repeat(32),
             )
         );
+    }
+
+    #[tokio::test]
+    async fn verified_crab_stream_withholds_terminal_chunk_until_hash_verifies() {
+        use futures_util::StreamExt as _;
+
+        let source: crab_read::ReconstructionStream = Box::pin(futures_util::stream::iter([
+            Ok(Bytes::from_static(b"hello")),
+            Ok(Bytes::from_static(b" world")),
+        ]));
+        let mut stream = verified_crab_stream(source, 11, *blake3::hash(b"hello world").as_bytes());
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"hello")
+        );
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            Bytes::from_static(b" world")
+        );
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn verified_crab_stream_reports_hash_mismatch_before_releasing_last_chunk() {
+        use futures_util::StreamExt as _;
+
+        let source: crab_read::ReconstructionStream = Box::pin(futures_util::stream::iter([
+            Ok(Bytes::from_static(b"hello")),
+            Ok(Bytes::from_static(b" world")),
+        ]));
+        let mut stream = verified_crab_stream(source, 11, [0; 32]);
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            Bytes::from_static(b"hello")
+        );
+        assert!(matches!(
+            stream.next().await,
+            Some(Err(crab_read::ReadError::HashMismatch { .. }))
+        ));
+        assert!(stream.next().await.is_none());
     }
 
     #[test]

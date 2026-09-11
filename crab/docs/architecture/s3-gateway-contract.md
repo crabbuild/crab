@@ -335,15 +335,14 @@ verified LFS content path; the committed Git blob is the canonical LFS pointer
 and the S3 attribute record retains the logical size and ETag. That same Git
 commit appends an exact tracking rule to the nearest `.gitattributes`,
 preserving any existing rules, so ordinary Git/LFS checkout interprets the
-pointer consistently. GET streams LFS content directly. A partial Crab/Xet GET
-streams verified selected chunks through a single bounded backpressure slot and
-cancels reconstruction when the response is dropped; a complete GET reconstructs
-to temporary storage before opening the response so its whole-file hash is
-verified. Successful writes are returned only after their committed outcome is
-durable and read-ready.
+pointer consistently. GET streams LFS content directly. A Crab/Xet GET streams
+verified reconstruction through a single bounded backpressure slot and cancels
+reconstruction when the response is dropped; a complete GET withholds its
+terminal chunk until the whole-file hash and declared size verify. Successful
+writes are returned only after their committed outcome is durable and read-ready.
 
 The temporary-storage requirement is proportional to each in-progress request
-body, copied range, or complete Crab/Xet GET, not to a partial Xet GET or a
+body, copied range, or non-streaming source assembly, not to a Crab/Xet GET or a
 completed multipart object's aggregate size.
 Production deployments must place the process temporary directory on
 capacity-managed scratch storage; atomic reservations bind admitted work to

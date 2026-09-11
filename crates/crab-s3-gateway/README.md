@@ -99,7 +99,8 @@ cancels reconstruction on disconnect without response-sized scratch. Copy-source
 ranges still use bounded temporary storage because publication requires a fully
 verified source before mutation. Low-coverage cold reads fetch bounded xorb
 ranges; the cache may fetch a complete verified xorb for high-coverage reads.
-Complete GETs retain whole-file verification before response headers. Legacy
+Complete GETs retain whole-file verification through a bounded stream and report
+success only after its terminal chunk is verified. Legacy
 Crab and LFS pointers project their content digest as an opaque ETag, so HEAD,
 listings, conditions, and range admission do not hydrate object payloads.
 Every process uses one cache instance shared by all configured repositories.

@@ -617,8 +617,8 @@ selected chunks cover most of it. The selected bytes stream through one bounded
 backpressure slot, so the gateway does not hydrate the complete logical file,
 retain the requested range in memory, or reserve scratch proportional to the
 response. Dropping the response cancels reconstruction. A complete GET continues
-through whole-file reconstruction to bounded scratch before response headers so
-the pointer hash and declared size are both verified.
+through the same bounded reconstruction stream; its terminal chunk is withheld
+until the pointer hash and declared size are verified before successful EOF.
 
 ### 3.2 Headers, conditions and ranges
 
