@@ -137,6 +137,8 @@ Rules:
 Resources:
   ImageRepository:
     Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       RepositoryName: !Ref ImageRepositoryName
       ImageScanningConfiguration:
