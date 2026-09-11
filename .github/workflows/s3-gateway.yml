@@ -393,7 +393,24 @@ jobs:
             "${crab_bin}" track '*.bin'
             "${crab_bin}" add qualification/xet-large.bin \
               qualification/xet-duplicate.bin
-            git add crab.toml .gitattributes
+            git show :qualification/xet-large.bin > "${xet_root}/xet-pointer-staged"
+            LISTING_ROOT="${source_root}/qualification/listing" \
+            XET_POINTER="${xet_root}/xet-pointer-staged" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["LISTING_ROOT"])
+          pointer = Path(os.environ["XET_POINTER"]).read_bytes()
+          root.mkdir(parents=True)
+          for index in range(10_000):
+              (root / f"flat-{index:05}.pointer").write_bytes(pointer)
+          for group in ("group-a", "group-b"):
+              directory = root / group
+              directory.mkdir()
+              for index in range(16):
+                  (directory / f"item-{index:02}.pointer").write_bytes(pointer)
+          PY
+            git add crab.toml .gitattributes qualification/listing
             git commit -q -m 'add Xet range qualification fixture'
             "${crab_bin}" push --upload-concurrency 0 \
               origin HEAD:refs/heads/main
@@ -406,6 +423,14 @@ jobs:
           grep -Fx 'size 67108864' "${xet_root}/xet-pointer"
           test "$(sed -n 's/^file-hash //p' "${xet_root}/xet-pointer")" = \
             "$(sed -n 's/^file-hash //p' "${xet_root}/xet-duplicate-pointer")"
+          git -C "${source_root}" ls-tree -r --name-only HEAD \
+            qualification/listing | wc -l | tr -d ' ' \
+            > "${xet_root}/listing-object-count"
+          test "$(cat "${xet_root}/listing-object-count")" = 10032
+          git -C "${source_root}" ls-tree -r HEAD qualification/listing | \
+            awk '{print $3}' | sort -u | wc -l | tr -d ' ' \
+            > "${xet_root}/listing-blob-count"
+          test "$(cat "${xet_root}/listing-blob-count")" = 1
           aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2 \
             --bucket crab-s3-gateway-qualification --prefix .crab/xorbs/ \
             --query 'length(Contents)' --output text > "${xet_root}/xorb-count"
@@ -561,6 +586,182 @@ jobs:
                   output,
                   sort_keys=True,
               )
+              output.write("\n")
+          PY
+
+          backend_requests() {
+            curl --fail --silent http://127.0.0.1:18081/metrics | \
+              awk '$1 ~ /^crab_s3_gateway_backend_requests_total\{/ {sum += $2} END {print int(sum)}'
+          }
+          backend_bytes_read() {
+            curl --fail --silent http://127.0.0.1:18081/metrics | \
+              awk '$1 ~ /^crab_s3_gateway_backend_bytes_read_total\{/ {sum += $2} END {print int(sum)}'
+          }
+          listing_prefix=main/qualification/listing/
+          listing_keys="${qualification_root}/listing-keys"
+          : > "${listing_keys}"
+          listing_scratch_before="$(xet_written)"
+          listing_requests_before="$(backend_requests)"
+          listing_bytes_before="$(backend_bytes_read)"
+          listing_started_ms="$(date +%s%3N)"
+          listing_token=
+          listing_pages=0
+          listing_objects=0
+          while true; do
+            listing_pages=$((listing_pages + 1))
+            page="${qualification_root}/listing-page-${listing_pages}.json"
+            list_command=(
+              aws --endpoint-url "${endpoint}" s3api list-objects-v2
+              --bucket "${bucket}" --prefix "${listing_prefix}"
+              --max-keys 1000 --no-paginate --output json
+            )
+            if test -n "${listing_token}"; then
+              list_command+=(--continuation-token "${listing_token}")
+            fi
+            "${list_command[@]}" > "${page}"
+            page_count="$(jq -r '.KeyCount' "${page}")"
+            test "${page_count}" -gt 0
+            test "${page_count}" -le 1000
+            jq -e '.KeyCount == ((.Contents // []) | length)' \
+              "${page}" >/dev/null
+            jq -e '(.Contents // []) | all(.[]; .Size == 67108864)' \
+              "${page}" >/dev/null
+            jq -r '.Contents[]?.Key' "${page}" >> "${listing_keys}"
+            listing_objects=$((listing_objects + page_count))
+            listing_token="$(jq -r '.NextContinuationToken // empty' "${page}")"
+            truncated="$(jq -r '.IsTruncated' "${page}")"
+            if test "${truncated}" = false; then
+              test -z "${listing_token}"
+              break
+            fi
+            test "${truncated}" = true
+            test -n "${listing_token}"
+            test "${listing_pages}" -lt 12
+          done
+          listing_elapsed_ms=$(( $(date +%s%3N) - listing_started_ms ))
+          test "${listing_objects}" = 10032
+          test "${listing_pages}" = 11
+          test "${listing_elapsed_ms}" -gt 0
+          test "${listing_elapsed_ms}" -le 120000
+          LISTING_KEYS="${listing_keys}" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          actual = Path(os.environ["LISTING_KEYS"]).read_text(encoding="utf-8").splitlines()
+          root = "main/qualification/listing/"
+          expected = [f"{root}flat-{index:05}.pointer" for index in range(10_000)]
+          expected.extend(
+              f"{root}{group}/item-{index:02}.pointer"
+              for group in ("group-a", "group-b")
+              for index in range(16)
+          )
+          if actual != expected:
+              raise SystemExit("large-list traversal was incomplete or out of order")
+          if len(actual) != len(set(actual)):
+              raise SystemExit("large-list traversal returned duplicate keys")
+          PY
+
+          late_prefix="${listing_prefix}flat-0999"
+          aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" --prefix "${late_prefix}" --max-keys 7 \
+            --no-paginate --output json \
+            > "${qualification_root}/listing-late-1.json"
+          test "$(jq -r '.KeyCount' \
+            "${qualification_root}/listing-late-1.json")" = 7
+          test "$(jq -r '.IsTruncated' \
+            "${qualification_root}/listing-late-1.json")" = true
+          late_token="$(jq -r '.NextContinuationToken' \
+            "${qualification_root}/listing-late-1.json")"
+          test -n "${late_token}"
+          aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" --prefix "${late_prefix}" --max-keys 7 \
+            --continuation-token "${late_token}" --no-paginate --output json \
+            > "${qualification_root}/listing-late-2.json"
+          test "$(jq -r '.KeyCount' \
+            "${qualification_root}/listing-late-2.json")" = 3
+          test "$(jq -r '.IsTruncated' \
+            "${qualification_root}/listing-late-2.json")" = false
+          jq -r '.Contents[].Key' \
+            "${qualification_root}/listing-late-1.json" \
+            "${qualification_root}/listing-late-2.json" \
+            > "${qualification_root}/listing-late-keys"
+          LISTING_LATE_KEYS="${qualification_root}/listing-late-keys" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          actual = Path(os.environ["LISTING_LATE_KEYS"]).read_text(
+              encoding="utf-8"
+          ).splitlines()
+          expected = [
+              f"main/qualification/listing/flat-{index:05}.pointer"
+              for index in range(9_990, 10_000)
+          ]
+          if actual != expected:
+              raise SystemExit("late-prefix listing did not seek to the exact ordered page")
+          PY
+
+          aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" \
+            --prefix "${listing_prefix}group-" --delimiter / --max-keys 10 \
+            --no-paginate --output json \
+            > "${qualification_root}/listing-groups.json"
+          LISTING_GROUPS="${qualification_root}/listing-groups.json" python3 - <<'PY'
+          import json
+          import os
+
+          with open(os.environ["LISTING_GROUPS"], encoding="utf-8") as source:
+              response = json.load(source)
+          expected = [
+              "main/qualification/listing/group-a/",
+              "main/qualification/listing/group-b/",
+          ]
+          actual = [value["Prefix"] for value in response.get("CommonPrefixes", [])]
+          if response.get("KeyCount") != 2 or response.get("Contents") or actual != expected:
+              raise SystemExit("delimiter listing did not collapse the two subtrees exactly")
+          PY
+
+          listing_scratch_after="$(xet_written)"
+          listing_requests_after="$(backend_requests)"
+          listing_bytes_after="$(backend_bytes_read)"
+          listing_scratch_delta=$((listing_scratch_after - listing_scratch_before))
+          listing_requests_delta=$((listing_requests_after - listing_requests_before))
+          listing_bytes_delta=$((listing_bytes_after - listing_bytes_before))
+          test "${listing_scratch_delta}" = 0
+          test "${listing_requests_delta}" -gt 0
+          test "${listing_bytes_delta}" -gt 0
+          LISTING_PROOF="${qualification_root}/listing-proof.json" \
+          LISTING_OBJECTS="${listing_objects}" \
+          LISTING_PAGES="${listing_pages}" \
+          LISTING_ELAPSED_MS="${listing_elapsed_ms}" \
+          LISTING_SCRATCH_DELTA="${listing_scratch_delta}" \
+          LISTING_REQUESTS_DELTA="${listing_requests_delta}" \
+          LISTING_BYTES_DELTA="${listing_bytes_delta}" \
+          LISTING_GIT_BLOBS="$(cat "${xet_root}/listing-blob-count")" python3 - <<'PY'
+          import json
+          import os
+
+          proof = {
+              "objects": int(os.environ["LISTING_OBJECTS"]),
+              "flat_objects": 10_000,
+              "git_blob_oids": int(os.environ["LISTING_GIT_BLOBS"]),
+              "pages": int(os.environ["LISTING_PAGES"]),
+              "max_keys": 1_000,
+              "logical_size_bytes": 64 * 1024 * 1024,
+              "logical_bytes": int(os.environ["LISTING_OBJECTS"]) * 64 * 1024 * 1024,
+              "ordered": True,
+              "unique": True,
+              "late_prefix_objects": 10,
+              "late_prefix_pages": 2,
+              "delimiter_common_prefixes": 2,
+              "metadata_scratch_bytes_written_delta": int(
+                  os.environ["LISTING_SCRATCH_DELTA"]
+              ),
+              "backend_requests_delta": int(os.environ["LISTING_REQUESTS_DELTA"]),
+              "backend_bytes_read_delta": int(os.environ["LISTING_BYTES_DELTA"]),
+              "elapsed_ms": int(os.environ["LISTING_ELAPSED_MS"]),
+          }
+          with open(os.environ["LISTING_PROOF"], "w", encoding="utf-8") as output:
+              json.dump(proof, output, sort_keys=True)
               output.write("\n")
           PY
 
@@ -1014,6 +1215,7 @@ jobs:
               "${RUNNER_TEMP}/crab-s3-gateway-xet/source/qualification/xet-large.bin" \
             --xet-range "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-range.bin" \
             --xet-proof "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-proof.json" \
+            --listing-proof "${qualification_root}/listing-proof.json" \
             --resident-memory "${qualification_root}/resident-memory" \
             --container-writable \
               "${qualification_root}/container-writable-bytes" \

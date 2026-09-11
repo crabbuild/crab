@@ -68,6 +68,24 @@ def valid_report() -> dict[str, Any]:
             "range_scratch_peak_bytes": 0,
             "range_scratch_bytes_written_delta": 0,
         },
+        "listing_qualification": {
+            "objects": 10_032,
+            "flat_objects": 10_000,
+            "git_blob_oids": 1,
+            "pages": 11,
+            "max_keys": 1_000,
+            "logical_size_bytes": 64 * 1024 * 1024,
+            "logical_bytes": 10_032 * 64 * 1024 * 1024,
+            "ordered": True,
+            "unique": True,
+            "late_prefix_objects": 10,
+            "late_prefix_pages": 2,
+            "delimiter_common_prefixes": 2,
+            "metadata_scratch_bytes_written_delta": 0,
+            "backend_requests_delta": 30,
+            "backend_bytes_read_delta": 1_000_000,
+            "elapsed_ms": 2_000,
+        },
         "assertion_count": len(checks),
         "passed_assertions": len(checks),
         "skipped": [],
@@ -94,10 +112,11 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             report, source_sha="a" * 40, run_id="123", run_attempt="2"
         )
 
-    def test_accepts_complete_v1_report(self) -> None:
+    def test_accepts_complete_v3_report(self) -> None:
         result = self.verify(valid_report())
         self.assertEqual(result["status"], "verified")
         self.assertEqual(result["checks"], len(REPORT.REQUIRED_CHECKS))
+        self.assertEqual(result["large_list_objects"], 10_032)
 
     def test_rejects_stale_or_dirty_source(self) -> None:
         for field, value in (
@@ -162,6 +181,34 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
         report["xet_qualification"]["duplicate_etag"] = "0" * 64
         with self.assertRaisesRegex(REPORT.EvidenceError, "deduplicated"):
             self.verify(report)
+
+    def test_rejects_incomplete_or_unbounded_large_listing(self) -> None:
+        for field, value in (
+            ("objects", 10_031),
+            ("flat_objects", 9_999),
+            ("git_blob_oids", 2),
+            ("pages", 10),
+            ("max_keys", 999),
+            ("logical_size_bytes", 1),
+            ("logical_bytes", 1),
+            ("ordered", False),
+            ("unique", False),
+            ("late_prefix_objects", 9),
+            ("late_prefix_pages", 1),
+            ("delimiter_common_prefixes", 1),
+            ("metadata_scratch_bytes_written_delta", 1),
+            ("backend_requests_delta", 0),
+            ("backend_bytes_read_delta", 0),
+            ("elapsed_ms", 120_001),
+        ):
+            with self.subTest(field=field):
+                report = valid_report()
+                report["listing_qualification"][field] = value
+                with self.assertRaisesRegex(
+                    REPORT.EvidenceError,
+                    "large-list|hydrated Xet",
+                ):
+                    self.verify(report)
 
     def test_rejects_identity_and_secret_fields(self) -> None:
         for field in REPORT.SENSITIVE_KEYS:
@@ -238,6 +285,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             metrics=metrics,
             fixture=report["fixture"],
             xet_qualification=report["xet_qualification"],
+            listing_qualification=report["listing_qualification"],
             resident_memory_bytes=1_000_000,
             container_writable_bytes=0,
             started_unix_ms=100,
@@ -263,6 +311,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             metrics={},
             fixture={"bytes": None, "sha256": None},
             xet_qualification={},
+            listing_qualification={},
             resident_memory_bytes=None,
             container_writable_bytes=None,
             started_unix_ms=100,

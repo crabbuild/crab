@@ -16,7 +16,7 @@ from typing import Any
 
 
 SCHEMA = "crab.s3-gateway-evidence"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SUITE = "deployment"
 BACKEND_IMAGE = "rustfs/rustfs:1.0.0-beta.8-glibc"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -41,6 +41,7 @@ CHECK_OWNERS = {
     "exact_range_read": "traffic",
     "xet_metadata_projection": "traffic",
     "xet_range_stream": "traffic",
+    "large_list_pagination": "traffic",
     "streaming_sigv4": "traffic",
     "streaming_rejection_atomicity": "traffic",
     "static_presigned_get": "traffic",
@@ -214,6 +215,34 @@ def _xet_qualification(
     }
 
 
+def _listing_qualification(proof_path: Path) -> dict[str, Any]:
+    try:
+        proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        proof = {}
+    if not isinstance(proof, dict):
+        proof = {}
+    fields = (
+        "objects",
+        "flat_objects",
+        "git_blob_oids",
+        "pages",
+        "max_keys",
+        "logical_size_bytes",
+        "logical_bytes",
+        "ordered",
+        "unique",
+        "late_prefix_objects",
+        "late_prefix_pages",
+        "delimiter_common_prefixes",
+        "metadata_scratch_bytes_written_delta",
+        "backend_requests_delta",
+        "backend_bytes_read_delta",
+        "elapsed_ms",
+    )
+    return {name: proof.get(name) for name in fields}
+
+
 def build_report(
     *,
     source: dict[str, Any],
@@ -221,6 +250,7 @@ def build_report(
     metrics: dict[str, list[float]],
     fixture: dict[str, Any],
     xet_qualification: dict[str, Any],
+    listing_qualification: dict[str, Any],
     resident_memory_bytes: int | None,
     container_writable_bytes: int | None,
     started_unix_ms: int,
@@ -272,6 +302,7 @@ def build_report(
         },
         "fixture": fixture,
         "xet_qualification": xet_qualification,
+        "listing_qualification": listing_qualification,
         "assertion_count": len(checks),
         "passed_assertions": passed_assertions,
         "skipped": [],
@@ -327,7 +358,7 @@ def verify_report(
     report: dict[str, Any], *, source_sha: str, run_id: str, run_attempt: str
 ) -> dict[str, Any]:
     if report.get("schema") != SCHEMA or report.get("schema_version") != SCHEMA_VERSION:
-        raise EvidenceError("report is not the canonical S3 gateway qualification v2 schema")
+        raise EvidenceError("report is not the canonical S3 gateway qualification v3 schema")
     if report.get("status") != "passed" or report.get("terminal_state") != "exited-zero":
         raise EvidenceError("qualification did not reach a successful terminal state")
     if report.get("suite") != SUITE or report.get("skipped") != []:
@@ -401,6 +432,43 @@ def verify_report(
         if xet.get(name) != 0:
             raise EvidenceError(f"Xet qualification used unexpected scratch: {name}")
 
+    listing = report.get("listing_qualification")
+    if not isinstance(listing, dict):
+        raise EvidenceError("large-list qualification evidence is missing")
+    if (
+        listing.get("objects"),
+        listing.get("flat_objects"),
+        listing.get("git_blob_oids"),
+        listing.get("pages"),
+        listing.get("max_keys"),
+        listing.get("logical_size_bytes"),
+        listing.get("logical_bytes"),
+    ) != (
+        10_032,
+        10_000,
+        1,
+        11,
+        1_000,
+        64 * 1024 * 1024,
+        10_032 * 64 * 1024 * 1024,
+    ):
+        raise EvidenceError("large-list fixture or complete pagination is wrong")
+    if listing.get("ordered") is not True or listing.get("unique") is not True:
+        raise EvidenceError("large-list results are not ordered and unique")
+    if (
+        listing.get("late_prefix_objects"),
+        listing.get("late_prefix_pages"),
+        listing.get("delimiter_common_prefixes"),
+    ) != (10, 2, 2):
+        raise EvidenceError("large-list seek or delimiter grouping is wrong")
+    if listing.get("metadata_scratch_bytes_written_delta") != 0:
+        raise EvidenceError("large-list metadata requests hydrated Xet payloads")
+    for name in ("backend_requests_delta", "backend_bytes_read_delta", "elapsed_ms"):
+        if type(listing.get(name)) is not int or listing[name] <= 0:
+            raise EvidenceError(f"large-list measurement {name} must be positive")
+    if listing["elapsed_ms"] > 120_000:
+        raise EvidenceError("large-list traversal exceeded the frozen time budget")
+
     checks = report.get("checks")
     if not isinstance(checks, list):
         raise EvidenceError("checks must be a list")
@@ -457,6 +525,8 @@ def verify_report(
         "http_requests": measurements["http_requests"],
         "backend_bytes_read": measurements["backend_bytes_read"],
         "backend_bytes_written": measurements["backend_bytes_written"],
+        "large_list_objects": listing["objects"],
+        "large_list_elapsed_ms": listing["elapsed_ms"],
     }
 
 
@@ -482,6 +552,7 @@ def produce(args: argparse.Namespace) -> int:
             xet_qualification=_xet_qualification(
                 args.xet_fixture, args.xet_range, args.xet_proof
             ),
+            listing_qualification=_listing_qualification(args.listing_proof),
             resident_memory_bytes=read_resident_memory(args.resident_memory),
             container_writable_bytes=_read_nonnegative_integer(args.container_writable),
             started_unix_ms=started_unix_ms,
@@ -534,6 +605,7 @@ def parser() -> argparse.ArgumentParser:
     producer.add_argument("--xet-fixture", type=Path, required=True)
     producer.add_argument("--xet-range", type=Path, required=True)
     producer.add_argument("--xet-proof", type=Path, required=True)
+    producer.add_argument("--listing-proof", type=Path, required=True)
     producer.add_argument("--resident-memory", type=Path, required=True)
     producer.add_argument("--container-writable", type=Path, required=True)
     producer.add_argument("--started", type=Path, required=True)

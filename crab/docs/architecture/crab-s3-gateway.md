@@ -277,6 +277,10 @@ Phase-owned artifacts:
   release binary publishes a real 64 MiB Xet fixture and an identical duplicate;
   signed HEAD, list, and throttled range traffic proves deterministic projected
   ETags, exact range bytes, deduplication, and zero response-sized Xet scratch.
+  The same commit contains 10,032 logical 64 MiB keys backed by one pointer blob;
+  unchanged AWS CLI traffic traverses eleven bounded pages, seeks a late prefix,
+  groups delimiter subtrees, and proves exact order, uniqueness, a two-minute
+  absolute ceiling, positive backend accounting, and zero Xet hydration scratch.
   The job retains and validates a versioned qualification report bound to the
   exact source, image, backend, client versions, both fixtures, measurements, and
   complete assertion inventory.
