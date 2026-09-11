@@ -22,8 +22,8 @@ concurrency:
 
 env:
   RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
-  RUSTFS_ACCESS_KEY: crab
-  RUSTFS_SECRET_KEY: crab
+  RUSTFS_ACCESS_KEY: rustfs-qualification
+  RUSTFS_SECRET_KEY: rustfs-qualification-secret
   GATEWAY_ACCESS_KEY: gateway-qualification
   GATEWAY_SECRET_KEY: gateway-qualification-secret
   GATEWAY_SESSION_ACCESS_KEY: gateway-session-qualification
@@ -1424,6 +1424,8 @@ jobs:
         run: |
           report="${RUNNER_TEMP}/crab-s3-gateway-evidence/report.json"
           if grep -Fq \
+            -e "${RUSTFS_ACCESS_KEY}" \
+            -e "${RUSTFS_SECRET_KEY}" \
             -e "${GATEWAY_ACCESS_KEY}" \
             -e "${GATEWAY_SECRET_KEY}" \
             -e "${GATEWAY_SESSION_ACCESS_KEY}" \
