@@ -1323,27 +1323,42 @@ impl S3 for Gateway {
                 i64::try_from(content_length).map_err(|_| s3_error!(InternalError))?,
             ),
             content_range: selection.content_range,
-            cache_control: object
-                .attributes
-                .as_ref()
-                .and_then(|value| value.cache_control.clone()),
-            content_disposition: object
-                .attributes
-                .as_ref()
-                .and_then(|value| value.content_disposition.clone()),
-            content_encoding: object
-                .attributes
-                .as_ref()
-                .and_then(|value| value.content_encoding.clone()),
-            content_language: object
-                .attributes
-                .as_ref()
-                .and_then(|value| value.content_language.clone()),
-            content_type: object
-                .attributes
-                .as_ref()
-                .and_then(|value| value.content_type.clone())
-                .or_else(|| Some("application/octet-stream".to_owned())),
+            cache_control: response_override(
+                req.input.response_cache_control,
+                object
+                    .attributes
+                    .as_ref()
+                    .and_then(|value| value.cache_control.as_ref()),
+            ),
+            content_disposition: response_override(
+                req.input.response_content_disposition,
+                object
+                    .attributes
+                    .as_ref()
+                    .and_then(|value| value.content_disposition.as_ref()),
+            ),
+            content_encoding: response_override(
+                req.input.response_content_encoding,
+                object
+                    .attributes
+                    .as_ref()
+                    .and_then(|value| value.content_encoding.as_ref()),
+            ),
+            content_language: response_override(
+                req.input.response_content_language,
+                object
+                    .attributes
+                    .as_ref()
+                    .and_then(|value| value.content_language.as_ref()),
+            ),
+            content_type: response_override(
+                req.input.response_content_type,
+                object
+                    .attributes
+                    .as_ref()
+                    .and_then(|value| value.content_type.as_ref()),
+            )
+            .or_else(|| Some("application/octet-stream".to_owned())),
             e_tag: Some(ETag::Strong(object.etag)),
             checksum_crc32: response_checksums.crc32,
             checksum_crc32c: response_checksums.crc32c,
@@ -1351,10 +1366,13 @@ impl S3 for Gateway {
             checksum_sha1: response_checksums.sha1,
             checksum_sha256: response_checksums.sha256,
             checksum_type: response_checksums.checksum_type.map(ChecksumType::from),
-            expires: object
-                .attributes
-                .as_ref()
-                .and_then(|value| value.expires.clone()),
+            expires: response_override(
+                req.input.response_expires,
+                object
+                    .attributes
+                    .as_ref()
+                    .and_then(|value| value.expires.as_ref()),
+            ),
             last_modified: Some(object.modified),
             parts_count: selection.parts_count,
             metadata: object
@@ -2869,6 +2887,10 @@ fn empty_list_objects_response(
         start_after: encode_list_option(req.input.start_after.clone(), url_encode),
         ..Default::default()
     }))
+}
+
+fn response_override<T: Clone>(requested: Option<T>, stored: Option<&T>) -> Option<T> {
+    requested.or_else(|| stored.cloned())
 }
 
 fn verify_content_md5(actual: &[u8; 16], expected: Option<&str>) -> S3Result<()> {
@@ -5150,6 +5172,20 @@ mod tests {
             .unwrap();
 
         reject_copy_extensions(&input).unwrap();
+    }
+
+    #[test]
+    fn head_response_overrides_take_precedence_over_stored_metadata() {
+        let stored = "stored-content-type".to_owned();
+        assert_eq!(
+            response_override(Some("requested-content-type".to_owned()), Some(&stored)),
+            Some("requested-content-type".to_owned())
+        );
+        assert_eq!(
+            response_override(None, Some(&stored)),
+            Some("stored-content-type".to_owned())
+        );
+        assert_eq!(response_override::<String>(None, None), None);
     }
 
     #[test]
