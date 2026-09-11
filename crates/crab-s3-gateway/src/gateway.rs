@@ -24,6 +24,7 @@ use crate::{
     Config, RepositoryAccess, RepositoryConfig,
     admission::{Admission, RequestClass, RequestPermit},
     auth::GatewayAuth,
+    content::RESPONSE_IDLE_TIMEOUT,
     metrics::{MaintenanceCycleOutcome, MaintenanceFailure, Metrics},
     mutation, namespace,
 };
@@ -166,10 +167,31 @@ type ContentStream =
     Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, s3s::StdError>> + Send + 'static>>;
 
 fn hold_permit(stream: ContentStream, permit: RequestPermit) -> ContentStream {
+    hold_permit_with_timeout(stream, permit, RESPONSE_IDLE_TIMEOUT)
+}
+
+fn hold_permit_with_timeout(
+    stream: ContentStream,
+    permit: RequestPermit,
+    idle_timeout: Duration,
+) -> ContentStream {
     Box::pin(futures_util::stream::unfold(
-        (stream, permit),
-        |(mut stream, permit)| async move {
-            stream.next().await.map(|result| (result, (stream, permit)))
+        Some((stream, permit)),
+        move |state| async move {
+            let (mut stream, permit) = state?;
+            match tokio::time::timeout(idle_timeout, stream.next()).await {
+                Ok(Some(Ok(bytes))) => Some((Ok(bytes), Some((stream, permit)))),
+                Ok(Some(Err(error))) => {
+                    drop(permit);
+                    Some((Err(error), None))
+                }
+                Ok(None) => None,
+                Err(_) => {
+                    drop(permit);
+                    let error: s3s::StdError = Box::new(crate::content::ResponseIdleTimeout);
+                    Some((Err(error), None))
+                }
+            }
         },
     ))
 }
@@ -4846,6 +4868,21 @@ mod tests {
         );
 
         drop(response);
+        admission.acquire(RequestClass::Read).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_response_releases_read_capacity_with_timeout_error() {
+        let admission = Admission::new(8, CancellationToken::new(), Metrics::new().unwrap());
+        let permit = admission.acquire(RequestClass::Read).await.unwrap();
+        let _second = admission.acquire(RequestClass::Read).await.unwrap();
+        let _third = admission.acquire(RequestClass::Read).await.unwrap();
+        let _fourth = admission.acquire(RequestClass::Read).await.unwrap();
+        let source: ContentStream = Box::pin(futures_util::stream::pending());
+        let mut response = hold_permit_with_timeout(source, permit, Duration::from_millis(1));
+
+        let error = response.next().await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "response body was idle for too long");
         admission.acquire(RequestClass::Read).await.unwrap();
     }
 

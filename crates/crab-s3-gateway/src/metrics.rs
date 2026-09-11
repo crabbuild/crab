@@ -84,6 +84,7 @@ struct MethodMetrics {
     in_flight: Gauge,
     duration: Histogram,
     body_errors: Counter,
+    body_timeouts: Counter,
     body_aborts: Counter,
 }
 
@@ -335,6 +336,13 @@ impl MethodMetrics {
                 ),
                 &METADATA,
             ),
+            body_timeouts: recorder.register_counter(
+                &key(
+                    "crab_s3_gateway_http_response_body_timeouts_total",
+                    &[("method", method)],
+                ),
+                &METADATA,
+            ),
             body_aborts: recorder.register_counter(
                 &key(
                     "crab_s3_gateway_http_response_body_aborts_total",
@@ -453,6 +461,13 @@ impl RequestObservation {
         self.finish();
     }
 
+    fn body_timeout(&mut self) {
+        self.metrics.inner.methods[self.method]
+            .body_timeouts
+            .increment(1);
+        self.body_error();
+    }
+
     fn body_abort(&mut self) {
         self.metrics.inner.methods[self.method]
             .body_aborts
@@ -523,7 +538,14 @@ impl http_body::Body for ObservedBody {
             }
             Poll::Ready(Some(Err(error))) => {
                 if let Some(mut observation) = this.observation.take() {
-                    observation.body_error();
+                    if error
+                        .downcast_ref::<crate::content::ResponseIdleTimeout>()
+                        .is_some()
+                    {
+                        observation.body_timeout();
+                    } else {
+                        observation.body_error();
+                    }
                 }
                 Poll::Ready(Some(Err(error)))
             }
@@ -572,6 +594,11 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_s3_gateway_http_response_body_errors_total",
         "Response streams that failed after headers were produced.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_http_response_body_timeouts_total",
+        "Response streams terminated by the bounded idle timeout.",
     );
     describe_counter(
         recorder,

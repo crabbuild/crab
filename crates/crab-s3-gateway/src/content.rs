@@ -17,6 +17,18 @@ pub(crate) const MAX_MULTIPART_OBJECT_BYTES: u64 = 50_000_000_000_000;
 pub(crate) const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 pub(crate) const INLINE_GIT_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug)]
+pub(crate) struct ResponseIdleTimeout;
+
+impl std::fmt::Display for ResponseIdleTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("response body was idle for too long")
+    }
+}
+
+impl std::error::Error for ResponseIdleTimeout {}
 
 pub(crate) fn max_multipart_object_bytes(provider: crab_storage::StorageProviderKind) -> u64 {
     MAX_MULTIPART_OBJECT_BYTES.min(crab_storage::multipart::upload_limits(provider).max_object_size)

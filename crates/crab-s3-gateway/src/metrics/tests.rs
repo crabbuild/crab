@@ -97,7 +97,27 @@ async fn failed_response_body_records_stream_error() {
     assert!(body.frame().await.unwrap().is_err());
     let rendered = metrics.render(&admission);
     assert!(rendered.contains("crab_s3_gateway_http_response_body_errors_total{method=\"get\"} 1"));
+    assert!(
+        rendered.contains("crab_s3_gateway_http_response_body_timeouts_total{method=\"get\"} 0")
+    );
     assert!(rendered.contains("crab_s3_gateway_http_in_flight_requests{method=\"get\"} 0"));
+}
+
+#[tokio::test]
+async fn timed_out_response_body_records_a_timeout_subclass() {
+    let (admission, metrics) = setup();
+    let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
+    let stream =
+        futures_util::stream::iter([Err::<Frame<Bytes>, _>(crate::content::ResponseIdleTimeout)]);
+    let source = http_body_util::StreamBody::new(stream);
+    let mut body = ObservedBody::new(s3s::Body::http_body_unsync(source), observation);
+
+    assert!(body.frame().await.unwrap().is_err());
+    let rendered = metrics.render(&admission);
+    assert!(rendered.contains("crab_s3_gateway_http_response_body_errors_total{method=\"get\"} 1"));
+    assert!(
+        rendered.contains("crab_s3_gateway_http_response_body_timeouts_total{method=\"get\"} 1")
+    );
 }
 
 #[test]

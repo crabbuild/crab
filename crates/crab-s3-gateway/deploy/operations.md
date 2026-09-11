@@ -65,10 +65,11 @@ kubectl get events --namespace "$gateway_namespace" \
 ```
 
 Use a temporary port-forward to inspect `/readyz` and `/metrics` on one pod.
-Compare maintenance failure reasons, backend outcomes, response-body errors,
-scratch health, and admission queues for the same pod and time window. A body
-error can occur after a client has received `200`; verify the complete object
-length and digest before treating that request as successful.
+Compare maintenance failure reasons, backend outcomes, response-body errors and
+the `crab_s3_gateway_http_response_body_timeouts_total` timeout subset, scratch
+health, and admission queues for the same pod and time window. A body error can
+occur after a client has received `200`; verify the complete object length and
+digest before treating that request as successful.
 
 Safe action:
 
@@ -303,7 +304,8 @@ For Kubernetes, use `helm upgrade --atomic`, wait for rollout, and observe
 readiness, maintenance health, admission pressure, and signed range reads under
 active traffic. Preserve `maxUnavailable: 0`, the disruption budget, and
 topology spreading. For Docker, recreate only the gateway container and retain
-the backend and cache volumes; Compose remains single-host and cannot provide
+the backend and cache volumes; the Compose smoke can exercise two instances
+against the shared backend, but it remains single-host and cannot provide
 failure-domain availability.
 
 Rollback only to a revision explicitly documented as compatible with every

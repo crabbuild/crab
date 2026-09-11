@@ -159,7 +159,10 @@ deadline; HTTP/2 is limited to 64 concurrent streams and a 128 KiB header list,
 with a 30-second keep-alive ping and a 10-second acknowledgement deadline. Each
 XML operation that `s3s` buffers, including multipart completion, is also bounded
 by the 60-second request-body idle timeout; streamed object and part uploads keep
-their existing body timeout and backpressure path.
+their existing body timeout and backpressure path. Object response streams also
+use a 60-second per-frame idle timeout: a stalled provider or Xet reconstruction
+releases read admission and is dropped, while a continuously producing large
+download has no total-transfer deadline.
 PutObject, UploadPart, and copied source range uses a request-local temporary
 file. Large multipart completion rereads durable parts instead of creating an
 additional full-object spool, so its local scratch does not scale with the
@@ -222,8 +225,9 @@ immutable view with bounded four-repository concurrency; it returns `503
 Service Unavailable` with `Retry-After: 5` when any repository is unsafe to
 serve. `GET /metrics` returns Prometheus 0.0.4 text
 for bounded HTTP method/outcome counts, full response-stream duration and
-in-flight requests, response-body errors/aborts, and control/read/transfer
-admission capacity, queue pressure, and outcomes. It also reports aggregate
+in-flight requests, response-body errors/aborts, and the bounded response-idle
+timeout subset, plus control/read/transfer admission capacity, queue pressure,
+and outcomes. It also reports aggregate
 multipart-maintenance cycles, completed lifecycle actions, failure reasons,
 cycle duration, and the last cycle in which every configured repository was
 healthy. Per-slot failures make that cycle degraded instead of disappearing
@@ -309,10 +313,14 @@ a range that crosses a persisted part boundary against the source SHA-256.
 Multipart registration is measured with equal one-part upload counts at 8 MiB
 and 64 MiB: the durable control records must remain within 64 KiB, differ by no
 more than 64 bytes, and leave no staged payload after abort.
-The packaged-image gate also kills the gateway with live, frozen, and eligible
-orphaned multipart payloads on RustFS. A restarted process must reclaim only the
-orphan within two completed scans, release its capacity slot, preserve the live
-and frozen payloads, and leave no fixture payloads after explicit cleanup.
+The packaged-image gate also runs two Compose gateway instances with independent
+caches against one RustFS-backed repository. It replaces the primary during a
+multipart upload, continues and completes that upload through the standby, and
+verifies the completed bytes through both instances. It then kills a gateway with
+live, frozen, and eligible orphaned multipart payloads on RustFS. A restarted
+process must reclaim only the orphan within two completed scans, release its
+capacity slot, preserve the live and frozen payloads, and leave no fixture
+payloads after explicit cleanup.
 Stale, dirty, incomplete, skipped, unmeasured, or identity-bearing reports fail
 the evidence gate.
 The statically validated Kubernetes workload and EKS values are in

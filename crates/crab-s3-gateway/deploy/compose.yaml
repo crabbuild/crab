@@ -53,6 +53,27 @@ services:
       - "127.0.0.1:${CRAB_S3_GATEWAY_MANAGEMENT_PORT:-18081}:8081"
     volumes: *gateway-mounts
 
+  gateway-standby:
+    image: ${CRAB_S3_GATEWAY_IMAGE:-crab-s3-gateway:local}
+    depends_on:
+      rustfs:
+        condition: service_started
+    environment: *backend-environment
+    read_only: true
+    tmpfs:
+      - /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=${CRAB_S3_GATEWAY_SCRATCH_SIZE:-512m},uid=10001,gid=10001,mode=0700
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 35s
+    ports:
+      - "127.0.0.1:${CRAB_S3_GATEWAY_STANDBY_PORT:-18082}:8080"
+      - "127.0.0.1:${CRAB_S3_GATEWAY_STANDBY_MANAGEMENT_PORT:-18083}:8081"
+    volumes:
+      - ${CRAB_S3_GATEWAY_CONFIG:?set CRAB_S3_GATEWAY_CONFIG}:/etc/crab/s3-gateway.toml:ro
+      - ${CRAB_S3_GATEWAY_SECRET_FILE:?set CRAB_S3_GATEWAY_SECRET_FILE}:/run/secrets/crab-s3-secret:ro
+      - gateway-cache-standby:/var/lib/crab/cache-volume
+
 volumes:
   rustfs-data:
   gateway-cache:
+  gateway-cache-standby:

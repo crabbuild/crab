@@ -1,11 +1,12 @@
 # Docker Compose qualification
 
 This stack is an isolated local smoke environment, not a production credential
-or storage configuration. It runs the packaged gateway with a non-root user,
-read-only root filesystem, dropped capabilities, bounded scratch, private
-management port, a process-bounded persistent gateway cache, and a persistent
-RustFS data volume. The cache is disposable and survives gateway-container
-replacement; it is never authoritative repository state.
+or storage configuration. It defines two independently runnable packaged
+gateway instances with non-root users, read-only root filesystems, dropped
+capabilities, bounded scratch, private management ports, process-bounded
+persistent gateway caches, and a persistent RustFS data volume. The caches are
+disposable and survive gateway-container replacement; they are never
+authoritative repository state.
 
 The checked ECS Fargate deployment profile is in [`ecs/`](ecs/), with the
 CloudFormation template, parameter example, static lint contract, and live-
@@ -62,6 +63,12 @@ Use any unchanged S3 client at `http://127.0.0.1:18080` with access key
 `us-east-1`, and path-style addressing. The management listener is bound only
 to `127.0.0.1:18081`.
 
+To exercise the two-instance path locally, start `gateway-standby` alongside
+`gateway`, use `http://127.0.0.1:18082` and its management listener at
+`127.0.0.1:18083`, and continue an upload through either endpoint. Each
+instance has its own disposable cache; RustFS-backed Crab metadata and staged
+multipart parts are the shared recovery boundary.
+
 Verify the private Prometheus endpoint after generating traffic:
 
 ```sh
@@ -84,13 +91,15 @@ Keep that runbook and the PrometheusRule from the same source revision.
 Provider-internal retries still require provider or load-balancer telemetry
 because gateway metrics count complete logical object-store operations.
 
-The checked CI qualification also creates a multipart session, uploads a valid
-non-final part, force-recreates the gateway container, verifies the replacement
-process can list the durable part, uploads the final part, completes the object,
-and compares every assembled byte. RustFS retains the shared upload catalog and
-repository data; the gateway's scratch filesystem remains disposable. The
-named `gateway-cache` volume may warm the replacement process but is not needed
-for correctness or recovery.
+The checked CI qualification starts both gateway instances, creates a multipart
+session through the primary, uploads a valid non-final part, force-recreates the
+primary while the standby remains live, verifies the standby can list the
+durable part, uploads the final part and completes the object through the
+standby, then reads it through both instances and compares every assembled byte.
+RustFS retains the shared upload catalog and repository data; each gateway's
+scratch filesystem remains disposable. The `gateway-cache` and
+`gateway-cache-standby` volumes may warm their respective replacement
+processes but are not needed for correctness or recovery.
 It also sends a multi-chunk HMAC-signed SigV4 `PutObject`, verifies the decoded
 bytes and S3-compatible `Content-Encoding` metadata, then corrupts a chunk
 signature and proves no object was published.
@@ -128,7 +137,7 @@ docker compose -f crates/crab-s3-gateway/deploy/compose.yaml down
 ```
 
 Only the explicit isolated-smoke teardown removes the RustFS and disposable
-gateway-cache volumes:
+`gateway-cache` and `gateway-cache-standby` volumes:
 
 ```sh
 docker compose -f crates/crab-s3-gateway/deploy/compose.yaml down --volumes

@@ -1308,6 +1308,8 @@ jobs:
           CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
           CRAB_S3_GATEWAY_MANAGEMENT_PORT: "18181"
           CRAB_S3_GATEWAY_PORT: "18180"
+          CRAB_S3_GATEWAY_STANDBY_MANAGEMENT_PORT: "18183"
+          CRAB_S3_GATEWAY_STANDBY_PORT: "18182"
           CRAB_S3_GATEWAY_SCRATCH_SIZE: 128m
           CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
           RUSTFS_PORT: "19100"
@@ -1335,24 +1337,33 @@ jobs:
             aws --endpoint-url http://127.0.0.1:19100 \
             s3api create-bucket --bucket crab-s3-gateway-qualification >/dev/null
           docker compose -f "${compose}" --profile initialize run --rm gateway-init
-          docker compose -f "${compose}" up --detach gateway
-          for attempt in $(seq 1 60); do
-            if docker compose -f "${compose}" exec --no-TTY gateway \
-              crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check; then
-              break
-            fi
-            if [[ "${attempt}" == 60 ]]; then
-              echo "Compose gateway did not become ready" >&2
-              exit 1
-            fi
-            sleep 1
+          docker compose -f "${compose}" up --detach gateway gateway-standby
+          for service in gateway gateway-standby; do
+            for attempt in $(seq 1 60); do
+              if docker compose -f "${compose}" exec --no-TTY "${service}" \
+                crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check; then
+                break
+              fi
+              if [[ "${attempt}" == 60 ]]; then
+                echo "Compose ${service} did not become ready" >&2
+                exit 1
+              fi
+              sleep 1
+            done
           done
           # JMESPath backticks are literals inside this single-quoted query.
           # shellcheck disable=SC2016
           AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}" \
             AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}" \
-            AWS_DEFAULT_REGION=us-east-1 \
+          AWS_DEFAULT_REGION=us-east-1 \
             aws --endpoint-url http://127.0.0.1:18180 s3api list-buckets \
+              --query 'Buckets[?Name==`gateway-repository`].Name | [0]' \
+              --output text | grep -Fx gateway-repository
+          # shellcheck disable=SC2016
+          AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 \
+            aws --endpoint-url http://127.0.0.1:18182 s3api list-buckets \
               --query 'Buckets[?Name==`gateway-repository`].Name | [0]' \
               --output text | grep -Fx gateway-repository
 
@@ -1361,6 +1372,7 @@ jobs:
           head -c 6291456 /dev/zero > "${compose_client}/part-1.bin"
           head -c 1048576 /dev/zero > "${compose_client}/part-2.bin"
           compose_endpoint=http://127.0.0.1:18180
+          compose_standby_endpoint=http://127.0.0.1:18182
           compose_bucket=gateway-repository
           compose_key=main/qualification/compose-restart.bin
           export AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}"
@@ -1386,19 +1398,19 @@ jobs:
             fi
             sleep 1
           done
-          test "$(aws --endpoint-url "${compose_endpoint}" s3api list-parts \
+          test "$(aws --endpoint-url "${compose_standby_endpoint}" s3api list-parts \
             --bucket "${compose_bucket}" --key "${compose_key}" \
             --upload-id "${compose_upload_id}" --query 'length(Parts)' --output text)" = 1
-          aws --endpoint-url "${compose_endpoint}" s3api upload-part \
+          aws --endpoint-url "${compose_standby_endpoint}" s3api upload-part \
             --bucket "${compose_bucket}" --key "${compose_key}" \
             --upload-id "${compose_upload_id}" --part-number 2 \
             --body "${compose_client}/part-2.bin" >/dev/null
-          aws --endpoint-url "${compose_endpoint}" s3api list-parts \
+          aws --endpoint-url "${compose_standby_endpoint}" s3api list-parts \
             --bucket "${compose_bucket}" --key "${compose_key}" \
             --upload-id "${compose_upload_id}" \
             --query '{Parts: Parts[].{ETag: ETag, PartNumber: PartNumber}}' \
             > "${compose_client}/completion.json"
-          aws --endpoint-url "${compose_endpoint}" s3api complete-multipart-upload \
+          aws --endpoint-url "${compose_standby_endpoint}" s3api complete-multipart-upload \
             --bucket "${compose_bucket}" --key "${compose_key}" \
             --upload-id "${compose_upload_id}" \
             --multipart-upload "file://${compose_client}/completion.json" >/dev/null
@@ -1407,15 +1419,25 @@ jobs:
             "${compose_client}/result.bin" >/dev/null
           cmp <(cat "${compose_client}/part-1.bin" "${compose_client}/part-2.bin") \
             "${compose_client}/result.bin"
+          aws --endpoint-url "${compose_standby_endpoint}" s3api get-object \
+            --bucket "${compose_bucket}" --key "${compose_key}" \
+            "${compose_client}/standby-result.bin" >/dev/null
+          cmp "${compose_client}/result.bin" "${compose_client}/standby-result.bin"
           aws --endpoint-url "${compose_endpoint}" s3api delete-object \
             --bucket "${compose_bucket}" --key "${compose_key}" >/dev/null
-          docker compose -f "${compose}" stop gateway
+          docker compose -f "${compose}" stop gateway gateway-standby
 
       - name: Print service logs after failure
         if: failure()
+        env:
+          CRAB_S3_GATEWAY_CONFIG: ${{ github.workspace }}/crates/crab-s3-gateway/deploy/compose.gateway.toml
+          CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
+          CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
         run: |
           docker logs crab-s3-gateway 2>&1 || true
           docker logs crab-s3-gateway-rustfs 2>&1 || true
+          docker compose -f crates/crab-s3-gateway/deploy/compose.yaml \
+            logs --no-color gateway gateway-standby rustfs 2>&1 || true
 
       - name: Clean up services
         if: always()

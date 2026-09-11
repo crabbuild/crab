@@ -352,8 +352,12 @@ abort with `RequestTimeout` after 60 seconds without an incoming body frame; thi
 is an idle timeout, not a total-transfer deadline, so large clients may continue
 for as long as they keep sending data. XML operations that `s3s` buffers,
 including multipart completion, use the same 60-second body-idle bound; streamed
-multipart form uploads remain on their streaming path. Content spools, Xet range reconstruction,
-and generated Git packs share one atomic process-local gate. It retains 10% of
+multipart form uploads remain on their streaming path. Response streams use the
+same 60-second per-frame idle bound, releasing read admission and dropping the
+underlying provider or Xet stream on timeout; this is not a total-transfer
+deadline, so large downloads may continue while bytes keep arriving. Content
+spools, Xet range reconstruction, and generated Git packs share one atomic
+process-local gate. It retains 10% of
 visible capacity outside reservations, bounded to a 64 MiB minimum and 1 GiB
 maximum. A failed capacity probe fails closed, and reservation pressure returns
 `SlowDown` without publishing partial state.
@@ -402,9 +406,11 @@ memory/local/service and hit/miss/failure dimensions, verified hit bytes, local
 persistence failures, and aggregate catalog entry/byte accounting. Catalog
 gauges come from a coalesced read-only SQLite probe on each scrape; probe health
 and last-success time distinguish genuine zero usage from an unreadable
-catalog. No series includes a repository, ref, path, endpoint, principal, or
-credential label. Origin transport metrics remain the authority for fallback
-cost and provider failures.
+catalog. Response-body failures after headers are exposed separately from
+request status outcomes; `crab_s3_gateway_http_response_body_timeouts_total`
+identifies the bounded response-idle-timeout subset. No series includes a
+repository, ref, path, endpoint, principal, or credential label. Origin
+transport metrics remain the authority for fallback cost and provider failures.
 
 The canonical Helm chart can optionally install a release-scoped PodMonitor and
 PrometheusRule. Both are opt-in because their CRDs belong to the Prometheus
@@ -446,4 +452,7 @@ byte-exact without Xet reconstruction scratch. The broader client/backend matrix
 remains a release gate, not an inferred claim from that local smoke test.
 The same packaged-image run uses pinned Boto3 to complete a deterministic 512 MiB
 multipart object and verify both a full read and a range crossing a persisted part
-boundary against the source digest.
+boundary against the source digest. Its Compose phase runs two gateway instances
+with independent caches against the same RustFS-backed Crab repository, then
+continues a multipart upload through the standby after replacing the primary and
+verifies reads through both instances.
