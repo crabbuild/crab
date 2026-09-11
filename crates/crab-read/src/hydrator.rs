@@ -9,7 +9,9 @@ mod failure_tests;
 mod output;
 #[cfg(test)]
 mod range_tests;
+mod stream;
 use buffer::ReconstructionBuffer;
+pub use stream::ReconstructionStream;
 
 use crab_cache_store::CachingStore;
 use crab_types::pointer::Pointer;
@@ -292,6 +294,19 @@ impl ShardHydrator {
         }
         self.reconstruct_writer(ptr, writer, Some(range), file_index_lookup, cancel)
             .await
+    }
+
+    /// Stream an exact range with bounded backpressure and drop cancellation.
+    ///
+    /// Selected Xet chunks and the exact output length are verified. Source or
+    /// integrity failures discovered after delivery starts are returned by the
+    /// stream, so callers must consume it through successful EOF.
+    pub fn reconstruct_range_stream(
+        &self,
+        ptr: &Pointer,
+        range: std::ops::Range<u64>,
+    ) -> Result<ReconstructionStream> {
+        stream::reconstruct_range(self.clone(), ptr.clone(), range)
     }
 
     async fn reconstruct_writer<W>(

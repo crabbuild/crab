@@ -176,6 +176,7 @@ impl ReadContent {
         repository: &Repository,
         range: std::ops::Range<u64>,
         metrics: &Metrics,
+        direct_range: bool,
     ) -> S3Result<ContentStream> {
         use futures_util::{StreamExt as _, TryStreamExt as _};
         use tokio::io::AsyncReadExt as _;
@@ -205,6 +206,14 @@ impl ReadContent {
                 let PointerKind::Crab(pointer) = crab_git::classify(&pointer_bytes) else {
                     return Err(s3_error!(InvalidObjectState));
                 };
+                if direct_range {
+                    let stream = repository
+                        .hydrator
+                        .reconstruct_range_stream(&pointer, range)
+                        .map_err(|error| gateway_error(error.into()))?
+                        .map_err(|error| Box::new(error) as s3s::StdError);
+                    return Ok(Box::pin(stream));
+                }
                 let size = range.end - range.start;
                 let capacity = metrics
                     .reserve_scratch(size)
@@ -274,7 +283,7 @@ impl ReadContent {
         use futures_util::StreamExt as _;
 
         let expected = range.end.saturating_sub(range.start);
-        let mut stream = self.stream(repository, range, metrics).await?;
+        let mut stream = self.stream(repository, range, metrics, false).await?;
         let mut writer = crate::content::SpoolWriter::new(metrics, Some(expected))
             .await
             .map_err(content_error)?;
@@ -291,6 +300,25 @@ impl ReadContent {
                 .map_err(content_error)?;
         }
         writer.finish().await.map_err(content_error)
+    }
+
+    fn projected_etag(&self) -> S3Result<String> {
+        match self {
+            Self::Ordinary(bytes) => Ok(md5_hex(bytes)),
+            Self::CrabPointer(pointer_bytes) => {
+                let PointerKind::Crab(pointer) = crab_git::classify(pointer_bytes) else {
+                    return Err(s3_error!(InvalidObjectState));
+                };
+                Ok(blake3::Hash::from_bytes(pointer.file_hash)
+                    .to_hex()
+                    .to_string())
+            }
+            Self::LfsPointer(pointer) => Ok(pointer
+                .oid
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()),
+        }
     }
 }
 
@@ -684,16 +712,7 @@ impl Gateway {
             let (content, size) = classify_blob(blob)?;
             let etag = match attributes.as_ref() {
                 Some(value) => value.etag.clone(),
-                None => match &content {
-                    ReadContent::Ordinary(bytes) => md5_hex(bytes),
-                    ReadContent::CrabPointer(_) | ReadContent::LfsPointer(_) => {
-                        let spool = content
-                            .clone()
-                            .spool(repository, 0..size, u64::MAX, &self.metrics)
-                            .await?;
-                        crate::content::md5_hex(&spool.digests.md5)
-                    }
-                },
+                None => content.projected_etag()?,
             };
             Ok(ReadObject {
                 content,
@@ -757,15 +776,7 @@ impl Gateway {
                 .map_err(remote_error)?;
             let blob_oid = blob.metadata.oid;
             let (content, size) = classify_blob(blob)?;
-            let etag = match &content {
-                ReadContent::Ordinary(bytes) => md5_hex(bytes),
-                ReadContent::CrabPointer(_) | ReadContent::LfsPointer(_) => {
-                    let spool = content
-                        .spool(repository, 0..size, u64::MAX, &self.metrics)
-                        .await?;
-                    crate::content::md5_hex(&spool.digests.md5)
-                }
-            };
+            let etag = content.projected_etag()?;
             Ok(ReadObjectMetadata {
                 blob_oid,
                 size,
@@ -1197,13 +1208,14 @@ impl S3 for Gateway {
             req.input.checksum_mode.as_ref(),
             selection.checksums.as_ref(),
         )?;
+        let direct_range = selection.content_range.is_some();
         let range = selection.range;
         let content_length =
             i64::try_from(range.end - range.start).map_err(|_| s3_error!(InternalError))?;
         let body = hold_permit(
             object
                 .content
-                .stream(repository, range, &self.metrics)
+                .stream(repository, range, &self.metrics, direct_range)
                 .await?,
             permit,
         );
@@ -2748,10 +2760,7 @@ impl S3 for Gateway {
                             .await
                             .map_err(remote_error)?;
                         let (content, logical_size) = classify_blob(blob)?;
-                        let spool = content
-                            .spool(repository, 0..logical_size, u64::MAX, &self.metrics)
-                            .await?;
-                        (crate::content::md5_hex(&spool.digests.md5), logical_size)
+                        (content.projected_etag()?, logical_size)
                     }
                 };
                 keys.push((key, etag, Some(logical_size), modified));
@@ -4136,6 +4145,34 @@ mod tests {
             service: None,
             trailing_headers: None,
         }
+    }
+
+    #[test]
+    fn projected_pointer_etags_are_content_bound_without_hydration() {
+        let file_hash = "01".repeat(32);
+        let crab_pointer = ReadContent::CrabPointer(Bytes::from(format!(
+            "version https://crab.build/spec/v1\nfile-hash {file_hash}\nsize 1\n"
+        )));
+        let lfs_pointer = ReadContent::LfsPointer(crab_git::LfsPointer {
+            oid: [2; 32],
+            size: 1,
+            extensions: Vec::new(),
+        });
+
+        assert_eq!(
+            (
+                ReadContent::Ordinary(Bytes::from_static(b"a"))
+                    .projected_etag()
+                    .unwrap(),
+                crab_pointer.projected_etag().unwrap(),
+                lfs_pointer.projected_etag().unwrap(),
+            ),
+            (
+                "0cc175b9c0f1b6a831c399e269772661".to_owned(),
+                file_hash,
+                "02".repeat(32),
+            )
+        );
     }
 
     #[test]

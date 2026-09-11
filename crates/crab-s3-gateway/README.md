@@ -91,9 +91,14 @@ range requests bind to the verified object version without rehashing the whole
 object for every slice.
 Objects already stored as Crab/Xet pointers retain Xet deduplication: partial
 GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
-stream the selected bytes through bounded temporary storage. Low-coverage cold
-reads fetch bounded xorb ranges; the cache may fetch a complete verified xorb
-for high-coverage reads. Complete GETs retain whole-file verification.
+partial GET streams selected bytes through one bounded backpressure slot and
+cancels reconstruction on disconnect without response-sized scratch. Copy-source
+ranges still use bounded temporary storage because publication requires a fully
+verified source before mutation. Low-coverage cold reads fetch bounded xorb
+ranges; the cache may fetch a complete verified xorb for high-coverage reads.
+Complete GETs retain whole-file verification before response headers. Legacy
+Crab and LFS pointers project their content digest as an opaque ETag, so HEAD,
+listings, conditions, and range admission do not hydrate object payloads.
 Every process uses one cache instance shared by all configured repositories.
 The required `[cache]` section supplies an absolute writable directory and a
 positive `max_bytes` retention ceiling; startup proves descriptor-relative
@@ -124,10 +129,12 @@ additional full-object spool, so its local scratch does not scale with the
 assembled object size. Deployments must still place `TMPDIR` on
 capacity-managed scratch storage sized for concurrent request bodies. The
 gateway atomically reserves declared bodies before reading them and reserves
-unknown streams in bounded increments. Xet reconstructions and generated Git
-packs share the same process-wide capacity gate. The gate retains 10% of the
-filesystem outside reservations, with a 64 MiB minimum and 1 GiB maximum, and
-returns retryable S3 `SlowDown` before admitted work can consume that headroom.
+unknown streams in bounded increments. Xet reconstructions that materialize
+local files and generated Git packs share the same process-wide capacity gate;
+partial Xet GETs use bounded in-memory backpressure instead. The gate retains
+10% of the filesystem outside reservations, with a 64 MiB minimum and 1 GiB
+maximum, and returns retryable S3 `SlowDown` before admitted work can consume
+that headroom.
 Give each replica its own scratch mount; reservations are process-local while
 filesystem probes account for already materialized bytes from every writer.
 Registered multipart staging is bounded by the configured active-slot count

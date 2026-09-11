@@ -36,6 +36,94 @@ async fn range_writer_delivers_exact_bytes_without_a_range_sized_buffer() {
 }
 
 #[tokio::test]
+async fn range_stream_delivers_exact_bytes_through_bounded_backpressure() {
+    use futures_util::TryStreamExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (hydrator, pointer, original) =
+        reconstruction_fixture(&directory.path().join("cache"), false).await;
+    let range = 17..pointer.size - 23;
+
+    let chunks = hydrator
+        .reconstruct_range_stream(&pointer, range.clone())
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        chunks.concat(),
+        original[range.start as usize..range.end as usize]
+    );
+}
+
+#[tokio::test]
+async fn range_stream_reports_corrupt_origin_before_successful_eof() {
+    use futures_util::TryStreamExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let (hydrator, pointer, _) =
+        reconstruction_fixture(&directory.path().join("cache"), true).await;
+
+    assert!(
+        hydrator
+            .reconstruct_range_stream(&pointer, 0..1)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_range_stream_cancels_pending_source() {
+    struct PendingSource {
+        entered: tokio::sync::Notify,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct PendingRead(Arc<AtomicBool>);
+
+    impl Drop for PendingRead {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::XorbAvailability for PendingSource {
+        async fn ensure_available(&self, _: &object_store::path::Path) -> crate::Result<()> {
+            let _pending_read = PendingRead(self.dropped.clone());
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let (hydrator, pointer, _) =
+        reconstruction_fixture(&directory.path().join("cache"), false).await;
+    let dropped = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(PendingSource {
+        entered: tokio::sync::Notify::new(),
+        dropped: dropped.clone(),
+    });
+    let hydrator = hydrator.with_availability(source.clone());
+    let stream = hydrator.reconstruct_range_stream(&pointer, 0..1).unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), source.entered.notified())
+        .await
+        .unwrap();
+    drop(stream);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn range_writer_rejects_invalid_bounds_and_pre_cancelled_requests() {
     let directory = tempfile::tempdir().unwrap();
     let (hydrator, pointer, _) =
@@ -45,6 +133,10 @@ async fn range_writer_rejects_invalid_bounds_and_pre_cancelled_requests() {
         0..pointer.size + 1,
         pointer.size + 1..pointer.size + 1,
     ] {
+        assert!(matches!(
+            hydrator.reconstruct_range_stream(&pointer, range.clone()),
+            Err(ReadError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
         let result = hydrator
             .reconstruct_range_to_writer_with_cancel(
                 &pointer,
