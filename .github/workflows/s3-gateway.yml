@@ -191,7 +191,7 @@ jobs:
             abort "task root is writable" unless container.fetch("ReadonlyRootFilesystem")
             abort "task has no scratch volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-scratch" }
             abort "task has no cache volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-cache" }
-            abort "task image is not digest-pinned" unless container.fetch("Image").to_s.include?("@${ImageDigest}")
+            abort "task image is not digest-pinned" unless container.fetch("Image").to_s.include?("@\x24{ImageDigest}")
             service = resources.fetch("GatewayService").fetch("Properties")
             deployment = service.fetch("DeploymentConfiguration")
             abort "rolling deployment can drop all tasks" unless deployment.fetch("MinimumHealthyPercent") == 100
