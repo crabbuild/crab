@@ -2950,7 +2950,7 @@ fn verify_xml_request_integrity<T>(
     req: &S3Request<T>,
     content_md5: Option<&str>,
     checksum_algorithm: Option<&ChecksumAlgorithm>,
-    require_md5: bool,
+    require_integrity: bool,
 ) -> S3Result<()> {
     let header_md5 = req
         .headers
@@ -2958,9 +2958,6 @@ fn verify_xml_request_integrity<T>(
         .map(|value| value.to_str().map_err(|_| s3_error!(InvalidDigest)))
         .transpose()?;
     let expected_md5 = content_md5.or(header_md5);
-    if require_md5 && expected_md5.is_none() {
-        return Err(s3_error!(InvalidDigest));
-    }
     let has_checksum_header = [
         "x-amz-checksum-crc32",
         "x-amz-checksum-crc32c",
@@ -2970,6 +2967,13 @@ fn verify_xml_request_integrity<T>(
     ]
     .iter()
     .any(|name| req.headers.contains_key(*name));
+    if require_integrity
+        && expected_md5.is_none()
+        && checksum_algorithm.is_none()
+        && !has_checksum_header
+    {
+        return Err(s3_error!(InvalidDigest));
+    }
     if expected_md5.is_none() && checksum_algorithm.is_none() && !has_checksum_header {
         return Ok(());
     }
@@ -5315,7 +5319,7 @@ mod tests {
             &req,
             None,
             Some(&ChecksumAlgorithm::from_static(ChecksumAlgorithm::CRC32)),
-            false,
+            true,
         )
         .unwrap();
 

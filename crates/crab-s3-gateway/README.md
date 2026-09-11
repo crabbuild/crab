@@ -24,7 +24,9 @@ listing, multi-delete, and durable multipart create/upload/copy/list/abort/compl
 GET/HEAD support conditions, checksum mode, and a single byte range. PUT,
 single-object DELETE, and multipart completion support atomic strong `If-Match`;
 PUT and multipart completion also support `If-None-Match: *` writes.
-Content-MD5 and modeled S3 checksum headers are validated and persisted;
+Content-MD5 and modeled S3 checksum headers are validated and persisted. XML
+tagging and multi-delete bodies require either Content-MD5 or a modeled
+checksum header, matching current official SDK request shapes.
 multipart full-object and composite checksum profiles are returned by object
 and part inspection APIs. Path-style addressing is always available. Set
 `endpoint_domain` to also accept virtual-hosted requests. Single PUTs and

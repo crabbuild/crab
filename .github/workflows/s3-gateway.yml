@@ -221,6 +221,13 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
+      - name: Install pinned Boto3 qualification client
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/crab-s3-gateway-boto3"
+          "${RUNNER_TEMP}/crab-s3-gateway-boto3/bin/pip" install \
+            --disable-pip-version-check --no-cache-dir --quiet boto3==1.36.4
+          echo "${RUNNER_TEMP}/crab-s3-gateway-boto3/bin" >> "${GITHUB_PATH}"
+
       - name: Record qualification start
         run: |
           install -d "${RUNNER_TEMP}/crab-s3-gateway-evidence"
@@ -233,6 +240,7 @@ jobs:
           python3 -B -m unittest \
             crab/scripts/e2e/test_s3_gateway_qualification_report.py \
             crab/scripts/e2e/test_s3_gateway_workload.py
+          python3 -B crab/scripts/e2e/s3_gateway_boto3.py --help >/dev/null
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
@@ -1121,6 +1129,12 @@ jobs:
           aws --endpoint-url "${endpoint}" s3api delete-object \
             --bucket "${bucket}" --key "${key}" >/dev/null
 
+          S3_GATEWAY_BOTO3_ACCESS_KEY="${GATEWAY_ACCESS_KEY}" \
+          S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
+          python3 crab/scripts/e2e/s3_gateway_boto3.py \
+            --endpoint "${endpoint}" --bucket "${bucket}" \
+            --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
+
           oversized_key=main/qualification/scratch-capacity.bin
           truncate --size 500M "${qualification_root}/oversized.bin"
           if AWS_MAX_ATTEMPTS=1 aws --endpoint-url "${endpoint}" s3api put-object \
@@ -1502,12 +1516,41 @@ jobs:
             --source-sha "${GITHUB_SHA}" \
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          boto3_report="${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
+          if grep -Fq \
+            -e "${RUSTFS_ACCESS_KEY}" \
+            -e "${RUSTFS_SECRET_KEY}" \
+            -e "${GATEWAY_ACCESS_KEY}" \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_ACCESS_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
+            "${boto3_report}"; then
+            echo "Boto3 qualification report exposed credential material" >&2
+            exit 1
+          fi
+          python3 - "${boto3_report}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              report = json.load(stream)
+          if report.get("schema") != "crab.s3-gateway-boto3-smoke":
+              raise SystemExit("unexpected Boto3 qualification report schema")
+          if report.get("status") != "passed":
+              raise SystemExit("Boto3 qualification report is not passed")
+          checks = report.get("checks")
+          if not isinstance(checks, dict) or not checks or not all(checks.values()):
+              raise SystemExit("Boto3 qualification report contains a failed check")
+          PY
 
       - name: Upload retained qualification report
         if: always() && steps.report.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: s3-gateway-qualification-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/crab-s3-gateway-evidence/report.json
+          path: |
+            ${{ runner.temp }}/crab-s3-gateway-evidence/report.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-proof.json
           if-no-files-found: error
           retention-days: 90

@@ -181,11 +181,12 @@ than ignored. Multi-range GET returns `InvalidRange`. `versionId` returns
 `NotImplemented`; `GetBucketVersioning` returns the S3 empty/unversioned state.
 Checksums are validated before publication and stored in the commit attribute
 manifest. XML mutation bodies for `PutObjectTagging` and `DeleteObjects` require
-and validate `Content-MD5` before metadata or deletion mutation; supplied
-`x-amz-checksum-*` values are validated as well. Objects uploaded without a
-checksum receive S3's default full-object CRC64NVME checksum. A response never
-attaches a full-object checksum to a
-partial range. A part-number request or a byte range exactly aligned to one
+and validate either `Content-MD5` or a modeled `x-amz-checksum-*` value before
+metadata or deletion mutation; when both are supplied, both are validated. This
+accepts the checksum headers emitted by current official SDKs such as Boto3.
+Objects uploaded without a checksum receive S3's default full-object CRC64NVME
+checksum. A response never attaches a full-object checksum to a partial range.
+A part-number request or a byte range exactly aligned to one
 persisted multipart part returns that part's checksum.
 Composite object checksum responses carry S3's `-PART_COUNT` suffix; individual
 part checksums and a precomputed completion checksum use the raw Base64 digest.
