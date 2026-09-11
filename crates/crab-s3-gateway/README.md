@@ -102,9 +102,9 @@ listings, conditions, and range admission do not hydrate object payloads.
 Every process uses one cache instance shared by all configured repositories.
 The required `[cache]` section supplies an absolute writable directory and a
 positive `max_bytes` retention ceiling; startup proves descriptor-relative
-publish and removal before opening the listener. Keep this cache on a private
-volume separate from request scratch so eviction and upload admission do not
-compete for the same free-space signal.
+publish and removal and initializes the cache catalog before opening the
+listener. Keep this cache on a private volume separate from request scratch so
+eviction and upload admission do not compete for the same free-space signal.
 The complete frozen surface and deliberate exclusions are in the protocol
 contract linked below.
 

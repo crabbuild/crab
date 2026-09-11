@@ -235,14 +235,19 @@ impl LocalCache {
         self.catalog.max_bytes()
     }
 
-    /// Create the private root and prove that complete files can be published and removed.
+    /// Prepare the private root, catalog, and payload publication boundary.
     ///
     /// Services should call this during startup when local-cache persistence is a required
-    /// deployment contract. The probe uses the same pinned, descriptor-relative filesystem
-    /// operations as cache payloads and leaves no entry behind on success.
+    /// deployment contract. Catalog initialization completes before the write probe so
+    /// read-only service health cannot race the first cache fill. The probe uses the same
+    /// pinned, descriptor-relative filesystem operations as cache payloads and leaves no
+    /// payload entry behind on success.
     pub fn prepare(&self) -> Result<()> {
         crate::ensure_private_cache_directory(&self.root)?;
         let root = crate::private_fs::PinnedRoot::create(&self.root)?;
+        // Establish the catalog before service metrics can race the first cache fill.
+        // Read-only health probes must keep treating incomplete schemas as failures.
+        self.catalog.prepare_at(&root)?;
         let sequence = CACHE_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let relative = PathBuf::from(format!(".write-probe-{}-{sequence}", std::process::id()));
         let pending = root.pending_file(&relative)?;
@@ -1820,13 +1825,24 @@ mod tests {
     }
 
     #[test]
-    fn prepare_proves_private_cache_writes_without_leaving_a_probe() {
+    fn prepare_proves_private_cache_writes_and_catalog_readiness() {
         let (_dir, cache) = temp_cache();
 
         cache.prepare().unwrap();
 
         assert!(cache.root().is_dir());
-        assert_eq!(std::fs::read_dir(cache.root()).unwrap().count(), 0);
+        assert!(cache.root().join(".catalog.sqlite").is_file());
+        assert_eq!(
+            crate::CacheCatalog::read_only_stats(cache.root()).unwrap(),
+            crate::CacheCatalogStats::default()
+        );
+        assert!(std::fs::read_dir(cache.root()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".write-probe-")
+        }));
     }
 
     #[tokio::test]

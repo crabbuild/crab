@@ -200,6 +200,12 @@ impl CacheCatalog {
         self.max_bytes
     }
 
+    #[cfg(feature = "local-cache")]
+    pub(crate) fn prepare_at(&self, root: &PinnedRoot) -> Result<()> {
+        drop(open_catalog(root, &self.root.join(CATALOG_FILE))?);
+        Ok(())
+    }
+
     /// Register a completed cache file and opportunistically enforce the budget.
     pub(crate) async fn record_and_maintain(
         &self,
