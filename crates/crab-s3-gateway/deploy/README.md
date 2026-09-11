@@ -7,6 +7,10 @@ management port, a process-bounded persistent gateway cache, and a persistent
 RustFS data volume. The cache is disposable and survives gateway-container
 replacement; it is never authoritative repository state.
 
+The checked ECS Fargate deployment profile is in [`ecs/`](ecs/), with the
+CloudFormation template, parameter example, static lint contract, and live-
+qualification boundary documented in [`ecs/README.md`](ecs/README.md).
+
 From the repository root, choose an untracked working directory and create the
 synthetic gateway secret with mode `0600`:
 

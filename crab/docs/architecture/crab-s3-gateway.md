@@ -1462,15 +1462,16 @@ health; failed probes clear stale capacity. Request-body spools, Xet range
 reconstruction, and generated Git packs now share atomic pre-write capacity
 admission. Declared bodies reserve before consumption, unknown streams reserve
 in bounded increments, and a 10% headroom policy bounded to 64 MiB–1 GiB turns
-pressure or mount loss into retryable `SlowDown`. Live EKS, external TLS,
-independent Git-history proof, provider wire-attempt metrics, cache usage and
-failure telemetry are now implemented with fixed cache-layer/outcome counters,
+pressure or mount loss into retryable `SlowDown`. Cache usage and failure
+telemetry are implemented with fixed cache-layer/outcome counters,
 verified-hit byte counters, local-persistence failures, and coalesced read-only
 catalog usage/health probes. The Helm chart now includes opt-in, release-scoped
 PodMonitor and PrometheusRule resources backed by syntax validation and healthy
 and faulting rule tests. Live Prometheus selection, Alertmanager receiver
-delivery, Kubernetes policy-quota telemetry, live EKS, external TLS, and live
-ECS remain requirements, not qualified deployment support. The checked operations runbook now binds every
+delivery, Kubernetes policy-quota telemetry, live EKS, external TLS, independent
+Git-history proof, provider wire-attempt metrics, and live ECS remain
+requirements, not qualified deployment support. The checked operations runbook
+now binds every
 alert to a trigger, bounded diagnosis/action, and recovery proof, and covers
 scaling, credential rotation, repository maintenance, backup/restore, and
 upgrade/rollback without claiming unqualified platforms. One explicitly
