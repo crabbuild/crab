@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    hash::Hash,
     sync::{
         Arc, Mutex as StdMutex, MutexGuard,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -18,6 +19,9 @@ use tokio_util::sync::CancellationToken;
 use crate::gateway::Repository;
 
 const MAINTENANCE_TTL: Duration = Duration::from_secs(60);
+const MAX_CACHED_SNAPSHOTS: usize = 64;
+const MAX_CACHED_MANIFESTS: usize = 16;
+const MAX_CACHED_OBJECT_ATTRIBUTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadViewKey {
@@ -54,11 +58,7 @@ impl ReadView {
     ) -> crate::Result<RemoteGitSnapshot> {
         let cell = {
             let mut snapshots = self.snapshots.lock().await;
-            Arc::clone(
-                snapshots
-                    .entry(revision.to_owned())
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            bounded_cell(&mut snapshots, revision.to_owned(), MAX_CACHED_SNAPSHOTS)
         };
         cell.get_or_try_init(|| async {
             self.remote
@@ -77,11 +77,7 @@ impl ReadView {
     ) -> crate::Result<Arc<crate::attributes::Manifest>> {
         let cell = {
             let mut manifests = self.manifests.lock().await;
-            Arc::clone(
-                manifests
-                    .entry(commit)
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            bounded_cell(&mut manifests, commit, MAX_CACHED_MANIFESTS)
         };
         cell.get_or_try_init(|| async {
             crate::attributes::load(repository, commit)
@@ -102,16 +98,30 @@ impl ReadView {
         let key = (commit, path.to_owned(), oid);
         let cell = {
             let mut objects = self.objects.lock().await;
-            Arc::clone(
-                objects
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(OnceCell::new())),
-            )
+            bounded_cell(&mut objects, key, MAX_CACHED_OBJECT_ATTRIBUTES)
         };
         cell.get_or_try_init(|| crate::attributes::load_object(repository, commit, path, oid))
             .await
             .cloned()
     }
+}
+
+fn bounded_cell<K, V>(
+    cache: &mut HashMap<K, Arc<OnceCell<V>>>,
+    key: K,
+    capacity: usize,
+) -> Arc<OnceCell<V>>
+where
+    K: Eq + Hash,
+{
+    if !cache.contains_key(&key) && cache.len() >= capacity {
+        cache.clear();
+    }
+    Arc::clone(
+        cache
+            .entry(key)
+            .or_insert_with(|| Arc::new(OnceCell::new())),
+    )
 }
 
 /// Singleflight refresh and immutable generation reuse for one repository.
@@ -378,6 +388,23 @@ mod tests {
 
         parent.cancel();
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn read_view_cells_evict_before_inserting_past_capacity() {
+        let mut cache: HashMap<String, Arc<OnceCell<()>>> = HashMap::new();
+        let first = bounded_cell(&mut cache, "first".to_owned(), 2);
+        let _second = bounded_cell(&mut cache, "second".to_owned(), 2);
+        assert_eq!(cache.len(), 2);
+
+        let third = bounded_cell(&mut cache, "third".to_owned(), 2);
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.contains_key("first"));
+        assert!(Arc::ptr_eq(
+            &third,
+            cache.get("third").expect("third cell is cached")
+        ));
+        assert_eq!(Arc::strong_count(&first), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
