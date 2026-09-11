@@ -1408,21 +1408,17 @@ pub(crate) async fn sweep(repository: &Repository, now: u64) -> Result<SweepStat
         .list_prefix_bounded(&prefix, MAX_CAPACITY_SLOTS)
         .await?
         .ok_or(Error::Capacity)?;
-    let reconciled = futures_util::stream::iter(slots)
+    let mut reconciled = futures_util::stream::iter(slots)
         .map(|object| reconcile_capacity_slot(repository, object.location, now))
-        .buffer_unordered(CATALOG_READ_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-    let stats = reconciled
-        .into_iter()
-        .fold(SweepStats::default(), |mut total, mut item| {
-            total.expired += item.expired;
-            total.terminal_cleanups += item.terminal_cleanups;
-            total.missing_cleanups += item.missing_cleanups;
-            total.reconciliation_failures += item.reconciliation_failures;
-            total.completing.append(&mut item.completing);
-            total
-        });
+        .buffer_unordered(CATALOG_READ_CONCURRENCY);
+    let mut stats = SweepStats::default();
+    while let Some(mut item) = reconciled.next().await {
+        stats.expired += item.expired;
+        stats.terminal_cleanups += item.terminal_cleanups;
+        stats.missing_cleanups += item.missing_cleanups;
+        stats.reconciliation_failures += item.reconciliation_failures;
+        stats.completing.append(&mut item.completing);
+    }
     Ok(stats)
 }
 
