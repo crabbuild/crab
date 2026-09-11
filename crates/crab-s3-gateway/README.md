@@ -245,7 +245,10 @@ Build the checked image from the repository root with:
 docker build -f crates/crab-s3-gateway/deploy/Dockerfile -t crab-s3-gateway .
 ```
 
-The isolated Docker Compose qualification procedure is in `deploy/README.md`.
+The isolated Docker Compose qualification procedure and retained evidence
+contract are in `deploy/README.md`. Successful packaged-image runs retain a
+machine-verified report for 90 days; stale, dirty, incomplete, skipped,
+unmeasured, or identity-bearing reports fail the evidence gate.
 The statically validated Kubernetes workload and EKS values are in
 `deploy/helm/crab-s3-gateway/`. They are deployment assets, not evidence of a
 live EKS qualification. Operational alert response, scaling, credential

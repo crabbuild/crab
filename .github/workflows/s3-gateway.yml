@@ -154,10 +154,21 @@ jobs:
     name: Build and qualify image
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
+      - name: Record qualification start
+        run: |
+          install -d "${RUNNER_TEMP}/crab-s3-gateway-evidence"
+          date +%s%3N > "${RUNNER_TEMP}/crab-s3-gateway-evidence/started-unix-ms"
+
+      - name: Verify qualification evidence contract
+        run: python3 -m unittest crab/scripts/e2e/test_s3_gateway_qualification_report.py
+
       - name: Build locked gateway image
+        id: build
         run: >-
           docker build
           --file crates/crab-s3-gateway/deploy/Dockerfile
@@ -165,6 +176,7 @@ jobs:
           .
 
       - name: Verify runtime contract
+        id: runtime
         run: |
           set -euo pipefail
           test "$(docker image inspect crab-s3-gateway:test --format '{{.Config.User}}')" = "crab:crab"
@@ -176,6 +188,7 @@ jobs:
           docker run --rm crab-s3-gateway:test --help | grep -F -- "--readiness-check"
 
       - name: Start RustFS and initialize repository
+        id: initialize
         run: |
           set -euo pipefail
           docker network create crab-s3-gateway-qualification
@@ -327,6 +340,7 @@ jobs:
             --config /etc/crab/s3-gateway.toml --initialize
 
       - name: Start constrained gateway
+        id: gateway
         run: |
           set -euo pipefail
           config_root="${RUNNER_TEMP}/crab-s3-gateway"
@@ -379,6 +393,7 @@ jobs:
           done
 
       - name: Verify signed S3 traffic and range reads
+        id: traffic
         run: |
           set -euo pipefail
           qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
@@ -670,13 +685,24 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             http://127.0.0.1:18080/metrics)" = 403
 
+          gateway_pid="$(docker inspect crab-s3-gateway --format '{{.State.Pid}}')"
+          awk '/^VmRSS:/ { printf "%.0f\\n", $2 * 1024 }' "/proc/${gateway_pid}/status" \
+            > "${qualification_root}/rss-bytes"
+          grep -Eq '^[1-9][0-9]*$' "${qualification_root}/rss-bytes"
+          docker inspect --size crab-s3-gateway --format '{{.SizeRw}}' \
+            > "${qualification_root}/container-writable-bytes"
+          grep -Eq '^[0-9]+$' \
+            "${qualification_root}/container-writable-bytes"
+
       - name: Verify graceful termination
+        id: graceful
         run: |
           set -euo pipefail
           docker stop --time 35 crab-s3-gateway >/dev/null
           test "$(docker inspect crab-s3-gateway --format '{{.State.ExitCode}}')" = "0"
 
       - name: Qualify Docker Compose asset
+        id: compose
         env:
           CRAB_S3_GATEWAY_CONFIG: ${{ github.workspace }}/crates/crab-s3-gateway/deploy/compose.gateway.toml
           CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
@@ -804,3 +830,82 @@ jobs:
             crab-s3-gateway crab-s3-gateway-unready crab-s3-gateway-rustfs \
             >/dev/null 2>&1 || true
           docker network rm crab-s3-gateway-qualification >/dev/null 2>&1 || true
+
+      - name: Produce retained qualification report
+        id: report
+        if: always()
+        env:
+          STEP_BUILD: ${{ steps.build.outcome }}
+          STEP_RUNTIME: ${{ steps.runtime.outcome }}
+          STEP_INITIALIZE: ${{ steps.initialize.outcome }}
+          STEP_GATEWAY: ${{ steps.gateway.outcome }}
+          STEP_TRAFFIC: ${{ steps.traffic.outcome }}
+          STEP_GRACEFUL: ${{ steps.graceful.outcome }}
+          STEP_COMPOSE: ${{ steps.compose.outcome }}
+        run: |
+          set -euo pipefail
+          report_root="${RUNNER_TEMP}/crab-s3-gateway-evidence"
+          qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
+          gateway_image_id="$(docker image inspect crab-s3-gateway:test \
+            --format '{{.Id}}' 2>/dev/null || printf unavailable)"
+          python3 crab/scripts/e2e/s3_gateway_qualification_report.py produce \
+            --report "${report_root}/report.json" \
+            --repository "${GITHUB_WORKSPACE}" \
+            --metrics "${qualification_root}/metrics.txt" \
+            --fixture "${qualification_root}/input.bin" \
+            --rss "${qualification_root}/rss-bytes" \
+            --container-writable \
+              "${qualification_root}/container-writable-bytes" \
+            --started "${report_root}/started-unix-ms" \
+            --source-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --gateway-image-id "${gateway_image_id}" \
+            --aws-cli-version "$(aws --version 2>&1)" \
+            --curl-version "$(curl --version | head -n 1)" \
+            --platform "$(uname -srm)" \
+            --step "build=${STEP_BUILD}" \
+            --step "runtime=${STEP_RUNTIME}" \
+            --step "initialize=${STEP_INITIALIZE}" \
+            --step "gateway=${STEP_GATEWAY}" \
+            --step "traffic=${STEP_TRAFFIC}" \
+            --step "graceful=${STEP_GRACEFUL}" \
+            --step "compose=${STEP_COMPOSE}"
+
+      - name: Verify retained qualification report
+        if: >-
+          ${{ !cancelled() &&
+              steps.build.outcome == 'success' &&
+              steps.runtime.outcome == 'success' &&
+              steps.initialize.outcome == 'success' &&
+              steps.gateway.outcome == 'success' &&
+              steps.traffic.outcome == 'success' &&
+              steps.graceful.outcome == 'success' &&
+              steps.compose.outcome == 'success' &&
+              steps.report.outcome == 'success' }}
+        run: |
+          report="${RUNNER_TEMP}/crab-s3-gateway-evidence/report.json"
+          if grep -Fq \
+            -e "${GATEWAY_ACCESS_KEY}" \
+            -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_ACCESS_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
+            "${report}"; then
+            echo "qualification report exposed credential material" >&2
+            exit 1
+          fi
+          python3 crab/scripts/e2e/s3_gateway_qualification_report.py verify \
+            --report "${report}" \
+            --source-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}"
+
+      - name: Upload retained qualification report
+        if: always() && steps.report.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: s3-gateway-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/crab-s3-gateway-evidence/report.json
+          if-no-files-found: error
+          retention-days: 90

@@ -94,6 +94,11 @@ The packaged-image qualification additionally uses an unchanged AWS CLI with a
 configured temporary access-key/secret/session-token triple. Header-signed and
 presigned-query requests succeed, while a missing or wrong token returns
 `InvalidToken`; log and metric scans include the session credential material.
+It then validates and retains a 90-day `crab.s3-gateway-evidence` report
+bound to the exact source and image digest. The report includes the fixed check
+inventory, backend and client versions, fixture digest, request/byte/latency
+measurements, RSS, disk usage, and terminal state, but no endpoint, repository,
+object, or credential identity.
 
 Stop containers without deleting repository data:
 
