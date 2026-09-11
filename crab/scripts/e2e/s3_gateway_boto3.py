@@ -102,12 +102,15 @@ def _qualify_large_object(
         with source_path.open("rb") as source:
             for number in range(1, part_count + 1):
                 length = min(part_size, size - (number - 1) * part_size)
+                payload = source.read(length)
+                if len(payload) != length:
+                    raise RuntimeError("large-object multipart source ended early")
                 result = client.upload_part(
                     Bucket=bucket,
                     Key=key,
                     UploadId=upload_id,
                     PartNumber=number,
-                    Body=source,
+                    Body=payload,
                     ContentLength=length,
                 )
                 parts.append({"PartNumber": number, "ETag": result["ETag"]})
