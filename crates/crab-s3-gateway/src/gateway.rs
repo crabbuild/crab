@@ -2916,7 +2916,11 @@ impl S3 for Gateway {
                 &snapshot,
                 Bytes::copy_from_slice(path_prefix.as_bytes()),
                 after,
-                req.input.delimiter.as_deref().map(|_| b'/'),
+                req.input
+                    .delimiter
+                    .as_deref()
+                    .filter(|delimiter| !delimiter.is_empty())
+                    .map(|_| b'/'),
                 limit,
                 &operation,
             )
@@ -3878,7 +3882,10 @@ fn reject_copy_extensions(input: &CopyObjectInput) -> S3Result<()> {
 }
 
 fn reject_list_extensions(input: &ListObjectsV2Input) -> S3Result<()> {
-    if input.delimiter.as_deref().is_some_and(|value| value != "/")
+    if input
+        .delimiter
+        .as_deref()
+        .is_some_and(|value| !value.is_empty() && value != "/")
         || input.expected_bucket_owner.is_some()
         || input.fetch_owner.is_some()
         || !supported_list_attributes(input.optional_object_attributes.as_ref())
@@ -5588,6 +5595,15 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.code().as_str(), "NotImplemented");
+    }
+
+    #[test]
+    fn empty_list_delimiter_is_treated_as_unset() {
+        reject_list_extensions(&ListObjectsV2Input {
+            delimiter: Some(String::new()),
+            ..Default::default()
+        })
+        .unwrap();
     }
 
     #[test]
