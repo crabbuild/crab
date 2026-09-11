@@ -33,6 +33,9 @@ explicitly and are unique ignoring ASCII case. They contain 3–63 lowercase
 ASCII letters, digits, dots, and hyphens, start and end with a letter or digit,
 and are never derived from a backing provider bucket. Backing bucket and prefix
 values never appear in S3 responses.
+At startup, backing placement prefixes use the shared object-store canonical
+path form; duplicate provider/bucket/prefix placements, including prefixes that
+normalize to the same path, are rejected before serving requests.
 
 An object key is `REF/KEY`. The first slash separates the encoded ref segment
 from the repository path. A short ref selects `refs/heads/REF`;

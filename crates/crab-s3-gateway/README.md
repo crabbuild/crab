@@ -262,6 +262,9 @@ The backing provider uses Crab's existing environment credential chain. Set
 the usual AWS, GCP, or Azure credentials for the selected provider. For an
 S3-compatible endpoint, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, and
 `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` are supported by the shared storage layer.
+Repository placement prefixes are canonicalized with the shared object-store
+path rules at startup; two logical repositories that would resolve to the same
+provider/bucket/prefix are rejected before any listener opens.
 
 `endpoint_domain` is the gateway's public host name, without a scheme. When it
 is set, both `https://endpoint.example/repository/key` and

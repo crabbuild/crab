@@ -5,6 +5,7 @@ use std::{
 };
 
 use crab_storage::StorageProviderKind;
+use object_store::path::Path as ObjectStorePath;
 use serde::Deserialize;
 
 use crate::{Error, Result};
@@ -192,9 +193,14 @@ impl Config {
                     "repository names must be unique valid lowercase S3 bucket names",
                 ));
             }
+            let canonical_prefix = ObjectStorePath::from(repository.prefix.as_str()).to_string();
             if repository.bucket.is_empty()
-                || repository.prefix.is_empty()
-                || !placements.insert((repository.provider, &repository.bucket, &repository.prefix))
+                || canonical_prefix.is_empty()
+                || !placements.insert((
+                    repository.provider,
+                    repository.bucket.clone(),
+                    canonical_prefix,
+                ))
             {
                 return Err(Error::Config(
                     "repository bucket/prefix placements must be present and unique",
@@ -399,6 +405,26 @@ mod tests {
         }
         let mut config = valid_config(secret.path().to_owned());
         config.management_listen = config.listen;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn physical_placements_reject_equivalent_object_store_prefixes() {
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(secret.path(), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut config = valid_config(secret.path().to_owned());
+        config.repositories[0].prefix = "repositories//test".to_owned();
+        let mut equivalent = config.repositories[0].clone();
+        equivalent.name = "other-repository".to_owned();
+        equivalent.prefix = "repositories/test".to_owned();
+        config.repositories.push(equivalent);
+
         assert!(config.validate().is_err());
     }
 
