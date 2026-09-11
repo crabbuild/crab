@@ -35,10 +35,10 @@ rust-version = "1.91"
 
 [workspace.dependencies]
 crab-auth = { version = "=0.1.0", path = "crates/crab-auth", default-features = false }
-crab-auth-server = { version = "=1.2.2", path = "crates/crab-auth-server", default-features = false }
+crab-auth-server = { version = "=1.2.3", path = "crates/crab-auth-server", default-features = false }
 crab-auth-store = { version = "=0.1.0", path = "crates/crab-auth-store", default-features = false }
 crab-cache = { version = "=0.1.0", path = "crates/crab-cache", default-features = false }
-crab-cache-server = { version = "=1.2.2", path = "crates/crab-cache-server", default-features = false }
+crab-cache-server = { version = "=1.2.3", path = "crates/crab-cache-server", default-features = false }
 crab-cache-store = { version = "=0.1.0", path = "crates/crab-cache-store", default-features = false }
 crab-coordination = { version = "=0.1.0", path = "crates/crab-coordination", default-features = false }
 crab-diff = { version = "=0.1.0", path = "crates/crab-diff", default-features = false }

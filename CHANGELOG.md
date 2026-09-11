@@ -5,6 +5,27 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.2.3 - 2026-09-11
+
+### S3 And Reliability
+
+- Hardened S3-compatible streaming, burst-load handling, and large-object
+  clone paths.
+- Added bounded response-stream idle handling and expanded gateway metrics,
+  deployment, and qualification coverage.
+
+### Git And Performance
+
+- Reduced clone latency by overlapping catalog scans with pack transfer.
+- Kept incremental push latency flat during owner maintenance by caching
+  immutable ref transactions and reusing unchanged repository snapshots.
+
+### Rust SDK
+
+- Unified the public repository API and aligned executable capability versions.
+- Completed workflow and recovery qualification and replaced SDK README
+  snippets with compilable examples.
+
 ## 1.2.2 - 2026-09-09
 
 ### Git And Progress
