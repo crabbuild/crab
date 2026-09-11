@@ -125,6 +125,9 @@ with every preceding or following object in the repository.
 The attribute loader projects each emitted object to ETag, size, and modification
 time before retaining the page, so multipart part/checksum metadata cannot make a
 large object listing grow with historical upload detail.
+Root branch-prefix listings retain only the `MaxKeys + 1` smallest encoded
+prefixes while scanning the immutable ref catalog, preserving S3 order and
+pagination without duplicating every branch name for large repositories.
 Multipart-upload listings scan the bounded durable slot catalog with bounded
 concurrency and retain only the metadata needed for the current S3 page; the
 recorded part payload map is released before the next listing decision.

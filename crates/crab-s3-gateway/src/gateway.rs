@@ -3932,39 +3932,18 @@ impl Gateway {
     ) -> S3Result<S3Response<ListObjectsV2Output>> {
         let url_encode = list_url_encoding(req.input.encoding_type.as_ref())?;
         let repo = self.open(repository).await?;
-        let mut keys = repo
-            .remote()
-            .refs()
-            .entries
-            .iter()
-            .filter_map(|reference| reference.name.strip_prefix("refs/heads/"))
-            .map(|branch| {
-                format!(
-                    "{}/",
-                    percent_encoding::utf8_percent_encode(
-                        branch,
-                        percent_encoding::NON_ALPHANUMERIC
-                    )
-                )
-            })
-            .collect::<Vec<_>>();
-        keys.sort();
         let after = req
             .input
             .continuation_token
             .as_deref()
             .or(req.input.start_after.as_deref());
-        if let Some(after) = after {
-            keys.retain(|key| key.as_str() > after);
-        }
         let max_keys = req.input.max_keys.unwrap_or(1000);
         if max_keys < 0 {
             return Err(s3_error!(InvalidArgument));
         }
         let max_keys = max_keys.min(1000);
         let limit = usize::try_from(max_keys).map_err(|_| s3_error!(InvalidArgument))?;
-        let truncated = limit != 0 && keys.len() > limit;
-        keys.truncate(limit);
+        let (keys, truncated) = select_ref_keys(&repo.remote().refs().entries, after, limit);
         let next = truncated.then(|| keys.last().cloned()).flatten();
         let count = i32::try_from(keys.len()).map_err(|_| s3_error!(InternalError))?;
         Ok(S3Response::new(ListObjectsV2Output {
@@ -4093,6 +4072,42 @@ fn namespace_error(error: namespace::NamespaceError) -> s3s::S3Error {
         namespace::NamespaceError::MissingObject => s3_error!(NoSuchKey),
         _ => s3_error!(InvalidArgument),
     }
+}
+
+fn select_ref_keys(
+    entries: &[crab_remote_git::RepositoryRef],
+    after: Option<&str>,
+    limit: usize,
+) -> (Vec<String>, bool) {
+    use std::collections::BinaryHeap;
+
+    if limit == 0 {
+        return (Vec::new(), false);
+    }
+    let retain = limit.saturating_add(1);
+    let mut selected = BinaryHeap::with_capacity(retain);
+    for key in entries
+        .iter()
+        .filter_map(|reference| reference.name.strip_prefix("refs/heads/"))
+        .map(|branch| {
+            format!(
+                "{}/",
+                percent_encoding::utf8_percent_encode(branch, percent_encoding::NON_ALPHANUMERIC)
+            )
+        })
+        .filter(|key| after.is_none_or(|marker| key.as_str() > marker))
+    {
+        if selected.len() < retain {
+            selected.push(key);
+        } else if selected.peek().is_some_and(|largest| key < *largest) {
+            selected.pop();
+            selected.push(key);
+        }
+    }
+    let truncated = selected.len() > limit;
+    let mut keys = selected.into_sorted_vec();
+    keys.truncate(limit);
+    (keys, truncated)
 }
 
 fn remote_error(error: crab_remote_git::Error) -> s3s::S3Error {
@@ -4439,6 +4454,34 @@ mod tests {
         });
 
         assert!(empty_list_objects_response(&req, false).is_err());
+    }
+
+    #[test]
+    fn root_ref_listing_bounds_selection_without_changing_order() {
+        let target =
+            gix_hash::ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
+        let entries = [
+            "refs/heads/z",
+            "refs/tags/release",
+            "refs/heads/a",
+            "refs/heads/m",
+        ]
+        .into_iter()
+        .map(|name| crab_remote_git::RepositoryRef {
+            name: name.to_owned(),
+            target,
+            peeled: None,
+        })
+        .collect::<Vec<_>>();
+
+        assert_eq!(
+            select_ref_keys(&entries, None, 2),
+            (vec!["a/".to_owned(), "m/".to_owned()], true)
+        );
+        assert_eq!(
+            select_ref_keys(&entries, Some("m/"), 2),
+            (vec!["z/".to_owned()], false)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
