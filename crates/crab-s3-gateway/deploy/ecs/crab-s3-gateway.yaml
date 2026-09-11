@@ -325,7 +325,7 @@ Resources:
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
       HealthCheckPath: /readyz
-      HealthCheckPort: traffic-port
+      HealthCheckPort: '8081'
       HealthCheckIntervalSeconds: 15
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2

@@ -197,6 +197,7 @@ jobs:
             abort "deployment rollback is disabled" unless deployment.fetch("DeploymentCircuitBreaker").fetch("Rollback")
             target = resources.fetch("GatewayTargetGroup").fetch("Properties")
             abort "target readiness path changed" unless target.fetch("HealthCheckPath") == "/readyz"
+            abort "target readiness port changed" unless target.fetch("HealthCheckPort") == "8081"
             parameters = JSON.parse(File.read("crates/crab-s3-gateway/deploy/ecs/parameters.example.json"))
             example_keys = parameters.map { |parameter| parameter.fetch("ParameterKey") }
             required_parameters.each do |name|

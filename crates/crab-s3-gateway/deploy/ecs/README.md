@@ -22,7 +22,7 @@ files in the disposable scratch volume before starting the gateway:
   backend keys must not be placed in either secret.
 
 The existing security groups must allow the selected client sources to the ALB
-on 443, ALB-to-task traffic on 8080, and task egress to the backend, ECR,
+on 443, ALB-to-task traffic on 8080 and the target health probe on 8081, and task egress to the backend, ECR,
 Secrets Manager, CloudWatch Logs, and the configured KMS keys. The management
 port 8081 is not exposed by the load balancer. The ALB terminates TLS and
 forwards the original S3 path and query to the gateway; configure the
