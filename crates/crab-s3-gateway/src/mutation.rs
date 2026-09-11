@@ -127,7 +127,6 @@ pub(crate) enum DeleteCondition {
     #[default]
     None,
     IfMatchAny,
-    IfMatchMissing,
     IfMatch {
         object: ObjectId,
         etag: String,
@@ -1083,7 +1082,6 @@ fn delete_condition_matches(
     match condition {
         DeleteCondition::None => true,
         DeleteCondition::IfMatchAny => old.is_some(),
-        DeleteCondition::IfMatchMissing => old.is_none(),
         DeleteCondition::IfMatch {
             object,
             etag,
@@ -1979,6 +1977,32 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
             "first"
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conditional_delete_rejects_a_missing_object() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"missing".to_vec()).unwrap();
+        let result = apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Delete {
+                condition: DeleteCondition::IfMatch {
+                    object: object_id(Kind::Blob, b"missing").unwrap(),
+                    etag: crate::gateway::md5_hex(b"missing"),
+                    attributes_present: false,
+                },
+            },
+            "user",
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::PreconditionFailed)));
         runtime.shutdown().await;
     }
 

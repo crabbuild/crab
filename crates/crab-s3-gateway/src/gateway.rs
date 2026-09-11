@@ -929,7 +929,7 @@ impl Gateway {
                 let object = match self.read_object_metadata(repository, key).await {
                     Ok(object) => object,
                     Err(error) if error.code().as_str() == "NoSuchKey" => {
-                        return Ok(mutation::DeleteCondition::IfMatchMissing);
+                        return Err(s3_error!(PreconditionFailed));
                     }
                     Err(error) => return Err(error),
                 };
