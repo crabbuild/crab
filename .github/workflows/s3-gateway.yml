@@ -167,6 +167,23 @@ jobs:
       - name: Verify qualification evidence contract
         run: python3 -m unittest crab/scripts/e2e/test_s3_gateway_qualification_report.py
 
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: 1.93.0
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-s3-gateway-publisher-target
+        with:
+          shared-key: s3-gateway-xet-publisher
+
+      - name: Build minimal Crab fixture publisher
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crab-s3-gateway-publisher-target
+        run: >-
+          cargo build --release --locked -p crab --bin crab
+          --no-default-features --features simd-accel,gix-pathmatch
+
       - name: Build locked gateway image
         id: build
         run: >-
@@ -339,6 +356,61 @@ jobs:
             crab-s3-gateway:test \
             --config /etc/crab/s3-gateway.toml --initialize
 
+          xet_root="${RUNNER_TEMP}/crab-s3-gateway-xet"
+          source_root="${xet_root}/source"
+          install -d "${source_root}/qualification" "${xet_root}/publisher-cache"
+          XET_FIXTURE="${source_root}/qualification/xet-large.bin" python3 - <<'PY'
+          import os
+          import random
+          from pathlib import Path
+
+          output = Path(os.environ["XET_FIXTURE"])
+          source = random.Random(0xC2AB53)
+          with output.open("wb") as stream:
+              for _ in range(64):
+                  stream.write(source.randbytes(1024 * 1024))
+          PY
+          cp "${source_root}/qualification/xet-large.bin" \
+            "${source_root}/qualification/xet-duplicate.bin"
+          git -C "${source_root}" init -q -b main
+          git -C "${source_root}" config user.name 'S3 Xet qualification'
+          git -C "${source_root}" config user.email 'qualification@example.invalid'
+          export AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}"
+          export AWS_DEFAULT_REGION=us-east-1
+          export AWS_REGION=us-east-1
+          export AWS_ENDPOINT_URL=http://127.0.0.1:19000
+          export AWS_ENDPOINT_URL_S3=http://127.0.0.1:19000
+          export AWS_ALLOW_HTTP=true
+          export AWS_EC2_METADATA_DISABLED=true
+          export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
+          export CRAB_CACHE_DIR="${xet_root}/publisher-cache"
+          crab_bin="${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release/crab"
+          (
+            cd "${source_root}"
+            "${crab_bin}" init --storage-provider s3 \
+              crab://crab-s3-gateway-qualification/repositories/qualification
+            "${crab_bin}" track '*.bin'
+            "${crab_bin}" add qualification/xet-large.bin \
+              qualification/xet-duplicate.bin
+            git add crab.toml .gitattributes
+            git commit -q -m 'add Xet range qualification fixture'
+            "${crab_bin}" push --upload-concurrency 0 \
+              origin HEAD:refs/heads/main
+            git show HEAD:qualification/xet-large.bin > "${xet_root}/xet-pointer"
+            git show HEAD:qualification/xet-duplicate.bin \
+              > "${xet_root}/xet-duplicate-pointer"
+          )
+          grep -Eq '^version https://crab.build/spec/v1$' \
+            "${xet_root}/xet-pointer"
+          grep -Fx 'size 67108864' "${xet_root}/xet-pointer"
+          test "$(sed -n 's/^file-hash //p' "${xet_root}/xet-pointer")" = \
+            "$(sed -n 's/^file-hash //p' "${xet_root}/xet-duplicate-pointer")"
+          aws --endpoint-url http://127.0.0.1:19000 s3api list-objects-v2 \
+            --bucket crab-s3-gateway-qualification --prefix .crab/xorbs/ \
+            --query 'length(Contents)' --output text > "${xet_root}/xorb-count"
+          test "$(cat "${xet_root}/xorb-count")" -gt 0
+
       - name: Start constrained gateway
         id: gateway
         run: |
@@ -413,6 +485,84 @@ jobs:
           endpoint=http://127.0.0.1:18080
           bucket=gateway-repository
           key=main/qualification/signed.bin
+          xet_root="${RUNNER_TEMP}/crab-s3-gateway-xet"
+          xet_key=main/qualification/xet-large.bin
+          duplicate_key=main/qualification/xet-duplicate.bin
+
+          xet_written() {
+            curl --fail --silent http://127.0.0.1:18081/metrics | \
+              awk '$1 == "crab_s3_gateway_scratch_bytes_written_total{purpose=\"xet_reconstruction\"}" {print int($2)}'
+          }
+          xet_written_before_metadata="$(xet_written)"
+          expected_etag="$(sed -n 's/^file-hash //p' "${xet_root}/xet-pointer")"
+          head_etag="$(aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${xet_key}" --query ETag --output text | tr -d '"')"
+          duplicate_etag="$(aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${duplicate_key}" --query ETag --output text | tr -d '"')"
+          list_etag="$(aws --endpoint-url "${endpoint}" s3api list-objects-v2 \
+            --bucket "${bucket}" --prefix "${xet_key}" \
+            --query 'Contents[0].ETag' --output text | tr -d '"')"
+          test "${head_etag}" = "${expected_etag}"
+          test "${duplicate_etag}" = "${expected_etag}"
+          test "${list_etag}" = "${expected_etag}"
+          xet_written_after_metadata="$(xet_written)"
+          metadata_scratch_delta=$((xet_written_after_metadata - xet_written_before_metadata))
+          test "${metadata_scratch_delta}" = 0
+
+          xet_presigned_url="$(aws --endpoint-url "${endpoint}" s3 presign \
+            "s3://${bucket}/${xet_key}" --expires-in 120)"
+          curl --fail --silent --show-error --limit-rate 4m \
+            --header 'Range: bytes=16777216-33554431' "${xet_presigned_url}" \
+            --output "${xet_root}/xet-range.bin" &
+          xet_curl_pid=$!
+          peak_xet_scratch=0
+          while kill -0 "${xet_curl_pid}" 2>/dev/null; do
+            active_xet_scratch="$(curl --fail --silent \
+              http://127.0.0.1:18081/metrics | \
+              awk '$1 == "crab_s3_gateway_scratch_bytes{purpose=\"xet_reconstruction\"}" {print int($2)}')"
+            if test "${active_xet_scratch}" -gt "${peak_xet_scratch}"; then
+              peak_xet_scratch="${active_xet_scratch}"
+            fi
+            sleep 0.1
+          done
+          wait "${xet_curl_pid}"
+          xet_written_after_range="$(xet_written)"
+          range_scratch_delta=$((xet_written_after_range - xet_written_after_metadata))
+          test "${peak_xet_scratch}" = 0
+          test "${range_scratch_delta}" = 0
+          XET_ROOT="${xet_root}" \
+          PROJECTED_ETAG="${head_etag}" \
+          DUPLICATE_ETAG="${duplicate_etag}" \
+          XORB_OBJECTS="$(cat "${xet_root}/xorb-count")" \
+          METADATA_SCRATCH_DELTA="${metadata_scratch_delta}" \
+          RANGE_SCRATCH_PEAK="${peak_xet_scratch}" \
+          RANGE_SCRATCH_DELTA="${range_scratch_delta}" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["XET_ROOT"])
+          with (root / "xet-proof.json").open("w", encoding="utf-8") as output:
+              json.dump(
+                  {
+                      "range_start": 16 * 1024 * 1024,
+                      "range_end": 32 * 1024 * 1024,
+                      "projected_etag": os.environ["PROJECTED_ETAG"],
+                      "duplicate_etag": os.environ["DUPLICATE_ETAG"],
+                      "xorb_objects": int(os.environ["XORB_OBJECTS"]),
+                      "metadata_scratch_bytes_written_delta": int(
+                          os.environ["METADATA_SCRATCH_DELTA"]
+                      ),
+                      "range_scratch_peak_bytes": int(os.environ["RANGE_SCRATCH_PEAK"]),
+                      "range_scratch_bytes_written_delta": int(
+                          os.environ["RANGE_SCRATCH_DELTA"]
+                      ),
+                  },
+                  output,
+                  sort_keys=True,
+              )
+              output.write("\n")
+          PY
 
           # JMESPath backticks are literals inside this single-quoted query.
           # shellcheck disable=SC2016
@@ -860,6 +1010,10 @@ jobs:
             --repository "${GITHUB_WORKSPACE}" \
             --metrics "${qualification_root}/metrics.txt" \
             --fixture "${qualification_root}/input.bin" \
+            --xet-fixture \
+              "${RUNNER_TEMP}/crab-s3-gateway-xet/source/qualification/xet-large.bin" \
+            --xet-range "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-range.bin" \
+            --xet-proof "${RUNNER_TEMP}/crab-s3-gateway-xet/xet-proof.json" \
             --resident-memory "${qualification_root}/resident-memory" \
             --container-writable \
               "${qualification_root}/container-writable-bytes" \

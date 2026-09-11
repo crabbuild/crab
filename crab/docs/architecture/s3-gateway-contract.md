@@ -391,5 +391,7 @@ recorded without credentials.
 The checked-in implementation currently has unit coverage for namespace,
 multipart persistence/retry, checksum validation, and branch-preserving Git
 mutation. Local release qualification additionally runs the AWS CLI against a
-RustFS-backed Crab repository. The broader client/backend matrix remains a
-release gate, not an inferred claim from that local smoke test.
+RustFS-backed Crab repository. It publishes a real duplicated 64 MiB Xet object
+through Crab, then proves signed metadata and throttled range reads are
+byte-exact without Xet reconstruction scratch. The broader client/backend matrix
+remains a release gate, not an inferred claim from that local smoke test.

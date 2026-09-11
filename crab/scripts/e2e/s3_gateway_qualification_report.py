@@ -16,7 +16,7 @@ from typing import Any
 
 
 SCHEMA = "crab.s3-gateway-evidence"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SUITE = "deployment"
 BACKEND_IMAGE = "rustfs/rustfs:1.0.0-beta.8-glibc"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -34,10 +34,13 @@ CHECK_OWNERS = {
     "packaged_image": "build",
     "runtime_contract": "runtime",
     "backend_initialization": "initialize",
+    "xet_fixture_publication": "initialize",
     "constrained_runtime": "gateway",
     "signed_catalog": "traffic",
     "put_get_round_trip": "traffic",
     "exact_range_read": "traffic",
+    "xet_metadata_projection": "traffic",
+    "xet_range_stream": "traffic",
     "streaming_sigv4": "traffic",
     "streaming_rejection_atomicity": "traffic",
     "static_presigned_get": "traffic",
@@ -155,12 +158,69 @@ def _fixture(path: Path) -> dict[str, Any]:
     return {"bytes": path.stat().st_size, "sha256": digest.hexdigest()}
 
 
+def _range_digest(path: Path, start: int, end: int) -> dict[str, Any]:
+    if not path.is_file() or start < 0 or end < start or end > path.stat().st_size:
+        return {"bytes": None, "sha256": None}
+    digest = hashlib.sha256()
+    remaining = end - start
+    with path.open("rb") as stream:
+        stream.seek(start)
+        while remaining:
+            block = stream.read(min(1024 * 1024, remaining))
+            if not block:
+                return {"bytes": None, "sha256": None}
+            digest.update(block)
+            remaining -= len(block)
+    return {"bytes": end - start, "sha256": digest.hexdigest()}
+
+
+def _xet_qualification(
+    fixture_path: Path, range_path: Path, proof_path: Path
+) -> dict[str, Any]:
+    try:
+        proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        proof = {}
+    if not isinstance(proof, dict):
+        proof = {}
+    start = proof.get("range_start")
+    end = proof.get("range_end")
+    source_range = (
+        _range_digest(fixture_path, start, end)
+        if type(start) is int and type(end) is int
+        else {"bytes": None, "sha256": None}
+    )
+    actual_range = _fixture(range_path)
+    return {
+        "fixture": _fixture(fixture_path),
+        "range": {
+            "start": start,
+            "end": end,
+            "bytes": actual_range["bytes"],
+            "sha256": actual_range["sha256"],
+            "source_sha256": source_range["sha256"],
+            "exact": actual_range == source_range,
+        },
+        "projected_etag": proof.get("projected_etag"),
+        "duplicate_etag": proof.get("duplicate_etag"),
+        "xorb_objects": proof.get("xorb_objects"),
+        "metadata_scratch_bytes_written_delta": proof.get(
+            "metadata_scratch_bytes_written_delta"
+        ),
+        "range_scratch_peak_bytes": proof.get("range_scratch_peak_bytes"),
+        "range_scratch_bytes_written_delta": proof.get(
+            "range_scratch_bytes_written_delta"
+        ),
+    }
+
+
 def build_report(
     *,
     source: dict[str, Any],
     steps: dict[str, str],
     metrics: dict[str, list[float]],
     fixture: dict[str, Any],
+    xet_qualification: dict[str, Any],
     resident_memory_bytes: int | None,
     container_writable_bytes: int | None,
     started_unix_ms: int,
@@ -211,6 +271,7 @@ def build_report(
             "platform": platform,
         },
         "fixture": fixture,
+        "xet_qualification": xet_qualification,
         "assertion_count": len(checks),
         "passed_assertions": passed_assertions,
         "skipped": [],
@@ -266,7 +327,7 @@ def verify_report(
     report: dict[str, Any], *, source_sha: str, run_id: str, run_attempt: str
 ) -> dict[str, Any]:
     if report.get("schema") != SCHEMA or report.get("schema_version") != SCHEMA_VERSION:
-        raise EvidenceError("report is not the canonical S3 gateway qualification v1 schema")
+        raise EvidenceError("report is not the canonical S3 gateway qualification v2 schema")
     if report.get("status") != "passed" or report.get("terminal_state") != "exited-zero":
         raise EvidenceError("qualification did not reach a successful terminal state")
     if report.get("suite") != SUITE or report.get("skipped") != []:
@@ -304,6 +365,41 @@ def verify_report(
         raise EvidenceError("qualification fixture size is wrong")
     if re.fullmatch(r"[0-9a-f]{64}", str(fixture.get("sha256"))) is None:
         raise EvidenceError("qualification fixture digest is missing")
+
+    xet = report.get("xet_qualification")
+    if not isinstance(xet, dict):
+        raise EvidenceError("Xet qualification evidence is missing")
+    xet_fixture = xet.get("fixture")
+    if not isinstance(xet_fixture, dict) or xet_fixture.get("bytes") != 64 * 1024 * 1024:
+        raise EvidenceError("Xet qualification fixture size is wrong")
+    if re.fullmatch(r"[0-9a-f]{64}", str(xet_fixture.get("sha256"))) is None:
+        raise EvidenceError("Xet qualification fixture digest is missing")
+    xet_range = xet.get("range")
+    if not isinstance(xet_range, dict) or (
+        xet_range.get("start"), xet_range.get("end"), xet_range.get("bytes")
+    ) != (16 * 1024 * 1024, 32 * 1024 * 1024, 16 * 1024 * 1024):
+        raise EvidenceError("Xet qualification range is wrong")
+    if xet_range.get("exact") is not True or xet_range.get("sha256") != xet_range.get(
+        "source_sha256"
+    ):
+        raise EvidenceError("Xet qualification range is not byte exact")
+    if re.fullmatch(r"[0-9a-f]{64}", str(xet_range.get("sha256"))) is None:
+        raise EvidenceError("Xet qualification range digest is missing")
+    projected_etag = str(xet.get("projected_etag"))
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", projected_etag) is None
+        or xet.get("duplicate_etag") != projected_etag
+    ):
+        raise EvidenceError("Xet projected ETag is missing or not deduplicated")
+    if type(xet.get("xorb_objects")) is not int or xet["xorb_objects"] <= 0:
+        raise EvidenceError("Xet qualification did not publish xorb content")
+    for name in (
+        "metadata_scratch_bytes_written_delta",
+        "range_scratch_peak_bytes",
+        "range_scratch_bytes_written_delta",
+    ):
+        if xet.get(name) != 0:
+            raise EvidenceError(f"Xet qualification used unexpected scratch: {name}")
 
     checks = report.get("checks")
     if not isinstance(checks, list):
@@ -383,6 +479,9 @@ def produce(args: argparse.Namespace) -> int:
             steps=steps,
             metrics=parse_metrics(args.metrics),
             fixture=_fixture(args.fixture),
+            xet_qualification=_xet_qualification(
+                args.xet_fixture, args.xet_range, args.xet_proof
+            ),
             resident_memory_bytes=read_resident_memory(args.resident_memory),
             container_writable_bytes=_read_nonnegative_integer(args.container_writable),
             started_unix_ms=started_unix_ms,
@@ -432,6 +531,9 @@ def parser() -> argparse.ArgumentParser:
     producer.add_argument("--repository", type=Path, required=True)
     producer.add_argument("--metrics", type=Path, required=True)
     producer.add_argument("--fixture", type=Path, required=True)
+    producer.add_argument("--xet-fixture", type=Path, required=True)
+    producer.add_argument("--xet-range", type=Path, required=True)
+    producer.add_argument("--xet-proof", type=Path, required=True)
     producer.add_argument("--resident-memory", type=Path, required=True)
     producer.add_argument("--container-writable", type=Path, required=True)
     producer.add_argument("--started", type=Path, required=True)

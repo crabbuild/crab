@@ -254,8 +254,11 @@ docker build -f crates/crab-s3-gateway/deploy/Dockerfile -t crab-s3-gateway .
 
 The isolated Docker Compose qualification procedure and retained evidence
 contract are in `deploy/README.md`. Successful packaged-image runs retain a
-machine-verified report for 90 days; stale, dirty, incomplete, skipped,
-unmeasured, or identity-bearing reports fail the evidence gate.
+machine-verified report for 90 days. The report includes a real duplicated
+64 MiB Crab/Xet fixture, projected ETags, an exact throttled 16 MiB range, and
+proof that metadata and range delivery used no Xet reconstruction scratch.
+Stale, dirty, incomplete, skipped, unmeasured, or identity-bearing reports fail
+the evidence gate.
 The statically validated Kubernetes workload and EKS values are in
 `deploy/helm/crab-s3-gateway/`. They are deployment assets, not evidence of a
 live EKS qualification. Operational alert response, scaling, credential

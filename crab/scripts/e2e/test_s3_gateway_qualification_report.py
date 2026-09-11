@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -50,6 +51,23 @@ def valid_report() -> dict[str, Any]:
             "platform": "Linux x86_64",
         },
         "fixture": {"bytes": 2 * 1024 * 1024, "sha256": "c" * 64},
+        "xet_qualification": {
+            "fixture": {"bytes": 64 * 1024 * 1024, "sha256": "d" * 64},
+            "range": {
+                "start": 16 * 1024 * 1024,
+                "end": 32 * 1024 * 1024,
+                "bytes": 16 * 1024 * 1024,
+                "sha256": "e" * 64,
+                "source_sha256": "e" * 64,
+                "exact": True,
+            },
+            "projected_etag": "f" * 64,
+            "duplicate_etag": "f" * 64,
+            "xorb_objects": 1,
+            "metadata_scratch_bytes_written_delta": 0,
+            "range_scratch_peak_bytes": 0,
+            "range_scratch_bytes_written_delta": 0,
+        },
         "assertion_count": len(checks),
         "passed_assertions": len(checks),
         "skipped": [],
@@ -123,6 +141,28 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
                 with self.assertRaisesRegex(REPORT.EvidenceError, "measurement|scratch"):
                     self.verify(report)
 
+    def test_rejects_inexact_or_scratch_backed_xet_range(self) -> None:
+        for field, value in (
+            ("range_scratch_peak_bytes", 1),
+            ("range_scratch_bytes_written_delta", 1),
+            ("metadata_scratch_bytes_written_delta", 1),
+        ):
+            with self.subTest(field=field):
+                report = valid_report()
+                report["xet_qualification"][field] = value
+                with self.assertRaisesRegex(REPORT.EvidenceError, "scratch"):
+                    self.verify(report)
+
+        report = valid_report()
+        report["xet_qualification"]["range"]["exact"] = False
+        with self.assertRaisesRegex(REPORT.EvidenceError, "byte exact"):
+            self.verify(report)
+
+        report = valid_report()
+        report["xet_qualification"]["duplicate_etag"] = "0" * 64
+        with self.assertRaisesRegex(REPORT.EvidenceError, "deduplicated"):
+            self.verify(report)
+
     def test_rejects_identity_and_secret_fields(self) -> None:
         for field in REPORT.SENSITIVE_KEYS:
             with self.subTest(field=field):
@@ -143,6 +183,36 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             )
             metrics = REPORT.parse_metrics(path)
         self.assertEqual(metrics, {"request": [2.0, 3.0], "gauge": [7.0]})
+
+    def test_xet_qualification_derives_exact_source_range(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture = root / "fixture.bin"
+            selected = root / "range.bin"
+            proof = root / "proof.json"
+            fixture.write_bytes(b"0123456789abcdef")
+            selected.write_bytes(b"456789")
+            proof.write_text(
+                json.dumps(
+                    {
+                        "range_start": 4,
+                        "range_end": 10,
+                        "projected_etag": "a" * 64,
+                        "duplicate_etag": "a" * 64,
+                        "xorb_objects": 1,
+                        "metadata_scratch_bytes_written_delta": 0,
+                        "range_scratch_peak_bytes": 0,
+                        "range_scratch_bytes_written_delta": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = REPORT._xet_qualification(fixture, selected, proof)
+
+        self.assertTrue(result["range"]["exact"])
+        self.assertEqual(result["range"]["bytes"], 6)
+        self.assertEqual(result["range"]["sha256"], result["range"]["source_sha256"])
 
     def test_docker_resident_memory_parser_accepts_binary_units(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -167,6 +237,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             steps={name: "success" for name in REPORT.REQUIRED_STEPS - {"traffic"}},
             metrics=metrics,
             fixture=report["fixture"],
+            xet_qualification=report["xet_qualification"],
             resident_memory_bytes=1_000_000,
             container_writable_bytes=0,
             started_unix_ms=100,
@@ -191,6 +262,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             steps={name: "skipped" for name in REPORT.REQUIRED_STEPS},
             metrics={},
             fixture={"bytes": None, "sha256": None},
+            xet_qualification={},
             resident_memory_bytes=None,
             container_writable_bytes=None,
             started_unix_ms=100,

@@ -273,10 +273,13 @@ Phase-owned artifacts:
   image against RustFS with an unchanged signed AWS client. It separately
   exercises chained SigV4 streaming signatures, S3-compatible transport metadata,
   rejection atomicity for a corrupted chunk signature, and configured temporary
-  SigV4 credentials through header and presigned-query requests. The job retains
-  and validates a versioned qualification report bound to the exact source,
-  image, backend, client versions, fixture, measurements, and complete assertion
-  inventory.
+  SigV4 credentials through header and presigned-query requests. A minimal Crab
+  release binary publishes a real 64 MiB Xet fixture and an identical duplicate;
+  signed HEAD, list, and throttled range traffic proves deterministic projected
+  ETags, exact range bytes, deduplication, and zero response-sized Xet scratch.
+  The job retains and validates a versioned qualification report bound to the
+  exact source, image, backend, client versions, both fixtures, measurements, and
+  complete assertion inventory.
 - Phase 9: the crate README, pinned image, example configuration, separate
   management probes, container runtime smoke and isolated Compose profile
   exist. The canonical Helm chart is schema-checked, rendered and validated as
