@@ -15,6 +15,7 @@ use hyper_util::{
     server::{conn::auto::Builder as ConnectionBuilder, graceful::GracefulShutdown},
 };
 use s3s::{
+    config::{S3Config, StaticConfigProvider},
     host::SingleDomain,
     service::{S3Service, S3ServiceBuilder},
 };
@@ -36,6 +37,11 @@ const MAX_HTTP1_HEADERS: usize = 128;
 const MAX_HTTP1_BUFFER_BYTES: usize = 128 * 1024;
 const MAX_HTTP2_HEADER_LIST_BYTES: u32 = 128 * 1024;
 const MAX_HTTP2_STREAMS_PER_CONNECTION: u32 = 64;
+const S3_XML_MAX_BODY_BYTES: usize = 20 * 1024 * 1024;
+const S3_FORM_MAX_FIELD_BYTES: usize = 1024 * 1024;
+const S3_FORM_MAX_FIELDS_BYTES: usize = 20 * 1024 * 1024;
+const S3_FORM_MAX_PARTS: usize = 1000;
+const S3_PRESIGNED_MAX_SKEW_SECONDS: u32 = 900;
 
 #[derive(Clone)]
 pub(crate) struct RequestBodyDigest {
@@ -86,6 +92,9 @@ pub async fn serve(config: Config) -> Result<()> {
     let auth = gateway.auth();
     builder.set_auth(auth.clone());
     builder.set_access(auth);
+    builder.set_config(Arc::new(StaticConfigProvider::new(Arc::new(
+        gateway_s3_config(),
+    ))));
     if let Some(domain) = endpoint_domain {
         builder.set_host(SingleDomain::new(&domain)?);
     }
@@ -189,6 +198,18 @@ fn connection_capacity(max_in_flight_requests: usize) -> usize {
     max_in_flight_requests
         .saturating_mul(CONNECTIONS_PER_REQUEST)
         .max(MANAGEMENT_CONNECTIONS)
+}
+
+fn gateway_s3_config() -> S3Config {
+    let mut config = S3Config::default();
+    config.xml_max_body_size = S3_XML_MAX_BODY_BYTES;
+    config.post_object_max_file_size = crate::content::MAX_PUT_OBJECT_BYTES;
+    config.form_max_field_size = S3_FORM_MAX_FIELD_BYTES;
+    config.form_max_fields_size = S3_FORM_MAX_FIELDS_BYTES;
+    config.form_max_parts = S3_FORM_MAX_PARTS;
+    config.presigned_url_max_skew_time_secs = S3_PRESIGNED_MAX_SKEW_SECONDS;
+    config.normalize_forward_slash_path = false;
+    config
 }
 
 /// Check the running process without accessing repository storage.
@@ -485,6 +506,25 @@ mod tests {
     fn connection_capacity_scales_without_exceeding_the_request_budget_multiplier() {
         assert_eq!(connection_capacity(8), 32);
         assert_eq!(connection_capacity(4096), 16_384);
+    }
+
+    #[test]
+    fn s3_protocol_limits_are_pinned_to_the_gateway_contract() {
+        let config = gateway_s3_config();
+
+        assert_eq!(config.xml_max_body_size, S3_XML_MAX_BODY_BYTES);
+        assert_eq!(
+            config.post_object_max_file_size,
+            crate::content::MAX_PUT_OBJECT_BYTES
+        );
+        assert_eq!(config.form_max_field_size, S3_FORM_MAX_FIELD_BYTES);
+        assert_eq!(config.form_max_fields_size, S3_FORM_MAX_FIELDS_BYTES);
+        assert_eq!(config.form_max_parts, S3_FORM_MAX_PARTS);
+        assert_eq!(
+            config.presigned_url_max_skew_time_secs,
+            S3_PRESIGNED_MAX_SKEW_SECONDS
+        );
+        assert!(!config.normalize_forward_slash_path);
     }
 
     #[test]
