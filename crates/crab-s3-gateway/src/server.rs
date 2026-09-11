@@ -7,6 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode, header};
+use http_body::Body as _;
 use http_body_util::{BodyExt as _, Full};
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::{
@@ -23,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Config, Result,
-    content::Digester,
+    content::{BODY_IDLE_TIMEOUT, Digester},
     gateway::Gateway,
     metrics::{Metrics, ObservedBody},
 };
@@ -253,23 +254,60 @@ async fn observed_s3_response(
 }
 
 fn request_body_with_digest(request: Request<Incoming>) -> Request<s3s::Body> {
-    if !needs_xml_body_digest(&request) {
-        return request.map(s3s::Body::from);
-    }
-
-    let digest = RequestBodyDigest::new();
-    let digest_for_body = digest.clone();
+    let needs_digest = needs_xml_body_digest(&request);
     let (parts, body) = request.into_parts();
-    let body = body.map_frame(move |frame| {
-        if let Some(data) = frame.data_ref() {
-            digest_for_body.update(data.as_ref());
+    if needs_digest {
+        // `s3s` buffers XML mutation requests before dispatch; bound that body at
+        // the transport boundary so a client cannot hold a connection forever.
+        let body = body_with_idle_timeout(body, BODY_IDLE_TIMEOUT);
+        let digest = RequestBodyDigest::new();
+        let digest_for_body = digest.clone();
+        let body = body.map_frame(move |frame| {
+            if let Some(data) = frame.data_ref() {
+                digest_for_body.update(data.as_ref());
+            }
+            frame
+        });
+        let mut request = Request::from_parts(parts, s3s::Body::http_body_unsync(body));
+        request.extensions_mut().insert(digest);
+        request
+    } else {
+        Request::from_parts(parts, s3s::Body::from(body))
+    }
+}
+
+fn body_with_idle_timeout<B>(
+    body: B,
+    idle_timeout: Duration,
+) -> impl http_body::Body<Data = Bytes, Error = std::io::Error> + Send + 'static
+where
+    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let body = Box::pin(http_body_util::BodyStream::new(body));
+    let stream = futures_util::stream::unfold((body, false), move |(mut body, done)| async move {
+        if done {
+            return None;
         }
-        frame
+        let frame = tokio::time::timeout(
+            idle_timeout,
+            std::future::poll_fn(|context| body.as_mut().poll_frame(context)),
+        )
+        .await;
+        match frame {
+            Ok(Some(Ok(frame))) => Some((Ok(frame), (body, false))),
+            Ok(Some(Err(error))) => Some((Err(std::io::Error::other(error)), (body, true))),
+            Ok(None) => None,
+            Err(_) => Some((
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "request body was idle for too long",
+                )),
+                (body, true),
+            )),
+        }
     });
-    let body = body.map_err(|error| -> s3s::StdError { Box::new(error) });
-    let mut request = Request::from_parts(parts, s3s::Body::http_body(body));
-    request.extensions_mut().insert(digest);
-    request
+    http_body_util::StreamBody::new(stream)
 }
 
 fn needs_xml_body_digest(request: &Request<Incoming>) -> bool {
@@ -451,5 +489,36 @@ mod tests {
         let expected: [u8; 16] = md5::Md5::digest(b"tagging body").into();
         assert_eq!(digests.md5, expected);
         assert!(digest.finish().is_none());
+    }
+
+    #[tokio::test]
+    async fn request_body_idle_timeout_stops_a_stalled_stream() {
+        let body = http_body_util::StreamBody::new(futures_util::stream::pending::<
+            std::result::Result<http_body::Frame<Bytes>, std::io::Error>,
+        >());
+        let error = body_with_idle_timeout(body, Duration::from_millis(1))
+            .collect()
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn request_body_idle_timeout_preserves_data_and_trailers() {
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("x-test-trailer", "present".parse().unwrap());
+        let body = http_body_util::StreamBody::new(futures_util::stream::iter([
+            Ok::<_, std::io::Error>(http_body::Frame::data(Bytes::from_static(b"body"))),
+            Ok::<_, std::io::Error>(http_body::Frame::trailers(trailers.clone())),
+        ]));
+
+        let collected = body_with_idle_timeout(body, Duration::from_secs(1))
+            .collect()
+            .await
+            .unwrap();
+
+        assert_eq!(collected.trailers(), Some(&trailers));
+        assert_eq!(collected.to_bytes(), Bytes::from_static(b"body"));
     }
 }
