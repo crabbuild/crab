@@ -25,6 +25,7 @@ REQUIRED_STEPS = {
     "initialize",
     "gateway",
     "traffic",
+    "measurements",
     "graceful",
     "compose",
 }
@@ -46,6 +47,7 @@ CHECK_OWNERS = {
     "scratch_capacity_rejection": "traffic",
     "metrics_contract": "traffic",
     "credential_leak_scan": "traffic",
+    "runtime_measurements": "measurements",
     "graceful_termination": "graceful",
     "compose_deployment": "compose",
     "multipart_restart_recovery": "compose",

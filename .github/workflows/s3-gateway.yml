@@ -685,8 +685,14 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             http://127.0.0.1:18080/metrics)" = 403
 
-          docker top crab-s3-gateway -eo pid,rss | \
-            awk 'NR > 1 { rss += $2 } END { if (rss > 0) printf "%.0f\\n", rss * 1024; else exit 1 }' \
+
+      - name: Capture runtime measurements
+        id: measurements
+        run: |
+          set -euo pipefail
+          qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
+          docker exec crab-s3-gateway /bin/cat /proc/1/status | \
+            awk '/^VmRSS:/ { printf "%.0f\\n", $2 * 1024 }' \
             > "${qualification_root}/rss-bytes"
           grep -Eq '^[1-9][0-9]*$' "${qualification_root}/rss-bytes"
           docker inspect --size crab-s3-gateway --format '{{.SizeRw}}' \
@@ -840,6 +846,7 @@ jobs:
           STEP_INITIALIZE: ${{ steps.initialize.outcome }}
           STEP_GATEWAY: ${{ steps.gateway.outcome }}
           STEP_TRAFFIC: ${{ steps.traffic.outcome }}
+          STEP_MEASUREMENTS: ${{ steps.measurements.outcome }}
           STEP_GRACEFUL: ${{ steps.graceful.outcome }}
           STEP_COMPOSE: ${{ steps.compose.outcome }}
         run: |
@@ -869,6 +876,7 @@ jobs:
             --step "initialize=${STEP_INITIALIZE}" \
             --step "gateway=${STEP_GATEWAY}" \
             --step "traffic=${STEP_TRAFFIC}" \
+            --step "measurements=${STEP_MEASUREMENTS}" \
             --step "graceful=${STEP_GRACEFUL}" \
             --step "compose=${STEP_COMPOSE}"
 
@@ -880,6 +888,7 @@ jobs:
               steps.initialize.outcome == 'success' &&
               steps.gateway.outcome == 'success' &&
               steps.traffic.outcome == 'success' &&
+              steps.measurements.outcome == 'success' &&
               steps.graceful.outcome == 'success' &&
               steps.compose.outcome == 'success' &&
               steps.report.outcome == 'success' }}
