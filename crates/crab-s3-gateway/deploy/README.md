@@ -110,6 +110,11 @@ and write no Xet reconstruction scratch.
 It also registers one 8 MiB and one 64 MiB multipart part, requires each durable
 state record to stay within 64 KiB and their sizes to differ by at most 64 bytes,
 then aborts both uploads and proves their staged payloads are gone.
+The pinned Boto3 client additionally uploads a deterministic 512 MiB object as
+eight sequential 64 MiB parts, reads the complete object back, and reads a
+range crossing a persisted part boundary. Both reads are compared with the
+local SHA-256 fixture, and upload/full-read/range-read timings are retained
+without credentials or object names.
 Finally, it kills the gateway while RustFS holds one live part, one frozen part,
 and one eligible synthetic missing-session orphan. The replacement must remove
 the orphan and release its capacity within two completed maintenance scans while

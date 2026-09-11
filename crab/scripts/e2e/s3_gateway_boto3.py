@@ -9,6 +9,8 @@ import io
 import json
 import os
 import secrets
+import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -42,7 +44,140 @@ def _write_report(path: Path | None, report: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def run(client, bucket: str, prefix: str) -> dict[str, object]:
+def _write_large_fixture(path: Path, size: int) -> str:
+    digest = hashlib.sha256()
+    block_size = 1024 * 1024
+    offset = 0
+    with path.open("wb") as output:
+        while offset < size:
+            length = min(block_size, size - offset)
+            seed = hashlib.sha256(f"crab-s3-gateway-large:{offset}".encode()).digest()
+            block = (seed * ((length + len(seed) - 1) // len(seed)))[:length]
+            output.write(block)
+            digest.update(block)
+            offset += length
+    return digest.hexdigest()
+
+
+def _digest_file(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+            size += len(block)
+    return size, digest.hexdigest()
+
+
+def _digest_range(path: Path, start: int, length: int) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    remaining = length
+    with path.open("rb") as stream:
+        stream.seek(start)
+        while remaining:
+            block = stream.read(min(8 * 1024 * 1024, remaining))
+            if not block:
+                raise RuntimeError("large-object range source ended early")
+            digest.update(block)
+            remaining -= len(block)
+    return length, digest.hexdigest()
+
+
+def _qualify_large_object(
+    client, bucket: str, key: str, size: int, temporary_root: Path
+) -> dict[str, object]:
+    part_size = 64 * 1024 * 1024
+    if size < part_size + 8192 or size > 5 * 1024**4:
+        raise ValueError("large-object size must be between 64 MiB and 5 TiB")
+    source_path = temporary_root / "large-input.bin"
+    output_path = temporary_root / "large-output.bin"
+    source_digest = _write_large_fixture(source_path, size)
+    part_count = (size + part_size - 1) // part_size
+    upload_id = None
+    completed = False
+    upload_started = time.monotonic_ns()
+    try:
+        upload_id = client.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"]
+        parts = []
+        with source_path.open("rb") as source:
+            for number in range(1, part_count + 1):
+                length = min(part_size, size - (number - 1) * part_size)
+                result = client.upload_part(
+                    Bucket=bucket,
+                    Key=key,
+                    UploadId=upload_id,
+                    PartNumber=number,
+                    Body=source,
+                    ContentLength=length,
+                )
+                parts.append({"PartNumber": number, "ETag": result["ETag"]})
+        client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": parts},
+        )
+        completed = True
+        upload_elapsed_ms = max(1, (time.monotonic_ns() - upload_started) // 1_000_000)
+
+        head = client.head_object(Bucket=bucket, Key=key)
+        if head.get("ContentLength") != size:
+            raise RuntimeError("large-object HeadObject returned the wrong size")
+        get_started = time.monotonic_ns()
+        response = client.get_object(Bucket=bucket, Key=key)
+        try:
+            with output_path.open("wb") as output:
+                for block in iter(lambda: response["Body"].read(8 * 1024 * 1024), b""):
+                    output.write(block)
+        finally:
+            response["Body"].close()
+        get_elapsed_ms = max(1, (time.monotonic_ns() - get_started) // 1_000_000)
+        output_size, output_digest = _digest_file(output_path)
+        if output_size != size or output_digest != source_digest:
+            raise RuntimeError("large-object full GET was not byte exact")
+
+        range_start = part_size - 4096
+        range_length = min(part_size + 8192, size - range_start)
+        range_started = time.monotonic_ns()
+        response = client.get_object(
+            Bucket=bucket,
+            Key=key,
+            Range=f"bytes={range_start}-{range_start + range_length - 1}",
+        )
+        try:
+            range_bytes = response["Body"].read()
+        finally:
+            response["Body"].close()
+        range_elapsed_ms = max(1, (time.monotonic_ns() - range_started) // 1_000_000)
+        expected_range_size, expected_range_digest = _digest_range(
+            source_path, range_start, range_length
+        )
+        actual_range_digest = hashlib.sha256(range_bytes).hexdigest()
+        if len(range_bytes) != expected_range_size or actual_range_digest != expected_range_digest:
+            raise RuntimeError("large-object range GET was not byte exact")
+        return {
+            "bytes": size,
+            "part_bytes": part_size,
+            "parts": part_count,
+            "source_sha256": source_digest,
+            "full_get_sha256": output_digest,
+            "range_start": range_start,
+            "range_bytes": len(range_bytes),
+            "range_sha256": actual_range_digest,
+            "range_source_sha256": expected_range_digest,
+            "range_exact": True,
+            "upload_elapsed_ms": upload_elapsed_ms,
+            "full_get_elapsed_ms": get_elapsed_ms,
+            "range_get_elapsed_ms": range_elapsed_ms,
+        }
+    finally:
+        if upload_id is not None and not completed:
+            client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+
+
+def run(
+    client, bucket: str, prefix: str, large_object_bytes: int = 0
+) -> dict[str, object]:
     token = secrets.token_hex(8)
     root = f"{prefix}/{token}"
     object_key = f"{root}/object.bin"
@@ -50,7 +185,8 @@ def run(client, bucket: str, prefix: str) -> dict[str, object]:
     conditional_key = f"{root}/conditional.bin"
     multipart_key = f"{root}/multipart.bin"
     delete_key = f"{root}/delete.bin"
-    keys = [object_key, copy_key, conditional_key, multipart_key, delete_key]
+    large_key = f"{root}/large.bin"
+    keys = [object_key, copy_key, conditional_key, multipart_key, delete_key, large_key]
     body = b"boto3 gateway qualification\n" + bytes(range(256)) * 4096
     multipart_parts = [b"a" * (5 * 1024 * 1024), b"boto3-final-part"]
     upload_id = None
@@ -191,6 +327,17 @@ def run(client, bucket: str, prefix: str) -> dict[str, object]:
             Delete={"Objects": [{"Key": object_key}, {"Key": copy_key}, {"Key": delete_key}]},
         )
         checks["multi_delete"] = True
+        large_object = None
+        if large_object_bytes:
+            with tempfile.TemporaryDirectory(prefix="crab-s3-gateway-boto3-") as directory:
+                large_object = _qualify_large_object(
+                    client,
+                    bucket,
+                    large_key,
+                    large_object_bytes,
+                    Path(directory),
+                )
+            checks["large_object_range"] = True
         return {
             "schema": "crab.s3-gateway-boto3-smoke",
             "status": "passed",
@@ -198,6 +345,7 @@ def run(client, bucket: str, prefix: str) -> dict[str, object]:
             "object_bytes": len(body),
             "multipart_bytes": len(b"".join(multipart_parts)),
             "multipart_parts": len(multipart_parts),
+            "large_object": large_object,
         }
     finally:
         if upload_id is not None and not completed:
@@ -223,6 +371,12 @@ def main() -> int:
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--prefix", default="main/qualification/boto3")
     parser.add_argument("--region", default="us-east-1")
+    parser.add_argument(
+        "--large-object-bytes",
+        type=int,
+        default=0,
+        help="run the sequential LFS-path multipart qualification at this size",
+    )
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     prefix = args.prefix.strip("/")
@@ -246,8 +400,10 @@ def main() -> int:
         ),
     )
     try:
-        report = run(client, args.bucket, prefix)
-    except (ClientError, OSError, RuntimeError) as error:
+        if args.large_object_bytes < 0:
+            parser.error("--large-object-bytes must not be negative")
+        report = run(client, args.bucket, prefix, args.large_object_bytes)
+    except (ClientError, OSError, RuntimeError, ValueError) as error:
         print(f"error: Boto3 qualification failed: {error}")
         return 1
     _write_report(args.report, report)

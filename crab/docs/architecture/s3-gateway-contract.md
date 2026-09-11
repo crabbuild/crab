@@ -406,3 +406,6 @@ RustFS-backed Crab repository. It publishes a real duplicated 64 MiB Xet object
 through Crab, then proves signed metadata and throttled range reads are
 byte-exact without Xet reconstruction scratch. The broader client/backend matrix
 remains a release gate, not an inferred claim from that local smoke test.
+The same packaged-image run uses pinned Boto3 to complete a deterministic 512 MiB
+multipart object and verify both a full read and a range crossing a persisted part
+boundary against the source digest.

@@ -1133,6 +1133,7 @@ jobs:
           S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
           python3 crab/scripts/e2e/s3_gateway_boto3.py \
             --endpoint "${endpoint}" --bucket "${bucket}" \
+            --large-object-bytes $((512 * 1024 * 1024)) \
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
 
           oversized_key=main/qualification/scratch-capacity.bin
@@ -1542,6 +1543,42 @@ jobs:
           checks = report.get("checks")
           if not isinstance(checks, dict) or not checks or not all(checks.values()):
               raise SystemExit("Boto3 qualification report contains a failed check")
+          large = report.get("large_object")
+          if not isinstance(large, dict):
+              raise SystemExit("Boto3 large-object evidence is missing")
+          if (
+              large.get("bytes"),
+              large.get("part_bytes"),
+              large.get("parts"),
+              large.get("range_start"),
+              large.get("range_bytes"),
+          ) != (
+              512 * 1024 * 1024,
+              64 * 1024 * 1024,
+              8,
+              64 * 1024 * 1024 - 4096,
+              64 * 1024 * 1024 + 8192,
+          ):
+              raise SystemExit("Boto3 large-object fixture shape is wrong")
+          if (
+              large.get("range_exact") is not True
+              or large.get("range_sha256") != large.get("range_source_sha256")
+              or large.get("source_sha256") != large.get("full_get_sha256")
+          ):
+              raise SystemExit("Boto3 large-object bytes were not exact")
+          for name in (
+              "source_sha256",
+              "full_get_sha256",
+              "range_sha256",
+              "range_source_sha256",
+          ):
+              value = large.get(name)
+              if not isinstance(value, str) or len(value) != 64:
+                  raise SystemExit(f"Boto3 large-object {name} is missing")
+          for name in ("upload_elapsed_ms", "full_get_elapsed_ms", "range_get_elapsed_ms"):
+              value = large.get(name)
+              if type(value) is not int or value <= 0:
+                  raise SystemExit(f"Boto3 large-object {name} is missing")
           PY
 
       - name: Upload retained qualification report
