@@ -1143,6 +1143,9 @@ impl S3 for Gateway {
         req: S3Request<HeadBucketInput>,
     ) -> S3Result<S3Response<HeadBucketOutput>> {
         let _permit = self.admit(RequestClass::Control).await?;
+        if req.input.expected_bucket_owner.is_some() {
+            return Err(s3_error!(NotImplemented));
+        }
         self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let mut response = S3Response::new(HeadBucketOutput::default());
         response.headers.insert(
@@ -1488,14 +1491,7 @@ impl S3 for Gateway {
         {
             return Err(s3_error!(NotImplemented));
         }
-        if req
-            .input
-            .max_parts
-            .is_some_and(|value| !(1..=1000).contains(&value))
-            || req.input.part_number_marker.is_some_and(|value| value < 0)
-        {
-            return Err(s3_error!(InvalidArgument));
-        }
+        multipart_page_bounds(req.input.part_number_marker, req.input.max_parts)?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let object = self
             .read_object_metadata(repository, &req.input.key)
@@ -2470,11 +2466,8 @@ impl S3 for Gateway {
             principal,
         )
         .map_err(multipart_error)?;
-        let marker = req.input.part_number_marker.unwrap_or(0);
-        let max = req.input.max_parts.unwrap_or(1000);
-        if !(1..=1000).contains(&max) {
-            return Err(s3_error!(InvalidArgument));
-        }
+        let (marker, max) =
+            multipart_page_bounds(req.input.part_number_marker, req.input.max_parts)?;
         let mut parts = loaded
             .session
             .parts
@@ -2689,16 +2682,7 @@ impl S3 for Gateway {
         let _permit = self.admit(RequestClass::Read).await?;
         let repository = self.repository(&req, &req.input.bucket, RepositoryAccess::Read)?;
         let url_encode = list_url_encoding(req.input.encoding_type.as_ref())?;
-        if req
-            .input
-            .delimiter
-            .as_deref()
-            .is_some_and(|value| value != "/")
-            || !supported_list_attributes(req.input.optional_object_attributes.as_ref())
-            || req.input.request_payer.is_some()
-        {
-            return Err(s3_error!(NotImplemented));
-        }
+        reject_list_extensions(&req.input)?;
         let prefix = req.input.prefix.as_deref().unwrap_or("");
         let Some((reference, path_prefix)) =
             namespace::listing_reference(prefix).map_err(namespace_error)?
@@ -3444,8 +3428,7 @@ fn object_parts(
     marker: Option<i32>,
     max: Option<i32>,
 ) -> S3Result<GetObjectAttributesParts> {
-    let marker = marker.unwrap_or(0);
-    let max = max.unwrap_or(1000);
+    let (marker, max) = multipart_page_bounds(marker, max)?;
     let max_usize = usize::try_from(max).map_err(|_| s3_error!(InvalidArgument))?;
     let mut selected = parts
         .iter()
@@ -3479,6 +3462,15 @@ fn object_parts(
         ),
         total_parts_count: Some(i32::try_from(parts.len()).map_err(|_| s3_error!(InternalError))?),
     })
+}
+
+fn multipart_page_bounds(marker: Option<i32>, max: Option<i32>) -> S3Result<(i32, i32)> {
+    let marker = marker.unwrap_or(0);
+    let max = max.unwrap_or(1000);
+    if marker < 0 || !(1..=1000).contains(&max) {
+        return Err(s3_error!(InvalidArgument));
+    }
+    Ok((marker, max))
 }
 
 fn parse_tagging_header(value: Option<&str>) -> S3Result<BTreeMap<String, String>> {
@@ -3594,6 +3586,18 @@ fn reject_copy_extensions(input: &CopyObjectInput) -> S3Result<()> {
         || input.ssekms_key_id.is_some()
         || !standard_storage_class(input.storage_class.as_ref())
         || input.website_redirect_location.is_some()
+    {
+        return Err(s3_error!(NotImplemented));
+    }
+    Ok(())
+}
+
+fn reject_list_extensions(input: &ListObjectsV2Input) -> S3Result<()> {
+    if input.delimiter.as_deref().is_some_and(|value| value != "/")
+        || input.expected_bucket_owner.is_some()
+        || input.fetch_owner.is_some()
+        || !supported_list_attributes(input.optional_object_attributes.as_ref())
+        || input.request_payer.is_some()
     {
         return Err(s3_error!(NotImplemented));
     }
@@ -3793,7 +3797,8 @@ impl Gateway {
 }
 
 fn reject_get_extensions(input: &GetObjectInput) -> S3Result<()> {
-    if input.version_id.is_some()
+    if input.expected_bucket_owner.is_some()
+        || input.version_id.is_some()
         || input.request_payer.is_some()
         || input.sse_customer_algorithm.is_some()
         || input.sse_customer_key.is_some()
@@ -3805,7 +3810,8 @@ fn reject_get_extensions(input: &GetObjectInput) -> S3Result<()> {
 }
 
 fn reject_head_extensions(input: &HeadObjectInput) -> S3Result<()> {
-    if input.version_id.is_some()
+    if input.expected_bucket_owner.is_some()
+        || input.version_id.is_some()
         || input.request_payer.is_some()
         || input.sse_customer_algorithm.is_some()
         || input.sse_customer_key.is_some()
@@ -5087,6 +5093,56 @@ mod tests {
             .unwrap();
 
         reject_copy_extensions(&input).unwrap();
+    }
+
+    #[test]
+    fn modeled_request_extensions_fail_closed() {
+        let error = reject_get_extensions(&GetObjectInput {
+            expected_bucket_owner: Some("owner".to_owned()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code().as_str(), "NotImplemented");
+
+        let error = reject_head_extensions(&HeadObjectInput {
+            expected_bucket_owner: Some("owner".to_owned()),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code().as_str(), "NotImplemented");
+
+        let error = reject_put_extensions(&PutObjectInput {
+            write_offset_bytes: Some(0),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code().as_str(), "NotImplemented");
+
+        let error = reject_list_extensions(&ListObjectsV2Input {
+            fetch_owner: Some(true),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code().as_str(), "NotImplemented");
+    }
+
+    #[test]
+    fn multipart_page_bounds_reject_invalid_markers_and_sizes() {
+        assert_eq!(
+            multipart_page_bounds(Some(-1), None)
+                .unwrap_err()
+                .code()
+                .as_str(),
+            "InvalidArgument"
+        );
+        assert_eq!(
+            multipart_page_bounds(None, Some(0))
+                .unwrap_err()
+                .code()
+                .as_str(),
+            "InvalidArgument"
+        );
+        assert_eq!(multipart_page_bounds(Some(7), Some(32)).unwrap(), (7, 32));
     }
 
     #[test]
