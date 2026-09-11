@@ -16,7 +16,7 @@ from typing import Any
 
 
 SCHEMA = "crab.s3-gateway-evidence"
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SUITE = "deployment"
 BACKEND_IMAGE = "rustfs/rustfs:1.0.0-beta.8-glibc"
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -26,6 +26,7 @@ REQUIRED_STEPS = {
     "initialize",
     "gateway",
     "traffic",
+    "cleanup",
     "measurements",
     "graceful",
     "compose",
@@ -43,6 +44,7 @@ CHECK_OWNERS = {
     "xet_range_stream": "traffic",
     "large_list_pagination": "traffic",
     "multipart_registration_scaling": "traffic",
+    "terminal_orphan_cleanup": "cleanup",
     "streaming_sigv4": "traffic",
     "streaming_rejection_atomicity": "traffic",
     "static_presigned_get": "traffic",
@@ -216,56 +218,80 @@ def _xet_qualification(
     }
 
 
-def _listing_qualification(proof_path: Path) -> dict[str, Any]:
+def _proof_fields(proof_path: Path, fields: tuple[str, ...]) -> dict[str, Any]:
     try:
         proof = json.loads(proof_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         proof = {}
     if not isinstance(proof, dict):
         proof = {}
-    fields = (
-        "objects",
-        "flat_objects",
-        "git_blob_oids",
-        "pages",
-        "max_keys",
-        "logical_size_bytes",
-        "logical_bytes",
-        "ordered",
-        "unique",
-        "late_prefix_objects",
-        "late_prefix_pages",
-        "delimiter_common_prefixes",
-        "metadata_scratch_bytes_written_delta",
-        "backend_requests_delta",
-        "backend_bytes_read_delta",
-        "elapsed_ms",
-        "direct_baseline_objects",
-        "direct_baseline_pages",
-        "direct_baseline_elapsed_ms",
-        "gateway_to_direct_baseline_millis",
-    )
     return {name: proof.get(name) for name in fields}
+
+
+def _listing_qualification(proof_path: Path) -> dict[str, Any]:
+    return _proof_fields(
+        proof_path,
+        (
+            "objects",
+            "flat_objects",
+            "git_blob_oids",
+            "pages",
+            "max_keys",
+            "logical_size_bytes",
+            "logical_bytes",
+            "ordered",
+            "unique",
+            "late_prefix_objects",
+            "late_prefix_pages",
+            "delimiter_common_prefixes",
+            "metadata_scratch_bytes_written_delta",
+            "backend_requests_delta",
+            "backend_bytes_read_delta",
+            "elapsed_ms",
+            "direct_baseline_objects",
+            "direct_baseline_pages",
+            "direct_baseline_elapsed_ms",
+            "gateway_to_direct_baseline_millis",
+        ),
+    )
 
 
 def _multipart_registration_qualification(proof_path: Path) -> dict[str, Any]:
-    try:
-        proof = json.loads(proof_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        proof = {}
-    if not isinstance(proof, dict):
-        proof = {}
-    fields = (
-        "parts_per_upload",
-        "small_part_bytes",
-        "large_part_bytes",
-        "small_state_bytes",
-        "large_state_bytes",
-        "state_bytes_delta",
-        "maximum_state_bytes",
-        "part_payloads_reclaimed",
+    return _proof_fields(
+        proof_path,
+        (
+            "parts_per_upload",
+            "small_part_bytes",
+            "large_part_bytes",
+            "small_state_bytes",
+            "large_state_bytes",
+            "state_bytes_delta",
+            "maximum_state_bytes",
+            "part_payloads_reclaimed",
+        ),
     )
-    return {name: proof.get(name) for name in fields}
+
+
+def _multipart_cleanup_qualification(proof_path: Path) -> dict[str, Any]:
+    return _proof_fields(
+        proof_path,
+        (
+            "completed_cleanup_scans",
+            "missing_session_cleanups",
+            "live_parts_before",
+            "live_parts_after",
+            "frozen_parts_before",
+            "frozen_parts_after",
+            "orphan_parts_before",
+            "orphan_parts_after",
+            "live_session_open",
+            "frozen_session_completing",
+            "orphan_session_absent",
+            "orphan_capacity_released",
+            "fixture_payloads_reclaimed",
+            "forced_exit_code",
+        ),
+    )
 
 
 def build_report(
@@ -277,6 +303,7 @@ def build_report(
     xet_qualification: dict[str, Any],
     listing_qualification: dict[str, Any],
     multipart_registration_qualification: dict[str, Any],
+    multipart_cleanup_qualification: dict[str, Any],
     resident_memory_bytes: int | None,
     container_writable_bytes: int | None,
     started_unix_ms: int,
@@ -330,6 +357,7 @@ def build_report(
         "xet_qualification": xet_qualification,
         "listing_qualification": listing_qualification,
         "multipart_registration_qualification": multipart_registration_qualification,
+        "multipart_cleanup_qualification": multipart_cleanup_qualification,
         "assertion_count": len(checks),
         "passed_assertions": passed_assertions,
         "skipped": [],
@@ -385,7 +413,7 @@ def verify_report(
     report: dict[str, Any], *, source_sha: str, run_id: str, run_attempt: str
 ) -> dict[str, Any]:
     if report.get("schema") != SCHEMA or report.get("schema_version") != SCHEMA_VERSION:
-        raise EvidenceError("report is not the canonical S3 gateway qualification v5 schema")
+        raise EvidenceError("report is not the canonical S3 gateway qualification v6 schema")
     if report.get("status") != "passed" or report.get("terminal_state") != "exited-zero":
         raise EvidenceError("qualification did not reach a successful terminal state")
     if report.get("suite") != SUITE or report.get("skipped") != []:
@@ -532,6 +560,33 @@ def verify_report(
     if registration.get("part_payloads_reclaimed") is not True:
         raise EvidenceError("multipart registration fixtures retained staged payloads")
 
+    cleanup = report.get("multipart_cleanup_qualification")
+    if not isinstance(cleanup, dict):
+        raise EvidenceError("multipart orphan-cleanup evidence is missing")
+    completed_scans = cleanup.get("completed_cleanup_scans")
+    if type(completed_scans) is not int or not 1 <= completed_scans <= 2:
+        raise EvidenceError("multipart orphan cleanup exceeded two completed scans")
+    if (
+        cleanup.get("missing_session_cleanups"),
+        cleanup.get("live_parts_before"),
+        cleanup.get("live_parts_after"),
+        cleanup.get("frozen_parts_before"),
+        cleanup.get("frozen_parts_after"),
+        cleanup.get("orphan_parts_before"),
+        cleanup.get("orphan_parts_after"),
+        cleanup.get("forced_exit_code"),
+    ) != (1, 1, 1, 1, 1, 1, 0, 137):
+        raise EvidenceError("multipart orphan cleanup changed protected payloads")
+    for name in (
+        "live_session_open",
+        "frozen_session_completing",
+        "orphan_session_absent",
+        "orphan_capacity_released",
+        "fixture_payloads_reclaimed",
+    ):
+        if cleanup.get(name) is not True:
+            raise EvidenceError(f"multipart orphan cleanup did not prove {name}")
+
     checks = report.get("checks")
     if not isinstance(checks, list):
         raise EvidenceError("checks must be a list")
@@ -593,6 +648,7 @@ def verify_report(
         "large_list_direct_baseline_elapsed_ms": baseline_elapsed,
         "large_list_gateway_to_direct_baseline_millis": ratio_millis,
         "multipart_registration_state_bytes_delta": state_delta,
+        "multipart_cleanup_completed_scans": completed_scans,
     }
 
 
@@ -621,6 +677,9 @@ def produce(args: argparse.Namespace) -> int:
             listing_qualification=_listing_qualification(args.listing_proof),
             multipart_registration_qualification=_multipart_registration_qualification(
                 args.multipart_registration_proof
+            ),
+            multipart_cleanup_qualification=_multipart_cleanup_qualification(
+                args.multipart_cleanup_proof
             ),
             resident_memory_bytes=read_resident_memory(args.resident_memory),
             container_writable_bytes=_read_nonnegative_integer(args.container_writable),
@@ -676,6 +735,7 @@ def parser() -> argparse.ArgumentParser:
     producer.add_argument("--xet-proof", type=Path, required=True)
     producer.add_argument("--listing-proof", type=Path, required=True)
     producer.add_argument("--multipart-registration-proof", type=Path, required=True)
+    producer.add_argument("--multipart-cleanup-proof", type=Path, required=True)
     producer.add_argument("--resident-memory", type=Path, required=True)
     producer.add_argument("--container-writable", type=Path, required=True)
     producer.add_argument("--started", type=Path, required=True)

@@ -165,7 +165,12 @@ jobs:
           date +%s%3N > "${RUNNER_TEMP}/crab-s3-gateway-evidence/started-unix-ms"
 
       - name: Verify qualification evidence contract
-        run: python3 -m unittest crab/scripts/e2e/test_s3_gateway_qualification_report.py
+        run: |
+          python3 -m py_compile \
+            crab/scripts/e2e/run_s3_gateway_orphan_cleanup.py \
+            crab/scripts/e2e/s3_gateway_qualification_report.py
+          python3 -m unittest \
+            crab/scripts/e2e/test_s3_gateway_qualification_report.py
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
@@ -1190,6 +1195,13 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             http://127.0.0.1:18080/metrics)" = 403
 
+      - name: Verify multipart orphan cleanup after process kill
+        id: cleanup
+        run: >-
+          python3 -B crab/scripts/e2e/run_s3_gateway_orphan_cleanup.py
+          --qualification-root ${RUNNER_TEMP}/crab-s3-gateway-client
+          --part-file ${RUNNER_TEMP}/crab-s3-gateway-client/registration-08.bin
+          --proof ${RUNNER_TEMP}/crab-s3-gateway-client/multipart-cleanup-proof.json
 
       - name: Capture runtime measurements
         id: measurements
@@ -1351,6 +1363,7 @@ jobs:
           STEP_INITIALIZE: ${{ steps.initialize.outcome }}
           STEP_GATEWAY: ${{ steps.gateway.outcome }}
           STEP_TRAFFIC: ${{ steps.traffic.outcome }}
+          STEP_CLEANUP: ${{ steps.cleanup.outcome }}
           STEP_MEASUREMENTS: ${{ steps.measurements.outcome }}
           STEP_GRACEFUL: ${{ steps.graceful.outcome }}
           STEP_COMPOSE: ${{ steps.compose.outcome }}
@@ -1372,6 +1385,8 @@ jobs:
             --listing-proof "${qualification_root}/listing-proof.json" \
             --multipart-registration-proof \
               "${qualification_root}/multipart-registration-proof.json" \
+            --multipart-cleanup-proof \
+              "${qualification_root}/multipart-cleanup-proof.json" \
             --resident-memory "${qualification_root}/resident-memory" \
             --container-writable \
               "${qualification_root}/container-writable-bytes" \
@@ -1388,6 +1403,7 @@ jobs:
             --step "initialize=${STEP_INITIALIZE}" \
             --step "gateway=${STEP_GATEWAY}" \
             --step "traffic=${STEP_TRAFFIC}" \
+            --step "cleanup=${STEP_CLEANUP}" \
             --step "measurements=${STEP_MEASUREMENTS}" \
             --step "graceful=${STEP_GRACEFUL}" \
             --step "compose=${STEP_COMPOSE}"
@@ -1400,6 +1416,7 @@ jobs:
               steps.initialize.outcome == 'success' &&
               steps.gateway.outcome == 'success' &&
               steps.traffic.outcome == 'success' &&
+              steps.cleanup.outcome == 'success' &&
               steps.measurements.outcome == 'success' &&
               steps.graceful.outcome == 'success' &&
               steps.compose.outcome == 'success' &&

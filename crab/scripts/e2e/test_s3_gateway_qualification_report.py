@@ -100,6 +100,22 @@ def valid_report() -> dict[str, Any]:
             "maximum_state_bytes": 64 * 1024,
             "part_payloads_reclaimed": True,
         },
+        "multipart_cleanup_qualification": {
+            "completed_cleanup_scans": 1,
+            "missing_session_cleanups": 1,
+            "live_parts_before": 1,
+            "live_parts_after": 1,
+            "frozen_parts_before": 1,
+            "frozen_parts_after": 1,
+            "orphan_parts_before": 1,
+            "orphan_parts_after": 0,
+            "live_session_open": True,
+            "frozen_session_completing": True,
+            "orphan_session_absent": True,
+            "orphan_capacity_released": True,
+            "fixture_payloads_reclaimed": True,
+            "forced_exit_code": 137,
+        },
         "assertion_count": len(checks),
         "passed_assertions": len(checks),
         "skipped": [],
@@ -126,13 +142,14 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             report, source_sha="a" * 40, run_id="123", run_attempt="2"
         )
 
-    def test_accepts_complete_v5_report(self) -> None:
+    def test_accepts_complete_v6_report(self) -> None:
         result = self.verify(valid_report())
         self.assertEqual(result["status"], "verified")
         self.assertEqual(result["checks"], len(REPORT.REQUIRED_CHECKS))
         self.assertEqual(result["large_list_objects"], 10_032)
         self.assertEqual(result["large_list_gateway_to_direct_baseline_millis"], 1_000)
         self.assertEqual(result["multipart_registration_state_bytes_delta"], 1)
+        self.assertEqual(result["multipart_cleanup_completed_scans"], 1)
 
     def test_rejects_stale_or_dirty_source(self) -> None:
         for field, value in (
@@ -257,6 +274,32 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
                 ):
                     self.verify(report)
 
+    def test_rejects_incomplete_or_unsafe_multipart_orphan_cleanup(self) -> None:
+        for field, value in (
+            ("completed_cleanup_scans", 3),
+            ("missing_session_cleanups", 0),
+            ("live_parts_before", 0),
+            ("live_parts_after", 0),
+            ("frozen_parts_before", 0),
+            ("frozen_parts_after", 0),
+            ("orphan_parts_before", 0),
+            ("orphan_parts_after", 1),
+            ("live_session_open", False),
+            ("frozen_session_completing", False),
+            ("orphan_session_absent", False),
+            ("orphan_capacity_released", False),
+            ("fixture_payloads_reclaimed", False),
+            ("forced_exit_code", 0),
+        ):
+            with self.subTest(field=field):
+                report = valid_report()
+                report["multipart_cleanup_qualification"][field] = value
+                with self.assertRaisesRegex(
+                    REPORT.EvidenceError,
+                    "multipart orphan cleanup",
+                ):
+                    self.verify(report)
+
     def test_rejects_identity_and_secret_fields(self) -> None:
         for field in REPORT.SENSITIVE_KEYS:
             with self.subTest(field=field):
@@ -336,6 +379,9 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             multipart_registration_qualification=report[
                 "multipart_registration_qualification"
             ],
+            multipart_cleanup_qualification=report[
+                "multipart_cleanup_qualification"
+            ],
             resident_memory_bytes=1_000_000,
             container_writable_bytes=0,
             started_unix_ms=100,
@@ -363,6 +409,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             xet_qualification={},
             listing_qualification={},
             multipart_registration_qualification={},
+            multipart_cleanup_qualification={},
             resident_memory_bytes=None,
             container_writable_bytes=None,
             started_unix_ms=100,

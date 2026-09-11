@@ -285,6 +285,11 @@ Phase-owned artifacts:
   Two one-part uploads then compare 8 MiB and 64 MiB payload registration on the
   real backend: each durable state record stays within 64 KiB, their sizes differ
   by at most 64 bytes, and abort reclaims both staged payloads.
+  A forced process exit then leaves one live session, one synthetically frozen
+  completion, and one eligible missing-session orphan on the same durable
+  backend. The replacement process must reclaim the orphan within two completed
+  maintenance scans, preserve both protected payloads and their lifecycle state,
+  release the orphan's capacity slot, and reclaim the fixture payloads afterward.
   The job retains and validates a versioned qualification report bound to the
   exact source, image, backend, client versions, both fixtures, measurements, and
   complete assertion inventory.
