@@ -286,6 +286,7 @@ Resources:
               umask 077;
               printf '%s' "$CRAB_GATEWAY_CONFIG" > /var/lib/crab/tmp/s3-gateway.toml;
               printf '%s' "$CRAB_GATEWAY_SECRET" > /var/lib/crab/tmp/client-secret;
+              unset CRAB_GATEWAY_CONFIG CRAB_GATEWAY_SECRET;
               exec /usr/local/bin/crab-s3-gateway --config /var/lib/crab/tmp/s3-gateway.toml
           Environment:
             - Name: AWS_REGION
@@ -315,7 +316,10 @@ Resources:
               ReadOnly: false
           ReadonlyRootFilesystem: true
           LinuxParameters:
+            Capabilities:
+              Drop: [ALL]
             InitProcessEnabled: true
+          Privileged: false
           HealthCheck:
             Command:
               - CMD-SHELL

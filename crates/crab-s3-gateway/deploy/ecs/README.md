@@ -9,10 +9,12 @@ cluster, VPC/subnets, security groups, ACM certificate, Crab backend bucket and
 Secrets Manager values; it never creates a second repository placement.
 
 The task uses an immutable `sha256:` image digest, a read-only root filesystem,
-separate bounded scratch/cache volumes, a 45-second target deregistration
-delay, and a 100% minimum healthy deployment. ECS retrieves the two secret
+all Linux capabilities dropped, separate bounded scratch/cache volumes, a
+45-second target deregistration delay, and a 100% minimum healthy deployment.
+ECS retrieves the two secret
 values with the execution role. The task's entrypoint writes them as protected
-files in the disposable scratch volume before starting the gateway:
+files in the disposable scratch volume, unsets the injected environment
+variables, and only then starts the gateway:
 
 - `ConfigSecretArn` contains the complete validated TOML configuration. Its
   `secret_key_file` must be `/var/lib/crab/tmp/client-secret`, and its

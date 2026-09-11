@@ -189,9 +189,13 @@ jobs:
             abort "task is not Fargate" unless task.fetch("RequiresCompatibilities").include?("FARGATE")
             abort "task is not non-root" unless container.fetch("User") == "10001:10001"
             abort "task root is writable" unless container.fetch("ReadonlyRootFilesystem")
+            abort "task retains Linux capabilities" unless container.fetch("LinuxParameters").fetch("Capabilities").fetch("Drop") == ["ALL"]
+            abort "task is privileged" unless container.fetch("Privileged") == false
             abort "task has no scratch volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-scratch" }
             abort "task has no cache volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-cache" }
             abort "task image is not digest-pinned" unless container.fetch("Image").to_s.include?("@\x24{ImageDigest}")
+            command = container.fetch("Command").join(" ")
+            abort "task retains secret environment variables" unless command.include?("unset CRAB_GATEWAY_CONFIG CRAB_GATEWAY_SECRET")
             service = resources.fetch("GatewayService").fetch("Properties")
             deployment = service.fetch("DeploymentConfiguration")
             abort "rolling deployment can drop all tasks" unless deployment.fetch("MinimumHealthyPercent") == 100
