@@ -148,7 +148,10 @@ budget is 32 and should be tuned from measured CPU, memory, file-descriptor, and
 scratch usage rather than client fanout alone. The S3 listener also caps live
 TCP connections at four times this request budget, while a separate 16-connection
 management reserve keeps probes available during S3 connection pressure; excess
-connections are closed before spawning a task. Each
+connections are closed before spawning a task. The transport parser accepts at
+most 128 HTTP/1 headers with a 128 KiB buffer and a 30-second header-read
+deadline; HTTP/2 is limited to 64 concurrent streams and a 128 KiB header list,
+with a 30-second keep-alive ping and a 10-second acknowledgement deadline. Each
 PutObject, UploadPart, and copied source range uses a request-local temporary
 file. Large multipart completion rereads durable parts instead of creating an
 additional full-object spool, so its local scratch does not scale with the

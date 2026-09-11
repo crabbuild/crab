@@ -329,7 +329,12 @@ The process bounds live S3 TCP connections to four times
 `max_in_flight_requests` and reserves 16 management connections for health and
 metrics probes. A connection rejected at that boundary is closed before a
 connection task is spawned; request-level admission remains the source of S3
-`SlowDown` responses for accepted connections.
+`SlowDown` responses for accepted connections. HTTP/1 parsing is bounded to 128
+headers and a 128 KiB buffer with a 30-second header-read deadline. HTTP/2 is
+bounded to 64 concurrent streams and a 128 KiB header list; a 30-second
+keep-alive ping closes connections that do not acknowledge within 10 seconds.
+These transport bounds are independent of S3 request admission and remain in
+force for signed and unsigned traffic.
 
 Request bodies are streamed through bounded memory to temporary storage while
 checksums are computed. Declared request lengths reserve scratch before the body

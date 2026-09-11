@@ -11,7 +11,7 @@ use http_body::Body as _;
 use http_body_util::{BodyExt as _, Full};
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
+    rt::{TokioExecutor, TokioIo, TokioTimer},
     server::{conn::auto::Builder as ConnectionBuilder, graceful::GracefulShutdown},
 };
 use s3s::{
@@ -31,6 +31,11 @@ use crate::{
 
 const CONNECTIONS_PER_REQUEST: usize = 4;
 const MANAGEMENT_CONNECTIONS: usize = 16;
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_HTTP1_HEADERS: usize = 128;
+const MAX_HTTP1_BUFFER_BYTES: usize = 128 * 1024;
+const MAX_HTTP2_HEADER_LIST_BYTES: u32 = 128 * 1024;
+const MAX_HTTP2_STREAMS_PER_CONNECTION: u32 = 64;
 
 #[derive(Clone)]
 pub(crate) struct RequestBodyDigest {
@@ -85,7 +90,22 @@ pub async fn serve(config: Config) -> Result<()> {
         builder.set_host(SingleDomain::new(&domain)?);
     }
     let service = builder.build();
-    let connections = ConnectionBuilder::new(TokioExecutor::new());
+    let mut connections = ConnectionBuilder::new(TokioExecutor::new());
+    connections
+        .http1()
+        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .max_headers(MAX_HTTP1_HEADERS)
+        .max_buf_size(MAX_HTTP1_BUFFER_BYTES)
+        .timer(TokioTimer::new());
+    connections
+        .http2()
+        .max_concurrent_streams(
+            (max_in_flight_requests as u32).min(MAX_HTTP2_STREAMS_PER_CONNECTION),
+        )
+        .max_header_list_size(MAX_HTTP2_HEADER_LIST_BYTES)
+        .keep_alive_interval(Some(Duration::from_secs(30)))
+        .keep_alive_timeout(Duration::from_secs(10))
+        .timer(TokioTimer::new());
     let graceful = GracefulShutdown::new();
     tracing::info!(address = %listen_address, "Crab S3 gateway listening");
     tracing::info!(address = %management_address, "Crab S3 gateway management listener ready");
