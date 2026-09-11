@@ -281,6 +281,13 @@ live EKS qualification. Operational alert response, scaling, credential
 rotation, repository maintenance, backup/restore, and upgrade/rollback are in
 the [operations runbook](deploy/operations.md).
 
+The ECS Fargate CloudFormation profile and parameter example are in
+`deploy/ecs/`. The template uses an immutable image digest, existing
+VPC/subnets/security groups, Secrets Manager references, a least-privilege
+backend task role, separate scratch/cache volumes, and an internal TLS ALB.
+It is cfn-lint and contract checked in CI, but live Fargate deployment and
+replacement evidence remain unqualified.
+
 Run it with a read-only root filesystem, a capacity-limited writable scratch
 mount at `/var/lib/crab/tmp`, a separate bounded cache mount whose child path
 matches `[cache].directory`, the configuration mounted at

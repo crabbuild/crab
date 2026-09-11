@@ -296,10 +296,12 @@ Phase-owned artifacts:
 - Phase 9: the crate README, pinned image, example configuration, separate
   management probes, container runtime smoke and isolated Compose profile
   exist. The canonical Helm chart is schema-checked, rendered and validated as
-  Kubernetes 1.29 resources in CI, but has no live EKS evidence. ECS and full
-  ECS assets below remain planned. The operations runbook and alert mappings
-  exist, but live Prometheus and Alertmanager delivery remain unqualified. None
-  of EKS or ECS is qualified production deployment support yet.
+  Kubernetes 1.29 resources in CI, but has no live EKS evidence. The ECS
+  CloudFormation template and parameter example are cfn-lint checked and
+  contract-checked in CI, but have no live Fargate evidence. The operations
+  runbook and alert mappings exist, but live Prometheus and Alertmanager
+  delivery remain unqualified. Neither EKS nor ECS is qualified production
+  deployment support yet.
 
 Proposed runner interface, to implement in phase 2 and extend per phase:
 
@@ -1444,7 +1446,12 @@ Current implementation covers the locked `deploy/Dockerfile`, example and
 Compose configurations, liveness/readiness contract, packaged-image RustFS
 smoke and Compose multipart recovery across container replacement. It also
 includes the canonical Helm chart, values schema, EKS example and CI validation
-against Kubernetes 1.29 schemas. The private management listener exports
+against Kubernetes 1.29 schemas, plus `deploy/ecs/crab-s3-gateway.yaml` and its
+parameter example for an immutable-image, two-task Fargate service with Secrets
+Manager references, least-privilege backend access, bounded scratch, and an
+internal TLS ALB. The ECS template passes cfn-lint and checked contract
+invariants; live Fargate deployment and replacement evidence remain separate.
+The private management listener exports
 bounded-cardinality Prometheus HTTP, response-stream, admission-pressure,
 content-scratch, logical object-store latency/outcome/byte, and aggregate
 multipart-reconciliation metrics, with
@@ -1462,8 +1469,8 @@ verified-hit byte counters, local-persistence failures, and coalesced read-only
 catalog usage/health probes. The Helm chart now includes opt-in, release-scoped
 PodMonitor and PrometheusRule resources backed by syntax validation and healthy
 and faulting rule tests. Live Prometheus selection, Alertmanager receiver
-delivery, Kubernetes policy-quota telemetry, and ECS remain requirements, not
-qualified deployment support. The checked operations runbook now binds every
+delivery, Kubernetes policy-quota telemetry, live EKS, external TLS, and live
+ECS remain requirements, not qualified deployment support. The checked operations runbook now binds every
 alert to a trigger, bounded diagnosis/action, and recovery proof, and covers
 scaling, credential rotation, repository maintenance, backup/restore, and
 upgrade/rollback without claiming unqualified platforms. One explicitly

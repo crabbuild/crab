@@ -1,0 +1,82 @@
+[
+  {
+    "ParameterKey": "ClusterArn",
+    "ParameterValue": "arn:aws:ecs:us-east-1:123456789012:cluster/crab-gateway"
+  },
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "LoadBalancerSubnets",
+    "ParameterValue": "subnet-0123456789abcdef0,subnet-0fedcba9876543210"
+  },
+  {
+    "ParameterKey": "ServiceSubnets",
+    "ParameterValue": "subnet-0123456789abcdef0,subnet-0fedcba9876543210"
+  },
+  {
+    "ParameterKey": "LoadBalancerSecurityGroupId",
+    "ParameterValue": "sg-0123456789abcdef0"
+  },
+  {
+    "ParameterKey": "TaskSecurityGroupIds",
+    "ParameterValue": "sg-0fedcba9876543210"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:us-east-1:123456789012:certificate/00000000-0000-0000-0000-000000000000"
+  },
+  {
+    "ParameterKey": "ImageRepositoryName",
+    "ParameterValue": "crab-s3-gateway"
+  },
+  {
+    "ParameterKey": "ImageDigest",
+    "ParameterValue": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  {
+    "ParameterKey": "ConfigSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:123456789012:secret:crab-s3-gateway-config-EXAMPLE"
+  },
+  {
+    "ParameterKey": "GatewayCredentialSecretArn",
+    "ParameterValue": "arn:aws:secretsmanager:us-east-1:123456789012:secret:crab-s3-gateway-client-EXAMPLE"
+  },
+  {
+    "ParameterKey": "BackendBucketName",
+    "ParameterValue": "crab-production-backend"
+  },
+  {
+    "ParameterKey": "BackendPrefix",
+    "ParameterValue": "repositories/example"
+  },
+  {
+    "ParameterKey": "ServiceName",
+    "ParameterValue": "crab-s3-gateway"
+  },
+  {
+    "ParameterKey": "DesiredCount",
+    "ParameterValue": "2"
+  },
+  {
+    "ParameterKey": "TaskCpu",
+    "ParameterValue": "2048"
+  },
+  {
+    "ParameterKey": "TaskMemory",
+    "ParameterValue": "4096"
+  },
+  {
+    "ParameterKey": "PlatformVersion",
+    "ParameterValue": "1.4.0"
+  },
+  {
+    "ParameterKey": "CpuArchitecture",
+    "ParameterValue": "X86_64"
+  },
+  {
+    "ParameterKey": "EphemeralStorageGiB",
+    "ParameterValue": "50"
+  }
+]

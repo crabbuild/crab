@@ -150,6 +150,62 @@ jobs:
             grep -Fq "${invariant}" <<< "${deployment}"
           done
 
+  ecs:
+    name: Validate ECS Fargate template
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install pinned CloudFormation linter
+        run: python3 -m pip install --disable-pip-version-check --quiet cfn-lint==1.41.0
+
+      - name: Parse and check deployment contract
+        run: |
+          cfn-lint --info crates/crab-s3-gateway/deploy/ecs/crab-s3-gateway.yaml
+          ruby -ryaml -rjson -e '
+            path = "crates/crab-s3-gateway/deploy/ecs/crab-s3-gateway.yaml"
+            template = YAML.load_file(path)
+            required_parameters = %w[
+              ClusterArn VpcId LoadBalancerSubnets ServiceSubnets
+              LoadBalancerSecurityGroupId TaskSecurityGroupIds CertificateArn
+              ImageRepositoryName ImageDigest ConfigSecretArn
+              GatewayCredentialSecretArn BackendBucketName BackendPrefix
+            ]
+            required_parameters.each do |name|
+              abort "missing parameter #{name}" unless template.fetch("Parameters").key?(name)
+            end
+            resources = template.fetch("Resources")
+            %w[
+              ImageRepository GatewayLogGroup ExecutionRole BackendRole
+              GatewayTaskDefinition GatewayLoadBalancer GatewayTargetGroup
+              GatewayListener GatewayService
+            ].each do |name|
+              abort "missing resource #{name}" unless resources.key?(name)
+            end
+            task = resources.fetch("GatewayTaskDefinition").fetch("Properties")
+            container = task.fetch("ContainerDefinitions").fetch(0)
+            abort "task is not Fargate" unless task.fetch("RequiresCompatibilities").include?("FARGATE")
+            abort "task is not non-root" unless container.fetch("User") == "10001:10001"
+            abort "task root is writable" unless container.fetch("ReadonlyRootFilesystem")
+            abort "task has no scratch volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-scratch" }
+            abort "task has no cache volume" unless task.fetch("Volumes").any? { |volume| volume.fetch("Name") == "gateway-cache" }
+            abort "task image is not digest-pinned" unless container.fetch("Image").to_s.include?("@${ImageDigest}")
+            service = resources.fetch("GatewayService").fetch("Properties")
+            deployment = service.fetch("DeploymentConfiguration")
+            abort "rolling deployment can drop all tasks" unless deployment.fetch("MinimumHealthyPercent") == 100
+            abort "deployment rollback is disabled" unless deployment.fetch("DeploymentCircuitBreaker").fetch("Rollback")
+            target = resources.fetch("GatewayTargetGroup").fetch("Properties")
+            abort "target readiness path changed" unless target.fetch("HealthCheckPath") == "/readyz"
+            parameters = JSON.parse(File.read("crates/crab-s3-gateway/deploy/ecs/parameters.example.json"))
+            example_keys = parameters.map { |parameter| parameter.fetch("ParameterKey") }
+            required_parameters.each do |name|
+              abort "example omits #{name}" unless example_keys.include?(name)
+            end
+            abort "template contains a credential fixture" if File.read(path).match?(/AKIA|wJalr|gateway-qualification-secret/)
+            puts "ECS template contract passed"
+          '
+
   image:
     name: Build and qualify image
     runs-on: ubuntu-latest

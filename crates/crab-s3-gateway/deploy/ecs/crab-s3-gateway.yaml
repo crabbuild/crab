@@ -1,0 +1,402 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Digest-pinned Crab S3 gateway on ECS Fargate. The stack creates compute,
+  logging, ECR, and an internal TLS load balancer; VPC, subnet, security-group,
+  Crab repository storage, and Secrets Manager values remain caller-owned.
+
+Parameters:
+  ClusterArn:
+    Type: String
+    Description: Existing ECS cluster ARN for the gateway service.
+    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):ecs:[a-z0-9-]+:[0-9]{12}:cluster/.+$'
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC containing the load balancer and service subnets.
+  LoadBalancerSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two subnets in distinct availability zones for the ALB.
+  ServiceSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets with backend and ECR/Secrets Manager egress.
+  LoadBalancerSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Existing security group allowing the selected TLS client sources.
+  TaskSecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Existing security groups for gateway tasks and load-balancer ingress.
+  CertificateArn:
+    Type: String
+    Description: ACM certificate for the internal HTTPS listener.
+    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):acm:[a-z0-9-]+:[0-9]{12}:certificate/[0-9a-f-]+$'
+  ImageRepositoryName:
+    Type: String
+    Default: crab-s3-gateway
+    Description: ECR repository created for the immutable gateway image.
+    AllowedPattern: '^[a-z0-9]+(?:[._/-][a-z0-9]+)*$'
+    ConstraintDescription: Use a lowercase ECR repository name.
+  ImageDigest:
+    Type: String
+    Description: SHA-256 image digest built and scanned before deployment.
+    AllowedPattern: '^sha256:[0-9a-f]{64}$'
+    ConstraintDescription: Use the complete sha256 image digest, not a tag.
+  ConfigSecretArn:
+    Type: String
+    Description: Secrets Manager ARN whose value is the validated gateway TOML.
+    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+  GatewayCredentialSecretArn:
+    Type: String
+    Description: Secrets Manager ARN whose value is the client gateway secret.
+    AllowedPattern: '^arn:(aws|aws-us-gov|aws-cn):secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$'
+  SecretsKmsKeyArn:
+    Type: String
+    Default: ''
+    Description: Optional customer KMS key used by either gateway secret.
+    AllowedPattern: '^$|^arn:(aws|aws-us-gov|aws-cn):kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]+$'
+  BackendBucketName:
+    Type: String
+    Description: Existing object-store bucket containing the Crab repository prefix.
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+  BackendPrefix:
+    Type: String
+    Default: repositories/qualification
+    Description: Existing Crab repository prefix without a leading or trailing slash.
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$'
+  BackendKmsKeyArn:
+    Type: String
+    Default: ''
+    Description: Optional customer KMS key used by the backend bucket.
+    AllowedPattern: '^$|^arn:(aws|aws-us-gov|aws-cn):kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]+$'
+  ServiceName:
+    Type: String
+    Default: crab-s3-gateway
+    Description: ECS service and task family name.
+    AllowedPattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$'
+  DesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    MaxValue: 100
+    Description: Minimum number of tasks; two are required for replacement safety.
+  TaskCpu:
+    Type: String
+    Default: '2048'
+    AllowedValues: ['1024', '2048', '4096']
+  TaskMemory:
+    Type: String
+    Default: '4096'
+    AllowedValues: ['2048', '4096', '8192', '16384', '30720']
+    Description: Fargate memory in MiB; choose a value valid for TaskCpu.
+  PlatformVersion:
+    Type: String
+    Default: '1.4.0'
+    AllowedValues: ['1.4.0', LATEST]
+  CpuArchitecture:
+    Type: String
+    Default: X86_64
+    AllowedValues: [X86_64, ARM64]
+  EphemeralStorageGiB:
+    Type: Number
+    Default: 50
+    MinValue: 21
+    MaxValue: 200
+    Description: Disposable Fargate scratch/cache capacity, not durable repository state.
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+Conditions:
+  HasSecretsKmsKey: !Not [!Equals [!Ref SecretsKmsKeyArn, '']]
+  HasBackendKmsKey: !Not [!Equals [!Ref BackendKmsKeyArn, '']]
+
+Resources:
+  ImageRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Ref ImageRepositoryName
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      EmptyOnDelete: false
+
+  GatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /ecs/${ServiceName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pull-log-and-read-secrets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !GetAtt ImageRepository.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${GatewayLogGroup.Arn}:*
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref ConfigSecretArn
+                  - !Ref GatewayCredentialSecretArn
+
+  SecretsKmsPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasSecretsKmsKey
+    Properties:
+      PolicyName: decrypt-gateway-secrets
+      Roles: [!Ref ExecutionRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+            Resource: !Ref SecretsKmsKeyArn
+
+  BackendRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: crab-repository-prefix
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BackendBucketName}
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Ref BackendPrefix
+                      - !Sub ${BackendPrefix}/*
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:DeleteObject
+                  - s3:GetObject
+                  - s3:ListMultipartUploadParts
+                  - s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BackendBucketName}/${BackendPrefix}/*
+
+  BackendKmsPolicy:
+    Type: AWS::IAM::Policy
+    Condition: HasBackendKmsKey
+    Properties:
+      PolicyName: use-backend-kms-key
+      Roles: [!Ref BackendRole]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:GenerateDataKey
+            Resource: !Ref BackendKmsKeyArn
+
+  GatewayTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref ServiceName
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: !Ref CpuArchitecture
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt BackendRole.Arn
+      EphemeralStorage:
+        SizeInGiB: !Ref EphemeralStorageGiB
+      Volumes:
+        - Name: gateway-scratch
+        - Name: gateway-cache
+      ContainerDefinitions:
+        - Name: gateway
+          Image: !Sub ${ImageRepository.RepositoryUri}@${ImageDigest}
+          Essential: true
+          User: '10001:10001'
+          EntryPoint: [/bin/sh, -ec]
+          Command:
+            - >-
+              umask 077;
+              printf '%s' "$CRAB_GATEWAY_CONFIG" > /var/lib/crab/tmp/s3-gateway.toml;
+              printf '%s' "$CRAB_GATEWAY_SECRET" > /var/lib/crab/tmp/client-secret;
+              exec /usr/local/bin/crab-s3-gateway --config /var/lib/crab/tmp/s3-gateway.toml
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_DEFAULT_REGION
+              Value: !Ref AWS::Region
+            - Name: TMPDIR
+              Value: /var/lib/crab/tmp
+          Secrets:
+            - Name: CRAB_GATEWAY_CONFIG
+              ValueFrom: !Ref ConfigSecretArn
+            - Name: CRAB_GATEWAY_SECRET
+              ValueFrom: !Ref GatewayCredentialSecretArn
+          PortMappings:
+            - Name: s3
+              ContainerPort: 8080
+              Protocol: tcp
+            - Name: management
+              ContainerPort: 8081
+              Protocol: tcp
+          MountPoints:
+            - SourceVolume: gateway-scratch
+              ContainerPath: /var/lib/crab/tmp
+              ReadOnly: false
+            - SourceVolume: gateway-cache
+              ContainerPath: /var/lib/crab/cache-volume
+              ReadOnly: false
+          ReadonlyRootFilesystem: true
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - >-
+                /usr/local/bin/crab-s3-gateway --config
+                /var/lib/crab/tmp/s3-gateway.toml --healthcheck
+            Interval: 30
+            Timeout: 15
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref GatewayLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: gateway
+
+  GatewayLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups: [!Ref LoadBalancerSecurityGroupId]
+      Subnets: !Ref LoadBalancerSubnets
+
+  GatewayTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      TargetType: ip
+      Protocol: HTTP
+      Port: 8080
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /readyz
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: '200'
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '45'
+
+  GatewayListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref GatewayLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref GatewayTargetGroup
+
+  GatewayService:
+    Type: AWS::ECS::Service
+    DependsOn: GatewayListener
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cluster: !Ref ClusterArn
+      TaskDefinition: !Ref GatewayTaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: !Ref PlatformVersion
+      DesiredCount: !Ref DesiredCount
+      HealthCheckGracePeriodSeconds: 120
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: !Ref TaskSecurityGroupIds
+          Subnets: !Ref ServiceSubnets
+      LoadBalancers:
+        - TargetGroupArn: !Ref GatewayTargetGroup
+          ContainerName: gateway
+          ContainerPort: 8080
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+
+Outputs:
+  ImageRepositoryUri:
+    Description: Push the verified digest to this ECR repository before deployment.
+    Value: !GetAtt ImageRepository.RepositoryUri
+  LoadBalancerDnsName:
+    Description: Internal TLS endpoint for unchanged S3 clients.
+    Value: !GetAtt GatewayLoadBalancer.DNSName
+  LoadBalancerListenerArn:
+    Description: HTTPS listener preserving the S3 request path and query.
+    Value: !Ref GatewayListener
+  ServiceArn:
+    Description: ECS service running the gateway tasks.
+    Value: !Ref GatewayService
+  TaskDefinitionArn:
+    Description: Immutable task definition revision used by the service.
+    Value: !Ref GatewayTaskDefinition
+  BackendRoleArn:
+    Description: ECS task role used only for the configured Crab backend prefix.
+    Value: !GetAtt BackendRole.Arn
+  LogGroupName:
+    Description: Retained gateway application logs.
+    Value: !Ref GatewayLogGroup

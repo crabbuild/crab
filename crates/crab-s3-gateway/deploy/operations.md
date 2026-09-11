@@ -1,12 +1,13 @@
 # Crab S3 gateway operations
 
 This runbook covers the checked Docker image, the isolated Docker Compose
-qualification stack, and the canonical Kubernetes chart. Docker Compose is a
+qualification stack, the canonical Kubernetes chart, and the checked ECS
+Fargate CloudFormation profile under `deploy/ecs/`. Docker Compose is a
 single-host smoke profile. The chart is statically qualified for Kubernetes
 1.29/EKS, but EKS load-balancer, Pod Identity, TLS, Prometheus selection, and
-Alertmanager delivery still require evidence from the target cluster. ECS is
-not a supported deployment profile until the planned CloudFormation asset and
-live Fargate qualification exist.
+Alertmanager delivery still require evidence from the target cluster. The ECS
+template is statically linted and contract-checked; live Fargate qualification
+is still required before either platform is advertised as supported.
 
 ## Safety invariants
 
@@ -330,9 +331,10 @@ cycle.
 - Kubernetes/EKS: use the canonical Helm chart. Static rendering does not prove
   Pod Identity, DNS/TLS, load-balancer draining, monitoring selection, or
   multi-zone behavior in a target cluster.
-- ECS: no deployable asset or live evidence exists yet. Do not translate the
-  Kubernetes values by hand and call the result supported; use Docker or the
-  chart until the Fargate profile is implemented and qualified.
+- ECS: use `deploy/ecs/README.md` and the CloudFormation template. Static
+  validation is not live Fargate evidence; do not claim support until the
+  external TLS, task replacement, credential rotation, and active-transfer
+  recovery profile has passed in a dedicated AWS account.
 
 See `crab/docs/guides/operational-playbooks.md` for Crab-wide provider,
 repository, backup, and disaster-recovery policy.
