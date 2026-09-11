@@ -1,8 +1,13 @@
-use std::{convert::Infallible, net::IpAddr, time::Duration};
+use std::{
+    convert::Infallible,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode, header};
-use http_body_util::Full;
+use http_body_util::{BodyExt as _, Full};
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -17,9 +22,41 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Config, Result,
+    content::Digester,
     gateway::Gateway,
     metrics::{Metrics, ObservedBody},
 };
+
+#[derive(Clone)]
+pub(crate) struct RequestBodyDigest {
+    digester: Arc<Mutex<Option<Digester>>>,
+}
+
+impl RequestBodyDigest {
+    pub(crate) fn new() -> Self {
+        Self {
+            digester: Arc::new(Mutex::new(Some(Digester::new()))),
+        }
+    }
+
+    pub(crate) fn update(&self, bytes: &[u8]) {
+        if let Ok(mut digester) = self.digester.lock()
+            && let Some(digester) = digester.as_mut()
+        {
+            let _ = digester.write(bytes, u64::MAX);
+        }
+    }
+
+    pub(crate) fn finish(&self) -> Option<crate::content::Digests> {
+        self.digester
+            .lock()
+            .ok()?
+            .take()?
+            .finish()
+            .ok()
+            .map(|(_, digests)| digests)
+    }
+}
 
 /// Serve the configured gateway until SIGINT or SIGTERM.
 pub async fn serve(config: Config) -> Result<()> {
@@ -155,7 +192,8 @@ async fn observed_s3_response(
     request: Request<Incoming>,
 ) -> std::result::Result<Response<ObservedBody>, s3s::HttpError> {
     let observation = metrics.start_request(request.method());
-    match service.call(request.map(s3s::Body::from)).await {
+    let request = request_body_with_digest(request);
+    match service.call(request).await {
         Ok(response) => {
             let observation = observation.response(response.status());
             let (parts, body) = response.into_parts();
@@ -169,6 +207,43 @@ async fn observed_s3_response(
             Err(error)
         }
     }
+}
+
+fn request_body_with_digest(request: Request<Incoming>) -> Request<s3s::Body> {
+    if !needs_xml_body_digest(&request) {
+        return request.map(s3s::Body::from);
+    }
+
+    let digest = RequestBodyDigest::new();
+    let digest_for_body = digest.clone();
+    let (parts, body) = request.into_parts();
+    let body = body.map_frame(move |frame| {
+        if let Some(data) = frame.data_ref() {
+            digest_for_body.update(data.as_ref());
+        }
+        frame
+    });
+    let body = body.map_err(|error| -> s3s::StdError { Box::new(error) });
+    let mut request = Request::from_parts(parts, s3s::Body::http_body(body));
+    request.extensions_mut().insert(digest);
+    request
+}
+
+fn needs_xml_body_digest(request: &Request<Incoming>) -> bool {
+    match *request.method() {
+        Method::POST => has_query_flag(request.uri(), "delete"),
+        Method::PUT => has_query_flag(request.uri(), "tagging"),
+        _ => false,
+    }
+}
+
+fn has_query_flag(uri: &http::Uri, flag: &str) -> bool {
+    uri.query().is_some_and(|query| {
+        query.split('&').any(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            key == flag
+        })
+    })
 }
 
 async fn readiness_response(gateway: &Gateway) -> Response<Full<Bytes>> {
@@ -302,5 +377,30 @@ mod tests {
             response.headers()[header::CONTENT_TYPE],
             "text/plain; version=0.0.4; charset=utf-8"
         );
+    }
+
+    #[test]
+    fn xml_body_query_flags_are_selected_without_matching_prefixes() {
+        assert!(has_query_flag(&"/repo?delete".parse().unwrap(), "delete"));
+        assert!(has_query_flag(
+            &"/repo/key?tagging=".parse().unwrap(),
+            "tagging"
+        ));
+        assert!(!has_query_flag(
+            &"/repo?delete-marker".parse().unwrap(),
+            "delete"
+        ));
+    }
+
+    #[test]
+    fn request_body_digest_can_only_be_finished_once() {
+        use md5::Digest as _;
+
+        let digest = RequestBodyDigest::new();
+        digest.update(b"tagging body");
+        let digests = digest.finish().unwrap();
+        let expected: [u8; 16] = md5::Md5::digest(b"tagging body").into();
+        assert_eq!(digests.md5, expected);
+        assert!(digest.finish().is_none());
     }
 }

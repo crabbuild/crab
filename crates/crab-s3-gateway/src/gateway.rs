@@ -1582,6 +1582,11 @@ impl S3 for Gateway {
         {
             return Err(s3_error!(NotImplemented));
         }
+        verify_xml_request_integrity(
+            &req,
+            req.input.content_md5.as_deref(),
+            req.input.checksum_algorithm.as_ref(),
+        )?;
         let (repository, address, principal) =
             self.writable_address(&req, &req.input.bucket, &req.input.key)?;
         let tags = validate_tags(
@@ -1714,6 +1719,7 @@ impl S3 for Gateway {
         {
             return Err(s3_error!(NotImplemented));
         }
+        verify_xml_request_integrity(&req, None, req.input.checksum_algorithm.as_ref())?;
         if req.input.delete.objects.len() > 1000 {
             return Err(s3_error!(
                 MalformedXML,
@@ -2877,6 +2883,43 @@ fn verify_content_md5(actual: &[u8; 16], expected: Option<&str>) -> S3Result<()>
     Ok(())
 }
 
+fn verify_xml_request_integrity<T>(
+    req: &S3Request<T>,
+    content_md5: Option<&str>,
+    checksum_algorithm: Option<&ChecksumAlgorithm>,
+) -> S3Result<()> {
+    let header_md5 = req
+        .headers
+        .get(http::HeaderName::from_static("content-md5"))
+        .map(|value| value.to_str().map_err(|_| s3_error!(InvalidDigest)))
+        .transpose()?;
+    let expected_md5 = content_md5.or(header_md5);
+    let has_checksum_header = [
+        "x-amz-checksum-crc32",
+        "x-amz-checksum-crc32c",
+        "x-amz-checksum-crc64nvme",
+        "x-amz-checksum-sha1",
+        "x-amz-checksum-sha256",
+    ]
+    .iter()
+    .any(|name| req.headers.contains_key(*name));
+    if expected_md5.is_none() && checksum_algorithm.is_none() && !has_checksum_header {
+        return Ok(());
+    }
+    let digests = req
+        .extensions
+        .get::<crate::server::RequestBodyDigest>()
+        .and_then(crate::server::RequestBodyDigest::finish)
+        .ok_or_else(|| s3_error!(InvalidRequest, "request body checksum unavailable"))?;
+    verify_content_md5(&digests.md5, expected_md5)?;
+    let mut checksums = RequestChecksums {
+        algorithm: checksum_algorithm.cloned(),
+        ..Default::default()
+    };
+    checksums.merge_headers(&req.headers)?;
+    checksums.verify(&digests)
+}
+
 fn reject_put_extensions(input: &PutObjectInput) -> S3Result<()> {
     if input.acl.is_some()
         || input.bucket_key_enabled.is_some()
@@ -2982,6 +3025,15 @@ impl RequestChecksums {
         merge_checksum_header(&mut self.crc64nvme, &headers, "x-amz-checksum-crc64nvme")?;
         merge_checksum_header(&mut self.sha1, &headers, "x-amz-checksum-sha1")?;
         merge_checksum_header(&mut self.sha256, &headers, "x-amz-checksum-sha256")?;
+        Ok(())
+    }
+
+    fn merge_headers(&mut self, headers: &http::HeaderMap) -> S3Result<()> {
+        merge_checksum_header(&mut self.crc32, headers, "x-amz-checksum-crc32")?;
+        merge_checksum_header(&mut self.crc32c, headers, "x-amz-checksum-crc32c")?;
+        merge_checksum_header(&mut self.crc64nvme, headers, "x-amz-checksum-crc64nvme")?;
+        merge_checksum_header(&mut self.sha1, headers, "x-amz-checksum-sha1")?;
+        merge_checksum_header(&mut self.sha256, headers, "x-amz-checksum-sha256")?;
         Ok(())
     }
 
@@ -5124,6 +5176,66 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.code().as_str(), "NotImplemented");
+    }
+
+    #[test]
+    fn xml_request_integrity_validates_md5_and_checksum_headers() {
+        use md5::Digest as _;
+
+        let body = b"tagging body";
+        let digest = crate::server::RequestBodyDigest::new();
+        digest.update(body);
+        let mut req = S3Request {
+            input: (),
+            method: http::Method::PUT,
+            uri: http::Uri::from_static("/repo/main/object?tagging"),
+            headers: http::HeaderMap::new(),
+            extensions: http::Extensions::new(),
+            credentials: None,
+            region: None,
+            service: None,
+            trailing_headers: None,
+        };
+        req.extensions.insert(digest);
+        let md5 = base64::engine::general_purpose::STANDARD.encode(md5::Md5::digest(body));
+        verify_xml_request_integrity(&req, Some(&md5), None).unwrap();
+
+        let digest = crate::server::RequestBodyDigest::new();
+        digest.update(body);
+        let mut req = req;
+        req.extensions = http::Extensions::new();
+        req.extensions.insert(digest);
+        let mut checksums = http::HeaderMap::new();
+        let mut crc = crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32IsoHdlc);
+        crc.update(body);
+        checksums.insert(
+            "x-amz-checksum-crc32",
+            base64::engine::general_purpose::STANDARD
+                .encode(u32::try_from(crc.finalize()).unwrap().to_be_bytes())
+                .parse()
+                .unwrap(),
+        );
+        req.headers = checksums;
+        verify_xml_request_integrity(
+            &req,
+            None,
+            Some(&ChecksumAlgorithm::from_static(ChecksumAlgorithm::CRC32)),
+        )
+        .unwrap();
+
+        let digest = crate::server::RequestBodyDigest::new();
+        digest.update(body);
+        req.extensions = http::Extensions::new();
+        req.extensions.insert(digest);
+        req.headers.insert(
+            "content-md5",
+            base64::engine::general_purpose::STANDARD
+                .encode(md5::Md5::digest(b"different"))
+                .parse()
+                .unwrap(),
+        );
+        let error = verify_xml_request_integrity(&req, None, None).unwrap_err();
+        assert_eq!(error.code().as_str(), "BadDigest");
     }
 
     #[test]
