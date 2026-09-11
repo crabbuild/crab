@@ -207,12 +207,14 @@ impl Manifest {
 
 pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Result<Manifest> {
     let mut current = Some(commit);
-    let mut deltas = Vec::new();
+    let mut depth = 0;
+    let mut changes = BTreeMap::new();
     let mut manifest = Manifest::default();
     while let Some(commit) = current {
-        if deltas.len() >= MAX_DELTA_DEPTH {
+        if depth >= MAX_DELTA_DEPTH {
             return Err(crate::Error::Config("S3 attribute delta chain is too deep"));
         }
+        depth += 1;
         match load_stored(repository, commit).await? {
             None => break,
             Some(Stored::Legacy(legacy)) => {
@@ -221,14 +223,21 @@ pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Re
             }
             Some(Stored::Delta(delta)) => {
                 current = parse_parent(delta.parent.as_deref())?;
-                deltas.push(delta.changes);
+                retain_newest_changes(&mut changes, delta.changes);
             }
         }
     }
-    for changes in deltas.into_iter().rev() {
-        manifest.apply(changes);
-    }
+    manifest.apply(changes);
     Ok(manifest)
+}
+
+fn retain_newest_changes(
+    selected: &mut BTreeMap<String, Option<ObjectAttributes>>,
+    changes: BTreeMap<String, Option<ObjectAttributes>>,
+) {
+    for (path, attributes) in changes {
+        selected.entry(path).or_insert(attributes);
+    }
 }
 
 pub(crate) async fn load_object(
@@ -389,4 +398,49 @@ fn parse_parent(value: Option<&str>) -> crate::Result<Option<ObjectId>> {
         .map(ObjectId::from_str)
         .transpose()
         .map_err(|_| crate::Error::Config("S3 attribute delta parent is corrupt"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attributes(etag: &str) -> ObjectAttributes {
+        ObjectAttributes::new(
+            ObjectId::empty_blob(gix_hash::Kind::Sha1),
+            etag.to_owned(),
+            0,
+            0,
+            PutAttributes::default(),
+        )
+    }
+
+    #[test]
+    fn newest_delta_change_wins_without_retaining_history() {
+        let mut selected = BTreeMap::new();
+        retain_newest_changes(
+            &mut selected,
+            BTreeMap::from([
+                ("same".to_owned(), Some(attributes("new"))),
+                ("deleted".to_owned(), None),
+            ]),
+        );
+        retain_newest_changes(
+            &mut selected,
+            BTreeMap::from([
+                ("same".to_owned(), Some(attributes("old"))),
+                ("deleted".to_owned(), Some(attributes("old"))),
+                ("older".to_owned(), Some(attributes("old"))),
+            ]),
+        );
+
+        assert_eq!(
+            selected["same"].as_ref().map(|value| value.etag.as_str()),
+            Some("new")
+        );
+        assert!(selected["deleted"].is_none());
+        assert_eq!(
+            selected["older"].as_ref().map(|value| value.etag.as_str()),
+            Some("old")
+        );
+    }
 }
