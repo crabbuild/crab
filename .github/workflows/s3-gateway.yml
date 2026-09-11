@@ -685,8 +685,8 @@ jobs:
           test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
             http://127.0.0.1:18080/metrics)" = 403
 
-          gateway_pid="$(docker inspect crab-s3-gateway --format '{{.State.Pid}}')"
-          awk '/^VmRSS:/ { printf "%.0f\\n", $2 * 1024 }' "/proc/${gateway_pid}/status" \
+          docker top crab-s3-gateway -eo pid,rss | \
+            awk 'NR > 1 { rss += $2 } END { if (rss > 0) printf "%.0f\\n", rss * 1024; else exit 1 }' \
             > "${qualification_root}/rss-bytes"
           grep -Eq '^[1-9][0-9]*$' "${qualification_root}/rss-bytes"
           docker inspect --size crab-s3-gateway --format '{{.SizeRw}}' \
