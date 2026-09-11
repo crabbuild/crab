@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    ops::Bound::{Excluded, Unbounded},
     pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -497,77 +498,88 @@ impl Gateway {
                     }
                 };
                 if now != 0 {
-                    let names = repositories.keys().cloned().collect::<Vec<_>>();
-                    let maintenance = futures_util::stream::iter(names)
-                        .map(|name| {
-                            let gateway = gateway.clone();
-                            let repositories = Arc::clone(&repositories);
-                            async move {
-                                let result = if let Some(repository) = repositories.get(&name) {
+                    let mut healthy = true;
+                    let mut after = None;
+                    loop {
+                        let names = repository_batch_names(&repositories, after.as_deref());
+                        let Some(next_after) = names.last().cloned() else {
+                            break;
+                        };
+                        let maintenance = futures_util::stream::iter(names)
+                            .map(|name| {
+                                let gateway = gateway.clone();
+                                let repositories = Arc::clone(&repositories);
+                                async move {
                                     // Every transition is restart-idempotent; a timed-out
                                     // pass retains its slot/state for the next sweep.
-                                    Some(
-                                        tokio::time::timeout(
-                                            Duration::from_secs(30),
-                                            gateway.maintain_multipart_repository(repository, now),
+                                    let result = if let Some(repository) = repositories.get(&name) {
+                                        Some(
+                                            tokio::time::timeout(
+                                                Duration::from_secs(30),
+                                                gateway
+                                                    .maintain_multipart_repository(repository, now),
+                                            )
+                                            .await,
                                         )
-                                        .await,
-                                    )
-                                } else {
-                                    None
-                                };
-                                (name, result)
-                            }
-                        })
-                        .buffer_unordered(4)
-                        .collect::<Vec<_>>();
-                    let results = tokio::select! {
-                        () = cancellation.cancelled() => break,
-                        results = maintenance => results,
-                    };
-                    let mut healthy = true;
-                    for (repository, result) in results {
-                        match result {
-                            None => {
-                                healthy = false;
-                                gateway.metrics.record_maintenance_failure(
-                                    MaintenanceFailure::RepositoryMissing,
-                                    1,
-                                );
-                                tracing::warn!(%repository, "multipart repository disappeared");
-                            }
-                            Some(Err(_)) => {
-                                healthy = false;
-                                gateway
-                                    .metrics
-                                    .record_maintenance_failure(MaintenanceFailure::Timeout, 1);
-                                tracing::warn!(%repository, "multipart maintenance timed out");
-                            }
-                            Some(Ok(Ok(stats))) => {
-                                healthy &= gateway.metrics.record_maintenance_result(&stats);
-                                if stats.expired != 0
-                                    || stats.terminal_cleanups != 0
-                                    || stats.missing_cleanups != 0
-                                    || stats.published_recoveries != 0
-                                {
-                                    tracing::info!(
-                                        %repository,
-                                        expired = stats.expired,
-                                        terminal_cleanups = stats.terminal_cleanups,
-                                        missing_cleanups = stats.missing_cleanups,
-                                        published_recoveries = stats.published_recoveries,
-                                        "multipart maintenance completed"
+                                    } else {
+                                        None
+                                    };
+                                    (name, result)
+                                }
+                            })
+                            .buffer_unordered(4);
+                        tokio::pin!(maintenance);
+                        loop {
+                            let item = tokio::select! {
+                                () = cancellation.cancelled() => return,
+                                item = maintenance.next() => item,
+                            };
+                            let Some((repository, result)) = item else {
+                                break;
+                            };
+                            match result {
+                                None => {
+                                    healthy = false;
+                                    gateway.metrics.record_maintenance_failure(
+                                        MaintenanceFailure::RepositoryMissing,
+                                        1,
                                     );
+                                    tracing::warn!(%repository, "multipart repository disappeared");
+                                }
+                                Some(Err(_)) => {
+                                    healthy = false;
+                                    gateway
+                                        .metrics
+                                        .record_maintenance_failure(MaintenanceFailure::Timeout, 1);
+                                    tracing::warn!(%repository, "multipart maintenance timed out");
+                                }
+                                Some(Ok(Ok(stats))) => {
+                                    healthy &= gateway.metrics.record_maintenance_result(&stats);
+                                    if stats.expired != 0
+                                        || stats.terminal_cleanups != 0
+                                        || stats.missing_cleanups != 0
+                                        || stats.published_recoveries != 0
+                                    {
+                                        tracing::info!(
+                                            %repository,
+                                            expired = stats.expired,
+                                            terminal_cleanups = stats.terminal_cleanups,
+                                            missing_cleanups = stats.missing_cleanups,
+                                            published_recoveries = stats.published_recoveries,
+                                            "multipart maintenance completed"
+                                        );
+                                    }
+                                }
+                                Some(Ok(Err(error))) => {
+                                    healthy = false;
+                                    gateway
+                                        .metrics
+                                        .record_maintenance_failure(MaintenanceFailure::Sweep, 1);
+                                    tracing::warn!(%repository, %error, "multipart maintenance failed");
                                 }
                             }
-                            Some(Ok(Err(error))) => {
-                                healthy = false;
-                                gateway
-                                    .metrics
-                                    .record_maintenance_failure(MaintenanceFailure::Sweep, 1);
-                                tracing::warn!(%repository, %error, "multipart maintenance failed");
-                            }
                         }
+                        after = Some(next_after);
                     }
                     gateway.metrics.record_maintenance_cycle(
                         if healthy {
@@ -602,16 +614,14 @@ impl Gateway {
         now: u64,
     ) -> crate::multipart::Result<crate::multipart::SweepStats> {
         let mut stats = crate::multipart::sweep(repository, now).await?;
-        let recoveries = futures_util::stream::iter(stats.take_completing())
+        let mut recoveries = futures_util::stream::iter(stats.take_completing())
             .map(|loaded| async move {
                 let upload_id = loaded.session.id.clone();
                 let result = self.recover_published_multipart(repository, loaded).await;
                 (upload_id, result)
             })
-            .buffer_unordered(4)
-            .collect::<Vec<_>>()
-            .await;
-        for (upload_id, result) in recoveries {
+            .buffer_unordered(4);
+        while let Some((upload_id, result)) = recoveries.next().await {
             match result {
                 Ok(true) => stats.published_recoveries += 1,
                 Ok(false) => {
@@ -4110,6 +4120,20 @@ fn select_ref_keys(
     (keys, truncated)
 }
 
+fn repository_batch_names<V>(
+    repositories: &BTreeMap<String, V>,
+    after: Option<&str>,
+) -> Vec<String> {
+    match after {
+        None => repositories.keys().take(4).cloned().collect(),
+        Some(after) => repositories
+            .range::<str, _>((Excluded(after), Unbounded))
+            .take(4)
+            .map(|(name, _)| name.clone())
+            .collect(),
+    }
+}
+
 fn remote_error(error: crab_remote_git::Error) -> s3s::S3Error {
     match error {
         crab_remote_git::Error::PathNotFound => s3_error!(NoSuchKey),
@@ -4482,6 +4506,27 @@ mod tests {
             select_ref_keys(&entries, Some("m/"), 2),
             (vec!["z/".to_owned()], false)
         );
+    }
+
+    #[test]
+    fn repository_maintenance_batches_resume_after_exclusive_name() {
+        let repositories = BTreeMap::from([
+            ("repo-a".to_owned(), ()),
+            ("repo-b".to_owned(), ()),
+            ("repo-c".to_owned(), ()),
+            ("repo-d".to_owned(), ()),
+            ("repo-e".to_owned(), ()),
+        ]);
+
+        assert_eq!(
+            repository_batch_names(&repositories, None),
+            ["repo-a", "repo-b", "repo-c", "repo-d"]
+        );
+        assert_eq!(
+            repository_batch_names(&repositories, Some("repo-d")),
+            ["repo-e"]
+        );
+        assert!(repository_batch_names(&repositories, Some("repo-e")).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

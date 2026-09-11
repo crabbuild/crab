@@ -64,6 +64,9 @@ then closes the session only when durable evidence proves that publication
 succeeded. Plan evidence remains valid after a later write replaces the object.
 A session without committed evidence remains fenced for an identical client
 retry.
+The reconciler walks the repository catalog in four-entry batches and streams
+completion recovery with bounded concurrency, so it does not retain a full
+catalog snapshot or a second queue of per-repository results.
 
 Repositories written by older Crab builds may not have the verified Git
 visibility evidence required by current background readability maintenance. If
