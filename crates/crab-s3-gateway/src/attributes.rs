@@ -92,6 +92,23 @@ pub(crate) struct ObjectAttributes {
     pub(crate) metadata: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ListingAttributes {
+    pub(crate) etag: String,
+    pub(crate) size: u64,
+    pub(crate) modified_seconds: u64,
+}
+
+impl From<&ObjectAttributes> for ListingAttributes {
+    fn from(attributes: &ObjectAttributes) -> Self {
+        Self {
+            etag: attributes.etag.clone(),
+            size: attributes.size,
+            modified_seconds: attributes.modified_seconds,
+        }
+    }
+}
+
 impl ObjectAttributes {
     pub(crate) fn new(
         blob_oid: ObjectId,
@@ -252,7 +269,7 @@ pub(crate) async fn load_objects(
     repository: &Repository,
     commit: ObjectId,
     objects: &[(String, ObjectId)],
-) -> crate::Result<BTreeMap<String, ObjectAttributes>> {
+) -> crate::Result<BTreeMap<String, ListingAttributes>> {
     let mut unresolved = objects.iter().cloned().collect::<BTreeMap<_, _>>();
     let mut resolved = BTreeMap::new();
     let mut current = Some(commit);
@@ -272,7 +289,7 @@ pub(crate) async fn load_objects(
                         .get(&path)
                         .filter(|attributes| attributes.blob_oid == oid.to_string())
                     {
-                        resolved.insert(path, attributes.clone());
+                        resolved.insert(path, attributes.into());
                     }
                 }
                 return Ok(resolved);
@@ -286,7 +303,7 @@ pub(crate) async fn load_objects(
                     if let Some(attributes) =
                         attributes.filter(|attributes| attributes.blob_oid == oid.to_string())
                     {
-                        resolved.insert(path, attributes);
+                        resolved.insert(path, (&attributes).into());
                     }
                 }
             }

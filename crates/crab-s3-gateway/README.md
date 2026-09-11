@@ -122,6 +122,9 @@ seek from the requested prefix and continuation in canonical complete-path byte
 order, visit only enough tree entries for `MaxKeys` plus one lookahead, and
 collapse delimiter subtrees before descent. Page cost therefore does not scale
 with every preceding or following object in the repository.
+The attribute loader projects each emitted object to ETag, size, and modification
+time before retaining the page, so multipart part/checksum metadata cannot make a
+large object listing grow with historical upload detail.
 Multipart-upload listings scan the bounded durable slot catalog with bounded
 concurrency and retain only the metadata needed for the current S3 page; the
 recorded part payload map is released before the next listing decision.
