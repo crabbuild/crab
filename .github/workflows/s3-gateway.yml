@@ -1198,9 +1198,9 @@ jobs:
         id: cleanup
         run: >-
           python3 -B crab/scripts/e2e/run_s3_gateway_orphan_cleanup.py
-          --qualification-root ${RUNNER_TEMP}/crab-s3-gateway-client
-          --part-file ${RUNNER_TEMP}/crab-s3-gateway-client/registration-08.bin
-          --proof ${RUNNER_TEMP}/crab-s3-gateway-client/multipart-cleanup-proof.json
+          --qualification-root "${RUNNER_TEMP}/crab-s3-gateway-client"
+          --part-file "${RUNNER_TEMP}/crab-s3-gateway-client/registration-08.bin"
+          --proof "${RUNNER_TEMP}/crab-s3-gateway-client/multipart-cleanup-proof.json"
 
       - name: Capture runtime measurements
         id: measurements
