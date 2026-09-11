@@ -97,8 +97,8 @@ presigned-query requests succeed, while a missing or wrong token returns
 It then validates and retains a 90-day `crab.s3-gateway-evidence` report
 bound to the exact source and image digest. The report includes the fixed check
 inventory, backend and client versions, fixture digest, request/byte/latency
-measurements, RSS, disk usage, and terminal state, but no endpoint, repository,
-object, or credential identity.
+measurements, container resident working-set memory, disk usage, and terminal
+state, but no endpoint, repository, object, or credential identity.
 
 Stop containers without deleting repository data:
 

@@ -62,7 +62,7 @@ def valid_report() -> dict[str, Any]:
             "backend_requests": 25,
             "backend_bytes_read": 100,
             "backend_bytes_written": 200,
-            "rss_bytes": 1_000_000,
+            "resident_memory_bytes": 1_000_000,
             "cache_retained_bytes": 100,
             "scratch_active_bytes": 0,
             "container_writable_bytes": 0,
@@ -113,7 +113,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
         for field, value in (
             ("http_requests", 0),
             ("backend_bytes_read", None),
-            ("rss_bytes", -1),
+            ("resident_memory_bytes", -1),
             ("scratch_active_bytes", 1),
             ("http_duration_seconds", 0.0),
         ):
@@ -144,6 +144,12 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             metrics = REPORT.parse_metrics(path)
         self.assertEqual(metrics, {"request": [2.0, 3.0], "gauge": [7.0]})
 
+    def test_docker_resident_memory_parser_accepts_binary_units(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "memory.txt"
+            path.write_text("49.47MiB / 7.667GiB\n", encoding="utf-8")
+            self.assertEqual(REPORT.read_resident_memory(path), 51_873_054)
+
     def test_builder_marks_failed_steps_incomplete(self) -> None:
         report = valid_report()
         metrics = {
@@ -161,7 +167,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             steps={name: "success" for name in REPORT.REQUIRED_STEPS - {"traffic"}},
             metrics=metrics,
             fixture=report["fixture"],
-            rss_bytes=1_000_000,
+            resident_memory_bytes=1_000_000,
             container_writable_bytes=0,
             started_unix_ms=100,
             finished_unix_ms=250,
@@ -185,7 +191,7 @@ class S3GatewayQualificationReportTests(unittest.TestCase):
             steps={name: "skipped" for name in REPORT.REQUIRED_STEPS},
             metrics={},
             fixture={"bytes": None, "sha256": None},
-            rss_bytes=None,
+            resident_memory_bytes=None,
             container_writable_bytes=None,
             started_unix_ms=100,
             finished_unix_ms=250,

@@ -691,10 +691,10 @@ jobs:
         run: |
           set -euo pipefail
           qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
-          docker exec crab-s3-gateway /bin/cat /proc/1/status | \
-            awk '/^VmRSS:/ { printf "%.0f\\n", $2 * 1024 }' \
-            > "${qualification_root}/rss-bytes"
-          grep -Eq '^[1-9][0-9]*$' "${qualification_root}/rss-bytes"
+          docker stats --no-stream --format '{{.MemUsage}}' crab-s3-gateway \
+            > "${qualification_root}/resident-memory"
+          grep -Eq '^[0-9]+([.][0-9]+)?([KMGT]i)?B / ' \
+            "${qualification_root}/resident-memory"
           docker inspect --size crab-s3-gateway --format '{{.SizeRw}}' \
             > "${qualification_root}/container-writable-bytes"
           grep -Eq '^[0-9]+$' \
@@ -860,7 +860,7 @@ jobs:
             --repository "${GITHUB_WORKSPACE}" \
             --metrics "${qualification_root}/metrics.txt" \
             --fixture "${qualification_root}/input.bin" \
-            --rss "${qualification_root}/rss-bytes" \
+            --resident-memory "${qualification_root}/resident-memory" \
             --container-writable \
               "${qualification_root}/container-writable-bytes" \
             --started "${report_root}/started-unix-ms" \

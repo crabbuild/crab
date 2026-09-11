@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import decimal
 import hashlib
 import json
 import re
@@ -66,6 +67,18 @@ SENSITIVE_KEYS = {
 METRIC_RE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{[^}]*\})?\s+([-+0-9.eE]+)$"
 )
+MEMORY_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B)\s*/")
+MEMORY_UNITS = {
+    "B": 1,
+    "KB": 1_000,
+    "MB": 1_000_000,
+    "GB": 1_000_000_000,
+    "TB": 1_000_000_000_000,
+    "KiB": 1 << 10,
+    "MiB": 1 << 20,
+    "GiB": 1 << 30,
+    "TiB": 1 << 40,
+}
 
 
 class EvidenceError(ValueError):
@@ -119,6 +132,19 @@ def _read_nonnegative_integer(path: Path) -> int | None:
     return value if value >= 0 else None
 
 
+def read_resident_memory(path: Path) -> int | None:
+    try:
+        value = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = MEMORY_RE.match(value)
+    if match is None:
+        return None
+    amount = decimal.Decimal(match.group(1)) * MEMORY_UNITS[match.group(2)]
+    resident_bytes = int(amount)
+    return resident_bytes if resident_bytes > 0 else None
+
+
 def _fixture(path: Path) -> dict[str, Any]:
     if not path.is_file():
         return {"bytes": None, "sha256": None}
@@ -135,7 +161,7 @@ def build_report(
     steps: dict[str, str],
     metrics: dict[str, list[float]],
     fixture: dict[str, Any],
-    rss_bytes: int | None,
+    resident_memory_bytes: int | None,
     container_writable_bytes: int | None,
     started_unix_ms: int,
     finished_unix_ms: int,
@@ -207,7 +233,7 @@ def build_report(
             "backend_bytes_written": _integer_sum(
                 metrics, "crab_s3_gateway_backend_bytes_written_total"
             ),
-            "rss_bytes": rss_bytes,
+            "resident_memory_bytes": resident_memory_bytes,
             "cache_retained_bytes": _integer_sum(
                 metrics, "crab_s3_gateway_cache_retained_bytes"
             ),
@@ -311,7 +337,7 @@ def verify_report(
         "backend_requests",
         "backend_bytes_read",
         "backend_bytes_written",
-        "rss_bytes",
+        "resident_memory_bytes",
     ):
         if type(measurements.get(name)) is not int or measurements[name] <= 0:
             raise EvidenceError(f"measurement {name} must be a positive integer")
@@ -357,7 +383,7 @@ def produce(args: argparse.Namespace) -> int:
             steps=steps,
             metrics=parse_metrics(args.metrics),
             fixture=_fixture(args.fixture),
-            rss_bytes=_read_nonnegative_integer(args.rss),
+            resident_memory_bytes=read_resident_memory(args.resident_memory),
             container_writable_bytes=_read_nonnegative_integer(args.container_writable),
             started_unix_ms=started_unix_ms,
             finished_unix_ms=time.time_ns() // 1_000_000,
@@ -406,7 +432,7 @@ def parser() -> argparse.ArgumentParser:
     producer.add_argument("--repository", type=Path, required=True)
     producer.add_argument("--metrics", type=Path, required=True)
     producer.add_argument("--fixture", type=Path, required=True)
-    producer.add_argument("--rss", type=Path, required=True)
+    producer.add_argument("--resident-memory", type=Path, required=True)
     producer.add_argument("--container-writable", type=Path, required=True)
     producer.add_argument("--started", type=Path, required=True)
     producer.add_argument("--source-sha", required=True)
