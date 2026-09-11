@@ -3679,12 +3679,13 @@ fn multipart_page_bounds(marker: Option<i32>, max: Option<i32>) -> S3Result<(i32
 }
 
 fn parse_tagging_header(value: Option<&str>) -> S3Result<BTreeMap<String, String>> {
-    let tags = value
-        .map(|value| url::form_urlencoded::parse(value.as_bytes()).into_owned())
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    validate_tags(tags)
+    match value {
+        Some(value) => validate_tags(
+            url::form_urlencoded::parse(value.as_bytes())
+                .map(|(key, value)| (key.into_owned(), value.into_owned())),
+        ),
+        None => Ok(BTreeMap::new()),
+    }
 }
 
 fn validate_tags(

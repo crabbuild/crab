@@ -150,20 +150,21 @@ fn sigv4_binds_session_token(headers: &HeaderMap, uri: &Uri, token_in_header: bo
             });
     }
 
-    let fields =
-        url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()).collect::<Vec<_>>();
-    if !fields.iter().any(|(name, _)| name == "X-Amz-Signature") {
+    let mut signature_present = false;
+    let mut signed_headers_seen = false;
+    let mut token_signed = false;
+    for (name, value) in url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes()) {
+        if name == "X-Amz-Signature" {
+            signature_present = true;
+        } else if name == "X-Amz-SignedHeaders" && !signed_headers_seen {
+            signed_headers_seen = true;
+            token_signed = value.split(';').any(|name| name == "x-amz-security-token");
+        }
+    }
+    if !signature_present {
         return false;
     }
-    !token_in_header
-        || fields
-            .iter()
-            .find(|(name, _)| name == "X-Amz-SignedHeaders")
-            .is_some_and(|(_, headers)| {
-                headers
-                    .split(';')
-                    .any(|name| name == "x-amz-security-token")
-            })
+    !token_in_header || token_signed
 }
 
 fn constant_time_eq(actual: &str, expected: &str) -> bool {
