@@ -2880,19 +2880,16 @@ impl S3 for Gateway {
                 },
                 None => None,
             };
-            let listing = snapshot
-                .list_tree_blobs(
-                    &crab_remote_git::TreeListingRequest::new(
-                        Bytes::copy_from_slice(path_prefix.as_bytes()),
-                        after,
-                        req.input.delimiter.as_deref().map(|_| b'/'),
-                        limit,
-                    )
-                    .map_err(remote_error)?,
-                    &operation,
-                )
-                .await
-                .map_err(remote_error)?;
+            let listing = list_visible_tree_blobs(
+                &snapshot,
+                Bytes::copy_from_slice(path_prefix.as_bytes()),
+                after,
+                req.input.delimiter.as_deref().map(|_| b'/'),
+                limit,
+                &operation,
+            )
+            .await
+            .map_err(remote_error)?;
             let paths = listing
                 .items
                 .iter()
@@ -2987,6 +2984,56 @@ impl S3 for Gateway {
         }
         .await;
         finish(operation, result).await
+    }
+}
+
+async fn list_visible_tree_blobs(
+    snapshot: &crab_remote_git::RemoteGitSnapshot,
+    prefix: Bytes,
+    after: Option<Bytes>,
+    delimiter: Option<u8>,
+    limit: usize,
+    operation: &crab_remote_git::OperationContext,
+) -> crab_remote_git::Result<crab_remote_git::TreeListingPage> {
+    let mut cursor = after;
+    let mut items = Vec::with_capacity(limit.saturating_add(1));
+    loop {
+        let page = snapshot
+            .list_tree_blobs(
+                &crab_remote_git::TreeListingRequest::new(
+                    prefix.clone(),
+                    cursor.clone(),
+                    delimiter,
+                    limit,
+                )?,
+                operation,
+            )
+            .await?;
+        let raw_last = page
+            .items
+            .last()
+            .map(|item| Bytes::copy_from_slice(item.path()));
+        items.extend(
+            page.items
+                .into_iter()
+                .filter(|item| namespace::listable_path(item.path())),
+        );
+        if items.len() > limit {
+            items.truncate(limit);
+            return Ok(crab_remote_git::TreeListingPage {
+                items,
+                has_more: true,
+            });
+        }
+        if !page.has_more {
+            return Ok(crab_remote_git::TreeListingPage {
+                items,
+                has_more: false,
+            });
+        }
+        cursor = Some(raw_last.ok_or(crab_remote_git::Error::InternalInvariant {
+            invariant: "tree listing returned an empty page with more results",
+        })?);
     }
 }
 
@@ -4642,6 +4689,25 @@ mod tests {
                         bytes: Bytes::from_static(b"value"),
                         track_lfs: false,
                         attributes: Box::new(attributes),
+                        condition: mutation::PutCondition::None,
+                    },
+                    "user",
+                    &gateway.cancellation,
+                )
+                .await
+                .unwrap();
+        }
+        for path in ["prefix/.git/legacy", "prefix/../legacy"] {
+            gateway
+                .mutations
+                .apply(
+                    repository,
+                    "refs/heads/main",
+                    &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+                    mutation::Change::Put {
+                        bytes: Bytes::from_static(b"legacy"),
+                        track_lfs: false,
+                        attributes: Box::new(crate::attributes::PutAttributes::default()),
                         condition: mutation::PutCondition::None,
                     },
                     "user",

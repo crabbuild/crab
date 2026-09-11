@@ -209,6 +209,12 @@ inside the raw Git trees, stops after `MaxKeys` plus one lookahead, and reads
 blob metadata only for emitted objects. It does not hydrate logical payloads or
 walk every preceding/following object. V1 markers are visible keys and each page
 resolves the current branch according to S3's non-snapshot behavior.
+Legacy Git trees may contain non-UTF-8 paths or components excluded by the S3
+key profile; LIST skips those blobs and delimiter groups so every returned key
+can be addressed by the read APIs. A listing prefix containing an invalid
+complete component is rejected as `InvalidArgument`. Skipped raw entries still
+consume the repository operation budget, and pagination advances through them
+without retaining more than `MaxKeys + 1` visible items.
 
 V2 continuation tokens are the last emitted raw key or common prefix. They are
 portable across gateway nodes and are reauthorized when the next request is

@@ -125,6 +125,11 @@ seek from the requested prefix and continuation in canonical complete-path byte
 order, visit only enough tree entries for `MaxKeys` plus one lookahead, and
 collapse delimiter subtrees before descent. Page cost therefore does not scale
 with every preceding or following object in the repository.
+Legacy Git commits can contain paths outside the S3 key profile; LIST filters
+those blobs and delimiter groups before emitting a page, while prefixes naming
+invalid path components fail as `InvalidArgument`. Continuation scanning keeps
+the same bounded page/lookahead allocation while advancing past filtered raw
+tree entries.
 The in-memory singleflight maps clear at bounded entry counts, so a long-lived
 read generation cannot grow with the number of distinct refs and object paths
 served through it.
