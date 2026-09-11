@@ -74,6 +74,9 @@ Before installation:
   does not initialize storage.
 - Create the ConfigMap and Secret outside this chart. Secret keys must have the
   same filenames used by each `secret_key_file` configuration path.
+- Temporary client credentials additionally need the `session_token_file` key
+  in that Secret and an RFC 3339 `expires_at` in the same configuration entry;
+  roll every replica before that deadline.
 - Set the required cache directory and byte ceiling in the ConfigMap. Account
   for both `scratch.sizeLimit` and `cache.sizeLimit` in the container's
   ephemeral-storage limit.

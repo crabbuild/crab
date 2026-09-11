@@ -46,6 +46,10 @@ pub struct LocalCacheConfig {
 pub struct CredentialConfig {
     pub access_key: String,
     pub secret_key_file: PathBuf,
+    /// Session token and expiry must be configured together for temporary credentials.
+    pub session_token_file: Option<PathBuf>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<time::OffsetDateTime>,
     pub principal: String,
 }
 
@@ -154,6 +158,23 @@ impl Config {
                 return Err(Error::Config("credential secret path must be a file"));
             }
             validate_secret_permissions(&metadata)?;
+            match (&credential.session_token_file, credential.expires_at) {
+                (Some(path), Some(_)) => {
+                    let metadata = std::fs::metadata(path)?;
+                    if !metadata.is_file() {
+                        return Err(Error::Config(
+                            "credential session token path must be a file",
+                        ));
+                    }
+                    validate_secret_permissions(&metadata)?;
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(Error::Config(
+                        "credential session_token_file and expires_at must be configured together",
+                    ));
+                }
+            }
             configured_principals.insert(credential.principal.as_str());
         }
         let mut names = HashSet::new();
@@ -313,6 +334,8 @@ mod tests {
             credentials: vec![CredentialConfig {
                 access_key: "test-access-key".to_owned(),
                 secret_key_file,
+                session_token_file: None,
+                expires_at: None,
                 principal: "test-principal".to_owned(),
             }],
             repositories: vec![RepositoryConfig {
@@ -445,5 +468,24 @@ mod tests {
             secret_permissions_are_private(0o444, 20, 20),
         ];
         assert!(insecure.into_iter().all(|accepted| !accepted));
+    }
+
+    #[test]
+    fn temporary_credentials_require_token_and_expiry_together() {
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        let token = tempfile::NamedTempFile::new().unwrap();
+        #[cfg(unix)]
+        for path in [secret.path(), token.path()] {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut config = valid_config(secret.path().to_owned());
+        config.credentials[0].session_token_file = Some(token.path().to_owned());
+        assert!(config.validate().is_err());
+        config.credentials[0].expires_at = Some(time::OffsetDateTime::now_utc());
+        config.validate().unwrap();
+        config.credentials[0].session_token_file = None;
+        assert!(config.validate().is_err());
     }
 }

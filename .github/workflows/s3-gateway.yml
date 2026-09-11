@@ -26,6 +26,9 @@ env:
   RUSTFS_SECRET_KEY: crab
   GATEWAY_ACCESS_KEY: gateway-qualification
   GATEWAY_SECRET_KEY: gateway-qualification-secret
+  GATEWAY_SESSION_ACCESS_KEY: gateway-session-qualification
+  GATEWAY_SESSION_SECRET_KEY: gateway-session-qualification-secret
+  GATEWAY_SESSION_TOKEN: gateway-session-qualification-token
 
 jobs:
   helm:
@@ -207,8 +210,15 @@ jobs:
           config_root="${RUNNER_TEMP}/crab-s3-gateway"
           install -d "${config_root}"
           printf '%s' "${GATEWAY_SECRET_KEY}" > "${config_root}/gateway-secret"
-          chmod 0440 "${config_root}/gateway-secret"
-          sudo chown 0:10001 "${config_root}/gateway-secret"
+          printf '%s' "${GATEWAY_SESSION_SECRET_KEY}" > "${config_root}/gateway-session-secret"
+          printf '%s' "${GATEWAY_SESSION_TOKEN}" > "${config_root}/gateway-session-token"
+          chmod 0440 "${config_root}/gateway-secret" \
+            "${config_root}/gateway-session-secret" \
+            "${config_root}/gateway-session-token"
+          sudo chown 0:10001 "${config_root}/gateway-secret" \
+            "${config_root}/gateway-session-secret" \
+            "${config_root}/gateway-session-token"
+          session_expiry="$(date --utc --date='+1 hour' '+%Y-%m-%dT%H:%M:%SZ')"
           printf '%s\n' \
             'listen = "0.0.0.0:8080"' \
             'management_listen = "0.0.0.0:8081"' \
@@ -222,6 +232,13 @@ jobs:
             '[[credentials]]' \
             "access_key = \"${GATEWAY_ACCESS_KEY}\"" \
             'secret_key_file = "/run/secrets/crab-s3-secret"' \
+            'principal = "service-account:qualification"' \
+            '' \
+            '[[credentials]]' \
+            "access_key = \"${GATEWAY_SESSION_ACCESS_KEY}\"" \
+            'secret_key_file = "/run/secrets/crab-s3-session-secret"' \
+            'session_token_file = "/run/secrets/crab-s3-session-token"' \
+            "expires_at = \"${session_expiry}\"" \
             'principal = "service-account:qualification"' \
             '' \
             '[[repositories]]' \
@@ -244,6 +261,8 @@ jobs:
             --tmpfs /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
             --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
             crab-s3-gateway:test \
             --config /etc/crab/s3-gateway.toml --initialize \
             >"${config_root}/missing-cache.stdout" \
@@ -269,6 +288,8 @@ jobs:
             --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
             --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
             crab-s3-gateway:test
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18081/livez >/dev/null; then
@@ -300,6 +321,8 @@ jobs:
             --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
             --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
             crab-s3-gateway:test \
             --config /etc/crab/s3-gateway.toml --initialize
 
@@ -324,6 +347,8 @@ jobs:
             --env RUST_LOG=trace \
             --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
+            --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
+            --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
             crab-s3-gateway:test
 
           for attempt in $(seq 1 60); do
@@ -440,6 +465,41 @@ jobs:
           curl --fail --silent --show-error "${presigned_url}" \
             --output "${qualification_root}/presigned.bin"
           cmp "${qualification_root}/input.bin" "${qualification_root}/presigned.bin"
+
+          export AWS_ACCESS_KEY_ID="${GATEWAY_SESSION_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${GATEWAY_SESSION_SECRET_KEY}"
+          export AWS_SESSION_TOKEN="${GATEWAY_SESSION_TOKEN}"
+          aws --endpoint-url "${endpoint}" s3api head-object \
+            --bucket "${bucket}" --key "${key}" >/dev/null
+          session_presigned_url="$(aws --endpoint-url "${endpoint}" s3 presign \
+            "s3://${bucket}/${key}" --expires-in 60)"
+          grep -Fq 'X-Amz-Security-Token=' <<< "${session_presigned_url}"
+          curl --fail --silent --show-error "${session_presigned_url}" \
+            --output "${qualification_root}/session-presigned.bin"
+          cmp "${qualification_root}/input.bin" \
+            "${qualification_root}/session-presigned.bin"
+          if AWS_MAX_ATTEMPTS=1 AWS_SESSION_TOKEN=wrong-session-token \
+            aws --endpoint-url "${endpoint}" s3api list-buckets \
+              >"${qualification_root}/wrong-session.stdout" \
+              2>"${qualification_root}/wrong-session.stderr"; then
+            echo "incorrect session token was accepted" >&2
+            exit 1
+          fi
+          grep -Fq 'InvalidToken' "${qualification_root}/wrong-session.stderr"
+          if env -u AWS_SESSION_TOKEN AWS_MAX_ATTEMPTS=1 \
+            AWS_ACCESS_KEY_ID="${GATEWAY_SESSION_ACCESS_KEY}" \
+            AWS_SECRET_ACCESS_KEY="${GATEWAY_SESSION_SECRET_KEY}" \
+            AWS_DEFAULT_REGION=us-east-1 AWS_CONFIG_FILE="${AWS_CONFIG_FILE}" \
+            aws --endpoint-url "${endpoint}" s3api list-buckets \
+              >"${qualification_root}/missing-session.stdout" \
+              2>"${qualification_root}/missing-session.stderr"; then
+            echo "session credential without its token was accepted" >&2
+            exit 1
+          fi
+          grep -Fq 'InvalidToken' "${qualification_root}/missing-session.stderr"
+          export AWS_ACCESS_KEY_ID="${GATEWAY_ACCESS_KEY}"
+          export AWS_SECRET_ACCESS_KEY="${GATEWAY_SECRET_KEY}"
+          unset AWS_SESSION_TOKEN
 
           PRESIGNED_URL="${presigned_url}" python3 - <<'PY'
           import os
@@ -577,6 +637,9 @@ jobs:
           if grep -Fq \
             -e "${GATEWAY_ACCESS_KEY}" \
             -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_ACCESS_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
             -e "${bucket}" \
             -e "${key}" \
             -e 'service-account:qualification' \
@@ -588,7 +651,10 @@ jobs:
             2> "${qualification_root}/gateway.stderr"
           if grep -Fq \
             -e "${GATEWAY_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_SECRET_KEY}" \
+            -e "${GATEWAY_SESSION_TOKEN}" \
             -e "Credential=${GATEWAY_ACCESS_KEY}" \
+            -e "Credential=${GATEWAY_SESSION_ACCESS_KEY}" \
             -e "AWS ${GATEWAY_ACCESS_KEY}:" \
             -e "AWSAccessKeyId=${GATEWAY_ACCESS_KEY}" \
             -e 'X-Amz-Signature=' \

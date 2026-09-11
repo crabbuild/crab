@@ -94,12 +94,14 @@ error. Preserve the incident window's logs and metrics after recovery.
 ## Credential and backend authentication
 
 Applies to `CrabS3GatewayBackendAuthorizationFailures` and any client-side
-`InvalidAccessKeyId` or `SignatureDoesNotMatch` burst.
+`InvalidAccessKeyId`, `SignatureDoesNotMatch`, `InvalidToken`, or `ExpiredToken`
+burst.
 
 First separate the two identities:
 
 - Client authentication failures happen before repository operations and use
-  the static access-key mappings in `s3-gateway.toml` plus mounted secret files.
+  access-key mappings in `s3-gateway.toml` plus mounted secret files. Temporary
+  mappings also require a session-token file and explicit expiry.
 - `crab_s3_gateway_backend_requests_total{outcome="auth"}` means the gateway's
   cloud identity could not access the physical object store.
 
@@ -112,6 +114,12 @@ For client credential rotation, use an overlap window:
 3. Prove signed discovery, PUT/HEAD/range GET, and DELETE with the new key.
 4. Remove the old mapping and secret, restart again, and prove the old key is
    rejected while the new key still succeeds.
+
+For temporary credentials, distribute the access key, secret, token, and expiry
+as one atomic credential generation. Roll all replicas before expiry and verify
+both header-signed and presigned-query traffic. A token is accepted only with
+its configured access key and only until its expiry; the gateway does not call
+STS or refresh client credentials itself.
 
 For backend IAM rotation, inspect the selected service account/task identity,
 object-store audit logs, provider throttling, and credential expiry without

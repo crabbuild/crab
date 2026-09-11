@@ -31,7 +31,9 @@ pub async fn serve(config: Config) -> Result<()> {
     let gateway = Gateway::new(config, cancellation.clone())?;
     let multipart_maintenance = gateway.start_multipart_maintenance();
     let mut builder = S3ServiceBuilder::new(gateway.clone());
-    builder.set_auth(gateway.auth());
+    let auth = gateway.auth();
+    builder.set_auth(auth.clone());
+    builder.set_access(auth);
     if let Some(domain) = endpoint_domain {
         builder.set_host(SingleDomain::new(&domain)?);
     }

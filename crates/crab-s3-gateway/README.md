@@ -8,9 +8,12 @@ configuration. Object keys use `REF/path`, for example
 The gateway accepts S3 SigV4 header signing and presigned-query URLs, plus
 legacy SigV2 header and presigned-query authentication, through `s3s`. It maps
 each access key to a Crab principal and authorizes that principal against the
-logical repository catalog. Gateway credentials are static Crab credentials,
-not SigV4a or temporary STS credentials, and are independent of the cloud
-credentials used for the backing object store.
+logical repository catalog. Gateway credentials may be long-lived or configured
+temporary SigV4 credential triples. Temporary credentials require a protected
+session-token file and an RFC 3339 expiry; missing, wrong, unsigned, duplicate,
+or expired tokens fail before repository authorization. The gateway does not
+issue or refresh STS credentials and does not support SigV4a. Client credentials
+remain independent of the cloud credentials used for the backing object store.
 HMAC-signed SigV4 streaming requests verify every chained chunk before
 publication. Their `aws-chunked` transport encoding is removed from stored
 object metadata, matching S3; any accompanying application encoding remains.
@@ -226,6 +229,10 @@ The deployment's DNS and TLS certificate must cover the wildcard host.
 
 See `deploy/gateway.example.toml` for configuration and
 `crab/docs/architecture/s3-gateway-contract.md` for the protocol contract.
+For a temporary client credential, add `session_token_file` and `expires_at` to
+the same `[[credentials]]` entry. Both are required together, the token file is
+subject to the same private-permission check as the secret-key file, and the
+process must be rolled before the configured credential expires.
 Terminate with SIGTERM or SIGINT for graceful connection draining.
 
 Production deployments should bind to a private listener and terminate TLS at

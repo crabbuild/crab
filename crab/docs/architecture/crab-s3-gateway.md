@@ -272,8 +272,9 @@ Phase-owned artifacts:
 - Phase 8: `.github/workflows/s3-gateway.yml` builds and qualifies the packaged
   image against RustFS with an unchanged signed AWS client. It separately
   exercises chained SigV4 streaming signatures, S3-compatible transport metadata,
-  and rejection atomicity for a corrupted chunk signature. Qualification-report
-  production and validation remain planned.
+  rejection atomicity for a corrupted chunk signature, and configured temporary
+  SigV4 credentials through header and presigned-query requests. Qualification-
+  report production and validation remain planned.
 - Phase 9: the crate README, pinned image, example configuration, separate
   management probes, container runtime smoke and isolated Compose profile
   exist. The canonical Helm chart is schema-checked, rendered and validated as

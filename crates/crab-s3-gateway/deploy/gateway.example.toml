@@ -19,6 +19,10 @@ max_bytes = 2147483648
 [[credentials]]
 access_key = "replace-with-issued-access-key"
 secret_key_file = "/run/secrets/crab-s3-secret"
+# For a temporary SigV4 credential, configure both fields and roll every
+# gateway replica before the expiry. The gateway does not issue or refresh it.
+# session_token_file = "/run/secrets/crab-s3-session-token"
+# expires_at = "2099-01-01T00:00:00Z"
 principal = "service-account:analytics"
 
 [[repositories]]

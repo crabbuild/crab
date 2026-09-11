@@ -90,6 +90,10 @@ for correctness or recovery.
 It also sends a multi-chunk HMAC-signed SigV4 `PutObject`, verifies the decoded
 bytes and S3-compatible `Content-Encoding` metadata, then corrupts a chunk
 signature and proves no object was published.
+The packaged-image qualification additionally uses an unchanged AWS CLI with a
+configured temporary access-key/secret/session-token triple. Header-signed and
+presigned-query requests succeed, while a missing or wrong token returns
+`InvalidToken`; log and metric scans include the session credential material.
 
 Stop containers without deleting repository data:
 

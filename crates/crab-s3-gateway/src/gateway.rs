@@ -4584,6 +4584,8 @@ mod tests {
             credentials: vec![crate::CredentialConfig {
                 access_key: "recovery-key".to_owned(),
                 secret_key_file: secret.path().to_owned(),
+                session_token_file: None,
+                expires_at: None,
                 principal: "user".to_owned(),
             }],
             repositories: Vec::new(),
