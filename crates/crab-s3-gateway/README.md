@@ -218,8 +218,9 @@ initializes or converts repository storage.
 The S3 and management listeners are deliberately separate. `GET /livez` on
 `management_listen` reports only that the process can serve requests. `GET
 /readyz` freshly reads and constructs every configured repository's current
-immutable view; it returns `503 Service Unavailable` with `Retry-After: 5` when
-any repository is unsafe to serve. `GET /metrics` returns Prometheus 0.0.4 text
+immutable view with bounded four-repository concurrency; it returns `503
+Service Unavailable` with `Retry-After: 5` when any repository is unsafe to
+serve. `GET /metrics` returns Prometheus 0.0.4 text
 for bounded HTTP method/outcome counts, full response-stream duration and
 in-flight requests, response-body errors/aborts, and control/read/transfer
 admission capacity, queue pressure, and outcomes. It also reports aggregate

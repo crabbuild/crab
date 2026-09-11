@@ -29,6 +29,7 @@ use crate::{
 };
 
 const MAX_BUCKETS_PER_PAGE: usize = 10_000;
+const READINESS_CONCURRENCY: usize = 4;
 
 pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
@@ -471,16 +472,25 @@ impl Gateway {
     pub(crate) async fn ready(&self) -> crate::Result<()> {
         let cancellation = self.cancellation.child_token();
         let _cancel_on_drop = cancellation.clone().drop_guard();
-        for repository in self.repositories.values() {
-            repository
-                .read_views
-                .current(
-                    repository,
-                    Arc::clone(&self.runtime),
-                    self.options,
-                    &cancellation,
-                )
-                .await?;
+        let mut repositories = self.repositories.values();
+        loop {
+            let batch: Vec<_> = repositories.by_ref().take(READINESS_CONCURRENCY).collect();
+            if batch.is_empty() {
+                break;
+            }
+            futures_util::future::try_join_all(batch.iter().map(|repository| async {
+                repository
+                    .read_views
+                    .current(
+                        repository,
+                        Arc::clone(&self.runtime),
+                        self.options,
+                        &cancellation,
+                    )
+                    .await
+                    .map(|_| ())
+            }))
+            .await?;
         }
         Ok(())
     }

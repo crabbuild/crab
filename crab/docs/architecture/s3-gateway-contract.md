@@ -391,6 +391,12 @@ In-memory singleflight maps inside each immutable read view are independently
 bounded; eviction may repeat a cold lookup but cannot invalidate a view or
 remove acknowledged state.
 
+The private `/readyz` probe refreshes every configured repository's current
+immutable view in batches of four, keeping metadata and object-store work
+bounded while avoiding serial startup latency. It returns unavailable when any
+refresh fails or the ten-second probe deadline expires; `/livez` remains a
+storage-free process check.
+
 The private metrics listener reports cache attempts by the fixed
 memory/local/service and hit/miss/failure dimensions, verified hit bytes, local
 persistence failures, and aggregate catalog entry/byte accounting. Catalog
