@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -31,8 +33,15 @@ import {
 } from "./api";
 import { Link, Result, date, short } from "./ui";
 import { compareFileItems } from "./entry-sort";
-import { RepositoryMarkdown } from "./repository-markdown";
 import { PaneResizer } from "./pane-resizer";
+import {
+  previewDescriptor,
+  type PreviewDescriptor,
+} from "./file-preview-model";
+
+const FilePreview = lazy(() =>
+  import("./file-preview").then((module) => ({ default: module.FilePreview })),
+);
 
 type Props = {
   repo: Repository;
@@ -74,14 +83,26 @@ function changePanelId(pathHex: string) {
 }
 
 export function FileView({ repo, rev, path, name, theme, write }: Props) {
+  const preview = previewDescriptor(name);
+  const previewFirst =
+    preview !== null &&
+    !["markdown", "delimited", "json"].includes(preview.kind);
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev, path_hex: path }),
   );
-  const [view, setView] = useState<"code" | "preview" | "blame">("code");
+  const [view, setView] = useState<"code" | "preview" | "blame">(
+    previewFirst ? "preview" : "code",
+  );
   const [blamePaneWidth, setBlamePaneWidth] = useState(
     DEFAULT_BLAME_PANE_WIDTH,
   );
   const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    setView(previewFirst ? "preview" : "code");
+  }, [path, previewFirst]);
+  useEffect(() => {
+    if (preview === null && state.data?.text === null) setView("preview");
+  }, [preview, state.data?.oid, state.data?.text]);
   const blame = useRequest<Blame>(
     view === "blame" ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
   );
@@ -97,6 +118,11 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
     () => ({ theme: themes, themeType: theme, disableFileHeader: true }),
     [theme],
   );
+  const activePreview: PreviewDescriptor | null =
+    preview ??
+    (state.data?.text === null
+      ? { kind: "generic", label: "File inspector" }
+      : null);
   return (
     <Result state={state}>
       {(content) => (
@@ -106,28 +132,37 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
               <SegmentedControl
                 aria-label="File view"
                 onChange={(index) => {
-                  const views =
-                    /\.(?:md|markdown)$/i.test(name) && content.text !== null
-                      ? (["code", "preview", "blame"] as const)
-                      : (["code", "blame"] as const);
+                  const views = [
+                    "code",
+                    ...(activePreview ? (["preview"] as const) : []),
+                    ...(content.text !== null &&
+                    content.classification === "OrdinaryGit"
+                      ? (["blame"] as const)
+                      : []),
+                  ] as const;
                   setView(views[index] ?? "code");
                 }}
               >
                 <SegmentedControl.Button selected={view === "code"}>
-                  Code
+                  {content.text === null ? "Info" : "Code"}
                 </SegmentedControl.Button>
-                {/\.(?:md|markdown)$/i.test(name) && content.text !== null && (
+                {activePreview && (
                   <SegmentedControl.Button selected={view === "preview"}>
                     Preview
                   </SegmentedControl.Button>
                 )}
-                <SegmentedControl.Button selected={view === "blame"}>
-                  Blame
-                </SegmentedControl.Button>
+                {content.text !== null &&
+                  content.classification === "OrdinaryGit" && (
+                    <SegmentedControl.Button selected={view === "blame"}>
+                      Blame
+                    </SegmentedControl.Button>
+                  )}
               </SegmentedControl>
               <span className="file-metadata muted">
                 {content.text === null
-                  ? "Binary"
+                  ? content.text_truncated
+                    ? (activePreview?.label ?? "Large text file")
+                    : (activePreview?.label ?? "Binary file")
                   : `${content.text === "" ? 0 : content.text.split("\n").length - Number(content.text.endsWith("\n"))} lines`}{" "}
                 <span aria-hidden="true">·</span> {formatSize(content.size)}
               </span>
@@ -208,20 +243,36 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
           {view === "blame" && (blame.loading || blame.error) && (
             <Result state={blame}>{() => null}</Result>
           )}
-          {content.text === null ? (
-            <div className="notice">
-              <strong>Binary file</strong>
-              <p>Download this file to view its contents.</p>
-            </div>
-          ) : view === "preview" ? (
-            <RepositoryMarkdown
-              repo={repo}
-              rev={rev}
-              directory={parentHex(path)}
-              className="file-markdown-preview"
+          {view === "preview" && activePreview ? (
+            <Suspense
+              fallback={
+                <div className="file-preview-notice" role="status">
+                  Loading preview tools…
+                </div>
+              }
             >
-              {content.text}
-            </RepositoryMarkdown>
+              <FilePreview
+                descriptor={activePreview}
+                repo={repo}
+                rev={rev}
+                directory={parentHex(path)}
+                name={name}
+                text={content.text}
+                size={content.size}
+                blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
+              />
+            </Suspense>
+          ) : content.text === null ? (
+            <div className="notice">
+              <strong>
+                {content.text_truncated ? "Large text file" : "Binary file"}
+              </strong>
+              <p>
+                {content.text_truncated
+                  ? "Inline source is limited to 1 MB. Download the exact stored bytes to inspect the complete file."
+                  : "Crab does not recognize a safe interactive preview for this format. Download the exact stored bytes to inspect it locally."}
+              </p>
+            </div>
           ) : view === "blame" ? (
             blame.data ? (
               <div className="blame-view" aria-label="Blame view">

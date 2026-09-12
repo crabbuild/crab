@@ -664,7 +664,7 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
         [
             ("x-content-type-options", "nosniff"),
             ("referrer-policy", "same-origin"),
-            ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'"),
+            ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
         ], response,
     ).into_response()
 }

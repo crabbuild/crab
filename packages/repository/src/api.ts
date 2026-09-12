@@ -78,6 +78,7 @@ export interface Content {
   mode: string;
   classification: string;
   text: string | null;
+  text_truncated: boolean;
 }
 export interface Change {
   path: string;

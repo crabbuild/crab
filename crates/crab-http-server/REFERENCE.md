@@ -360,7 +360,7 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | Repository root | Selected commit, file table, repository details, rendered README, request timing, and Code menu |
 | Branch and tag picker | Search, keyboard navigation, default-branch state, and writer-only creation from the viewed commit |
 | Branches and tags | Natural sorting, protected/default labels, copied names, immutable tips, default comparison, and guarded deletion |
-| Tree and file workspace | Resizable lazy folder-first tree, preserved expansion, breadcrumbs, source, preview, blame, raw bytes, copy, download, edit, and delete |
+| Tree and file workspace | Resizable lazy folder-first tree, preserved expansion, breadcrumbs, source, format-aware preview, blame, raw bytes, copy, download, edit, and delete |
 | History and comparison | Signed pagination, first-parent path history, a persistent change tree with independently scrolling jump-linked diffs, split/unified layouts, and exact revision links |
 | Go to file | Bounded full-tree fuzzy search without blob reads; `T` opens and focuses search |
 | Releases | Releases/Tags navigation, search, drafts, publication, edits, deletion, source ZIPs, and binary assets |
@@ -405,7 +405,11 @@ Root commits compare against an empty tree. Path history follows the exact first
 
 ### Render repository content safely
 
-Markdown README files render beneath directory listings. Markdown file views switch between source, preview, and blame.
+Markdown README files render beneath directory listings. Recognized file views switch between source and a format-aware preview; ordinary UTF-8 Git blobs also offer blame.
+
+Preview-capable formats include raster and SVG images, PDF, common audio and video containers, CSV/TSV, JSON/JSON Lines, Jupyter notebooks, Office Open XML and OpenDocument packages, SQLite, Parquet, Arrow/Feather, NumPy/NPZ, Safetensors, GGUF, ZIP-derived packages, and TAR archives. Data formats share searchable, paginated tables. Crab runs only read queries against an in-browser SQLite copy, notebooks never execute cells or HTML outputs, and model previews inspect metadata without loading or running weights. Office previews preserve document text, worksheets, and slide structure rather than promising pixel-identical desktop rendering.
+
+Preview parsers are loaded only for the selected format and run in the signed-in browser. Crab does not send repository contents to a third-party conversion service. Source text is embedded in JSON only through 1 MiB; recognized larger text formats fetch their exact bytes for preview. Unrecognized binary formats use a bounded universal inspector with extension hints, magic-signature detection, a safe text sample when applicable, and a 512-byte hex/ASCII view. Interactive previews are capped at 50 MiB; oversized files retain exact raw and download actions with an explicit fallback instead of attempting unbounded parsing.
 
 Relative links stay inside the selected repository revision. Relative raster images load through the signature-checked `asset` endpoint. SVG, other local formats, and external images remain links. This prevents repository content from becoming same-origin active content or forcing signed-in browsers to contact third-party hosts.
 
