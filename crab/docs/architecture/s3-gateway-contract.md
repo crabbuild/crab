@@ -458,3 +458,12 @@ boundary against the source digest. Its Compose phase runs two gateway instances
 with independent caches against the same RustFS-backed Crab repository, then
 continues a multipart upload through the standby after replacing the primary and
 verifies reads through both instances.
+The packaged-image job also retains a pinned RustFS interoperability report for
+AWS CLI, Boto3 and SigV4 presigning, DuckDB CLI and Python, LanceDB, Spark S3A,
+PyArrow, Pandas, Polars, fsspec/s3fs, Dask, MinIO, smart_open, awswrangler,
+PyIceberg, Delta Lake, Java AWS SDK v2, Go AWS SDK v2, and s3cmd. An on-demand
+workflow can run fifteen, thirty, or sixty minutes of 16-writer signed traffic;
+it requires exact acknowledgement/listing integrity and clean time windows,
+with terminal throughput at least 80% and terminal p95 latency at most 150% of
+the startup cohort. This does not replace the still-required live S3, GCS, and
+Azure backend matrix.

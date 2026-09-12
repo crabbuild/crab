@@ -349,11 +349,15 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-s3-gateway \
 cargo fmt --check -p crab-s3-gateway
 ```
 
-The Compose qualification exercises signed AWS CLI and Boto3 requests,
+The packaged-image qualification exercises signed AWS CLI and Boto3 requests,
 checksums, streaming uploads, multipart restart and multi-instance recovery,
 large-object full and range reads, Xet deduplication, bounded listing, and
-cleanup. The accepted release matrix and the distinction between checked-in,
-local, and live-cloud evidence are defined in the protocol contract.
+cleanup. It also runs write/read fixtures through DuckDB, LanceDB, Spark S3A,
+Arrow and dataframe libraries, table formats, alternative S3 clients, and the
+Java and Go AWS SDKs. The on-demand workflow can also run the time-window
+degradation gate for fifteen, thirty, or sixty minutes. The accepted release
+matrix and the distinction between checked-in, local, and live-cloud evidence
+are defined in the protocol contract.
 
 ## Further reading
 
@@ -368,3 +372,7 @@ local, and live-cloud evidence are defined in the protocol contract.
   configuration
 - [Boto3 qualification client](../../crab/scripts/e2e/s3_gateway_boto3.py) —
   executable official-SDK coverage
+- [Ecosystem qualification client](../../crab/scripts/e2e/s3_gateway_ecosystem.py) —
+  executable data-tool, table-format, CLI, and SDK interoperability coverage
+- [Sustained-write qualification](../../crab/scripts/e2e/s3_gateway_workload.py) —
+  signed concurrent writes with integrity and time-window degradation gates

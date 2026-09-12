@@ -45,6 +45,18 @@ class RequestResult:
 
 
 @dataclass
+class WindowStats:
+    requests: int = 0
+    acknowledged: int = 0
+    latencies_ms: list[float] = field(default_factory=list)
+    errors: Counter[str] = field(default_factory=Counter)
+
+    @property
+    def failed(self) -> int:
+        return self.requests - self.acknowledged
+
+
+@dataclass
 class WorkloadStats:
     requests: int = 0
     acknowledged: int = 0
@@ -56,6 +68,7 @@ class WorkloadStats:
     unexpected_keys: int = 0
     duplicate_list_entries: int = 0
     elapsed_ms: int = 0
+    windows: dict[int, WindowStats] = field(default_factory=dict)
 
     @property
     def failed(self) -> int:
@@ -233,7 +246,9 @@ def _put_worker(
     endpoint: Endpoint,
     prefix: str,
     writer: int,
+    started: float,
     deadline: float,
+    window_seconds: float,
     object_bytes: int,
     timeout: float,
 ) -> WorkloadStats:
@@ -248,15 +263,24 @@ def _put_worker(
             body=_payload(writer, sequence, object_bytes),
             timeout=timeout,
         )
+        completed = time.monotonic()
+        window = stats.windows.setdefault(
+            int((completed - started) / window_seconds), WindowStats()
+        )
         stats.requests += 1
         stats.latencies_ms.append(result.latency_ms)
+        window.requests += 1
+        window.latencies_ms.append(result.latency_ms)
         if result.status is not None and 200 <= result.status < 300:
             stats.acknowledged += 1
             stats.acknowledged_keys.add(key)
+            window.acknowledged += 1
         elif result.status is None:
             stats.errors[result.error or "transport"] += 1
+            window.errors[result.error or "transport"] += 1
         else:
             stats.errors[f"http_{result.status}"] += 1
+            window.errors[f"http_{result.status}"] += 1
         sequence += 1
     return stats
 
@@ -267,6 +291,12 @@ def _merge_stats(target: WorkloadStats, source: WorkloadStats) -> None:
     target.latencies_ms.extend(source.latencies_ms)
     target.errors.update(source.errors)
     target.acknowledged_keys.update(source.acknowledged_keys)
+    for index, source_window in source.windows.items():
+        target_window = target.windows.setdefault(index, WindowStats())
+        target_window.requests += source_window.requests
+        target_window.acknowledged += source_window.acknowledged
+        target_window.latencies_ms.extend(source_window.latencies_ms)
+        target_window.errors.update(source_window.errors)
 
 
 def _element_text(root: ElementTree.Element, name: str) -> str | None:
@@ -316,6 +346,7 @@ def _run_endpoint(
     duration_seconds: float,
     object_bytes: int,
     timeout: float,
+    window_seconds: float = 60.0,
 ) -> WorkloadStats:
     started = time.monotonic()
     deadline = started + duration_seconds
@@ -327,7 +358,9 @@ def _run_endpoint(
                 endpoint,
                 prefix,
                 writer,
+                started,
                 deadline,
+                window_seconds,
                 object_bytes,
                 timeout,
             )
@@ -349,7 +382,29 @@ def _run_endpoint(
     return stats
 
 
-def _stats_report(stats: WorkloadStats) -> dict[str, object]:
+def _stats_report(
+    stats: WorkloadStats,
+    duration_seconds: float,
+    window_seconds: float,
+) -> dict[str, object]:
+    complete_windows = int(duration_seconds // window_seconds)
+    windows = []
+    for index in range(complete_windows):
+        window = stats.windows.get(index, WindowStats())
+        windows.append(
+            {
+                "index": index,
+                "requests": window.requests,
+                "acknowledged": window.acknowledged,
+                "failed": window.failed,
+                "errors": dict(sorted(window.errors.items())),
+                "p50_latency_ms": round(_percentile(window.latencies_ms, 0.50), 3),
+                "p95_latency_ms": round(_percentile(window.latencies_ms, 0.95), 3),
+                "throughput_per_second": round(
+                    window.acknowledged / window_seconds, 6
+                ),
+            }
+        )
     return {
         "requests": stats.requests,
         "acknowledged": stats.acknowledged,
@@ -363,6 +418,80 @@ def _stats_report(stats: WorkloadStats) -> dict[str, object]:
         "missing_acknowledgements": stats.missing_acknowledgements,
         "unexpected_keys": stats.unexpected_keys,
         "duplicate_list_entries": stats.duplicate_list_entries,
+        "complete_windows": windows,
+    }
+
+
+def _percentile(values: list[float], fraction: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * fraction) - 1))
+    return ordered[index]
+
+
+def _degradation(
+    stats: WorkloadStats,
+    duration_seconds: float,
+    window_seconds: float,
+    min_terminal_throughput_ratio: float,
+    max_terminal_p95_ratio: float,
+) -> dict[str, object]:
+    complete_windows = [
+        stats.windows.get(index, WindowStats())
+        for index in range(int(duration_seconds // window_seconds))
+    ]
+    if len(complete_windows) < 4:
+        return {
+            "measured": False,
+            "passed": False,
+            "complete_windows": len(complete_windows),
+            "required_complete_windows": 4,
+        }
+    cohort_size = max(1, len(complete_windows) // 3)
+    early = complete_windows[:cohort_size]
+    terminal = complete_windows[-cohort_size:]
+
+    def throughput(windows: list[WindowStats]) -> float:
+        return sum(window.acknowledged for window in windows) / (
+            len(windows) * window_seconds
+        )
+
+    def p95(windows: list[WindowStats]) -> float:
+        return _percentile(
+            [latency for window in windows for latency in window.latencies_ms], 0.95
+        )
+
+    early_throughput = throughput(early)
+    terminal_throughput = throughput(terminal)
+    early_p95 = p95(early)
+    terminal_p95 = p95(terminal)
+    throughput_ratio = (
+        terminal_throughput / early_throughput if early_throughput > 0 else 0.0
+    )
+    p95_ratio = terminal_p95 / early_p95 if early_p95 > 0 else 0.0
+    windows_are_clean = all(
+        window.acknowledged > 0 and window.failed == 0 for window in complete_windows
+    )
+    passed = (
+        windows_are_clean
+        and throughput_ratio >= min_terminal_throughput_ratio
+        and p95_ratio <= max_terminal_p95_ratio
+    )
+    return {
+        "measured": True,
+        "passed": passed,
+        "complete_windows": len(complete_windows),
+        "cohort_windows": cohort_size,
+        "early_throughput_per_second": round(early_throughput, 6),
+        "terminal_throughput_per_second": round(terminal_throughput, 6),
+        "terminal_throughput_ratio": round(throughput_ratio, 6),
+        "early_p95_latency_ms": round(early_p95, 3),
+        "terminal_p95_latency_ms": round(terminal_p95, 3),
+        "terminal_p95_latency_ratio": round(p95_ratio, 6),
+        "min_terminal_throughput_ratio": min_terminal_throughput_ratio,
+        "max_terminal_p95_latency_ratio": max_terminal_p95_ratio,
+        "windows_are_clean": windows_are_clean,
     }
 
 
@@ -374,34 +503,67 @@ def build_report(
     object_bytes: int,
     timeout: float,
     gateway: WorkloadStats,
-    baseline: WorkloadStats,
+    baseline: WorkloadStats | None,
     min_throughput_ratio: float,
     max_p95_ratio: float,
+    window_seconds: float = 60.0,
+    min_terminal_throughput_ratio: float = 0.80,
+    max_terminal_p95_ratio: float = 1.50,
     source: str = "sustained-small-write",
 ) -> dict[str, object]:
-    baseline_throughput = baseline.throughput_per_second
+    baseline_throughput = baseline.throughput_per_second if baseline else None
     throughput_ratio = (
         gateway.throughput_per_second / baseline_throughput
-        if baseline_throughput > 0
-        else 0.0
+        if baseline_throughput is not None and baseline_throughput > 0
+        else None
     )
-    baseline_p95 = baseline.percentile(0.95)
-    p95_ratio = gateway.percentile(0.95) / baseline_p95 if baseline_p95 > 0 else 0.0
+    baseline_p95 = baseline.percentile(0.95) if baseline else None
+    p95_ratio = (
+        gateway.percentile(0.95) / baseline_p95
+        if baseline_p95 is not None and baseline_p95 > 0
+        else None
+    )
+    measured_stats = [gateway] + ([baseline] if baseline else [])
     integrity_passed = all(
         stats.acknowledged > 0
         and stats.failed == 0
         and stats.missing_acknowledgements == 0
         and stats.unexpected_keys == 0
         and stats.duplicate_list_entries == 0
-        for stats in (gateway, baseline)
+        for stats in measured_stats
     )
-    performance_passed = (
-        throughput_ratio >= min_throughput_ratio
+    gateway_degradation = _degradation(
+        gateway,
+        duration_seconds,
+        window_seconds,
+        min_terminal_throughput_ratio,
+        max_terminal_p95_ratio,
+    )
+    baseline_degradation = (
+        _degradation(
+            baseline,
+            duration_seconds,
+            window_seconds,
+            min_terminal_throughput_ratio,
+            max_terminal_p95_ratio,
+        )
+        if baseline
+        else None
+    )
+    baseline_comparison_passed = baseline is None or (
+        throughput_ratio is not None
+        and p95_ratio is not None
+        and throughput_ratio >= min_throughput_ratio
         and p95_ratio <= max_p95_ratio
+    )
+    performance_passed = bool(
+        gateway_degradation["passed"]
+        and baseline_comparison_passed
+        and (baseline_degradation is None or baseline_degradation["passed"])
     )
     return {
         "schema": "crab.s3-gateway-workload",
-        "schema_version": 1,
+        "schema_version": 2,
         "source": source,
         "status": "passed" if integrity_passed and performance_passed else "failed",
         "workload": {
@@ -410,16 +572,27 @@ def build_report(
             "duration_seconds": duration_seconds,
             "object_bytes": object_bytes,
             "request_timeout_seconds": timeout,
+            "window_seconds": window_seconds,
         },
-        "gateway": _stats_report(gateway),
-        "direct_baseline": _stats_report(baseline),
+        "gateway": _stats_report(gateway, duration_seconds, window_seconds),
+        "direct_baseline": (
+            _stats_report(baseline, duration_seconds, window_seconds)
+            if baseline
+            else None
+        ),
         "comparison": {
-            "throughput_ratio": round(throughput_ratio, 6),
-            "p95_latency_ratio": round(p95_ratio, 6),
+            "throughput_ratio": (
+                round(throughput_ratio, 6) if throughput_ratio is not None else None
+            ),
+            "p95_latency_ratio": round(p95_ratio, 6) if p95_ratio is not None else None,
             "min_throughput_ratio": min_throughput_ratio,
             "max_p95_latency_ratio": max_p95_ratio,
             "integrity_passed": integrity_passed,
             "performance_passed": performance_passed,
+            "baseline_comparison_measured": baseline is not None,
+            "baseline_comparison_passed": baseline_comparison_passed,
+            "gateway_degradation": gateway_degradation,
+            "baseline_degradation": baseline_degradation,
         },
     }
 
@@ -444,8 +617,8 @@ def parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--gateway-endpoint", required=True)
     parser.add_argument("--gateway-bucket", required=True)
-    parser.add_argument("--baseline-endpoint", required=True)
-    parser.add_argument("--baseline-bucket", required=True)
+    parser.add_argument("--baseline-endpoint")
+    parser.add_argument("--baseline-bucket")
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--prefix", default="main/qualification/small-write")
     parser.add_argument("--writers", type=int, default=16)
@@ -454,6 +627,9 @@ def parser() -> argparse.ArgumentParser:
     parser.add_argument("--request-timeout-seconds", type=float, default=30.0)
     parser.add_argument("--min-throughput-ratio", type=float, default=0.90)
     parser.add_argument("--max-p95-ratio", type=float, default=1.25)
+    parser.add_argument("--window-seconds", type=float, default=60.0)
+    parser.add_argument("--min-terminal-throughput-ratio", type=float, default=0.80)
+    parser.add_argument("--max-terminal-p95-ratio", type=float, default=1.50)
     parser.add_argument("--region", default="us-east-1")
     return parser
 
@@ -473,15 +649,36 @@ def main() -> int:
         argument_parser.error("--min-throughput-ratio must be greater than 0 and at most 1")
     if not math.isfinite(args.max_p95_ratio) or args.max_p95_ratio <= 0:
         argument_parser.error("--max-p95-ratio must be greater than 0")
+    if (
+        not math.isfinite(args.window_seconds)
+        or args.window_seconds <= 0
+        or args.duration_seconds // args.window_seconds < 4
+    ):
+        argument_parser.error(
+            "--window-seconds must produce at least four complete workload windows"
+        )
+    if (
+        not math.isfinite(args.min_terminal_throughput_ratio)
+        or not 0 < args.min_terminal_throughput_ratio <= 1
+    ):
+        argument_parser.error(
+            "--min-terminal-throughput-ratio must be greater than 0 and at most 1"
+        )
+    if (
+        not math.isfinite(args.max_terminal_p95_ratio)
+        or args.max_terminal_p95_ratio <= 0
+    ):
+        argument_parser.error("--max-terminal-p95-ratio must be greater than 0")
+    if bool(args.baseline_endpoint) != bool(args.baseline_bucket):
+        argument_parser.error(
+            "--baseline-endpoint and --baseline-bucket must be configured together"
+        )
     prefix = args.prefix.strip("/")
     if not prefix or "?" in prefix or "#" in prefix:
         argument_parser.error("--prefix must be a non-empty S3 prefix without query or fragment")
 
     try:
         gateway_access, gateway_secret, gateway_token = _credentials("S3_GATEWAY_WORKLOAD")
-        baseline_access, baseline_secret, baseline_token = _credentials(
-            "S3_BASELINE_WORKLOAD"
-        )
         gateway = Endpoint(
             args.gateway_endpoint,
             args.gateway_bucket,
@@ -490,23 +687,31 @@ def main() -> int:
             args.region,
             gateway_token,
         )
-        baseline = Endpoint(
-            args.baseline_endpoint,
-            args.baseline_bucket,
-            baseline_access,
-            baseline_secret,
-            args.region,
-            baseline_token,
-        )
+        baseline = None
+        if args.baseline_endpoint and args.baseline_bucket:
+            baseline_access, baseline_secret, baseline_token = _credentials(
+                "S3_BASELINE_WORKLOAD"
+            )
+            baseline = Endpoint(
+                args.baseline_endpoint,
+                args.baseline_bucket,
+                baseline_access,
+                baseline_secret,
+                args.region,
+                baseline_token,
+            )
         run_prefix = f"{prefix}/{secrets.token_hex(8)}"
-        baseline_stats = _run_endpoint(
-            baseline,
-            run_prefix,
-            args.writers,
-            args.duration_seconds,
-            args.object_bytes,
-            args.request_timeout_seconds,
-        )
+        baseline_stats = None
+        if baseline:
+            baseline_stats = _run_endpoint(
+                baseline,
+                run_prefix,
+                args.writers,
+                args.duration_seconds,
+                args.object_bytes,
+                args.request_timeout_seconds,
+                args.window_seconds,
+            )
         gateway_stats = _run_endpoint(
             gateway,
             run_prefix,
@@ -514,6 +719,7 @@ def main() -> int:
             args.duration_seconds,
             args.object_bytes,
             args.request_timeout_seconds,
+            args.window_seconds,
         )
         report = build_report(
             prefix=run_prefix,
@@ -525,6 +731,9 @@ def main() -> int:
             baseline=baseline_stats,
             min_throughput_ratio=args.min_throughput_ratio,
             max_p95_ratio=args.max_p95_ratio,
+            window_seconds=args.window_seconds,
+            min_terminal_throughput_ratio=args.min_terminal_throughput_ratio,
+            max_terminal_p95_ratio=args.max_terminal_p95_ratio,
         )
         _write_report(args.report, report)
         print(json.dumps(report, sort_keys=True))

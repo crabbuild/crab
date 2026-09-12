@@ -23,13 +23,22 @@ SPEC.loader.exec_module(WORKLOAD)
 
 
 def stats(*, count: int, latency: float = 10.0) -> WORKLOAD.WorkloadStats:
+    total = count * 4
     return WORKLOAD.WorkloadStats(
-        requests=count,
-        acknowledged=count,
-        latencies_ms=[latency] * count,
-        acknowledged_keys={f"key-{index}" for index in range(count)},
-        listed_keys=count,
+        requests=total,
+        acknowledged=total,
+        latencies_ms=[latency] * total,
+        acknowledged_keys={f"key-{index}" for index in range(total)},
+        listed_keys=total,
         elapsed_ms=1000,
+        windows={
+            index: WORKLOAD.WindowStats(
+                requests=count,
+                acknowledged=count,
+                latencies_ms=[latency] * count,
+            )
+            for index in range(4)
+        },
     )
 
 
@@ -126,13 +135,14 @@ class S3GatewayWorkloadTests(unittest.TestCase):
         report = WORKLOAD.build_report(
             prefix="main/qualification/secret-object-prefix",
             writers=16,
-            duration_seconds=5,
+            duration_seconds=4,
             object_bytes=4096,
             timeout=30,
             gateway=stats(count=10, latency=10),
             baseline=stats(count=10, latency=10),
             min_throughput_ratio=0.9,
             max_p95_ratio=1.25,
+            window_seconds=1,
         )
         encoded = json.dumps(report, sort_keys=True)
         self.assertEqual(report["status"], "passed")
@@ -154,9 +164,74 @@ class S3GatewayWorkloadTests(unittest.TestCase):
             baseline=stats(count=2),
             min_throughput_ratio=0.9,
             max_p95_ratio=1.25,
+            window_seconds=1,
         )
         self.assertEqual(report["status"], "failed")
         self.assertFalse(report["comparison"]["integrity_passed"])
+
+    def test_report_fails_when_terminal_windows_degrade(self) -> None:
+        gateway = stats(count=10, latency=10)
+        gateway.windows[3] = WORKLOAD.WindowStats(
+            requests=10,
+            acknowledged=5,
+            latencies_ms=[20] * 10,
+        )
+        report = WORKLOAD.build_report(
+            prefix="isolated",
+            writers=1,
+            duration_seconds=4,
+            object_bytes=4096,
+            timeout=2,
+            gateway=gateway,
+            baseline=stats(count=10, latency=10),
+            min_throughput_ratio=0.1,
+            max_p95_ratio=10,
+            window_seconds=1,
+            min_terminal_throughput_ratio=0.8,
+            max_terminal_p95_ratio=1.5,
+        )
+        degradation = report["comparison"]["gateway_degradation"]
+        self.assertEqual(report["status"], "failed")
+        self.assertTrue(degradation["measured"])
+        self.assertFalse(degradation["passed"])
+        self.assertEqual(degradation["terminal_throughput_ratio"], 0.5)
+        self.assertEqual(degradation["terminal_p95_latency_ratio"], 2.0)
+
+    def test_gateway_only_report_measures_degradation_without_a_baseline(self) -> None:
+        report = WORKLOAD.build_report(
+            prefix="isolated",
+            writers=1,
+            duration_seconds=4,
+            object_bytes=4096,
+            timeout=2,
+            gateway=stats(count=10),
+            baseline=None,
+            min_throughput_ratio=0.9,
+            max_p95_ratio=1.25,
+            window_seconds=1,
+        )
+        self.assertEqual(report["status"], "passed")
+        self.assertIsNone(report["direct_baseline"])
+        self.assertFalse(report["comparison"]["baseline_comparison_measured"])
+        self.assertIsNone(report["comparison"]["throughput_ratio"])
+        self.assertIsNone(report["comparison"]["p95_latency_ratio"])
+        self.assertTrue(report["comparison"]["gateway_degradation"]["passed"])
+
+    def test_report_rejects_too_few_complete_windows(self) -> None:
+        report = WORKLOAD.build_report(
+            prefix="isolated",
+            writers=1,
+            duration_seconds=3,
+            object_bytes=4096,
+            timeout=2,
+            gateway=stats(count=10),
+            baseline=stats(count=10),
+            min_throughput_ratio=0.1,
+            max_p95_ratio=10,
+            window_seconds=1,
+        )
+        self.assertEqual(report["status"], "failed")
+        self.assertFalse(report["comparison"]["gateway_degradation"]["measured"])
 
     def test_percentile_uses_nearest_observed_sample(self) -> None:
         value = WORKLOAD.WorkloadStats(latencies_ms=[4, 1, 9, 3])
