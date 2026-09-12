@@ -188,8 +188,17 @@ def run(
     conditional_key = f"{root}/conditional.bin"
     multipart_key = f"{root}/multipart.bin"
     delete_key = f"{root}/delete.bin"
+    conditional_delete_key = f"{root}/conditional-delete.bin"
     large_key = f"{root}/large.bin"
-    keys = [object_key, copy_key, conditional_key, multipart_key, delete_key, large_key]
+    keys = [
+        object_key,
+        copy_key,
+        conditional_key,
+        multipart_key,
+        delete_key,
+        conditional_delete_key,
+        large_key,
+    ]
     body = b"boto3 gateway qualification\n" + bytes(range(256)) * 4096
     multipart_parts = [b"a" * (5 * 1024 * 1024), b"boto3-final-part"]
     upload_id = None
@@ -282,10 +291,39 @@ def run(
             Key=copy_key,
             CopySource={"Bucket": bucket, "Key": object_key},
             MetadataDirective="COPY",
+            IfNoneMatch="*",
         )
         if client.get_object(Bucket=bucket, Key=copy_key)["Body"].read() != body:
             raise RuntimeError("Boto3 CopyObject returned different bytes")
+        _expect_error(
+            "CopyObject destination If-None-Match",
+            lambda: client.copy_object(
+                Bucket=bucket,
+                Key=copy_key,
+                CopySource={"Bucket": bucket, "Key": object_key},
+                IfNoneMatch="*",
+            ),
+            "PreconditionFailed",
+        )
+        copy_head = client.head_object(Bucket=bucket, Key=copy_key)
+        _expect_error(
+            "CopyObject destination stale If-Match",
+            lambda: client.copy_object(
+                Bucket=bucket,
+                Key=copy_key,
+                CopySource={"Bucket": bucket, "Key": object_key},
+                IfMatch='"00000000000000000000000000000000"',
+            ),
+            "PreconditionFailed",
+        )
+        client.copy_object(
+            Bucket=bucket,
+            Key=copy_key,
+            CopySource={"Bucket": bucket, "Key": object_key},
+            IfMatch=copy_head["ETag"],
+        )
         checks["copy"] = True
+        checks["copy_destination_conditions"] = True
 
         listing = client.list_objects_v2(Bucket=bucket, Prefix=root, MaxKeys=1000)
         listed = {entry["Key"] for entry in listing.get("Contents", [])}
@@ -325,11 +363,60 @@ def run(
         checks["multipart"] = True
 
         client.put_object(Bucket=bucket, Key=delete_key, Body=b"delete")
+        client.put_object(
+            Bucket=bucket,
+            Key=conditional_delete_key,
+            Body=b"conditional delete",
+        )
+        conditional_delete_head = client.head_object(
+            Bucket=bucket,
+            Key=conditional_delete_key,
+        )
+        stale_delete = client.delete_objects(
+            Bucket=bucket,
+            Delete={
+                "Objects": [
+                    {
+                        "Key": conditional_delete_key,
+                        "ETag": '"00000000000000000000000000000000"',
+                    }
+                ]
+            },
+        )
+        stale_errors = stale_delete.get("Errors", [])
+        if len(stale_errors) != 1 or stale_errors[0].get("Code") != "PreconditionFailed":
+            raise RuntimeError("Boto3 conditional DeleteObjects did not report the stale ETag")
+        client.head_object(Bucket=bucket, Key=conditional_delete_key)
+        missing_delete = client.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": f"{root}/missing-delete.bin", "ETag": "*"}]},
+        )
+        missing_errors = missing_delete.get("Errors", [])
+        if len(missing_errors) != 1 or missing_errors[0].get("Code") != "NoSuchKey":
+            raise RuntimeError("Boto3 conditional DeleteObjects did not report the missing key")
+        matched_delete = client.delete_objects(
+            Bucket=bucket,
+            Delete={
+                "Objects": [
+                    {
+                        "Key": conditional_delete_key,
+                        "ETag": conditional_delete_head["ETag"],
+                    },
+                    {"Key": delete_key, "ETag": "*"},
+                ]
+            },
+        )
+        if {entry["Key"] for entry in matched_delete.get("Deleted", [])} != {
+            conditional_delete_key,
+            delete_key,
+        }:
+            raise RuntimeError("Boto3 conditional DeleteObjects omitted successful deletes")
         client.delete_objects(
             Bucket=bucket,
-            Delete={"Objects": [{"Key": object_key}, {"Key": copy_key}, {"Key": delete_key}]},
+            Delete={"Objects": [{"Key": object_key}, {"Key": copy_key}]},
         )
         checks["multi_delete"] = True
+        checks["multi_delete_conditions"] = True
         large_object = None
         if large_object_bytes:
             with tempfile.TemporaryDirectory(prefix="crab-s3-gateway-boto3-") as directory:

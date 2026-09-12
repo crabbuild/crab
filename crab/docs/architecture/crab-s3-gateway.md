@@ -123,8 +123,8 @@ error, authorization and real-client evidence before advertising it.
 | ListBuckets, HeadBucket | Authorized logical repository catalog; pagination and visibility policy; no exposure of backing buckets |
 | GetObject, HeadObject | Logical reconstructed content; metadata and caching headers; correct conditional-header precedence, ETags, single ranges, suffix/open ranges, empty objects and HEAD responses |
 | PutObject | Bounded streaming, checksums, user metadata and standard content headers; atomic publication with conditional writes |
-| DeleteObject, DeleteObjects | Missing-key semantics; per-key authorization/results, quiet mode and request integrity; no claim that S3 multi-delete is an atomic transaction |
-| CopyObject | Authorize source and destination separately; pin source version, apply copy conditions and metadata directive; cross-ref/repository data dependencies remain valid after source GC |
+| DeleteObject, DeleteObjects | Missing-key semantics; atomic ETag conditions including per-entry multi-delete conditions; per-key authorization/results, quiet mode and request integrity; no claim that S3 multi-delete is an atomic transaction |
+| CopyObject | Authorize source and destination separately; pin source version, apply source ETag/date and atomic destination ETag conditions plus the metadata directive; cross-ref/repository data dependencies remain valid after source GC |
 | ListObjects, ListObjectsV2 | Prefix, delimiter `/`, ordering, markers/tokens, truncation, URL encoding and CommonPrefixes; returned keys remain usable by S3 clients |
 | CreateMultipartUpload, UploadPart, UploadPartCopy | Durable upload identity and part catalog, replacement of a part number, checksums, source ranges and isolated uncommitted content |
 | CompleteMultipartUpload | Validate selected ordered parts and ETags/checksums; publish once for that upload identity; durable recovery of uncertain completion |

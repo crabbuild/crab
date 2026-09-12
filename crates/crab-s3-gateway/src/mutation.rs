@@ -53,6 +53,8 @@ pub(crate) enum Error {
     InvalidAttributes,
     #[error("object write precondition failed")]
     PreconditionFailed,
+    #[error("conditional delete target does not exist")]
+    ConditionalTargetMissing,
     #[error("repository mutation was cancelled")]
     Cancelled,
     #[error("repository write queue is full")]
@@ -127,24 +129,37 @@ pub(crate) enum Change {
     },
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum PutCondition {
     #[default]
     None,
     IfNoneMatchAny,
-    IfMatch(ObjectId),
+    IfMatch {
+        object: ObjectId,
+        etag: String,
+        attributes_present: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
 pub(crate) enum DeleteCondition {
     #[default]
     None,
-    IfMatchAny,
+    IfMatchAny {
+        missing: MissingDeleteResult,
+    },
     IfMatch {
         object: ObjectId,
         etag: String,
         attributes_present: bool,
+        missing: MissingDeleteResult,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum MissingDeleteResult {
+    PreconditionFailed,
+    NotFound,
 }
 
 #[derive(Clone, Debug)]
@@ -1953,6 +1968,17 @@ async fn build_commit(
     let current_attributes = old
         .as_ref()
         .and_then(|(oid, _)| manifest.object(path_string, *oid));
+    match &change {
+        Change::Put { condition, .. }
+            if !put_condition_matches(condition, old.as_ref(), current_attributes) =>
+        {
+            return Err(Error::PreconditionFailed);
+        }
+        Change::Delete { condition } => {
+            validate_delete_condition(condition, old.as_ref(), current_attributes)?;
+        }
+        Change::Put { .. } | Change::Attributes { .. } => {}
+    }
     let lfs_attributes = match &change {
         Change::Put {
             track_lfs: true, ..
@@ -1965,28 +1991,13 @@ async fn build_commit(
         }
         Change::Put { .. } | Change::Attributes { .. } | Change::Delete { .. } => None,
     };
-    if let Change::Delete { condition } = &change
-        && !delete_condition_matches(condition, old.as_ref(), current_attributes)
-    {
-        return Err(Error::PreconditionFailed);
-    }
     let (etag, changed, pending_attributes) = match change {
         Change::Put {
             bytes,
             track_lfs: _,
             attributes,
-            condition,
+            condition: _,
         } => {
-            match condition {
-                PutCondition::None => {}
-                PutCondition::IfNoneMatchAny if old.is_some() => {
-                    return Err(Error::PreconditionFailed);
-                }
-                PutCondition::IfMatch(expected) if old.is_none_or(|(oid, _)| oid != expected) => {
-                    return Err(Error::PreconditionFailed);
-                }
-                PutCondition::IfNoneMatchAny | PutCondition::IfMatch(_) => {}
-            }
             let oid = object_id(Kind::Blob, &bytes)?;
             let digest = md5::Md5::digest(&bytes);
             let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
@@ -2130,27 +2141,75 @@ async fn build_commit(
     })))
 }
 
-fn delete_condition_matches(
-    condition: &DeleteCondition,
+fn put_condition_matches(
+    condition: &PutCondition,
     old: Option<&(ObjectId, EntryMode)>,
     current_attributes: Option<&attributes::ObjectAttributes>,
 ) -> bool {
     match condition {
-        DeleteCondition::None => true,
-        DeleteCondition::IfMatchAny => old.is_some(),
+        PutCondition::None => true,
+        PutCondition::IfNoneMatchAny => old.is_none(),
+        PutCondition::IfMatch {
+            object,
+            etag,
+            attributes_present,
+        } => object_condition_matches(*object, etag, *attributes_present, old, current_attributes),
+    }
+}
+
+fn validate_delete_condition(
+    condition: &DeleteCondition,
+    old: Option<&(ObjectId, EntryMode)>,
+    current_attributes: Option<&attributes::ObjectAttributes>,
+) -> Result<()> {
+    match condition {
+        DeleteCondition::None => Ok(()),
+        DeleteCondition::IfMatchAny { missing } if old.is_none() => {
+            Err(missing_delete_error(*missing))
+        }
+        DeleteCondition::IfMatchAny { .. } => Ok(()),
+        DeleteCondition::IfMatch { missing, .. } if old.is_none() => {
+            Err(missing_delete_error(*missing))
+        }
         DeleteCondition::IfMatch {
             object,
             etag,
             attributes_present,
-        } => {
-            old.is_some_and(|(oid, _)| oid == object)
-                && match (attributes_present, current_attributes) {
-                    (_, Some(value)) => value.etag == *etag,
-                    (true, None) => false,
-                    (false, None) => true,
-                }
+            missing: _,
+        } if object_condition_matches(
+            *object,
+            etag,
+            *attributes_present,
+            old,
+            current_attributes,
+        ) =>
+        {
+            Ok(())
         }
+        DeleteCondition::IfMatch { .. } => Err(Error::PreconditionFailed),
     }
+}
+
+fn missing_delete_error(result: MissingDeleteResult) -> Error {
+    match result {
+        MissingDeleteResult::PreconditionFailed => Error::PreconditionFailed,
+        MissingDeleteResult::NotFound => Error::ConditionalTargetMissing,
+    }
+}
+
+fn object_condition_matches(
+    object: ObjectId,
+    etag: &str,
+    attributes_present: bool,
+    old: Option<&(ObjectId, EntryMode)>,
+    current_attributes: Option<&attributes::ObjectAttributes>,
+) -> bool {
+    old.is_some_and(|(oid, _)| *oid == object)
+        && match (attributes_present, current_attributes) {
+            (_, Some(value)) => value.etag == etag,
+            (true, None) => false,
+            (false, None) => true,
+        }
 }
 
 struct LfsAttributesChange {
@@ -3322,13 +3381,21 @@ mod tests {
         let first_oid = object_id(Kind::Blob, b"first").unwrap();
         put(
             Bytes::from_static(b"second"),
-            PutCondition::IfMatch(first_oid),
+            PutCondition::IfMatch {
+                object: first_oid,
+                etag: crate::gateway::md5_hex(b"first"),
+                attributes_present: true,
+            },
         )
         .await
         .unwrap();
         let stale = put(
             Bytes::from_static(b"third"),
-            PutCondition::IfMatch(first_oid),
+            PutCondition::IfMatch {
+                object: first_oid,
+                etag: crate::gateway::md5_hex(b"first"),
+                attributes_present: true,
+            },
         )
         .await;
 
@@ -3337,6 +3404,51 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
             "second"
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn if_match_rejects_a_stale_etag_for_unchanged_bytes() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        let bytes = Bytes::from_static(b"same bytes");
+        let oid = object_id(Kind::Blob, &bytes).unwrap();
+        let apply_with = |etag: &str, condition| {
+            apply(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                "refs/heads/main",
+                &path,
+                Change::Put {
+                    bytes: bytes.clone(),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes {
+                        etag_override: Some(etag.to_owned()),
+                        ..Default::default()
+                    }),
+                    condition,
+                },
+                "user",
+                &cancel,
+            )
+        };
+        apply_with("first-etag", PutCondition::None).await.unwrap();
+        apply_with("replacement-etag", PutCondition::None)
+            .await
+            .unwrap();
+
+        let stale = apply_with(
+            "third-etag",
+            PutCondition::IfMatch {
+                object: oid,
+                etag: "first-etag".to_owned(),
+                attributes_present: true,
+            },
+        )
+        .await;
+
+        assert!(matches!(stale, Err(Error::PreconditionFailed)));
         runtime.shutdown().await;
     }
 
@@ -3404,7 +3516,14 @@ mod tests {
                     Bytes::from_static(b"rejected"),
                     PutCondition::IfNoneMatchAny,
                 ),
-                mutation(Bytes::from_static(b"third"), PutCondition::IfMatch(first)),
+                mutation(
+                    Bytes::from_static(b"third"),
+                    PutCondition::IfMatch {
+                        object: first,
+                        etag: crate::gateway::md5_hex(b"first"),
+                        attributes_present: true,
+                    },
+                ),
             ],
             ApplyRequest {
                 branch: "refs/heads/main",
@@ -3450,6 +3569,7 @@ mod tests {
                     object: object_id(Kind::Blob, b"missing").unwrap(),
                     etag: crate::gateway::md5_hex(b"missing"),
                     attributes_present: false,
+                    missing: MissingDeleteResult::PreconditionFailed,
                 },
             },
             "user",
@@ -3458,6 +3578,30 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(Error::PreconditionFailed)));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn conditional_multi_delete_reports_a_missing_object() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"missing".to_vec()).unwrap();
+        let result = apply(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            "refs/heads/main",
+            &path,
+            Change::Delete {
+                condition: DeleteCondition::IfMatchAny {
+                    missing: MissingDeleteResult::NotFound,
+                },
+            },
+            "user",
+            &cancel,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::ConditionalTargetMissing)));
         runtime.shutdown().await;
     }
 
@@ -3511,6 +3655,7 @@ mod tests {
                     object: first,
                     etag: crate::gateway::md5_hex(b"first"),
                     attributes_present: false,
+                    missing: MissingDeleteResult::PreconditionFailed,
                 },
             },
             "user",
@@ -3535,6 +3680,7 @@ mod tests {
                     object: second,
                     etag: crate::gateway::md5_hex(b"second"),
                     attributes_present: false,
+                    missing: MissingDeleteResult::PreconditionFailed,
                 },
             },
             "user",

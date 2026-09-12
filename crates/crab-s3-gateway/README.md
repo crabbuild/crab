@@ -214,7 +214,7 @@ The supported data-plane surface includes:
 | Objects | `GetObject`, `HeadObject`, `PutObject`, `DeleteObject`, `CopyObject`, `GetObjectAttributes` |
 | Listings | `ListObjects`, `ListObjectsV2`, delimiter and continuation semantics |
 | Metadata | user metadata, standard content headers, tagging, ETags, modeled checksums |
-| Conditions | read conditions; strong `If-Match`; `If-None-Match: *` where documented |
+| Conditions | read ETag/date conditions; atomic strong `If-Match` for writes, copies, and deletes; `If-None-Match: *` for object creation/replacement |
 | Ranges | one open, closed, or suffix byte range; multipart part-number reads |
 | Batch delete | `DeleteObjects`, including quiet mode and per-key results |
 | Multipart | create, upload, upload-copy, list, abort, and complete with durable recovery |
