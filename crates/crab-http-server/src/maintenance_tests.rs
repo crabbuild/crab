@@ -54,6 +54,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         auth: None,
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
+        metrics: crate::metrics::Metrics::new().unwrap(),
     })
 }
 

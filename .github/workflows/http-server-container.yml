@@ -62,7 +62,11 @@ jobs:
                 --set ingress.className=nginx \
                 --set ingress.host=git.example.com \
                 --set ingress.tlsSecretName=crab-http-server-tls \
+                --set metrics.prometheusAnnotations=true \
+                --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
                 > "${rendered}"
+            grep -F 'prometheus.io/scrape: "true"' "${rendered}"
+            grep -F 'port: management' "${rendered}"
             docker run --rm \
               --volume "${rendered}:/manifests/server.yaml:ro" \
               "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
@@ -157,6 +161,10 @@ jobs:
           grep --extended-regexp --ignore-case \
             '^x-request-id: [0-9a-f-]{36}[[:space:]]*$' \
             "${RUNNER_TEMP}/crab-http-server-headers"
+          docker compose --file crates/crab-http-server/deploy/compose.yaml \
+            exec --no-TTY proxy curl --fail --silent --show-error \
+              http://127.0.0.1:8789/metrics \
+            | grep -F 'crab_http_server_requests_total{method="get",outcome="2xx"}'
           jq --exit-status \
             '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
             "${RUNNER_TEMP}/crab-http-server-repositories.json"

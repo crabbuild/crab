@@ -19,4 +19,11 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+    {{- with .Values.networkPolicy.metricsIngressFrom }}
+    - ports:
+        - port: management
+          protocol: TCP
+      from:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
 {{- end }}

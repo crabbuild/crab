@@ -17,6 +17,7 @@ mod issues;
 mod labels;
 mod lfs;
 mod maintenance;
+mod metrics;
 mod pulls;
 mod receive;
 mod releases;
@@ -55,6 +56,8 @@ pub enum Error {
     Maintenance(#[from] crab_write::WriteError),
     #[error("repository catalog operation failed")]
     Catalog(#[from] catalog::CatalogError),
+    #[error("server metrics setup failed")]
+    Metrics(#[from] metrics_exporter_prometheus::BuildError),
     #[error("repository maintenance task failed")]
     Worker(#[from] tokio::task::JoinError),
     #[error("repository settings could not be loaded")]

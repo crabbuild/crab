@@ -11,6 +11,7 @@
     "service",
     "ingress",
     "networkPolicy",
+    "metrics",
     "autoscaling",
     "resources",
     "scratch",
@@ -101,10 +102,19 @@
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "publicIngressFrom"],
+      "required": ["enabled", "publicIngressFrom", "metricsIngressFrom"],
       "properties": {
         "enabled": { "type": "boolean" },
-        "publicIngressFrom": { "type": "array", "items": { "type": "object" } }
+        "publicIngressFrom": { "type": "array", "items": { "type": "object" } },
+        "metricsIngressFrom": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prometheusAnnotations"],
+      "properties": {
+        "prometheusAnnotations": { "type": "boolean" }
       }
     },
     "autoscaling": {

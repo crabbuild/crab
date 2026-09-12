@@ -42,6 +42,10 @@ ingress:
 networkPolicy:
   enabled: true
   publicIngressFrom: []
+  metricsIngressFrom: []
+
+metrics:
+  prometheusAnnotations: false
 
 autoscaling:
   enabled: false

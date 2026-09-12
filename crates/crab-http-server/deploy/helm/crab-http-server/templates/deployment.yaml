@@ -26,20 +26,19 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
-      annotations:
-        checksum/managed-config: {{ $.Values.config.content | sha256sum | quote }}
-        {{- with $.Values.rolloutToken }}
-        crab.build/rollout-token: {{ . | quote }}
-        {{- end }}
-        {{- toYaml . | nindent 8 }}
-      {{- else }}
       annotations:
         checksum/managed-config: {{ .Values.config.content | sha256sum | quote }}
         {{- with .Values.rolloutToken }}
         crab.build/rollout-token: {{ . | quote }}
         {{- end }}
-      {{- end }}
+        {{- if .Values.metrics.prometheusAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8789"
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "crab-http-server.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}

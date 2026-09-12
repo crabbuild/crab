@@ -83,6 +83,7 @@ and a canonical HTTPS origin. For container deployment, use the
 | Start locally with Docker Compose | [Local Compose stack](deploy/README.md#start-locally-with-docker-compose) |
 | Deploy on EKS, GKE, AKS, or ECS | [Deployment profiles](deploy/README.md) |
 | Probe readiness and drain the service | [Container operation](REFERENCE.md#run-the-container) |
+| Scrape metrics and define alerts | [Operations runbook](deploy/operations.md#observe-requests-and-capacity) |
 | Understand browser APIs and publication ownership | [Application behavior](REFERENCE.md#repository-browser-and-application-apis) |
 | Configure identity, membership, sessions, and protection | [Team sign-in](REFERENCE.md#team-sign-in) |
 | Clone and fetch with scoped Git tokens | [Git HTTP reads](REFERENCE.md#git-http-reads) |

@@ -238,6 +238,7 @@ impl Harness {
             auth: Some(auth),
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
+            metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));
         let task = tokio::spawn(async move {

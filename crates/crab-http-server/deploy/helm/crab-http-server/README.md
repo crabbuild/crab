@@ -19,7 +19,10 @@ flowchart LR
     Management -.-> Pods
 ```
 
-The public Service exposes port 8788. The chart never exposes management port 8789 through a Service or ingress. The default NetworkPolicy admits public traffic only on the named `http` port.
+The public Service exposes port 8788. The chart never exposes management port
+8789 through a Service or ingress. The default NetworkPolicy admits public
+traffic only on the named `http` port. Metrics scraping requires an explicit
+management-port source.
 
 ## Prepare the platform
 
@@ -78,6 +81,7 @@ Choose `gke-values.example.yaml` or `aks-values.example.yaml` for those platform
 | `config.content.storage.url` | Your dedicated object-storage root |
 | `config.content.auth.*` | Your OIDC issuer, client ID, and public HTTPS URL |
 | `serviceAccount.*` | Your provider workload identity |
+| `metrics` and `networkPolicy.metricsIngressFrom` | Your private Prometheus discovery and allowed scraper source |
 
 The chart rejects image tags, missing digests, unknown top-level values, automatic Kubernetes API credentials, fewer than two replicas, and an unsafe shutdown budget.
 
@@ -167,6 +171,27 @@ autoscaling:
 ```
 
 CPU scaling protects general request capacity. It does not create a cluster-wide Git admission limit: transfer and maintenance admission remain process-local.
+
+## Scrape Prometheus metrics
+
+The private management listener serves `GET /metrics`. Enable standard pod
+annotations and allow only the namespace or pods that run your scraper:
+
+```yaml
+metrics:
+  prometheusAnnotations: true
+
+networkPolicy:
+  metricsIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+```
+
+The public Service and ingress never expose port 8789. Metrics have bounded
+labels and retain request duration through streaming response completion. Use a
+`PodMonitor` or equivalent discovery configuration instead of creating a
+public management Service.
 
 ## Restrict network sources
 

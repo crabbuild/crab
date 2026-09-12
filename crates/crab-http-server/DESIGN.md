@@ -7,7 +7,11 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 
 > **Current status:** The runtime has a provider-neutral storage root, durable
 > CAS repository catalog, shared identity state, dynamic replica refresh,
-> private management listener, a local Compose profile, and hardened Helm profiles for EKS/GKE/AKS. The ECS Fargate profile cannot preserve the full shutdown budget. Static artifacts do not constitute live cloud qualification. Abrupt write-process crash recovery and index-receipt reconstruction remain incomplete.
+> private probes and bounded Prometheus metrics, a local Compose profile, and
+> hardened Helm profiles for EKS/GKE/AKS. The ECS Fargate profile cannot
+> preserve the full shutdown budget. Static artifacts do not constitute live
+> cloud qualification. Abrupt write-process crash recovery and index-receipt
+> reconstruction remain incomplete.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
@@ -199,7 +203,7 @@ cache and coordination identities from colliding across clouds.
 | AKS | Microsoft Entra Workload ID | `az://account/container/root` |
 | ECS/Fargate | ECS task role | `s3://bucket/root` |
 
-Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. One Helm chart owns inline or external configuration, the Deployment, Service, ServiceAccount, disruption budget, probes, security context, topology spread, scratch volume, ingress NetworkPolicy, optional TLS ingress, optional autoscaling, and digest-pinned image. Provider value files contain the storage URL, OIDC settings, workload-identity annotations or labels, and required environment. The public Service exposes port 8788; port 8789 remains private for liveness and storage-aware readiness.
+Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. One Helm chart owns inline or external configuration, the Deployment, Service, ServiceAccount, disruption budget, probes, security context, topology spread, scratch volume, ingress NetworkPolicy, optional TLS ingress, optional autoscaling, and digest-pinned image. Provider value files contain the storage URL, OIDC settings, workload-identity annotations or labels, and required environment. The public Service exposes port 8788; port 8789 remains private for liveness, storage-aware readiness, and Prometheus metrics. Metrics retain request observations through response-body completion and use only bounded method, outcome, and admission-class labels.
 
 ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
 three protected files to disposable scratch, unsets the injected environment

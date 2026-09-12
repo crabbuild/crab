@@ -214,9 +214,9 @@ seconds without a restart.
 Without OIDC, the server accepts loopback listeners only. This mode trusts one
 local operator and exposes every cataloged repository to that principal.
 
-The private management listener owns `GET /healthz` and `GET /readyz`. The
-public listener does not expose probes. Use `healthcheck` to call readiness on
-the configured management address.
+The private management listener owns `GET /healthz`, `GET /readyz`, and
+`GET /metrics`. The public listener does not expose management routes. Use
+`healthcheck` to call readiness on the configured management address.
 
 ## Run the container
 
@@ -307,7 +307,7 @@ The binary's `healthcheck` command calls `/readyz` on the management listener.
 identity, and application state remain in object storage; `/var/lib/crab/tmp`
 contains only bounded transient files.
 
-### Probe liveness and readiness
+### Probe health and scrape metrics
 
 The two probe routes answer different operator questions:
 
@@ -315,11 +315,18 @@ The two probe routes answer different operator questions:
 | --- | --- | --- |
 | `GET /healthz` | The HTTP process can answer | It does not inspect repository storage |
 | `GET /readyz` | The durable catalog can be read and validated within 10 seconds | HTTP 503 with `Retry-After: 5` |
+| `GET /metrics` | Prometheus text exposes request/body lifetime, admission, catalog, repository, receive-worker, and drain signals | It does not perform a storage probe |
 
 Only the management listener serves probes. Every public request retains strict
 canonical `Host` validation.
 
 Every public response includes a server-generated `x-request-id`. The completion log records the same identifier with the method, path, status, and elapsed milliseconds. Set the standard `RUST_LOG` environment variable to adjust tracing filters; the default level is `info`.
+
+Metrics use bounded `method`, `outcome`, and `class` labels. They never include
+repository names, paths, principals, request IDs, or storage keys. Request
+duration and in-flight gauges retain ownership through the response body, so a
+long Git, LFS, archive, or release stream remains visible after its handler has
+returned. Body errors and client aborts have separate counters.
 
 ### Choose an orchestrator
 
@@ -1066,7 +1073,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 
 | Contract | Primary source | Executable evidence |
 | --- | --- | --- |
-| Route composition, Host checks, request correlation, readiness, and shutdown | `src/server.rs` | Server, authentication, and maintenance tests |
+| Route composition, Host checks, request correlation, readiness, metrics, and shutdown | `src/server.rs`, `src/metrics.rs` | Server, metrics, authentication, and maintenance tests |
 | OIDC, membership, sessions, tokens, and CSRF | `src/auth.rs` | `src/auth_tests.rs` and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
@@ -1087,7 +1094,7 @@ Current local and CI evidence includes:
 - Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, and cooperative restart recovery
 - OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
-- Container build, non-root identity, stop signal, health command, runtime inspection, strict Helm lint, and Kubernetes schema validation
+- Container build, non-root identity, stop signal, health command, private metrics scrape, runtime inspection, strict Helm lint, and Kubernetes schema validation
 
 These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The tests do not establish abrupt process-crash safety, multi-instance global admission, provider-scale performance, backup recovery, or complete manual accessibility.
 
@@ -1117,7 +1124,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; crash and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, request correlation, and runbook implemented; application metrics and live qualification remain |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -1133,7 +1140,7 @@ The remaining production gaps include:
 - Repository creation and adoption exist in the CLI; browser import remains
 - Backup and restore qualification for Git and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
-- Application metrics plus live upgrade, rollback, and disaster-recovery qualification
+- Live upgrade, rollback, alert-tuning, and disaster-recovery qualification
 
 ## Ownership
 

@@ -20,7 +20,10 @@ flowchart LR
 | AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
 | ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
-The Kubernetes chart manages inline configuration, two or more replicas, private management probes, a disruption budget, ingress isolation, optional Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is release-qualified only after its live test matrix passes.
+The Kubernetes chart manages inline configuration, two or more replicas,
+private probes and Prometheus metrics, a disruption budget, ingress isolation,
+optional Transport Layer Security (TLS) ingress, and optional autoscaling. A
+provider is release-qualified only after its live test matrix passes.
 
 ## Start locally with Docker Compose
 

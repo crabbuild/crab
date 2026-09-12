@@ -37,8 +37,9 @@ Complete these checks before the first install and every infrastructure change:
 5. Confirm the ingress preserves the canonical `Host` header and streams bodies without buffering.
 6. Confirm port 8789 has no Service, ingress, or public load-balancer listener.
 7. Confirm the NetworkPolicy-capable CNI enforces the chart policy.
-8. Confirm the cluster can schedule two replicas in separate zones.
-9. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
+8. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
+9. Confirm the cluster can schedule two replicas in separate zones.
+10. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
 
 Render and validate the release before applying it:
 
@@ -92,12 +93,22 @@ Monitor these platform and application signals:
 | Restarts and termination reason | A pod restarts or exits without a planned rollout |
 | CPU throttling | Sustained throttling precedes request latency or HPA growth |
 | Scratch usage and eviction | Free scratch approaches the largest qualified concurrent workload |
-| Ingress 4xx/5xx and duration | Error rate or tail duration changes from the recorded baseline |
-| `repository readiness check failed` | The catalog can’t be read or validated |
+| `crab_http_server_requests_total` and request duration | Error rate or tail duration changes from the recorded baseline |
+| Response-body errors and aborts | A stream fails after headers or a client/proxy disconnects early |
+| Admission available permits | A class remains saturated instead of returning to capacity |
+| `crab_http_server_catalog_healthy` | Any pod reports `0` |
+| `crab_http_server_catalog_refresh_failures_total` | The counter increases |
+| `crab_http_server_receive_workers` | Workers remain after request traffic settles |
+| `crab_http_server_draining` | A pod reports `1` outside a planned rollout |
 | `repository catalog refresh failed` | Running pods stop discovering catalog changes |
 | Publication or LFS transfer failures | A write may need client retry or operator outcome inspection |
 
-Crab does not expose a Prometheus metrics endpoint yet. Use Kubernetes, ingress, and object-storage telemetry plus structured tracing fields. Treat the missing application metrics surface as a production gap.
+Scrape `GET /metrics` on each pod's private management port. The chart can add
+Prometheus pod annotations and a management-port NetworkPolicy rule for an
+explicit monitoring source. Keep port 8789 absent from public Services and
+ingress. Alert thresholds need a workload baseline; start with catalog health,
+new catalog-refresh failures, sustained zero admission permits, response-body
+errors, and unexpected drain state.
 
 ## Roll back a failed release
 
@@ -207,6 +218,7 @@ Record these gates against a dedicated storage root:
 - Upgrade and roll back one release without losing committed state
 - Restore the complete root to an isolated prefix and repeat read verification
 - Confirm the management listener is unreachable through Service, ingress, and peer pods
+- Scrape every pod and exercise request, body-error, admission, catalog-health, and drain signals
 - Confirm no static provider credential exists in Secret, ConfigMap, pod environment, or rendered manifests
 
 Static rendering, unit tests, and localhost RustFS tests don’t replace these gates. Keep the recorded evidence with the release decision.

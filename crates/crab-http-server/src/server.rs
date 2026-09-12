@@ -32,6 +32,10 @@ use crate::{
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const READ_ADMISSION_CAPACITY: usize = 16;
+const GIT_ADMISSION_CAPACITY: usize = 4;
+const APP_ADMISSION_CAPACITY: usize = 8;
+const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
 
 pub(crate) struct Repository {
     pub config: RepositoryConfig,
@@ -64,6 +68,13 @@ impl RepositorySet {
             .values()
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     fn replace(&self, next: BTreeMap<(String, String), Arc<Repository>>) {
@@ -221,6 +232,7 @@ pub(crate) struct Server {
     pub auth: Option<Authentication>,
     catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
+    metrics: crate::metrics::Metrics,
 }
 
 impl Server {
@@ -287,14 +299,15 @@ pub async fn serve(config: Config) -> Result<()> {
             .as_ref()
             .map(Authentication::cursor_key)
             .unwrap_or_else(rand::random),
-        admission: Semaphore::new(16),
-        git_admission: Arc::new(Semaphore::new(4)),
-        app_admission: Semaphore::new(8),
-        maintenance_admission: Arc::new(Semaphore::new(2)),
+        admission: Semaphore::new(READ_ADMISSION_CAPACITY),
+        git_admission: Arc::new(Semaphore::new(GIT_ADMISSION_CAPACITY)),
+        app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
+        maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         port,
         auth,
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
+        metrics: crate::metrics::Metrics::new()?,
     });
     let app = router(Arc::clone(&server));
     let management = management_router(Arc::clone(&server));
@@ -404,12 +417,14 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
             Ok(value) => value,
             Err(error) => {
                 server.catalog_healthy.store(false, Ordering::Release);
+                server.metrics.record_catalog_refresh_failure();
                 tracing::warn!(error = ?error, "repository catalog refresh failed");
                 continue;
             }
         };
         if document.version < version {
             server.catalog_healthy.store(false, Ordering::Release);
+            server.metrics.record_catalog_refresh_failure();
             tracing::warn!(
                 catalog_version = document.version,
                 active_version = version,
@@ -431,6 +446,7 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
             }
             Err(error) => {
                 server.catalog_healthy.store(false, Ordering::Release);
+                server.metrics.record_catalog_refresh_failure();
                 tracing::warn!(error = ?error, "repository catalog materialization failed");
             }
         }
@@ -523,7 +539,40 @@ fn management_router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
+        .route("/metrics", get(render_metrics))
         .with_state(server)
+}
+
+async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
+    let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
+        repositories: server.repositories.len(),
+        catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
+        draining: server.cancellation.is_cancelled(),
+        receive_workers: server.receives.len(),
+        admission_available: [
+            server.admission.available_permits(),
+            server.git_admission.available_permits(),
+            server.app_admission.available_permits(),
+            server.maintenance_admission.available_permits(),
+        ],
+        admission_capacity: [
+            READ_ADMISSION_CAPACITY,
+            GIT_ADMISSION_CAPACITY,
+            APP_ADMISSION_CAPACITY,
+            MAINTENANCE_ADMISSION_CAPACITY,
+        ],
+    });
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 async fn readiness(State(server): State<Arc<Server>>) -> Response {
@@ -592,6 +641,7 @@ async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Nex
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let started = Instant::now();
+    let observation = server.metrics.start_request(&method);
     let span = tracing::info_span!(
         "http_request",
         request_id = %request_id,
@@ -608,7 +658,15 @@ async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Nex
             elapsed_ms = started.elapsed().as_millis(),
             "request completed"
         );
-        response
+        let status = response.status();
+        let (parts, body) = response.into_parts();
+        Response::from_parts(
+            parts,
+            axum::body::Body::new(crate::metrics::ObservedBody::new(
+                body,
+                observation.response(status),
+            )),
+        )
     }
     .instrument(span)
     .await
@@ -805,6 +863,7 @@ mod tests {
             auth: None,
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
+            metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));
         for (path, host, expected, cache) in [
@@ -887,6 +946,27 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected, "{path}");
         }
+        let response = management
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("crab_http_server_catalog_healthy 0"));
+        assert!(body.contains("crab_http_server_requests_total{method=\"get\",outcome=\"2xx\"} 2"));
         runtime.shutdown().await;
     }
 }
