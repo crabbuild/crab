@@ -330,7 +330,7 @@ returned. Body errors and client aborts have separate counters.
 
 ### Choose an orchestrator
 
-Use the portable Helm chart for an EKS, GKE, or AKS team deployment. Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. The chart runs at least two replicas, exposes only the public port, pins an image digest, drops Linux capabilities, uses a read-only root filesystem, mounts bounded disposable scratch, applies a disruption budget and ingress NetworkPolicy, and supports optional TLS ingress and autoscaling.
+Use the portable Helm chart for an EKS, GKE, or AKS team deployment. Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. The chart runs at least two replicas, exposes only the public port, pins an image digest, drops Linux capabilities, uses a read-only root filesystem, mounts bounded disposable scratch, applies a disruption budget and ingress NetworkPolicy, and supports optional TLS ingress and autoscaling. During pod termination, a 15-second pre-stop delay lets endpoint and ingress routes converge before `SIGTERM`; the 630-second pod grace period then preserves the complete application drain budget.
 
 The ECS Fargate task definition remains an evaluation profile. Fargate limits a container stop timeout to 120 seconds, which can interrupt Crab operations that run for up to ten minutes. Prefer the Kubernetes chart until abrupt-process-crash qualification closes that gap.
 

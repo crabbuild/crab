@@ -90,7 +90,7 @@ livenessProbe:
   timeoutSeconds: 3
   failureThreshold: 3
 
-terminationGracePeriodSeconds: 600
+terminationGracePeriodSeconds: 630
 minReadySeconds: 10
 revisionHistoryLimit: 3
 progressDeadlineSeconds: 900

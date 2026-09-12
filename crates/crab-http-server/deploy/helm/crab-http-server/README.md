@@ -83,7 +83,9 @@ Choose `gke-values.example.yaml` or `aks-values.example.yaml` for those platform
 | `serviceAccount.*` | Your provider workload identity |
 | `metrics` and `networkPolicy.metricsIngressFrom` | Your private Prometheus discovery and allowed scraper source |
 
-The chart rejects image tags, missing digests, unknown top-level values, automatic Kubernetes API credentials, fewer than two replicas, and an unsafe shutdown budget.
+The chart rejects image tags, missing digests, unknown top-level values,
+automatic Kubernetes API credentials, fewer than two replicas, and a shutdown
+budget shorter than 630 seconds.
 
 ## Create the application Secret
 
@@ -143,6 +145,12 @@ kubectl --namespace crab exec deployment/crab-http-server -- \
 ```
 
 Every healthy replica discovers the new record within five seconds. Use `repository adopt` instead when the target prefix already contains a canonical Crab repository.
+
+During termination, Kubernetes marks the pod endpoint non-ready before running
+the chart's 15-second pre-stop delay. Crab keeps serving during that interval so
+Service and ingress routes can converge before `SIGTERM` starts the application
+drain. The 630-second pod grace period preserves more than ten minutes after the
+pre-stop delay.
 
 ## Enable HTTPS ingress
 

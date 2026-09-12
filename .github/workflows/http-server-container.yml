@@ -67,6 +67,9 @@ jobs:
                 > "${rendered}"
             grep -F 'prometheus.io/scrape: "true"' "${rendered}"
             grep -F 'port: management' "${rendered}"
+            grep -F 'terminationGracePeriodSeconds: 630' "${rendered}"
+            grep -F -- '- /usr/bin/sleep' "${rendered}"
+            grep -F -- '- "15"' "${rendered}"
             docker run --rm \
               --volume "${rendered}:/manifests/server.yaml:ro" \
               "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
@@ -110,6 +113,12 @@ jobs:
             echo "chart accepted an invalid autoscaling range" >&2
             exit 1
           fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set terminationGracePeriodSeconds=629 >/dev/null 2>&1; then
+            echo "chart accepted a shutdown budget shorter than pre-stop plus drain" >&2
+            exit 1
+          fi
 
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${terraform_image}" fmt -check -recursive "${terraform_root}"
@@ -134,6 +143,8 @@ jobs:
           test "$(docker run --rm --entrypoint /usr/bin/id crab-http-server:test -u)" = "10001"
           docker run --rm --entrypoint /usr/bin/test crab-http-server:test \
             -s /etc/ssl/certs/ca-certificates.crt
+          docker run --rm --entrypoint /usr/bin/test crab-http-server:test \
+            -x /usr/bin/sleep
           docker run --rm crab-http-server:test --help | grep -F -- "--config"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"
       - name: Exercise the Compose quick start and restart

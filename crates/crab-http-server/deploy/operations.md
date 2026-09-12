@@ -173,13 +173,18 @@ Don’t repair object storage by editing catalog JSON, ref markers, manifests, o
 
 ## Drain a deployment
 
-Keep the chart’s 600-second termination grace period. A terminating pod stops accepting connections, drains Axum handlers, waits for tracked publications and maintenance, then shuts down repository runtimes.
+Keep the chart's 630-second termination grace period. Kubernetes marks a
+terminating endpoint non-ready, then the pre-stop hook keeps Crab serving for
+15 seconds while Service and ingress routes converge. `SIGTERM` starts the
+application drain after that delay, leaving more than the complete ten-minute
+operation budget for Axum handlers, tracked publications, maintenance, and
+repository runtime shutdown.
 
 Before planned cluster or node maintenance:
 
 1. Confirm at least two ready replicas.
 2. Confirm the PodDisruptionBudget reports one allowed disruption.
-3. Confirm ingress deregistration and connection-drain timeouts preserve active streams.
+3. Confirm endpoint and ingress deregistration complete during the pre-stop delay and connection-drain timeouts preserve active streams.
 4. Replace one pod and complete a test fetch and push.
 5. Continue one pod at a time.
 

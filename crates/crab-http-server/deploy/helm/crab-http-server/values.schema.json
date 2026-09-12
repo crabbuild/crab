@@ -155,7 +155,7 @@
     "startupProbe": { "$ref": "#/definitions/probe" },
     "readinessProbe": { "$ref": "#/definitions/probe" },
     "livenessProbe": { "$ref": "#/definitions/probe" },
-    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 600 },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 630 },
     "minReadySeconds": { "type": "integer", "minimum": 5 },
     "revisionHistoryLimit": { "type": "integer", "minimum": 1 },
     "progressDeadlineSeconds": { "type": "integer", "minimum": 600 },
