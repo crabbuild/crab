@@ -222,6 +222,44 @@ the configured management address.
 
 The checked-in image builds the locked React application and Rust server from digest-pinned bases. The runtime installs no packages, runs as UID/GID 10001, embeds the frontend, and uses a dedicated temporary directory.
 
+### Start the complete local stack
+
+Docker Compose provides the shortest path from checkout to a usable server:
+
+```sh
+docker compose --file crates/crab-http-server/deploy/compose.yaml \
+  up --detach --build --wait
+```
+
+The stack provisions its own private RustFS bucket and durable catalog, then
+idempotently creates `demo/hello`. Open
+<http://127.0.0.1:8788/demo/hello> or inspect discovery directly:
+
+```sh
+curl --fail http://127.0.0.1:8788/api/repos
+```
+
+Only Caddy's public port is published, and only on host loopback. Caddy shares
+the server container's network namespace and forwards streaming bodies to
+Crab's `127.0.0.1:8788` listener. Crab therefore retains the same local-trust
+security rule as a direct development process; its `127.0.0.1:8789`
+management listener and RustFS remain unreachable from the host network.
+
+```text
+host loopback                  shared container namespace       private network
+127.0.0.1:8788 ──> Caddy :8080 ──> Crab 127.0.0.1:8788 ──> RustFS :9000
+                                      │
+                                      └──> management 127.0.0.1:8789
+```
+
+The named `repository-data` volume survives `docker compose down` and server
+recreation. Use `down --volumes` only when intentionally deleting the local
+catalog and repositories. This profile has synthetic credentials and no OIDC;
+never expose it remotely. Use the orchestrator profiles below for team service.
+
+The complete command set, image overrides, port and scratch sizing, repository
+administration, and teardown behavior live in `deploy/README.md`.
+
 ### Build the image
 
 Build from the repository root so Docker can access the workspace and frontend inputs:

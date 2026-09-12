@@ -7,10 +7,10 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 
 > **Current status:** The runtime has a provider-neutral storage root, durable
 > CAS repository catalog, shared identity state, dynamic replica refresh,
-> private management listener, Helm profiles for EKS/GKE/AKS, and an ECS
-> Fargate task profile. Static artifacts do not constitute live cloud
-> qualification. Abrupt write-process crash recovery and index-receipt
-> reconstruction remain incomplete.
+> private management listener, a local Compose profile, Helm profiles for
+> EKS/GKE/AKS, and an ECS Fargate task profile. Static artifacts do not
+> constitute live cloud qualification. Abrupt write-process crash recovery and
+> index-receipt reconstruction remain incomplete.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
@@ -72,6 +72,10 @@ The following are deliberate non-goals:
 - No durable state on pod or Fargate scratch disks
 - No Lambda deployment pretending to support the streaming data plane
 - No automatic creation or deletion of the operator's bucket/container
+
+The last rule applies to production roots. The local Compose profile owns a
+dedicated RustFS volume and can safely bootstrap its bucket and demo repository
+inside that explicit development boundary.
 
 ## Use one durable repository catalog
 
@@ -192,6 +196,7 @@ cache and coordination identities from colliding across clouds.
 
 | Runtime | Provider-native identity | URL |
 | --- | --- | --- |
+| Local Compose | Synthetic stack-local credentials | `s3://crab-http-server/repositories` |
 | EKS | EKS Pod Identity | `s3://bucket/root` |
 | GKE | Workload Identity Federation for GKE | `gs://bucket/root` |
 | AKS | Microsoft Entra Workload ID | `az://account/container/root` |
@@ -207,6 +212,31 @@ ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
 three protected files to disposable scratch, unsets the injected environment
 variables, and execs the same binary. Repository, catalog, and session state
 never depend on that scratch volume.
+
+### Preserve local trust through a container proxy
+
+Unauthenticated operation accepts loopback listeners only. Publishing Crab's
+listener directly from an ordinary bridge-network container would require it
+to bind to an unspecified address and would erase that invariant. The Compose
+profile instead shares one network namespace between Crab and a small Caddy
+proxy:
+
+```mermaid
+flowchart LR
+    Host[Host 127.0.0.1] -->|published 8788 → 8080| Proxy[Caddy]
+    subgraph Namespace[shared network namespace]
+      Proxy -->|127.0.0.1:8788| Crab[Crab public listener]
+      Crab -.->|127.0.0.1:8789| Health[private management listener]
+    end
+    Crab -->|Compose-private DNS| Store[(RustFS)]
+```
+
+Caddy disables automatic HTTPS, preserves streaming by flushing upstream
+responses immediately, and normalizes the upstream `Host` to Crab's loopback
+origin. Docker publishes only Caddy's port and restricts it to host loopback.
+No server flag, trusted-proxy escape hatch, or alternate authentication path is
+needed. Production profiles terminate HTTPS at their provider load balancer
+and require OIDC instead.
 
 ### Exclude Lambda from the data plane
 
