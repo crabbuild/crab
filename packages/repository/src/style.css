@@ -498,31 +498,83 @@ main {
   overflow-wrap: anywhere;
   margin: 16px 0;
 }
-.change-list button {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  text-align: left;
-  width: 100%;
-  border: 0;
-  border-bottom: 1px solid var(--borderColor-muted);
-  padding: 12px 16px;
-  background: transparent;
+.change-workspace {
+  display: grid;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  align-items: stretch;
+  height: calc(100vh - 32px);
+  min-height: 520px;
+  max-height: 960px;
+  overflow: hidden;
+  border: 1px solid var(--borderColor-default);
+  border-radius: var(--borderRadius-medium);
+}
+.change-workspace-sticky {
+  position: sticky;
+  top: 16px;
+}
+.change-tree-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bgColor-muted);
+  border-right: 1px solid var(--borderColor-default);
+}
+.change-file-tree {
+  display: block;
+  height: 100%;
+  min-height: 0;
   color: var(--fgColor-default);
+  --trees-accent-override: var(--fgColor-accent);
+  --trees-bg-override: var(--bgColor-muted);
+  --trees-bg-muted-override: var(--control-transparent-bgColor-hover);
+  --trees-border-color-override: var(--borderColor-default);
+  --trees-fg-override: var(--fgColor-default);
+  --trees-fg-muted-override: var(--fgColor-muted);
+  --trees-font-family-override: var(--fontStack-system);
+  --trees-font-size-override: 14px;
+  --trees-focus-ring-color-override: var(--focus-outlineColor);
+  --trees-git-added-color-override: var(--fgColor-default);
+  --trees-git-deleted-color-override: var(--fgColor-default);
+  --trees-git-modified-color-override: var(--fgColor-default);
+  --trees-item-margin-x-override: 0px;
+  --trees-item-padding-x-override: 6px;
+}
+.change-diff-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-padding-top: 16px;
+  background: var(--bgColor-muted);
+}
+.change-diff-pane .diff-panel {
+  margin: 0;
+}
+.change-diff-list {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+}
+.diff-placeholder {
+  display: grid;
+  min-height: 140px;
+  place-items: center;
+  border-top: 1px solid var(--borderColor-muted);
+}
+.diff-file-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+.diff-file-heading h4 {
+  margin: 0;
+  overflow: hidden;
   font-size: 14px;
-}
-.change-list button:last-child {
-  border-bottom: 0;
-}
-.change-list button:hover,
-.change-list button.selected {
-  background: var(--bgColor-accent-muted);
-}
-.change-list button span {
-  overflow-wrap: anywhere;
-}
-.change-list code {
-  margin-left: auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .diff-panel {
   margin-top: 24px;
@@ -554,7 +606,7 @@ main {
   overflow: hidden;
   background: var(--bgColor-muted);
 }
-.blame-resizer {
+.pane-resizer {
   position: relative;
   width: 9px;
   min-width: 9px;
@@ -566,7 +618,7 @@ main {
   border: 0;
   border-inline: 1px solid var(--borderColor-muted);
 }
-.blame-resizer::before {
+.pane-resizer::before {
   position: absolute;
   inset: 0 2px;
   content: "";
@@ -574,7 +626,7 @@ main {
   opacity: 0;
   transition: opacity 120ms ease;
 }
-.blame-resizer::after {
+.pane-resizer::after {
   position: absolute;
   top: 50%;
   left: 50%;
@@ -589,20 +641,20 @@ main {
     height 120ms ease,
     opacity 120ms ease;
 }
-.blame-resizer:hover::before,
-.blame-resizer:focus-visible::before,
-.blame-resizer:active::before {
+.pane-resizer:hover::before,
+.pane-resizer:focus-visible::before,
+.pane-resizer:active::before {
   opacity: 1;
   background: var(--bgColor-accent-muted);
 }
-.blame-resizer:hover::after,
-.blame-resizer:focus-visible::after,
-.blame-resizer:active::after {
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after,
+.pane-resizer:active::after {
   height: 44px;
   opacity: 1;
   background: var(--fgColor-accent);
 }
-.blame-resizer:focus-visible {
+.pane-resizer:focus-visible {
   z-index: 1;
   outline: 2px solid var(--focus-outlineColor);
   outline-offset: -2px;
@@ -747,8 +799,8 @@ main {
   letter-spacing: 0.01em;
 }
 @media (prefers-reduced-motion: reduce) {
-  .blame-resizer::before,
-  .blame-resizer::after {
+  .pane-resizer::before,
+  .pane-resizer::after {
     transition: none;
   }
 }
@@ -799,6 +851,28 @@ main {
   .code-layout {
     display: flex;
     flex-direction: column;
+  }
+  .change-workspace {
+    position: static;
+    grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+    max-height: none;
+  }
+  .change-tree-pane {
+    border-right: 0;
+    border-bottom: 1px solid var(--borderColor-default);
+  }
+  .change-file-tree {
+    position: static;
+    height: 240px;
+    min-height: 0;
+  }
+  .change-diff-pane {
+    overflow: visible;
+  }
+  .change-diff-list {
+    padding: 12px;
   }
   .tree-sidebar {
     position: static;
@@ -2114,15 +2188,26 @@ main {
   padding: 20px;
 }
 .discussion-editor {
+  contain: inline-size;
+  width: 100%;
+  min-width: 0;
   border: 1px solid var(--borderColor-default);
   border-radius: 6px;
   background: var(--bgColor-default);
   overflow: hidden;
 }
-.editor-tabs {
+.editor-header {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: stretch;
+  overflow: hidden;
   background: var(--bgColor-muted);
   border-bottom: 1px solid var(--borderColor-default);
+}
+.editor-tabs {
+  display: flex;
+  flex: 0 0 auto;
   gap: 8px;
   padding: 8px 8px 0;
 }
@@ -2141,6 +2226,57 @@ main {
   background: var(--bgColor-default);
   border-color: var(--borderColor-default);
   font-weight: 600;
+}
+.editor-toolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 6px 8px;
+  margin-left: auto;
+  overflow-x: auto;
+}
+.editor-toolbar[hidden] {
+  display: none;
+}
+.editor-tool-group {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+.editor-tool-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 5px;
+  background: var(--borderColor-muted);
+}
+.editor-tool {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  place-items: center;
+  color: var(--fgColor-muted);
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-radius: var(--borderRadius-medium);
+}
+.editor-tool:hover {
+  color: var(--fgColor-default);
+  background: var(--control-transparent-bgColor-hover);
+}
+.editor-tool:focus-visible {
+  color: var(--fgColor-default);
+  outline: 2px solid var(--focus-outlineColor);
+  outline-offset: -2px;
+}
+.editor-tool:disabled {
+  color: var(--fgColor-disabled);
+  cursor: default;
+  background: transparent;
 }
 .discussion-editor textarea {
   border: 0;
@@ -2315,6 +2451,14 @@ main {
   padding-top: 16px;
 }
 @media (max-width: 640px) {
+  .editor-header {
+    flex-wrap: wrap;
+  }
+  .editor-toolbar {
+    flex: 1 0 100%;
+    justify-content: flex-start;
+    border-top: 1px solid var(--borderColor-muted);
+  }
   .issues-workspace {
     display: block;
   }
@@ -3452,6 +3596,8 @@ main {
 .timing summary {
   cursor: pointer;
   display: inline-block;
+  color: var(--fgColor-default);
+  background: var(--bgColor-default);
 }
 .timing summary:hover {
   color: var(--fgColor-accent);
@@ -3666,7 +3812,9 @@ main {
   padding: 0;
 }
 .repo-file-workspace .code-layout {
-  grid-template-columns: 356px minmax(0, 1fr);
+  grid-template-columns:
+    minmax(240px, var(--tree-pane-width, 356px)) 9px
+    minmax(0, 1fr);
   gap: 0;
 }
 .repo-file-workspace .code-layout.no-sidebar {
@@ -3676,7 +3824,7 @@ main {
   position: sticky;
   top: 0;
   min-height: calc(100vh - 113px);
-  border-width: 0 1px 0 0;
+  border-width: 0;
   border-radius: 0;
 }
 .repo-file-workspace .repository-tree {
@@ -4048,6 +4196,9 @@ main {
   .repo-file-workspace .code-layout {
     display: flex;
     gap: 16px;
+  }
+  .repo-file-workspace .tree-resizer {
+    display: none;
   }
   .repo-file-workspace .tree-sidebar {
     position: static;

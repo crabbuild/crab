@@ -401,9 +401,23 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     "refs/heads/feature/docs",
   );
   await page.getByLabel("Title", { exact: true }).fill("Document the feature");
-  await page
-    .getByRole("textbox", { name: "Description", exact: true })
-    .fill("This explains the **new behavior**.");
+  const pullForm = page.locator(".pull-form");
+  const description = pullForm.getByRole("textbox", {
+    name: "Description",
+    exact: true,
+  });
+  await description.fill("This explains the new behavior.");
+  await description.evaluate((input: HTMLTextAreaElement) =>
+    input.setSelectionRange(18, 30),
+  );
+  await pullForm
+    .getByRole("button", { name: "Add bold text", exact: true })
+    .click();
+  await expect(description).toHaveValue("This explains the **new behavior**.");
+  await pullForm.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect(
+    pullForm.getByRole("tabpanel", { name: "Preview", exact: true }),
+  ).toContainText("This explains the new behavior.");
   await page
     .getByRole("button", { name: "Create pull request", exact: true })
     .click();
@@ -463,7 +477,12 @@ test("pull request creation, discussion, and files follow the GitHub review flow
 
   await page.getByRole("link", { name: "Files changed", exact: true }).click();
   await expect(page.getByText("1 changed file", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /Modified README.md/ }).click();
+  const changedFiles = page.locator(
+    'file-tree-container[aria-label="Changed files"]',
+  );
+  await expect(
+    changedFiles.getByRole("treeitem", { name: "README.md", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
   await expect(page.locator(".diff-panel")).toContainText("New content");
   await expectNoAccessibilityViolations(page);
 

@@ -360,12 +360,12 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | Repository root | Selected commit, file table, repository details, rendered README, request timing, and Code menu |
 | Branch and tag picker | Search, keyboard navigation, default-branch state, and writer-only creation from the viewed commit |
 | Branches and tags | Natural sorting, protected/default labels, copied names, immutable tips, default comparison, and guarded deletion |
-| Tree and file workspace | Lazy folder-first tree, preserved expansion, breadcrumbs, source, preview, blame, raw bytes, copy, download, edit, and delete |
-| History and comparison | Signed pagination, first-parent path history, commit changes, split/unified diffs, and exact revision links |
+| Tree and file workspace | Resizable lazy folder-first tree, preserved expansion, breadcrumbs, source, preview, blame, raw bytes, copy, download, edit, and delete |
+| History and comparison | Signed pagination, first-parent path history, a persistent change tree with independently scrolling jump-linked diffs, split/unified layouts, and exact revision links |
 | Go to file | Bounded full-tree fuzzy search without blob reads; `T` opens and focuses search |
 | Releases | Releases/Tags navigation, search, drafts, publication, edits, deletion, source ZIPs, and binary assets |
-| Pull requests | Conversation, Commits, Checks, Files changed, reviews, approval state, and merge controls |
-| Issues and metadata | Searchable issues, comments, labels, assignees, Markdown preview, and conflict recovery |
+| Pull requests | Conversation, Commits, Checks, Files changed, reviews, shared Markdown formatting, approval state, and merge controls |
+| Issues and metadata | Searchable issues, comments, labels, assignees, Markdown formatting and preview, and conflict recovery |
 | Settings | Default branch, exact protection rules, and archive state with stale-version checks |
 | Appearance | System, light, and dark themes persisted across desktop and narrow layouts |
 
