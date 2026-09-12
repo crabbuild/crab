@@ -543,27 +543,57 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("repository views pass automated WCAG A and AA checks", async ({
-  page,
-}) => {
-  for (const theme of ["light", "dark"] as const) {
+for (const theme of ["light", "dark"] as const) {
+  test(`repository views pass automated WCAG A and AA checks in ${theme} theme`, async ({
+    page,
+  }) => {
     await page.goto("/team/project");
     await selectTheme(page, theme);
-    for (const location of [
-      "/team/project",
-      `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
-      `/team/project?view=commit&rev=${oid}`,
-      "/team/project?view=issues",
-      "/team/project?view=issues&issue=new",
-      "/team/project?view=branches",
-      "/team/project?view=settings",
+    for (const view of [
+      {
+        location: "/team/project",
+        ready: page.getByRole("region", { name: "Folders and files" }),
+      },
+      {
+        location: `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+        ready: page.locator(".file-panel"),
+      },
+      {
+        location: `/team/project?view=commit&rev=${oid}`,
+        ready: page.getByRole("heading", {
+          name: "3 changed files",
+          exact: true,
+        }),
+      },
+      {
+        location: "/team/project?view=issues",
+        ready: page.getByRole("heading", { name: "All issues" }),
+      },
+      {
+        location: "/team/project?view=issues&issue=new",
+        ready: page.getByRole("heading", { name: "New issue", exact: true }),
+      },
+      {
+        location: "/team/project?view=branches",
+        ready: page.getByRole("heading", {
+          name: "Branches",
+          exact: true,
+          level: 2,
+        }),
+      },
+      {
+        location: "/team/project?view=settings",
+        ready: page.getByRole("heading", { name: "General", exact: true }),
+      },
     ]) {
-      await page.goto(location);
-      await page.waitForLoadState("networkidle");
-      await expectNoAccessibilityViolations(page);
+      await test.step(view.location, async () => {
+        await page.goto(view.location);
+        await expect(view.ready).toBeVisible();
+        await expectNoAccessibilityViolations(page);
+      });
     }
-  }
-});
+  });
+}
 
 test("new issue Markdown toolbar formats selections and remains usable on mobile", async ({
   page,
