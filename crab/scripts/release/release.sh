@@ -446,7 +446,7 @@ build_linux() {
         --mount "type=volume,source=${image_tag//[:\/]/-}-registry,target=/usr/local/cargo/registry" \
         --mount "type=volume,source=${image_tag//[:\/]/-}-git,target=/usr/local/cargo/git" \
         -w /workspace \
-        rust:1.93-bookworm \
+        rust:1.97-bookworm \
         bash -c '
             set -euo pipefail
             cargo_target_args=()

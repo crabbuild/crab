@@ -1,5 +1,5 @@
 awswrangler==3.17.1
-boto3==1.36.4
+boto3==1.43.75
 dask[dataframe]==2026.8.0
 deltalake==1.6.3
 duckdb==1.5.5

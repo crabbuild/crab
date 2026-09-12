@@ -21,13 +21,14 @@ branch names a mutable view; a tag or full commit ID names an immutable read-onl
 view. Every request resolves and pins one commit before reading. Writes recheck
 authorization, branch protection, and the branch tip under the canonical per-ref
 publication lock. A conflicting branch update returns `OperationAborted` and is
-safe for the S3 client to retry. `PutObject` and `CompleteMultipartUpload`
-support `If-None-Match: *` and strong `If-Match` atomically. `DeleteObject`
-also supports a strong `If-Match` precondition. The ETag is checked before
-receiving or assembling content, and the observed blob identity is checked
-again under the publication lock so a concurrent replacement cannot be
-deleted by a stale request. Directory-bucket-only conditional delete size and
-timestamp headers remain outside the surface.
+safe for the S3 client to retry. `PutObject`, destination `CopyObject`, and
+`CompleteMultipartUpload` support `If-None-Match: *` and strong `If-Match`
+atomically. `DeleteObject` and each `DeleteObjects` entry support a strong
+`If-Match` precondition, including `*`. The ETag is checked before receiving,
+copying, or assembling content, and the observed blob identity and ETag are
+checked again under the publication lock so a concurrent replacement cannot be
+overwritten or deleted by a stale request. Directory-bucket-only conditional
+delete size and timestamp headers remain outside the surface.
 
 ## Bucket and key namespace
 
@@ -178,8 +179,8 @@ Supported operations:
 | `ListObjects`, `ListObjectsV2` | prefix, delimiter `/`, marker/start-after, max keys, reusable keys, common prefixes, and the `RestoreStatus` optional-object hint |
 | `PutObject` | body up to 5 GiB, atomic `If-Match` and `If-None-Match: *`, `Content-MD5`, SigV4 payload and chained streaming signatures, CRC32/CRC32C/CRC64NVME/SHA1/SHA256 checksums, tags, metadata, standard content headers with the `aws-chunked` transport token removed, explicit `STANDARD` storage class, and virtual empty directory-marker hints |
 | `GetObjectTagging`, `PutObjectTagging`, `DeleteObjectTagging` | Up to ten current-object tags; tag changes publish metadata-only commits without changing object bytes or ETag |
-| `DeleteObject`, `DeleteObjects` | S3 missing-key success, atomic strong `If-Match` for single-object deletes, virtual directory-marker deletion, per-key authorization/results, quiet mode, and at most 1000 XML entries |
-| `CopyObject` | pinned source, source conditions/range where defined, metadata/tag `COPY`/`REPLACE`, checksum selection, explicit `STANDARD` storage class, separately authorized destination |
+| `DeleteObject`, `DeleteObjects` | Unconditional S3 missing-key success, atomic strong `If-Match` including `*`, per-entry `NoSuchKey` for a missing conditional multi-delete target, virtual directory-marker deletion, per-key authorization/results, quiet mode, and at most 1000 XML entries |
+| `CopyObject` | pinned source, source ETag/date conditions with copy-specific failure status, atomic destination `If-Match` and `If-None-Match: *`, metadata/tag `COPY`/`REPLACE`, checksum selection, explicit `STANDARD` storage class, separately authorized destination |
 | Multipart create/upload/copy/list/abort/complete | durable opaque sessions, conditional completion, validated full-object CRC and composite CRC/SHA checksums, part replacement, explicit `STANDARD` storage class, ordered selection, 10,000 parts, 5 GiB per part, 50 TB completed objects, restart and multi-instance retry |
 
 Modeled unsupported request headers and query parameters are rejected rather
@@ -199,12 +200,13 @@ part checksums and a precomputed completion checksum use the raw Base64 digest.
 
 Conditional reads use S3 precedence: match conditions are evaluated before
 unmodified conditions, then modified conditions; a failed read condition returns
-`NotModified` or `PreconditionFailed` as defined by that header. Directory-
-bucket-only conditional DELETE size and timestamp headers, and destination COPY
-conditions, are outside this surface. `PutObject`, `DeleteObject`, and
-`CompleteMultipartUpload` support atomic strong `If-Match`; `PutObject` and
-`CompleteMultipartUpload` also support `If-None-Match: *`. Weak or multi-value
-write/delete validators are rejected.
+`NotModified` or `PreconditionFailed` as defined by that header. Failed COPY
+source conditions return `PreconditionFailed`. Directory-bucket-only
+conditional DELETE size and timestamp headers remain outside this surface.
+`PutObject`, destination `CopyObject`, `DeleteObject`, each `DeleteObjects`
+entry, and `CompleteMultipartUpload` support atomic strong `If-Match`;
+object-producing operations also support `If-None-Match: *`. Weak or
+multi-value write/delete validators are rejected.
 
 ## Listings and continuation
 

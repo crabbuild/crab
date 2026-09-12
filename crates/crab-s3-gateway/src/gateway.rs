@@ -1040,7 +1040,7 @@ impl Gateway {
                 }
                 Err(error) => return Err(error),
             };
-            let actual = ETag::Strong(object.etag);
+            let actual = ETag::Strong(object.etag.clone());
             let matches = match condition {
                 ETagCondition::Any => true,
                 ETagCondition::ETag(expected) => actual.strong_cmp(&expected),
@@ -1048,7 +1048,11 @@ impl Gateway {
             if !matches {
                 return Err(s3_error!(PreconditionFailed));
             }
-            return Ok(mutation::PutCondition::IfMatch(object.blob_oid));
+            return Ok(mutation::PutCondition::IfMatch {
+                object: object.blob_oid,
+                etag: object.etag,
+                attributes_present: object.attributes.is_some(),
+            });
         }
         match if_none_match {
             None => Ok(mutation::PutCondition::None),
@@ -1062,18 +1066,24 @@ impl Gateway {
         repository: &Repository,
         key: &str,
         if_match: Option<&ETagCondition>,
+        missing: mutation::MissingDeleteResult,
     ) -> S3Result<mutation::DeleteCondition> {
         let Some(if_match) = if_match else {
             return Ok(mutation::DeleteCondition::None);
         };
         match if_match {
-            ETagCondition::Any => Ok(mutation::DeleteCondition::IfMatchAny),
+            ETagCondition::Any => Ok(mutation::DeleteCondition::IfMatchAny { missing }),
             ETagCondition::ETag(ETag::Weak(_)) => Err(s3_error!(InvalidRequest)),
             ETagCondition::ETag(ETag::Strong(expected)) => {
                 let object = match self.read_object_metadata(repository, key).await {
                     Ok(object) => object,
                     Err(error) if error.code().as_str() == "NoSuchKey" => {
-                        return Err(s3_error!(PreconditionFailed));
+                        return Err(match missing {
+                            mutation::MissingDeleteResult::PreconditionFailed => {
+                                s3_error!(PreconditionFailed)
+                            }
+                            mutation::MissingDeleteResult::NotFound => s3_error!(NoSuchKey),
+                        });
                     }
                     Err(error) => return Err(error),
                 };
@@ -1084,6 +1094,7 @@ impl Gateway {
                     object: object.blob_oid,
                     etag: expected.clone(),
                     attributes_present: object.attributes.is_some(),
+                    missing,
                 })
             }
         }
@@ -1371,6 +1382,7 @@ impl S3 for Gateway {
             req.input.if_unmodified_since.as_ref(),
             &object.etag,
             &object.modified,
+            ConditionContext::Read,
         )?;
         let selection = read_selection(
             object.size,
@@ -1476,6 +1488,7 @@ impl S3 for Gateway {
             req.input.if_unmodified_since.as_ref(),
             &object.etag,
             &object.modified,
+            ConditionContext::Read,
         )?;
         let selection = read_selection(
             object.size,
@@ -1884,7 +1897,12 @@ impl S3 for Gateway {
             return Ok(S3Response::new(DeleteObjectOutput::default()));
         }
         let condition = self
-            .delete_condition(repository, &req.input.key, req.input.if_match.as_ref())
+            .delete_condition(
+                repository,
+                &req.input.key,
+                req.input.if_match.as_ref(),
+                mutation::MissingDeleteResult::PreconditionFailed,
+            )
             .await?;
         self.mutations
             .apply(
@@ -1929,7 +1947,6 @@ impl S3 for Gateway {
         let mut errors = Vec::new();
         for object in req.input.delete.objects {
             if object.version_id.is_some()
-                || object.e_tag.is_some()
                 || object.last_modified_time.is_some()
                 || object.size.is_some()
             {
@@ -1937,13 +1954,14 @@ impl S3 for Gateway {
                     key: Some(object.key),
                     code: Some("NotImplemented".to_owned()),
                     message: Some(
-                        "Per-object version and condition fields are unsupported".to_owned(),
+                        "Per-object version, size, and timestamp fields are unsupported".to_owned(),
                     ),
                     ..Default::default()
                 });
                 continue;
             }
             let key = object.key;
+            let condition = multi_delete_condition(object.e_tag);
             let result: S3Result<()> = async {
                 let marker_address =
                     namespace::directory_marker_address(&key).map_err(namespace_error)?;
@@ -1954,16 +1972,25 @@ impl S3 for Gateway {
                 };
                 let branch = writable_branch(repository, &address)?;
                 if is_directory_marker {
+                    if condition.is_some() {
+                        return Err(s3_error!(PreconditionFailed));
+                    }
                     return Ok(());
                 }
+                let condition = self
+                    .delete_condition(
+                        repository,
+                        &key,
+                        condition.as_ref(),
+                        mutation::MissingDeleteResult::NotFound,
+                    )
+                    .await?;
                 self.mutations
                     .apply(
                         repository,
                         branch,
                         &address.path,
-                        mutation::Change::Delete {
-                            condition: mutation::DeleteCondition::default(),
-                        },
+                        mutation::Change::Delete { condition },
                         &principal,
                         &self.cancellation,
                     )
@@ -2004,6 +2031,7 @@ impl S3 for Gateway {
     ) -> S3Result<S3Response<CopyObjectOutput>> {
         let _permit = self.admit(RequestClass::Transfer).await?;
         reject_copy_extensions(&req.input)?;
+        let (if_match, if_none_match) = copy_destination_conditions(&req.headers)?;
         let (source_bucket, source_key) = match &req.input.copy_source {
             CopySource::Bucket {
                 bucket,
@@ -2035,11 +2063,17 @@ impl S3 for Gateway {
             req.input.copy_source_if_unmodified_since.as_ref(),
             &source_object.etag,
             &source_object.modified,
+            ConditionContext::CopySource,
         )?;
         let source_size = source_object.size;
         if source_size > crate::content::MAX_PUT_OBJECT_BYTES {
             return Err(s3_error!(EntityTooLarge));
         }
+        let (repository, address, principal) =
+            self.writable_address(&req, &req.input.bucket, &req.input.key)?;
+        let condition = self
+            .put_condition_values(repository, &req.input.key, if_match, if_none_match)
+            .await?;
         let spool = source_object
             .content
             .spool(
@@ -2049,8 +2083,6 @@ impl S3 for Gateway {
                 &self.metrics,
             )
             .await?;
-        let (repository, address, principal) =
-            self.writable_address(&req, &req.input.bucket, &req.input.key)?;
         let mut attributes = if req
             .input
             .metadata_directive
@@ -2127,7 +2159,7 @@ impl S3 for Gateway {
                     bytes: content.bytes,
                     track_lfs: content.track_lfs,
                     attributes: Box::new(attributes),
-                    condition: mutation::PutCondition::None,
+                    condition,
                 },
                 &principal,
                 &self.cancellation,
@@ -2320,6 +2352,7 @@ impl S3 for Gateway {
             req.input.copy_source_if_unmodified_since.as_ref(),
             &source.etag,
             &source.modified,
+            ConditionContext::CopySource,
         )?;
         let range = match req.input.copy_source_range.as_deref() {
             Some(value) => {
@@ -3965,6 +3998,41 @@ fn reject_delete_extensions(input: &DeleteObjectInput) -> S3Result<()> {
     Ok(())
 }
 
+fn copy_destination_conditions(
+    headers: &http::HeaderMap,
+) -> S3Result<(Option<ETagCondition>, Option<ETagCondition>)> {
+    // The s3s model does not expose destination COPY conditions. Read the
+    // authenticated original headers so this official surface is not ignored.
+    Ok((
+        etag_condition_header(headers, http::header::IF_MATCH)?,
+        etag_condition_header(headers, http::header::IF_NONE_MATCH)?,
+    ))
+}
+
+fn multi_delete_condition(etag: Option<ETag>) -> Option<ETagCondition> {
+    // s3s decodes the XML wildcard as a strong ETag containing `*`.
+    etag.map(|etag| match etag {
+        ETag::Strong(value) if value == "*" => ETagCondition::Any,
+        etag => ETagCondition::ETag(etag),
+    })
+}
+
+fn etag_condition_header(
+    headers: &http::HeaderMap,
+    name: http::header::HeaderName,
+) -> S3Result<Option<ETagCondition>> {
+    let mut values = headers.get_all(&name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(s3_error!(InvalidRequest, "Duplicate write precondition"));
+    }
+    ETagCondition::parse_http_header(value.as_bytes())
+        .map(Some)
+        .map_err(|_| s3_error!(InvalidRequest, "Invalid write precondition"))
+}
+
 fn reject_copy_extensions(input: &CopyObjectInput) -> S3Result<()> {
     let directive_supported = input.metadata_directive.as_ref().is_none_or(|value| {
         matches!(
@@ -4245,6 +4313,12 @@ fn reject_head_extensions(input: &HeadObjectInput) -> S3Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum ConditionContext {
+    Read,
+    CopySource,
+}
+
 fn evaluate_conditions(
     if_match: Option<&ETagCondition>,
     if_none_match: Option<&ETagCondition>,
@@ -4252,6 +4326,7 @@ fn evaluate_conditions(
     if_unmodified_since: Option<&Timestamp>,
     etag: &str,
     modified: &Timestamp,
+    context: ConditionContext,
 ) -> S3Result<()> {
     let actual = ETag::Strong(etag.to_owned());
     if let Some(condition) = if_match {
@@ -4271,12 +4346,19 @@ fn evaluate_conditions(
             ETagCondition::ETag(expected) => actual.weak_cmp(expected),
         };
         if matches {
-            return Err(s3_error!(NotModified));
+            return Err(condition_not_modified(context));
         }
     } else if if_modified_since.is_some_and(|expected| modified <= expected) {
-        return Err(s3_error!(NotModified));
+        return Err(condition_not_modified(context));
     }
     Ok(())
+}
+
+fn condition_not_modified(context: ConditionContext) -> s3s::S3Error {
+    match context {
+        ConditionContext::Read => s3_error!(NotModified),
+        ConditionContext::CopySource => s3_error!(PreconditionFailed),
+    }
 }
 
 async fn finish<T>(
@@ -4421,6 +4503,7 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
         mutation::Error::Overloaded | mutation::Error::AdmissionTimeout => slow_down_error(),
         mutation::Error::Capacity(error) => scratch_capacity_error(error),
         mutation::Error::PreconditionFailed => s3_error!(PreconditionFailed),
+        mutation::Error::ConditionalTargetMissing => s3_error!(NoSuchKey),
         mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => {
             s3_error!(
                 OperationAborted,
@@ -5800,6 +5883,83 @@ mod tests {
             .unwrap();
 
         reject_copy_extensions(&input).unwrap();
+    }
+
+    #[test]
+    fn copy_destination_conditions_parse_official_headers() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::IF_MATCH, "\"current\"".parse().unwrap());
+
+        assert_eq!(
+            copy_destination_conditions(&headers).unwrap(),
+            (
+                Some(ETagCondition::ETag(ETag::Strong("current".to_owned()))),
+                None,
+            )
+        );
+    }
+
+    #[test]
+    fn copy_destination_if_none_match_wildcard_is_preserved() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::IF_NONE_MATCH, "*".parse().unwrap());
+
+        assert_eq!(
+            copy_destination_conditions(&headers).unwrap(),
+            (None, Some(ETagCondition::Any))
+        );
+    }
+
+    #[test]
+    fn multi_delete_etag_maps_wildcard_and_strong_conditions() {
+        assert_eq!(
+            [
+                multi_delete_condition(Some(ETag::Strong("*".to_owned()))),
+                multi_delete_condition(Some(ETag::Strong("current".to_owned()))),
+            ],
+            [
+                Some(ETagCondition::Any),
+                Some(ETagCondition::ETag(ETag::Strong("current".to_owned()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_source_if_none_match_failure_returns_precondition_failed() {
+        let condition = ETagCondition::ETag(ETag::Strong("current".to_owned()));
+        let modified = timestamp(10).unwrap();
+
+        let error = evaluate_conditions(
+            None,
+            Some(&condition),
+            None,
+            None,
+            "current",
+            &modified,
+            ConditionContext::CopySource,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code().as_str(), "PreconditionFailed");
+    }
+
+    #[test]
+    fn read_if_none_match_failure_returns_not_modified() {
+        let condition = ETagCondition::ETag(ETag::Strong("current".to_owned()));
+        let modified = timestamp(10).unwrap();
+
+        let error = evaluate_conditions(
+            None,
+            Some(&condition),
+            None,
+            None,
+            "current",
+            &modified,
+            ConditionContext::Read,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code().as_str(), "NotModified");
     }
 
     #[test]
