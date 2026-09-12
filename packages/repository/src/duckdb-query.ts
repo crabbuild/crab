@@ -5,6 +5,10 @@ import type { TableData } from "./file-preview-model";
 
 export const MAX_QUERY_ROWS = 1_000;
 
+// Worker responses carry CSP and are cached immutably. Change this revision
+// whenever the worker's allowed network policy changes to avoid stale policy.
+const DUCKDB_WORKER_POLICY = "duckdb-extensions-v1";
+
 export type QueryFormat = "csv" | "tsv" | "json" | "jsonl" | "parquet";
 
 export type QuerySource = {
@@ -96,7 +100,9 @@ function valueAt(table: ArrowResult, row: number, column: number) {
 export async function createQuerySession(
   source: QuerySource,
 ): Promise<QuerySession> {
-  const worker = new Worker(duckdbWorker);
+  const workerUrl = new URL(duckdbWorker, window.location.href);
+  workerUrl.searchParams.set("worker-policy", DUCKDB_WORKER_POLICY);
+  const worker = new Worker(workerUrl);
   const database = new duckdb.AsyncDuckDB(new duckdb.VoidLogger(), worker);
   let connection: duckdb.AsyncDuckDBConnection | undefined;
   try {

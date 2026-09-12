@@ -1032,6 +1032,11 @@ test("Markdown files switch between source and a repository-aware preview", asyn
 test("format-aware previews explore data, office files, media, and databases locally", async ({
   page,
 }) => {
+  const duckdbWorkerRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("duckdb-browser-mvp.worker"))
+      duckdbWorkerRequests.push(request.url());
+  });
   const csv = "run,model,score\n1,small,0.91\n2,large,0.98\n";
   const svg =
     '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#0969da"/></svg>';
@@ -1139,6 +1144,15 @@ test("format-aware previews explore data, office files, media, and databases loc
   const parquetWorkbench = page.getByRole("region", {
     name: "features.parquet query workbench",
   });
+  await expect
+    .poll(() =>
+      duckdbWorkerRequests.some(
+        (url) =>
+          new URL(url).searchParams.get("worker-policy") ===
+          "duckdb-extensions-v1",
+      ),
+    )
+    .toBe(true);
   await expect(parquetWorkbench).toContainText("5.00 GB");
   await expect(parquetWorkbench).toContainText("2 source rows");
   await parquetWorkbench.getByRole("button", { name: "Count rows" }).click();
