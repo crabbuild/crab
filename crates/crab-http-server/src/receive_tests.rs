@@ -78,7 +78,10 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
         .await
         .unwrap();
     assert_eq!(server.git_admission.available_permits(), 4);
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     let snapshot =
         crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
             .await
@@ -166,7 +169,10 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     success(path, &["commit", "-m", "missing content dependency"]).await;
     let rejected = git(path, &["push", &url, branch]).await;
     assert!(!rejected.status.success());
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     let before = crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
         .await
         .unwrap();
@@ -189,7 +195,10 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
         serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     assert!(tag_only["head"].is_null());
     assert_eq!(tag_only["unborn_head"], "refs/heads/main");
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     let (manifest, _) = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
         .await
         .unwrap();
@@ -713,7 +722,10 @@ async fn exercise(mut server: Arc<Server>, branch: &str) {
     assert_eq!(raw.stdout, proposal_binary);
     reader.close().unwrap();
 
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     let remote = repo
         .open_current(&server, server.options, &server.cancellation)
         .await

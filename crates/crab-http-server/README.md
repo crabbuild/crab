@@ -41,29 +41,34 @@ npm run build --prefix packages/repository
 cargo build -p crab-http-server --release --locked
 ```
 
-Create a configuration using the [development example](REFERENCE.md#run-the-current-development-build).
-Give each repository a distinct bucket/prefix pair and configure storage
-credentials through the environment. Then initialize the prefixes and start:
+Create a configuration using the
+[development example](REFERENCE.md#run-the-current-development-build). Select
+one `s3://`, `gs://`, or `az://` storage root and configure ambient workload
+credentials. Then create a cataloged repository and start:
 
 ```sh
-"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml --initialize
-"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  repository create --owner team --name project --prefix team/project
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
-The bucket must already exist. Initialization can adopt an existing canonical
-repository; it does not convert arbitrary objects into a Crab repository.
+The bucket or container must already exist. `repository adopt` can publish an
+existing canonical repository; it does not convert arbitrary objects into a
+Crab repository. Every replica discovers catalog changes without a restart.
 Without authentication, the server accepts only loopback listeners and trusts
 the local operator. Team deployments need [OIDC configuration](REFERENCE.md#team-sign-in)
 and a canonical HTTPS origin. For container deployment, use the
-[container instructions](REFERENCE.md#run-the-container) and
+[deployment profiles](deploy/README.md),
+[container instructions](REFERENCE.md#run-the-container), and
 [example configuration](deploy/server.example.toml).
 
 ## Find the relevant contract
 
 | Task | Read |
 | --- | --- |
-| Configure repositories, temporary space, and credentials | [Development setup](REFERENCE.md#run-the-current-development-build) |
-| Deploy, probe readiness, and drain the service | [Container operation](REFERENCE.md#run-the-container) |
+| Configure catalog, storage root, temporary space, and credentials | [Development setup](REFERENCE.md#run-the-current-development-build) |
+| Deploy on EKS, GKE, AKS, or ECS | [Deployment profiles](deploy/README.md) |
+| Probe readiness and drain the service | [Container operation](REFERENCE.md#run-the-container) |
 | Understand browser APIs and publication ownership | [Application behavior](REFERENCE.md#repository-browser-and-application-apis) |
 | Configure identity, membership, sessions, and protection | [Team sign-in](REFERENCE.md#team-sign-in) |
 | Clone and fetch with scoped Git tokens | [Git HTTP reads](REFERENCE.md#git-http-reads) |

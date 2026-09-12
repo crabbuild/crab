@@ -91,7 +91,11 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
             );
         }
         let principal = principal(&h, token).await;
-        let mut config = h.server.repositories[&("team".into(), "private".into())]
+        let mut config = h
+            .server
+            .repositories
+            .get(&("team".into(), "private".into()))
+            .unwrap()
             .config
             .clone();
         assert_eq!(
@@ -300,7 +304,15 @@ async fn git_tokens_are_read_scoped_and_revoked_with_the_browser_session() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(!retained.authenticated());
-    assert!(!retained.can_read(&h.server.repositories[&("team".into(), "private".into())].config));
+    assert!(
+        !retained.can_read(
+            &h.server
+                .repositories
+                .get(&("team".into(), "private".into()))
+                .unwrap()
+                .config
+        )
+    );
     let response = h
         .http
         .get(&git_url)
@@ -473,7 +485,11 @@ async fn lfs_tokens_enforce_scope_and_revocation_before_upload_publication() {
             client.await.unwrap().unwrap().status(),
             StatusCode::NOT_FOUND
         );
-        let repo = &h.server.repositories[&("team".into(), "private".into())];
+        let repo = h
+            .server
+            .repositories
+            .get(&("team".into(), "private".into()))
+            .unwrap();
         assert!(
             !crab_lfs::LfsObjectStore::new(repo.store.clone(), &repo.config.prefix)
                 .exists(&[0; 32])

@@ -85,6 +85,7 @@ async fn list(
     Path(key): Path<(String, String)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     let available = available(repo, &app::actor(&principal)?);
     Ok(Json(json!({
         "items":available.iter().map(view).collect::<Vec<_>>(),

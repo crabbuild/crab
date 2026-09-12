@@ -8,17 +8,25 @@ use serde::Deserialize;
 
 use crate::{Error, Result};
 
-/// Server listener and the explicit catalog of object-storage repositories.
+/// Server listeners, object-storage root, and browser identity configuration.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: SocketAddr,
-    pub repositories: Vec<RepositoryConfig>,
+    pub management_listen: SocketAddr,
+    pub storage: StorageConfig,
     pub auth: Option<OidcConfig>,
 }
 
-/// One public repository name mapped to an operator-owned storage location.
+/// Provider-neutral object-storage root containing the repository catalog.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageConfig {
+    pub url: String,
+}
+
+/// One resolved repository from the durable application catalog.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryConfig {
     pub owner: String,
@@ -47,7 +55,7 @@ pub struct BranchProtection {
 }
 
 /// A provider subject's explicit repository permission.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryMember {
     pub subject: String,
@@ -73,6 +81,21 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.listen == self.management_listen {
+            return Err(Error::Config(
+                "public and management listeners must be different",
+            ));
+        }
+        let storage = crab_git::url::ObjectUrl::parse(&self.storage.url)
+            .map_err(|_| Error::Config("storage.url must be a valid raw cloud URL"))?;
+        if storage.form != crab_git::url::UrlForm::Raw
+            || storage.cloud == crab_git::url::Cloud::Local
+            || storage.prefix.is_empty()
+        {
+            return Err(Error::Config(
+                "storage.url must use s3://, gs://, or az:// with a nonempty root prefix",
+            ));
+        }
         if let Some(auth) = &self.auth {
             validate_identity_url(&auth.public_url, true)?;
             validate_identity_url(auth.issuer.url(), auth.public_url.scheme() == "http")?;
@@ -90,86 +113,75 @@ impl Config {
                     "HTTP identity development requires a loopback listener",
                 ));
             }
+            if !self.listen.ip().is_loopback() && auth.state_key_file.is_none() {
+                return Err(Error::Config(
+                    "OIDC deployments beyond loopback require auth.state_key_file",
+                ));
+            }
         } else if !self.listen.ip().is_loopback() {
             return Err(Error::Config(
                 "OIDC authentication is required beyond loopback",
             ));
         }
-        if self.repositories.is_empty() {
-            return Err(Error::Config("configure at least one repository"));
-        }
-        let mut names = HashSet::new();
-        let mut storage_locations = HashSet::new();
-        for repository in &self.repositories {
-            let mut subjects = HashSet::new();
-            let mut member_names = HashSet::new();
-            for member in &repository.members {
-                if member.subject.trim() != member.subject
-                    || member.subject.is_empty()
-                    || member.subject.chars().count() > 512
-                    || member.subject.chars().any(char::is_control)
-                    || !subjects.insert(&member.subject)
-                    || member.name.trim() != member.name
-                    || member.name.is_empty()
-                    || member.name.chars().count() > 160
-                    || member.name.chars().any(char::is_control)
-                    || !member_names.insert(member.name.to_lowercase())
-                {
-                    return Err(Error::Config(
-                        "repository members require unique OIDC subjects of at most 512 characters and unique names of at most 160 characters",
-                    ));
-                }
-            }
-            if !valid_branch_protections(&repository.protected_branches) {
-                return Err(Error::Config(
-                    "protected branches require at most 100 unique valid names, at most 20 approvals, and at most 50 unique check names",
-                ));
-            }
-            if matches!(repository.owner.as_str(), "api" | "assets" | "auth" | "git") {
-                return Err(Error::Config(
-                    "repository owner conflicts with a server route",
-                ));
-            }
-            for value in [&repository.owner, &repository.name] {
-                if value.is_empty()
-                    || value.len() > 100
-                    || !value
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-                    || matches!(value.as_str(), "." | "..")
-                {
-                    return Err(Error::Config(
-                        "repository owner and name must be URL-safe identifiers",
-                    ));
-                }
-            }
-            if repository.bucket.is_empty() || repository.prefix.is_empty() {
-                return Err(Error::Config("repository bucket and prefix are required"));
-            }
-            if !storage_locations.insert((&repository.bucket, &repository.prefix)) {
-                return Err(Error::Config(
-                    "repository bucket and prefix must identify a unique storage location",
-                ));
-            }
-            let default_ref = format!("refs/heads/{}", repository.default_branch);
-            if repository.default_branch.starts_with("refs/")
-                || crab_git::validate_push_refname(&default_ref).is_err()
-            {
-                return Err(Error::Config(
-                    "repository default_branch must be a valid short branch name",
-                ));
-            }
-            if !names.insert((
-                repository.owner.to_lowercase(),
-                repository.name.to_lowercase(),
-            )) {
-                return Err(Error::Config(
-                    "repository names must be unique ignoring case",
-                ));
-            }
-        }
         Ok(())
     }
+}
+
+pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
+    let mut subjects = HashSet::new();
+    let mut member_names = HashSet::new();
+    for member in &repository.members {
+        if member.subject.trim() != member.subject
+            || member.subject.is_empty()
+            || member.subject.chars().count() > 512
+            || member.subject.chars().any(char::is_control)
+            || !subjects.insert(&member.subject)
+            || member.name.trim() != member.name
+            || member.name.is_empty()
+            || member.name.chars().count() > 160
+            || member.name.chars().any(char::is_control)
+            || !member_names.insert(member.name.to_lowercase())
+        {
+            return Err(Error::Config(
+                "repository members require unique OIDC subjects of at most 512 characters and unique names of at most 160 characters",
+            ));
+        }
+    }
+    if !valid_branch_protections(&repository.protected_branches) {
+        return Err(Error::Config(
+            "protected branches require at most 100 unique valid names, at most 20 approvals, and at most 50 unique check names",
+        ));
+    }
+    if matches!(repository.owner.as_str(), "api" | "assets" | "auth" | "git") {
+        return Err(Error::Config(
+            "repository owner conflicts with a server route",
+        ));
+    }
+    for value in [&repository.owner, &repository.name] {
+        if value.is_empty()
+            || value.len() > 100
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+            || matches!(value.as_str(), "." | "..")
+        {
+            return Err(Error::Config(
+                "repository owner and name must be URL-safe identifiers",
+            ));
+        }
+    }
+    if repository.bucket.is_empty() || repository.prefix.is_empty() {
+        return Err(Error::Config("repository bucket and prefix are required"));
+    }
+    let default_ref = format!("refs/heads/{}", repository.default_branch);
+    if repository.default_branch.starts_with("refs/")
+        || crab_git::validate_push_refname(&default_ref).is_err()
+    {
+        return Err(Error::Config(
+            "repository default_branch must be a valid short branch name",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn valid_branch_protections(rules: &[BranchProtection]) -> bool {
@@ -208,6 +220,7 @@ pub struct OidcConfig {
     pub client_id: String,
     pub public_url: Url,
     pub client_secret_file: Option<PathBuf>,
+    pub state_key_file: Option<PathBuf>,
 }
 
 pub(crate) fn validate_identity_url(url: &Url, allow_loopback_http: bool) -> Result<()> {
@@ -234,6 +247,17 @@ pub(crate) fn validate_identity_url(url: &Url, allow_loopback_http: bool) -> Res
 mod tests {
     use super::*;
 
+    fn local_config(storage_url: &str) -> Config {
+        toml::from_str(&format!(
+            "listen='127.0.0.1:8788'\nmanagement_listen='127.0.0.1:8789'\n[storage]\nurl='{storage_url}'"
+        ))
+        .unwrap()
+    }
+
+    fn repository() -> RepositoryConfig {
+        toml::from_str("owner='team'\nname='project'\nbucket='bucket'\nprefix='project'").unwrap()
+    }
+
     #[test]
     fn repository_members_require_an_explicit_known_permission() {
         for member in [
@@ -256,39 +280,43 @@ mod tests {
 
     #[test]
     fn repository_default_branch_is_short_valid_and_defaults_to_main() {
-        let repository: RepositoryConfig =
-            toml::from_str("owner='team'\nname='project'\nbucket='bucket'\nprefix='project'")
-                .unwrap();
-        assert_eq!(repository.default_branch, "main");
+        let repository_config = repository();
+        assert_eq!(repository_config.default_branch, "main");
 
         for branch in ["", "refs/heads/main", "release..next"] {
-            let source = format!(
-                "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\ndefault_branch='{branch}'"
-            );
-            let config: Config = toml::from_str(&source).unwrap();
-            assert!(config.validate().is_err(), "{branch}");
+            let mut repository = repository();
+            repository.default_branch = branch.into();
+            assert!(validate_repository(&repository).is_err(), "{branch}");
         }
 
-        let config: Config = toml::from_str(
-            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\ndefault_branch='trunk'",
-        )
-        .unwrap();
-        assert!(config.validate().is_ok());
+        let mut repository = repository();
+        repository.default_branch = "trunk".into();
+        assert!(validate_repository(&repository).is_ok());
     }
 
     #[test]
-    fn repositories_can_share_a_bucket_when_prefixes_are_distinct() {
-        let config: Config = toml::from_str(
-            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='shared'\nprefix='team/project'\n[[repositories]]\nowner='team'\nname='docs'\nbucket='shared'\nprefix='team/docs'",
-        )
-        .unwrap();
-        assert!(config.validate().is_ok());
+    fn storage_root_accepts_each_cloud_provider() {
+        for url in [
+            "s3://bucket/repositories",
+            "gs://bucket/repositories",
+            "az://account/container/repositories",
+        ] {
+            assert!(local_config(url).validate().is_ok(), "{url}");
+        }
+        for url in [
+            "s3://bucket",
+            "file:///repositories",
+            "https://example.com/repositories",
+        ] {
+            assert!(local_config(url).validate().is_err(), "{url}");
+        }
+    }
 
-        let duplicate: Config = toml::from_str(
-            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='shared'\nprefix='team/project'\n[[repositories]]\nowner='other'\nname='project'\nbucket='shared'\nprefix='team/project'",
-        )
-        .unwrap();
-        assert!(duplicate.validate().is_err());
+    #[test]
+    fn management_listener_is_separate() {
+        let mut config = local_config("s3://bucket/repositories");
+        config.management_listen = config.listen;
+        assert!(config.validate().is_err());
     }
 
     #[test]
@@ -308,11 +336,13 @@ mod tests {
             ),
             "[{subject='alice',name='Alice',access='read'},{subject='bob',name='alice',access='write'}]".into(),
         ] {
-            let source = format!(
-                "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers={members}"
-            );
-            let config: Config = toml::from_str(&source).unwrap();
-            assert!(config.validate().is_err(), "{members}");
+            let mut repository = repository();
+            repository.members = toml::from_str::<RepositoryConfig>(&format!(
+                "owner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers={members}"
+            ))
+            .unwrap()
+            .members;
+            assert!(validate_repository(&repository).is_err(), "{members}");
         }
     }
 
@@ -330,18 +360,18 @@ mod tests {
             "[{branch='main',unexpected=true}]",
         ] {
             let source = format!(
-                "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches={branches}"
+                "owner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches={branches}"
             );
-            if let Ok(config) = toml::from_str::<Config>(&source) {
-                assert!(config.validate().is_err(), "{branches}");
+            if let Ok(repository) = toml::from_str::<RepositoryConfig>(&source) {
+                assert!(validate_repository(&repository).is_err(), "{branches}");
             }
         }
-        let config: Config = toml::from_str(
-            "listen='127.0.0.1:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches=[{branch='main',required_approvals=2,required_checks=['ci/test']},{branch='release/v1'}]",
+        let repository: RepositoryConfig = toml::from_str(
+            "owner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nprotected_branches=[{branch='main',required_approvals=2,required_checks=['ci/test']},{branch='release/v1'}]",
         )
         .unwrap();
-        assert!(config.validate().is_ok());
-        let main = config.repositories[0]
+        assert!(validate_repository(&repository).is_ok());
+        let main = repository
             .protected_branches
             .iter()
             .find(|rule| rule.branch == "main")
@@ -349,7 +379,7 @@ mod tests {
         assert_eq!(main.required_approvals, 2);
         assert_eq!(main.required_checks, ["ci/test"]);
         assert!(
-            !config.repositories[0]
+            !repository
                 .protected_branches
                 .iter()
                 .any(|rule| rule.branch == "Main")
@@ -358,8 +388,8 @@ mod tests {
 
     #[test]
     fn public_listeners_require_identity_and_https() {
-        let base = "listen = '0.0.0.0:8788'\n[[repositories]]\nowner='team'\nname='project'\nbucket='bucket'\nprefix='project'\nmembers=[{subject='alice',name='Alice',access='read'}]\n";
-        let identity = "\n[auth]\nissuer='https://identity.example/realm'\nclient_id='crab'\npublic_url='https://git.example'\n";
+        let base = "listen='0.0.0.0:8788'\nmanagement_listen='0.0.0.0:8789'\n[storage]\nurl='s3://bucket/repositories'\n";
+        let identity = "\n[auth]\nissuer='https://identity.example/realm'\nclient_id='crab'\npublic_url='https://git.example'\nstate_key_file='/run/secrets/crab/state-key'\n";
         let config: Config = toml::from_str(base).unwrap();
         assert!(config.validate().is_err());
         let config: Config = toml::from_str(&format!("{base}{identity}")).unwrap();
@@ -378,14 +408,5 @@ mod tests {
             .unwrap();
             assert!(config.validate().is_err(), "{replacement}");
         }
-        let config: Config = toml::from_str(&format!(
-            "{}{identity}",
-            base.replace(
-                "members=[{subject='alice',name='Alice',access='read'}]",
-                "members=[{subject='alice',name='Alice',access='read'},{subject='alice',name='Alice 2',access='write'}]"
-            )
-        ))
-        .unwrap();
-        assert!(config.validate().is_err());
     }
 }

@@ -296,6 +296,7 @@ async fn list(
     Path((owner, name, oid)): Path<(String, String, String)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let oid = require_commit(&server, repo, parse_oid(&oid)?).await?;
     let statuses = latest(repo, &oid).await?;
     Ok(Json(json!({
@@ -312,6 +313,7 @@ async fn create(
     input: std::result::Result<Json<NewStatus>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::StatusPermission);
     }

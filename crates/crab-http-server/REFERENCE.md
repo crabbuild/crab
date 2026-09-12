@@ -38,7 +38,7 @@ flowchart LR
     Server[crab-http-server]
     Auth[OIDC provider]
     Temp[Temporary pack and index files]
-    Store[(S3-compatible object storage)]
+    Store[(S3, GCS, or Azure Blob root)]
 
     Browser -->|web pages, API data, ZIP| Server
     Git -->|protocol v2, receive-pack, LFS| Server
@@ -54,7 +54,7 @@ The process does not create a server checkout, clone a repository, run the Git e
 
 | Component | Responsibility |
 | --- | --- |
-| `crab-http-server` | Routing, HTTP policy, authentication, authorization, sessions, versioned application documents, configured repository catalog, and response contracts |
+| `crab-http-server` | Routing, HTTP policy, authentication, authorization, durable sessions, catalog refresh, versioned application documents, and response contracts |
 | `crab-remote-git` | Immutable, bounded Git reads from committed object locators and packs |
 | `crab-read` | Snapshot-bound dependency selection and verified Crab pointer reconstruction |
 | `crab-lfs` | LFS object layout, streaming transfer, size checks, and SHA-256 verification |
@@ -98,7 +98,7 @@ You need:
 
 - Node.js 22.12 or newer
 - Rust and the repository's locked Cargo dependencies
-- An existing S3-compatible bucket
+- An existing S3 bucket, GCS bucket, or Azure Storage account/container
 - Storage credentials in the environment
 - Writable temporary space for receive packs and index sidecars
 - A unique Cargo target directory on the mounted workspace volume
@@ -116,75 +116,52 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-http-server-dev" \
   cargo build -p crab-http-server --release --locked
 ```
 
-### Configure one repository
+### Configure one storage root
 
-The configuration maps a public repository name to an operator-owned bucket and prefix:
+The process configuration selects listeners, one physical storage root, and
+optional identity. Repositories are durable catalog records below that root;
+they are not repeated in every pod's configuration.
 
 ```toml
 listen = "127.0.0.1:8788"
+management_listen = "127.0.0.1:8789"
 
-[[repositories]]
-owner = "your_team"
-name = "your_project"
-bucket = "your_bucket_name"
-prefix = "repositories/your_team/your_project"
-default_branch = "main"
-description = "Your project description"
+[storage]
+url = "s3://your-bucket/repositories"
 ```
 
-| Field | Contract |
-| --- | --- |
-| `listen` | Required socket address. A non-loopback listener requires OIDC |
-| `owner` | URL-safe identifier, at most 100 bytes, unique with `name` ignoring case |
-| `name` | URL-safe identifier, at most 100 bytes, unique with `owner` ignoring case |
-| `bucket` | Existing S3-compatible bucket name |
-| `prefix` | Stable mutable namespace for this repository |
-| `default_branch` | Valid short branch name. Defaults to `main` |
-| `description` | Optional catalog description |
-| `members` | Optional OIDC subject, display name, and access records |
-| `protected_branches` | Optional exact branch rules. Stored rules become authoritative after the first browser save |
+Choose exactly one URL form per deployment:
 
-The identifiers accept ASCII letters, numbers, `.`, `_`, and `-`. The owner names `api`, `assets`, `auth`, and `git` are reserved by server routes.
+| Provider | URL | Ambient credential source |
+| --- | --- | --- |
+| Amazon S3 or compatible development service | `s3://bucket/root` | AWS SDK environment/container chain |
+| Google Cloud Storage | `gs://bucket/root` | Application Default Credentials or metadata server |
+| Azure Blob Storage | `az://account/container/root` | Azure environment, managed identity, or workload identity |
 
-### Share a bucket safely
-
-Multiple repositories can share a bucket when every bucket and prefix pair is unique:
-
-```toml
-[[repositories]]
-owner = "your_team"
-name = "service"
-bucket = "your_bucket_name"
-prefix = "repositories/your_team/service"
-
-[[repositories]]
-owner = "your_team"
-name = "docs"
-bucket = "your_bucket_name"
-prefix = "repositories/your_team/docs"
-```
-
-Crab reuses one object-store client per bucket. Immutable content-addressed objects live under shared `.crab/` keys, while each prefix isolates refs, manifests, settings, locks, application data, and Git packs.
+The root prefix is required. The server derives all catalog and identity-state
+keys below it, so two deployments share a repository universe only when their
+normalized provider, account/container, and root prefix match.
 
 ```mermaid
 flowchart TB
-    Bucket[(your_bucket_name)]
-    Shared[.crab shared immutable objects]
-    Service[repositories/your_team/service]
-    Docs[repositories/your_team/docs]
-    Mutable1[refs, manifests, app/v1, locks, packs]
-    Mutable2[refs, manifests, app/v1, locks, packs]
-
-    Bucket --> Shared
-    Bucket --> Service --> Mutable1
-    Bucket --> Docs --> Mutable2
+    Root[(provider root)]
+    Catalog[.crab/http-server/v1/catalog.json]
+    Auth[.crab/http-server/v1/auth/...]
+    Service[your-team/service]
+    Docs[your-team/docs]
+    Root --> Catalog
+    Root --> Auth
+    Root --> Service
+    Root --> Docs
 ```
 
-Keep prefixes stable when you rename a catalog entry. Two names cannot share one bucket and prefix pair because they would share mutable Git state.
+Do not point the server at a bucket/container root. A nonempty application root
+prevents catalog and session objects from colliding with unrelated workloads.
 
 ### Configure storage credentials
 
-The server uses Crab's S3 environment provider. For local RustFS, set these values in a private environment file:
+Production deployments should use workload identity. For local RustFS, set
+these S3-compatible values in a private environment file:
 
 ```sh
 AWS_ENDPOINT_URL=http://127.0.0.1:9000
@@ -196,25 +173,50 @@ AWS_SECRET_ACCESS_KEY=your_secret_key_here
 
 Do not put storage credentials in `server.toml`, source files, logs, or frontend assets.
 
-### Initialize and start the server
+### Create or adopt repositories
 
-Initialize every configured prefix once, then start the same binary with the same configuration and credentials:
+Create initializes the canonical repository first and then publishes its
+catalog record with compare-and-swap. Adopt validates an existing layout and
+manifest and never converts arbitrary object prefixes.
 
 ```sh
 SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-server"
-"$SERVER" --config /secure/server.toml --initialize
-"$SERVER" --config /secure/server.toml
+"$SERVER" --config /secure/server.toml repository create \
+  --owner your-team \
+  --name your-project \
+  --prefix your-team/your-project \
+  --default-branch main \
+  --description "Your project" \
+  --members-file /secure/members.toml
+
+"$SERVER" --config /secure/server.toml repository list
+"$SERVER" --config /secure/server.toml serve
 ```
 
-Initialization creates the canonical layout descriptor and generation-zero manifest. It is idempotent and adopts an already initialized repository after validating its layout.
+Membership is supplied separately so the shared server configuration stays
+small and secret-independent:
 
-Initialization stops without overwriting data when a prefix contains objects but lacks a canonical layout descriptor. It does not convert arbitrary objects into a Crab repository, and it does not create the bucket.
+```toml
+members = [
+  { subject = "provider-subject", name = "Alice", access = "admin" },
+]
+```
+
+Use `repository adopt` with the same identity flags for an existing canonical
+Crab prefix. Owner and name are URL-safe identifiers of at most 100 bytes;
+`api`, `assets`, `auth`, and `git` are reserved owner names. Prefixes and names
+are unique in the catalog, and the relative `.crab` namespace is reserved for
+server state. Successful changes become visible to every replica within five
+seconds without a restart.
 
 ### Understand local trust mode
 
-Without OIDC, the server accepts loopback listeners only. This mode trusts one local operator and exposes every configured repository to that principal.
+Without OIDC, the server accepts loopback listeners only. This mode trusts one
+local operator and exposes every cataloged repository to that principal.
 
-`GET /healthz` proves process liveness. It does not prove that repositories can open from storage. Use `GET /readyz` or the binary's `--healthcheck` mode for readiness.
+The private management listener owns `GET /healthz` and `GET /readyz`. The
+public listener does not expose probes. Use `healthcheck` to call readiness on
+the configured management address.
 
 ## Run the container
 
@@ -233,13 +235,15 @@ docker build \
 
 ### Prepare runtime files
 
-Copy `crates/crab-http-server/deploy/server.example.toml` outside the checkout. Replace its identity, repository, and bucket values.
+Copy `crates/crab-http-server/deploy/server.example.toml` outside the checkout.
+Replace its identity and storage-root values.
 
 Keep these inputs separate:
 
-- `server.toml`: repository and OIDC configuration
+- `server.toml`: listeners, storage root, and OIDC configuration
 - `crab-storage.env`: private storage credentials
 - `oidc-client-secret`: optional confidential-client secret
+- `state-key`: at least 32 random bytes, stable across every replica and rollout
 - `/var/lib/crab/tmp`: writable transient pack and index space
 
 ### Initialize and run the container
@@ -252,12 +256,18 @@ docker run --rm --name crab-http-server \
   --env-file /secure/crab-storage.env \
   --mount type=bind,src=/secure/server.toml,dst=/etc/crab/server.toml,readonly \
   --mount type=bind,src=/secure/oidc-client-secret,dst=/run/secrets/crab-oidc-client-secret,readonly \
+  --mount type=bind,src=/secure/state-key,dst=/run/secrets/crab-state-key,readonly \
   crab-http-server:local
 ```
 
-Append `--config /etc/crab/server.toml --initialize` for the one-time initialization run. Keep all mounts identical between initialization and service startup.
+Run `repository create` or `repository adopt` as a one-shot container with the
+same mounts before or after starting the service. Catalog changes are discovered
+without restarting the long-running container.
 
-The binary's `--healthcheck` mode calls `/readyz` on the configured listener. `SIGTERM` and Ctrl-C start the same graceful drain. Repository and application state remain in object storage; `/var/lib/crab/tmp` contains only bounded transient files.
+The binary's `healthcheck` command calls `/readyz` on the management listener.
+`SIGTERM` and Ctrl-C start the same graceful drain. Repository, catalog,
+identity, and application state remain in object storage; `/var/lib/crab/tmp`
+contains only bounded transient files.
 
 ### Probe liveness and readiness
 
@@ -266,9 +276,39 @@ The two probe routes answer different operator questions:
 | Route | Success means | Failure contract |
 | --- | --- | --- |
 | `GET /healthz` | The HTTP process can answer | It does not inspect repository storage |
-| `GET /readyz` | Every configured repository opened within one shared 10-second deadline | HTTP 503 with `Retry-After: 5` |
+| `GET /readyz` | The durable catalog can be read and validated within 10 seconds | HTTP 503 with `Retry-After: 5` |
 
-Health probes accept the listener's loopback `Host` even when OIDC uses another canonical hostname. Every non-probe request retains strict canonical `Host` validation.
+Only the management listener serves probes. Every public request retains strict
+canonical `Host` validation.
+
+### Choose an orchestrator
+
+Use the portable Helm chart for EKS, GKE, or AKS and the Fargate task profile
+for ECS. Both run at least two replicas, expose only the public port, pin an
+image digest, drop Linux capabilities, use a read-only root filesystem, and
+mount bounded disposable scratch space.
+
+```mermaid
+flowchart LR
+    EKS[EKS + Pod Identity]
+    GKE[GKE + Workload Identity Federation]
+    AKS[AKS + Workload ID]
+    Helm[One Helm chart]
+    ECS[ECS/Fargate task role]
+    S3[(S3)]
+    GCS[(GCS)]
+    Azure[(Azure Blob)]
+    EKS --> Helm --> S3
+    GKE --> Helm --> GCS
+    AKS --> Helm --> Azure
+    ECS --> S3
+```
+
+See `deploy/README.md`, `deploy/helm/crab-http-server/README.md`, and
+`deploy/ecs/README.md`. Lambda is intentionally excluded from the full data
+plane because Git and LFS require long streaming requests, large bodies, and
+bounded scratch that do not preserve the same contract through Lambda/API
+Gateway buffering and limits.
 
 ## Repository browser and application APIs
 
@@ -471,24 +511,18 @@ https://git.example.com/auth/callback
 Use the provider's exact issuer string, including its path and trailing-slash policy.
 
 ```toml
-listen = "127.0.0.1:8788"
+listen = "0.0.0.0:8788"
+management_listen = "0.0.0.0:8789"
+
+[storage]
+url = "s3://your-bucket/repositories"
 
 [auth]
 issuer = "https://identity.example.com/realms/team"
 client_id = "crab-browser"
 public_url = "https://git.example.com"
 client_secret_file = "/run/secrets/crab-oidc-client-secret"
-
-[[repositories]]
-owner = "your_team"
-name = "your_project"
-bucket = "your_bucket_name"
-prefix = "repositories/your_team/your_project"
-members = [
-  { subject = "provider_subject_alice", name = "Alice", access = "admin" },
-  { subject = "provider_subject_bob", name = "Bob", access = "write" },
-  { subject = "provider_subject_carol", name = "Carol", access = "read" },
-]
+state_key_file = "/run/secrets/crab-state-key"
 ```
 
 Omit `client_secret_file` for a public PKCE client. A secret file can end with one newline; other whitespace remains part of the secret.
@@ -499,7 +533,9 @@ HTTP identity endpoints are allowed only when the issuer, public URL, and listen
 
 ### Define repository membership
 
-Each member record binds the provider's stable `sub` claim to a display name and explicit grant:
+Each catalog member record binds the provider's stable `sub` claim to a display
+name and explicit grant. Supply records through `--members-file` when creating
+or adopting a repository:
 
 | Access | Capabilities |
 | --- | --- |
@@ -509,7 +545,10 @@ Each member record binds the provider's stable `sub` claim to a display name and
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
 
-An authenticated account without membership sees an empty catalog. Unauthorized and absent repositories both return HTTP 404 after authentication. Membership changes require a configuration update and restart, which invalidates sessions.
+An authenticated account without membership sees an empty catalog. Unauthorized
+and absent repositories both return HTTP 404 after authentication. Catalog
+membership changes do not invalidate the user's shared session and become
+effective on every replica after refresh.
 
 ### Configure protected branches
 
@@ -527,15 +566,30 @@ After a repository has a branch, native Git cannot create, update, or delete a p
 
 ### Understand session security
 
-The sign-in callback verifies state, PKCE, nonce, signature, issuer, audience, authorized party, expiry, issuance time, and an access-token hash when supplied. It reloads provider keys after signature failure to handle rotation.
+The sign-in callback verifies state, PKCE, nonce, signature, issuer, audience,
+authorized party, expiry, issuance time, and an access-token hash when supplied.
+It reloads provider keys after signature failure to handle rotation. Login flow
+consumption uses object-store compare-and-swap, so a callback can land on any
+replica and only one replay can exchange the code.
 
-Identity requests reject redirects, time out after 10 seconds, and cap responses at 1 MiB. Login transactions expire after 10 minutes. The process admits eight callbacks, retains at most 512 login transactions, and retains at most 4,096 sessions.
+Identity requests reject redirects, time out after 10 seconds, and cap responses
+at 1 MiB. Login transactions expire after 10 minutes. Each process admits eight
+simultaneous callbacks. Sessions and Git-token records use the shared storage
+root rather than pod memory.
 
 Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. Sessions expire at the earlier of ID-token expiry or eight hours. The server does not retain refresh tokens.
 
-Restarting the server invalidates sessions and Git tokens. Logout requires the canonical `Origin` and the session's cross-site request forgery (CSRF) token. It removes the local session but does not sign the account out of the identity provider.
+Restarting or replacing a replica preserves sessions and Git tokens. Logout
+requires the canonical `Origin` and the session's cross-site request forgery
+(CSRF) token. It removes the durable session, invalidating subsequent browser
+and Git-token authentication on every replica, but does not sign the account
+out of the identity provider. Configure an object-store lifecycle rule that
+deletes objects below `.crab/http-server/v1/auth/` after 24 hours. Active state
+expires within eight hours; the rule only collects consumed flows, expired
+sessions, and token records left after session invalidation.
 
-Provider-side account revocation does not invalidate an issued Crab session before expiry or restart. Back-channel logout remains unimplemented.
+Provider-side account revocation does not invalidate an issued Crab session
+before expiry. Back-channel logout remains unimplemented.
 
 `GET /api/session` returns the current account and CSRF token to the same-origin frontend. Anonymous repository APIs return HTTP 401. No cloud credential reaches the browser.
 
@@ -565,7 +619,8 @@ git config --global 'credential.https://git.example.com.useHttpPath' true
 }
 ```
 
-The response contains the secret, target, permission, and remaining session lifetime. The process retains only token hashes.
+The response contains the secret, target, permission, and remaining session
+lifetime. Shared storage retains only token hashes.
 
 Token rules:
 
@@ -573,9 +628,8 @@ Token rules:
 - Effective access intersects token scope with current membership
 - A read token never inherits write capability
 - Each session retains at most 10 tokens
-- The process retains at most 4,096 tokens
-- Sign-out, replacement sign-in, revocation, and restart invalidate tokens
-- Revocation affects retained principals on their next authorization check
+- Sign-out, replacement sign-in, and explicit revocation invalidate tokens
+- Revocation is enforced on the next request; an already admitted request drains
 
 ### Fetch through smart HTTP
 
@@ -1016,15 +1070,15 @@ The server is complete only when a real account can perform the workflow and obs
 
 | Surface | Required evidence | Status |
 | --- | --- | --- |
-| Single-server deployment | One Rust binary serves embedded assets and APIs; documented setup, health, drain, and reproducible container | Complete for the current single-server shape |
+| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, Helm, ECS profile, and reproducible container | Implemented; live rollout qualification remains |
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; membership administration and provider revocation remain |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; crash and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
-| Repository management | Create, import, archive, settings, search, and audited administration | In progress; creation, import, and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Pending |
+| Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Static EKS/GKE/AKS/ECS profiles implemented; live qualification pending |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -1033,11 +1087,11 @@ The remaining production gaps include:
 
 - Durable application-level push receipts and full abrupt-crash recovery
 - Index receipts and restart reconstruction when verified visibility evidence is missing
-- Protected-view and active-active writer coexistence with shared namespace guarantees
+- Protected-view writer coexistence with shared namespace guarantees
 - Multi-instance global admission and production throughput qualification
 - LFS locking and resumed range downloads
 - Membership administration, provider back-channel logout, and immediate provider revocation
-- Repository creation and import through the application
+- Repository creation and adoption exist in the CLI; browser import remains
 - Backup and restore qualification for Git and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
 - Production observability, upgrade, rollback, and disaster-recovery procedures
@@ -1055,6 +1109,7 @@ The service account needs object reads plus conditional writes and deletes for:
 - Per-ref, namespace, generation-owner, and GC coordination keys
 - The complete `app/v1` application namespace
 - LFS objects and multipart lifecycle
+- The server catalog and shared OIDC/session/Git-token namespace
 
 Preserve source errors across crate boundaries. Map them at the HTTP boundary only when the status code or client action changes.
 

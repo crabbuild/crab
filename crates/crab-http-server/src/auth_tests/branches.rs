@@ -103,7 +103,11 @@ async fn set_archive(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (Sta
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     let h = Harness::new(false).await;
-    let repo = &h.server.repositories[&("team".into(), "private".into())];
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
     let alice = h.login().await;
     let session = h.json("/api/session", &alice).await;
     let csrf = session["csrf"].as_str().unwrap();
@@ -192,7 +196,7 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         catalog["repositories"][0]["protected_branches"][1]["branch"],
         "feature/policy"
     );
-    let persisted = crate::repository_settings::load(repo).await.unwrap();
+    let persisted = crate::repository_settings::load(&repo).await.unwrap();
     assert_eq!(persisted, repo.branch_protections().await.unwrap());
 
     crate::server::receive_tests::success(source.path(), &["checkout", "-b", "feature/policy"])
@@ -510,7 +514,7 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
     assert_eq!(catalog["repositories"][0]["archive_version"], 1);
     assert_eq!(catalog["repositories"][0]["archived"], true);
     assert_eq!(
-        crate::repository_settings::load_lifecycle(repo)
+        crate::repository_settings::load_lifecycle(&repo)
             .await
             .unwrap(),
         crate::repository_settings::RepositoryLifecycle {

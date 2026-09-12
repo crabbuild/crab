@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader},
+    sync::Arc,
     time::Duration,
 };
 
@@ -118,82 +119,93 @@ pub(crate) async fn publish_default_branch(
     entry
         .open_current(server, RepositoryOptions::default(), cancel)
         .await?;
+    let leased_entry = Arc::clone(&entry);
     crab_remote::publication::with_leases(
         &entry.store,
         &entry.layout,
         [branch.to_owned()],
         TTL,
         cancel,
-        |holders, cancel| async move {
-            crab_remote::publication::with_internal_lease(
-                &entry.store,
-                &entry.layout,
-                GIT_MANIFEST_RESOURCE,
-                TTL,
-                &cancel,
-                |cancel| async move {
-                    check_cancelled(&cancel)?;
-                    let snapshot =
-                        manifest_store::read_repository_snapshot(&entry.store, &entry.layout)
-                            .await?;
-                    if snapshot.journal.head != expected_head {
-                        return Err(ReceiveError::DefaultBranchChanged);
-                    }
-                    let oid = expected_oid.to_string();
-                    if snapshot.journal.refs.get(branch) != Some(&oid) {
-                        return Err(ReceiveError::BranchChanged);
-                    }
-                    if snapshot.journal.head == branch {
-                        return Ok(());
-                    }
-                    let evidence = git_visibility::GitVisibilityEdit::from_delta_objects(
-                        Some(oid.clone()),
-                        oid.clone(),
-                        vec![],
-                        vec![],
-                    );
-                    let evidence_hash =
-                        git_visibility::upload_edit(&entry.store, &entry.layout, &evidence).await?;
-                    check_cancelled(&cancel)?;
-                    if !principal.can_admin(&entry.config) {
-                        return Err(ReceiveError::Forbidden);
-                    }
-                    // Retargeting HEAD needs a journal parent and branch lease. This no-op
-                    // ref edit preserves the branch's immutable visibility closure.
-                    crab_write::journal::commit_edits(
-                        &entry.store,
-                        &entry.layout,
-                        &snapshot,
-                        vec![RefJournalEdit {
-                            ref_name: branch.to_owned(),
-                            old_oid: Some(oid.clone()),
-                            new_oid: Some(oid),
-                            peeled_oid: None,
-                            lock_holder: holders.get(branch).cloned(),
-                            visibility_evidence_hash: Some(evidence_hash),
-                        }],
-                        Some(branch.to_owned()),
-                        vec![],
-                        vec![],
-                        crab_write::journal::CommitOptions::new(TTL, &cancel),
-                    )
-                    .await?;
-                    Ok(())
-                },
-            )
-            .await?;
-            // Release the manifest lease before maintenance reacquires it; keep
-            // GC admission until this readiness attempt finishes. HEAD acceptance
-            // is independent of read readiness.
-            let _readiness = crab_remote::publication::finish_committed(async {
-                entry.invalidate().await;
-                let repository = entry
-                    .open_current(server, RepositoryOptions::default(), &cancel)
-                    .await?;
-                Ok::<_, crate::Error>(repository.generation())
-            })
-            .await;
-            Ok(())
+        move |holders, cancel| {
+            let entry = Arc::clone(&leased_entry);
+            async move {
+                let manifest_entry = Arc::clone(&entry);
+                crab_remote::publication::with_internal_lease(
+                    &entry.store,
+                    &entry.layout,
+                    GIT_MANIFEST_RESOURCE,
+                    TTL,
+                    &cancel,
+                    move |cancel| async move {
+                        check_cancelled(&cancel)?;
+                        let snapshot = manifest_store::read_repository_snapshot(
+                            &manifest_entry.store,
+                            &manifest_entry.layout,
+                        )
+                        .await?;
+                        if snapshot.journal.head != expected_head {
+                            return Err(ReceiveError::DefaultBranchChanged);
+                        }
+                        let oid = expected_oid.to_string();
+                        if snapshot.journal.refs.get(branch) != Some(&oid) {
+                            return Err(ReceiveError::BranchChanged);
+                        }
+                        if snapshot.journal.head == branch {
+                            return Ok(());
+                        }
+                        let evidence = git_visibility::GitVisibilityEdit::from_delta_objects(
+                            Some(oid.clone()),
+                            oid.clone(),
+                            vec![],
+                            vec![],
+                        );
+                        let evidence_hash = git_visibility::upload_edit(
+                            &manifest_entry.store,
+                            &manifest_entry.layout,
+                            &evidence,
+                        )
+                        .await?;
+                        check_cancelled(&cancel)?;
+                        if !principal.can_admin(&manifest_entry.config) {
+                            return Err(ReceiveError::Forbidden);
+                        }
+                        // Retargeting HEAD needs a journal parent and branch lease. This no-op
+                        // ref edit preserves the branch's immutable visibility closure.
+                        crab_write::journal::commit_edits(
+                            &manifest_entry.store,
+                            &manifest_entry.layout,
+                            &snapshot,
+                            vec![RefJournalEdit {
+                                ref_name: branch.to_owned(),
+                                old_oid: Some(oid.clone()),
+                                new_oid: Some(oid),
+                                peeled_oid: None,
+                                lock_holder: holders.get(branch).cloned(),
+                                visibility_evidence_hash: Some(evidence_hash),
+                            }],
+                            Some(branch.to_owned()),
+                            vec![],
+                            vec![],
+                            crab_write::journal::CommitOptions::new(TTL, &cancel),
+                        )
+                        .await?;
+                        Ok(())
+                    },
+                )
+                .await?;
+                // Release the manifest lease before maintenance reacquires it; keep
+                // GC admission until this readiness attempt finishes. HEAD acceptance
+                // is independent of read readiness.
+                let _readiness = crab_remote::publication::finish_committed(async {
+                    entry.invalidate().await;
+                    let repository = entry
+                        .open_current(server, RepositoryOptions::default(), &cancel)
+                        .await?;
+                    Ok::<_, crate::Error>(repository.generation())
+                })
+                .await;
+                Ok(())
+            }
         },
     )
     .await
@@ -252,17 +264,18 @@ async fn run_request(
         .iter()
         .map(|update| update.name.clone())
         .collect();
+    let leased_entry = Arc::clone(&entry);
     crab_remote::publication::with_leases(
         &entry.store,
         &entry.layout,
         names,
         TTL,
         cancel,
-        |holders, cancel| async move {
+        move |holders, cancel| async move {
             publish(
                 server,
                 principal,
-                entry,
+                &leased_entry,
                 &request,
                 input,
                 directory.path(),

@@ -99,7 +99,10 @@ async fn lfs_batch_upload_download_is_verified_and_idempotent() {
 async fn lfs_download_does_not_publish_verification_receipts() {
     use futures_util::TryStreamExt;
     let server = maintenance_tests::fixture().await;
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     let oid = crab_git::lfs_pointer::LfsPointer::parse(
         format!("version https://git-lfs.github.com/spec/v1\noid sha256:{HELLO}\nsize 5\n")
             .as_bytes(),
@@ -129,7 +132,10 @@ async fn lfs_download_does_not_publish_verification_receipts() {
 #[tokio::test]
 async fn lfs_corrupt_download_fails_its_body_and_releases_admission() {
     let server = maintenance_tests::fixture().await;
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     let oid = crab_git::lfs_pointer::LfsPointer::parse(
         format!("version https://git-lfs.github.com/spec/v1\noid sha256:{HELLO}\nsize 5\n")
             .as_bytes(),
@@ -160,8 +166,11 @@ async fn lfs_corrupt_download_fails_its_body_and_releases_admission() {
 #[tokio::test]
 async fn archived_repository_rejects_lfs_writes_and_keeps_reads_available() {
     let server = maintenance_tests::fixture().await;
-    let repository = &server.repositories[&("team".into(), "repo".into())];
-    repository_settings::replace_lifecycle(repository, 0, true)
+    let repository = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    repository_settings::replace_lifecycle(&repository, 0, true)
         .await
         .unwrap();
     let batch = |operation| {
@@ -308,7 +317,10 @@ async fn cancelled_lfs_response_fails_http_body_and_releases_capacity() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         Arc::get_mut(&mut server).unwrap().port = port;
-        let repo = &server.repositories[&("team".into(), "repo".into())];
+        let repo = server
+            .repositories
+            .get(&("team".into(), "repo".into()))
+            .unwrap();
         let oid: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(b"hello").into();
         crab_lfs::LfsObjectStore::new(repo.store.clone(), &repo.config.prefix)
             .put(&oid, bytes::Bytes::from_static(b"hello"))

@@ -1,0 +1,77 @@
+{
+  "family": "crab-http-server",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "4096",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/crab-http-server-execution",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/crab-http-server-storage",
+  "ephemeralStorage": { "sizeInGiB": 50 },
+  "runtimePlatform": {
+    "operatingSystemFamily": "LINUX",
+    "cpuArchitecture": "X86_64"
+  },
+  "volumes": [{ "name": "scratch" }],
+  "containerDefinitions": [
+    {
+      "name": "crab-http-server",
+      "image": "123456789012.dkr.ecr.us-west-2.amazonaws.com/crab-http-server@sha256:replace-with-qualified-image-digest",
+      "essential": true,
+      "user": "10001:10001",
+      "readonlyRootFilesystem": true,
+      "linuxParameters": { "capabilities": { "drop": ["ALL"] } },
+      "entryPoint": ["/bin/sh", "-ec"],
+      "command": [
+        "umask 077; printf '%s' \"$CRAB_HTTP_CONFIG\" > /var/lib/crab/tmp/server.toml; printf '%s' \"$CRAB_OIDC_CLIENT_SECRET\" > /var/lib/crab/tmp/oidc-client-secret; printf '%s' \"$CRAB_STATE_KEY\" > /var/lib/crab/tmp/state-key; unset CRAB_HTTP_CONFIG CRAB_OIDC_CLIENT_SECRET CRAB_STATE_KEY; exec /usr/local/bin/crab-http-server --config /var/lib/crab/tmp/server.toml"
+      ],
+      "environment": [
+        { "name": "AWS_REGION", "value": "us-west-2" },
+        { "name": "AWS_DEFAULT_REGION", "value": "us-west-2" },
+        { "name": "TMPDIR", "value": "/var/lib/crab/tmp" }
+      ],
+      "secrets": [
+        {
+          "name": "CRAB_HTTP_CONFIG",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:123456789012:secret:crab-http-server-config"
+        },
+        {
+          "name": "CRAB_OIDC_CLIENT_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:123456789012:secret:crab-http-server-oidc"
+        },
+        {
+          "name": "CRAB_STATE_KEY",
+          "valueFrom": "arn:aws:secretsmanager:us-west-2:123456789012:secret:crab-http-server-state-key"
+        }
+      ],
+      "portMappings": [
+        { "name": "http", "containerPort": 8788, "protocol": "tcp" },
+        { "name": "management", "containerPort": 8789, "protocol": "tcp" }
+      ],
+      "mountPoints": [
+        { "sourceVolume": "scratch", "containerPath": "/var/lib/crab/tmp", "readOnly": false }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD",
+          "/usr/local/bin/crab-http-server",
+          "--config",
+          "/var/lib/crab/tmp/server.toml",
+          "healthcheck"
+        ],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "stopTimeout": 120,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/crab-http-server",
+          "awslogs-region": "us-west-2",
+          "awslogs-stream-prefix": "server"
+        }
+      }
+    }
+  ]
+}

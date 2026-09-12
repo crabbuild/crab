@@ -273,6 +273,7 @@ async fn list(
     Path(key): Path<(String, String)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     let labels = catalog(repo).await?;
     Ok(Json(json!({
         "items": labels.iter().map(view).collect::<Vec<_>>(),
@@ -287,6 +288,7 @@ async fn create(
     input: std::result::Result<Json<NewLabel>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }
@@ -344,6 +346,7 @@ async fn edit(
     input: std::result::Result<Json<LabelEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name_key))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }
@@ -399,6 +402,7 @@ async fn remove(
     input: std::result::Result<Json<LabelDelete>, JsonRejection>,
 ) -> Result<StatusCode> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::LabelPermission);
     }

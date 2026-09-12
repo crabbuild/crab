@@ -333,6 +333,7 @@ async fn list(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     app::actor(&principal)?;
     let limit = params.limit()?;
     let state = params.state()?;
@@ -420,6 +421,7 @@ async fn create(
     input: std::result::Result<Json<NewPull>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let title = app::title(&input.title)?;
@@ -504,6 +506,7 @@ async fn detail(
     Path((owner, name, id)): Path<(String, String, u64)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let (pull, _) = app_storage::read::<PullRequest>(repo, &storage::pull_path(app::number(id)?))
         .await?
         .ok_or(Error::NotFound)?;
@@ -545,6 +548,7 @@ async fn edit(
     input: std::result::Result<Json<PullEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let path = storage::pull_path(app::number(id)?);
@@ -640,6 +644,7 @@ async fn comments(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let id = app::number(id)?;
     if app_storage::read::<PullRequest>(repo, &storage::pull_path(id))
         .await?
@@ -695,6 +700,7 @@ async fn comment(
     input: std::result::Result<Json<NewComment>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let id = app::number(id)?;
     if app_storage::read::<PullRequest>(repo, &storage::pull_path(id))
         .await?
@@ -722,6 +728,7 @@ async fn comment_detail(
     Path((owner, name, id, comment)): Path<(String, String, u64, u64)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let path = storage::comment_path(app::number(id)?, app::number(comment)?);
     let (comment, _) = app_storage::read::<PullComment>(repo, &path)
         .await?
@@ -743,6 +750,7 @@ async fn edit_comment(
     input: std::result::Result<Json<CommentEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let Json(input) = input?;
     let actor = app::actor(&principal)?;
     let path = storage::comment_path(app::number(id)?, app::number(comment)?);

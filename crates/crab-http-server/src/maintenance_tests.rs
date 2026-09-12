@@ -39,7 +39,8 @@ pub(super) async fn fixture() -> Arc<Server> {
                 pinned: Mutex::new(None),
                 maintenance: Mutex::new(None),
             },
-        )]),
+        )])
+        .into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
@@ -51,11 +52,16 @@ pub(super) async fn fixture() -> Arc<Server> {
         receives: tokio_util::task::TaskTracker::new(),
         port: 8788,
         auth: None,
+        catalog: None,
+        catalog_healthy: AtomicBool::new(false),
     })
 }
 
-fn repository(server: &Server) -> &Repository {
-    &server.repositories[&("team".into(), "repo".into())]
+fn repository(server: &Server) -> Arc<Repository> {
+    server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap()
 }
 
 pub(super) async fn commit_without_proof(repo: &Repository) -> PushLock {
@@ -126,7 +132,7 @@ async fn expired_browser_cache_observes_journal_and_reports_missing_proof_withou
         .await
         .unwrap()
         .1;
-    let lease = commit_without_proof(repo).await;
+    let lease = commit_without_proof(&repo).await;
     assert_eq!(
         before,
         manifest_store::read_manifest(&repo.store, &repo.layout)
@@ -154,7 +160,7 @@ async fn expired_browser_cache_observes_journal_and_reports_missing_proof_withou
         .unwrap();
     assert_eq!(after.manifest.refs["refs/heads/main"], "a".repeat(40));
     assert!(after.journal.transactions.is_empty());
-    assert_released(repo).await;
+    assert_released(&repo).await;
     lease.release().await.unwrap();
     close(&server).await;
 }
@@ -163,7 +169,7 @@ async fn expired_browser_cache_observes_journal_and_reports_missing_proof_withou
 async fn another_generation_owner_keeps_publication_authority() {
     let server = fixture().await;
     let repo = repository(&server);
-    let lease = commit_without_proof(repo).await;
+    let lease = commit_without_proof(&repo).await;
     let mut owner = PushLock::acquire_internal(
         repo.store.inner(),
         repo.layout.repo_prefix(),
@@ -201,7 +207,7 @@ async fn gc_sweep_blocks_publication_and_releases_preceding_leases() {
     for global in [true, false] {
         let server = fixture().await;
         let repo = repository(&server);
-        let lease = commit_without_proof(repo).await;
+        let lease = commit_without_proof(&repo).await;
         let domain = if global {
             repo.layout.global_prefix()
         } else {
@@ -230,7 +236,7 @@ async fn gc_sweep_blocks_publication_and_releases_preceding_leases() {
         );
         sweep.renew().await.unwrap();
         sweep.release().await.unwrap();
-        assert_released(repo).await;
+        assert_released(&repo).await;
         lease.release().await.unwrap();
         close(&server).await;
     }
@@ -241,7 +247,7 @@ async fn disconnected_reader_retains_publication_until_retry_or_shutdown_drains_
     for shutdown in [false, true] {
         let server = fixture().await;
         let repo = repository(&server);
-        let lease = commit_without_proof(repo).await;
+        let lease = commit_without_proof(&repo).await;
         let manifest = PushLock::acquire_internal(
             repo.store.inner(),
             repo.layout.repo_prefix(),
@@ -300,7 +306,7 @@ async fn disconnected_reader_retains_publication_until_retry_or_shutdown_drains_
         }
         assert_eq!(server.maintenance_admission.available_permits(), 2);
         assert!(repo.maintenance.lock().await.is_none());
-        assert_released(repo).await;
+        assert_released(&repo).await;
         lease.release().await.unwrap();
     }
 }

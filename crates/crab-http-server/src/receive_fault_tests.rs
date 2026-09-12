@@ -156,7 +156,10 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
 
     let (wire, oid) = body().await;
     let server = maintenance_tests::fixture().await;
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let wire_path = directory.path().join("wire");
     std::fs::write(&wire_path, wire).unwrap();
@@ -170,30 +173,37 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
     let plan_id = "d".repeat(64);
     let ttl = Duration::from_secs(60);
     let cancel = CancellationToken::new();
+    let planned_repo = Arc::clone(&repo);
+    let plan_key = plan_id.clone();
+    let plan_server = Arc::clone(&server);
     let outcome = with_plan(
         &repo.store,
         &repo.layout,
         &plan_id,
         ttl,
         &cancel,
-        |cancel| {
-            let plan_id = &plan_id;
-            let server = &server;
+        move |cancel| {
+            let plan_id = plan_key.clone();
+            let server = Arc::clone(&plan_server);
+            let repo = Arc::clone(&planned_repo);
             async move {
+                let leased_repo = Arc::clone(&repo);
                 with_leases(
                     &repo.store,
                     &repo.layout,
                     names,
                     ttl,
                     &cancel,
-                    |holders, cancel| async move {
-                        let snapshot =
-                            manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
-                                .await?;
+                    move |holders, cancel| async move {
+                        let snapshot = manifest_store::read_repository_snapshot(
+                            &leased_repo.store,
+                            &leased_repo.layout,
+                        )
+                        .await?;
                         let repository = RemoteGitRepository::open(
-                            repo.store.clone(),
-                            repo.layout.clone(),
-                            repo.identity.clone(),
+                            leased_repo.store.clone(),
+                            leased_repo.layout.clone(),
+                            leased_repo.identity.clone(),
                             server.runtime.clone(),
                             RepositoryOptions::default(),
                             &cancel,
@@ -207,7 +217,7 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                             BTreeMap::new(),
                             &cancel,
                             crab_remote::prepare::Options {
-                                layout: repo.layout.clone(),
+                                layout: leased_repo.layout.clone(),
                                 graph: crab_git::receive_plan::GraphLimits {
                                     max_ref_updates: 16,
                                     max_graph_steps: 1024,
@@ -254,7 +264,7 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
                             .commit(
                                 None,
                                 crab_write::journal::CommitOptions::new(ttl, &cancel)
-                                    .with_plan(plan_id),
+                                    .with_plan(&plan_id),
                             )
                             .await?;
                         Ok::<_, TestError>(outcome)
@@ -346,7 +356,9 @@ async fn receive_faults_rustfs() {
     let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
     let prefix = std::env::var("QUALIFICATION_PREFIX").unwrap();
     assert!(prefix.starts_with("qualification/http-receive-"));
-    let store = build_static_env_store(&bucket, StorageProviderKind::S3).unwrap();
+    let store =
+        crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+            .unwrap();
     let domain = format!("{prefix}/draining-writer");
     let writer = crab_coordination::GcFenceLease::acquire_writer(
         store.inner(),

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 mod git_tokens;
 pub(crate) use git_tokens::{issue_git_token, revoke_git_tokens};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Extension, Json,
@@ -11,6 +11,9 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
+use bytes::Bytes;
+use crab_storage::{StorageError, Store};
+use object_store::path::Path as ObjectPath;
 use openidconnect::{
     AccessTokenHash, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet,
     EndpointNotSet, EndpointSet, Nonce, OAuth2TokenResponse, PkceCodeChallenge, PkceCodeVerifier,
@@ -37,6 +40,7 @@ type Client = CoreClient<
 type Key = [u8; 32];
 const FLOW_LIFETIME: Duration = Duration::from_secs(600);
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
+const STATE_CAS_ATTEMPTS: usize = 8;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AuthError {
@@ -50,6 +54,10 @@ pub(crate) enum AuthError {
     Busy,
     #[error("identity provider request failed")]
     Provider(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("shared identity state storage failed")]
+    Storage(#[from] StorageError),
+    #[error("shared identity state encoding failed")]
+    Json(#[from] serde_json::Error),
 }
 
 impl AuthError {
@@ -80,7 +88,7 @@ impl IntoResponse for AuthError {
                 "sign_in_busy",
                 "Sign-in is busy. Try again shortly.",
             ),
-            Self::Provider(_) => (
+            Self::Provider(_) | Self::Storage(_) | Self::Json(_) => (
                 StatusCode::BAD_GATEWAY,
                 "identity_unavailable",
                 "The identity provider is unavailable. Try signing in again.",
@@ -105,13 +113,14 @@ pub(crate) struct Identity {
 pub(crate) struct Session {
     identity: Identity,
     csrf: String,
-    expires: Instant,
+    expires_at: u64,
+    session_key: Key,
     revoked: AtomicBool,
 }
 
 impl Session {
     fn active(&self) -> bool {
-        self.expires > Instant::now() && !self.revoked.load(Ordering::Acquire)
+        self.expires_at > now_epoch().unwrap_or(u64::MAX) && !self.revoked.load(Ordering::Acquire)
     }
 }
 
@@ -202,7 +211,43 @@ struct Flow {
     nonce: Nonce,
     verifier: PkceCodeVerifier,
     return_to: String,
-    expires: Instant,
+    expires_at: u64,
+}
+
+#[derive(Clone)]
+struct AuthState {
+    store: Store,
+    prefix: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredFlow {
+    nonce: String,
+    verifier: String,
+    return_to: String,
+    expires_at: u64,
+    consumed: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSession {
+    identity: Identity,
+    csrf: String,
+    expires_at: u64,
+    #[serde(default)]
+    git_tokens: Vec<Key>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredGitToken {
+    session_key: Key,
+    owner: String,
+    repository: String,
+    access: RepositoryAccess,
+    expires_at: u64,
 }
 
 pub(crate) struct Authentication {
@@ -213,11 +258,32 @@ pub(crate) struct Authentication {
     flows: Mutex<HashMap<Key, Flow>>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
     git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
+    state: Option<AuthState>,
+    cursor_key: [u8; 32],
     admission: Semaphore,
 }
 
 impl Authentication {
+    #[cfg(test)]
     pub async fn new(config: OidcConfig) -> Result<Self, AuthError> {
+        Self::build(config, None).await
+    }
+
+    pub(crate) async fn new_durable(
+        config: OidcConfig,
+        root: &crate::storage_root::StorageRoot,
+    ) -> Result<Self, AuthError> {
+        Self::build(
+            config,
+            Some(AuthState {
+                store: root.store.clone(),
+                prefix: root.path(".crab/http-server/v1/auth").to_string(),
+            }),
+        )
+        .await
+    }
+
+    async fn build(config: OidcConfig, state: Option<AuthState>) -> Result<Self, AuthError> {
         let secret = config
             .client_secret_file
             .as_ref()
@@ -233,6 +299,16 @@ impl Authentication {
                 Ok(ClientSecret::new(text.to_owned()))
             })
             .transpose()?;
+        let cursor_key = match &config.state_key_file {
+            Some(path) => {
+                let secret = std::fs::read(path).map_err(AuthError::provider)?;
+                if secret.len() < 32 {
+                    return Err(AuthError::Invalid);
+                }
+                blake3::derive_key("crab http server state key v1", &secret)
+            }
+            None => rand::random(),
+        };
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
@@ -247,8 +323,14 @@ impl Authentication {
             flows: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             git_tokens: Mutex::new(HashMap::new()),
+            state,
+            cursor_key,
             admission: Semaphore::new(8),
         })
+    }
+
+    pub(crate) fn cursor_key(&self) -> [u8; 32] {
+        self.cursor_key
     }
 
     pub fn origin(&self) -> String {
@@ -295,11 +377,8 @@ impl Authentication {
         let Some(token) = cookie_value(headers, self.cookie_name(false)) else {
             return Principal::Anonymous;
         };
-        let mut sessions = self.sessions.lock().await;
-        sessions.retain(|_, session| session.active());
-        sessions
-            .get(&key(token))
-            .cloned()
+        self.load_session(key(token))
+            .await
             .map(Principal::User)
             .unwrap_or(Principal::Anonymous)
     }
@@ -319,6 +398,165 @@ impl Authentication {
                 blake3::hash(csrf.as_bytes()) == blake3::hash(session.csrf.as_bytes())
             })
     }
+
+    async fn store_flow(&self, state_key: Key, flow: Flow) -> Result<(), AuthError> {
+        let Some(state) = &self.state else {
+            let mut flows = self.flows.lock().await;
+            flows.retain(|_, flow| flow.expires_at > now_epoch().unwrap_or(u64::MAX));
+            if flows.len() >= 512 {
+                return Err(AuthError::Busy);
+            }
+            flows.insert(state_key, flow);
+            return Ok(());
+        };
+        let record = StoredFlow {
+            nonce: flow.nonce.secret().clone(),
+            verifier: flow.verifier.secret().clone(),
+            return_to: flow.return_to,
+            expires_at: flow.expires_at,
+            consumed: false,
+        };
+        state
+            .store
+            .create_strict(
+                &state.path("flows", &state_key),
+                Bytes::from(serde_json::to_vec(&record)?),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn take_flow(&self, state_key: Key) -> Result<Flow, AuthError> {
+        let Some(state) = &self.state else {
+            return self
+                .flows
+                .lock()
+                .await
+                .remove(&state_key)
+                .filter(|flow| flow.expires_at > now_epoch().unwrap_or(u64::MAX))
+                .ok_or(AuthError::Invalid);
+        };
+        let path = state.path("flows", &state_key);
+        let (body, etag) = state
+            .store
+            .get_with_etag_bounded(&path, 64 * 1024)
+            .await
+            .map_err(|error| match error {
+                StorageError::NotFound { .. } => AuthError::Invalid,
+                other => AuthError::Storage(other),
+            })?;
+        let mut record: StoredFlow = serde_json::from_slice(&body)?;
+        if record.consumed || record.expires_at <= now_epoch()? {
+            let _ = state.store.delete(&path).await;
+            return Err(AuthError::Invalid);
+        }
+        record.consumed = true;
+        state
+            .store
+            .update(&path, Bytes::from(serde_json::to_vec(&record)?), etag)
+            .await
+            .map_err(|error| match error {
+                StorageError::StateConflict { .. } => AuthError::Invalid,
+                other => AuthError::Storage(other),
+            })?;
+        Ok(Flow {
+            nonce: Nonce::new(record.nonce),
+            verifier: PkceCodeVerifier::new(record.verifier),
+            return_to: record.return_to,
+            expires_at: record.expires_at,
+        })
+    }
+
+    async fn store_session(&self, session: Arc<Session>) -> Result<(), AuthError> {
+        let Some(state) = &self.state else {
+            let mut sessions = self.sessions.lock().await;
+            sessions.retain(|_, session| session.active());
+            if sessions.len() >= 4096 {
+                return Err(AuthError::Busy);
+            }
+            sessions.insert(session.session_key, session);
+            return Ok(());
+        };
+        let record = StoredSession {
+            identity: session.identity.clone(),
+            csrf: session.csrf.clone(),
+            expires_at: session.expires_at,
+            git_tokens: Vec::new(),
+        };
+        state
+            .store
+            .create_strict(
+                &state.path("sessions", &session.session_key),
+                Bytes::from(serde_json::to_vec(&record)?),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn load_session(&self, session_key: Key) -> Option<Arc<Session>> {
+        let Some(state) = &self.state else {
+            let mut sessions = self.sessions.lock().await;
+            sessions.retain(|_, session| session.active());
+            return sessions.get(&session_key).cloned();
+        };
+        let body = state
+            .store
+            .get_with_etag_bounded(&state.path("sessions", &session_key), 64 * 1024)
+            .await
+            .ok()?
+            .0;
+        let record: StoredSession = serde_json::from_slice(&body).ok()?;
+        let session = Arc::new(Session {
+            identity: record.identity,
+            csrf: record.csrf,
+            expires_at: record.expires_at,
+            session_key,
+            revoked: AtomicBool::new(false),
+        });
+        if session.active() {
+            Some(session)
+        } else {
+            let _ = state
+                .store
+                .delete(&state.path("sessions", &session_key))
+                .await;
+            None
+        }
+    }
+
+    async fn remove_session(&self, session_key: Key) -> Result<(), AuthError> {
+        if let Some(state) = &self.state {
+            match state
+                .store
+                .delete(&state.path("sessions", &session_key))
+                .await
+            {
+                Ok(()) | Err(StorageError::NotFound { .. }) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(session) = self.sessions.lock().await.remove(&session_key) {
+            session.revoked.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+impl AuthState {
+    fn path(&self, kind: &str, key: &Key) -> ObjectPath {
+        ObjectPath::from(format!("{}/{kind}/{}", self.prefix, hex_key(key)))
+    }
+}
+
+fn hex_key(key: &Key) -> String {
+    key.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn now_epoch() -> Result<u64, AuthError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(AuthError::provider)?
+        .as_secs())
 }
 
 async fn discover(
@@ -418,20 +656,16 @@ pub(crate) async fn login(
         .add_scope(Scope::new("profile".into()))
         .set_pkce_challenge(challenge)
         .url();
-    let mut flows = auth.flows.lock().await;
-    flows.retain(|_, flow| flow.expires > Instant::now());
-    if flows.len() >= 512 {
-        return Err(AuthError::Busy);
-    }
-    flows.insert(
+    auth.store_flow(
         key(state.secret()),
         Flow {
             nonce,
             verifier,
             return_to,
-            expires: Instant::now() + FLOW_LIFETIME,
+            expires_at: now_epoch()? + FLOW_LIFETIME.as_secs(),
         },
-    );
+    )
+    .await?;
     Ok((
         [(
             header::SET_COOKIE,
@@ -472,13 +706,7 @@ async fn finish_login(
         return Err(AuthError::Invalid);
     }
     // Consume only after binding the state to this browser. Replays cannot exchange a code.
-    let flow = auth
-        .flows
-        .lock()
-        .await
-        .remove(&key(&state))
-        .filter(|flow| flow.expires > Instant::now())
-        .ok_or(AuthError::Invalid)?;
+    let flow = auth.take_flow(key(&state)).await?;
     let code = query.code.ok_or(AuthError::Invalid)?;
     // Discover fresh signing keys at every callback so provider rotation does not require a restart.
     let client = discover(&auth.config, auth.secret.clone(), &auth.http).await?;
@@ -547,6 +775,7 @@ async fn finish_login(
         .unwrap_or(&subject)
         .to_owned();
     let token = CsrfToken::new_random_len(32);
+    let session_key = key(token.secret());
     let session = Arc::new(Session {
         identity: Identity {
             issuer: auth.config.issuer.as_str().to_owned(),
@@ -554,20 +783,16 @@ async fn finish_login(
             name,
         },
         csrf: CsrfToken::new_random_len(32).secret().clone(),
-        expires: Instant::now() + lifetime,
+        expires_at: now
+            .checked_add(lifetime.as_secs())
+            .ok_or(AuthError::Invalid)?,
+        session_key,
         revoked: AtomicBool::new(false),
     });
-    let mut sessions = auth.sessions.lock().await;
-    sessions.retain(|_, session| session.active());
-    if sessions.len() >= 4096 {
-        return Err(AuthError::Busy);
+    if let Some(old) = cookie_value(&headers, auth.cookie_name(false)) {
+        auth.remove_session(key(old)).await?;
     }
-    if let Some(old) = cookie_value(&headers, auth.cookie_name(false))
-        && let Some(session) = sessions.remove(&key(old))
-    {
-        session.revoked.store(true, Ordering::Release);
-    }
-    sessions.insert(key(token.secret()), session);
+    auth.store_session(session).await?;
     let mut response = Redirect::to(&flow.return_to).into_response();
     // Axum's tuple header arrays replace duplicate names; both cookies must reach the browser.
     response.headers_mut().append(
@@ -599,9 +824,7 @@ pub(crate) async fn logout(
     let auth = server.auth.as_ref().ok_or(AuthError::Invalid)?;
     // The transport boundary has already required both session CSRF and the canonical Origin.
     let token = cookie_value(&headers, auth.cookie_name(false)).ok_or(AuthError::Invalid)?;
-    if let Some(session) = auth.sessions.lock().await.remove(&key(token)) {
-        session.revoked.store(true, Ordering::Release);
-    }
+    auth.remove_session(key(token)).await?;
     Ok((
         [(header::SET_COOKIE, auth.cookie(false, "", Duration::ZERO)?)],
         StatusCode::NO_CONTENT,
@@ -658,7 +881,8 @@ mod tests {
                 name: "Alice".into(),
             },
             csrf: "csrf".into(),
-            expires: Instant::now() + Duration::from_secs(60),
+            expires_at: now_epoch().unwrap() + 60,
+            session_key: [0; 32],
             revoked: AtomicBool::new(false),
         })
     }
@@ -694,6 +918,7 @@ mod tests {
             public_url: Url::parse("https://git.example").unwrap(),
             client_id: "crab".into(),
             client_secret_file: None,
+            state_key_file: None,
         };
         let metadata: CoreProviderMetadata = serde_json::from_value(json!({"issuer":"https://id.example","authorization_endpoint":"https://id.example/auth","jwks_uri":"https://id.example/keys","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"]})).unwrap();
         let auth = Authentication {
@@ -708,6 +933,8 @@ mod tests {
             flows: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             git_tokens: Mutex::new(HashMap::new()),
+            state: None,
+            cursor_key: [0; 32],
             admission: Semaphore::new(1),
         };
         let cookie = auth.cookie(false, "test-token", SESSION_LIFETIME).unwrap();
@@ -727,7 +954,8 @@ mod tests {
                 name: "Alice".into(),
             },
             csrf: "test-csrf".into(),
-            expires: Instant::now() - Duration::from_secs(1),
+            expires_at: now_epoch().unwrap() - 1,
+            session_key: key("test-token"),
             revoked: AtomicBool::new(false),
         });
         auth.sessions
@@ -749,5 +977,105 @@ mod tests {
             HeaderValue::from_static("__Host-crab_session=shadow"),
         );
         assert!(cookie_value(&headers, "__Host-crab_session").is_none());
+    }
+
+    fn shared_auth(store: Store) -> Authentication {
+        let config = OidcConfig {
+            issuer: openidconnect::IssuerUrl::new("https://id.example".into()).unwrap(),
+            public_url: Url::parse("https://git.example").unwrap(),
+            client_id: "crab".into(),
+            client_secret_file: None,
+            state_key_file: None,
+        };
+        let metadata: CoreProviderMetadata = serde_json::from_value(json!({
+            "issuer":"https://id.example",
+            "authorization_endpoint":"https://id.example/auth",
+            "jwks_uri":"https://id.example/keys",
+            "response_types_supported":["code"],
+            "subject_types_supported":["public"],
+            "id_token_signing_alg_values_supported":["RS256"]
+        }))
+        .unwrap();
+        Authentication {
+            config,
+            secret: None,
+            http: reqwest::Client::new(),
+            client: CoreClient::from_provider_metadata(
+                metadata,
+                ClientId::new("crab".into()),
+                None,
+            ),
+            flows: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            git_tokens: Mutex::new(HashMap::new()),
+            state: Some(AuthState {
+                store,
+                prefix: "root/.crab/http-server/v1/auth".into(),
+            }),
+            cursor_key: [7; 32],
+            admission: Semaphore::new(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_state_crosses_replica_boundaries_and_consumes_flows_once() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let first = shared_auth(store.clone());
+        let second = shared_auth(store);
+        let session_key = key("browser-token");
+        let session = Arc::new(Session {
+            identity: Identity {
+                issuer: "https://id.example".into(),
+                subject: "alice".into(),
+                name: "Alice".into(),
+            },
+            csrf: "csrf".into(),
+            expires_at: now_epoch().unwrap() + 600,
+            session_key,
+            revoked: AtomicBool::new(false),
+        });
+        first.store_session(Arc::clone(&session)).await.unwrap();
+        let second_session = second.load_session(session_key).await.unwrap();
+        assert!(second_session.active());
+
+        let git_key = key("git-token");
+        first
+            .store_git_token(
+                git_key,
+                Arc::new(GitToken {
+                    session,
+                    owner: "team".into(),
+                    repository: "private".into(),
+                    access: RepositoryAccess::Write,
+                    revoked: AtomicBool::new(false),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(second.load_git_token(git_key).await.unwrap().active());
+        second.remove_git_tokens(&second_session).await.unwrap();
+        assert!(first.load_git_token(git_key).await.is_none());
+
+        let flow_key = key("login-state");
+        first
+            .store_flow(
+                flow_key,
+                Flow {
+                    nonce: Nonce::new("nonce".into()),
+                    verifier: PkceCodeVerifier::new("v".repeat(43)),
+                    return_to: "/team/private".into(),
+                    expires_at: now_epoch().unwrap() + 60,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second.take_flow(flow_key).await.unwrap().return_to,
+            "/team/private"
+        );
+        assert!(matches!(
+            first.take_flow(flow_key).await,
+            Err(AuthError::Invalid)
+        ));
     }
 }

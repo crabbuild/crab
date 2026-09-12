@@ -139,13 +139,13 @@ fn pointer(oid: &str, size: u64) -> Result<LfsPointer> {
     )?)
 }
 
-fn repository<'a>(
-    server: &'a Server,
+fn repository(
+    server: &Server,
     principal: &Principal,
     owner: &str,
     name: &str,
     write: bool,
-) -> Result<&'a Repository> {
+) -> Result<Arc<Repository>> {
     let name = name.strip_suffix(".git").ok_or(Error::NotFound)?;
     let entry = server
         .repositories
@@ -186,7 +186,7 @@ pub(crate) async fn batch(
     let upload = matches!(batch.operation, Operation::Upload);
     let entry = repository(&server, &principal, &owner, &name, upload)?;
     if upload {
-        ensure_active(entry).await?;
+        ensure_active(&entry).await?;
     }
     if batch.objects.len() > 200 {
         return Err(Error::TooLarge);
@@ -307,7 +307,7 @@ pub(crate) async fn upload(
     headers: HeaderMap,
     request: Request,
 ) -> Result<Response> {
-    ensure_active(repository(&server, &principal, &owner, &name, true)?).await?;
+    ensure_active(repository(&server, &principal, &owner, &name, true)?.as_ref()).await?;
     let pointer = pointer(&oid, size.size)?;
     if headers
         .get(header::CONTENT_ENCODING)
@@ -356,7 +356,7 @@ pub(crate) async fn upload(
                 return Err(Error::Cancelled);
             }
             let entry = repository(&worker_server, &principal, &owner, &name, true)?;
-            ensure_active(entry).await?;
+            ensure_active(&entry).await?;
             let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
             // Once multipart publication starts, drain it through completion/abort.
             // Dropping this future on disconnect could strand uploaded parts.

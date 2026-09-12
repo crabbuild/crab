@@ -280,7 +280,7 @@ async fn retry_repairs_interruption_after_reservation_without_allocating_another
     let h = Harness::new(false).await;
     let cookie = h.login().await;
     let issue = write(&h, &cookie, "POST", ROOT, input(1)).await.1;
-    let repo = h.server.repositories.values().next().unwrap();
+    let repo = h.server.repositories.values().into_iter().next().unwrap();
     // Recreate the durable state left between reserving a number and publishing its issue.
     let path = repo.layout.repo_path(&format!(
         "app/v1/issues/{:016}/issue.json",
@@ -312,7 +312,7 @@ async fn unknown_storage_schema_and_invalid_inputs_fail_without_creating_content
             StatusCode::BAD_REQUEST
         );
     }
-    let repo = h.server.repositories.values().next().unwrap();
+    let repo = h.server.repositories.values().into_iter().next().unwrap();
     assert!(
         repo.store
             .list_prefix(&repo.layout.repo_path("app/v1/issues"))

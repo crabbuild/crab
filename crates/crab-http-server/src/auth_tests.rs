@@ -176,6 +176,7 @@ impl Harness {
             public_url: Url::parse(&origin).unwrap(),
             client_id: "crab-browser".into(),
             client_secret_file: secret_file.as_ref().map(|file| file.path().to_owned()),
+            state_key_file: None,
         })
         .await
         .unwrap();
@@ -223,7 +224,7 @@ impl Harness {
         .await
         .unwrap();
         let server = Arc::new(Server {
-            repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]),
+            repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
@@ -235,6 +236,8 @@ impl Harness {
             receives: tokio_util::task::TaskTracker::new(),
             port: address.port(),
             auth: Some(auth),
+            catalog: None,
+            catalog_healthy: AtomicBool::new(false),
         });
         let app = router(Arc::clone(&server));
         let task = tokio::spawn(async move {
@@ -488,11 +491,15 @@ async fn non_members_cannot_trigger_repository_publication() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method}");
     }
-    let repo = &h.server.repositories[&("team".into(), "private".into())];
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
     crab_write::initialize::initialize_repository(&repo.store, &repo.layout, "refs/heads/main")
         .await
         .unwrap();
-    let lease = super::maintenance_tests::commit_without_proof(repo).await;
+    let lease = super::maintenance_tests::commit_without_proof(&repo).await;
     let before = crab_metadata::manifest_store::read_manifest(&repo.store, &repo.layout)
         .await
         .unwrap();

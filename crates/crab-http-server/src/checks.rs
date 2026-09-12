@@ -483,6 +483,7 @@ async fn create(
     input: std::result::Result<Json<NewCheckRun>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::CheckPermission);
     }
@@ -560,6 +561,7 @@ async fn list(
     Query(params): Query<ListParams>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let oid = statuses::require_commit(&server, repo, statuses::parse_oid(&oid)?).await?;
     let limit = params.limit.unwrap_or(30);
     if !(1..=50).contains(&limit) || params.before == Some(0) {
@@ -591,6 +593,7 @@ async fn detail(
     Path((owner, name, oid, number)): Path<(String, String, String, u64)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let oid = statuses::require_commit(&server, repo, statuses::parse_oid(&oid)?).await?;
     let number = app::number(number)?;
     let run = catalog(repo, &oid)
@@ -607,6 +610,7 @@ async fn edit(
     input: std::result::Result<Json<CheckEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::CheckPermission);
     }

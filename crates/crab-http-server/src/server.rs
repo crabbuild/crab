@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -10,14 +11,16 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
-use crab_storage::{StorageProviderKind, Store, StoreLayout, build_static_env_store};
+use crab_storage::{Store, StoreLayout};
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
+use crate::catalog::CatalogStore;
 use crate::{
     Config, RepositoryConfig, Result, api, app, archive, assets, assignees,
     auth::{self, Authentication, Principal},
@@ -37,6 +40,66 @@ pub(crate) struct Repository {
     pub(crate) lifecycle: RwLock<RepositoryLifecycle>,
     pinned: Mutex<Option<(Instant, RemoteGitRepository)>>,
     maintenance: Mutex<Option<tokio::task::JoinHandle<crab_write::Result<()>>>>,
+}
+
+pub(crate) struct RepositorySet {
+    current: SyncRwLock<BTreeMap<(String, String), Arc<Repository>>>,
+}
+
+impl RepositorySet {
+    pub(crate) fn get(&self, key: &(String, String)) -> Option<Arc<Repository>> {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+
+    pub(crate) fn values(&self) -> Vec<Arc<Repository>> {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    fn replace(&self, next: BTreeMap<(String, String), Arc<Repository>>) {
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_mut(&mut self, key: &(String, String)) -> Option<&mut Repository> {
+        self.current
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(key)
+            .and_then(Arc::get_mut)
+    }
+}
+
+impl From<BTreeMap<(String, String), Repository>> for RepositorySet {
+    fn from(repositories: BTreeMap<(String, String), Repository>) -> Self {
+        Self {
+            current: SyncRwLock::new(
+                repositories
+                    .into_iter()
+                    .map(|(key, repository)| (key, Arc::new(repository)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+impl From<BTreeMap<(String, String), Arc<Repository>>> for RepositorySet {
+    fn from(repositories: BTreeMap<(String, String), Arc<Repository>>) -> Self {
+        Self {
+            current: SyncRwLock::new(repositories),
+        }
+    }
 }
 
 impl Repository {
@@ -142,7 +205,7 @@ impl Repository {
 }
 
 pub(crate) struct Server {
-    pub repositories: BTreeMap<(String, String), Repository>,
+    pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
@@ -154,6 +217,8 @@ pub(crate) struct Server {
     pub receives: tokio_util::task::TaskTracker,
     port: u16,
     pub auth: Option<Authentication>,
+    catalog: Option<CatalogStore>,
+    catalog_healthy: AtomicBool,
 }
 
 impl Server {
@@ -176,34 +241,129 @@ impl Server {
 /// Serve configured repositories and compiled React assets until shutdown.
 pub async fn serve(config: Config) -> Result<()> {
     config.validate()?;
-    let auth =
-        match config.auth {
-            Some(config) => Some(Authentication::new(config).await.map_err(|source| {
-                crate::Error::Identity {
+    let catalog = CatalogStore::from_config(&config)?;
+    let (document, _) = catalog.load().await?;
+    let auth = match config.auth.clone() {
+        Some(config) => Some(
+            Authentication::new_durable(config, catalog.root())
+                .await
+                .map_err(|source| crate::Error::Identity {
                     source: Box::new(source),
-                }
-            })?),
-            None => None,
-        };
+                })?,
+        ),
+        None => None,
+    };
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let port = listener.local_addr()?.port();
+    let catalog_version = document.version;
+    let repositories = materialize_catalog(&catalog, document).await?;
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let cancellation = CancellationToken::new();
+    let options = RepositoryOptions::new(
+        Default::default(),
+        OperationLimits {
+            // Graph-backed batches keep deep blame bounded while covering
+            // first-parent histories of Kubernetes-scale repositories.
+            max_duration: Duration::from_secs(2 * 60),
+            max_logical_objects: 175_000,
+            max_storage_requests: 200_000,
+            max_entries: 2_000_000,
+            max_history_commits: 75_000,
+            max_blame_comparison_cells: 64_000_000,
+            max_response_bytes: 8 * 1024 * 1024,
+            ..Default::default()
+        },
+    )?;
+    let server = Arc::new(Server {
+        repositories: repositories.into(),
+        runtime: Arc::clone(&runtime),
+        cancellation: cancellation.clone(),
+        receives: tokio_util::task::TaskTracker::new(),
+        options,
+        cursor_key: auth
+            .as_ref()
+            .map(Authentication::cursor_key)
+            .unwrap_or_else(rand::random),
+        admission: Semaphore::new(16),
+        git_admission: Arc::new(Semaphore::new(4)),
+        app_admission: Semaphore::new(8),
+        maintenance_admission: Arc::new(Semaphore::new(2)),
+        port,
+        auth,
+        catalog: Some(catalog),
+        catalog_healthy: AtomicBool::new(true),
+    });
+    let app = router(Arc::clone(&server));
+    let management = management_router(Arc::clone(&server));
+    println!("Crab repositories: http://{}", listener.local_addr()?);
+    println!(
+        "Crab management: http://{}",
+        management_listener.local_addr()?
+    );
+    let signal_cancellation = cancellation.clone();
+    let signal = tokio::spawn(async move {
+        shutdown_signal().await;
+        signal_cancellation.cancel();
+    });
+    let refresh_server = Arc::clone(&server);
+    let refresh =
+        tokio::spawn(async move { refresh_catalog(refresh_server, catalog_version).await });
+    let public_shutdown = cancellation.clone();
+    let management_shutdown = cancellation.clone();
+    let result = tokio::try_join!(
+        axum::serve(listener, app).with_graceful_shutdown(public_shutdown.cancelled_owned()),
+        axum::serve(management_listener, management)
+            .with_graceful_shutdown(management_shutdown.cancelled_owned()),
+    );
+    cancellation.cancel();
+    signal.abort();
+    if let Err(error) = refresh.await {
+        tracing::warn!(error = %error, "repository catalog refresh task failed");
+    }
+    // Axum has drained its connections, so no handler can register a new
+    // receive after the tracker becomes empty. Close readers only after that drain.
+    server.cancellation.cancel();
+    server.receives.close();
+    server.receives.wait().await;
+    let maintenance = server.finish_maintenance().await;
+    runtime.shutdown().await;
+    result
+        .map(|_| ())
+        .map_err(crate::Error::from)
+        .and(maintenance)
+}
+
+async fn materialize_catalog(
+    catalog: &CatalogStore,
+    document: crate::catalog::CatalogDocument,
+) -> Result<BTreeMap<(String, String), Arc<Repository>>> {
     let mut repositories = BTreeMap::new();
-    let mut stores: BTreeMap<String, Store> = BTreeMap::new();
-    for entry in config.repositories {
-        let store = if let Some(store) = stores.get(&entry.bucket) {
-            store.clone()
-        } else {
-            let store = build_static_env_store(&entry.bucket, StorageProviderKind::S3)?;
-            stores.insert(entry.bucket.clone(), store.clone());
-            store
-        };
+    for record in document.repositories {
+        let store = catalog.root().store.clone();
+        let prefix = catalog.root().repository_prefix(&record.prefix)?;
+        let layout = StoreLayout::new(store.clone(), prefix.clone());
+        let (manifest, _) =
+            read_manifest(&store, &layout)
+                .await
+                .map_err(|source| crate::Error::Settings {
+                    source: Box::new(source),
+                })?;
+        let default_branch =
+            manifest
+                .head
+                .strip_prefix("refs/heads/")
+                .ok_or(crate::Error::Config(
+                    "catalog repository HEAD must name a branch",
+                ))?;
+        let entry = record.runtime_config(catalog.root(), default_branch)?;
         let configured_protections = BranchProtections::configured(&entry.protected_branches);
         let repository = Repository {
-            layout: StoreLayout::new(store.clone(), entry.prefix.clone()),
+            layout,
             identity: RepositoryIdentity::new(
-                format!("s3:{}", entry.bucket),
-                entry.prefix.clone(),
-                1,
+                catalog.root().provider_namespace.clone(),
+                prefix,
+                record.placement_generation,
             )?,
             config: entry.clone(),
             store,
@@ -224,55 +384,58 @@ pub async fn serve(config: Config) -> Result<()> {
                 source: Box::new(source),
             })?;
         *repository.lifecycle.write().await = lifecycle;
-        repositories.insert((entry.owner, entry.name), repository);
+        repositories.insert(
+            (entry.owner.clone(), entry.name.clone()),
+            Arc::new(repository),
+        );
     }
-    let runtime = Arc::new(RemoteGitRuntime::default());
-    let cancellation = CancellationToken::new();
-    let options = RepositoryOptions::new(
-        Default::default(),
-        OperationLimits {
-            // Graph-backed batches keep deep blame bounded while covering
-            // first-parent histories of Kubernetes-scale repositories.
-            max_duration: Duration::from_secs(2 * 60),
-            max_logical_objects: 175_000,
-            max_storage_requests: 200_000,
-            max_entries: 2_000_000,
-            max_history_commits: 75_000,
-            max_blame_comparison_cells: 64_000_000,
-            max_response_bytes: 8 * 1024 * 1024,
-            ..Default::default()
-        },
-    )?;
-    let server = Arc::new(Server {
-        repositories,
-        runtime: Arc::clone(&runtime),
-        cancellation: cancellation.clone(),
-        receives: tokio_util::task::TaskTracker::new(),
-        options,
-        cursor_key: rand::random(),
-        admission: Semaphore::new(16),
-        git_admission: Arc::new(Semaphore::new(4)),
-        app_admission: Semaphore::new(8),
-        maintenance_admission: Arc::new(Semaphore::new(2)),
-        port,
-        auth,
-    });
-    let app = router(Arc::clone(&server));
-    println!("Crab repositories: http://{}", listener.local_addr()?);
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            cancellation.cancel();
-        })
-        .await;
-    // Axum has drained its connections, so no handler can register a new
-    // receive after the tracker becomes empty. Close readers only after that drain.
-    server.cancellation.cancel();
-    server.receives.close();
-    server.receives.wait().await;
-    let maintenance = server.finish_maintenance().await;
-    runtime.shutdown().await;
-    result.map_err(crate::Error::from).and(maintenance)
+    Ok(repositories)
+}
+
+async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
+    let Some(catalog) = server.catalog.clone() else {
+        return;
+    };
+    loop {
+        tokio::select! {
+            () = server.cancellation.cancelled() => return,
+            () = tokio::time::sleep(Duration::from_secs(5)) => {}
+        }
+        let (document, _) = match catalog.load().await {
+            Ok(value) => value,
+            Err(error) => {
+                server.catalog_healthy.store(false, Ordering::Release);
+                tracing::warn!(error = ?error, "repository catalog refresh failed");
+                continue;
+            }
+        };
+        if document.version < version {
+            server.catalog_healthy.store(false, Ordering::Release);
+            tracing::warn!(
+                catalog_version = document.version,
+                active_version = version,
+                "repository catalog version moved backwards"
+            );
+            continue;
+        }
+        if document.version == version {
+            server.catalog_healthy.store(true, Ordering::Release);
+            continue;
+        }
+        let next_version = document.version;
+        match materialize_catalog(&catalog, document).await {
+            Ok(repositories) => {
+                server.repositories.replace(repositories);
+                version = next_version;
+                server.catalog_healthy.store(true, Ordering::Release);
+                tracing::info!(catalog_version = version, "repository catalog refreshed");
+            }
+            Err(error) => {
+                server.catalog_healthy.store(false, Ordering::Release);
+                tracing::warn!(error = ?error, "repository catalog materialization failed");
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {
@@ -327,8 +490,6 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
             "/git/{owner}/{name}/info/lfs/locks/verify",
             post(lfs::locks_unavailable),
         )
-        .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
-        .route("/readyz", get(readiness))
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
         .route(
             "/git/{owner}/{name}/git-receive-pack",
@@ -359,14 +520,24 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
         .with_state(server)
 }
 
+fn management_router(server: Arc<Server>) -> Router {
+    Router::new()
+        .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
+        .route("/readyz", get(readiness))
+        .with_state(server)
+}
+
 async fn readiness(State(server): State<Arc<Server>>) -> Response {
-    let cancellation = server.cancellation.child_token();
-    let _cancel_on_drop = cancellation.clone().drop_guard();
     let check = async {
-        for repository in server.repositories.values() {
-            repository.open(&server, &cancellation).await?;
+        if !server.catalog_healthy.load(Ordering::Acquire) {
+            return Err(crate::Error::Config("catalog refresh is unhealthy"));
         }
-        Ok::<(), crate::Error>(())
+        let catalog = server
+            .catalog
+            .as_ref()
+            .ok_or(crate::Error::Config("catalog is unavailable"))?;
+        catalog.load().await?;
+        Ok::<_, crate::Error>(())
     };
     match tokio::time::timeout(Duration::from_secs(10), check).await {
         Ok(Ok(())) => Json(json!({"status":"ready"})).into_response(),
@@ -398,6 +569,7 @@ async fn catalog(
     for repository in server
         .repositories
         .values()
+        .into_iter()
         .filter(|repository| principal.can_read(&repository.config))
     {
         let protections = repository.branch_protections().await?;
@@ -592,8 +764,8 @@ mod tests {
     #[tokio::test]
     async fn transport_enforces_host_and_preserves_asset_cache_policy() {
         let runtime = Arc::new(RemoteGitRuntime::default());
-        let app = router(Arc::new(Server {
-            repositories: BTreeMap::new(),
+        let server = Arc::new(Server {
+            repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
@@ -605,7 +777,10 @@ mod tests {
             receives: tokio_util::task::TaskTracker::new(),
             port: 8788,
             auth: None,
-        }));
+            catalog: None,
+            catalog_healthy: AtomicBool::new(false),
+        });
+        let app = router(Arc::clone(&server));
         for (path, host, expected, cache) in [
             (
                 "/api/repos",
@@ -615,18 +790,6 @@ mod tests {
             ),
             (
                 "/api/repos",
-                "127.0.0.1:8788",
-                StatusCode::OK,
-                Some("no-store"),
-            ),
-            (
-                "/healthz",
-                "127.0.0.1:8788",
-                StatusCode::OK,
-                Some("no-store"),
-            ),
-            (
-                "/readyz",
                 "127.0.0.1:8788",
                 StatusCode::OK,
                 Some("no-store"),
@@ -662,14 +825,33 @@ mod tests {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(value["error"]["code"], "repository_not_found");
-            } else if path == "/healthz" || path == "/readyz" {
-                let body = response.into_body().collect().await.unwrap().to_bytes();
-                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(
-                    value["status"],
-                    if path == "/healthz" { "ok" } else { "ready" }
-                );
             }
+        }
+        for path in ["/healthz", "/readyz"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("host", "127.0.0.1:8788")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        let management = management_router(server);
+        for (path, expected) in [
+            ("/healthz", StatusCode::OK),
+            ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = management
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{path}");
         }
         runtime.shutdown().await;
     }

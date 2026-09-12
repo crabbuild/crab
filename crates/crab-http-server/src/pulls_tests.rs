@@ -236,7 +236,10 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     assert_eq!(detail["branches_available"], false);
     assert_eq!(detail["original_head_oid"], first_head);
 
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     assert!(
         repo.store
             .list_prefix(&repo.layout.repo_path("app/v1/pulls"))
@@ -257,7 +260,10 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
 #[tokio::test]
 async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
     let server = maintenance_tests::fixture().await;
-    let repo = &server.repositories[&("team".into(), "repo".into())];
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
     for (base, head) in [
         ("refs/heads/main", "refs/heads/main"),
         ("main", "refs/heads/feature"),

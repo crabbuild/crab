@@ -29,10 +29,10 @@ COPY --from=builder /build/target/release/crab-http-server /usr/local/bin/crab-h
 
 ENV TMPDIR=/var/lib/crab/tmp
 USER crab:crab
-EXPOSE 8788
+EXPOSE 8788 8789
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=12s --start-period=15s --retries=3 \
-    CMD ["/usr/local/bin/crab-http-server", "--config", "/etc/crab/server.toml", "--healthcheck"]
+    CMD ["/usr/local/bin/crab-http-server", "--config", "/etc/crab/server.toml", "healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/crab-http-server"]
 CMD ["--config", "/etc/crab/server.toml"]

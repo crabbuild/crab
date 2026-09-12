@@ -273,6 +273,7 @@ async fn create(
 ) -> Result<impl IntoResponse, Error> {
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    let repository = repository.as_ref();
     if !principal.can_write(&repository.config) {
         return Err(Error::Permission);
     }
@@ -306,6 +307,7 @@ async fn remove(
 ) -> Result<impl IntoResponse, Error> {
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    let repository = repository.as_ref();
     if !principal.can_write(&repository.config) {
         return Err(Error::Permission);
     }
@@ -350,6 +352,7 @@ async fn set_default(
 ) -> Result<impl IntoResponse, Error> {
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    let repository = repository.as_ref();
     if !principal.can_admin(&repository.config) {
         return Err(Error::AdminPermission);
     }
@@ -387,6 +390,7 @@ async fn set_branch_protections(
 ) -> Result<Json<BranchProtections>, Error> {
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner, name))?;
+    let repository = repository.as_ref();
     if !principal.can_admin(&repository.config) {
         return Err(Error::AdminPermission);
     }
@@ -403,6 +407,7 @@ async fn set_archive(
 ) -> Result<Json<crate::repository_settings::RepositoryLifecycle>, Error> {
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    let repository = repository.as_ref();
     if !principal.can_admin(&repository.config) {
         return Err(Error::AdminPermission);
     }

@@ -414,6 +414,7 @@ async fn upload(
 ) -> Result<impl IntoResponse, Error> {
     let Json(input) = input?;
     let repo = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::Permission);
     }
@@ -506,6 +507,7 @@ async fn change(
     input: ChangeInput,
 ) -> Result<impl IntoResponse, Error> {
     let repo = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::Permission);
     }

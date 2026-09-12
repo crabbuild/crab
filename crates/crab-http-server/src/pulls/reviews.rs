@@ -99,6 +99,7 @@ async fn list(
     Query(params): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let id = app::number(id)?;
     let (_, head) = pull_and_head(&server, repo, id).await?;
     let actor = app::actor(&principal)?;
@@ -152,6 +153,7 @@ async fn create(
     input: std::result::Result<Json<NewReview>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let id = app::number(id)?;
     let Json(input) = input?;
     validate_body(&input.body, input.state)?;
@@ -202,6 +204,7 @@ async fn detail(
     Path((owner, name, id, review)): Path<(String, String, u64, u64)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let id = app::number(id)?;
     let (_, head) = pull_and_head(&server, repo, id).await?;
     let (review, _) =
@@ -229,6 +232,7 @@ async fn edit(
     input: std::result::Result<Json<ReviewEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let id = app::number(id)?;
     let Json(input) = input?;
     let actor = app::actor(&principal)?;

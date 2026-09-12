@@ -26,6 +26,15 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Validate deployment profiles
+        run: |
+          jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
+          for values in eks-values.example.yaml gke-values.example.yaml aks-values.example.yaml; do
+            docker run --rm \
+              --volume "$PWD/crates/crab-http-server/deploy/helm/crab-http-server:/chart:ro" \
+              alpine/helm@sha256:b80eb190fca14707e94a5090235a3f1bf2f206f26761f2890d16a1e570386236 \
+              lint /chart --values "/chart/$values"
+          done
       - name: Build locked server image
         run: >-
           docker build
@@ -36,7 +45,7 @@ jobs:
         run: |
           test "$(docker image inspect crab-http-server:test --format '{{.Config.User}}')" = "crab:crab"
           test "$(docker image inspect crab-http-server:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
-          docker image inspect crab-http-server:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"--healthcheck"'
+          docker image inspect crab-http-server:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"healthcheck"'
           test "$(docker run --rm --entrypoint /usr/bin/id crab-http-server:test -u)" = "10001"
           docker run --rm crab-http-server:test --help | grep -F -- "--config"
-          docker run --rm crab-http-server:test --help | grep -F -- "--healthcheck"
+          docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"

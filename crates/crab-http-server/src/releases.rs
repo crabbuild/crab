@@ -530,6 +530,7 @@ async fn create(
     input: std::result::Result<Json<NewRelease>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
@@ -615,6 +616,7 @@ async fn download_asset(
     Path((owner, name, number, asset_id)): Path<(String, String, u64, String)>,
 ) -> Result<Response> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let (release, _) = visible_release(repo, &principal, number).await?;
     let asset = release
         .assets
@@ -673,6 +675,7 @@ async fn upload_asset(
 ) -> Result<impl IntoResponse> {
     let key = (owner, name);
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
@@ -764,6 +767,7 @@ async fn upload_asset(
             let digest = format!("{:x}", sha256.finalize());
             let expected_hash = *blake3.finalize().as_bytes();
             let repo = app::repository(&worker_server, &principal, &key)?;
+            let repo = repo.as_ref();
             if repo.lifecycle().await?.archived || !principal.can_write(&repo.config) {
                 return Err(Error::Archived);
             }
@@ -838,6 +842,7 @@ async fn remove_asset(
     input: std::result::Result<Json<ReleaseDelete>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
@@ -872,6 +877,7 @@ async fn detail(
     Path((owner, name, number)): Path<(String, String, u64)>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     let include_drafts = principal.can_write(&repo.config);
     let release = app_storage::read::<Release>(repo, &release_path(app::number(number)?))
         .await?
@@ -889,6 +895,7 @@ async fn edit(
 ) -> Result<Json<Value>> {
     let key = (owner, name);
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
@@ -948,6 +955,7 @@ async fn remove(
     input: std::result::Result<Json<ReleaseDelete>, JsonRejection>,
 ) -> Result<StatusCode> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::ReleasePermission);
     }
@@ -988,6 +996,7 @@ async fn list(
     Query(parameters): Query<ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
+    let repo = repo.as_ref();
     let include_drafts = principal.can_write(&repo.config);
     let limit = parameters.limit()?;
     let query = parameters.query()?;
