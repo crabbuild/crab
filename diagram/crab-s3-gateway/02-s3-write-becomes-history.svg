@@ -1,0 +1,131 @@
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title description">
+  <title id="title">An S3 write becomes repository history</title>
+  <desc id="description">Sequence diagram showing an S3 request passing through the Crab gateway, persisting verified content, publishing a Git commit, and reading an immutable historical snapshot.</desc>
+  <defs>
+    <style>
+      text { font-family: 'SF Mono', 'Cascadia Code', 'DejaVu Sans Mono', monospace; }
+      .title { fill: #f8fafc; font-size: 24px; font-weight: 700; letter-spacing: -0.6px; }
+      .subtitle { fill: #94a3b8; font-size: 11px; }
+      .eyebrow { fill: #fb923c; font-size: 9px; font-weight: 700; letter-spacing: 1.8px; }
+      .actor { fill: #f8fafc; font-size: 11px; font-weight: 700; }
+      .message { fill: #e2e8f0; font-size: 8.5px; font-weight: 600; }
+      .return { fill: #94a3b8; font-size: 8px; font-style: italic; }
+      .small { fill: #94a3b8; font-size: 8px; }
+      .tiny { fill: #64748b; font-size: 7px; }
+      .step { fill: #0f172a; font-size: 7px; font-weight: 700; }
+    </style>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <linearGradient id="headline" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a78bfa"/>
+      <stop offset="0.55" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#fbbf24"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-violet" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#a78bfa"/>
+    </marker>
+    <marker id="arrow-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="720" fill="#0f172a"/>
+  <rect width="1280" height="720" fill="url(#grid)"/>
+  <rect x="0" y="0" width="1280" height="104" fill="#0b1220" fill-opacity="0.86"/>
+  <rect x="50" y="95" width="1180" height="2" rx="1" fill="url(#headline)" opacity="0.8"/>
+
+  <text x="50" y="32" class="eyebrow">REQUEST → COMMIT → SNAPSHOT</text>
+  <text x="50" y="64" class="title">AN S3 WRITE BECOMES REPOSITORY HISTORY</text>
+  <text x="50" y="85" class="subtitle">The application keeps S3 semantics. Crab turns each successful object mutation into a durable commit.</text>
+
+  <line x1="150" y1="162" x2="150" y2="627" stroke="#334155" stroke-width="1" stroke-dasharray="6,5"/>
+  <line x1="455" y1="162" x2="455" y2="627" stroke="#334155" stroke-width="1" stroke-dasharray="6,5"/>
+  <line x1="760" y1="162" x2="760" y2="627" stroke="#334155" stroke-width="1" stroke-dasharray="6,5"/>
+  <line x1="1065" y1="162" x2="1065" y2="627" stroke="#334155" stroke-width="1" stroke-dasharray="6,5"/>
+
+  <line x1="150" y1="200" x2="455" y2="200" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <line x1="455" y1="280" x2="760" y2="280" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+  <line x1="760" y1="320" x2="1065" y2="320" stroke="#fbbf24" stroke-width="1.8" marker-end="url(#arrow-amber)"/>
+  <line x1="1065" y1="364" x2="760" y2="364" stroke="#64748b" stroke-width="1.2" stroke-dasharray="6,4" marker-end="url(#arrow)"/>
+  <path d="M760 398 h62 v30 h-62" fill="none" stroke="#34d399" stroke-width="1.6" marker-end="url(#arrow-emerald)"/>
+  <line x1="760" y1="444" x2="455" y2="444" stroke="#64748b" stroke-width="1.2" stroke-dasharray="6,4" marker-end="url(#arrow)"/>
+  <line x1="455" y1="480" x2="150" y2="480" stroke="#64748b" stroke-width="1.2" stroke-dasharray="6,4" marker-end="url(#arrow)"/>
+
+  <line x1="150" y1="528" x2="455" y2="528" stroke="#a78bfa" stroke-width="1.8" marker-end="url(#arrow-violet)"/>
+  <line x1="455" y1="568" x2="760" y2="568" stroke="#34d399" stroke-width="1.8" marker-end="url(#arrow-emerald)"/>
+  <path d="M760 592 H1065 V610 H455 V624 H150" fill="none" stroke="#64748b" stroke-width="1.2" stroke-dasharray="6,4" marker-end="url(#arrow)"/>
+
+  <rect x="65" y="112" width="170" height="50" rx="7" fill="#0f172a"/>
+  <rect x="65" y="112" width="170" height="50" rx="7" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="150" y="142" class="actor" text-anchor="middle">Existing S3 app</text>
+
+  <rect x="370" y="112" width="170" height="50" rx="7" fill="#0f172a"/>
+  <rect x="370" y="112" width="170" height="50" rx="7" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="455" y="142" class="actor" text-anchor="middle">Crab S3 Gateway</text>
+
+  <rect x="675" y="112" width="170" height="50" rx="7" fill="#0f172a"/>
+  <rect x="675" y="112" width="170" height="50" rx="7" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="760" y="142" class="actor" text-anchor="middle">Crab repository</text>
+
+  <rect x="980" y="112" width="170" height="50" rx="7" fill="#0f172a"/>
+  <rect x="980" y="112" width="170" height="50" rx="7" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="1065" y="142" class="actor" text-anchor="middle">Object-store bucket</text>
+
+  <rect x="446" y="199" width="18" height="282" rx="3" fill="rgba(8,51,68,0.65)" stroke="#22d3ee"/>
+  <rect x="751" y="279" width="18" height="166" rx="3" fill="rgba(6,78,59,0.65)" stroke="#34d399"/>
+  <rect x="446" y="527" width="18" height="98" rx="3" fill="rgba(8,51,68,0.65)" stroke="#22d3ee"/>
+  <rect x="751" y="567" width="18" height="58" rx="3" fill="rgba(6,78,59,0.65)" stroke="#34d399"/>
+
+  <circle cx="174" cy="200" r="10" fill="#a78bfa"/><text x="174" y="203" class="step" text-anchor="middle">1</text>
+  <text x="302" y="188" class="message" text-anchor="middle">PUT /repo/main/models/model.bin</text>
+  <text x="302" y="214" class="tiny" text-anchor="middle">standard S3 SDK request</text>
+
+  <path d="M455 227 h62 v27 h-62" fill="none" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <circle cx="479" cy="227" r="10" fill="#22d3ee"/><text x="479" y="230" class="step" text-anchor="middle">2</text>
+  <text x="531" y="241" class="message">verify SigV4 + authorize</text>
+  <text x="531" y="254" class="tiny">repository • branch • path • action</text>
+
+  <circle cx="479" cy="280" r="10" fill="#34d399"/><text x="479" y="283" class="step" text-anchor="middle">3</text>
+  <text x="607" y="268" class="message" text-anchor="middle">apply object mutation</text>
+  <text x="607" y="294" class="tiny" text-anchor="middle">stream + validate checksums</text>
+
+  <circle cx="784" cy="320" r="10" fill="#fbbf24"/><text x="784" y="323" class="step" text-anchor="middle">4</text>
+  <text x="912" y="308" class="message" text-anchor="middle">persist verified content + Git objects</text>
+  <text x="912" y="336" class="small" text-anchor="middle">≤1 MiB by default: Git blob</text>
+  <text x="912" y="350" class="small" text-anchor="middle">Above configured limit: LFS + pointer</text>
+
+  <text x="912" y="380" class="return" text-anchor="middle">durable</text>
+
+  <circle cx="784" cy="398" r="10" fill="#34d399"/><text x="784" y="401" class="step" text-anchor="middle">5</text>
+  <text x="832" y="414" class="message">publish commit C2</text>
+  <text x="832" y="427" class="tiny">atomically advance refs/heads/main</text>
+
+  <text x="607" y="432" class="return" text-anchor="middle">ETag + committed outcome</text>
+  <text x="302" y="468" class="return" text-anchor="middle">200 OK — visible to later S3 and Git reads</text>
+
+  <rect x="52" y="505" width="1176" height="132" rx="9" fill="none" stroke="#a78bfa" stroke-width="1" stroke-dasharray="5,4" opacity="0.72"/>
+  <rect x="52" y="505" width="108" height="20" rx="5" fill="#26144c" stroke="#a78bfa"/>
+  <text x="106" y="519" class="small" fill="#c4b5fd" text-anchor="middle">HISTORICAL READ</text>
+
+  <circle cx="174" cy="528" r="10" fill="#a78bfa"/><text x="174" y="531" class="step" text-anchor="middle">6</text>
+  <text x="302" y="516" class="message" text-anchor="middle">GET /repo/&lt;commit-id&gt;/models/model.bin</text>
+  <circle cx="479" cy="568" r="10" fill="#34d399"/><text x="479" y="571" class="step" text-anchor="middle">7</text>
+  <text x="607" y="556" class="message" text-anchor="middle">pin immutable commit view</text>
+  <text x="912" y="579" class="return" text-anchor="middle">reconstruct + stream verified logical bytes</text>
+  <text x="302" y="611" class="return" text-anchor="middle">same S3 GET, exact historical content</text>
+
+  <rect x="50" y="654" width="1180" height="46" rx="9" fill="#0b1220" stroke="#334155"/>
+  <text x="72" y="673" class="eyebrow" fill="#a78bfa">KEY SELECTS THE VIEW</text>
+  <text x="275" y="673" class="small">mutable latest:</text>
+  <text x="375" y="673" class="message">s3://repo/main/path</text>
+  <text x="710" y="673" class="small">immutable snapshot:</text>
+  <text x="850" y="673" class="message">s3://repo/&lt;commit-id&gt;/path</text>
+  <text x="275" y="691" class="tiny">Repository history is the version model; AWS bucket version IDs are not used.</text>
+</svg>

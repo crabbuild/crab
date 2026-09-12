@@ -1116,8 +1116,12 @@ enum MultipartAssembly {
 }
 
 impl MultipartAssemblyWriter {
-    async fn new(size: u64, metrics: &Metrics) -> Result<Self, crate::content::Error> {
-        if size <= crate::content::INLINE_GIT_BLOB_BYTES {
+    async fn new(
+        size: u64,
+        git_blob_max_bytes: u64,
+        metrics: &Metrics,
+    ) -> Result<Self, crate::content::Error> {
+        if size <= git_blob_max_bytes {
             Ok(Self::Inline(Box::new(
                 crate::content::SpoolWriter::new(metrics, Some(size)).await?,
             )))
@@ -1178,15 +1182,7 @@ async fn mutation_bytes(
     repository: &Repository,
     spool: &crate::content::Spool,
 ) -> S3Result<MutationContent> {
-    mutation_bytes_with_inline_limit(repository, spool, crate::content::INLINE_GIT_BLOB_BYTES).await
-}
-
-async fn mutation_bytes_with_inline_limit(
-    repository: &Repository,
-    spool: &crate::content::Spool,
-    inline_limit: u64,
-) -> S3Result<MutationContent> {
-    if spool.size <= inline_limit {
+    if spool.size <= repository.config.git_blob_max_bytes {
         return Ok(MutationContent {
             bytes: spool.bytes().await.map_err(content_error)?,
             track_lfs: false,
@@ -2483,9 +2479,13 @@ impl S3 for Gateway {
                 .checked_add(part.size)
                 .ok_or_else(|| s3_error!(EntityTooLarge))
         })?;
-        let mut writer = MultipartAssemblyWriter::new(selected_size, &self.metrics)
-            .await
-            .map_err(content_error)?;
+        let mut writer = MultipartAssemblyWriter::new(
+            selected_size,
+            repository.config.git_blob_max_bytes,
+            &self.metrics,
+        )
+        .await
+        .map_err(content_error)?;
         for part in &parts {
             use md5::Digest as _;
 
@@ -4649,6 +4649,7 @@ mod tests {
                     access: RepositoryAccess::Write,
                 }],
                 protected_branches: Vec::new(),
+                git_blob_max_bytes: 1024 * 1024,
                 max_active_multipart_uploads: 16,
                 multipart_staging_bytes_per_upload: 50_000_000_000_000,
                 multipart_upload_ttl_seconds: 604_800,
@@ -5075,7 +5076,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_above_inline_threshold_is_stored_as_streamable_lfs() {
+    async fn content_above_configured_git_blob_limit_is_stored_as_streamable_lfs() {
         use futures_util::TryStreamExt as _;
 
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
@@ -5088,6 +5089,7 @@ mod tests {
                 default_branch: "main".to_owned(),
                 members: Vec::new(),
                 protected_branches: Vec::new(),
+                git_blob_max_bytes: 8,
                 max_active_multipart_uploads: 16,
                 multipart_staging_bytes_per_upload: 50_000_000_000_000,
                 multipart_upload_ttl_seconds: 604_800,
@@ -5103,9 +5105,7 @@ mod tests {
         writer.write(content, u64::MAX).await.unwrap();
         let spool = writer.finish().await.unwrap();
 
-        let mutation = mutation_bytes_with_inline_limit(&repository, &spool, 8)
-            .await
-            .unwrap();
+        let mutation = mutation_bytes(&repository, &spool).await.unwrap();
         assert!(mutation.track_lfs);
         let PointerKind::Lfs(pointer) = crab_git::classify(&mutation.bytes) else {
             panic!("expected an LFS pointer");
@@ -5140,6 +5140,7 @@ mod tests {
                 default_branch: "main".to_owned(),
                 members: Vec::new(),
                 protected_branches: Vec::new(),
+                git_blob_max_bytes: 1024 * 1024,
                 max_active_multipart_uploads: 16,
                 multipart_staging_bytes_per_upload: 50_000_000_000_000,
                 multipart_upload_ttl_seconds: 604_800,
@@ -5257,6 +5258,7 @@ mod tests {
             default_branch: "main".to_owned(),
             members: Vec::new(),
             protected_branches: Vec::new(),
+            git_blob_max_bytes: 1024 * 1024,
             max_active_multipart_uploads: 1,
             multipart_staging_bytes_per_upload: 50_000_000_000_000,
             multipart_upload_ttl_seconds: 604_800,

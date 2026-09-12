@@ -12,6 +12,8 @@ use crate::{Error, Result};
 
 const MIN_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CACHE_BYTES: u64 = 1024 * 1024 * 1024 * 1024 * 1024;
+const DEFAULT_GIT_BLOB_MAX_BYTES: u64 = 1024 * 1024;
+const MAX_CONFIGURABLE_GIT_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Listener, credentials, and logical repository catalog.
 #[derive(Clone, Debug, Deserialize)]
@@ -69,6 +71,9 @@ pub struct RepositoryConfig {
     pub members: Vec<RepositoryMember>,
     #[serde(default)]
     pub protected_branches: Vec<String>,
+    /// Maximum object size stored directly in Git before using LFS.
+    #[serde(default = "default_git_blob_max_bytes")]
+    pub git_blob_max_bytes: u64,
     /// Distributed capacity for durable, non-terminal multipart sessions.
     #[serde(default = "default_max_active_multipart_uploads")]
     pub max_active_multipart_uploads: usize,
@@ -211,6 +216,11 @@ impl Config {
                     "max_active_multipart_uploads must be between 1 and 10000",
                 ));
             }
+            if !(1..=MAX_CONFIGURABLE_GIT_BLOB_BYTES).contains(&repository.git_blob_max_bytes) {
+                return Err(Error::Config(
+                    "git_blob_max_bytes must be between 1 byte and 64 MiB",
+                ));
+            }
             if !(5 * 1024 * 1024..=50_000_000_000_000)
                 .contains(&repository.multipart_staging_bytes_per_upload)
             {
@@ -314,6 +324,10 @@ fn default_max_active_multipart_uploads() -> usize {
     1_024
 }
 
+fn default_git_blob_max_bytes() -> u64 {
+    DEFAULT_GIT_BLOB_MAX_BYTES
+}
+
 fn default_multipart_staging_bytes_per_upload() -> u64 {
     50_000_000_000_000
 }
@@ -355,6 +369,7 @@ mod tests {
                     access: RepositoryAccess::Write,
                 }],
                 protected_branches: Vec::new(),
+                git_blob_max_bytes: default_git_blob_max_bytes(),
                 max_active_multipart_uploads: default_max_active_multipart_uploads(),
                 multipart_staging_bytes_per_upload: default_multipart_staging_bytes_per_upload(),
                 multipart_upload_ttl_seconds: default_multipart_upload_ttl_seconds(),
@@ -471,6 +486,45 @@ mod tests {
         let no_expiry = config.validate();
 
         assert!(no_sessions.is_err() && undersized_staging.is_err() && no_expiry.is_err());
+    }
+
+    #[test]
+    fn repository_git_blob_limit_defaults_and_accepts_an_override() {
+        for (override_line, expected) in [
+            ("", 1024 * 1024),
+            ("git_blob_max_bytes = 2097152", 2 * 1024 * 1024),
+        ] {
+            let config: RepositoryConfig = toml::from_str(&format!(
+                "name = 'test-repository'\nbucket = 'test-storage'\nprefix = 'repositories/test'\n{override_line}"
+            ))
+            .unwrap();
+            assert_eq!(config.git_blob_max_bytes, expected);
+        }
+    }
+
+    #[test]
+    fn git_blob_limit_rejects_unsafe_values() {
+        let secret = tempfile::NamedTempFile::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            std::fs::set_permissions(secret.path(), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut config = valid_config(secret.path().to_owned());
+        for value in [
+            1,
+            DEFAULT_GIT_BLOB_MAX_BYTES,
+            MAX_CONFIGURABLE_GIT_BLOB_BYTES,
+        ] {
+            config.repositories[0].git_blob_max_bytes = value;
+            config.validate().unwrap();
+        }
+        for value in [0, MAX_CONFIGURABLE_GIT_BLOB_BYTES + 1] {
+            config.repositories[0].git_blob_max_bytes = value;
+            assert!(config.validate().is_err());
+        }
     }
 
     #[cfg(unix)]

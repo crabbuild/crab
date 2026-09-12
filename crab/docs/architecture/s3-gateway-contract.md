@@ -361,12 +361,14 @@ process-local gate. It retains 10% of
 visible capacity outside reservations, bounded to a 64 MiB minimum and 1 GiB
 maximum. A failed capacity probe fails closed, and reservation pressure returns
 `SlowDown` without publishing partial state.
-Multipart completion keeps objects through 64 MiB in a local spool; larger
-objects validate and hash the frozen durable parts, then replay them through
-size-and-SHA-verified LFS publication without assembling the logical object on
-local disk. Objects above the inline Git threshold are stored through Crab's
-verified LFS content path; the committed Git blob is the canonical LFS pointer
-and the S3 attribute record retains the logical size and ETag. That same Git
+Multipart completion keeps objects through the repository's configured
+`git_blob_max_bytes` limit in a local spool; larger objects validate and hash
+the frozen durable parts, then replay them through size-and-SHA-verified LFS
+publication without assembling the logical object on local disk. The limit
+defaults to 1 MiB and accepts values from 1 byte through 64 MiB. Objects above
+it are stored through Crab's verified LFS content path; the committed Git blob
+is the canonical LFS pointer and the S3 attribute record retains the logical
+size and ETag. That same Git
 commit appends an exact tracking rule to the nearest `.gitattributes`,
 preserving any existing rules, so ordinary Git/LFS checkout interprets the
 pointer consistently. GET streams LFS content directly. A Crab/Xet GET streams

@@ -192,8 +192,13 @@ canonical compatibility reference; this README is only an overview.
 ## Large objects, range reads, and deduplication
 
 Large uploads use bounded temporary spools and Crab's verified LFS path.
-Multipart completion does not assemble objects larger than 64 MiB into a second
-full-size local file; it validates and replays durable parts directly into LFS.
+`git_blob_max_bytes` is configured per repository, defaults to 1 MiB, and
+accepts values through 64 MiB. Objects at or below that limit remain ordinary
+Git blobs; larger PUTs and copies use LFS. Multipart completion does not
+assemble objects above the configured limit into a second full-size local file;
+it validates and replays durable parts directly into LFS. Configure the same
+limit on every gateway instance serving a repository so writers use one
+representation policy.
 
 Objects already represented by Crab/Xet keep their deduplication. A byte-range
 GET reconstructs only overlapping Xet chunks and streams the selected bytes
@@ -215,7 +220,7 @@ minimal configuration defines:
 - an absolute cache directory and retention limit
 - access keys mapped to Crab principals, with secrets read from protected files
 - logical repositories, backing placements, member access, protected branches,
-  and durable multipart limits
+  the Git blob limit, and durable multipart limits
 
 ```toml
 listen = "0.0.0.0:8080"
@@ -239,6 +244,7 @@ bucket = "physical-storage-bucket"
 prefix = "repositories/analytics"
 default_branch = "main"
 protected_branches = ["release"]
+git_blob_max_bytes = 1048576
 
 [[repositories.members]]
 principal = "service-account:analytics"
@@ -254,10 +260,11 @@ Secret files must be private to the process owner or effective group. Never put
 secrets on the command line or in the TOML file. Set `endpoint_domain` only
 when deployment DNS and TLS cover its wildcard hosts.
 
-Every gateway instance serving the same repository must use identical
-multipart session, byte-budget, and expiry settings. Run one continuously
-supervised `crab metadb owner` worker per backing repository for catalog,
-visibility, commit-graph, and geometric repack maintenance.
+Every gateway instance serving the same repository must use an identical Git
+blob limit and identical multipart session, byte-budget, and expiry settings.
+Run one continuously supervised `crab metadb owner` worker per backing
+repository for catalog, visibility, commit-graph, and geometric repack
+maintenance.
 
 ## Initialize and run
 
