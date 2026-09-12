@@ -205,7 +205,7 @@ jobs:
             "crab-http-server ${expected_version}"
           docker run --rm crab-http-server:test --help | grep -F -- "--config"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"
-      - name: Exercise the Compose quick start and restart
+      - name: Exercise Compose startup, crash recovery, and restart
         env:
           CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
         run: |
@@ -237,6 +237,9 @@ jobs:
           jq --exit-status \
             '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
             "${RUNNER_TEMP}/crab-http-server-repositories.json"
+
+          crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
+            crates/crab-http-server/deploy/compose.yaml
 
           docker compose --file crates/crab-http-server/deploy/compose.yaml down
           docker compose --file crates/crab-http-server/deploy/compose.yaml \

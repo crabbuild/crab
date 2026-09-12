@@ -1091,12 +1091,12 @@ Current local and CI evidence includes:
 
 - Kubernetes-scale protocol version 2 discovery, partial clone, deepening, large request batches, path search, history, diff, and deep blame
 - Exact commit, tree, blob, archive, LFS, branch, tag, release, pull, merge, status, and check data compared with independent Git clients
-- Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, and cooperative restart recovery
+- Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, cooperative restart recovery, and container `SIGKILL` during an in-flight push
 - OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
 - Container build, non-root identity, stop signal, health command, private metrics scrape, runtime inspection, strict Helm lint, and Kubernetes schema validation
 
-These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The tests do not establish abrupt process-crash safety, multi-instance global admission, provider-scale performance, backup recovery, or complete manual accessibility.
+These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. It does not establish every crash phase, multi-instance global admission, provider-scale performance, backup recovery, or complete manual accessibility.
 
 ### Keep qualification evidence honest
 
@@ -1108,7 +1108,7 @@ Use the following interpretation:
 | In-memory HTTP test | Routing, authorization, and response semantics | Provider behavior or restart durability |
 | RustFS integration | Real object-store persistence and independent-client result | Production load, region failure, or Internet latency |
 | Browser regression | Rendered behavior and automated accessibility rules | Storage durability or manual assistive technology |
-| Container CI | Reproducible image and runtime metadata | Production orchestration or upgrade safety |
+| Container CI | Reproducible image/runtime metadata and one in-flight `SIGKILL` outcome | Cloud orchestration, every crash phase, or upgrade safety |
 
 ## Completion requirements
 
@@ -1121,17 +1121,17 @@ The server is complete only when a real account can perform the workflow and obs
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
 | Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; membership administration and provider revocation remain |
-| Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; crash and coexistence qualification remain |
+| Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
 
 The remaining production gaps include:
 
-- Durable application-level push receipts and full abrupt-crash recovery
+- Durable application-level push receipts and abrupt-crash coverage beyond the qualified in-flight native-push boundary
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
 - Multi-instance global admission and production throughput qualification

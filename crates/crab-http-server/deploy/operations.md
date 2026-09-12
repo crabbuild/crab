@@ -192,6 +192,8 @@ Use this triage map:
 
 Don’t repair object storage by editing catalog JSON, ref markers, manifests, or coordination records directly. Use the repository administration commands or a reviewed recovery tool.
 
+The container gate kills Crab after a new immutable pack appears during a 128 MB native push. A fresh process must expose exactly the old or new ref. The same push must become idempotently successful within the publication lease and recovery budget, and an independent clone must reconstruct every byte within that budget. Read indexing may reject an early clone while it converges. Repeat this test with provider storage and pod replacement before production use.
+
 ## Drain a deployment
 
 Keep the chart's 630-second termination grace period. Kubernetes marks a
