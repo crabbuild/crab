@@ -1108,7 +1108,40 @@ test("format-aware previews explore data, office files, media, and databases loc
   await expect(
     csvWorkbench.getByRole("region", { name: "Query result chart" }),
   ).toBeVisible();
+  await csvWorkbench.getByText("Recent runs", { exact: false }).click();
+  await expect(csvWorkbench.getByText(/Query · success · 1 row/)).toBeVisible();
+
+  await csvWorkbench
+    .getByRole("textbox", { name: "SQL query" })
+    .fill("SELECT model, score FROM data");
+  await csvWorkbench.getByRole("button", { name: "Explain" }).click();
+  await expect(
+    csvWorkbench.getByRole("cell", { name: "physical_plan" }),
+  ).toBeVisible();
+  const resultDownload = page.waitForEvent("download");
+  await csvWorkbench
+    .getByRole("button", { name: "Download query result as CSV" })
+    .click();
+  expect((await resultDownload).suggestedFilename()).toBe("metrics-query.csv");
+
+  await csvWorkbench
+    .getByRole("textbox", { name: "SQL query" })
+    .fill("SELECT sum(i) AS total FROM range(10000000000) values(i)");
+  await csvWorkbench.getByRole("button", { name: "Run query" }).click();
+  await csvWorkbench.getByRole("button", { name: "Stop query" }).click();
+  await expect(csvWorkbench.getByText(/Query stopped/)).toBeVisible();
+  await csvWorkbench.getByRole("button", { name: "Count rows" }).click();
+  await csvWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(csvWorkbench.getByRole("cell", { name: "2" })).toBeVisible();
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect(
+    csvWorkbench.getByRole("textbox", { name: "SQL query" }),
+  ).toBeVisible();
+  await expect(
+    csvWorkbench.getByRole("table", { name: "Query results" }),
+  ).toBeVisible();
   await expectNoAccessibilityViolations(page);
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("diagram.svg")}&kind=Blob`,
@@ -1155,9 +1188,32 @@ test("format-aware previews explore data, office files, media, and databases loc
     .toBe(true);
   await expect(parquetWorkbench).toContainText("5.00 GB");
   await expect(parquetWorkbench).toContainText("2 source rows");
+  const parquetQuery = parquetWorkbench.getByRole("textbox", {
+    name: "SQL query",
+  });
+  await parquetQuery.fill("SELECT  FROM data");
+  await parquetQuery.evaluate((element) =>
+    (element as HTMLTextAreaElement).setSelectionRange(7, 7),
+  );
+  await parquetWorkbench.getByTitle("Insert score into the query").click();
+  await expect(parquetQuery).toHaveValue('SELECT "score" FROM data');
+  await parquetWorkbench
+    .getByRole("button", { name: "Profile columns" })
+    .click();
+  await expect(parquetQuery).toHaveValue(/approx_count_distinct/);
+  await parquetWorkbench.getByRole("button", { name: "Run query" }).click();
+  const profileColumn = parquetWorkbench.getByRole("columnheader", {
+    name: "column_name",
+  });
+  await profileColumn.getByRole("button").click();
+  await expect(profileColumn).toHaveAttribute("aria-sort", "ascending");
   await parquetWorkbench.getByRole("button", { name: "Count rows" }).click();
   await parquetWorkbench.getByRole("button", { name: "Run query" }).click();
-  await expect(parquetWorkbench.getByRole("cell", { name: "2" })).toBeVisible();
+  const countResult = parquetWorkbench.getByRole("table", {
+    name: "Query results",
+  });
+  await expect(countResult.getByRole("row")).toHaveCount(2);
+  await expect(countResult.getByRole("cell", { name: "2" })).toBeVisible();
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("batch.arrow")}&kind=Blob`,

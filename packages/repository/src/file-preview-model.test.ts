@@ -7,7 +7,10 @@ import {
 import {
   boundedReadQuery,
   defaultDataQuery,
+  explainReadQuery,
   MAX_QUERY_ROWS,
+  profileDataQuery,
+  serializeQueryResult,
 } from "./duckdb-query";
 
 describe("file preview classification", () => {
@@ -42,12 +45,45 @@ describe("interactive data queries", () => {
     expect(defaultDataQuery()).toContain("FROM data");
   });
 
+  it("accepts semicolons in values and discards a terminal separator", () => {
+    expect(
+      boundedReadQuery("SELECT ';' AS punctuation; -- retained comment"),
+    ).toBe(
+      `SELECT * FROM (SELECT ';' AS punctuation -- retained comment) AS crab_query_result LIMIT ${MAX_QUERY_ROWS + 1}`,
+    );
+  });
+
+  it("builds read-only explain and column-quality queries", () => {
+    expect(explainReadQuery("SELECT score FROM data;")).toBe(
+      "EXPLAIN SELECT score FROM data",
+    );
+    expect(
+      profileDataQuery([
+        { name: 'run "id"', type: "INTEGER", nullable: false },
+      ]),
+    ).toContain('count("run ""id""") AS populated');
+  });
+
   it.each([
     "DELETE FROM data",
     "COPY data TO 'remote.csv'",
     "SELECT * FROM data; SELECT * FROM data",
   ])("rejects unsafe or multiple statements: %s", (query) => {
     expect(() => boundedReadQuery(query)).toThrow();
+  });
+
+  it("exports typed query results without losing nulls or big integers", () => {
+    const data = {
+      columns: ["name", "count", "note"],
+      rows: [["crab, build", 9_007_199_254_740_993n, null]],
+      totalRows: 1,
+    };
+    expect(serializeQueryResult(data, "csv")).toBe(
+      'name,count,note\r\n"crab, build",9007199254740993,',
+    );
+    expect(JSON.parse(serializeQueryResult(data, "json"))).toEqual([
+      { name: "crab, build", count: "9007199254740993", note: null },
+    ]);
   });
 });
 

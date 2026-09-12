@@ -1,22 +1,56 @@
-import { useMemo, useState } from "react";
-import { SearchIcon } from "@primer/octicons-react";
+import { useEffect, useMemo, useState } from "react";
+import { SearchIcon, SortAscIcon, SortDescIcon } from "@primer/octicons-react";
 import { Button } from "@primer/react";
 import { displayCell, type TableData } from "./file-preview-model";
 
 const PAGE_SIZE = 100;
 
+type Sort = { column: number; direction: "ascending" | "descending" };
+
+function compareCells(
+  left: unknown,
+  right: unknown,
+  direction: Sort["direction"],
+) {
+  if (left === null || left === undefined)
+    return right === null || right === undefined ? 0 : 1;
+  if (right === null || right === undefined) return -1;
+  let order: number;
+  if (typeof left === "bigint" && typeof right === "bigint")
+    order = left < right ? -1 : left > right ? 1 : 0;
+  else if (typeof left === "number" && typeof right === "number")
+    order = left - right;
+  else
+    order = displayCell(left).localeCompare(displayCell(right), undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+  return direction === "ascending" ? order : -order;
+}
+
 export function DataTable({ data, name }: { data: TableData; name: string }) {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
+  const [sort, setSort] = useState<Sort>();
+  useEffect(() => {
+    setQuery("");
+    setPage(0);
+    setSort(undefined);
+  }, [data]);
   const filtered = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
-    if (!term) return data.rows;
-    return data.rows.filter((row) =>
-      row.some((value) =>
-        displayCell(value).toLocaleLowerCase().includes(term),
-      ),
+    const rows = term
+      ? data.rows.filter((row) =>
+          row.some((value) =>
+            displayCell(value).toLocaleLowerCase().includes(term),
+          ),
+        )
+      : data.rows;
+    if (!sort) return rows;
+    return [...rows].sort((left, right) =>
+      compareCells(left[sort.column], right[sort.column], sort.direction),
     );
-  }, [data.rows, query]);
+  }, [data.rows, query, sort]);
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const current = Math.min(page, pages - 1);
   const rows = filtered.slice(current * PAGE_SIZE, (current + 1) * PAGE_SIZE);
@@ -60,8 +94,36 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
                 #
               </th>
               {data.columns.map((column, columnIndex) => (
-                <th key={`${column}:${columnIndex}`} scope="col">
-                  {column}
+                <th
+                  aria-sort={
+                    sort?.column === columnIndex ? sort.direction : "none"
+                  }
+                  key={`${column}:${columnIndex}`}
+                  scope="col"
+                >
+                  <button
+                    className="data-sort"
+                    type="button"
+                    onClick={() => {
+                      setSort((current) => ({
+                        column: columnIndex,
+                        direction:
+                          current?.column === columnIndex &&
+                          current.direction === "ascending"
+                            ? "descending"
+                            : "ascending",
+                      }));
+                      setPage(0);
+                    }}
+                  >
+                    <span>{column}</span>
+                    {sort?.column === columnIndex &&
+                      (sort.direction === "ascending" ? (
+                        <SortAscIcon aria-hidden="true" />
+                      ) : (
+                        <SortDescIcon aria-hidden="true" />
+                      ))}
+                  </button>
                 </th>
               ))}
             </tr>
@@ -87,7 +149,9 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
       </div>
       <footer className="data-explorer-footer">
         <span className="muted">
-          {data.note ?? "All loaded rows are shown."}
+          {query && !filtered.length
+            ? "No loaded rows match this search."
+            : (data.note ?? "All loaded rows are shown.")}
         </span>
         {pages > 1 && (
           <div className="data-pagination">

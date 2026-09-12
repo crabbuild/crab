@@ -584,6 +584,7 @@ export function FilePreview(props: Props) {
             : "json";
     return (
       <DataWorkbench
+        key={props.blobUrl}
         format={format}
         name={props.name}
         size={props.size}
