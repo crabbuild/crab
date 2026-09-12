@@ -1,8 +1,16 @@
-# How native Git writes become durable and readable
+# `crab-http-server` system and write design
 
-This design explains how `crab-http-server` accepts an exact native Git push, validates it without a checkout, commits its refs atomically, and makes its objects readable from cloud storage. It also defines the ownership boundaries, cancellation rules, recovery states, and remaining production gaps.
+This design explains how `crab-http-server` discovers repositories, runs as a
+replica-safe multi-cloud service, authenticates users, accepts exact native Git
+pushes, and makes committed objects readable without a checkout. It defines the
+storage, deployment, ownership, cancellation, and recovery boundaries.
 
-> **Current status:** Standard single-repository HTTP publication works for exact branch and tag creation, fast-forward updates, and deletion. Forced rewrites fail atomically. In-memory and isolated RustFS tests cover native clients, independent reads, response loss, and injected storage faults. Abrupt process-crash recovery, active-active coexistence, and index-receipt reconstruction remain incomplete.
+> **Current status:** The runtime has a provider-neutral storage root, durable
+> CAS repository catalog, shared identity state, dynamic replica refresh,
+> private management listener, Helm profiles for EKS/GKE/AKS, and an ECS
+> Fargate task profile. Static artifacts do not constitute live cloud
+> qualification. Abrupt write-process crash recovery and index-receipt
+> reconstruction remain incomplete.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
@@ -24,6 +32,190 @@ Use this map to jump from a write concern to its owning contract.
 | What happens after cancellation or response loss? | [Classify failures by commit boundary](#classify-failures-by-commit-boundary) |
 | Why not reuse protected-view receive? | [Keep protected-view translation separate](#keep-protected-view-translation-separate) |
 | What evidence exists? | [Read the evidence map](#read-the-evidence-map) |
+| How are repositories discovered? | [Use one durable repository catalog](#use-one-durable-repository-catalog) |
+| How do replicas share identity? | [Keep identity state outside the pod](#keep-identity-state-outside-the-pod) |
+| How does one build run on three clouds? | [Keep deployment provider-neutral](#keep-deployment-provider-neutral) |
+
+## Set the system boundary
+
+The server is a composition boundary, not a new Crab data service. One
+deployment points at one storage root and serves a cataloged set of repositories
+inside it.
+
+```mermaid
+flowchart LR
+    Client[Browser / Git / LFS / CI]
+    Edge[TLS edge]
+    A[Replica A]
+    B[Replica B]
+    Identity[OIDC provider]
+    Root[(Object-storage root)]
+    Catalog[CAS catalog]
+    Sessions[Flows / sessions / Git tokens]
+    Repositories[Repository prefixes]
+
+    Client --> Edge
+    Edge --> A
+    Edge --> B
+    A & B --> Identity
+    A & B --> Root
+    Root --> Catalog
+    Root --> Sessions
+    Root --> Repositories
+```
+
+The following are deliberate non-goals:
+
+- No bucket scan for repository discovery
+- No reuse of the garbage-collection ref registry as an application catalog
+- No per-repository cloud client or credential block
+- No durable state on pod or Fargate scratch disks
+- No Lambda deployment pretending to support the streaming data plane
+- No automatic creation or deletion of the operator's bucket/container
+
+## Use one durable repository catalog
+
+The deployment configuration contains only a provider URL. The catalog path is
+derived and versioned:
+
+```text
+{storage root}/.crab/http-server/v1/catalog.json
+```
+
+The document is bounded to 8 MiB and 10,000 records. A record carries a stable
+UUIDv7 identity, public owner/name, relative repository prefix, placement
+generation, presentation metadata, membership, and initial branch-protection
+rules.
+
+```json
+{
+  "schema_version": 1,
+  "version": 42,
+  "repositories": [
+    {
+      "id": "01991c9d-77c0-7d67-bf60-aef10eb9f081",
+      "owner": "team",
+      "name": "service",
+      "prefix": "team/service",
+      "placement_generation": 1,
+      "description": "Production service",
+      "members": [],
+      "protected_branches": []
+    }
+  ]
+}
+```
+
+Every mutation reads the document with its provider CAS token, validates the
+whole next document, sorts it deterministically, increments `version`, and uses
+conditional create or update. A state conflict restarts the bounded loop. Names
+are unique ignoring case; prefixes and IDs are exactly unique.
+
+### Create and adopt without scanning
+
+```mermaid
+sequenceDiagram
+    participant O as Operator CLI
+    participant C as Catalog store
+    participant R as Repository prefix
+
+    O->>R: create canonical layout + generation-0 manifest
+    O->>R: read layout and manifest back
+    O->>C: CAS insert catalog record
+    C-->>O: stable record or conflict
+```
+
+`repository create` is idempotent for the same case-insensitive name and exact
+prefix. A catalog conflict can leave initialized but undiscoverable objects;
+this is safe and recoverable with `repository adopt`. It never leaves a catalog
+record pointing at an unvalidated repository. Adopt performs only the two
+canonical metadata reads before the same CAS insertion.
+
+The server does not infer public names from object paths. That would make
+listing permissions, rename behavior, partial uploads, and unrelated bucket
+contents ambiguous.
+
+### Refresh replicas without invalidating requests
+
+At startup the server reads and validates the catalog, materializes each
+repository, and refuses readiness if the catalog is unavailable. Every replica
+polls the small catalog every five seconds. On a new version it constructs a
+complete next routing map and swaps it under a short synchronous write lock.
+
+Handlers clone an `Arc<Repository>` at route admission. A catalog refresh can
+therefore remove or replace a route without invalidating a request already
+using the old handle. New requests see the complete old or complete new map;
+they never observe a partially rebuilt catalog.
+
+```mermaid
+stateDiagram-v2
+    [*] --> VersionN
+    VersionN --> Building: observe version N+1
+    Building --> VersionN: validation/open fails
+    Building --> VersionN1: complete map built
+    VersionN1 --> VersionN2: later successful refresh
+```
+
+## Keep identity state outside the pod
+
+OIDC authorization-code flows, browser sessions, and repository-scoped Git
+tokens live below the same storage root. Only hashes of random bearer values
+appear in object keys. Raw browser and Git tokens stay in cookies or the one
+creation response.
+
+| State | Lifetime | Cross-replica rule |
+| --- | ---: | --- |
+| Login flow | 10 minutes | Callback consumes the record with CAS exactly once |
+| Browser session | Earlier of ID-token expiry or 8 hours | Any replica resolves the hashed cookie key |
+| Git token | Never beyond its browser session | Any replica resolves token then durable parent session |
+| Cursor signature key | Operator rotated | Every replica reads the same mounted 32-byte-or-longer secret |
+
+Logout deletes the durable parent session. Subsequent browser and Git-token
+requests therefore fail on every replica even when token objects remain for
+bounded lifecycle collection. A per-session CAS index makes token issuance and
+revocation constant-sized without scanning the auth namespace. The process
+does not interrupt a request that already passed authorization; every later
+request resolves the durable parent again and observes revocation. A 24-hour
+object lifecycle on the auth prefix safely collects all state because its
+maximum active lifetime is eight hours.
+
+Shared state is not an excuse to broaden credentials. The workload identity
+may access the configured root and nothing else. The OIDC client secret and
+cursor key remain separate mounted secrets; neither enters the catalog.
+
+## Keep deployment provider-neutral
+
+`StorageRoot` parses one raw URL and delegates provider construction to
+`crab-storage`. Repository identities include normalized provider, account or
+host, container/bucket, relative prefix, and placement generation. That keeps
+cache and coordination identities from colliding across clouds.
+
+| Runtime | Provider-native identity | URL |
+| --- | --- | --- |
+| EKS | EKS Pod Identity | `s3://bucket/root` |
+| GKE | Workload Identity Federation for GKE | `gs://bucket/root` |
+| AKS | Microsoft Entra Workload ID | `az://account/container/root` |
+| ECS/Fargate | ECS task role | `s3://bucket/root` |
+
+One Helm chart owns the common Deployment, Service, ServiceAccount, disruption
+budget, probes, security context, topology spread, scratch volume, and
+digest-pinned image. Provider value files contain only the workload-identity
+annotations/labels and required environment. The public Service exposes port
+8788; port 8789 remains private for liveness and storage-aware readiness.
+
+ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
+three protected files to disposable scratch, unsets the injected environment
+variables, and execs the same binary. Repository, catalog, and session state
+never depend on that scratch volume.
+
+### Exclude Lambda from the data plane
+
+Receive-pack, upload-pack, LFS, archives, and maintenance have streaming bodies,
+multi-minute cooperative budgets, and potentially tens of GiB of bounded
+scratch. Lambda and common HTTP front doors impose buffering, request/response
+payload, duration, and ephemeral-lifecycle behavior that changes this contract.
+The implementation therefore makes no full-server Lambda claim. A future
+bounded catalog-control function would be a separate executable and API.
 
 ## Preserve the write invariants
 
@@ -593,7 +785,9 @@ The current implementation does not satisfy these production claims:
 - **Active-active coexistence:** Versioned coordinator writers do not share the native journal namespace gate or commitment authority.
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
 - **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
-- **Production scale:** Kubernetes read qualification does not establish Kubernetes-size push throughput, temporary-disk sizing, provider latency, or regional failure behavior.
+- **Production scale:** Static EKS/GKE/AKS and ECS profiles do not establish
+  Kubernetes-size push throughput, temporary-disk sizing, provider latency,
+  cross-replica failover, or regional failure behavior.
 - **LFS locking:** The server transfers and verifies LFS objects but does not implement lock creation or push enforcement.
 
 Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabricated protected plan, fallback reader, or OID rewrite. Each shortcut violates an ownership or outcome invariant above.

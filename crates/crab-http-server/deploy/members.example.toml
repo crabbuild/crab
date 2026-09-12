@@ -1,0 +1,4 @@
+members = [
+  { subject = "provider-subject-for-alice", name = "Alice", access = "admin" },
+  { subject = "provider-subject-for-bob", name = "Bob", access = "read" },
+]

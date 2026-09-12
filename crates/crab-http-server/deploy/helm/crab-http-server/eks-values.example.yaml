@@ -1,0 +1,20 @@
+image:
+  repository: 123456789012.dkr.ecr.us-west-2.amazonaws.com/crab-http-server
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+config:
+  existingConfigMap: crab-http-server
+
+secrets:
+  existingSecret: crab-http-server
+
+serviceAccount:
+  name: crab-http-server
+  # Associate this service account and namespace with an IAM role through
+  # EKS Pod Identity; Pod Identity does not use a service-account annotation.
+
+extraEnv:
+  - name: AWS_REGION
+    value: us-west-2
+  - name: AWS_DEFAULT_REGION
+    value: us-west-2

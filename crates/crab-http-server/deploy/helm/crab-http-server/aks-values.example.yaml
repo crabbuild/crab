@@ -1,0 +1,17 @@
+image:
+  repository: example.azurecr.io/crab-http-server
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+config:
+  existingConfigMap: crab-http-server
+
+secrets:
+  existingSecret: crab-http-server
+
+serviceAccount:
+  name: crab-http-server
+  annotations:
+    azure.workload.identity/client-id: replace-with-managed-identity-client-id
+
+podLabels:
+  azure.workload.identity/use: "true"

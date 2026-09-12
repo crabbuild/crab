@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["replicaCount", "image", "serviceAccount", "config", "secrets", "service", "resources", "scratch"],
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 2 },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets": { "type": "array" },
+    "nameOverride": { "type": "string" },
+    "fullnameOverride": { "type": "string" },
+    "serviceAccount": { "type": "object" },
+    "config": { "type": "object" },
+    "secrets": { "type": "object" },
+    "service": { "type": "object" },
+    "resources": { "type": "object" },
+    "scratch": { "type": "object" },
+    "startupProbe": { "type": "object" },
+    "readinessProbe": { "type": "object" },
+    "livenessProbe": { "type": "object" },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30 },
+    "minReadySeconds": { "type": "integer", "minimum": 0 },
+    "revisionHistoryLimit": { "type": "integer", "minimum": 0 },
+    "podAnnotations": { "type": "object" },
+    "podLabels": { "type": "object" },
+    "podDisruptionBudget": { "type": "object" },
+    "topologySpreadConstraints": { "type": "array" },
+    "nodeSelector": { "type": "object" },
+    "tolerations": { "type": "array" },
+    "affinity": { "type": "object" },
+    "extraEnv": { "type": "array" }
+  }
+}
