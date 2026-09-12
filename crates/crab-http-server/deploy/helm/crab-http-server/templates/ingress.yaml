@@ -1,7 +1,4 @@
 {{- if .Values.ingress.enabled }}
-{{- if ne .Values.service.type "ClusterIP" }}
-{{- fail "service.type must be ClusterIP when ingress is enabled" }}
-{{- end }}
 {{- if empty .Values.networkPolicy.publicIngressFrom }}
 {{- fail "networkPolicy.publicIngressFrom is required when ingress is enabled" }}
 {{- end }}

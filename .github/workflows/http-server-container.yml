@@ -137,18 +137,8 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" --values "${values}" \
-              --set ingress.enabled=true --set ingress.host=git.example.com \
-              --set ingress.tlsSecretName=crab-http-server-tls \
               --set service.type=LoadBalancer >/dev/null 2>&1; then
-            echo "chart accepted a load balancer that bypasses ingress TLS" >&2
-            exit 1
-          fi
-          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
-              --set service.type=LoadBalancer \
-              --set-json 'networkPolicy.publicIngressFrom=[{"ipBlock":{"cidr":"203.0.113.0/24"}}]' \
-              >/dev/null 2>&1; then
-            echo "chart accepted an unrestricted public load balancer" >&2
+            echo "chart accepted a direct load balancer that bypasses TLS ingress" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \

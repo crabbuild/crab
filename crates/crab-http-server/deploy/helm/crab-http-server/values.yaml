@@ -27,10 +27,8 @@ secrets:
   stateKeyKey: state-key
 
 service:
-  type: ClusterIP
   port: 80
   annotations: {}
-  loadBalancerSourceRanges: []
 
 ingress:
   enabled: false

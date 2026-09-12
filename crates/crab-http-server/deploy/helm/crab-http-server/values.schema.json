@@ -75,16 +75,10 @@
     "service": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["type", "port", "annotations", "loadBalancerSourceRanges"],
+      "required": ["port", "annotations"],
       "properties": {
-        "type": { "enum": ["ClusterIP", "LoadBalancer"] },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "annotations": { "type": "object" },
-        "loadBalancerSourceRanges": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 },
-          "uniqueItems": true
-        }
+        "annotations": { "type": "object" }
       }
     },
     "ingress": {

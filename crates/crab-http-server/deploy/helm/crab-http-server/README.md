@@ -19,8 +19,9 @@ flowchart LR
     Management -.-> Pods
 ```
 
-The public Service exposes port 8788. The chart never exposes management port
-8789 through a Service or ingress. The default NetworkPolicy admits public
+The private ClusterIP Service exposes port 8788 inside the cluster. The TLS
+ingress is the only supported public path. The chart never exposes management
+port 8789 through a Service or ingress. The default NetworkPolicy admits public
 traffic only on the named `http` port. Metrics scraping requires an explicit
 management-port source.
 
@@ -81,12 +82,13 @@ Choose `gke-values.example.yaml` or `aks-values.example.yaml` for those platform
 | `config.content.storage.url` | Your dedicated object-storage root |
 | `config.content.auth.*` | Your OIDC issuer, client ID, and public HTTPS URL |
 | `serviceAccount.*` | Your provider workload identity |
+| `ingress` and `networkPolicy.publicIngressFrom` | Your HTTPS host, ingress class, TLS Secret, and allowed controller source |
 | `metrics` and `networkPolicy.metricsIngressFrom` | Your private Prometheus discovery and allowed scraper source |
 
 The chart rejects image tags, missing digests, unknown top-level values,
 automatic Kubernetes API credentials, disabled network isolation, unrestricted
-ingress or load balancers, overrides of chart-owned pod metadata, fewer than two
-replicas, and a shutdown budget shorter than 630 seconds.
+ingress, direct load balancers, overrides of chart-owned pod metadata, fewer
+than two replicas, and a shutdown budget shorter than 630 seconds.
 
 ## Create the application Secret
 
@@ -163,6 +165,12 @@ ingress:
   className: nginx
   host: git.example.com
   tlsSecretName: crab-http-server-tls
+
+networkPolicy:
+  publicIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
 ```
 
 Configure the ingress controller for streaming request and response bodies. Its request-body limit, upstream timeout, idle timeout, and connection-drain settings must accommodate five-minute Git and Large File Storage (LFS) transfers plus ten-minute archive downloads.
@@ -197,16 +205,16 @@ networkPolicy:
           kubernetes.io/metadata.name: monitoring
 ```
 
-The public Service and ingress never expose port 8789. Metrics have bounded
-labels and retain request duration through streaming response completion. Use a
-`PodMonitor` or equivalent discovery configuration instead of creating a
-public management Service.
+The application Service and ingress never expose port 8789. Metrics have
+bounded labels and retain request duration through streaming response
+completion. Use a `PodMonitor` or equivalent discovery configuration instead
+of creating a public management Service.
 
 ## Restrict network sources
 
 The NetworkPolicy blocks every source until you select the pods, namespaces, or
-IP ranges allowed to reach port 8788. Ingress and `LoadBalancer` modes reject an
-empty `publicIngressFrom`; Prometheus annotations reject an empty
+IP ranges allowed to reach port 8788. Ingress rejects an empty
+`publicIngressFrom`; Prometheus annotations reject an empty
 `metricsIngressFrom`. Select an ingress controller with a standard
 `namespaceSelector`, `podSelector`, or `ipBlock` entry:
 
@@ -220,8 +228,8 @@ networkPolicy:
 
 The chart does not allow the policy to be disabled. Verify that your CNI
 enforces it and that kubelet readiness probes still succeed before exposing the
-ingress. A direct `LoadBalancer` additionally requires nonempty
-`service.loadBalancerSourceRanges`.
+ingress. The Service is always private `ClusterIP`; public traffic has one
+supported path through the TLS ingress.
 
 ## Roll out configuration and secret changes
 
