@@ -1,0 +1,9 @@
+project_id      = "team-production-123456789012"
+region          = "us-west1"
+bucket_name     = "team-crab-repositories-123456789012"
+bucket_location = "us-west1"
+
+labels = {
+  environment = "production"
+  owner       = "platform"
+}

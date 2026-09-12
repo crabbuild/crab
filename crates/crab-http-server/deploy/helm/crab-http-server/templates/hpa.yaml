@@ -1,0 +1,38 @@
+{{- if .Values.autoscaling.enabled }}
+{{- if lt (.Values.autoscaling.maxReplicas | int) (.Values.autoscaling.minReplicas | int) }}
+{{- fail "autoscaling.maxReplicas must be greater than or equal to autoscaling.minReplicas" }}
+{{- end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "crab-http-server.fullname" . }}
+  labels:
+    {{- include "crab-http-server.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "crab-http-server.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleDown.stabilizationWindowSeconds }}
+      policies:
+        - type: Percent
+          value: {{ .Values.autoscaling.behavior.scaleDown.percent }}
+          periodSeconds: {{ .Values.autoscaling.behavior.scaleDown.periodSeconds }}
+    scaleUp:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleUp.stabilizationWindowSeconds }}
+      policies:
+        - type: Percent
+          value: {{ .Values.autoscaling.behavior.scaleUp.percent }}
+          periodSeconds: {{ .Values.autoscaling.behavior.scaleUp.periodSeconds }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

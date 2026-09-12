@@ -2,7 +2,28 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "image", "serviceAccount", "config", "secrets", "service", "resources", "scratch"],
+  "required": [
+    "replicaCount",
+    "image",
+    "serviceAccount",
+    "config",
+    "secrets",
+    "service",
+    "ingress",
+    "networkPolicy",
+    "autoscaling",
+    "resources",
+    "scratch",
+    "startupProbe",
+    "readinessProbe",
+    "livenessProbe",
+    "terminationGracePeriodSeconds",
+    "minReadySeconds",
+    "revisionHistoryLimit",
+    "progressDeadlineSeconds",
+    "podDisruptionBudget",
+    "topologySpreadConstraints"
+  ],
   "properties": {
     "replicaCount": { "type": "integer", "minimum": 2 },
     "image": {
@@ -10,33 +31,187 @@
       "additionalProperties": false,
       "required": ["repository", "digest", "pullPolicy"],
       "properties": {
-        "repository": { "type": "string" },
-        "digest": { "type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$" },
+        "repository": { "type": "string", "minLength": 1 },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
       }
     },
-    "imagePullSecrets": { "type": "array" },
+    "imagePullSecrets": { "type": "array", "items": { "type": "object" } },
     "nameOverride": { "type": "string" },
     "fullnameOverride": { "type": "string" },
-    "serviceAccount": { "type": "object" },
-    "config": { "type": "object" },
-    "secrets": { "type": "object" },
-    "service": { "type": "object" },
-    "resources": { "type": "object" },
-    "scratch": { "type": "object" },
-    "startupProbe": { "type": "object" },
-    "readinessProbe": { "type": "object" },
-    "livenessProbe": { "type": "object" },
-    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30 },
-    "minReadySeconds": { "type": "integer", "minimum": 0 },
-    "revisionHistoryLimit": { "type": "integer", "minimum": 0 },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["create", "name", "annotations", "labels", "automountServiceAccountToken"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" },
+        "labels": { "type": "object" },
+        "automountServiceAccountToken": { "enum": [false] }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingConfigMap", "content", "key"],
+      "properties": {
+        "existingConfigMap": { "type": "string" },
+        "content": { "type": "string" },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["existingSecret", "oidcClientSecretKey", "stateKeyKey"],
+      "properties": {
+        "existingSecret": { "type": "string", "minLength": 1 },
+        "oidcClientSecretKey": { "type": "string" },
+        "stateKeyKey": { "type": "string", "minLength": 1 }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "port", "annotations", "loadBalancerSourceRanges"],
+      "properties": {
+        "type": { "enum": ["ClusterIP", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "annotations": { "type": "object" },
+        "loadBalancerSourceRanges": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "className", "annotations", "host", "tlsSecretName"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "host": { "type": "string" },
+        "tlsSecretName": { "type": "string" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "publicIngressFrom"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "publicIngressFrom": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "minReplicas", "maxReplicas", "targetCPUUtilizationPercentage", "behavior"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 2 },
+        "maxReplicas": { "type": "integer", "minimum": 2 },
+        "targetCPUUtilizationPercentage": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "behavior": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scaleDown", "scaleUp"],
+          "properties": {
+            "scaleDown": { "$ref": "#/definitions/scalingBehavior" },
+            "scaleUp": { "$ref": "#/definitions/scalingBehavior" }
+          }
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": { "$ref": "#/definitions/resourceQuantities" },
+        "limits": { "$ref": "#/definitions/resourceQuantities" }
+      }
+    },
+    "scratch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizeLimit"],
+      "properties": { "sizeLimit": { "type": "string", "minLength": 1 } }
+    },
+    "startupProbe": { "$ref": "#/definitions/probe" },
+    "readinessProbe": { "$ref": "#/definitions/probe" },
+    "livenessProbe": { "$ref": "#/definitions/probe" },
+    "terminationGracePeriodSeconds": { "type": "integer", "minimum": 600 },
+    "minReadySeconds": { "type": "integer", "minimum": 5 },
+    "revisionHistoryLimit": { "type": "integer", "minimum": 1 },
+    "progressDeadlineSeconds": { "type": "integer", "minimum": 600 },
+    "priorityClassName": { "type": "string" },
+    "rolloutToken": { "type": "string" },
     "podAnnotations": { "type": "object" },
     "podLabels": { "type": "object" },
-    "podDisruptionBudget": { "type": "object" },
-    "topologySpreadConstraints": { "type": "array" },
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "minAvailable"],
+      "properties": {
+        "enabled": { "enum": [true] },
+        "minAvailable": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "topologySpreadConstraints": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maxSkew", "topologyKey", "whenUnsatisfiable"],
+        "properties": {
+          "maxSkew": { "type": "integer", "minimum": 1 },
+          "minDomains": { "type": "integer", "minimum": 1 },
+          "topologyKey": { "type": "string", "minLength": 1 },
+          "whenUnsatisfiable": { "enum": ["DoNotSchedule", "ScheduleAnyway"] }
+        }
+      }
+    },
     "nodeSelector": { "type": "object" },
-    "tolerations": { "type": "array" },
+    "tolerations": { "type": "array", "items": { "type": "object" } },
     "affinity": { "type": "object" },
-    "extraEnv": { "type": "array" }
+    "extraEnv": { "type": "array", "items": { "type": "object" } }
+  },
+  "definitions": {
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["periodSeconds", "timeoutSeconds", "failureThreshold"],
+      "properties": {
+        "periodSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "failureThreshold": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "scalingBehavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stabilizationWindowSeconds", "percent", "periodSeconds"],
+      "properties": {
+        "stabilizationWindowSeconds": { "type": "integer", "minimum": 0, "maximum": 3600 },
+        "percent": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "periodSeconds": { "type": "integer", "minimum": 1, "maximum": 1800 }
+      }
+    },
+    "resourceQuantities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory", "ephemeral-storage"],
+      "properties": {
+        "cpu": { "type": "string", "minLength": 1 },
+        "memory": { "type": "string", "minLength": 1 },
+        "ephemeral-storage": { "type": "string", "minLength": 1 }
+      }
+    }
   }
 }

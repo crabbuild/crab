@@ -39,3 +39,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "crab-http-server.image" -}}
 {{- printf "%s@%s" (required "image.repository is required" .Values.image.repository) (required "image.digest is required" .Values.image.digest) }}
 {{- end }}
+
+{{- define "crab-http-server.configMapName" -}}
+{{- if and .Values.config.existingConfigMap .Values.config.content -}}
+{{- fail "config.existingConfigMap and config.content are mutually exclusive" -}}
+{{- else if .Values.config.existingConfigMap -}}
+{{- .Values.config.existingConfigMap -}}
+{{- else -}}
+{{- $_ := required "config.content is required when config.existingConfigMap is empty" .Values.config.content -}}
+{{- include "crab-http-server.fullname" . -}}
+{{- end -}}
+{{- end }}

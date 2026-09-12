@@ -1,0 +1,8 @@
+region       = "us-west-2"
+cluster_name = "team-production"
+bucket_name  = "team-crab-repositories-123456789012"
+
+tags = {
+  Environment = "production"
+  Owner       = "platform"
+}

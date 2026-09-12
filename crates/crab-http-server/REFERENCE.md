@@ -319,12 +319,13 @@ The two probe routes answer different operator questions:
 Only the management listener serves probes. Every public request retains strict
 canonical `Host` validation.
 
+Every public response includes a server-generated `x-request-id`. The completion log records the same identifier with the method, path, status, and elapsed milliseconds. Set the standard `RUST_LOG` environment variable to adjust tracing filters; the default level is `info`.
+
 ### Choose an orchestrator
 
-Use the portable Helm chart for EKS, GKE, or AKS and the Fargate task profile
-for ECS. Both run at least two replicas, expose only the public port, pin an
-image digest, drop Linux capabilities, use a read-only root filesystem, and
-mount bounded disposable scratch space.
+Use the portable Helm chart for an EKS, GKE, or AKS team deployment. Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. The chart runs at least two replicas, exposes only the public port, pins an image digest, drops Linux capabilities, uses a read-only root filesystem, mounts bounded disposable scratch, applies a disruption budget and ingress NetworkPolicy, and supports optional TLS ingress and autoscaling.
+
+The ECS Fargate task definition remains an evaluation profile. Fargate limits a container stop timeout to 120 seconds, which can interrupt Crab operations that run for up to ten minutes. Prefer the Kubernetes chart until abrupt-process-crash qualification closes that gap.
 
 ```mermaid
 flowchart LR
@@ -342,11 +343,7 @@ flowchart LR
     ECS --> S3
 ```
 
-See `deploy/README.md`, `deploy/helm/crab-http-server/README.md`, and
-`deploy/ecs/README.md`. Lambda is intentionally excluded from the full data
-plane because Git and LFS require long streaming requests, large bodies, and
-bounded scratch that do not preserve the same contract through Lambda/API
-Gateway buffering and limits.
+See `deploy/README.md`, `deploy/terraform/README.md`, `deploy/helm/crab-http-server/README.md`, and `deploy/operations.md`. Lambda is intentionally excluded from the full data plane because Git and LFS require long streaming requests, large bodies, and bounded scratch that do not preserve the same contract through Lambda/API Gateway buffering and limits.
 
 ## Repository browser and application APIs
 
@@ -1069,7 +1066,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 
 | Contract | Primary source | Executable evidence |
 | --- | --- | --- |
-| Route composition, Host checks, readiness, and shutdown | `src/server.rs` | Server, authentication, and maintenance tests |
+| Route composition, Host checks, request correlation, readiness, and shutdown | `src/server.rs` | Server, authentication, and maintenance tests |
 | OIDC, membership, sessions, tokens, and CSRF | `src/auth.rs` | `src/auth_tests.rs` and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
@@ -1079,7 +1076,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
 | Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
-| Container identity and health contract | `deploy/Dockerfile` | `.github/workflows/http-server-container.yml` |
+| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml` |
 
 ### Understand what has been qualified
 
@@ -1090,7 +1087,7 @@ Current local and CI evidence includes:
 - Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, and cooperative restart recovery
 - OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
-- Container build, non-root identity, stop signal, health command, and runtime inspection
+- Container build, non-root identity, stop signal, health command, runtime inspection, strict Helm lint, and Kubernetes schema validation
 
 These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The tests do not establish abrupt process-crash safety, multi-instance global admission, provider-scale performance, backup recovery, or complete manual accessibility.
 
@@ -1112,7 +1109,7 @@ The server is complete only when a real account can perform the workflow and obs
 
 | Surface | Required evidence | Status |
 | --- | --- | --- |
-| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, Helm, ECS profile, and reproducible container | Implemented; live rollout qualification remains |
+| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, and reproducible container | Implemented; live rollout qualification remains |
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
@@ -1120,7 +1117,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; crash and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Static EKS/GKE/AKS/ECS profiles implemented; live qualification pending |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, request correlation, and runbook implemented; application metrics and live qualification remain |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -1136,7 +1133,7 @@ The remaining production gaps include:
 - Repository creation and adoption exist in the CLI; browser import remains
 - Backup and restore qualification for Git and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
-- Production observability, upgrade, rollback, and disaster-recovery procedures
+- Application metrics plus live upgrade, rollback, and disaster-recovery qualification
 
 ## Ownership
 

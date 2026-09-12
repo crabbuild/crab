@@ -28,17 +28,93 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Validate deployment profiles
         run: |
+          set -euo pipefail
+          chart=crates/crab-http-server/deploy/helm/crab-http-server
+          terraform_root=crates/crab-http-server/deploy/terraform
+          helm_image=alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9
+          kubeconform_image=ghcr.io/yannh/kubeconform:v0.7.0@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c
+          terraform_image=hashicorp/terraform:1.13.3@sha256:dfb1889a8ee74ada3ddacc48f89b8a0d69f3e114de3d8a2ce15f6a8d3dbfdbe2
+
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
           docker run --rm \
             --volume "$PWD/crates/crab-http-server/deploy/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
             caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              >/dev/null 2>&1; then
+            echo "chart accepted mutable or missing deployment inputs" >&2
+            exit 1
+          fi
+
           for values in eks-values.example.yaml gke-values.example.yaml aks-values.example.yaml; do
+            values_path="${chart}/${values}"
+            rendered="${RUNNER_TEMP}/crab-http-server-${values}"
+            docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+              "${helm_image}" lint --strict "${chart}" --values "${values_path}"
+            docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+              "${helm_image}" template qualification "${chart}" \
+                --namespace crab --values "${values_path}" \
+                --set autoscaling.enabled=true \
+                --set ingress.enabled=true \
+                --set ingress.className=nginx \
+                --set ingress.host=git.example.com \
+                --set ingress.tlsSecretName=crab-http-server-tls \
+                > "${rendered}"
             docker run --rm \
-              --volume "$PWD/crates/crab-http-server/deploy/helm/crab-http-server:/chart:ro" \
-              alpine/helm@sha256:b80eb190fca14707e94a5090235a3f1bf2f206f26761f2890d16a1e570386236 \
-              lint /chart --values "/chart/$values"
+              --volume "${rendered}:/manifests/server.yaml:ro" \
+              "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
+                /manifests/server.yaml
+          done
+
+          values="${chart}/eks-values.example.yaml"
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set serviceAccount.automountServiceAccountToken=true \
+              >/dev/null 2>&1; then
+            echo "chart accepted automatic Kubernetes API credentials" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set config.existingConfigMap=another-config \
+              >/dev/null 2>&1; then
+            echo "chart accepted two configuration sources" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set ingress.enabled=true --set ingress.host=git.example.com \
+              >/dev/null 2>&1; then
+            echo "chart accepted ingress without a TLS Secret" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set ingress.enabled=true --set ingress.host=git.example.com \
+              --set ingress.tlsSecretName=crab-http-server-tls \
+              --set service.type=LoadBalancer >/dev/null 2>&1; then
+            echo "chart accepted a load balancer that bypasses ingress TLS" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set autoscaling.enabled=true --set autoscaling.minReplicas=5 \
+              --set autoscaling.maxReplicas=2 >/dev/null 2>&1; then
+            echo "chart accepted an invalid autoscaling range" >&2
+            exit 1
+          fi
+
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${terraform_image}" fmt -check -recursive "${terraform_root}"
+          for provider in aws gcp azure; do
+            module="${terraform_root}/${provider}"
+            docker run --rm --volume "${PWD}:/src" --workdir "/src/${module}" \
+              "${terraform_image}" init -backend=false -input=false -lockfile=readonly
+            docker run --rm --volume "${PWD}:/src:ro" --workdir "/src/${module}" \
+              "${terraform_image}" validate
           done
       - name: Build locked server image
         run: >-
@@ -74,13 +150,23 @@ jobs:
 
           docker compose --file crates/crab-http-server/deploy/compose.yaml \
             up --detach --no-build --wait --wait-timeout 120
-          curl --fail --silent --show-error http://127.0.0.1:8788/api/repos |
-            jq --exit-status \
-              '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1'
+          curl --fail --silent --show-error \
+            --dump-header "${RUNNER_TEMP}/crab-http-server-headers" \
+            --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \
+            http://127.0.0.1:8788/api/repos
+          grep --extended-regexp --ignore-case \
+            '^x-request-id: [0-9a-f-]{36}[[:space:]]*$' \
+            "${RUNNER_TEMP}/crab-http-server-headers"
+          jq --exit-status \
+            '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
+            "${RUNNER_TEMP}/crab-http-server-repositories.json"
 
           docker compose --file crates/crab-http-server/deploy/compose.yaml down
           docker compose --file crates/crab-http-server/deploy/compose.yaml \
             up --detach --no-build --wait --wait-timeout 120
-          curl --fail --silent --show-error http://127.0.0.1:8788/api/repos |
-            jq --exit-status \
-              '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1'
+          curl --fail --silent --show-error \
+            --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \
+            http://127.0.0.1:8788/api/repos
+          jq --exit-status \
+            '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
+            "${RUNNER_TEMP}/crab-http-server-repositories.json"

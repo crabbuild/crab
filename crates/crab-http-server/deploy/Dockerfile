@@ -13,7 +13,6 @@ FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd7
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-COPY .cargo/ .cargo/
 COPY crab/ crab/
 COPY crates/ crates/
 COPY --from=frontend /build/packages/repository/dist/ packages/repository/dist/

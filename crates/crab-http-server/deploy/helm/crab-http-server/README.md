@@ -1,62 +1,207 @@
-# Kubernetes deployment
+# Deploy Crab for a team on Kubernetes
 
-This chart is the portable `crab-http-server` deployment for EKS, GKE, and
-AKS. It runs two replicas, keeps the management listener out of the Service,
-uses object storage for the catalog and identity state, and treats pod scratch
-as disposable. The chart does not create buckets, identities, DNS, TLS, or an
-ingress controller.
+This chart runs `crab-http-server` on Amazon Elastic Kubernetes Service (EKS), Google Kubernetes Engine (GKE), or Azure Kubernetes Service (AKS). Start with the provider values file, create one Kubernetes Secret, and install one chart. The chart manages the application configuration, replicas, probes, disruption budget, network policy, optional ingress, and optional autoscaling.
 
-## Inputs
+> Production qualification is still incomplete. Read [Production boundaries](#production-boundaries) before serving critical repositories.
 
-Create a ConfigMap with `server.toml`. Its secret paths must match the projected
-files in the chart:
+## Understand the deployment
 
-```toml
-listen = "0.0.0.0:8788"
-management_listen = "0.0.0.0:8789"
+Every pod reads one durable catalog and its repositories from the same object-storage root. Pods keep no authoritative state on their scratch volumes.
 
-[storage]
-url = "s3://bucket/repositories" # or gs:// / az://
-
-[auth]
-issuer = "https://identity.example/realm"
-client_id = "crab-browser"
-public_url = "https://git.example.com"
-client_secret_file = "/run/secrets/crab/oidc-client-secret"
-state_key_file = "/run/secrets/crab/state-key"
+```mermaid
+flowchart LR
+    Client[Browser, Git, or LFS client] --> TLS[HTTPS ingress]
+    TLS --> Service[ClusterIP Service]
+    Service --> Pods[Two or more Crab pods]
+    Pods --> Identity[OIDC provider]
+    Pods --> Storage[(S3, GCS, or Azure Blob)]
+    Kubelet[Kubelet probes] -.-> Management[Private port 8789]
+    Management -.-> Pods
 ```
 
-The existing Secret must contain `oidc-client-secret` and a random `state-key`
-of at least 32 bytes. The latter must remain stable across rollouts. Replace
-the example's all-zero image digest with a qualified image digest, then use one
-of the checked-in provider value files:
+The public Service exposes port 8788. The chart never exposes management port 8789 through a Service or ingress. The default NetworkPolicy admits public traffic only on the named `http` port.
+
+## Prepare the platform
+
+Create these resources before installing Crab:
+
+- A Kubernetes 1.29 or newer cluster across at least two zones
+- Helm 3
+- A NetworkPolicy-capable Container Network Interface (CNI)
+- A versioned S3 bucket, Google Cloud Storage (GCS) bucket, or Azure Blob container
+- A workload identity with list, read, create, conditional-update, and delete access below one storage prefix
+- An OpenID Connect (OIDC) client with `https://git.example.com/auth/callback` as its redirect URI
+- An HTTPS ingress controller and TLS Secret when `ingress.enabled` is `true`
+- The Kubernetes metrics API when `autoscaling.enabled` is `true`
+
+Use one workload identity mechanism:
+
+| Platform | Identity mechanism | Storage URL |
+| --- | --- | --- |
+| EKS | [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html) | `s3://bucket/root` |
+| GKE | [Workload Identity Federation for GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) | `gs://bucket/root` |
+| AKS | [Microsoft Entra Workload ID](https://learn.microsoft.com/en-us/azure/aks/workload-identity-deploy-cluster) | `az://account/container/root` |
+
+Grant access only below the configured root. Don’t put static cloud keys in the Kubernetes Secret.
+
+Use [the Terraform provider roots](../../terraform/README.md) to create dedicated versioned storage and workload identity for an existing cluster. Skip them when your platform team already manages those resources.
+
+## Publish an immutable image
+
+Build from the repository root and push the architectures used by your cluster:
+
+```sh
+docker buildx build --platform linux/amd64,linux/arm64 --push \
+  --file crates/crab-http-server/deploy/Dockerfile \
+  --tag registry.example.com/crab-http-server:release_name_here .
+docker buildx imagetools inspect \
+  registry.example.com/crab-http-server:release_name_here
+```
+
+Copy the reported manifest digest into `image.digest`. Keep the repository in `image.repository`; don’t put a tag in that value.
+
+## Configure one provider profile
+
+Copy the matching values file outside the checkout:
+
+```sh
+cp crates/crab-http-server/deploy/helm/crab-http-server/eks-values.example.yaml \
+  /secure/crab-http-server-values.yaml
+```
+
+Choose `gke-values.example.yaml` or `aks-values.example.yaml` for those platforms. Replace every example value in the copy:
+
+| Value | Required change |
+| --- | --- |
+| `image.repository` | Your private image repository |
+| `image.digest` | The qualified immutable image digest |
+| `config.content.storage.url` | Your dedicated object-storage root |
+| `config.content.auth.*` | Your OIDC issuer, client ID, and public HTTPS URL |
+| `serviceAccount.*` | Your provider workload identity |
+
+The chart rejects image tags, missing digests, unknown top-level values, automatic Kubernetes API credentials, fewer than two replicas, and an unsafe shutdown budget.
+
+## Create the application Secret
+
+Write the OIDC client secret and a stable random state key to private files. Keep the state key unchanged across replicas and rollouts.
+
+```sh
+mkdir -p /secure/crab-http-server
+openssl rand -out /secure/crab-http-server/state-key 32
+chmod 0700 /secure/crab-http-server
+chmod 0600 /secure/crab-http-server/state-key \
+  /secure/crab-http-server/oidc-client-secret
+```
+
+Create the namespace and Secret from those files:
+
+```sh
+kubectl create namespace crab --dry-run=client -o yaml | kubectl apply -f -
+kubectl --namespace crab create secret generic crab-http-server \
+  --from-file=oidc-client-secret=/secure/crab-http-server/oidc-client-secret \
+  --from-file=state-key=/secure/crab-http-server/state-key \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+When the identity provider registers Crab as a public Proof Key for Code Exchange (PKCE) client, omit `client_secret_file` from `config.content` and set `secrets.oidcClientSecretKey` to an empty string. The Secret then needs only `state-key`.
+
+## Install the server
+
+Install or upgrade Crab with the provider profile:
 
 ```sh
 helm upgrade --install crab-http-server \
   crates/crab-http-server/deploy/helm/crab-http-server \
   --namespace crab --create-namespace \
-  --values crates/crab-http-server/deploy/helm/crab-http-server/eks-values.example.yaml
+  --values /secure/crab-http-server-values.yaml \
+  --wait --timeout 15m
 ```
 
-For EKS, create an [EKS Pod Identity association](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html)
-for the chart's Kubernetes service account and a least-privilege IAM role. For
-GKE, bind the Kubernetes service account through
-[Workload Identity Federation for GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity)
-and set the checked-in annotation. For AKS, follow the
-[Microsoft Entra Workload ID setup](https://learn.microsoft.com/en-us/azure/aks/workload-identity-deploy-cluster),
-create the federated identity credential, set the client ID annotation, and
-retain the pod label that enables the workload identity webhook. In all three
-cases grant list/read/write/delete access only below the configured storage
-root; static cloud keys do not belong in the Kubernetes Secret.
+The Deployment becomes ready only after a pod can read and validate the durable catalog. Confirm the rollout and inspect the catalog:
 
-Configure a provider lifecycle rule that deletes objects below
-`.crab/http-server/v1/auth/` after 24 hours. The server checks active expiry and
-parent-session validity on every auth lookup; the lifecycle rule collects only
-bounded expired state.
+```sh
+kubectl --namespace crab rollout status deployment/crab-http-server --timeout=15m
+kubectl --namespace crab exec deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml healthcheck
+kubectl --namespace crab exec deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml repository list
+```
 
-The Service and ingress must exclude the management port. Restrict port 8789
-with the cluster's network policy while preserving kubelet probe access.
-Startup and readiness verify that the catalog can be read from object storage;
-liveness only verifies that the process is serving. Put TLS and
-request-size/time limits appropriate for large Git and LFS streams on the
-ingress or external load balancer.
+## Create the first repository
+
+Run repository administration through a pod that already has configuration and workload identity. The command initializes the canonical storage layout before publishing the catalog record.
+
+```sh
+kubectl --namespace crab exec deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml repository create \
+  --owner your_team --name your_project \
+  --prefix your_team/your_project --default-branch main
+```
+
+Every healthy replica discovers the new record within five seconds. Use `repository adopt` instead when the target prefix already contains a canonical Crab repository.
+
+## Enable HTTPS ingress
+
+Enable ingress only after installing an ingress controller and creating the TLS Secret. The ingress host must match `auth.public_url` in the server configuration.
+
+```yaml
+ingress:
+  enabled: true
+  className: nginx
+  host: git.example.com
+  tlsSecretName: crab-http-server-tls
+```
+
+Configure the ingress controller for streaming request and response bodies. Its request-body limit, upstream timeout, idle timeout, and connection-drain settings must accommodate five-minute Git and Large File Storage (LFS) transfers plus ten-minute archive downloads.
+
+## Enable autoscaling
+
+Enable the Horizontal Pod Autoscaler (HPA) after the cluster reports pod CPU metrics:
+
+```yaml
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+```
+
+CPU scaling protects general request capacity. It does not create a cluster-wide Git admission limit: transfer and maintenance admission remain process-local.
+
+## Restrict network sources
+
+The default NetworkPolicy permits port 8788 from every source and blocks cross-pod access to port 8789 on enforcing CNI implementations. Restrict public sources with standard `namespaceSelector`, `podSelector`, or `ipBlock` entries:
+
+```yaml
+networkPolicy:
+  publicIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+```
+
+Keep the policy enabled. Verify that your CNI enforces it and that kubelet readiness probes still succeed before exposing the ingress.
+
+## Roll out configuration and secret changes
+
+The chart hashes inline `config.content`, so a configuration change starts a rolling replacement. Externally managed ConfigMaps and Secrets don’t change the pod template automatically.
+
+Set a new rollout token after rotating an external input:
+
+```sh
+helm upgrade crab-http-server \
+  crates/crab-http-server/deploy/helm/crab-http-server \
+  --namespace crab --values /secure/crab-http-server-values.yaml \
+  --set-string rolloutToken="$(date -u +%Y%m%dT%H%M%SZ)" \
+  --wait --timeout 15m
+```
+
+Rotate the OIDC client secret without changing the state key. Changing the state key invalidates browser sessions and in-flight OIDC transactions.
+
+## Production boundaries
+
+The chart is portable deployment evidence, not provider qualification. Before production use, run a dedicated live test for push, fetch, LFS upload/download, OIDC callback routing across replicas, rolling replacement, and object-store restore.
+
+The current server still lacks complete abrupt-process-crash qualification, cluster-wide admission, provider-scale throughput evidence, and a proven backup restore procedure. Prefer Kubernetes over AWS Fargate for long streams: Fargate limits container stop timeout to 120 seconds, while Crab permits operations lasting up to ten minutes.
+
+Use [the operations runbook](../../operations.md) for rollout, rollback, rotation, incident response, and restore qualification.

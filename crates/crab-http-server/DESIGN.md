@@ -7,10 +7,7 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 
 > **Current status:** The runtime has a provider-neutral storage root, durable
 > CAS repository catalog, shared identity state, dynamic replica refresh,
-> private management listener, a local Compose profile, Helm profiles for
-> EKS/GKE/AKS, and an ECS Fargate task profile. Static artifacts do not
-> constitute live cloud qualification. Abrupt write-process crash recovery and
-> index-receipt reconstruction remain incomplete.
+> private management listener, a local Compose profile, and hardened Helm profiles for EKS/GKE/AKS. The ECS Fargate profile cannot preserve the full shutdown budget. Static artifacts do not constitute live cloud qualification. Abrupt write-process crash recovery and index-receipt reconstruction remain incomplete.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
@@ -202,16 +199,14 @@ cache and coordination identities from colliding across clouds.
 | AKS | Microsoft Entra Workload ID | `az://account/container/root` |
 | ECS/Fargate | ECS task role | `s3://bucket/root` |
 
-One Helm chart owns the common Deployment, Service, ServiceAccount, disruption
-budget, probes, security context, topology spread, scratch volume, and
-digest-pinned image. Provider value files contain only the workload-identity
-annotations/labels and required environment. The public Service exposes port
-8788; port 8789 remains private for liveness and storage-aware readiness.
+Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. One Helm chart owns inline or external configuration, the Deployment, Service, ServiceAccount, disruption budget, probes, security context, topology spread, scratch volume, ingress NetworkPolicy, optional TLS ingress, optional autoscaling, and digest-pinned image. Provider value files contain the storage URL, OIDC settings, workload-identity annotations or labels, and required environment. The public Service exposes port 8788; port 8789 remains private for liveness and storage-aware readiness.
 
 ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
 three protected files to disposable scratch, unsets the injected environment
 variables, and execs the same binary. Repository, catalog, and session state
 never depend on that scratch volume.
+
+Fargate limits container shutdown to 120 seconds. That limit is shorter than Crab's five-minute Git and LFS budgets and ten-minute archive budget. Treat the task definition as evaluation evidence until abrupt-crash qualification proves safe replacement outcomes.
 
 ### Preserve local trust through a container proxy
 
@@ -815,9 +810,7 @@ The current implementation does not satisfy these production claims:
 - **Active-active coexistence:** Versioned coordinator writers do not share the native journal namespace gate or commitment authority.
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
 - **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
-- **Production scale:** Static EKS/GKE/AKS and ECS profiles do not establish
-  Kubernetes-size push throughput, temporary-disk sizing, provider latency,
-  cross-replica failover, or regional failure behavior.
+- **Production scale:** Static EKS/GKE/AKS profiles do not establish Kubernetes-size push throughput, temporary-disk sizing, provider latency, cross-replica failover, or regional failure behavior. The ECS stop limit is shorter than the maximum operation budget.
 - **LFS locking:** The server transfers and verifies LFS objects but does not implement lock creation or push enforcement.
 
 Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabricated protected plan, fallback reader, or OID rewrite. Each shortcut violates an ownership or outcome invariant above.

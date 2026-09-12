@@ -5,6 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use crab_http_server::RepositoryMember;
 use crab_http_server::catalog::CatalogStore;
 use serde::Deserialize;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(about = "Serve and administer Crab repositories")]
@@ -85,6 +86,9 @@ impl RepositoryIdentity {
 #[tokio::main]
 async fn main() -> crab_http_server::Result<()> {
     tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_target(false)
         .with_writer(std::io::stderr)
         .try_init()

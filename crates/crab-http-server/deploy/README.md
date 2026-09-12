@@ -1,7 +1,6 @@
 # Deployment profiles
 
-`crab-http-server` has one provider-neutral runtime contract, a one-command
-local stack, and checked-in production deployment profiles:
+`crab-http-server` has one provider-neutral runtime contract, a one-command local stack, and checked-in deployment profiles for three cloud storage providers:
 
 ```mermaid
 flowchart LR
@@ -13,17 +12,15 @@ flowchart LR
     Catalog & State & Repos --> Root[(One object-storage root)]
 ```
 
-| Target | Deployment asset | Workload identity | Storage URLs |
-|---|---|---|---|
-| Local Docker | `compose.yaml` | Synthetic local credentials | Private RustFS volume |
-| EKS | `helm/crab-http-server` | EKS Pod Identity association | `s3://bucket/root` |
-| GKE | `helm/crab-http-server` | GKE Workload Identity Federation | `gs://bucket/root` |
-| AKS | `helm/crab-http-server` | AKS Workload ID | `az://account/container/root` |
-| ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | `s3://bucket/root` |
+| Target | Deployment asset | Workload identity | Status |
+| --- | --- | --- | --- |
+| Local Docker | `compose.yaml` | Synthetic local credentials | Qualified in container CI |
+| EKS | `helm/crab-http-server` | EKS Pod Identity association | Recommended team profile; live qualification required |
+| GKE | `helm/crab-http-server` | GKE Workload Identity Federation | Recommended team profile; live qualification required |
+| AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
+| ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
-These assets are portable implementation evidence. A provider is only
-release-qualified after its live test matrix passes; the chart or task
-definition alone is not that claim.
+The Kubernetes chart manages inline configuration, two or more replicas, private management probes, a disruption budget, ingress isolation, optional Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is release-qualified only after its live test matrix passes.
 
 ## Start locally with Docker Compose
 
@@ -74,7 +71,7 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow 
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
 
-`docker compose ... down --volumes` permanently removes the local RustFS
+`docker compose down --volumes` permanently removes the local RustFS
 volume, including the catalog and every repository. The defaults need no
 `.env` file. These optional environment variables customize local operation:
 
@@ -88,6 +85,31 @@ The dependency images are version- and digest-pinned. `RUSTFS_IMAGE`,
 `AWS_CLI_IMAGE`, and `CADDY_IMAGE` exist for controlled mirrors; keep them
 pinned when overriding. To use a prebuilt server image, set
 `CRAB_HTTP_SERVER_IMAGE` and add `--no-build` to `up`.
+
+## Deploy for a team
+
+Use the Helm chart on Amazon Elastic Kubernetes Service (EKS), Google Kubernetes Engine (GKE), or Azure Kubernetes Service (AKS). One chart preserves the server runtime contract across providers.
+
+```mermaid
+flowchart LR
+    Values[One provider values file] --> Helm[Helm release]
+    Secret[OIDC secret and stable state key] --> Helm
+    Identity[Cloud workload identity] --> Pods[Two or more Crab pods]
+    Helm --> Pods
+    Pods --> Root[(One storage root)]
+```
+
+Complete the setup in this order:
+
+1. Create versioned storage and provider workload identity with `terraform/aws`, `terraform/gcp`, or `terraform/azure`.
+2. Grant the workload identity access only to the dedicated storage boundary.
+3. Register the OpenID Connect (OIDC) callback `https://git.example.com/auth/callback`.
+4. Copy and edit the matching `eks`, `gke`, or `aks` example values file.
+5. Create the Kubernetes Secret and install the chart.
+6. Create the first repository through a running pod.
+7. Run the live qualification gates before admitting critical repositories.
+
+[The infrastructure bootstrap guide](terraform/README.md) creates storage and identity. [The Kubernetes deployment guide](helm/crab-http-server/README.md) contains install commands. [The operations runbook](operations.md) covers rollout, rollback, rotation, incidents, and restore qualification.
 
 ## Repository lifecycle
 

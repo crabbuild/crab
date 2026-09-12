@@ -19,6 +19,8 @@ use crab_storage::{Store, StoreLayout};
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use uuid::Uuid;
 
 use crate::catalog::CatalogStore;
 use crate::{
@@ -296,11 +298,8 @@ pub async fn serve(config: Config) -> Result<()> {
     });
     let app = router(Arc::clone(&server));
     let management = management_router(Arc::clone(&server));
-    println!("Crab repositories: http://{}", listener.local_addr()?);
-    println!(
-        "Crab management: http://{}",
-        management_listener.local_addr()?
-    );
+    tracing::info!(address = %listener.local_addr()?, "public listener started");
+    tracing::info!(address = %management_listener.local_addr()?, "management listener started");
     let signal_cancellation = cancellation.clone();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -588,7 +587,34 @@ async fn catalog(
     Ok(Json(json!({"repositories":repositories})))
 }
 
-async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next: Next) -> Response {
+async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Next) -> Response {
+    let request_id = Uuid::now_v7().to_string();
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let started = Instant::now();
+    let span = tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %method,
+        path = %path,
+    );
+    async move {
+        let mut response = boundary_request(server, request, next).await;
+        if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+            response.headers_mut().insert("x-request-id", value);
+        }
+        tracing::info!(
+            status = response.status().as_u16(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "request completed"
+        );
+        response
+    }
+    .instrument(span)
+    .await
+}
+
+async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get("host")
@@ -814,6 +840,14 @@ mod tests {
                 .unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), expected, "{path}, {host}");
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok());
+            assert!(
+                request_id.is_some_and(|value| Uuid::parse_str(value).is_ok()),
+                "{path}, {host}"
+            );
             assert_eq!(
                 response
                     .headers()

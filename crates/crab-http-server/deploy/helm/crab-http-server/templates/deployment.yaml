@@ -5,9 +5,12 @@ metadata:
   labels:
     {{- include "crab-http-server.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   minReadySeconds: {{ .Values.minReadySeconds }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -25,12 +28,25 @@ spec:
         {{- end }}
       {{- with .Values.podAnnotations }}
       annotations:
+        checksum/managed-config: {{ $.Values.config.content | sha256sum | quote }}
+        {{- with $.Values.rolloutToken }}
+        crab.build/rollout-token: {{ . | quote }}
+        {{- end }}
         {{- toYaml . | nindent 8 }}
+      {{- else }}
+      annotations:
+        checksum/managed-config: {{ .Values.config.content | sha256sum | quote }}
+        {{- with .Values.rolloutToken }}
+        crab.build/rollout-token: {{ . | quote }}
+        {{- end }}
       {{- end }}
     spec:
       serviceAccountName: {{ include "crab-http-server.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       enableServiceLinks: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
@@ -48,6 +64,7 @@ spec:
           image: {{ include "crab-http-server.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["--config", "/etc/crab/http-server/server.toml"]
+          terminationMessagePolicy: FallbackToLogsOnError
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -117,7 +134,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ required "config.existingConfigMap is required" .Values.config.existingConfigMap }}
+            name: {{ include "crab-http-server.configMapName" . }}
             defaultMode: 0440
             items:
               - key: {{ .Values.config.key }}
@@ -129,8 +146,10 @@ spec:
               - secret:
                   name: {{ required "secrets.existingSecret is required" .Values.secrets.existingSecret }}
                   items:
-                    - key: {{ .Values.secrets.oidcClientSecretKey }}
+                    {{- with .Values.secrets.oidcClientSecretKey }}
+                    - key: {{ . }}
                       path: oidc-client-secret
+                    {{- end }}
                     - key: {{ .Values.secrets.stateKeyKey }}
                       path: state-key
         - name: scratch
