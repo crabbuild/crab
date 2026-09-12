@@ -19,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 use crate::gateway::Repository;
 
 const MAINTENANCE_TTL: Duration = Duration::from_secs(60);
+const FULL_MAINTENANCE_IDLE_DELAY: Duration = Duration::from_secs(5);
+const CATALOG_MAINTENANCE_EPOCHS: u64 = 64;
 const MAX_CACHED_SNAPSHOTS: usize = 64;
 const MAX_CACHED_MANIFESTS: usize = 16;
 const MAX_CACHED_OBJECT_ATTRIBUTES: usize = 256;
@@ -134,6 +136,8 @@ pub(crate) struct ReadViewCache {
 pub(crate) struct WriteMaintenance {
     epoch: AtomicU64,
     active: AtomicUsize,
+    next_catalog_maintenance_epoch: AtomicU64,
+    catalog_maintenance_running: std::sync::atomic::AtomicBool,
     state: StdMutex<MaintenanceState>,
 }
 
@@ -147,6 +151,8 @@ impl WriteMaintenance {
         Self {
             epoch: AtomicU64::new(0),
             active: AtomicUsize::new(0),
+            next_catalog_maintenance_epoch: AtomicU64::new(CATALOG_MAINTENANCE_EPOCHS),
+            catalog_maintenance_running: std::sync::atomic::AtomicBool::new(false),
             state: StdMutex::new(MaintenanceState {
                 scheduled: CancellationToken::new(),
                 running: false,
@@ -199,6 +205,36 @@ impl WriteMaintenance {
         self.state().running = false;
     }
 
+    fn claim_catalog_maintenance(&self, epoch: u64) -> bool {
+        if epoch < self.next_catalog_maintenance_epoch.load(Ordering::Acquire)
+            || self
+                .catalog_maintenance_running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        self.next_catalog_maintenance_epoch.store(
+            epoch.saturating_add(CATALOG_MAINTENANCE_EPOCHS),
+            Ordering::Release,
+        );
+        true
+    }
+
+    fn finish_catalog_maintenance(&self) {
+        self.catalog_maintenance_running
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn catalog_maintenance_is_running(&self) -> bool {
+        self.catalog_maintenance_running.load(Ordering::Acquire)
+    }
+
     fn is_idle_at(&self, epoch: u64) -> bool {
         self.active.load(Ordering::Acquire) == 0 && self.epoch.load(Ordering::Acquire) == epoch
     }
@@ -209,6 +245,40 @@ impl WriteMaintenance {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+}
+
+pub(crate) fn schedule_catalog_maintenance(
+    repository: &Repository,
+    cancel: &CancellationToken,
+    epoch: u64,
+) {
+    if !repository.maintenance.claim_catalog_maintenance(epoch) {
+        return;
+    }
+    let store = repository.store.clone();
+    let layout = repository.layout.clone();
+    let maintenance = Arc::clone(&repository.maintenance);
+    let cancel = cancel.child_token();
+    tokio::spawn(async move {
+        loop {
+            let result = crab_write::generation::ensure_catalog_readable(
+                &store,
+                &layout,
+                MAINTENANCE_TTL,
+                &cancel,
+            )
+            .await;
+            maintenance.finish_catalog_maintenance();
+            match result {
+                Ok(_) => {}
+                Err(crab_write::WriteError::Cancelled) if cancel.is_cancelled() => return,
+                Err(error) => tracing::warn!(%error, "S3 bounded catalog maintenance failed"),
+            }
+            if !maintenance.claim_catalog_maintenance(maintenance.current_epoch()) {
+                return;
+            }
+        }
+    });
 }
 
 impl ReadViewCache {
@@ -231,13 +301,13 @@ impl ReadViewCache {
         if let Some(view) = self.observed_since(requested_at).await {
             return Ok(view);
         }
-        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        let mut snapshot = crab_metadata::manifest_store::read_repository_snapshot(
             &repository.store,
             &repository.layout,
         )
         .await?;
         let observed_at = tokio::time::Instant::now();
-        let key = ReadViewKey {
+        let mut key = ReadViewKey {
             generation: snapshot.manifest.generation,
             snapshot_digest: snapshot.digest()?,
         };
@@ -250,21 +320,60 @@ impl ReadViewCache {
             .map(|cached| Arc::clone(&cached.view));
         let view = match existing {
             Some(view) => view,
-            None => Arc::new(ReadView {
-                key,
-                remote: RemoteGitRepository::from_snapshot(
-                    repository.layout.clone(),
-                    &snapshot,
-                    repository.identity.clone(),
-                    runtime,
-                    options,
-                    cancel,
-                )
-                .await?,
-                snapshots: Mutex::new(HashMap::new()),
-                manifests: Mutex::new(HashMap::new()),
-                objects: Mutex::new(HashMap::new()),
-            }),
+            None => {
+                let remote = if snapshot.journal.transactions.is_empty() {
+                    match RemoteGitRepository::open(
+                        repository.store.clone(),
+                        repository.layout.clone(),
+                        repository.identity.clone(),
+                        Arc::clone(&runtime),
+                        options,
+                        cancel,
+                    )
+                    .await
+                    {
+                        Ok(remote) => remote,
+                        Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {
+                            snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+                                &repository.store,
+                                &repository.layout,
+                            )
+                            .await?;
+                            key = ReadViewKey {
+                                generation: snapshot.manifest.generation,
+                                snapshot_digest: snapshot.digest()?,
+                            };
+                            RemoteGitRepository::from_snapshot_with_catalog_tail(
+                                repository.layout.clone(),
+                                &snapshot,
+                                repository.identity.clone(),
+                                runtime,
+                                options,
+                                cancel,
+                            )
+                            .await?
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    RemoteGitRepository::from_snapshot_with_catalog_tail(
+                        repository.layout.clone(),
+                        &snapshot,
+                        repository.identity.clone(),
+                        runtime,
+                        options,
+                        cancel,
+                    )
+                    .await?
+                };
+                Arc::new(ReadView {
+                    key,
+                    remote,
+                    snapshots: Mutex::new(HashMap::new()),
+                    manifests: Mutex::new(HashMap::new()),
+                    objects: Mutex::new(HashMap::new()),
+                })
+            }
         };
         *self.cached.write().await = Some(CachedReadView {
             observed_at,
@@ -352,7 +461,7 @@ async fn wait_for_idle(
     // compact it, instead of racing every acknowledgement with maintenance.
     tokio::select! {
         () = cancel.cancelled() => false,
-        () = tokio::time::sleep(Duration::from_millis(100)) => maintenance.is_idle_at(epoch),
+        () = tokio::time::sleep(FULL_MAINTENANCE_IDLE_DELAY) => maintenance.is_idle_at(epoch),
     }
 }
 
@@ -388,6 +497,18 @@ mod tests {
 
         parent.cancel();
         assert!(second.is_cancelled());
+    }
+
+    #[test]
+    fn sustained_writes_claim_one_periodic_catalog_maintenance() {
+        let maintenance = WriteMaintenance::new();
+
+        assert!(!maintenance.claim_catalog_maintenance(63));
+        assert!(maintenance.claim_catalog_maintenance(65));
+        assert!(!maintenance.claim_catalog_maintenance(128));
+        maintenance.finish_catalog_maintenance();
+        assert!(!maintenance.claim_catalog_maintenance(128));
+        assert!(maintenance.claim_catalog_maintenance(129));
     }
 
     #[test]

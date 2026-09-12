@@ -135,6 +135,23 @@ fn renderer_emits_the_configured_cumulative_histogram() {
 }
 
 #[test]
+fn mutation_batch_metrics_expose_amortization_and_wait() {
+    let (admission, metrics) = setup();
+    let observation = metrics.start_mutation_batch(8, 4096);
+    metrics.record_mutation_queue_wait(0.01);
+    metrics.record_mutation_commits(7);
+    drop(observation);
+
+    let body = metrics.render(&admission);
+    assert!(body.contains("crab_s3_gateway_mutation_batches_total 1"));
+    assert!(body.contains("crab_s3_gateway_mutation_batch_requests_total 8"));
+    assert!(body.contains("crab_s3_gateway_mutation_batch_commits_total 7"));
+    assert!(body.contains("crab_s3_gateway_mutation_batch_input_bytes_total 4096"));
+    assert!(body.contains("crab_s3_gateway_mutation_batch_duration_seconds_count 1"));
+    assert!(body.contains("crab_s3_gateway_mutation_queue_wait_seconds_count 1"));
+}
+
+#[test]
 fn renderer_exports_current_scratch_filesystem_capacity() {
     let scratch = tempfile::tempdir().unwrap();
     let metrics = Metrics::new_with_scratch_path(scratch.path().to_owned()).unwrap();

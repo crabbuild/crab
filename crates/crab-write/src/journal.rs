@@ -106,6 +106,68 @@ pub async fn commit_edits(
     .await
 }
 
+/// Commit one existing ref update against its captured visible journal position.
+///
+/// The caller must hold that ref's lease and must have obtained
+/// `expected_transaction` together with the prepared old object ID. Ref creation,
+/// deletion, and namespace changes require [`commit_edits`] and a full repository
+/// snapshot.
+pub async fn commit_existing_ref_edit(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    expected_transaction: &str,
+    edit: RefJournalEdit,
+    packs: Vec<PackManifestEntry>,
+    options: CommitOptions<'_>,
+) -> Result<RefJournalCommitResult> {
+    let CommitOptions {
+        plan_id,
+        lock_ttl: _,
+        cancel,
+    } = options;
+    check_cancelled(cancel)?;
+    if edit.old_oid.is_none() || edit.new_oid.is_none() {
+        return Err(WriteError::RefChanged {
+            ref_name: edit.ref_name.clone(),
+            path: router.repo_prefix().to_owned(),
+        });
+    }
+    let observed = ref_journal::read_ref_head(store, router, &edit.ref_name).await?;
+    if observed.visible_transaction.as_deref() != Some(expected_transaction) {
+        return Err(WriteError::RefChanged {
+            ref_name: edit.ref_name.clone(),
+            path: router
+                .ref_journal_head_path(&ref_journal::ref_name_hash(&edit.ref_name))
+                .to_string(),
+        });
+    }
+    let parent = ref_journal::read_transaction(store, router, expected_transaction).await?;
+    let current_oid = parent
+        .edits
+        .iter()
+        .find(|parent_edit| parent_edit.ref_name == edit.ref_name)
+        .and_then(|parent_edit| parent_edit.new_oid.as_ref());
+    if current_oid != edit.old_oid.as_ref() {
+        return Err(WriteError::RefChanged {
+            ref_name: edit.ref_name,
+            path: router
+                .ref_journal_transaction_path(expected_transaction)
+                .to_string(),
+        });
+    }
+    let transaction = RefJournalTransaction::new(
+        std::collections::BTreeMap::from([(
+            edit.ref_name.clone(),
+            Some(expected_transaction.to_owned()),
+        )]),
+        vec![edit],
+        None,
+        packs,
+        vec![],
+    )?;
+    commit_transaction_with_heads(store, router, transaction, vec![observed], plan_id, cancel).await
+}
+
 fn check_old_values(
     router: &StoreLayout<Store>,
     snapshot: &RepositorySnapshot,
@@ -165,6 +227,17 @@ async fn commit_transaction(
             .insert(edit.ref_name.clone(), observed.visible_transaction.clone());
         expected_heads.push(observed);
     }
+    commit_transaction_with_heads(store, router, transaction, expected_heads, plan_id, cancel).await
+}
+
+async fn commit_transaction_with_heads(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    transaction: RefJournalTransaction,
+    expected_heads: Vec<ref_journal::RefJournalHeadSnapshot>,
+    plan_id: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<RefJournalCommitResult> {
     Ok(match plan_id {
         Some(plan_id) => {
             ref_journal::commit_ref_transaction_for_plan(

@@ -761,18 +761,68 @@ recheck object conditions on the new destination view. Never resolve contention
 with a blind forced branch update or replacement of an entire stale tree.
 
 The implemented mutation owner admits same-ref requests through a bounded FIFO
-queue. It resolves only the target's ancestor trees, writes one path-local
-attribute delta, prepares the pack, and uploads the pack sidecars, visibility
-evidence, and attribute delta concurrently before acquiring the ref lease. Under
-the lease it captures a new repository snapshot, revalidates the parent, and
-either publishes the journal edit or releases and reprepares. Journal success is
-the acknowledgement point; catalog compaction and commit-graph maintenance run
-asynchronously because the repository read view consumes committed journal
-transactions directly. A new foreground write cancels an in-flight maintenance
-pass so derived catalog work releases its fences and yields to S3 mutation
-traffic. The gateway schedules maintenance again after the local write burst is
-idle and prevents overlapping compaction waves from advancing ahead of visibility
-proof publication.
+queue. After a 10 ms collection window it drains at most 32 compatible requests
+or 32 MiB of Git mutation payload; a larger request proceeds alone and multipart
+completion is always isolated with its durable publication plan. The owner loads
+one immutable starting view, evaluates conditions sequentially against an
+in-memory evolving tree and attribute manifest, and builds one commit per
+successful state change. It deduplicates the generated objects into one pack,
+spools those trusted objects once before producing the canonical pack and
+verified sidecars, and uploads them with every commit-bound attribute delta and
+one visibility proof, then acquires the ref lease. Under the lease it captures a
+bounded ref-journal head and parent transaction for warm existing-ref updates;
+cold creation and namespace-changing paths still capture a coherent repository
+snapshot. It revalidates the original parent and either advances the ref directly
+to the final commit with one journal transaction or releases and rebuilds the
+bounded batch. Journal success is the acknowledgement point;
+catalog compaction and commit-graph maintenance run asynchronously because the
+repository read view consumes committed journal transactions directly. The
+object-store ref journal, immutable active marker, and lease are authoritative;
+SlateDB remains a rebuildable derived index and is not part of admission or
+acknowledgement. At most 256 warm branch queues may retain a materialized
+Git directory state and attribute manifest between batches under a shared
+128 MiB process budget. A warm batch prepares optimistically, then revalidates
+its cached parent under the object-store ref lease before publication; a
+competing writer forces a cold rebuild. Idle states remain reusable until memory
+pressure requires eviction; capacity pressure or restart falls back to immutable
+repository objects. An unborn branch bypasses the object catalog because it has
+no starting Git tree, while publication still rechecks absence under its ref
+lease. Cold reconstruction prepares a full, commit-identified attribute
+checkpoint; warm state does the same after each 64 publication batches. After
+validating the parent under the ref lease, publication commits the journal and
+then attempts to replace one bounded checkpoint slot for that branch. A crash or
+checkpoint-write failure leaves a missing or stale slot, which readers ignore
+while replaying immutable deltas. Only the journal winner writes the checkpoint. The final
+version-2 delta carries optional checkpoint and slot fields, so existing deltas
+require neither migration nor a schema-version bump. A manifest above the existing
+32 MiB bound keeps its authoritative delta chain and retries checkpointing after
+another 64 publication batches instead of failing the write. Drained batches run
+under gateway ownership so disconnecting the caller
+that acquired local admission cannot abandon peer requests. A new foreground
+write cancels an in-flight maintenance pass so
+derived catalog work releases its fences and yields to S3 mutation traffic. The
+gateway schedules maintenance again after the local write burst is idle and
+prevents overlapping maintenance waves from advancing ahead of visibility proof
+publication. Sustained traffic additionally claims one catalog-maintenance pass
+every 64 local publication epochs. The elected worker compacts durable journal
+entries and advances exact-object catalog coverage under the generation-owner and
+GC-writer fences.
+
+When an attribute delta ancestry proves that a branch began empty and every
+commit came from the gateway, its checkpoint is also a complete materialized S3
+namespace index. `ListObjects` binds that index to the current journal-projected
+ref and pages the sorted checkpoint plus the per-commit deltas from at most 63
+newer publication batches under normal checkpoint publication, without opening
+SlateDB or walking Git trees. A missing delta, legacy checkpoint, or Git-authored
+ancestor removes the coverage proof and routes the request through canonical Git
+traversal. For that fallback, each read binds the newest catalog whose immutable
+pack inventory is a proven subset of its snapshot, then searches only the
+remaining pack tail. This remains valid while manifest compaction and catalog
+publication briefly differ and keeps common object lookup bounded without waiting
+for an idle window; a complete pack scan remains the fallback when no catalog
+inventory can be proven as a subset or the derived catalog cannot open.
+Commit-graph maintenance still requires a
+five-second quiet window.
 
 ### 4.2 PUT and DELETE execution rules
 
@@ -825,11 +875,11 @@ processing entries. Preserve per-entry result association, including duplicate
 keys and quiet-mode behavior specified by the protocol. Authorize each target;
 an authorized sibling must not grant access to another key/ref.
 
-Use bounded canonical per-key mutations initially. Each admitted deletion owns
-its durable outcome; aggregate only proven successes/errors into the XML result.
-A later optimization may batch compatible authorized edits, but must preserve
-the same per-key contract and map publication rejection accurately. Do not promise
-cross-ref atomicity. If the response is lost after partial progress, a client
+Use bounded canonical per-key mutations. Each admitted deletion owns its durable
+outcome; aggregate only proven successes/errors into the XML result. The
+same-branch mutation owner may group compatible edits into one publication while
+retaining one FIFO commit and result per successful state change. Do not promise
+cross-ref or whole-request atomicity. If the response is lost after partial progress, a client
 retry re-evaluates missing-key semantics; it does not reverse prior deletions.
 Unknown per-key publication outcomes must not be labeled definite rejection.
 [S3 multi-delete contract](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html)

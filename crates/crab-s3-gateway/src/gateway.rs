@@ -32,15 +32,16 @@ use crate::{
 const MAX_BUCKETS_PER_PAGE: usize = 10_000;
 const READINESS_CONCURRENCY: usize = 4;
 
+#[derive(Clone)]
 pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
     pub(crate) identity: RepositoryIdentity,
-    pub(crate) read_views: crate::repository::ReadViewCache,
+    pub(crate) read_views: Arc<crate::repository::ReadViewCache>,
     pub(crate) maintenance: Arc<crate::repository::WriteMaintenance>,
-    hydrator: crab_read::ShardHydrator,
-    lfs: crab_lfs::LfsObjectStore,
+    hydrator: Arc<crab_read::ShardHydrator>,
+    lfs: Arc<crab_lfs::LfsObjectStore>,
 }
 
 impl Repository {
@@ -85,14 +86,19 @@ impl Repository {
             layout.global_prefix().to_owned(),
         );
         Ok(Self {
-            hydrator: crab_read::ReadRuntimeBuilder::new(caching, read_layout, 16).build()?,
-            lfs: crab_lfs::LfsObjectStore::new(store.clone(), layout.repo_prefix()),
+            hydrator: Arc::new(
+                crab_read::ReadRuntimeBuilder::new(caching, read_layout, 16).build()?,
+            ),
+            lfs: Arc::new(crab_lfs::LfsObjectStore::new(
+                store.clone(),
+                layout.repo_prefix(),
+            )),
             identity: RepositoryIdentity::new(
                 format!("{}:{}", provider_name(config.provider), config.bucket),
                 config.prefix.clone(),
                 1,
             )?,
-            read_views: crate::repository::ReadViewCache::new(),
+            read_views: Arc::new(crate::repository::ReadViewCache::new()),
             maintenance: Arc::new(crate::repository::WriteMaintenance::new()),
             config,
             store,
@@ -813,10 +819,17 @@ impl Gateway {
             if blob.metadata.kind != EntryKind::Blob {
                 return Err(s3_error!(InvalidObjectState));
             }
-            let manifest = repo
-                .attributes(repository, snapshot.commit_oid())
-                .await
-                .map_err(gateway_error)?;
+            let manifest = match self.mutations.manifest(
+                &repository.config.name,
+                &address.reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => manifest,
+                None => repo
+                    .attributes(repository, snapshot.commit_oid())
+                    .await
+                    .map_err(gateway_error)?,
+            };
             let path = std::str::from_utf8(address.path.as_bytes())
                 .map_err(|_| s3_error!(InvalidObjectState))?;
             let attributes = manifest.object(path, blob.metadata.oid).cloned();
@@ -869,10 +882,17 @@ impl Gateway {
             }
             let path = std::str::from_utf8(address.path.as_bytes())
                 .map_err(|_| s3_error!(InvalidObjectState))?;
-            let attributes = view
-                .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
-                .await
-                .map_err(gateway_error)?;
+            let attributes = match self.mutations.manifest(
+                &repository.config.name,
+                &address.reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => manifest.object(path, entry.oid).cloned(),
+                None => view
+                    .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                    .await
+                    .map_err(gateway_error)?,
+            };
             if let Some(attributes) = attributes {
                 return Ok(ReadObjectMetadata {
                     blob_oid: entry.oid,
@@ -934,9 +954,17 @@ impl Gateway {
             }
             let path = std::str::from_utf8(address.path.as_bytes())
                 .map_err(|_| s3_error!(InvalidObjectState))?;
-            view.object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
-                .await
-                .map_err(gateway_error)
+            match self.mutations.manifest(
+                &repository.config.name,
+                &address.reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => Ok(manifest.object(path, entry.oid).cloned()),
+                None => view
+                    .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                    .await
+                    .map_err(gateway_error),
+            }
         }
         .await;
         finish(operation, result).await
@@ -2875,11 +2903,52 @@ impl S3 for Gateway {
         }
         let max_keys = max_keys.min(1000);
         let limit = usize::try_from(max_keys).map_err(|_| s3_error!(InvalidArgument))?;
-        let repo = self.open(repository).await?;
-        if repo.remote().refs().find(&reference).is_none() {
+        if limit == 0 {
             return empty_list_objects_response(&req, url_encode);
         }
-        if limit == 0 {
+        let encoded_ref = prefix
+            .split_once('/')
+            .map(|(value, _)| value)
+            .unwrap_or_default();
+        let ref_prefix = format!("{encoded_ref}/");
+        let after = req
+            .input
+            .continuation_token
+            .as_deref()
+            .or(req.input.start_after.as_deref());
+        let after = match after {
+            Some(after) => match after.strip_prefix(&ref_prefix) {
+                Some(path) => Some(path),
+                None if after < ref_prefix.as_str() => None,
+                None => return empty_list_objects_response(&req, url_encode),
+            },
+            None => None,
+        };
+        if let Some(page) = self
+            .complete_attribute_listing(
+                repository,
+                &reference,
+                &path_prefix,
+                after,
+                req.input
+                    .delimiter
+                    .as_deref()
+                    .filter(|delimiter| !delimiter.is_empty())
+                    .map(|_| b'/'),
+                limit,
+            )
+            .await?
+        {
+            return complete_attribute_listing_response(
+                &req,
+                encoded_ref,
+                page,
+                max_keys,
+                url_encode,
+            );
+        }
+        let repo = self.open(repository).await?;
+        if repo.remote().refs().find(&reference).is_none() {
             return empty_list_objects_response(&req, url_encode);
         }
         let operation = repo
@@ -2894,28 +2963,10 @@ impl S3 for Gateway {
                 .map_err(gateway_error)?;
             let commit = snapshot.commit(&operation).await.map_err(remote_error)?;
             let commit_modified = timestamp(commit.committer.seconds)?;
-            let encoded_ref = prefix
-                .split_once('/')
-                .map(|(value, _)| value)
-                .unwrap_or_default();
-            let ref_prefix = format!("{encoded_ref}/");
-            let after = req
-                .input
-                .continuation_token
-                .as_deref()
-                .or(req.input.start_after.as_deref());
-            let after = match after {
-                Some(after) => match after.strip_prefix(&ref_prefix) {
-                    Some(path) => Some(Bytes::copy_from_slice(path.as_bytes())),
-                    None if after < ref_prefix.as_str() => None,
-                    None => return empty_list_objects_response(&req, url_encode),
-                },
-                None => None,
-            };
             let listing = list_visible_tree_blobs(
                 &snapshot,
                 Bytes::copy_from_slice(path_prefix.as_bytes()),
-                after,
+                after.map(|path| Bytes::copy_from_slice(path.as_bytes())),
                 req.input
                     .delimiter
                     .as_deref()
@@ -2946,10 +2997,20 @@ impl S3 for Gateway {
                     crab_remote_git::TreeListingItem::CommonPrefix(_) => None,
                 })
                 .collect::<Vec<_>>();
-            let page_attributes =
-                crate::attributes::load_objects(repository, snapshot.commit_oid(), &page_objects)
-                    .await
-                    .map_err(gateway_error)?;
+            let page_attributes = match self.mutations.manifest(
+                &repository.config.name,
+                &reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => manifest.listing(&page_objects),
+                None => crate::attributes::load_objects(
+                    repository,
+                    snapshot.commit_oid(),
+                    &page_objects,
+                )
+                .await
+                .map_err(gateway_error)?,
+            };
             let mut contents = Vec::new();
             let mut common_prefixes = Vec::new();
             let mut next = None;
@@ -3021,6 +3082,66 @@ impl S3 for Gateway {
         .await;
         finish(operation, result).await
     }
+}
+
+fn complete_attribute_listing_response(
+    req: &S3Request<ListObjectsV2Input>,
+    encoded_ref: &str,
+    page: crate::attributes::ManifestListingPage,
+    max_keys: i32,
+    url_encode: bool,
+) -> S3Result<S3Response<ListObjectsV2Output>> {
+    let mut contents = Vec::new();
+    let mut common_prefixes = Vec::new();
+    let mut next = None;
+    for item in page.items {
+        match item {
+            crate::attributes::ManifestListingItem::Object { path, attributes } => {
+                let key = format!("{encoded_ref}/{path}");
+                next = Some(key.clone());
+                contents.push(Object {
+                    key: Some(key),
+                    e_tag: Some(ETag::Strong(attributes.etag)),
+                    last_modified: Some(timestamp(
+                        i64::try_from(attributes.modified_seconds)
+                            .map_err(|_| s3_error!(InternalError))?,
+                    )?),
+                    size: i64::try_from(attributes.size).ok(),
+                    storage_class: Some(ObjectStorageClass::from_static("STANDARD")),
+                    ..Default::default()
+                });
+            }
+            crate::attributes::ManifestListingItem::CommonPrefix(path) => {
+                let key = format!("{encoded_ref}/{path}");
+                next = Some(key.clone());
+                common_prefixes.push(CommonPrefix { prefix: Some(key) });
+            }
+        }
+    }
+    if url_encode {
+        for object in &mut contents {
+            object.key = encode_list_option(object.key.take(), true);
+        }
+        for group in &mut common_prefixes {
+            group.prefix = encode_list_option(group.prefix.take(), true);
+        }
+    }
+    let key_count = contents.len().saturating_add(common_prefixes.len());
+    Ok(S3Response::new(ListObjectsV2Output {
+        name: Some(req.input.bucket.clone()),
+        prefix: encode_list_option(req.input.prefix.clone(), url_encode),
+        max_keys: Some(max_keys),
+        key_count: Some(i32::try_from(key_count).map_err(|_| s3_error!(InternalError))?),
+        continuation_token: req.input.continuation_token.clone(),
+        next_continuation_token: page.has_more.then_some(next).flatten(),
+        is_truncated: Some(page.has_more),
+        contents: (!contents.is_empty()).then_some(contents),
+        common_prefixes: (!common_prefixes.is_empty()).then_some(common_prefixes),
+        delimiter: encode_list_option(req.input.delimiter.clone(), url_encode),
+        encoding_type: req.input.encoding_type.clone(),
+        start_after: encode_list_option(req.input.start_after.clone(), url_encode),
+        ..Default::default()
+    }))
 }
 
 async fn list_visible_tree_blobs(
@@ -4023,6 +4144,37 @@ fn stored_to_pending(
 }
 
 impl Gateway {
+    async fn complete_attribute_listing(
+        &self,
+        repository: &Repository,
+        reference: &str,
+        prefix: &str,
+        after: Option<&str>,
+        delimiter: Option<u8>,
+        limit: usize,
+    ) -> S3Result<Option<crate::attributes::ManifestListingPage>> {
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await
+        .map_err(|error| gateway_error(error.into()))?;
+        let Some(tip) = snapshot.journal.refs.get(reference) else {
+            return Ok(None);
+        };
+        let tip = gix_hash::ObjectId::from_hex(tip.as_bytes())
+            .map_err(|_| s3_error!(InvalidObjectState))?;
+        let Some(manifest) = self
+            .mutations
+            .complete_manifest(repository, reference, tip)
+            .await
+            .map_err(gateway_error)?
+        else {
+            return Ok(None);
+        };
+        Ok(manifest.complete_listing(prefix, after, delimiter, limit))
+    }
+
     async fn list_refs(
         &self,
         req: &S3Request<ListObjectsV2Input>,
@@ -4256,6 +4408,7 @@ fn object_entry_error(kind: EntryKind) -> s3s::S3Error {
 
 fn mutation_error(error: mutation::Error) -> s3s::S3Error {
     match error {
+        mutation::Error::Batch(error) => shared_mutation_error(error),
         mutation::Error::NotDirectory
         | mutation::Error::IsDirectory
         | mutation::Error::InvalidAttributes => {
@@ -4288,6 +4441,35 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
         ),
         error => {
             tracing::error!(error = ?error, "S3 repository mutation failed");
+            s3_error!(InternalError)
+        }
+    }
+}
+
+fn shared_mutation_error(error: Arc<mutation::Error>) -> s3s::S3Error {
+    match error.as_ref() {
+        mutation::Error::Cancelled
+        | mutation::Error::Publication(crab_remote::publication::Error::Cancelled) => {
+            s3_error!(RequestTimeout)
+        }
+        mutation::Error::Overloaded
+        | mutation::Error::AdmissionTimeout
+        | mutation::Error::Capacity(_) => slow_down_error(),
+        mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => s3_error!(
+            OperationAborted,
+            "A conflicting branch write won; retry the request"
+        ),
+        mutation::Error::Coordination(crab_coordination::CoordinationError::PushLockHeld {
+            ..
+        })
+        | mutation::Error::Publication(crab_remote::publication::Error::Coordination(
+            crab_coordination::CoordinationError::PushLockHeld { .. },
+        )) => s3_error!(
+            OperationAborted,
+            "The write outcome is being reconciled; retry the request"
+        ),
+        _ => {
+            tracing::error!(error = ?error, "S3 repository mutation batch failed");
             s3_error!(InternalError)
         }
     }
@@ -4703,8 +4885,8 @@ mod tests {
             auth,
             region: Arc::from("us-east-1"),
             admission: Admission::new(8, cancellation.clone(), metrics.clone()),
-            metrics,
-            local_cache,
+            metrics: metrics.clone(),
+            local_cache: Arc::clone(&local_cache),
             cancellation,
         };
         let repository = &gateway.repositories["repo"];
@@ -4756,8 +4938,56 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let lfs_pointer = crab_git::LfsPointer {
+            oid: [7; 32],
+            size: 10 * 1024 * 1024,
+            extensions: Vec::new(),
+        }
+        .serialize();
+        gateway
+            .mutations
+            .apply(
+                repository,
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(b"lfs/model.bin".to_vec()).unwrap(),
+                mutation::Change::Put {
+                    bytes: Bytes::from(lfs_pointer),
+                    track_lfs: true,
+                    attributes: Box::new(crate::attributes::PutAttributes {
+                        logical_size: Some(10 * 1024 * 1024),
+                        ..Default::default()
+                    }),
+                    condition: mutation::PutCondition::None,
+                },
+                "user",
+                &gateway.cancellation,
+            )
+            .await
+            .unwrap();
 
-        let first = gateway
+        // A fresh gateway has no branch actor or remote-Git caches. The
+        // durable attribute chain must still prove and serve the complete S3
+        // namespace without opening the repository-wide object catalog.
+        let listing_cancellation = CancellationToken::new();
+        let listing_runtime = Arc::new(RemoteGitRuntime::default());
+        let listing_gateway = Gateway {
+            repositories: Arc::clone(&gateway.repositories),
+            mutations: Arc::new(mutation::Coordinator::new(
+                Arc::clone(&listing_runtime),
+                options,
+                metrics.clone(),
+            )),
+            runtime: listing_runtime,
+            options,
+            auth: gateway.auth.clone(),
+            region: Arc::clone(&gateway.region),
+            admission: Admission::new(8, listing_cancellation.clone(), metrics.clone()),
+            metrics,
+            local_cache: Arc::clone(&local_cache),
+            cancellation: listing_cancellation,
+        };
+
+        let first = listing_gateway
             .list_objects_v2(list_request(ListObjectsV2Input {
                 bucket: "repo".to_owned(),
                 prefix: Some("main/prefix/".to_owned()),
@@ -4796,7 +5026,7 @@ mod tests {
                 Some(true),
             )
         );
-        let second = gateway
+        let second = listing_gateway
             .list_objects_v2(list_request(ListObjectsV2Input {
                 bucket: "repo".to_owned(),
                 prefix: Some("main/prefix/".to_owned()),
@@ -4828,7 +5058,7 @@ mod tests {
                 Some("main/prefix/b/"),
             )
         );
-        let last = gateway
+        let last = listing_gateway
             .list_objects_v2(list_request(ListObjectsV2Input {
                 bucket: "repo".to_owned(),
                 prefix: Some("main/prefix/".to_owned()),
@@ -4850,6 +5080,24 @@ mod tests {
             ),
             (Some("main/prefix/c".to_owned()), Some(1), Some(false), None)
         );
+        let lfs = listing_gateway
+            .list_objects_v2(list_request(ListObjectsV2Input {
+                bucket: "repo".to_owned(),
+                prefix: Some("main/lfs/".to_owned()),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(
+            lfs.contents
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|object| object.key)
+                .collect::<Vec<_>>(),
+            ["main/lfs/.gitattributes", "main/lfs/model.bin"]
+        );
+        listing_gateway.shutdown().await;
         gateway.shutdown().await;
     }
 

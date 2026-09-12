@@ -154,9 +154,50 @@ The first key component selects a ref:
 | `<40-hex-commit>/path/file` | Exact Git commit | No |
 
 An empty listing prefix returns the authorized branch prefixes. Reads pin one
-commit for a consistent view. Each successful PUT, COPY, single DELETE, or
-completed multipart upload publishes one commit. Multi-delete reports and
-publishes its entries individually.
+commit for a consistent view. Each successful state-changing PUT, COPY, single
+DELETE, or completed multipart upload owns one commit. Compatible same-branch
+requests wait up to 10 ms for a bounded batch of at most 32 requests or 32 MiB
+of Git payload. Their conditions are evaluated in FIFO order, their commits form
+one parent chain, and their Git objects share one pack and ref-journal
+publication. Trusted generated objects enter one bounded decoded spool before
+canonical pack and sidecar preparation; they are not compressed and reinflated
+as synthetic wire input. A single larger request runs alone. Multipart completion also runs
+alone so its durable exactly-once receipt cannot be coupled to another request.
+Once drained, a gateway-owned worker retains the batch even if an originating
+HTTP connection closes; one disconnected client cannot cancel peer mutations.
+Multi-delete retains one result and commit per successful entry; grouping never
+makes the whole request atomic. A process-local, 128 MiB warm-state budget may
+retain the exact-tip Git directories and S3 attribute manifest between batches.
+The cached parent is revalidated while holding the object-store ref lease before
+publishing a commit or returning a prepared no-op or precondition result. It is
+discarded on a tip mismatch, restart, or memory-pressure
+eviction; idle branch state remains reusable below the shared watermark. Object
+storage remains the authority and a cold request reconstructs the same state from
+immutable repository objects. Unborn branches skip catalog access and recheck
+absence under their ref lease before publication. The first cold
+publication and every 64 subsequent publication batches write a commit-identified
+attribute checkpoint into one bounded object-store slot per branch while holding
+the same ref lease. The final commit delta records the slot; a missing or
+superseded slot falls back to the immutable delta chain. Checkpoint markers remain
+optional in the existing version-2 delta format. If the full manifest exceeds the
+existing 32 MiB manifest bound, publication keeps the delta chain authoritative
+and skips the checkpoint, so the optimization cannot reject an otherwise valid
+mutation. When the delta ancestry proves that the branch began empty and every
+commit came from the gateway, the checkpoint is also a complete sorted S3
+namespace index. `ListObjects` binds it to the current durable ref and pages it
+with only the newer per-commit deltas since the last successful checkpoint,
+without opening SlateDB or walking Git trees. A missing delta, legacy checkpoint,
+or Git-authored ancestor keeps canonical Git tree listing, so the accelerator
+cannot hide Git-written objects. SlateDB is not required by this write path; its
+object catalog remains
+a rebuildable derived index. During sustained writes, one background worker every
+64 local publication epochs folds the active ref journal into the object-store
+manifest and advances catalog coverage under the generation-owner and GC-writer
+fences. Read views use the newest catalog whose immutable pack inventory is a
+proven subset of their snapshot, then inspect only the remaining pack tail. This
+also covers the interval between manifest compaction and matching catalog
+publication without scanning every historical pack. Full commit-graph
+maintenance still waits for a five-second quiet window.
 
 Keys must be valid UTF-8 paths that Git trees can represent without loss. The
 gateway rejects ambiguous or unsafe components such as empty segments, `.`,
@@ -296,7 +337,7 @@ private.
 | --- | --- |
 | `GET /livez` or `--healthcheck` | Process can accept requests |
 | `GET /readyz` or `--readiness-check` | Every configured repository has a fresh, safe read view |
-| `GET /metrics` | Prometheus request, admission, multipart, backend, cache, and scratch metrics |
+| `GET /metrics` | Prometheus request, admission, mutation-batch, multipart, backend, cache, and scratch metrics |
 
 Readiness returns `503 Service Unavailable` with `Retry-After: 5` when any
 repository cannot be served safely. Metric labels never contain repository
@@ -308,6 +349,16 @@ pool waits for bounded capacity, then returns S3 `SlowDown` with
 clients should use exponential backoff with jitter. Scratch capacity is also
 reserved before work begins so overload fails predictably instead of filling
 the filesystem.
+
+For write-efficiency diagnosis, compare
+`crab_s3_gateway_mutation_batch_requests_total` and
+`crab_s3_gateway_mutation_batch_commits_total` with
+`crab_s3_gateway_mutation_batches_total`. The first ratio is requests drained
+per local execution and the second is commits amortized over each durable pack.
+`crab_s3_gateway_mutation_queue_wait_seconds` and
+`crab_s3_gateway_mutation_batch_duration_seconds` separate collection/admission
+delay from object-store publication latency. These metrics use no repository,
+ref, key, principal, or credential labels.
 
 Operational alerts, capacity guidance, credential rotation, maintenance,
 backup/restore, upgrades, and rollback are documented in the

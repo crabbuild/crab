@@ -1,21 +1,22 @@
 use std::{
-    collections::HashMap,
-    io::Write as _,
+    collections::{HashMap, VecDeque},
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
 use crab_coordination::{GcFenceHeartbeat, GcFenceLease, PushLock};
 use crab_metadata::{git_visibility, manifests::PackManifestEntry, ref_journal::RefJournalEdit};
-use crab_remote_git::{EntryKind, EntryMode, OperationKind, RemoteGitRepository, Revision};
+#[cfg(test)]
+use crab_remote_git::RemoteGitRepository;
+use crab_remote_git::{EntryMode, OperationKind};
 use gix_hash::ObjectId;
-use gix_object::{Kind, WriteTo as _, bstr::BString, tree};
+use gix_object::{Kind, bstr::BString, tree};
 use md5::Digest as _;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -25,10 +26,18 @@ use crate::{
 };
 
 const LOCK_TTL: Duration = Duration::from_secs(300);
+const REF_LOCK_TTL: Duration = Duration::from_secs(30);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
 const PACK_SCRATCH_BASE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_QUEUED_WRITES_PER_REF: usize = 64;
+const MAX_TRACKED_REFS: usize = 256;
+const MAX_WARM_BRANCH_STATE_BYTES: usize = 128 * 1024 * 1024;
+const WARM_BRANCH_STATE_EVICTION_BYTES: usize = MAX_WARM_BRANCH_STATE_BYTES * 3 / 4;
+const ATTRIBUTE_CHECKPOINT_BATCHES: usize = 64;
 const WRITE_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
+const BATCH_COLLECTION_DELAY: Duration = Duration::from_millis(10);
+const MAX_MUTATIONS_PER_BATCH: usize = 32;
+const MAX_MUTATION_BATCH_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REPREPARE_ATTEMPTS: usize = 8;
 const TREE_PAGE_SIZE: usize = 4_096;
 
@@ -52,6 +61,10 @@ pub(crate) enum Error {
     AdmissionTimeout,
     #[error("repository write admission state is unavailable")]
     AdmissionState,
+    #[error("warm branch state does not cover the requested Git path")]
+    WarmStateMiss,
+    #[error("batched repository mutation failed")]
+    Batch(#[source] Arc<Error>),
     #[error("system clock is before the Unix epoch")]
     Clock(#[from] std::time::SystemTimeError),
     #[error("repository read failed")]
@@ -169,39 +182,199 @@ impl Coordinator {
         principal: &str,
         cancel: &CancellationToken,
     ) -> Result<Outcome> {
-        repository.maintenance.begin();
-        let result = async {
-            let _admitted = self
-                .admission
-                .acquire(&repository.config.name, branch, cancel)
-                .await?;
-            apply_admitted(
-                repository,
-                Arc::clone(&self.runtime),
-                self.options,
+        async {
+            let mutation = Mutation {
+                path: path.clone(),
                 change,
+                principal: principal.to_owned(),
+            };
+            let mut queued = self
+                .admission
+                .enqueue(&repository.config.name, branch, mutation)?;
+            let deadline = tokio::time::Instant::now() + WRITE_QUEUE_TIMEOUT;
+            loop {
+                let permit = tokio::select! {
+                    result = &mut queued.result => {
+                        break result.map_err(|_| Error::AdmissionState)?;
+                    }
+                    () = cancel.cancelled() => break Err(Error::Cancelled),
+                    () = tokio::time::sleep_until(deadline) => break Err(Error::AdmissionTimeout),
+                    permit = Arc::clone(&queued.queue.gate).acquire_owned() => {
+                        permit.map_err(|_| Error::AdmissionState)?
+                    }
+                };
+                match queued.result.try_recv() {
+                    Ok(result) => break result,
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        break Err(Error::AdmissionState);
+                    }
+                    Err(oneshot::error::TryRecvError::Empty) => {}
+                }
+                tokio::select! {
+                    () = cancel.cancelled() => break Err(Error::Cancelled),
+                    () = tokio::time::sleep_until(deadline) => break Err(Error::AdmissionTimeout),
+                    () = tokio::time::sleep(BATCH_COLLECTION_DELAY) => {}
+                }
+                let batch = queued.queue.take_batch()?;
+                if batch.is_empty() {
+                    drop(permit);
+                    continue;
+                }
+                let repository = Repository::clone(repository);
+                repository.maintenance.begin();
+                let runtime = Arc::clone(&self.runtime);
+                let options = self.options;
+                let metrics = self.metrics.clone();
+                let branch = branch.to_owned();
+                let queue = Arc::clone(&queued.queue);
+                let worker_cancel = cancel.clone();
+                // A drained batch owns every accepted mutation. Detaching it
+                // prevents one disconnected HTTP caller from cancelling peers.
+                tokio::spawn(async move {
+                    Self::apply_batch(
+                        &repository,
+                        runtime,
+                        options,
+                        &metrics,
+                        &branch,
+                        &queue,
+                        batch,
+                        &worker_cancel,
+                    )
+                    .await;
+                    drop(permit);
+                });
+            }
+        }
+        .await
+    }
+
+    pub(crate) fn manifest(
+        &self,
+        repository: &str,
+        branch: &str,
+        tip: ObjectId,
+    ) -> Option<Arc<attributes::Manifest>> {
+        self.admission.manifest(repository, branch, Some(tip))
+    }
+
+    pub(crate) async fn complete_manifest(
+        &self,
+        repository: &Repository,
+        branch: &str,
+        tip: ObjectId,
+    ) -> crate::Result<Option<Arc<attributes::Manifest>>> {
+        if let Some(manifest) = self.manifest(&repository.config.name, branch, tip)
+            && manifest.is_complete()
+        {
+            return Ok(Some(manifest));
+        }
+        if let Some(manifest) =
+            self.admission
+                .complete_manifest(&repository.config.name, branch, tip)
+        {
+            return Ok(Some(manifest));
+        }
+        let manifest = attributes::load(repository, tip).await?;
+        if !manifest.is_complete() {
+            return Ok(None);
+        }
+        let manifest = Arc::new(manifest);
+        self.admission.store_complete_manifest(
+            &repository.config.name,
+            branch,
+            tip,
+            Arc::clone(&manifest),
+        );
+        Ok(Some(manifest))
+    }
+
+    async fn apply_batch(
+        repository: &Repository,
+        runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+        options: crab_remote_git::RepositoryOptions,
+        metrics: &Metrics,
+        branch: &str,
+        queue: &RefQueue,
+        batch: Vec<PendingMutation>,
+        cancel: &CancellationToken,
+    ) {
+        let input_bytes = batch.iter().fold(0usize, |total, pending| {
+            total.saturating_add(pending.mutation.estimated_bytes())
+        });
+        for pending in &batch {
+            metrics.record_mutation_queue_wait(pending.queued_at.elapsed().as_secs_f64());
+        }
+        let _observation = metrics.start_mutation_batch(batch.len(), input_bytes);
+        let mutations = batch
+            .iter()
+            .map(|pending| pending.mutation.clone())
+            .collect::<Vec<_>>();
+        let planned = mutations.len() == 1 && mutations[0].is_planned();
+        let results = if planned {
+            match mutations.into_iter().next() {
+                Some(mutation) => Ok(vec![
+                    apply_admitted(
+                        repository,
+                        Arc::clone(&runtime),
+                        options,
+                        mutation,
+                        ApplyRequest {
+                            branch,
+                            plan_id: None,
+                            metrics,
+                            state: Some(&queue.state),
+                        },
+                        cancel,
+                    )
+                    .await,
+                ]),
+                None => Err(std::io::Error::other("planned mutation batch is empty").into()),
+            }
+        } else {
+            apply_batch_admitted(
+                repository,
+                Arc::clone(&runtime),
+                options,
+                mutations,
                 ApplyRequest {
                     branch,
-                    path,
-                    principal,
                     plan_id: None,
-                    metrics: &self.metrics,
+                    metrics,
+                    state: Some(&queue.state),
                 },
                 cancel,
             )
             .await
+        };
+        match results {
+            Ok(results) => {
+                for (pending, result) in batch.into_iter().zip(results) {
+                    let _ = pending.result.send(result);
+                }
+            }
+            Err(error) => {
+                let error = Arc::new(error);
+                for pending in batch {
+                    let _ = pending.result.send(Err(Error::Batch(Arc::clone(&error))));
+                }
+            }
         }
-        .await;
-        if let Some((epoch, maintenance_cancel)) = repository.maintenance.finish(cancel) {
+        let idle_maintenance = repository.maintenance.finish(cancel);
+        crate::repository::schedule_catalog_maintenance(
+            repository,
+            cancel,
+            repository.maintenance.current_epoch(),
+        );
+        if let Some((epoch, maintenance_cancel)) = idle_maintenance {
             crate::repository::schedule_readability(
                 repository,
-                Arc::clone(&self.runtime),
-                self.options,
+                runtime,
+                options,
                 maintenance_cancel,
                 epoch,
             );
         }
-        result
     }
 }
 
@@ -223,45 +396,368 @@ async fn apply(
 
 #[derive(Default)]
 struct WriteAdmission {
-    refs: std::sync::Mutex<HashMap<String, Weak<RefQueue>>>,
+    refs: std::sync::Mutex<HashMap<String, Arc<RefQueue>>>,
+    complete_manifests: std::sync::Mutex<HashMap<String, CachedCompleteManifest>>,
+    warm_bytes: Arc<AtomicUsize>,
+}
+
+struct CachedCompleteManifest {
+    tip: ObjectId,
+    manifest: Arc<attributes::Manifest>,
+    bytes: usize,
 }
 
 struct RefQueue {
     gate: Arc<Semaphore>,
     admitted: AtomicUsize,
+    pending: std::sync::Mutex<VecDeque<PendingMutation>>,
+    state: BranchState,
 }
 
-struct WritePermit {
+struct CachedBranchState {
+    tip: Option<ObjectId>,
+    transaction: Option<String>,
+    manifest: Arc<attributes::Manifest>,
+    tree: WarmTree,
+    bytes: usize,
+    batches_since_checkpoint: usize,
+}
+
+struct BranchState {
+    cached: std::sync::Mutex<Option<CachedBranchState>>,
+    warm_bytes: Arc<AtomicUsize>,
+}
+
+impl BranchState {
+    fn new(warm_bytes: Arc<AtomicUsize>) -> Self {
+        Self {
+            cached: std::sync::Mutex::new(None),
+            warm_bytes,
+        }
+    }
+
+    #[cfg(test)]
+    fn take(&self, tip: Option<ObjectId>) -> Option<CachedBranchState> {
+        self.take_latest().filter(|state| state.tip == tip)
+    }
+
+    fn take_latest(&self) -> Option<CachedBranchState> {
+        let mut cached = self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = cached.take();
+        if let Some(state) = &state {
+            self.warm_bytes.fetch_sub(state.bytes, Ordering::AcqRel);
+        }
+        state
+    }
+
+    fn store(
+        &self,
+        tip: Option<ObjectId>,
+        transaction: Option<String>,
+        manifest: attributes::Manifest,
+        tree: WarmTree,
+        batches_since_checkpoint: usize,
+    ) {
+        self.clear();
+        let bytes = manifest
+            .estimated_bytes()
+            .saturating_add(tree.estimated_bytes());
+        if self
+            .warm_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|next| *next <= MAX_WARM_BRANCH_STATE_BYTES)
+            })
+            .is_err()
+        {
+            return;
+        }
+        let state = CachedBranchState {
+            tip,
+            transaction,
+            manifest: Arc::new(manifest),
+            tree,
+            bytes,
+            batches_since_checkpoint,
+        };
+        *self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
+    }
+
+    fn manifest(&self, tip: Option<ObjectId>) -> Option<Arc<attributes::Manifest>> {
+        self.cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|state| state.tip == tip)
+            .map(|state| Arc::clone(&state.manifest))
+    }
+
+    fn clear(&self) {
+        let state = self
+            .cached
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(state) = state {
+            self.warm_bytes.fetch_sub(state.bytes, Ordering::AcqRel);
+        }
+    }
+}
+
+impl Drop for BranchState {
+    fn drop(&mut self) {
+        let state = self
+            .cached
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(state) = state {
+            self.warm_bytes.fetch_sub(state.bytes, Ordering::AcqRel);
+        }
+    }
+}
+
+struct QueuedMutation {
     queue: Arc<RefQueue>,
-    _permit: OwnedSemaphorePermit,
+    result: oneshot::Receiver<Result<Outcome>>,
 }
 
-impl Drop for WritePermit {
+impl Drop for QueuedMutation {
     fn drop(&mut self) {
         self.queue.admitted.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
+struct PendingMutation {
+    mutation: Mutation,
+    result: oneshot::Sender<Result<Outcome>>,
+    queued_at: Instant,
+}
+
+#[derive(Clone)]
+struct Mutation {
+    path: crab_remote_git::GitPath,
+    change: Change,
+    principal: String,
+}
+
+impl Mutation {
+    fn is_planned(&self) -> bool {
+        matches!(
+            &self.change,
+            Change::Put { attributes, .. } if attributes.completion_upload_id.is_some()
+        )
+    }
+
+    fn completion_plan(&self) -> Option<CompletionPlan> {
+        match &self.change {
+            Change::Put { attributes, .. } => {
+                attributes
+                    .completion_upload_id
+                    .as_deref()
+                    .map(|id| CompletionPlan {
+                        id: crate::multipart::publication_plan_id(id),
+                        etag: attributes.etag_override.clone(),
+                    })
+            }
+            Change::Attributes { .. } | Change::Delete { .. } => None,
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        match &self.change {
+            Change::Put { bytes, .. } => bytes.len(),
+            Change::Attributes { .. } | Change::Delete { .. } => 0,
+        }
+    }
+}
+
+impl RefQueue {
+    fn take_batch(&self) -> Result<Vec<PendingMutation>> {
+        let mut pending = self.pending.lock().map_err(|_| Error::AdmissionState)?;
+        while pending.front().is_some_and(|item| item.result.is_closed()) {
+            pending.pop_front();
+        }
+        let planned = pending
+            .front()
+            .is_some_and(|item| item.mutation.is_planned());
+        let mut batch = Vec::new();
+        let mut bytes = 0usize;
+        while batch.len() < MAX_MUTATIONS_PER_BATCH {
+            let Some(next) = pending.front() else {
+                break;
+            };
+            if next.result.is_closed() {
+                pending.pop_front();
+                continue;
+            }
+            if !batch.is_empty()
+                && (planned
+                    || next.mutation.is_planned()
+                    || bytes.saturating_add(next.mutation.estimated_bytes())
+                        > MAX_MUTATION_BATCH_BYTES)
+            {
+                break;
+            }
+            let next = pending
+                .pop_front()
+                .ok_or_else(|| std::io::Error::other("write queue front disappeared"))?;
+            bytes = bytes.saturating_add(next.mutation.estimated_bytes());
+            batch.push(next);
+            if planned {
+                break;
+            }
+        }
+        Ok(batch)
+    }
+}
+
 impl WriteAdmission {
-    async fn acquire(
+    fn complete_manifest(
         &self,
         repository: &str,
         branch: &str,
-        cancel: &CancellationToken,
-    ) -> Result<WritePermit> {
-        check_cancelled(cancel)?;
+        tip: ObjectId,
+    ) -> Option<Arc<attributes::Manifest>> {
+        self.complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&format!("{repository}\0{branch}"))
+            .filter(|cached| cached.tip == tip)
+            .map(|cached| Arc::clone(&cached.manifest))
+    }
+
+    fn store_complete_manifest(
+        &self,
+        repository: &str,
+        branch: &str,
+        tip: ObjectId,
+        manifest: Arc<attributes::Manifest>,
+    ) {
         let key = format!("{repository}\0{branch}");
+        let mut cached = self
+            .complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = cached.remove(&key) {
+            self.warm_bytes.fetch_sub(previous.bytes, Ordering::AcqRel);
+        }
+        let bytes = manifest.estimated_bytes();
+        if cached.len() >= MAX_TRACKED_REFS
+            || self
+                .warm_bytes
+                .load(Ordering::Acquire)
+                .saturating_add(bytes)
+                > MAX_WARM_BRANCH_STATE_BYTES
+        {
+            let removed = cached.drain().fold(0usize, |total, (_, entry)| {
+                total.saturating_add(entry.bytes)
+            });
+            self.warm_bytes.fetch_sub(removed, Ordering::AcqRel);
+        }
+        if self
+            .warm_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|next| *next <= MAX_WARM_BRANCH_STATE_BYTES)
+            })
+            .is_ok()
+        {
+            cached.insert(
+                key,
+                CachedCompleteManifest {
+                    tip,
+                    manifest,
+                    bytes,
+                },
+            );
+        }
+    }
+
+    fn clear_complete_manifest(&self, key: &str) {
+        let removed = self
+            .complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
+        if let Some(removed) = removed {
+            self.warm_bytes.fetch_sub(removed.bytes, Ordering::AcqRel);
+        }
+    }
+
+    fn clear_complete_manifests(&self) {
+        let removed = self
+            .complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .fold(0usize, |total, (_, entry)| {
+                total.saturating_add(entry.bytes)
+            });
+        self.warm_bytes.fetch_sub(removed, Ordering::AcqRel);
+    }
+
+    fn manifest(
+        &self,
+        repository: &str,
+        branch: &str,
+        tip: Option<ObjectId>,
+    ) -> Option<Arc<attributes::Manifest>> {
+        let key = format!("{repository}\0{branch}");
+        self.refs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .and_then(|queue| queue.state.manifest(tip))
+    }
+
+    fn enqueue(
+        &self,
+        repository: &str,
+        branch: &str,
+        mutation: Mutation,
+    ) -> Result<QueuedMutation> {
+        let key = format!("{repository}\0{branch}");
+        self.clear_complete_manifest(&key);
+        if self.warm_bytes.load(Ordering::Acquire) > WARM_BRANCH_STATE_EVICTION_BYTES {
+            self.clear_complete_manifests();
+        }
         let queue = {
             let mut refs = self.refs.lock().map_err(|_| Error::AdmissionState)?;
-            refs.retain(|_, queue| queue.strong_count() > 0);
-            match refs.get(&key).and_then(Weak::upgrade) {
-                Some(queue) => queue,
+            if self.warm_bytes.load(Ordering::Acquire) > WARM_BRANCH_STATE_EVICTION_BYTES {
+                for (candidate, queue) in refs.iter() {
+                    if self.warm_bytes.load(Ordering::Acquire) <= WARM_BRANCH_STATE_EVICTION_BYTES {
+                        break;
+                    }
+                    if candidate != &key && queue.admitted.load(Ordering::Acquire) == 0 {
+                        queue.state.clear();
+                    }
+                }
+            }
+            match refs.get(&key) {
+                Some(queue) => Arc::clone(queue),
                 None => {
+                    if refs.len() >= MAX_TRACKED_REFS {
+                        // The map is only a warm scheduling cache. Retain active
+                        // queues and discard every idle derived manifest at once.
+                        refs.retain(|_, queue| Arc::strong_count(queue) > 1);
+                    }
+                    if refs.len() >= MAX_TRACKED_REFS {
+                        return Err(Error::Overloaded);
+                    }
                     let queue = Arc::new(RefQueue {
                         gate: Arc::new(Semaphore::new(1)),
                         admitted: AtomicUsize::new(0),
+                        pending: std::sync::Mutex::new(VecDeque::new()),
+                        state: BranchState::new(Arc::clone(&self.warm_bytes)),
                     });
-                    refs.insert(key, Arc::downgrade(&queue));
+                    refs.insert(key, Arc::clone(&queue));
                     queue
                 }
             }
@@ -272,26 +768,26 @@ impl WriteAdmission {
                 (value < MAX_QUEUED_WRITES_PER_REF).then_some(value + 1)
             })
             .map_err(|_| Error::Overloaded)?;
-        let acquired = tokio::select! {
-            () = cancel.cancelled() => Err(Error::Cancelled),
-            result = tokio::time::timeout(WRITE_QUEUE_TIMEOUT, Arc::clone(&queue.gate).acquire_owned()) => {
-                match result {
-                    Ok(Ok(permit)) => Ok(permit),
-                    Ok(Err(_)) => Err(Error::AdmissionState),
-                    Err(_) => Err(Error::AdmissionTimeout),
-                }
-            }
-        };
-        match acquired {
-            Ok(permit) => Ok(WritePermit {
-                queue,
-                _permit: permit,
-            }),
-            Err(error) => {
-                queue.admitted.fetch_sub(1, Ordering::AcqRel);
-                Err(error)
-            }
+        let (result, receiver) = oneshot::channel();
+        let pushed = queue
+            .pending
+            .lock()
+            .map(|mut pending| {
+                pending.push_back(PendingMutation {
+                    mutation,
+                    result,
+                    queued_at: Instant::now(),
+                })
+            })
+            .map_err(|_| Error::AdmissionState);
+        if let Err(error) = pushed {
+            queue.admitted.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
         }
+        Ok(QueuedMutation {
+            queue,
+            result: receiver,
+        })
     }
 }
 
@@ -315,7 +811,7 @@ impl RefLease {
                 repository.store.inner(),
                 repository.layout.repo_prefix(),
                 branch,
-                LOCK_TTL,
+                REF_LOCK_TTL,
             )
             .await
             {
@@ -368,34 +864,32 @@ impl RefLease {
 #[derive(Clone, Copy)]
 struct ApplyRequest<'a> {
     branch: &'a str,
-    path: &'a crab_remote_git::GitPath,
-    principal: &'a str,
     plan_id: Option<&'a str>,
     metrics: &'a Metrics,
+    state: Option<&'a BranchState>,
 }
 
 async fn apply_admitted(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    change: Change,
+    mutation: Mutation,
     request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
-    let completion_plan = match &change {
-        Change::Put { attributes, .. } => {
-            attributes
-                .completion_upload_id
-                .as_deref()
-                .map(|id| CompletionPlan {
-                    id: crate::multipart::publication_plan_id(id),
-                    etag: attributes.etag_override.clone(),
-                })
-        }
-        Change::Attributes { .. } | Change::Delete { .. } => None,
-    };
+    let completion_plan = mutation.completion_plan();
     let Some(completion_plan) = completion_plan else {
-        return apply_with_gc_fences(repository, runtime, options, change, request, cancel).await;
+        return take_single_result(
+            apply_with_gc_fences(
+                repository,
+                runtime,
+                options,
+                vec![mutation],
+                request,
+                cancel,
+            )
+            .await?,
+        );
     };
     if let Some(outcome) = resolved_completion_plan(repository, &completion_plan).await? {
         return Ok(outcome);
@@ -412,7 +906,7 @@ async fn apply_admitted(
                 repository,
                 runtime,
                 options,
-                change,
+                vec![mutation],
                 ApplyRequest {
                     plan_id: Some(&executing_plan_id),
                     ..request
@@ -420,6 +914,7 @@ async fn apply_admitted(
                 &scoped,
             )
             .await
+            .and_then(take_single_result)
         },
     )
     .await;
@@ -433,6 +928,30 @@ async fn apply_admitted(
             .ok_or(error),
         result => result,
     }
+}
+
+async fn apply_batch_admitted(
+    repository: &Repository,
+    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    options: crab_remote_git::RepositoryOptions,
+    mutations: Vec<Mutation>,
+    request: ApplyRequest<'_>,
+    cancel: &CancellationToken,
+) -> Result<Vec<Result<Outcome>>> {
+    apply_with_gc_fences(repository, runtime, options, mutations, request, cancel).await
+}
+
+fn take_single_result(mut results: Vec<Result<Outcome>>) -> Result<Outcome> {
+    if results.len() != 1 {
+        return Err(
+            std::io::Error::other("singleton mutation returned the wrong result count").into(),
+        );
+    }
+    results.pop().ok_or_else(|| {
+        Error::Io(std::io::Error::other(
+            "singleton mutation result disappeared",
+        ))
+    })?
 }
 
 struct CompletionPlan {
@@ -462,10 +981,10 @@ async fn apply_with_gc_fences(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    change: Change,
+    mutations: Vec<Mutation>,
     request: ApplyRequest<'_>,
     cancel: &CancellationToken,
-) -> Result<Outcome> {
+) -> Result<Vec<Result<Outcome>>> {
     let mut fences = Vec::new();
     let result = async {
         for domain in [
@@ -482,7 +1001,7 @@ async fn apply_with_gc_fences(
             repository,
             Arc::clone(&runtime),
             options,
-            change,
+            mutations,
             request,
             cancel,
         ))
@@ -505,41 +1024,77 @@ async fn apply_with_fences(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    change: Change,
+    mutations: Vec<Mutation>,
     request: ApplyRequest<'_>,
     cancel: &CancellationToken,
-) -> Result<Outcome> {
+) -> Result<Vec<Result<Outcome>>> {
     for _ in 0..MAX_REPREPARE_ATTEMPTS {
         check_cancelled(cancel)?;
-        let prepared = prepare_and_upload(
+        let prepared = prepare_and_upload_batch(
             repository,
             Arc::clone(&runtime),
             options,
-            change.clone(),
+            &mutations,
             request,
             cancel,
         )
         .await?;
-        let prepared = match prepared {
-            Prepared::Noop(outcome) => return Ok(outcome),
-            Prepared::Commit(prepared) => prepared,
+        let Some(publication) = prepared.publication.as_ref() else {
+            if prepared.requires_revalidation {
+                let lease = RefLease::acquire(repository, request.branch, cancel).await?;
+                let current = prepared_parent_is_current(
+                    repository,
+                    request.branch,
+                    prepared.tip,
+                    prepared.transaction.as_deref(),
+                )
+                .await;
+                lease.release().await;
+                if !current? {
+                    repository.read_views.invalidate().await;
+                    continue;
+                }
+            }
+            if let Some(state) = request.state {
+                state.store(
+                    prepared.tip,
+                    prepared.transaction,
+                    prepared.attributes,
+                    prepared.tree,
+                    prepared.batches_since_checkpoint,
+                );
+            }
+            request
+                .metrics
+                .record_mutation_commits(prepared.commit_count);
+            return Ok(prepared.outcomes);
         };
         let lease = RefLease::acquire(repository, request.branch, cancel).await?;
         let published = publish_prepared(
             repository,
             request.branch,
             &lease.holder,
-            &prepared,
+            publication,
             request.plan_id,
             cancel,
         )
         .await;
         lease.release().await;
         match published? {
-            Publish::Committed => {
-                return Ok(Outcome {
-                    etag: prepared.etag,
-                });
+            Publish::Committed(transaction) => {
+                if let Some(state) = request.state {
+                    state.store(
+                        prepared.tip,
+                        Some(transaction),
+                        prepared.attributes,
+                        prepared.tree,
+                        prepared.batches_since_checkpoint,
+                    );
+                }
+                request
+                    .metrics
+                    .record_mutation_commits(prepared.commit_count);
+                return Ok(prepared.outcomes);
             }
             Publish::Reprepare => repository.read_views.invalidate().await,
         }
@@ -553,35 +1108,113 @@ async fn apply_with_fences(
 
 struct UploadedMutation {
     parent: Option<ObjectId>,
+    expected_transaction: Option<String>,
     commit: ObjectId,
-    etag: Option<String>,
     pack: PackManifestEntry,
     evidence_hash: String,
+    checkpoint: Option<attributes::PreparedCheckpoint>,
 }
 
-enum Prepared {
-    Noop(Outcome),
-    Commit(UploadedMutation),
+struct PreparedBatch {
+    outcomes: Vec<Result<Outcome>>,
+    publication: Option<UploadedMutation>,
+    commit_count: usize,
+    tip: Option<ObjectId>,
+    transaction: Option<String>,
+    attributes: attributes::Manifest,
+    tree: WarmTree,
+    batches_since_checkpoint: usize,
+    requires_revalidation: bool,
+}
+
+struct BuiltBatch {
+    outcomes: Vec<Result<Outcome>>,
+    commits: Vec<BuiltCommit>,
+    tip: Option<ObjectId>,
+    attributes: attributes::Manifest,
+    tree: WarmTree,
+    batches_since_checkpoint: usize,
+    checkpoint: bool,
 }
 
 enum Publish {
-    Committed,
+    Committed(String),
     Reprepare,
 }
 
-async fn prepare_and_upload(
+async fn prepare_and_upload_batch(
     repository: &Repository,
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
-    change: Change,
+    mutations: &[Mutation],
     request: ApplyRequest<'_>,
     cancel: &CancellationToken,
-) -> Result<Prepared> {
+) -> Result<PreparedBatch> {
+    if let Some(cached) = request.state.and_then(BranchState::take_latest) {
+        // The ref lease revalidates this optimistic parent before publication;
+        // a competing process forces a cold rebuild against object-store state.
+        match build_batch(
+            None,
+            None,
+            cached.tip,
+            Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
+            Some(cached.tree),
+            cached.batches_since_checkpoint,
+            mutations,
+        )
+        .await
+        {
+            Ok(batch) => {
+                return upload_batch(
+                    repository,
+                    request.branch,
+                    batch,
+                    cached.transaction,
+                    true,
+                    cancel,
+                    request.metrics,
+                )
+                .await;
+            }
+            Err(Error::WarmStateMiss) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        &repository.store,
+        &repository.layout,
+    )
+    .await?;
+    if !snapshot.journal.refs.contains_key(request.branch) {
+        // An unborn branch has no Git objects to reconstruct. Publication
+        // rechecks absence under the ref lease, so avoid opening the
+        // repository-wide locator merely to prove the empty starting tree.
+        let batch = build_batch(
+            None,
+            None,
+            None,
+            attributes::Manifest::empty_complete(),
+            None,
+            ATTRIBUTE_CHECKPOINT_BATCHES,
+            mutations,
+        )
+        .await?;
+        return upload_batch(
+            repository,
+            request.branch,
+            batch,
+            None,
+            false,
+            cancel,
+            request.metrics,
+        )
+        .await;
+    }
     let view = repository
         .read_views
         .current(repository, runtime, options, cancel)
         .await?;
-    let parent = view
+    let original_parent = view
         .remote()
         .refs()
         .find(request.branch)
@@ -590,65 +1223,247 @@ async fn prepare_and_upload(
         .remote()
         .operation(OperationKind::Repository, cancel)
         .await?;
-    let built = async {
-        let snapshot = match parent {
+    let batch = async {
+        let snapshot = match original_parent {
             Some(parent) => Some(view.snapshot(&parent.to_string(), &operation).await?),
             None => None,
         };
-        let path_string = std::str::from_utf8(request.path.as_bytes())
-            .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
-        let current_attributes = match &snapshot {
-            Some(snapshot) => match snapshot.entry(request.path, &operation).await? {
-                Some(entry) if entry.kind == EntryKind::Blob => {
-                    view.object_attributes(
-                        repository,
-                        snapshot.commit_oid(),
-                        path_string,
-                        entry.oid,
-                    )
-                    .await?
-                }
-                Some(_) | None => None,
-            },
-            None => None,
+        let manifest = match original_parent {
+            Some(parent) => (*view.attributes(repository, parent).await?).clone(),
+            None => attributes::Manifest::default(),
         };
-        build_commit(
-            view.remote(),
-            &operation,
-            parent,
-            request.path,
-            change,
-            request.principal,
-            current_attributes.as_ref(),
+        build_batch(
+            snapshot,
+            Some(&operation),
+            original_parent,
+            manifest,
+            None,
+            ATTRIBUTE_CHECKPOINT_BATCHES,
+            mutations,
         )
         .await
     }
     .await;
-    let built = match operation.finish(Ok(())).await {
-        Ok(()) => built?,
+    let batch = match operation.finish(Ok(())).await {
+        Ok(()) => batch?,
         Err(error) => return Err(error.into()),
     };
-    let built = match built {
-        Build::Noop(outcome) => return Ok(Prepared::Noop(outcome)),
-        Build::Commit(built) => *built,
-    };
-    upload_built(repository, parent, built, cancel, request.metrics)
-        .await
-        .map(Prepared::Commit)
+    upload_batch(
+        repository,
+        request.branch,
+        batch,
+        None,
+        false,
+        cancel,
+        request.metrics,
+    )
+    .await
 }
 
-async fn upload_built(
+async fn build_batch(
+    snapshot: Option<crab_remote_git::RemoteGitSnapshot>,
+    operation: Option<&crab_remote_git::OperationContext>,
+    original_parent: Option<ObjectId>,
+    mut manifest: attributes::Manifest,
+    warm_tree: Option<WarmTree>,
+    batches_since_checkpoint: usize,
+    mutations: &[Mutation],
+) -> Result<BuiltBatch> {
+    let mut tree_state = MutableTree::new(snapshot, warm_tree);
+    let mut parent = original_parent;
+    let mut outcomes = Vec::with_capacity(mutations.len());
+    let mut commits = Vec::with_capacity(mutations.len());
+    for mutation in mutations {
+        match build_commit(
+            &mut tree_state,
+            operation,
+            parent,
+            &mutation.path,
+            mutation.change.clone(),
+            &mutation.principal,
+            &mut manifest,
+        )
+        .await
+        {
+            Ok(Build::Noop(outcome)) => outcomes.push(Ok(outcome)),
+            Ok(Build::Commit(mut built)) => {
+                built.parent = parent;
+                parent = Some(built.commit);
+                outcomes.push(Ok(Outcome {
+                    etag: built.etag.clone(),
+                }));
+                commits.push(*built);
+            }
+            Err(Error::WarmStateMiss) => return Err(Error::WarmStateMiss),
+            Err(error) => outcomes.push(Err(error)),
+        }
+    }
+    let next_checkpoint = batches_since_checkpoint.saturating_add(1);
+    let has_commits = !commits.is_empty();
+    let checkpoint = has_commits && next_checkpoint >= ATTRIBUTE_CHECKPOINT_BATCHES;
+    let batches_since_checkpoint = if !has_commits {
+        batches_since_checkpoint
+    } else if checkpoint {
+        0
+    } else {
+        next_checkpoint
+    };
+    Ok(BuiltBatch {
+        outcomes,
+        commits,
+        tip: parent,
+        attributes: manifest,
+        tree: tree_state.into_warm(),
+        batches_since_checkpoint,
+        checkpoint,
+    })
+}
+
+async fn upload_batch(
+    repository: &Repository,
+    branch: &str,
+    batch: BuiltBatch,
+    expected_transaction: Option<String>,
+    requires_revalidation: bool,
+    cancel: &CancellationToken,
+    metrics: &Metrics,
+) -> Result<PreparedBatch> {
+    let BuiltBatch {
+        outcomes,
+        commits,
+        tip,
+        attributes,
+        tree,
+        batches_since_checkpoint,
+        checkpoint,
+    } = batch;
+    if commits.is_empty() {
+        return Ok(PreparedBatch {
+            outcomes,
+            publication: None,
+            commit_count: 0,
+            tip,
+            transaction: expected_transaction,
+            attributes,
+            tree,
+            batches_since_checkpoint,
+            requires_revalidation,
+        });
+    };
+    let commit_count = commits.len();
+    let parent = commits.first().and_then(|commit| commit.parent);
+    let final_commit = commits
+        .last()
+        .map(|commit| commit.commit)
+        .ok_or_else(|| std::io::Error::other("mutation batch has no commit"))?;
+    let checkpoint = if checkpoint {
+        check_cancelled(cancel)?;
+        attributes::prepare_checkpoint(branch, final_commit, &attributes)?
+    } else {
+        None
+    };
+    let publication = upload_built_batch(
+        repository,
+        parent,
+        commits,
+        expected_transaction.clone(),
+        checkpoint,
+        cancel,
+        metrics,
+    )
+    .await?;
+    Ok(PreparedBatch {
+        outcomes,
+        publication: Some(publication),
+        commit_count,
+        tip,
+        transaction: expected_transaction,
+        attributes,
+        tree,
+        batches_since_checkpoint,
+        requires_revalidation,
+    })
+}
+
+async fn prepared_parent_is_current(
+    repository: &Repository,
+    branch: &str,
+    expected_tip: Option<ObjectId>,
+    expected_transaction: Option<&str>,
+) -> Result<bool> {
+    if let Some(expected_transaction) = expected_transaction {
+        let head = crab_metadata::ref_journal::read_ref_head(
+            &repository.store,
+            &repository.layout,
+            branch,
+        )
+        .await?;
+        return Ok(head.visible_transaction.as_deref() == Some(expected_transaction));
+    }
+    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        &repository.store,
+        &repository.layout,
+    )
+    .await?;
+    let current = snapshot
+        .journal
+        .refs
+        .get(branch)
+        .map(|oid| oid.parse::<ObjectId>())
+        .transpose()
+        .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
+    Ok(current == expected_tip)
+}
+
+async fn upload_built_batch(
     repository: &Repository,
     parent: Option<ObjectId>,
-    built: BuiltCommit,
+    commits: Vec<BuiltCommit>,
+    expected_transaction: Option<String>,
+    checkpoint: Option<attributes::PreparedCheckpoint>,
     cancel: &CancellationToken,
     metrics: &Metrics,
 ) -> Result<UploadedMutation> {
-    let scratch_bytes = pack_scratch_reservation(&built.objects);
+    let mut objects = Vec::new();
+    let mut seen = HashMap::new();
+    let final_commit = commits
+        .last()
+        .map(|built| built.commit)
+        .ok_or_else(|| std::io::Error::other("mutation batch has no commit"))?;
+    let checkpoint_slot = checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.slot().to_owned());
+    let attribute_deltas = commits
+        .iter()
+        .map(|built| {
+            (
+                built.commit,
+                built.parent,
+                built.attribute_changes.clone(),
+                built.commit == final_commit && checkpoint_slot.is_some(),
+                (built.commit == final_commit)
+                    .then(|| checkpoint_slot.clone())
+                    .flatten(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for built in commits {
+        for (kind, bytes) in built.objects {
+            let oid = object_id(kind, &bytes)?;
+            if seen.insert(oid, ()).is_none() {
+                objects.push((kind, bytes));
+            }
+        }
+    }
+    let scratch_bytes = pack_scratch_reservation(&objects);
     let capacity = metrics.reserve_scratch(scratch_bytes)?;
     let mut scratch = metrics.start_scratch(ScratchPurpose::GitPack);
     scratch.reserve(scratch_bytes);
-    let prepared = prepare_pack(built.objects.clone(), cancel).await;
+    let visible_objects = objects
+        .iter()
+        .map(|(kind, bytes)| object_id(*kind, bytes).map(|oid| oid.to_string()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let prepared = prepare_pack(objects, cancel).await;
     if matches!(
         &prepared,
         Err(Error::Io(_)
@@ -663,21 +1478,16 @@ async fn upload_built(
     drop(capacity);
     check_cancelled(cancel)?;
     let pack_id = pack.content_hash().to_hex().to_string();
-    let visible_objects = built
-        .objects
-        .iter()
-        .map(|(kind, bytes)| object_id(*kind, bytes).map(|oid| oid.to_string()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
     let evidence = match parent {
         Some(parent) => git_visibility::GitVisibilityEdit::from_delta_objects(
             Some(parent.to_string()),
-            built.commit.to_string(),
+            final_commit.to_string(),
             visible_objects,
             vec![],
         ),
         None => git_visibility::GitVisibilityEdit::from_replacement_objects(
             None,
-            built.commit.to_string(),
+            final_commit.to_string(),
             visible_objects,
         ),
     };
@@ -713,14 +1523,20 @@ async fn upload_built(
             .map_err(Error::from)
     };
     let attributes_upload = async {
-        attributes::save_delta(
-            repository,
-            built.commit,
-            parent,
-            built.path.clone(),
-            built.attributes.clone(),
-        )
+        futures_util::future::try_join_all(attribute_deltas.into_iter().map(
+            |(commit, parent, changes, checkpoint, checkpoint_slot)| {
+                attributes::save_delta(
+                    repository,
+                    commit,
+                    parent,
+                    changes,
+                    checkpoint,
+                    checkpoint_slot,
+                )
+            },
+        ))
         .await
+        .map(|_| ())
         .map_err(Error::from)
     };
     let (_, _, _, _, evidence_hash, _) = tokio::try_join!(
@@ -743,16 +1559,17 @@ async fn upload_built(
     check_cancelled(cancel)?;
     let uploaded = UploadedMutation {
         parent,
-        commit: built.commit,
-        etag: built.etag,
+        expected_transaction,
+        commit: final_commit,
         pack: PackManifestEntry {
             pack_id: pack_id.clone(),
             content_hash: pack_id,
             size: pack.size(),
             object_count: pack.object_count().into(),
-            ref_tips: vec![built.commit.to_string()],
+            ref_tips: vec![final_commit.to_string()],
         },
         evidence_hash,
+        checkpoint,
     };
     drop(pack);
     drop(pack_owner);
@@ -765,11 +1582,11 @@ fn pack_scratch_reservation(objects: &[(Kind, Vec<u8>)]) -> u64 {
         total.saturating_add(object.len() as u64)
     });
     let sidecars = (objects.len() as u64).saturating_mul(64);
-    // Generated-pack preparation retains its source, quarantine pack,
-    // inflated/decoded spools, and two normalized packs at peak. The extra
-    // quarter plus fixed allowance covers zlib and index-sidecar overhead.
+    // Direct generated-pack preparation retains one decoded spool and two
+    // normalized packs at peak. The fourth copy, extra quarter, and fixed
+    // allowance conservatively cover indexing and sidecar overhead.
     bytes
-        .saturating_mul(6)
+        .saturating_mul(4)
         .saturating_add(bytes / 4)
         .saturating_add(sidecars)
         .saturating_add(PACK_SCRATCH_BASE_BYTES)
@@ -784,53 +1601,80 @@ async fn publish_prepared(
     cancel: &CancellationToken,
 ) -> Result<Publish> {
     check_cancelled(cancel)?;
-    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-        &repository.store,
-        &repository.layout,
-    )
-    .await?;
-    let current = snapshot
-        .journal
-        .refs
-        .get(branch)
-        .map(|oid| oid.parse::<ObjectId>())
-        .transpose()
-        .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
-    if current != prepared.parent {
-        return Ok(Publish::Reprepare);
-    }
     let options = crab_write::journal::CommitOptions::new(LOCK_TTL, cancel);
     let options = match plan_id {
         Some(plan_id) => options.with_plan(plan_id),
         None => options,
     };
-    crab_write::journal::commit_edits(
-        &repository.store,
-        &repository.layout,
-        &snapshot,
-        vec![RefJournalEdit {
-            ref_name: branch.to_owned(),
-            old_oid: prepared.parent.map(|oid| oid.to_string()),
-            new_oid: Some(prepared.commit.to_string()),
-            peeled_oid: None,
-            lock_holder: Some(holder.to_owned()),
-            visibility_evidence_hash: Some(prepared.evidence_hash.clone()),
-        }],
-        prepared.parent.is_none().then(|| branch.to_owned()),
-        vec![prepared.pack.clone()],
-        vec![],
-        options,
-    )
-    .await?;
-    Ok(Publish::Committed)
+    let edit = RefJournalEdit {
+        ref_name: branch.to_owned(),
+        old_oid: prepared.parent.map(|oid| oid.to_string()),
+        new_oid: Some(prepared.commit.to_string()),
+        peeled_oid: None,
+        lock_holder: Some(holder.to_owned()),
+        visibility_evidence_hash: Some(prepared.evidence_hash.clone()),
+    };
+    let committed = if let (Some(expected), Some(_)) =
+        (prepared.expected_transaction.as_deref(), prepared.parent)
+    {
+        crab_write::journal::commit_existing_ref_edit(
+            &repository.store,
+            &repository.layout,
+            expected,
+            edit,
+            vec![prepared.pack.clone()],
+            options,
+        )
+        .await
+    } else {
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await?;
+        let current = snapshot
+            .journal
+            .refs
+            .get(branch)
+            .map(|oid| oid.parse::<ObjectId>())
+            .transpose()
+            .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
+        if current != prepared.parent {
+            return Ok(Publish::Reprepare);
+        }
+        crab_write::journal::commit_edits(
+            &repository.store,
+            &repository.layout,
+            &snapshot,
+            vec![edit],
+            prepared.parent.is_none().then(|| branch.to_owned()),
+            vec![prepared.pack.clone()],
+            vec![],
+            options,
+        )
+        .await
+    };
+    let committed = match committed {
+        Ok(committed) => committed,
+        Err(crab_write::WriteError::RefChanged { .. }) => return Ok(Publish::Reprepare),
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(checkpoint) = &prepared.checkpoint
+        && let Err(error) = attributes::publish_checkpoint(repository, checkpoint).await
+    {
+        // The journal is already authoritative. A missing checkpoint falls
+        // back to immutable deltas, so retrying this mutation would duplicate it.
+        tracing::warn!(%error, "S3 attribute checkpoint publication failed");
+    }
+    Ok(Publish::Committed(committed.transaction_id))
 }
 
 struct BuiltCommit {
+    parent: Option<ObjectId>,
     commit: ObjectId,
     etag: Option<String>,
     objects: Vec<(Kind, Vec<u8>)>,
-    path: String,
-    attributes: Option<attributes::ObjectAttributes>,
+    attribute_changes: std::collections::BTreeMap<String, Option<attributes::ObjectAttributes>>,
 }
 
 enum Build {
@@ -839,55 +1683,258 @@ enum Build {
 }
 
 struct TreeFrame {
+    path: Vec<u8>,
     old_oid: Option<ObjectId>,
+    new_oid: Option<ObjectId>,
     entries: Vec<tree::Entry>,
 }
 
+#[derive(Clone)]
+struct DirectoryState {
+    oid: Option<ObjectId>,
+    entries: Vec<tree::Entry>,
+}
+
+struct GeneratedAttributeBlob {
+    oid: ObjectId,
+    bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+struct WarmTree {
+    root_oid: Option<ObjectId>,
+    directories: HashMap<Vec<u8>, DirectoryState>,
+    generated_attribute_blobs: HashMap<Vec<u8>, GeneratedAttributeBlob>,
+    estimated_bytes: usize,
+}
+
+impl WarmTree {
+    fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+}
+
+struct MutableTree {
+    snapshot: Option<crab_remote_git::RemoteGitSnapshot>,
+    root_oid: Option<ObjectId>,
+    directories: HashMap<Vec<u8>, DirectoryState>,
+    generated_attribute_blobs: HashMap<Vec<u8>, GeneratedAttributeBlob>,
+    estimated_bytes: usize,
+}
+
+impl MutableTree {
+    fn new(snapshot: Option<crab_remote_git::RemoteGitSnapshot>, warm: Option<WarmTree>) -> Self {
+        let snapshot_root = snapshot.as_ref().map(|value| value.root_tree_oid());
+        let warm = warm.filter(|warm| snapshot_root.is_none() || warm.root_oid == snapshot_root);
+        let (root_oid, directories, generated_attribute_blobs, estimated_bytes) = match warm {
+            Some(warm) => (
+                warm.root_oid,
+                warm.directories,
+                warm.generated_attribute_blobs,
+                warm.estimated_bytes,
+            ),
+            None => (snapshot_root, HashMap::new(), HashMap::new(), 0),
+        };
+        Self {
+            snapshot,
+            root_oid,
+            directories,
+            generated_attribute_blobs,
+            estimated_bytes,
+        }
+    }
+
+    fn into_warm(self) -> WarmTree {
+        WarmTree {
+            root_oid: self.root_oid,
+            directories: self.directories,
+            generated_attribute_blobs: self.generated_attribute_blobs,
+            estimated_bytes: self.estimated_bytes,
+        }
+    }
+
+    async fn frames(
+        &mut self,
+        directories: &[Vec<u8>],
+        operation: Option<&crab_remote_git::OperationContext>,
+    ) -> Result<Vec<TreeFrame>> {
+        let mut frames = Vec::with_capacity(directories.len() + 1);
+        let mut directory_path = crab_remote_git::GitPath::root();
+        let mut directory_oid = self.root_oid;
+        for depth in 0..=directories.len() {
+            let key = directory_path.as_bytes().to_vec();
+            if !self.directories.contains_key(&key) {
+                let entries = match (self.snapshot.as_ref(), directory_oid) {
+                    (Some(snapshot), Some(_)) => {
+                        load_directory(
+                            snapshot,
+                            &directory_path,
+                            operation.ok_or(Error::WarmStateMiss)?,
+                        )
+                        .await?
+                    }
+                    (None, None) | (Some(_), None) => Vec::new(),
+                    (None, Some(_)) => return Err(Error::WarmStateMiss),
+                };
+                let state = DirectoryState {
+                    oid: directory_oid,
+                    entries,
+                };
+                self.estimated_bytes = self
+                    .estimated_bytes
+                    .saturating_add(estimated_directory_bytes(&key, &state));
+                self.directories.insert(key.clone(), state);
+            }
+            let state = self
+                .directories
+                .get(&key)
+                .ok_or_else(|| std::io::Error::other("mutation directory state disappeared"))?;
+            if state.oid != directory_oid {
+                return Err(std::io::Error::other("mutation directory state diverged").into());
+            }
+            frames.push(TreeFrame {
+                path: key,
+                old_oid: state.oid,
+                new_oid: state.oid,
+                entries: state.entries.clone(),
+            });
+            if depth == directories.len() {
+                break;
+            }
+            let component = &directories[depth];
+            directory_oid = match find_entry(&state.entries, component) {
+                Some(entry) if entry.mode == tree::EntryKind::Tree.into() => Some(entry.oid),
+                Some(_) => return Err(Error::NotDirectory),
+                None => None,
+            };
+            directory_path = push_component(&directory_path, component)?;
+        }
+        Ok(frames)
+    }
+
+    fn commit(&mut self, frames: Vec<TreeFrame>, objects: &[(Kind, Vec<u8>)]) -> Result<()> {
+        for frame in &frames {
+            let attributes = find_entry(&frame.entries, b".gitattributes");
+            match attributes {
+                Some(attributes) => {
+                    let mut generated = None;
+                    for (kind, bytes) in objects {
+                        if *kind == Kind::Blob && object_id(*kind, bytes)? == attributes.oid {
+                            generated = Some(bytes);
+                            break;
+                        }
+                    }
+                    if let Some(bytes) = generated {
+                        self.replace_generated_attributes(
+                            frame.path.clone(),
+                            Some(GeneratedAttributeBlob {
+                                oid: attributes.oid,
+                                bytes: bytes.clone(),
+                            }),
+                        );
+                    } else if self
+                        .generated_attribute_blobs
+                        .get(&frame.path)
+                        .is_some_and(|blob| blob.oid != attributes.oid)
+                    {
+                        self.replace_generated_attributes(frame.path.clone(), None);
+                    }
+                }
+                None => self.replace_generated_attributes(frame.path.clone(), None),
+            }
+        }
+        for frame in frames {
+            if frame.path.is_empty() {
+                self.root_oid = frame.new_oid;
+            }
+            let state = DirectoryState {
+                oid: frame.new_oid,
+                entries: frame.entries,
+            };
+            let next_bytes = estimated_directory_bytes(&frame.path, &state);
+            if let Some(previous) = self.directories.insert(frame.path.clone(), state) {
+                self.estimated_bytes = self
+                    .estimated_bytes
+                    .saturating_sub(estimated_directory_bytes(&frame.path, &previous));
+            }
+            self.estimated_bytes = self.estimated_bytes.saturating_add(next_bytes);
+        }
+        Ok(())
+    }
+
+    fn replace_generated_attributes(
+        &mut self,
+        path: Vec<u8>,
+        replacement: Option<GeneratedAttributeBlob>,
+    ) {
+        if let Some(previous) = self.generated_attribute_blobs.remove(&path) {
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(estimated_attribute_blob_bytes(&path, &previous));
+        }
+        if let Some(replacement) = replacement {
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_add(estimated_attribute_blob_bytes(&path, &replacement));
+            self.generated_attribute_blobs.insert(path, replacement);
+        }
+    }
+
+    async fn blob(
+        &self,
+        path: &crab_remote_git::GitPath,
+        oid: ObjectId,
+        operation: Option<&crab_remote_git::OperationContext>,
+    ) -> Result<Vec<u8>> {
+        let directory = path
+            .as_bytes()
+            .strip_suffix(b"/.gitattributes")
+            .or_else(|| (path.as_bytes() == b".gitattributes").then_some(b"".as_slice()))
+            .ok_or(Error::WarmStateMiss)?;
+        if let Some(blob) = self.generated_attribute_blobs.get(directory)
+            && blob.oid == oid
+        {
+            return Ok(blob.bytes.clone());
+        }
+        let snapshot = self.snapshot.as_ref().ok_or(Error::WarmStateMiss)?;
+        let blob = snapshot
+            .read_blob(path, operation.ok_or(Error::WarmStateMiss)?)
+            .await?;
+        if blob.metadata.oid != oid {
+            return Err(std::io::Error::other("mutation blob identity diverged").into());
+        }
+        Ok(blob.bytes.to_vec())
+    }
+}
+
+fn estimated_directory_bytes(path: &[u8], directory: &DirectoryState) -> usize {
+    directory.entries.iter().fold(path.len(), |total, entry| {
+        total
+            .saturating_add(std::mem::size_of::<tree::Entry>())
+            .saturating_add(entry.filename.len())
+    })
+}
+
+fn estimated_attribute_blob_bytes(path: &[u8], blob: &GeneratedAttributeBlob) -> usize {
+    path.len()
+        .saturating_add(std::mem::size_of::<ObjectId>())
+        .saturating_add(blob.bytes.len())
+}
+
 async fn build_commit(
-    remote: &RemoteGitRepository,
-    operation: &crab_remote_git::OperationContext,
+    tree_state: &mut MutableTree,
+    operation: Option<&crab_remote_git::OperationContext>,
     parent: Option<ObjectId>,
     path: &crab_remote_git::GitPath,
     change: Change,
     principal: &str,
-    current_attributes: Option<&attributes::ObjectAttributes>,
+    manifest: &mut attributes::Manifest,
 ) -> Result<Build> {
     let components = path.components().map(<[u8]>::to_vec).collect::<Vec<_>>();
     let (name, directories) = components.split_last().ok_or(Error::IsDirectory)?;
-    let snapshot = match parent {
-        Some(parent) => Some(
-            remote
-                .snapshot(&Revision::Commit(parent), operation)
-                .await?,
-        ),
-        None => None,
-    };
-    let mut frames = Vec::with_capacity(directories.len() + 1);
+    let mut frames = tree_state.frames(directories, operation).await?;
     let mut directory_path = crab_remote_git::GitPath::root();
-    let mut directory_oid = snapshot.as_ref().map(|value| value.root_tree_oid());
-    for depth in 0..=directories.len() {
-        let entries = match (&snapshot, directory_oid) {
-            (Some(snapshot), Some(_)) => {
-                load_directory(snapshot, &directory_path, operation).await?
-            }
-            (None, None) | (Some(_), None) => Vec::new(),
-            (None, Some(_)) => {
-                return Err(std::io::Error::other("empty repository has a root tree").into());
-            }
-        };
-        frames.push(TreeFrame {
-            old_oid: directory_oid,
-            entries,
-        });
-        if depth == directories.len() {
-            break;
-        }
-        let component = &directories[depth];
-        directory_oid = match find_entry(&frames[depth].entries, component) {
-            Some(entry) if entry.mode == tree::EntryKind::Tree.into() => Some(entry.oid),
-            Some(_) => return Err(Error::NotDirectory),
-            None => None,
-        };
+    for component in directories {
         directory_path = push_component(&directory_path, component)?;
     }
     let leaf_entries = &mut frames
@@ -903,6 +1950,9 @@ async fn build_commit(
     };
     let path_string = std::str::from_utf8(path.as_bytes())
         .map_err(|_| std::io::Error::other("S3 object path is not UTF-8"))?;
+    let current_attributes = old
+        .as_ref()
+        .and_then(|(oid, _)| manifest.object(path_string, *oid));
     let lfs_attributes = match &change {
         Change::Put {
             track_lfs: true, ..
@@ -910,14 +1960,8 @@ async fn build_commit(
         Change::Put {
             track_lfs: true, ..
         } => {
-            prepare_lfs_attributes(
-                snapshot.as_ref(),
-                &directory_path,
-                leaf_entries,
-                name,
-                operation,
-            )
-            .await?
+            prepare_lfs_attributes(tree_state, &directory_path, leaf_entries, name, operation)
+                .await?
         }
         Change::Put { .. } | Change::Attributes { .. } | Change::Delete { .. } => None,
     };
@@ -1003,11 +2047,24 @@ async fn build_commit(
             (None, None, None)
         }
     };
+    let seconds = now_seconds()?;
     let mut objects = Vec::new();
+    let mut attribute_changes = std::collections::BTreeMap::new();
     if let Some(bytes) = changed {
         objects.push((Kind::Blob, bytes));
     }
     if let Some(attributes) = lfs_attributes {
+        let attributes_path = push_component(&directory_path, b".gitattributes")?;
+        let attributes_path = std::str::from_utf8(attributes_path.as_bytes())
+            .map_err(|_| std::io::Error::other("S3 attribute path is not UTF-8"))?
+            .to_owned();
+        let generated_attributes = attributes::ObjectAttributes::new(
+            attributes.oid,
+            crate::gateway::md5_hex(&attributes.bytes),
+            attributes.bytes.len() as u64,
+            seconds,
+            attributes::PutAttributes::default(),
+        );
         replace_entry(
             leaf_entries,
             b".gitattributes",
@@ -1017,6 +2074,7 @@ async fn build_commit(
                 oid: attributes.oid,
             }),
         );
+        attribute_changes.insert(attributes_path, Some(generated_attributes));
         objects.push((Kind::Blob, attributes.bytes));
     }
     let mut tree_oid = None;
@@ -1026,12 +2084,10 @@ async fn build_commit(
         let oid = if depth > 0 && empty {
             None
         } else {
-            Some(encode_tree(
-                frame.old_oid,
-                std::mem::take(&mut frame.entries),
-                &mut objects,
-            )?)
+            let oid = encode_tree(frame.old_oid, &frame.entries, &mut objects)?;
+            Some(oid)
         };
+        frame.new_oid = oid;
         if depth == 0 {
             tree_oid = oid;
             break;
@@ -1045,7 +2101,6 @@ async fn build_commit(
         replace_entry(&mut frames[depth - 1].entries, directory_name, entry);
     }
     let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
-    let seconds = now_seconds()?;
     let object_attributes = pending_attributes.map(|(oid, pending, size)| {
         attributes::ObjectAttributes::new(
             oid,
@@ -1055,22 +2110,23 @@ async fn build_commit(
             *pending,
         )
     });
-    let attribute_identity = serde_json::to_vec(&(
-        path_string,
-        parent.map(|oid| oid.to_string()),
-        &object_attributes,
-    ))
-    .map_err(|source| Error::Attributes(Box::new(crate::Error::Attributes { source })))?;
+    attribute_changes.insert(path_string.to_owned(), object_attributes.clone());
+    let attribute_identity = serde_json::to_vec(&attribute_changes)
+        .map_err(|source| Error::Attributes(Box::new(crate::Error::Attributes { source })))?;
     let attribute_digest = blake3::hash(&attribute_identity).to_hex();
     let commit_bytes = commit_bytes(tree, parent, principal, seconds, attribute_digest.as_str());
     let commit = object_id(Kind::Commit, &commit_bytes)?;
     objects.push((Kind::Commit, commit_bytes));
+    tree_state.commit(frames, &objects)?;
+    for (path, attributes) in &attribute_changes {
+        manifest.update(path.clone(), attributes.clone());
+    }
     Ok(Build::Commit(Box::new(BuiltCommit {
+        parent,
         commit,
         etag,
         objects,
-        path: path_string.to_owned(),
-        attributes: object_attributes,
+        attribute_changes,
     })))
 }
 
@@ -1104,35 +2160,30 @@ struct LfsAttributesChange {
 }
 
 async fn prepare_lfs_attributes(
-    snapshot: Option<&crab_remote_git::RemoteGitSnapshot>,
+    tree_state: &MutableTree,
     directory: &crab_remote_git::GitPath,
     entries: &[tree::Entry],
     filename: &[u8],
-    operation: &crab_remote_git::OperationContext,
+    operation: Option<&crab_remote_git::OperationContext>,
 ) -> Result<Option<LfsAttributesChange>> {
     let attributes_entry = find_entry(entries, b".gitattributes");
-    let (mut bytes, mode, old_oid) = match (snapshot, attributes_entry) {
-        (Some(snapshot), Some(entry)) => {
+    let (mut bytes, mode, old_oid) = match attributes_entry {
+        Some(entry) => {
             let mode = entry_mode(entry.mode)?;
             if !matches!(mode, EntryMode::Regular | EntryMode::Executable) {
                 return Err(Error::InvalidAttributes);
             }
             let path = push_component(directory, b".gitattributes")?;
-            let blob = snapshot.read_blob(&path, operation).await?;
+            let bytes = tree_state.blob(&path, entry.oid, operation).await?;
             if !matches!(
-                crab_git::classify(&blob.bytes),
+                crab_git::classify(&bytes),
                 crab_git::PointerKind::NotAPointer
             ) {
                 return Err(Error::InvalidAttributes);
             }
-            (blob.bytes.to_vec(), entry.mode, Some(entry.oid))
+            (bytes, entry.mode, Some(entry.oid))
         }
-        (_, None) => (Vec::new(), tree::EntryKind::Blob.into(), None),
-        (None, Some(_)) => {
-            return Err(
-                std::io::Error::other("empty repository contains a .gitattributes entry").into(),
-            );
-        }
+        None => (Vec::new(), tree::EntryKind::Blob.into(), None),
     };
     let line = lfs_attributes_line(filename);
     if bytes
@@ -1210,6 +2261,7 @@ async fn load_directory(
         };
         cursor = Some(next);
     }
+    entries.sort();
     Ok(entries)
 }
 
@@ -1249,16 +2301,33 @@ fn git_entry_mode(mode: EntryMode) -> gix_object::tree::EntryMode {
 }
 
 fn find_entry<'a>(entries: &'a [tree::Entry], name: &[u8]) -> Option<&'a tree::Entry> {
-    entries
-        .iter()
-        .find(|entry| <BString as AsRef<[u8]>>::as_ref(&entry.filename) == name)
+    entry_index(entries, name).map(|index| &entries[index])
 }
 
 fn replace_entry(entries: &mut Vec<tree::Entry>, name: &[u8], replacement: Option<tree::Entry>) {
-    entries.retain(|entry| <BString as AsRef<[u8]>>::as_ref(&entry.filename) != name);
-    if let Some(replacement) = replacement {
-        entries.push(replacement);
+    if let Some(index) = entry_index(entries, name) {
+        entries.remove(index);
     }
+    if let Some(replacement) = replacement {
+        let index = entries
+            .binary_search(&replacement)
+            .unwrap_or_else(|index| index);
+        entries.insert(index, replacement);
+    }
+}
+
+fn entry_index(entries: &[tree::Entry], name: &[u8]) -> Option<usize> {
+    [tree::EntryKind::Blob, tree::EntryKind::Tree]
+        .into_iter()
+        .find_map(|kind| {
+            entries
+                .binary_search(&tree::Entry {
+                    mode: kind.into(),
+                    filename: BString::from(name),
+                    oid: ObjectId::empty_blob(gix_hash::Kind::Sha1),
+                })
+                .ok()
+        })
 }
 
 fn push_component(
@@ -1275,12 +2344,18 @@ fn push_component(
 
 fn encode_tree(
     old_oid: Option<ObjectId>,
-    mut entries: Vec<tree::Entry>,
+    entries: &[tree::Entry],
     objects: &mut Vec<(Kind, Vec<u8>)>,
 ) -> Result<ObjectId> {
-    entries.sort();
     let mut bytes = Vec::new();
-    gix_object::Tree { entries }.write_to(&mut bytes)?;
+    let mut mode = [0; 6];
+    for entry in entries {
+        bytes.extend_from_slice(entry.mode.as_bytes(&mut mode));
+        bytes.push(b' ');
+        bytes.extend_from_slice(&entry.filename);
+        bytes.push(0);
+        bytes.extend_from_slice(entry.oid.as_bytes());
+    }
     let oid = object_id(Kind::Tree, &bytes)?;
     if old_oid != Some(oid) {
         objects.push((Kind::Tree, bytes));
@@ -1333,10 +2408,8 @@ async fn prepare_pack(
     let worker_flag = Arc::clone(&cancelled);
     let result = tokio::task::spawn_blocking(move || {
         let owner = tempfile::tempdir()?;
-        let input = owner.path().join("generated.pack");
-        write_pack(&input, &objects)?;
-        let incoming = crab_git::incoming_pack::quarantine(
-            std::io::BufReader::new(std::fs::File::open(&input)?),
+        let incoming = crab_git::incoming_pack::IncomingPack::from_generated_objects(
+            objects,
             owner.path(),
             crab_git::incoming_pack::ReceiveLimits {
                 max_pack_bytes: MAX_GENERATED_PACK_BYTES,
@@ -1346,7 +2419,6 @@ async fn prepare_pack(
                 max_delta_depth: 1,
             },
             || worker_flag.load(Ordering::Acquire),
-            |_| Ok(None),
         )?;
         let prepared = incoming
             .prepare(owner.path(), MAX_GENERATED_PACK_BYTES, &worker_flag)?
@@ -1356,42 +2428,6 @@ async fn prepare_pack(
     .await?;
     watcher.abort();
     result
-}
-
-fn write_pack(path: &std::path::Path, objects: &[(Kind, Vec<u8>)]) -> Result<()> {
-    let count = u32::try_from(objects.len())
-        .map_err(|_| std::io::Error::other("too many generated Git objects"))?;
-    let mut bytes = b"PACK\0\0\0\x02".to_vec();
-    bytes.extend_from_slice(&count.to_be_bytes());
-    for (kind, data) in objects {
-        pack_header(*kind, data.len(), &mut bytes);
-        let mut encoder =
-            flate2::write::ZlibEncoder::new(&mut bytes, flate2::Compression::default());
-        encoder.write_all(data)?;
-        encoder.finish()?;
-    }
-    let mut hasher = gix_hash::hasher(gix_hash::Kind::Sha1);
-    hasher.update(&bytes);
-    bytes.extend_from_slice(hasher.try_finalize()?.as_bytes());
-    std::fs::write(path, bytes)?;
-    Ok(())
-}
-
-fn pack_header(kind: Kind, size: usize, output: &mut Vec<u8>) {
-    let kind = match kind {
-        Kind::Commit => 1,
-        Kind::Tree => 2,
-        Kind::Blob => 3,
-        Kind::Tag => 4,
-    };
-    let mut remaining = size >> 4;
-    let mut byte = (kind << 4) | (size as u8 & 0x0f);
-    while remaining != 0 {
-        output.push(byte | 0x80);
-        byte = (remaining as u8) & 0x7f;
-        remaining >>= 7;
-    }
-    output.push(byte);
 }
 
 fn now_seconds() -> Result<u64> {
@@ -1411,7 +2447,24 @@ mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
     use crab_coordination::GIT_OBJECT_LOCATOR_RESOURCE;
+    use gix_object::WriteTo as _;
     use std::collections::BTreeMap;
+
+    fn mutation(path: &[u8], upload_id: Option<&str>) -> Mutation {
+        Mutation {
+            path: crab_remote_git::GitPath::new(path.to_vec()).unwrap(),
+            change: Change::Put {
+                bytes: Bytes::from_static(b"content"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes {
+                    completion_upload_id: upload_id.map(str::to_owned),
+                    ..Default::default()
+                }),
+                condition: PutCondition::None,
+            },
+            principal: "user".to_owned(),
+        }
+    }
 
     #[test]
     fn generated_pack_reservation_covers_peak_temporary_copies() {
@@ -1423,8 +2476,152 @@ mod tests {
 
         assert_eq!(
             pack_scratch_reservation(&objects),
-            bytes * 6 + bytes / 4 + 2 * 64 + PACK_SCRATCH_BASE_BYTES
+            bytes * 4 + bytes / 4 + 2 * 64 + PACK_SCRATCH_BASE_BYTES
         );
+    }
+
+    #[test]
+    fn tree_encoder_matches_the_canonical_git_encoding() {
+        let mut entries = vec![
+            tree::Entry {
+                mode: tree::EntryKind::Blob.into(),
+                filename: BString::from("z.txt"),
+                oid: ObjectId::empty_blob(gix_hash::Kind::Sha1),
+            },
+            tree::Entry {
+                mode: tree::EntryKind::Tree.into(),
+                filename: BString::from("a"),
+                oid: ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            },
+        ];
+        entries.sort();
+        let mut expected = Vec::new();
+        gix_object::Tree {
+            entries: entries.clone(),
+        }
+        .write_to(&mut expected)
+        .unwrap();
+        let mut objects = Vec::new();
+
+        let oid = encode_tree(None, &entries, &mut objects).unwrap();
+
+        assert_eq!(oid, object_id(Kind::Tree, &expected).unwrap());
+        assert_eq!(objects, vec![(Kind::Tree, expected)]);
+    }
+
+    #[test]
+    fn entry_lookup_preserves_git_tree_order_around_directories() {
+        let mut entries = vec![
+            tree::Entry {
+                mode: tree::EntryKind::Tree.into(),
+                filename: BString::from("name"),
+                oid: ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            },
+            tree::Entry {
+                mode: tree::EntryKind::Blob.into(),
+                filename: BString::from("name.ext"),
+                oid: ObjectId::empty_blob(gix_hash::Kind::Sha1),
+            },
+        ];
+        entries.sort();
+
+        assert_eq!(
+            find_entry(&entries, b"name").map(|entry| entry.mode.kind()),
+            Some(tree::EntryKind::Tree)
+        );
+        assert!(find_entry(&entries, b"missing").is_none());
+    }
+
+    #[test]
+    fn multipart_completion_stays_outside_ordinary_batches() {
+        let admission = WriteAdmission::default();
+        let first = admission
+            .enqueue("repo", "refs/heads/main", mutation(b"first", None))
+            .unwrap();
+        let planned = admission
+            .enqueue(
+                "repo",
+                "refs/heads/main",
+                mutation(b"planned", Some("upload")),
+            )
+            .unwrap();
+        let last = admission
+            .enqueue("repo", "refs/heads/main", mutation(b"last", None))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first.queue, &planned.queue));
+        assert!(Arc::ptr_eq(&first.queue, &last.queue));
+
+        let ordinary = first.queue.take_batch().unwrap();
+        assert_eq!(ordinary.len(), 1);
+        assert!(ordinary[0].mutation.completion_plan().is_none());
+        let completion = first.queue.take_batch().unwrap();
+        assert_eq!(completion.len(), 1);
+        assert!(completion[0].mutation.completion_plan().is_some());
+        let trailing = first.queue.take_batch().unwrap();
+        assert_eq!(trailing.len(), 1);
+        assert!(trailing[0].mutation.completion_plan().is_none());
+    }
+
+    #[test]
+    fn warm_branch_state_is_reused_only_for_the_exact_tip() {
+        let cache = BranchState::new(Arc::new(AtomicUsize::new(0)));
+        let tip = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let blob = ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let mut manifest = attributes::Manifest::default();
+        manifest.update(
+            "object".to_owned(),
+            Some(attributes::ObjectAttributes::new(
+                blob,
+                "etag".to_owned(),
+                0,
+                0,
+                attributes::PutAttributes::default(),
+            )),
+        );
+        cache.store(Some(tip), None, manifest, WarmTree::default(), 0);
+
+        assert!(
+            cache
+                .manifest(Some(tip))
+                .unwrap()
+                .object("object", blob)
+                .is_some()
+        );
+        let state = cache.take(Some(tip)).unwrap();
+        assert!(state.manifest.object("object", blob).is_some());
+        cache.store(
+            Some(tip),
+            state.transaction,
+            Arc::try_unwrap(state.manifest).unwrap(),
+            state.tree,
+            0,
+        );
+        assert!(cache.take(None).is_none());
+    }
+
+    #[test]
+    fn idle_branch_state_is_retained_below_memory_pressure() {
+        let admission = WriteAdmission::default();
+        let first = admission
+            .enqueue("repo", "refs/heads/first", mutation(b"first", None))
+            .unwrap();
+        let first_queue = Arc::clone(&first.queue);
+        drop(first);
+        let tip = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        first_queue.state.store(
+            Some(tip),
+            None,
+            attributes::Manifest::default(),
+            WarmTree::default(),
+            0,
+        );
+
+        let second = admission
+            .enqueue("repo", "refs/heads/second", mutation(b"second", None))
+            .unwrap();
+
+        assert!(first_queue.state.take(Some(tip)).is_some());
+        drop(second);
     }
 
     async fn fixture() -> (
@@ -1544,6 +2741,135 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sustained_write_maintenance_bounds_the_journal_and_advances_catalog() {
+        let (repository, runtime, cancel) = fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&coordinator, &repository, &cancel, "object", b"value").await;
+        let before = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await
+        .unwrap();
+        assert_eq!(before.journal.transactions.len(), 1);
+
+        crate::repository::schedule_catalog_maintenance(&repository, &cancel, 64);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+                    &repository.store,
+                    &repository.layout,
+                )
+                .await
+                .unwrap();
+                if snapshot.journal.transactions.is_empty()
+                    && !repository.maintenance.catalog_maintenance_is_running()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let read_view = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(
+            read_view
+                .remote()
+                .catalog_visibility_available(&cancel)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "object").await,
+            Bytes::from_static(b"value")
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn warm_existing_ref_publication_does_not_scan_repository_manifest() {
+        let (repository, runtime, cancel) = fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        );
+        let manifest_lock = PushLock::acquire_internal(
+            repository.store.inner(),
+            repository.layout.repo_prefix(),
+            crab_coordination::GIT_MANIFEST_RESOURCE,
+            LOCK_TTL,
+        )
+        .await
+        .unwrap();
+        coordinated_put(&coordinator, &repository, &cancel, "first.txt", b"first").await;
+        let first = crab_metadata::ref_journal::read_ref_head(
+            &repository.store,
+            &repository.layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap()
+        .visible_transaction
+        .unwrap();
+        let manifest_path = repository.layout.manifest_path();
+        let (manifest, _) = repository
+            .store
+            .get_with_etag(&manifest_path)
+            .await
+            .unwrap();
+        repository
+            .store
+            .put_overwrite(&manifest_path, Bytes::from_static(b"{"))
+            .await
+            .unwrap();
+
+        coordinated_put(&coordinator, &repository, &cancel, "second.txt", b"second").await;
+        let second = crab_metadata::ref_journal::read_ref_head(
+            &repository.store,
+            &repository.layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap()
+        .visible_transaction
+        .unwrap();
+        let transaction = crab_metadata::ref_journal::read_transaction(
+            &repository.store,
+            &repository.layout,
+            &second,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            transaction.parents.get("refs/heads/main"),
+            Some(&Some(first))
+        );
+        repository
+            .store
+            .put_overwrite(&manifest_path, manifest)
+            .await
+            .unwrap();
+        manifest_lock.release().await.unwrap();
+        runtime.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1707,18 +3033,30 @@ mod tests {
         .await
         .unwrap();
 
+        let stored_attributes = read(
+            &repository,
+            Arc::clone(&runtime),
+            &cancel,
+            "nested/.gitattributes",
+        )
+        .await;
         assert_eq!(
-            read(
-                &repository,
-                Arc::clone(&runtime),
-                &cancel,
-                "nested/.gitattributes",
-            )
-            .await,
+            stored_attributes,
             format!(
                 "README.md text\n{}\n",
                 lfs_attributes_line(filename.as_bytes())
             )
+        );
+        let commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let attributes_oid = object_id(Kind::Blob, &stored_attributes).unwrap();
+        let attributes_etag = crate::gateway::md5_hex(&stored_attributes);
+        assert!(manifest.is_complete());
+        assert_eq!(
+            manifest
+                .object("nested/.gitattributes", attributes_oid)
+                .map(|attributes| attributes.etag.as_str()),
+            Some(attributes_etag.as_str())
         );
         assert_eq!(
             read(
@@ -1729,6 +3067,65 @@ mod tests {
             )
             .await,
             pointer
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batched_lfs_puts_extend_the_generated_attribute_blob() {
+        let (repository, runtime, cancel) = fixture().await;
+        let metrics = Metrics::new().unwrap();
+        let mutation = |name: &str, marker: u8| Mutation {
+            path: crab_remote_git::GitPath::new(format!("nested/{name}").into_bytes()).unwrap(),
+            change: Change::Put {
+                bytes: Bytes::from(
+                    crab_git::LfsPointer {
+                        oid: [marker; 32],
+                        size: 10 * 1024 * 1024,
+                        extensions: Vec::new(),
+                    }
+                    .serialize(),
+                ),
+                track_lfs: true,
+                attributes: Box::new(attributes::PutAttributes {
+                    logical_size: Some(10 * 1024 * 1024),
+                    ..Default::default()
+                }),
+                condition: PutCondition::None,
+            },
+            principal: "user".to_owned(),
+        };
+        let results = apply_batch_admitted(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            vec![mutation("first.bin", 1), mutation("second.bin", 2)],
+            ApplyRequest {
+                branch: "refs/heads/main",
+                plan_id: None,
+                metrics: &metrics,
+                state: None,
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(results.iter().all(Result::is_ok));
+
+        let stored = read(
+            &repository,
+            Arc::clone(&runtime),
+            &cancel,
+            "nested/.gitattributes",
+        )
+        .await;
+        assert_eq!(
+            stored,
+            format!(
+                "{}\n{}\n",
+                lfs_attributes_line(b"first.bin"),
+                lfs_attributes_line(b"second.bin")
+            )
         );
         runtime.shutdown().await;
     }
@@ -1982,6 +3379,63 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn batch_conditions_observe_prior_successes_in_fifo_order() {
+        let (repository, runtime, cancel) = fixture().await;
+        let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
+        let mutation = |bytes, condition| Mutation {
+            path: path.clone(),
+            change: Change::Put {
+                bytes,
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes::default()),
+                condition,
+            },
+            principal: "user".to_owned(),
+        };
+        let first = object_id(Kind::Blob, b"first").unwrap();
+        let metrics = Metrics::new().unwrap();
+        let results = apply_batch_admitted(
+            &repository,
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            vec![
+                mutation(Bytes::from_static(b"first"), PutCondition::IfNoneMatchAny),
+                mutation(
+                    Bytes::from_static(b"rejected"),
+                    PutCondition::IfNoneMatchAny,
+                ),
+                mutation(Bytes::from_static(b"third"), PutCondition::IfMatch(first)),
+            ],
+            ApplyRequest {
+                branch: "refs/heads/main",
+                plan_id: None,
+                metrics: &metrics,
+                state: None,
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+
+        assert!(results[0].is_ok());
+        assert!(matches!(&results[1], Err(Error::PreconditionFailed)));
+        assert!(results[2].is_ok());
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
+            "third"
+        );
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.journal.transactions.len(), 1);
+        assert_eq!(snapshot.journal.packs.len(), 1);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn conditional_delete_rejects_a_missing_object() {
         let (repository, runtime, cancel) = fixture().await;
         let path = crab_remote_git::GitPath::new(b"missing".to_vec()).unwrap();
@@ -2092,20 +3546,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn same_ref_writes_queue_and_all_commit() {
+    async fn same_ref_writes_share_one_pack_and_keep_one_commit_each() {
         let (repository, runtime, cancel) = fixture().await;
         let repository = Arc::new(repository);
+        let blocker = PushLock::acquire_internal(
+            repository.store.inner(),
+            repository.layout.repo_prefix(),
+            GIT_OBJECT_LOCATOR_RESOURCE,
+            LOCK_TTL,
+        )
+        .await
+        .unwrap();
         let coordinator = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
             Metrics::new().unwrap(),
         ));
+        let start = Arc::new(tokio::sync::Barrier::new(9));
         let mut writes = tokio::task::JoinSet::new();
         for index in 0..8 {
             let repository = Arc::clone(&repository);
             let coordinator = Arc::clone(&coordinator);
             let cancel = cancel.clone();
+            let start = Arc::clone(&start);
             writes.spawn(async move {
+                start.wait().await;
                 let path = format!("queued/{index}.txt");
                 coordinator
                     .apply(
@@ -2124,11 +3589,64 @@ mod tests {
                     .await
             });
         }
+        start.wait().await;
         while let Some(result) = writes.join_next().await {
             result.unwrap().unwrap();
         }
+        let journal = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await
+        .unwrap()
+        .journal;
+        assert_eq!(journal.transactions.len(), 1);
+        assert_eq!(journal.packs.len(), 1);
+        let transaction = crab_metadata::ref_journal::read_transaction(
+            &repository.store,
+            &repository.layout,
+            &journal.transactions[0],
+        )
+        .await
+        .unwrap();
+        assert_eq!(transaction.edits.len(), 1);
+        assert_eq!(transaction.packs.len(), 1);
+
+        let view = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let tip = view.remote().refs().find("refs/heads/main").unwrap().target;
+        let operation = view
+            .remote()
+            .operation(OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        let snapshot = view
+            .remote()
+            .snapshot(&crab_remote_git::Revision::Commit(tip), &operation)
+            .await
+            .unwrap();
+        let history = snapshot
+            .history(
+                crab_remote_git::HistoryTraversal::FirstParent,
+                &crab_remote_git::PageRequest::new(16, None).unwrap(),
+                &operation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.items.len(), 8);
+        operation.finish(Ok(())).await.unwrap();
+        blocker.release().await.unwrap();
+
         let mut canonical = None;
-        for _ in 0..100 {
+        for _ in 0..700 {
             let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
                 &repository.store,
                 &repository.layout,
@@ -2166,6 +3684,183 @@ mod tests {
                 format!("value-{index}")
             );
         }
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn admitted_batch_survives_all_callers_being_dropped() {
+        let (repository, runtime, cancel) = fixture().await;
+        let repository = Arc::new(repository);
+        let lock = PushLock::acquire_ref(
+            repository.store.inner(),
+            repository.layout.repo_prefix(),
+            "refs/heads/main",
+            LOCK_TTL,
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        ));
+        let mut callers = Vec::new();
+        for index in 0..2 {
+            let repository = Arc::clone(&repository);
+            let coordinator = Arc::clone(&coordinator);
+            let cancel = cancel.clone();
+            callers.push(tokio::spawn(async move {
+                coordinated_put(
+                    &coordinator,
+                    &repository,
+                    &cancel,
+                    &format!("detached/{index}.txt"),
+                    b"durable",
+                )
+                .await;
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for caller in callers {
+            caller.abort();
+        }
+        lock.release().await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+                    &repository.store,
+                    &repository.layout,
+                )
+                .await
+                .unwrap();
+                if snapshot.journal.transactions.len() == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "detached/0.txt").await,
+            "durable"
+        );
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "detached/1.txt").await,
+            "durable"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn independent_coordinators_reprepare_against_the_winning_tip() {
+        let (repository, runtime, cancel) = fixture().await;
+        let repository = Arc::new(repository);
+        let first = Arc::new(Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        ));
+        let second = Arc::new(Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        ));
+        let start = Arc::new(tokio::sync::Barrier::new(3));
+        let mut writes = tokio::task::JoinSet::new();
+        for (coordinator, path, bytes) in [
+            (first, "first.txt", Bytes::from_static(b"first")),
+            (second, "second.txt", Bytes::from_static(b"second")),
+        ] {
+            let repository = Arc::clone(&repository);
+            let cancel = cancel.clone();
+            let start = Arc::clone(&start);
+            writes.spawn(async move {
+                start.wait().await;
+                coordinator
+                    .apply(
+                        &repository,
+                        "refs/heads/main",
+                        &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+                        Change::Put {
+                            bytes,
+                            track_lfs: false,
+                            attributes: Box::new(attributes::PutAttributes::default()),
+                            condition: PutCondition::None,
+                        },
+                        "user",
+                        &cancel,
+                    )
+                    .await
+            });
+        }
+        start.wait().await;
+        while let Some(result) = writes.join_next().await {
+            result.unwrap().unwrap();
+        }
+
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "first.txt").await,
+            "first"
+        );
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "second.txt").await,
+            "second"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn warm_precondition_failure_revalidates_the_object_store_ref() {
+        let (repository, runtime, cancel) = fixture().await;
+        let local = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        );
+        let competing = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&local, &repository, &cancel, "seed.txt", b"seed").await;
+        coordinated_put(
+            &competing,
+            &repository,
+            &cancel,
+            "created-elsewhere.txt",
+            b"winner",
+        )
+        .await;
+
+        let result = local
+            .apply(
+                &repository,
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(b"created-elsewhere.txt".to_vec()).unwrap(),
+                Change::Put {
+                    bytes: Bytes::from_static(b"loser"),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::IfNoneMatchAny,
+                },
+                "user",
+                &cancel,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(
+                &repository,
+                Arc::clone(&runtime),
+                &cancel,
+                "created-elsewhere.txt",
+            )
+            .await,
+            "winner"
+        );
         runtime.shutdown().await;
     }
 
@@ -2281,9 +3976,44 @@ mod tests {
         let (bytes, _) = repository.store.get_with_etag(&path).await.unwrap();
         let stored: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(stored["version"], 2);
+        assert_eq!(stored["checkpoint"], true);
         assert!(stored.get("objects").is_none());
         assert_eq!(stored["changes"].as_object().unwrap().len(), 1);
         assert!(stored["changes"].get("second.txt").is_some());
+        let checkpoint_slot = stored["checkpoint_slot"].as_str().unwrap();
+        let checkpoint = repository.layout.repo_path(&format!(
+            "s3/attribute-checkpoints/branches/{checkpoint_slot}.json"
+        ));
+        repository.store.head(&checkpoint).await.unwrap();
+
+        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let stale = attributes::prepare_checkpoint(
+            "refs/heads/main",
+            ObjectId::empty_tree(gix_hash::Kind::Sha1),
+            &manifest,
+        )
+        .unwrap()
+        .unwrap();
+        attributes::publish_checkpoint(&repository, &stale)
+            .await
+            .unwrap();
+        let fallback = attributes::load(&repository, commit).await.unwrap();
+        for path in ["first.txt", "second.txt"] {
+            let oid = object_id(Kind::Blob, path.as_bytes()).unwrap();
+            assert!(fallback.object(path, oid).is_some());
+        }
+        let current = attributes::prepare_checkpoint("refs/heads/main", commit, &manifest)
+            .unwrap()
+            .unwrap();
+        attributes::publish_checkpoint(&repository, &current)
+            .await
+            .unwrap();
+
+        let parent = stored["parent"].as_str().unwrap();
+        let parent_delta = repository
+            .layout
+            .repo_path(&format!("s3/attributes/{parent}.json"));
+        repository.store.delete(&parent_delta).await.unwrap();
 
         let manifest = attributes::load(&repository, commit).await.unwrap();
         for path in ["first.txt", "second.txt"] {

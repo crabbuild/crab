@@ -23,7 +23,10 @@ pub(crate) struct RepositoryState {
     pub(crate) git_validation_digest: Arc<str>,
     pub(crate) manifest_etag: String,
     pub(crate) shard_index_hash: Arc<str>,
+    /// Catalog for exact-generation APIs such as visibility and complete-pack transfer.
     pub(crate) catalog_identity: Option<GitObjectCatalogIdentity>,
+    /// Catalog usable for object lookup, including beneath a bounded journal overlay.
+    pub(crate) lookup_catalog_identity: Option<GitObjectCatalogIdentity>,
     pub(crate) inventory: HashMap<MerkleHash, GitPackInventoryEntry>,
     pub(crate) refs: RepositoryRefs,
     pub(crate) reader: Option<Arc<RemoteGitReader>>,

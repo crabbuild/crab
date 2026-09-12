@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, str::FromStr as _};
+use std::{
+    collections::BTreeMap,
+    ops::Bound::{Excluded, Included, Unbounded},
+    str::FromStr as _,
+};
 
 use bytes::Bytes;
 use gix_hash::ObjectId;
@@ -166,43 +170,205 @@ impl Checksums {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Manifest {
     objects: BTreeMap<String, ObjectAttributes>,
+    estimated_bytes: usize,
+    complete: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyManifest {
     version: u32,
     objects: BTreeMap<String, ObjectAttributes>,
 }
 
+#[derive(Serialize)]
+struct CheckpointPayload<'a> {
+    version: u32,
+    commit: String,
+    complete: bool,
+    objects: &'a BTreeMap<String, ObjectAttributes>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCheckpoint {
+    version: u32,
+    commit: String,
+    #[serde(default)]
+    complete: bool,
+    objects: BTreeMap<String, ObjectAttributes>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManifestListingItem {
+    Object {
+        path: String,
+        attributes: ListingAttributes,
+    },
+    CommonPrefix(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManifestListingPage {
+    pub(crate) items: Vec<ManifestListingItem>,
+    pub(crate) has_more: bool,
+}
+
+pub(crate) struct PreparedCheckpoint {
+    slot: String,
+    bytes: Bytes,
+}
+
+impl PreparedCheckpoint {
+    pub(crate) fn slot(&self) -> &str {
+        &self.slot
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Delta {
     version: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    checkpoint: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint_slot: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     changes: BTreeMap<String, Option<ObjectAttributes>>,
 }
 
 impl Manifest {
+    fn from_objects(objects: BTreeMap<String, ObjectAttributes>, complete: bool) -> Self {
+        let estimated_bytes = objects.iter().fold(0usize, |total, (path, attributes)| {
+            total.saturating_add(estimated_object_bytes(path, attributes))
+        });
+        Self {
+            objects,
+            estimated_bytes,
+            complete,
+        }
+    }
+
+    pub(crate) fn empty_complete() -> Self {
+        Self {
+            complete: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn object(&self, path: &str, oid: ObjectId) -> Option<&ObjectAttributes> {
         self.objects
             .get(path)
             .filter(|attributes| attributes.blob_oid == oid.to_string())
     }
 
+    pub(crate) fn update(&mut self, path: String, attributes: Option<ObjectAttributes>) {
+        self.apply(BTreeMap::from([(path, attributes)]));
+    }
+
+    pub(crate) fn listing(
+        &self,
+        objects: &[(String, ObjectId)],
+    ) -> BTreeMap<String, ListingAttributes> {
+        objects
+            .iter()
+            .filter_map(|(path, oid)| {
+                self.object(path, *oid)
+                    .map(|attributes| (path.clone(), attributes.into()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+
+    pub(crate) fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Page the durable S3 namespace only when it covers the complete Git tree.
+    pub(crate) fn complete_listing(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        delimiter: Option<u8>,
+        limit: usize,
+    ) -> Option<ManifestListingPage> {
+        if !self.complete {
+            return None;
+        }
+        let bounds = match after {
+            Some(after) => (Excluded(after.to_owned()), Unbounded),
+            None => (Included(prefix.to_owned()), Unbounded),
+        };
+        let mut items = Vec::with_capacity(limit.saturating_add(1));
+        let mut last_prefix = None;
+        for (path, attributes) in self.objects.range(bounds) {
+            if !path.starts_with(prefix) {
+                if path.as_str() > prefix {
+                    break;
+                }
+                continue;
+            }
+            if !crate::namespace::listable_path(path.as_bytes()) {
+                continue;
+            }
+            if delimiter == Some(b'/')
+                && let Some(offset) = path[prefix.len()..].find('/')
+            {
+                let common = &path[..prefix.len() + offset + 1];
+                if after.is_some_and(|after| common <= after)
+                    || last_prefix.as_deref() == Some(common)
+                {
+                    continue;
+                }
+                last_prefix = Some(common.to_owned());
+                items.push(ManifestListingItem::CommonPrefix(common.to_owned()));
+            } else {
+                last_prefix = None;
+                items.push(ManifestListingItem::Object {
+                    path: path.clone(),
+                    attributes: attributes.into(),
+                });
+            }
+            if items.len() > limit {
+                break;
+            }
+        }
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        Some(ManifestListingPage { items, has_more })
+    }
+
     fn apply(&mut self, changes: BTreeMap<String, Option<ObjectAttributes>>) {
         for (path, attributes) in changes {
             match attributes {
                 Some(attributes) => {
-                    self.objects.insert(path, attributes);
+                    let added = estimated_object_bytes(&path, &attributes);
+                    if let Some(previous) = self.objects.insert(path.clone(), attributes) {
+                        self.estimated_bytes = self
+                            .estimated_bytes
+                            .saturating_sub(estimated_object_bytes(&path, &previous));
+                    }
+                    self.estimated_bytes = self.estimated_bytes.saturating_add(added);
                 }
                 None => {
-                    self.objects.remove(&path);
+                    if let Some(previous) = self.objects.remove(&path) {
+                        self.estimated_bytes = self
+                            .estimated_bytes
+                            .saturating_sub(estimated_object_bytes(&path, &previous));
+                    }
                 }
             }
         }
     }
+}
+
+fn estimated_object_bytes(path: &str, attributes: &ObjectAttributes) -> usize {
+    path.len()
+        .saturating_add(serde_json::to_vec(attributes).map_or(usize::MAX, |bytes| bytes.len()))
 }
 
 pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Result<Manifest> {
@@ -218,14 +384,25 @@ pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Re
         match load_stored(repository, commit).await? {
             None => break,
             Some(Stored::Legacy(legacy)) => {
-                manifest.objects = legacy.objects;
+                manifest = Manifest::from_objects(legacy.objects, false);
                 break;
             }
             Some(Stored::Delta(delta)) => {
+                if delta.checkpoint
+                    && let Some(checkpoint) =
+                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
+                            .await?
+                {
+                    manifest = checkpoint;
+                    break;
+                }
                 current = parse_parent(delta.parent.as_deref())?;
                 retain_newest_changes(&mut changes, delta.changes);
             }
         }
+    }
+    if current.is_none() {
+        manifest.complete = true;
     }
     manifest.apply(changes);
     Ok(manifest)
@@ -261,6 +438,13 @@ pub(crate) async fn load_object(
                     .cloned());
             }
             Some(Stored::Delta(delta)) => {
+                if delta.checkpoint
+                    && let Some(checkpoint) =
+                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
+                            .await?
+                {
+                    return Ok(checkpoint.object(path, oid).cloned());
+                }
                 if let Some(attributes) = delta.changes.get(path) {
                     return Ok(attributes
                         .as_ref()
@@ -304,7 +488,6 @@ pub(crate) async fn load_objects(
                 return Ok(resolved);
             }
             Some(Stored::Delta(delta)) => {
-                current = parse_parent(delta.parent.as_deref())?;
                 for (path, attributes) in delta.changes {
                     let Some(oid) = unresolved.remove(&path) else {
                         continue;
@@ -315,6 +498,19 @@ pub(crate) async fn load_objects(
                         resolved.insert(path, (&attributes).into());
                     }
                 }
+                if delta.checkpoint
+                    && let Some(manifest) =
+                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
+                            .await?
+                {
+                    for (path, oid) in unresolved {
+                        if let Some(attributes) = manifest.object(&path, oid) {
+                            resolved.insert(path, attributes.into());
+                        }
+                    }
+                    return Ok(resolved);
+                }
+                current = parse_parent(delta.parent.as_deref())?;
             }
         }
     }
@@ -325,16 +521,19 @@ pub(crate) async fn save_delta(
     repository: &Repository,
     commit: ObjectId,
     parent: Option<ObjectId>,
-    path: String,
-    attributes: Option<ObjectAttributes>,
+    changes: BTreeMap<String, Option<ObjectAttributes>>,
+    checkpoint: bool,
+    checkpoint_slot: Option<String>,
 ) -> crate::Result<()> {
     let target = repository
         .layout
         .repo_path(&format!("s3/attributes/{commit}.json"));
     let bytes = serde_json::to_vec(&Delta {
         version: VERSION,
+        checkpoint,
+        checkpoint_slot,
         parent: parent.map(|oid| oid.to_string()),
-        changes: BTreeMap::from([(path, attributes)]),
+        changes,
     })
     .map_err(|source| crate::Error::Attributes { source })?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
@@ -345,6 +544,117 @@ pub(crate) async fn save_delta(
         .put_exact(&target, Bytes::from(bytes))
         .await?;
     Ok(())
+}
+
+pub(crate) fn prepare_checkpoint(
+    branch: &str,
+    commit: ObjectId,
+    manifest: &Manifest,
+) -> crate::Result<Option<PreparedCheckpoint>> {
+    if u64::try_from(manifest.estimated_bytes()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
+        return Ok(None);
+    }
+    let bytes = serde_json::to_vec(&CheckpointPayload {
+        version: VERSION,
+        commit: commit.to_string(),
+        complete: manifest.complete,
+        objects: &manifest.objects,
+    })
+    .map_err(|source| crate::Error::Attributes { source })?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(PreparedCheckpoint {
+        slot: blake3::hash(branch.as_bytes()).to_hex().to_string(),
+        bytes: Bytes::from(bytes),
+    }))
+}
+
+pub(crate) async fn publish_checkpoint(
+    repository: &Repository,
+    checkpoint: &PreparedCheckpoint,
+) -> crate::Result<()> {
+    repository
+        .store
+        .put_overwrite(
+            &checkpoint_slot_path(repository, &checkpoint.slot)?,
+            checkpoint.bytes.clone(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn load_checkpoint(
+    repository: &Repository,
+    commit: ObjectId,
+    slot: Option<&str>,
+) -> crate::Result<Option<Manifest>> {
+    let path = match slot {
+        Some(slot) => checkpoint_slot_path(repository, slot)?,
+        None => legacy_checkpoint_path(repository, commit),
+    };
+    let bytes = match repository
+        .store
+        .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
+        .await
+    {
+        Ok((bytes, _)) => bytes,
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let objects = match slot {
+        Some(_) => {
+            let stored = serde_json::from_slice::<StoredCheckpoint>(&bytes)
+                .map_err(|source| crate::Error::Attributes { source })?;
+            if !matches!(stored.version, LEGACY_VERSION | VERSION) {
+                return Err(crate::Error::Config(
+                    "unsupported S3 attribute checkpoint version",
+                ));
+            }
+            if stored.commit != commit.to_string() {
+                return Ok(None);
+            }
+            return Ok(Some(Manifest::from_objects(
+                stored.objects,
+                stored.version == VERSION && stored.complete,
+            )));
+        }
+        None => {
+            let stored = serde_json::from_slice::<LegacyManifest>(&bytes)
+                .map_err(|source| crate::Error::Attributes { source })?;
+            if stored.version != LEGACY_VERSION {
+                return Err(crate::Error::Config(
+                    "unsupported S3 attribute checkpoint version",
+                ));
+            }
+            stored.objects
+        }
+    };
+    Ok(Some(Manifest::from_objects(objects, false)))
+}
+
+fn checkpoint_slot_path(
+    repository: &Repository,
+    slot: &str,
+) -> crate::Result<object_store::path::Path> {
+    if slot.len() != blake3::OUT_LEN * 2
+        || !slot
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(crate::Error::Config(
+            "S3 attribute checkpoint slot is corrupt",
+        ));
+    }
+    Ok(repository
+        .layout
+        .repo_path(&format!("s3/attribute-checkpoints/branches/{slot}.json")))
+}
+
+fn legacy_checkpoint_path(repository: &Repository, commit: ObjectId) -> object_store::path::Path {
+    repository
+        .layout
+        .repo_path(&format!("s3/attribute-checkpoints/{commit}.json"))
 }
 
 enum Stored {
@@ -442,5 +752,124 @@ mod tests {
             selected["older"].as_ref().map(|value| value.etag.as_str()),
             Some("old")
         );
+    }
+
+    #[test]
+    fn version_two_delta_without_checkpoint_marker_remains_compatible() {
+        let delta: Delta = serde_json::from_str(r#"{"version":2,"changes":{}}"#).unwrap();
+
+        assert!(!delta.checkpoint);
+    }
+
+    #[test]
+    fn manifest_memory_estimate_tracks_replacement_and_removal() {
+        let mut manifest = Manifest::default();
+        manifest.update("object".to_owned(), Some(attributes("first")));
+        manifest.update("object".to_owned(), Some(attributes("replacement")));
+        let rebuilt = Manifest::from_objects(manifest.objects.clone(), false);
+        assert_eq!(manifest.estimated_bytes(), rebuilt.estimated_bytes());
+
+        manifest.update("object".to_owned(), None);
+        assert_eq!(manifest.estimated_bytes(), 0);
+    }
+
+    #[test]
+    fn oversized_manifest_skips_checkpoint_before_serialization() {
+        let manifest = Manifest {
+            objects: BTreeMap::new(),
+            estimated_bytes: MAX_MANIFEST_BYTES as usize + 1,
+            complete: false,
+        };
+
+        assert!(
+            prepare_checkpoint(
+                "refs/heads/main",
+                ObjectId::empty_tree(gix_hash::Kind::Sha1),
+                &manifest,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn complete_listing_pages_objects_and_prefixes_without_git_traversal() {
+        let mut manifest = Manifest::empty_complete();
+        for path in [
+            "prefix/a-1",
+            "prefix/a/item",
+            "prefix/a0",
+            "prefix/b/item",
+            "prefix/c",
+            "prefix/.git/hidden",
+        ] {
+            manifest.update(path.to_owned(), Some(attributes(path)));
+        }
+
+        let first = manifest
+            .complete_listing("prefix/", None, Some(b'/'), 2)
+            .unwrap();
+        assert_eq!(
+            first,
+            ManifestListingPage {
+                items: vec![
+                    ManifestListingItem::Object {
+                        path: "prefix/a-1".to_owned(),
+                        attributes: ListingAttributes {
+                            etag: "prefix/a-1".to_owned(),
+                            size: 0,
+                            modified_seconds: 0,
+                        },
+                    },
+                    ManifestListingItem::CommonPrefix("prefix/a/".to_owned()),
+                ],
+                has_more: true,
+            }
+        );
+        let second = manifest
+            .complete_listing("prefix/", Some("prefix/a/"), Some(b'/'), 2)
+            .unwrap();
+        assert_eq!(
+            second.items,
+            vec![
+                ManifestListingItem::Object {
+                    path: "prefix/a0".to_owned(),
+                    attributes: ListingAttributes {
+                        etag: "prefix/a0".to_owned(),
+                        size: 0,
+                        modified_seconds: 0,
+                    },
+                },
+                ManifestListingItem::CommonPrefix("prefix/b/".to_owned()),
+            ]
+        );
+        assert!(second.has_more);
+    }
+
+    #[test]
+    fn incomplete_manifest_cannot_replace_git_tree_listing() {
+        let mut manifest = Manifest::default();
+        manifest.update("known".to_owned(), Some(attributes("known")));
+
+        assert!(manifest.complete_listing("", None, None, 1000).is_none());
+    }
+
+    #[test]
+    fn checkpoint_persists_complete_namespace_proof() {
+        let commit = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let complete = prepare_checkpoint("refs/heads/main", commit, &Manifest::empty_complete())
+            .unwrap()
+            .unwrap();
+        let stored: StoredCheckpoint = serde_json::from_slice(&complete.bytes).unwrap();
+
+        assert_eq!(stored.version, VERSION);
+        assert_eq!(stored.commit, commit.to_string());
+        assert!(stored.complete);
+
+        let legacy: StoredCheckpoint = serde_json::from_str(&format!(
+            r#"{{"version":1,"commit":"{commit}","objects":{{}}}}"#
+        ))
+        .unwrap();
+        assert!(!legacy.complete);
     }
 }

@@ -33,6 +33,8 @@ The supported entry points are:
 - `RemoteGitRepository::open`: generation-consistent repository open;
 - `RemoteGitRepository::from_snapshot`: immutable committed-journal repository
   view without locator publication, for callers that own retention and freshness;
+- `RemoteGitRepository::from_snapshot_with_catalog_tail`: the same immutable
+  view with opportunistic exact base-catalog lookup and journal-pack-first misses;
 - `RemoteGitRepository::is_current`: metadata-only manifest identity check for
   safely reusing a pinned immutable handle;
 - `RemoteGitRepository::operation`: one typed operation kind,
@@ -126,7 +128,13 @@ Services may keep a bounded cache of cloned immutable repository handles.
 uncompacted commits capture a validated repository snapshot and open it through
 `from_snapshot`; its snapshot digest isolates journal-specific cache entries. A
 changed snapshot requires a new immutable handle; cached state is never refreshed
-in place.
+in place. High-throughput services may use `from_snapshot_with_catalog_tail`. It
+reads the immutable pack inventory named by the latest catalog checkpoint and
+proves that inventory is a subset of the pinned snapshot. Object lookups use that
+catalog and search only the remaining pack tail on a miss. If no checkpoint can
+be proven as a subset or the derived catalog cannot open, the canonical complete
+pack-index path remains; a miss in both the proven catalog and complete tail is
+definitive.
 
 ### Generated response packs
 

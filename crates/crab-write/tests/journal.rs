@@ -6,7 +6,10 @@ use crab_metadata::{manifest_store, manifests::Manifest, ref_journal};
 use crab_storage::{Store, StoreLayout};
 use crab_write::{
     WriteError,
-    journal::{CommitOptions, commit_edits, compact_for_owner, compact_for_reader},
+    journal::{
+        CommitOptions, commit_edits, commit_existing_ref_edit, compact_for_owner,
+        compact_for_reader,
+    },
 };
 use futures_util::TryStreamExt;
 use object_store::ObjectStoreExt;
@@ -65,6 +68,59 @@ fn edit(name: &str, old: Option<char>, new: Option<char>) -> ref_journal::RefJou
         lock_holder: None,
         visibility_evidence_hash: None,
     }
+}
+
+#[tokio::test]
+async fn existing_ref_commit_uses_the_captured_journal_position() {
+    let (store, layout) = storage("existing-ref-position").await;
+    let lease = pending(&store, &layout).await;
+    let initial = ref_journal::read_ref_head(&store, &layout, REF)
+        .await
+        .unwrap()
+        .visible_transaction
+        .unwrap();
+    let cancel = CancellationToken::new();
+
+    commit_existing_ref_edit(
+        &store,
+        &layout,
+        &initial,
+        edit(REF, Some('a'), Some('b')),
+        vec![],
+        CommitOptions::new(TTL, &cancel),
+    )
+    .await
+    .unwrap();
+    let wrong_old = commit_existing_ref_edit(
+        &store,
+        &layout,
+        &ref_journal::read_ref_head(&store, &layout, REF)
+            .await
+            .unwrap()
+            .visible_transaction
+            .unwrap(),
+        edit(REF, Some('z'), Some('c')),
+        vec![],
+        CommitOptions::new(TTL, &cancel),
+    )
+    .await;
+    let stale = commit_existing_ref_edit(
+        &store,
+        &layout,
+        &initial,
+        edit(REF, Some('b'), Some('c')),
+        vec![],
+        CommitOptions::new(TTL, &cancel),
+    )
+    .await;
+
+    assert!(matches!(wrong_old, Err(WriteError::RefChanged { .. })));
+    assert!(matches!(stale, Err(WriteError::RefChanged { .. })));
+    let state = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    assert_eq!(state.journal.refs.get(REF), Some(&"b".repeat(40)));
+    lease.release().await.unwrap();
 }
 
 #[tokio::test]
