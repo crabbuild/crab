@@ -106,9 +106,22 @@
     "metrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["prometheusAnnotations"],
+      "required": ["prometheusAnnotations", "prometheusRule"],
       "properties": {
-        "prometheusAnnotations": { "type": "boolean" }
+        "prometheusAnnotations": { "type": "boolean" },
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "labels", "runbookUrl"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "runbookUrl": { "type": "string" }
+          }
+        }
       }
     },
     "autoscaling": {

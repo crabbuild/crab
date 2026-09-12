@@ -330,7 +330,7 @@ returned. Body errors and client aborts have separate counters.
 
 ### Choose an orchestrator
 
-Use the portable Helm chart for an EKS, GKE, or AKS team deployment. Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. The chart runs at least two replicas, exposes only the public port, pins an image digest, drops Linux capabilities, uses a read-only root filesystem, mounts bounded disposable scratch, applies a disruption budget and ingress NetworkPolicy, and supports optional TLS ingress and autoscaling. During pod termination, a 15-second pre-stop delay lets endpoint and ingress routes converge before `SIGTERM`; the 630-second pod grace period then preserves the complete application drain budget.
+Use the portable Helm chart for an EKS, GKE, or AKS team deployment. Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. The chart runs at least two replicas, exposes only the public port, pins an image digest, drops Linux capabilities, uses a read-only root filesystem, mounts bounded disposable scratch, applies a disruption budget and ingress NetworkPolicy, and supports optional TLS ingress, autoscaling, and Prometheus Operator alerts. During pod termination, a 15-second pre-stop delay lets endpoint and ingress routes converge before `SIGTERM`; the 630-second pod grace period then preserves the complete application drain budget.
 
 The ECS Fargate task definition remains an evaluation profile. Fargate limits a container stop timeout to 120 seconds, which can interrupt Crab operations that run for up to ten minutes. Prefer the Kubernetes chart until abrupt-process-crash qualification closes that gap.
 
@@ -1094,7 +1094,7 @@ Current local and CI evidence includes:
 - Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, cooperative restart recovery, and container `SIGKILL` during an in-flight push
 - OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
-- Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, runtime inspection, strict Helm lint, and Kubernetes schema validation
+- Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, Prometheus-validated baseline alerts, runtime inspection, strict Helm lint, and Kubernetes schema validation
 - Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
 
 These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. Neither test establishes every crash phase, multi-instance global admission, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.

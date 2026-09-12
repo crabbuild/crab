@@ -21,9 +21,10 @@ flowchart LR
 | ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
 The Kubernetes chart manages inline configuration, two or more replicas,
-private probes and Prometheus metrics, a disruption budget, ingress isolation,
-optional Transport Layer Security (TLS) ingress, and optional autoscaling. A
-provider is release-qualified only after its live test matrix passes.
+private probes and Prometheus metrics, optional Prometheus Operator alerts, a
+disruption budget, ingress isolation, optional Transport Layer Security (TLS)
+ingress, and optional autoscaling. A provider is release-qualified only after
+its live test matrix passes.
 
 Container CI stops the local writers, copies the complete storage root to an
 isolated object prefix, compares every key and object body, then verifies the

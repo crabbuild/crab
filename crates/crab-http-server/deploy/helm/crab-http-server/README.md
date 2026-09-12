@@ -254,6 +254,38 @@ bounded labels and retain request duration through streaming response
 completion. Use a `PodMonitor` or equivalent discovery configuration instead
 of creating a public management Service.
 
+### Install baseline alert rules
+
+Clusters with the Prometheus Operator can install Crab's optional
+`PrometheusRule`. Its metadata labels must match the Prometheus
+`ruleSelector`. The scrape configuration must retain the standard `namespace`
+and `pod` target labels used to isolate one Helm release:
+
+```yaml
+metrics:
+  prometheusAnnotations: true
+  prometheusRule:
+    enabled: true
+    labels:
+      prometheus: platform
+      role: alert-rules
+    runbookUrl: https://operations.example.com/runbooks/crab-http-server
+
+networkPolicy:
+  metricsIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+```
+
+The rules alert on missing metrics, sustained catalog failure, repeated catalog
+refresh failures, sustained Git admission exhaustion, and a five-percent 5xx
+rate after a minimum traffic floor. They are disabled by default because the
+`PrometheusRule` custom resource must already exist. The chart rejects rules
+without metrics discovery or an explicit private scraper source. Route the
+included `critical` and `warning` severities through Alertmanager, then tune
+thresholds only from recorded workload evidence.
+
 ## Restrict network sources
 
 The NetworkPolicy blocks every source until you select the pods, namespaces, or
@@ -295,6 +327,12 @@ Rotate the OIDC client secret without changing the state key. Changing the state
 
 The chart is portable deployment evidence, not provider qualification. Before production use, run a dedicated live test for push, fetch, LFS upload/download, OIDC callback routing across replicas, rolling replacement, and object-store restore.
 
-The current server still lacks complete abrupt-process-crash qualification, cluster-wide admission, provider-scale throughput evidence, and a proven backup restore procedure. Prefer Kubernetes over AWS Fargate for long streams: Fargate limits container stop timeout to 120 seconds, while Crab permits operations lasting up to ten minutes.
+The current server still lacks complete abrupt-process-crash qualification,
+cluster-wide admission, provider-scale throughput evidence, and a
+version-selected provider restore drill. Local container CI proves the portable
+complete-root copy and independent restored reads, not a cloud recovery point.
+Prefer Kubernetes over AWS Fargate for long streams: Fargate limits container
+stop timeout to 120 seconds, while Crab permits operations lasting up to ten
+minutes.
 
 Use [the operations runbook](../../operations.md) for rollout, rollback, rotation, incident response, and restore qualification.

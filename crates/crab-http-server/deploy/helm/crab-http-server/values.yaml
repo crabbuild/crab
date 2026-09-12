@@ -44,6 +44,10 @@ networkPolicy:
 
 metrics:
   prometheusAnnotations: false
+  prometheusRule:
+    enabled: false
+    labels: {}
+    runbookUrl: ""
 
 autoscaling:
   enabled: false

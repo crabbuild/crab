@@ -193,6 +193,22 @@ Use this triage map:
 | New repository stays absent | Catalog refresh failure | Run `repository list`, inspect refresh warnings, and restart only after storage access works |
 | Rollout never becomes available | Configuration, identity, or catalog failure | Read the failing pod termination message and `/readyz` warnings |
 
+When the optional `PrometheusRule` is enabled, route its fixed severities and
+attach the runbook URL through Helm values:
+
+| Alert | Meaning | First action |
+| --- | --- | --- |
+| `CrabHttpServerMetricsMissing` | No catalog-health sample for 10 minutes | Check pod discovery, the metrics NetworkPolicy source, and Prometheus targets |
+| `CrabHttpServerCatalogUnavailable` | A replica reports catalog failure continuously | Check workload identity, provider availability, and catalog warnings before rolling pods |
+| `CrabHttpServerCatalogRefreshFailing` | More than three refresh failures in 15 minutes | Correlate provider errors and catalog versions across replicas |
+| `CrabHttpServerGitAdmissionExhausted` | A replica has no free Git permits for a sustained interval | Inspect active transfers and latency; scale only after checking storage saturation |
+| `CrabHttpServerHighErrorRate` | More than 5% of at least 20 requests return 5xx | Group completion logs by request ID and identify the failing route and storage boundary |
+
+Keep these defaults until a live load test establishes a better baseline.
+Silencing catalog or missing-metrics alerts during ordinary rollout can hide a
+failed replacement, so use a bounded maintenance window instead of a permanent
+mute.
+
 Don’t repair object storage by editing catalog JSON, ref markers, manifests, or coordination records directly. Use the repository administration commands or a reviewed recovery tool.
 
 The container gate kills Crab after a new immutable pack appears during a 128 MB native push. A fresh process must expose exactly the old or new ref. The same push must become idempotently successful within the publication lease and recovery budget, and an independent clone must reconstruct every byte within that budget. Readiness keeps the replacement out of endpoint routing while startup indexing converges; indexing triggered by a newly accepted write can still reject an early clone and must converge within the recovery budget. Repeat this test with provider storage and pod replacement before production use.

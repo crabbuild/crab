@@ -1,0 +1,80 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- if not .Values.metrics.prometheusAnnotations }}
+{{- fail "metrics.prometheusAnnotations must be enabled with metrics.prometheusRule" }}
+{{- end }}
+{{- range $key := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/version" "app.kubernetes.io/managed-by" "helm.sh/chart" }}
+{{- if hasKey $.Values.metrics.prometheusRule.labels $key }}
+{{- fail (printf "metrics.prometheusRule.labels.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
+{{- $namespace := .Release.Namespace }}
+{{- $podPattern := printf "%s-.+" (include "crab-http-server.fullname" .) }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "crab-http-server.fullname" . }}
+  labels:
+    {{- include "crab-http-server.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: crab-http-server.availability
+      rules:
+        - alert: CrabHttpServerMetricsMissing
+          expr: absent(crab_http_server_catalog_healthy{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }}}) == 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: Crab HTTP server metrics are missing
+            description: No catalog-health samples have been scraped for this release for ten minutes.
+            {{- with .Values.metrics.prometheusRule.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: CrabHttpServerCatalogUnavailable
+          expr: max_over_time(crab_http_server_catalog_healthy{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }}}[5m]) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Crab repository catalog is unavailable
+            description: A server replica has reported an unhealthy durable catalog continuously for at least five minutes.
+            {{- with .Values.metrics.prometheusRule.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: CrabHttpServerCatalogRefreshFailing
+          expr: increase(crab_http_server_catalog_refresh_failures_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }}}[15m]) > 3
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Crab repository catalog refresh is repeatedly failing
+            description: A server replica recorded more than three catalog refresh failures in fifteen minutes.
+            {{- with .Values.metrics.prometheusRule.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: CrabHttpServerGitAdmissionExhausted
+          expr: max_over_time(crab_http_server_admission_available_permits{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }},class="git_transfer"}[5m]) == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Crab Git transfer admission is exhausted
+            description: A server replica has had no free Git transfer permits continuously for at least five minutes.
+            {{- with .Values.metrics.prometheusRule.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: CrabHttpServerHighErrorRate
+          expr: (sum(rate(crab_http_server_requests_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }},outcome="5xx"}[10m])) / clamp_min(sum(rate(crab_http_server_requests_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }}}[10m])), 0.001)) > 0.05 and sum(increase(crab_http_server_requests_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }}}[10m])) >= 20
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Crab HTTP server error rate is elevated
+            description: More than five percent of at least twenty requests returned 5xx responses over ten minutes.
+            {{- with .Values.metrics.prometheusRule.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+{{- end }}
