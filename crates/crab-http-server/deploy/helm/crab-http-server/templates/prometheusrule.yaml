@@ -1,6 +1,6 @@
 {{- if .Values.metrics.prometheusRule.enabled }}
-{{- if not .Values.metrics.prometheusAnnotations }}
-{{- fail "metrics.prometheusAnnotations must be enabled with metrics.prometheusRule" }}
+{{- if not .Values.metrics.podMonitor.enabled }}
+{{- fail "metrics.podMonitor.enabled must be true with metrics.prometheusRule" }}
 {{- end }}
 {{- range $key := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/version" "app.kubernetes.io/managed-by" "helm.sh/chart" }}
 {{- if hasKey $.Values.metrics.prometheusRule.labels $key }}

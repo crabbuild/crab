@@ -106,9 +106,22 @@
     "metrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["prometheusAnnotations", "prometheusRule"],
+      "required": ["podMonitor", "prometheusRule"],
       "properties": {
-        "prometheusAnnotations": { "type": "boolean" },
+        "podMonitor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "labels", "interval", "scrapeTimeout"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "labels": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "interval": { "type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$" },
+            "scrapeTimeout": { "type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$" }
+          }
+        },
         "prometheusRule": {
           "type": "object",
           "additionalProperties": false,

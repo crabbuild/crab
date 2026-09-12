@@ -43,7 +43,11 @@ networkPolicy:
   metricsIngressFrom: []
 
 metrics:
-  prometheusAnnotations: false
+  podMonitor:
+    enabled: false
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
   prometheusRule:
     enabled: false
     labels: {}

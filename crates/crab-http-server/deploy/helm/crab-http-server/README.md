@@ -235,12 +235,19 @@ CPU scaling protects general request capacity. It does not create a cluster-wide
 
 ## Scrape Prometheus metrics
 
-The private management listener serves `GET /metrics`. Enable standard pod
-annotations and allow only the namespace or pods that run your scraper:
+The private management listener serves `GET /metrics`. On a cluster with the
+Prometheus Operator, let the chart create a `PodMonitor` and allow only the
+namespace or pods that run your scraper. Its labels must match the Prometheus
+`podMonitorSelector`:
 
 ```yaml
 metrics:
-  prometheusAnnotations: true
+  podMonitor:
+    enabled: true
+    labels:
+      prometheus: platform
+    interval: 30s
+    scrapeTimeout: 10s
 
 networkPolicy:
   metricsIngressFrom:
@@ -251,8 +258,8 @@ networkPolicy:
 
 The application Service and ingress never expose port 8789. Metrics have
 bounded labels and retain request duration through streaming response
-completion. Use a `PodMonitor` or equivalent discovery configuration instead
-of creating a public management Service.
+completion. The `PodMonitor` selects Crab pods directly, so no public or
+management Service is created.
 
 ### Install baseline alert rules
 
@@ -263,7 +270,10 @@ and `pod` target labels used to isolate one Helm release:
 
 ```yaml
 metrics:
-  prometheusAnnotations: true
+  podMonitor:
+    enabled: true
+    labels:
+      prometheus: platform
   prometheusRule:
     enabled: true
     labels:
@@ -278,19 +288,21 @@ networkPolicy:
           kubernetes.io/metadata.name: monitoring
 ```
 
-The rules alert on missing metrics, sustained catalog failure, repeated catalog
-refresh failures, sustained Git admission exhaustion, and a five-percent 5xx
-rate after a minimum traffic floor. They are disabled by default because the
-`PrometheusRule` custom resource must already exist. The chart rejects rules
-without metrics discovery or an explicit private scraper source. Route the
-included `critical` and `warning` severities through Alertmanager, then tune
-thresholds only from recorded workload evidence.
+The `PodMonitor` labels must match the Prometheus `podMonitorSelector`; the rule
+labels must independently match its `ruleSelector`. The rules alert on missing
+metrics, sustained catalog failure, repeated catalog refresh failures,
+sustained Git admission exhaustion, and a five-percent 5xx rate after a minimum
+traffic floor. They are disabled by default because the `PrometheusRule` custom
+resource must already exist. The chart rejects rules without metrics discovery
+or an explicit private scraper source. Route the included `critical` and
+`warning` severities through Alertmanager, then tune thresholds only from
+recorded workload evidence.
 
 ## Restrict network sources
 
 The NetworkPolicy blocks every source until you select the pods, namespaces, or
 IP ranges allowed to reach port 8788. Ingress rejects an empty
-`publicIngressFrom`; Prometheus annotations reject an empty
+`publicIngressFrom`; the `PodMonitor` rejects an empty
 `metricsIngressFrom`. Select an ingress controller with a standard
 `namespaceSelector`, `podSelector`, or `ipBlock` entry:
 

@@ -71,11 +71,8 @@ jobs:
                 --set ingress.className=nginx \
                 --set ingress.host=git.example.com \
                 --set ingress.tlsSecretName=crab-http-server-tls \
-                --set metrics.prometheusAnnotations=true \
                 --set-json 'networkPolicy.publicIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"ingress-nginx"}}}]' \
-                --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
                 > "${rendered}"
-            grep -F 'prometheus.io/scrape: "true"' "${rendered}"
             grep -F 'port: management' "${rendered}"
             grep -F 'terminationGracePeriodSeconds: 630' "${rendered}"
             grep -F -- '- /usr/bin/sleep' "${rendered}"
@@ -87,13 +84,27 @@ jobs:
           done
 
           values="${chart}/eks-values.example.yaml"
+          monitor_resource="${RUNNER_TEMP}/crab-http-server-pod-monitor.yaml"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab --values "${values}" \
+              --show-only templates/podmonitor.yaml \
+              --set metrics.podMonitor.enabled=true \
+              --set-json 'metrics.podMonitor.labels={"prometheus":"platform"}' \
+              --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
+              > "${monitor_resource}"
+          grep -F 'kind: PodMonitor' "${monitor_resource}"
+          grep -F 'port: management' "${monitor_resource}"
+          grep -F 'path: /metrics' "${monitor_resource}"
+          grep -F 'prometheus: platform' "${monitor_resource}"
+
           rules_resource="${RUNNER_TEMP}/crab-http-server-prometheus-rule.yaml"
           rules_file="${RUNNER_TEMP}/crab-http-server-rules.yaml"
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" \
               --namespace crab --values "${values}" \
               --show-only templates/prometheusrule.yaml \
-              --set metrics.prometheusAnnotations=true \
+              --set metrics.podMonitor.enabled=true \
               --set metrics.prometheusRule.enabled=true \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               > "${rules_resource}"
@@ -152,7 +163,7 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" --values "${values}" \
-              --set metrics.prometheusAnnotations=true >/dev/null 2>&1; then
+              --set metrics.podMonitor.enabled=true >/dev/null 2>&1; then
             echo "chart accepted a metrics scraper without an allowed source" >&2
             exit 1
           fi
@@ -164,12 +175,21 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" --values "${values}" \
-              --set metrics.prometheusAnnotations=true \
+              --set metrics.podMonitor.enabled=true \
               --set metrics.prometheusRule.enabled=true \
               --set-json 'metrics.prometheusRule.labels={"app.kubernetes.io/name":"other"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
               >/dev/null 2>&1; then
             echo "chart accepted an overridden alert-policy label" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set metrics.podMonitor.enabled=true \
+              --set-json 'metrics.podMonitor.labels={"app.kubernetes.io/name":"other"}' \
+              --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted an overridden metrics-discovery label" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \

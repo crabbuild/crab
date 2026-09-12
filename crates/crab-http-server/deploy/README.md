@@ -21,10 +21,10 @@ flowchart LR
 | ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
 The Kubernetes chart manages inline configuration, two or more replicas,
-private probes and Prometheus metrics, optional Prometheus Operator alerts, a
-disruption budget, ingress isolation, optional Transport Layer Security (TLS)
-ingress, and optional autoscaling. A provider is release-qualified only after
-its live test matrix passes.
+private probes and Prometheus metrics, an optional Prometheus Operator
+`PodMonitor` and alert rules, a disruption budget, ingress isolation, optional
+Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is
+release-qualified only after its live test matrix passes.
 
 S3 and GCS Terraform roots bound noncurrent repository versions to a configurable
 90-day recovery window and remove abandoned multipart uploads after one day.

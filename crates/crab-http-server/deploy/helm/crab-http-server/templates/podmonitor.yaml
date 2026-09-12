@@ -1,0 +1,30 @@
+{{- if .Values.metrics.podMonitor.enabled }}
+{{- if empty .Values.networkPolicy.metricsIngressFrom }}
+{{- fail "networkPolicy.metricsIngressFrom is required when metrics.podMonitor is enabled" }}
+{{- end }}
+{{- range $key := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/version" "app.kubernetes.io/managed-by" "helm.sh/chart" }}
+{{- if hasKey $.Values.metrics.podMonitor.labels $key }}
+{{- fail (printf "metrics.podMonitor.labels.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "crab-http-server.fullname" . }}
+  labels:
+    {{- include "crab-http-server.labels" . | nindent 4 }}
+    {{- with .Values.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "crab-http-server.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: management
+      path: /metrics
+      scheme: http
+      interval: {{ .Values.metrics.podMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.metrics.podMonitor.scrapeTimeout | quote }}
+      honorLabels: false
+{{- end }}
