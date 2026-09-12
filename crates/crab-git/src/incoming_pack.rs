@@ -94,6 +94,70 @@ impl IncomingPack {
         })
     }
 
+    /// Spool trusted generated objects directly for canonical pack preparation.
+    ///
+    /// Object identities, count, individual size, aggregate decoded bytes, and
+    /// cancellation are checked while writing the private spool. The caller must
+    /// still call [`IncomingPack::prepare`] to enforce the encoded-pack limit and
+    /// build verified index sidecars. This path is for objects constructed by the
+    /// caller, not untrusted Git pack input.
+    pub fn from_generated_objects<C>(
+        objects: impl IntoIterator<Item = (Kind, Vec<u8>)>,
+        directory: &Path,
+        limits: ReceiveLimits,
+        cancelled: C,
+    ) -> Result<Self>
+    where
+        C: Fn() -> bool,
+    {
+        let directory = tempfile::Builder::new()
+            .prefix("crab-generated-")
+            .tempdir_in(directory)?;
+        let mut decoded = File::options()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(directory.path().join("objects"))?;
+        let mut stored = BTreeMap::new();
+        let mut decoded_bytes = 0_u64;
+        for (kind, data) in objects {
+            check(&cancelled)?;
+            if data.len() > limits.max_object_bytes {
+                return Err(IncomingPackError::Limit("object size"));
+            }
+            let oid = object_id(kind, &data);
+            if stored.contains_key(&oid) {
+                continue;
+            }
+            if stored.len() >= limits.max_objects as usize {
+                return Err(IncomingPackError::Limit("object count"));
+            }
+            decoded_bytes = decoded_bytes
+                .checked_add(data.len() as u64)
+                .filter(|bytes| *bytes <= limits.max_inflated_bytes)
+                .ok_or(IncomingPackError::Limit("inflated bytes"))?;
+            let offset = decoded.stream_position()?;
+            decoded.write_all(&data)?;
+            stored.insert(
+                oid,
+                IncomingObject {
+                    oid,
+                    kind,
+                    size: data.len(),
+                    offset,
+                },
+            );
+        }
+        decoded.flush()?;
+        let received_objects =
+            u32::try_from(stored.len()).map_err(|_| IncomingPackError::Limit("object count"))?;
+        Ok(Self {
+            directory,
+            objects: stored,
+            received_objects,
+        })
+    }
+
     /// Returns all unique objects, including any verified external thin-pack bases.
     pub fn objects(&self) -> impl Iterator<Item = &IncomingObject> {
         self.objects.values()

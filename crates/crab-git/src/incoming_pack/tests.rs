@@ -37,6 +37,50 @@ fn no_base(
 }
 
 #[test]
+fn generated_objects_spool_once_with_identity_and_resource_bounds() {
+    let temp = tempfile::tempdir().unwrap();
+    let generated = IncomingPack::from_generated_objects(
+        [
+            (Kind::Blob, b"first".to_vec()),
+            (Kind::Blob, b"second".to_vec()),
+            (Kind::Blob, b"first".to_vec()),
+        ],
+        temp.path(),
+        limits(),
+        || false,
+    )
+    .unwrap();
+
+    assert_eq!(generated.received_objects(), 2);
+    assert_eq!(
+        generated
+            .read_object(&object_id(Kind::Blob, b"second"))
+            .unwrap()
+            .unwrap()
+            .data,
+        b"second"
+    );
+    assert!(matches!(
+        IncomingPack::from_generated_objects(
+            [(Kind::Blob, vec![0; 1024 * 1024 + 1])],
+            temp.path(),
+            limits(),
+            || false,
+        ),
+        Err(IncomingPackError::Limit("object size"))
+    ));
+    assert!(matches!(
+        IncomingPack::from_generated_objects(
+            [(Kind::Blob, Vec::new())],
+            temp.path(),
+            limits(),
+            || true,
+        ),
+        Err(IncomingPackError::Cancelled)
+    ));
+}
+
+#[test]
 fn resolves_forward_ref_deltas_and_cleans_private_spools() {
     let temp = tempfile::tempdir().unwrap();
     let oid = object_id(Kind::Blob, b"abc");

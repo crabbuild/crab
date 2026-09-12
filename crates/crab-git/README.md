@@ -159,6 +159,10 @@ on a blocking worker. Input reads and base lookups need caller-owned deadlines;
 base lookup must authorize access before returning bounded object bytes. The
 returned `IncomingPack` retains decoded objects in a private spool, exposes exact
 object IDs/kinds/bytes, and removes its files when dropped.
+`IncomingPack::from_generated_objects` gives trusted in-process Git object
+builders the same bounded identity spool without first compressing and then
+inflating an artificial wire pack. `prepare` remains mandatory and produces the
+same independently readable canonical pack and verified sidecars.
 
 This is an integrity boundary, not a Git publisher. It validates the complete pack
 checksum, compressed streams, entry framing and delta reconstruction. Callers
