@@ -34,7 +34,7 @@ pub(crate) async fn serve(request: Request) -> Response {
     };
     let content_type = match name.rsplit('.').next() {
         Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("svg") => "image/svg+xml",
         Some("json") => "application/json",
@@ -108,6 +108,26 @@ mod tests {
                 .unwrap()
                 .to_bytes()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn javascript_modules_receive_an_executable_media_type() {
+        let path = ASSETS
+            .iter()
+            .map(|(name, _)| *name)
+            .find(|name| name.ends_with(".mjs"))
+            .expect("the repository bundle includes an ES module asset");
+        let response = serve(
+            Request::builder()
+                .uri(format!("/{path}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/javascript; charset=utf-8"
         );
     }
 }

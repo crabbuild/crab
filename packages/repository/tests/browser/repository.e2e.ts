@@ -1,4 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
+import { tableFromArrays, tableToIPC } from "apache-arrow";
+import { strToU8, zipSync } from "fflate";
+import { parquetWriteBuffer } from "hyparquet-writer";
+import initSqlJs from "sql.js";
 import { expectNoAccessibilityViolations } from "./accessibility";
 
 const oid = "a".repeat(40);
@@ -13,6 +17,68 @@ const pathHex = (path: string) =>
   Array.from(new TextEncoder().encode(path), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+
+function pdfBytes(text: string) {
+  const stream = `BT /F1 20 Tf 72 720 Td (${text}) Tj ET`;
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let value = "%PDF-1.4\n";
+  const offsets = [0];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(value));
+    value += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xref = Buffer.byteLength(value);
+  value += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  value += offsets
+    .slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+    .join("");
+  value += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return strToU8(value);
+}
+
+async function routePreviewFiles(
+  page: Page,
+  files: Record<
+    string,
+    { text: string | null; bytes: Uint8Array; textTruncated?: boolean }
+  >,
+) {
+  await page.route("**/api/repos/team/project/file?*", async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path_hex");
+    const file = Object.entries(files).find(
+      ([name]) => pathHex(name) === path,
+    )?.[1];
+    if (!file) return route.fallback();
+    return route.fulfill({
+      json: {
+        oid,
+        size: file.bytes.byteLength,
+        mode: "100644",
+        classification: "OrdinaryGit",
+        text: file.text,
+        text_truncated: file.textTruncated ?? false,
+      },
+    });
+  });
+  await page.route("**/api/repos/team/project/blob?*", async (route) => {
+    const path = new URL(route.request().url()).searchParams.get("path_hex");
+    const file = Object.entries(files).find(
+      ([name]) => pathHex(name) === path,
+    )?.[1];
+    if (!file) return route.fallback();
+    return route.fulfill({
+      body: Buffer.from(file.bytes),
+      contentType: "application/octet-stream",
+    });
+  });
+}
 
 async function selectTheme(page: Page, theme: "light" | "dark") {
   await page
@@ -381,6 +447,7 @@ test.beforeEach(async ({ page }) => {
           mode: "100644",
           classification: "OrdinaryGit",
           text,
+          text_truncated: false,
         },
       });
     }
@@ -929,6 +996,133 @@ test("Markdown files switch between source and a repository-aware preview", asyn
   );
   await page.getByRole("button", { name: "Code", exact: true }).click();
   await expect(preview).toHaveCount(0);
+});
+
+test("format-aware previews explore data, office files, media, and databases locally", async ({
+  page,
+}) => {
+  const csv = "run,model,score\n1,small,0.91\n2,large,0.98\n";
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#0969da"/></svg>';
+  const workbook = zipSync({
+    "xl/workbook.xml": strToU8(
+      '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="Experiments"/></sheets></workbook>',
+    ),
+    "xl/worksheets/sheet1.xml": strToU8(
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1" t="inlineStr"><is><t>epoch</t></is></c><c r="B1" t="inlineStr"><is><t>loss</t></is></c></row><row><c r="A2"><v>1</v></c><c r="B2"><v>0.42</v></c></row></sheetData></worksheet>',
+    ),
+  });
+  const SQL = await initSqlJs();
+  const database = new SQL.Database();
+  database.run(
+    "CREATE TABLE runs (id INTEGER, model TEXT, score REAL); INSERT INTO runs VALUES (1, 'large', 0.98);",
+  );
+  const sqlite = database.export();
+  database.close();
+  const parquet = new Uint8Array(
+    parquetWriteBuffer({
+      columnData: [
+        { name: "run", data: [1, 2], type: "INT32" },
+        { name: "score", data: [0.91, 0.98], type: "DOUBLE" },
+      ],
+    }),
+  );
+  const arrow = tableToIPC(
+    tableFromArrays({ run: [1, 2], model: ["small", "large"] }),
+    "file",
+  );
+  await routePreviewFiles(page, {
+    "metrics.csv": {
+      text: null,
+      bytes: strToU8(csv),
+      textTruncated: true,
+    },
+    "diagram.svg": { text: svg, bytes: strToU8(svg) },
+    "report.xlsx": { text: null, bytes: workbook },
+    "runs.sqlite": { text: null, bytes: sqlite },
+    "features.parquet": { text: null, bytes: parquet },
+    "batch.arrow": { text: null, bytes: arrow },
+    "handbook.pdf": {
+      text: null,
+      bytes: pdfBytes("Private in-browser PDF preview"),
+    },
+    "model.onnx": {
+      text: null,
+      bytes: new Uint8Array([0x08, 0x03, 0x12, 0x00, 0xff, 0x00]),
+    },
+  });
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("metrics.csv")}&kind=Blob`,
+  );
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  const csvExplorer = page.getByRole("region", {
+    name: "CSV dataset data explorer",
+  });
+  await expect(csvExplorer).toContainText("large");
+  await csvExplorer.getByPlaceholder("Search loaded rows").fill("small");
+  await expect(csvExplorer.getByRole("row")).toHaveCount(2);
+  await expectNoAccessibilityViolations(page);
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("diagram.svg")}&kind=Blob`,
+  );
+  const image = page.getByRole("img", { name: "Preview of diagram.svg" });
+  await expect(image).toBeVisible();
+  await expect
+    .poll(() =>
+      image.evaluate((node) => (node as HTMLImageElement).naturalWidth),
+    )
+    .toBe(80);
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("report.xlsx")}&kind=Blob`,
+  );
+  await expect(
+    page.getByRole("navigation", { name: "Workbook sheets" }),
+  ).toContainText("Experiments");
+  await expect(page.getByRole("cell", { name: "0.42" })).toBeVisible();
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("runs.sqlite")}&kind=Blob`,
+  );
+  await expect(
+    page.getByRole("complementary", { name: "Database objects" }),
+  ).toContainText("runs");
+  await expect(page.getByRole("cell", { name: "large" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: "0.98" })).toBeVisible();
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("features.parquet")}&kind=Blob`,
+  );
+  await expect(
+    page.getByRole("region", { name: "Parquet dataset data explorer" }),
+  ).toContainText("0.91");
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("batch.arrow")}&kind=Blob`,
+  );
+  await expect(
+    page.getByRole("region", { name: "Arrow dataset data explorer" }),
+  ).toContainText("large");
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("handbook.pdf")}&kind=Blob`,
+  );
+  await expect(
+    page.getByRole("img", { name: "Page 1 of handbook.pdf" }),
+  ).toBeVisible();
+  await expect(page.getByText("Page 1 of 1")).toBeVisible();
+  await expect(page.getByText("Private in-browser PDF preview")).toBeAttached();
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("model.onnx")}&kind=Blob`,
+  );
+  await expect(page.getByText("ONNX model")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Hex and ASCII" }),
+  ).toBeVisible();
+  await expect(page.getByText(/00000000\s+08 03 12 00 ff 00/)).toBeVisible();
 });
 
 test("blame and source panes resize with pointer and keyboard controls", async ({

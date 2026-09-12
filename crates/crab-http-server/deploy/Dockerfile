@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:22.12.0-bookworm-slim@sha256:35531c52ce27b6575d69755c73e65d4468dba93a25644eed56dc12879cae9213 AS frontend
+FROM node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS frontend
 
 WORKDIR /build
 COPY packages/repository/package.json packages/repository/package-lock.json packages/repository/

@@ -17,6 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{auth::Principal, server::Server};
 
+const MAX_INLINE_TEXT_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Action {
@@ -486,12 +488,13 @@ async fn optional_blob(
 }
 
 fn content_json(blob: &Blob) -> Value {
-    let text = if blob.bytes.contains(&0) {
+    let decoded = if blob.bytes.contains(&0) {
         None
     } else {
         std::str::from_utf8(&blob.bytes).ok()
     };
-    json!({"oid":blob.metadata.oid.to_string(),"size":blob.bytes.len(),"mode":format!("{:06o}",blob.metadata.mode.raw()),"classification":format!("{:?}",blob.metadata.classification),"text":text})
+    let text = decoded.filter(|_| blob.bytes.len() <= MAX_INLINE_TEXT_BYTES);
+    json!({"oid":blob.metadata.oid.to_string(),"size":blob.bytes.len(),"mode":format!("{:06o}",blob.metadata.mode.raw()),"classification":format!("{:?}",blob.metadata.classification),"text":text,"text_truncated":decoded.is_some() && text.is_none()})
 }
 
 fn image_content_type(bytes: &[u8]) -> Option<&'static str> {
@@ -683,6 +686,17 @@ mod tests {
                 < search_score("src/engine/chunk_file.rs", "cfr").unwrap()
         );
         assert!(search_score("src/engine/chunk_file.rs", "not-here").is_none());
+    }
+
+    #[test]
+    fn file_metadata_keeps_large_utf8_available_without_embedding_it_in_json() {
+        let value = content_json(&blob(&vec![b'x'; MAX_INLINE_TEXT_BYTES + 1]));
+        assert_eq!(value["text"], Value::Null);
+        assert_eq!(value["text_truncated"], true);
+
+        let value = content_json(&blob(b"small text"));
+        assert_eq!(value["text"], "small text");
+        assert_eq!(value["text_truncated"], false);
     }
 
     #[test]
