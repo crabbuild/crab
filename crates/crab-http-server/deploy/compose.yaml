@@ -1,0 +1,135 @@
+name: crab-http-server
+
+x-server-build: &server-build
+  context: ../../..
+  dockerfile: crates/crab-http-server/deploy/Dockerfile
+
+x-storage-environment: &storage-environment
+  AWS_ACCESS_KEY_ID: crab-local-access
+  AWS_SECRET_ACCESS_KEY: crab-local-secret-key
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL_S3: http://rustfs:9000
+  AWS_ALLOW_HTTP: "true"
+  AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_CLI_AUTO_PROMPT: "off"
+  AWS_PAGER: ""
+
+x-server-service: &server-service
+  image: ${CRAB_HTTP_SERVER_IMAGE:-crab-http-server:local}
+  build: *server-build
+  environment: *storage-environment
+  volumes:
+    - ./compose.server.toml:/etc/crab/server.toml:ro
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=${CRAB_TMP_SIZE:-2g},uid=10001,gid=10001,mode=0700
+
+services:
+  rustfs:
+    image: ${RUSTFS_IMAGE:-rustfs/rustfs:1.0.0-beta.8-glibc@sha256:040304b66e029a5cde4bed140b41513e925909839a9b912a40a98340610d1f66}
+    environment:
+      RUSTFS_ACCESS_KEY: crab-local-access
+      RUSTFS_SECRET_KEY: crab-local-secret-key
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_OBS_LOG_DIRECTORY: /data/logs
+    volumes:
+      - repository-data:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:9000/health/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  bucket-init:
+    image: ${AWS_CLI_IMAGE:-public.ecr.aws/aws-cli/aws-cli:2.27.41@sha256:1c2d7a51b1ff4f460bc3f1e1ee46a6cef47c7429ad9089ef99012a95e472a1a5}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket crab-http-server 2>/dev/null; then
+          exit 0
+        fi
+        aws --endpoint-url http://rustfs:9000 s3api create-bucket --bucket crab-http-server
+    environment: *storage-environment
+    user: "65534:65534"
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65534,gid=65534,mode=0700
+    restart: "no"
+
+  repository-init:
+    <<: *server-service
+    command:
+      - --config
+      - /etc/crab/server.toml
+      - repository
+      - create
+      - --owner
+      - demo
+      - --name
+      - hello
+      - --prefix
+      - demo/hello
+      - --description
+      - A repository created by Docker Compose
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  server:
+    <<: *server-service
+    ports:
+      - 127.0.0.1:${CRAB_HTTP_SERVER_PORT:-8788}:8080
+    depends_on:
+      repository-init:
+        condition: service_completed_successfully
+    stop_grace_period: 10m
+    restart: unless-stopped
+
+  proxy:
+    image: ${CADDY_IMAGE:-caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d}
+    network_mode: service:server
+    user: "65534:65534"
+    volumes:
+      - ./compose.Caddyfile:/etc/caddy/Caddyfile:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /config:rw,noexec,nosuid,nodev,size=8m,uid=65534,gid=65534,mode=0700
+      - /data:rw,noexec,nosuid,nodev,size=8m,uid=65534,gid=65534,mode=0700
+    depends_on:
+      server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/api/repos"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+    restart: unless-stopped
+
+volumes:
+  repository-data:

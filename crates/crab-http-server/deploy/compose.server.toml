@@ -1,0 +1,5 @@
+listen = "127.0.0.1:8788"
+management_listen = "127.0.0.1:8789"
+
+[storage]
+url = "s3://crab-http-server/repositories"

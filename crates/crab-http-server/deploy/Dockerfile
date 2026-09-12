@@ -26,8 +26,10 @@ RUN printf 'crab:x:10001:\n' >> /etc/group \
     && install -d -o 10001 -g 10001 /etc/crab /var/lib/crab/tmp
 
 COPY --from=builder /build/target/release/crab-http-server /usr/local/bin/crab-http-server
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
-ENV TMPDIR=/var/lib/crab/tmp
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    TMPDIR=/var/lib/crab/tmp
 USER crab:crab
 EXPOSE 8788 8789
 STOPSIGNAL SIGTERM

@@ -29,6 +29,11 @@ jobs:
       - name: Validate deployment profiles
         run: |
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
+          docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
+          docker run --rm \
+            --volume "$PWD/crates/crab-http-server/deploy/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
           for values in eks-values.example.yaml gke-values.example.yaml aks-values.example.yaml; do
             docker run --rm \
               --volume "$PWD/crates/crab-http-server/deploy/helm/crab-http-server:/chart:ro" \
@@ -47,5 +52,35 @@ jobs:
           test "$(docker image inspect crab-http-server:test --format '{{.Config.StopSignal}}')" = "SIGTERM"
           docker image inspect crab-http-server:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"healthcheck"'
           test "$(docker run --rm --entrypoint /usr/bin/id crab-http-server:test -u)" = "10001"
+          docker run --rm --entrypoint /usr/bin/test crab-http-server:test \
+            -s /etc/ssl/certs/ca-certificates.crt
           docker run --rm crab-http-server:test --help | grep -F -- "--config"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"
+      - name: Exercise the Compose quick start and restart
+        env:
+          CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
+        run: |
+          cleanup() {
+            result=$?
+            if [ "$result" -ne 0 ]; then
+              docker compose --file crates/crab-http-server/deploy/compose.yaml ps --all || true
+              docker compose --file crates/crab-http-server/deploy/compose.yaml logs --no-color || true
+            fi
+            docker compose --file crates/crab-http-server/deploy/compose.yaml \
+              down --volumes --remove-orphans || true
+            exit "$result"
+          }
+          trap cleanup EXIT
+
+          docker compose --file crates/crab-http-server/deploy/compose.yaml \
+            up --detach --no-build --wait --wait-timeout 120
+          curl --fail --silent --show-error http://127.0.0.1:8788/api/repos |
+            jq --exit-status \
+              '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1'
+
+          docker compose --file crates/crab-http-server/deploy/compose.yaml down
+          docker compose --file crates/crab-http-server/deploy/compose.yaml \
+            up --detach --no-build --wait --wait-timeout 120
+          curl --fail --silent --show-error http://127.0.0.1:8788/api/repos |
+            jq --exit-status \
+              '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1'

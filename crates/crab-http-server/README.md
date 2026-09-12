@@ -28,8 +28,21 @@ or local Git object database.
 
 ## Build and run
 
-Run from the repository root. You need Node 22.12+, Rust, an existing bucket,
-and storage credentials. Build the frontend first: `build.rs` embeds its output.
+For the fastest local start, use Docker Engine with Compose v2:
+
+```sh
+docker compose --file crates/crab-http-server/deploy/compose.yaml \
+  up --detach --build --wait
+```
+
+Then open <http://127.0.0.1:8788/demo/hello>. The stack creates a persistent
+local object store and demo repository automatically. See the
+[Compose operations guide](deploy/README.md#start-locally-with-docker-compose)
+for repository commands, configuration overrides, and safe teardown.
+
+To build outside Docker, run from the repository root. You need Node 22.12+,
+Rust, an existing bucket, and storage credentials. Build the frontend first:
+`build.rs` embeds its output.
 
 Choose a unique Cargo target directory for this checkout on the mounted workspace
 volume, following root `AGENTS.md`. This example uses `/Volumes/Workspace`:
@@ -67,6 +80,7 @@ and a canonical HTTPS origin. For container deployment, use the
 | Task | Read |
 | --- | --- |
 | Configure catalog, storage root, temporary space, and credentials | [Development setup](REFERENCE.md#run-the-current-development-build) |
+| Start locally with Docker Compose | [Local Compose stack](deploy/README.md#start-locally-with-docker-compose) |
 | Deploy on EKS, GKE, AKS, or ECS | [Deployment profiles](deploy/README.md) |
 | Probe readiness and drain the service | [Container operation](REFERENCE.md#run-the-container) |
 | Understand browser APIs and publication ownership | [Application behavior](REFERENCE.md#repository-browser-and-application-apis) |
