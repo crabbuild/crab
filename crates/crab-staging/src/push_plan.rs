@@ -490,7 +490,6 @@ async fn materialize_prepared_xorb_file(
     if prepared_xorb_file_matches_plan(&target, &xorb_hash, &xorb_hash, planned).await? {
         return Ok(true);
     }
-    fail_if_existing_prepared_xorb_is_corrupt(&target, &xorb_hash).await?;
 
     let parent = target
         .parent()
@@ -502,7 +501,13 @@ async fn materialize_prepared_xorb_file(
             Ok(true)
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            prepared_xorb_file_matches_plan(&target, &xorb_hash, &xorb_hash, planned).await
+            if prepared_xorb_file_matches_plan(&target, &xorb_hash, &xorb_hash, planned).await? {
+                return Ok(true);
+            }
+            Err(StagingError::StagingCorrupt(format!(
+                "content-addressed prepared xorb {} already exists but fails plan validation",
+                xorb_hash.hex()
+            )))
         }
         Err(e)
             if matches!(
@@ -702,7 +707,6 @@ pub(crate) async fn write_prepared_xorb_with_payload_hash(
     if prepared_xorb_file_matches_identity(&path, xorb_hash, &payload_hash, byte_count).await? {
         return Ok(byte_count);
     }
-    fail_if_existing_prepared_xorb_is_corrupt(&path, xorb_hash).await?;
 
     let tmp = unique_prepared_xorb_temp_path(&path, "write");
     let mut tmp_guard = TempFileGuard::new(tmp.clone());
@@ -747,7 +751,6 @@ pub async fn move_prepared_xorb(
         tmp_guard.disarm();
         return Ok(bytes);
     }
-    fail_if_existing_prepared_xorb_is_corrupt(&path, xorb_hash).await?;
     let file = tokio::fs::OpenOptions::new().write(true).open(&tmp).await?;
     file.sync_all().await?;
     drop(file);
@@ -802,20 +805,6 @@ async fn install_prepared_xorb_temp(
     }
     tokio::fs::remove_file(temp).await?;
     sync_parent_directory(target).await
-}
-
-async fn fail_if_existing_prepared_xorb_is_corrupt(
-    path: &Path,
-    xorb_hash: &MerkleHash,
-) -> Result<()> {
-    match tokio::fs::metadata(path).await {
-        Ok(_) => Err(StagingError::StagingCorrupt(format!(
-            "content-addressed prepared xorb {} exists but fails identity validation",
-            xorb_hash.hex()
-        ))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
 }
 
 async fn prepared_xorb_file_matches_identity(
