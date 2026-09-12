@@ -29,6 +29,17 @@ variable "root_prefix" {
   }
 }
 
+variable "recovery_version_retention_days" {
+  description = "Days to retain noncurrent object versions below the Crab root for point-in-time recovery."
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.recovery_version_retention_days == floor(var.recovery_version_retention_days) && var.recovery_version_retention_days >= 30 && var.recovery_version_retention_days <= 3650
+    error_message = "recovery_version_retention_days must be a whole number from 30 through 3650."
+  }
+}
+
 variable "namespace" {
   description = "Kubernetes namespace used by the Helm release."
   type        = string

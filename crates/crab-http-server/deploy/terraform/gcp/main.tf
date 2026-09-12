@@ -28,6 +28,28 @@ resource "google_storage_bucket" "repositories" {
     }
   }
 
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+
+    condition {
+      days_since_noncurrent_time = var.recovery_version_retention_days
+      matches_prefix             = ["${var.root_prefix}/"]
+    }
+  }
+
+  lifecycle_rule {
+    action {
+      type = "AbortIncompleteMultipartUpload"
+    }
+
+    condition {
+      age            = 1
+      matches_prefix = ["${var.root_prefix}/"]
+    }
+  }
+
   lifecycle {
     prevent_destroy = true
   }

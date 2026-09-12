@@ -66,6 +66,32 @@ resource "aws_s3_bucket_lifecycle_configuration" "repositories" {
       noncurrent_days = 1
     }
   }
+
+  rule {
+    id     = "expire-noncurrent-recovery-versions"
+    status = "Enabled"
+
+    filter {
+      prefix = "${var.root_prefix}/"
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.recovery_version_retention_days
+    }
+  }
+
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+
+    filter {
+      prefix = "${var.root_prefix}/"
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
 }
 
 data "aws_iam_policy_document" "pod_identity_trust" {

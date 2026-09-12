@@ -26,6 +26,12 @@ disruption budget, ingress isolation, optional Transport Layer Security (TLS)
 ingress, and optional autoscaling. A provider is release-qualified only after
 its live test matrix passes.
 
+S3 and GCS Terraform roots bound noncurrent repository versions to a configurable
+90-day recovery window and remove abandoned multipart uploads after one day.
+Azure versions remain unexpired because its available lifecycle condition cannot
+measure age since becoming noncurrent safely. Provider cost alerts and the
+restore runbook remain operator responsibilities.
+
 Container CI stops the local writers, copies the complete storage root to an
 isolated object prefix, compares every key and object body, then verifies the
 restored catalog through native Git, issue, and LFS clients. This proves the

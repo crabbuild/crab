@@ -1,7 +1,8 @@
-project_id      = "team-production-123456789012"
-region          = "us-west1"
-bucket_name     = "team-crab-repositories-123456789012"
-bucket_location = "us-west1"
+project_id                      = "team-production-123456789012"
+region                          = "us-west1"
+bucket_name                     = "team-crab-repositories-123456789012"
+bucket_location                 = "us-west1"
+recovery_version_retention_days = 90
 
 labels = {
   environment = "production"

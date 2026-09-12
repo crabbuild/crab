@@ -17,3 +17,8 @@ output "service_account_name" {
   description = "Helm serviceAccount.name value."
   value       = var.service_account_name
 }
+
+output "recovery_version_retention_days" {
+  description = "Configured noncurrent object-version recovery window."
+  value       = var.recovery_version_retention_days
+}

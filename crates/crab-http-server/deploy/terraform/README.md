@@ -41,11 +41,15 @@ Copy the provider’s `terraform.tfvars.example` to a private `terraform.tfvars`
 
 ```sh
 terraform -chdir=crates/crab-http-server/deploy/terraform/aws init
+terraform -chdir=crates/crab-http-server/deploy/terraform/aws test
 terraform -chdir=crates/crab-http-server/deploy/terraform/aws plan
 terraform -chdir=crates/crab-http-server/deploy/terraform/aws apply
 ```
 
 Replace `aws` with `gcp` or `azure`. Store Terraform state in your organization’s encrypted remote backend with state locking and restricted access. The checked-in roots intentionally omit a backend block so each team can use its existing state platform.
+
+The AWS and GCP tests use mocked providers to prove the recovery-version and
+incomplete-multipart lifecycle values without contacting a cloud account.
 
 ## Transfer outputs to Helm
 
@@ -69,6 +73,27 @@ The EKS association uses the namespace and ServiceAccount name directly, so EKS 
 
 The roots disable force deletion and enable object versioning. Don’t remove versioning, public-access protection, encryption, or provider-native identity to shorten setup.
 
-The 24-hour lifecycle rule applies only to `repositories/.crab/http-server/v1/auth/`. It removes expired login flows, sessions, and Git-token records. It never covers the catalog or repository prefixes.
+The 24-hour lifecycle rule applies only to
+`repositories/.crab/http-server/v1/auth/`. It removes expired login flows,
+sessions, and Git-token records. The maximum active identity lifetime is eight
+hours, so this rule never expires a valid session.
+
+S3 and GCS also retain noncurrent versions below the complete Crab root for 90
+days by default. Set `recovery_version_retention_days` from 30 through 3650 to
+match the organization’s recovery and compliance window. Their lifecycle
+contracts measure from the time a version becomes noncurrent. They also abort
+incomplete multipart uploads after one day, well beyond Crab’s maximum
+operation duration.
+
+Azure Blob lifecycle exposes version age from creation, not age since a version
+became noncurrent. The Azure root therefore does not automatically expire
+repository versions: applying the same numeric policy could remove an old
+object’s previous value immediately after its first update. Use storage cost
+alerts and a separately tested, version-aware backup policy until Azure can
+express the same safe boundary.
+
+Lifecycle expiration is not a backup. Before reducing retention, prove a
+version-selected restore into an isolated root and retain longer-term backups
+outside the application account when policy requires them.
 
 Terraform state doesn’t contain the OIDC client secret or Crab state key. Create those inputs through your secret-management system and follow [the Kubernetes deployment guide](../helm/crab-http-server/README.md).

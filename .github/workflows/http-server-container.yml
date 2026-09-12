@@ -204,6 +204,10 @@ jobs:
               "${terraform_image}" init -backend=false -input=false -lockfile=readonly
             docker run --rm --volume "${PWD}:/src:ro" --workdir "/src/${module}" \
               "${terraform_image}" validate
+            if [ -d "${module}/tests" ]; then
+              docker run --rm --volume "${PWD}:/src" --workdir "/src/${module}" \
+                "${terraform_image}" test
+            fi
           done
       - name: Build locked server image
         run: >-

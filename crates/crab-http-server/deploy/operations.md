@@ -248,6 +248,13 @@ Test restore without overwriting the active root:
 8. Record restored object counts, selected version, RPO, RTO, and failures.
 9. Delete the isolated test only after retaining the evidence.
 
+For Terraform-managed S3 and GCS roots, the selected noncurrent version must be
+inside `recovery_version_retention_days` (90 days by default). Azure repository
+versions are intentionally not lifecycle-expired because its available policy
+measures version creation age rather than time since becoming noncurrent. In
+all three providers, use an independently retained backup for recovery points
+outside the object-version window.
+
 The container gate repeats the portable core of this drill against RustFS. It
 stops source writers, performs an object-store-to-object-store copy, compares
 the complete relative key and size set, hashes every source/restored body, and
