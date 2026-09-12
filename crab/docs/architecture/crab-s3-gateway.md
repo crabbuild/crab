@@ -783,15 +783,16 @@ acknowledgement. At most 256 warm branch queues may retain a materialized
 Git directory state and attribute manifest between batches under a shared
 128 MiB process budget. A warm batch prepares optimistically, then revalidates
 its cached parent under the object-store ref lease before publication; a
-competing writer forces a cold rebuild. Idle-branch eviction, capacity pressure,
-or restart also falls back to immutable repository objects. Cold reconstruction
-prepares a full, commit-identified attribute checkpoint; warm state does the same
-after each 64 publication batches. After validating the parent under the ref
-lease, publication commits the journal and then replaces one bounded checkpoint
-slot for that branch before acknowledging the batch when the checkpoint PUT
-succeeds. A crash or checkpoint-write failure leaves a missing or stale slot,
-which readers ignore while replaying
-immutable deltas. Only the journal winner writes the checkpoint. The final
+competing writer forces a cold rebuild. Idle states remain reusable until memory
+pressure requires eviction; capacity pressure or restart falls back to immutable
+repository objects. An unborn branch bypasses the object catalog because it has
+no starting Git tree, while publication still rechecks absence under its ref
+lease. Cold reconstruction prepares a full, commit-identified attribute
+checkpoint; warm state does the same after each 64 publication batches. After
+validating the parent under the ref lease, publication commits the journal and
+then attempts to replace one bounded checkpoint slot for that branch. A crash or
+checkpoint-write failure leaves a missing or stale slot, which readers ignore
+while replaying immutable deltas. Only the journal winner writes the checkpoint. The final
 version-2 delta carries optional checkpoint and slot fields, so existing deltas
 require neither migration nor a schema-version bump. A manifest above the existing
 32 MiB bound keeps its authoritative delta chain and retries checkpointing after
@@ -805,9 +806,22 @@ prevents overlapping maintenance waves from advancing ahead of visibility proof
 publication. Sustained traffic additionally claims one catalog-maintenance pass
 every 64 local publication epochs. The elected worker compacts durable journal
 entries and advances exact-object catalog coverage under the generation-owner and
-GC-writer fences. This keeps both the mutable journal and clean-read object lookup
-bounded without waiting for an idle window; commit-graph maintenance still
-requires a five-second quiet window.
+GC-writer fences.
+
+When an attribute delta ancestry proves that a branch began empty and every
+commit came from the gateway, its checkpoint is also a complete materialized S3
+namespace index. `ListObjects` binds that index to the current journal-projected
+ref and pages the sorted checkpoint plus the per-commit deltas from at most 63
+newer publication batches under normal checkpoint publication, without opening
+SlateDB or walking Git trees. A missing delta, legacy checkpoint, or Git-authored
+ancestor removes the coverage proof and routes the request through canonical Git
+traversal. For that fallback, each read binds the newest catalog whose immutable
+pack inventory is a proven subset of its snapshot, then searches only the
+remaining pack tail. This remains valid while manifest compaction and catalog
+publication briefly differ and keeps common object lookup bounded without waiting
+for an idle window; a complete pack scan remains the fallback when no catalog
+inventory can be proven as a subset. Commit-graph maintenance still requires a
+five-second quiet window.
 
 ### 4.2 PUT and DELETE execution rules
 

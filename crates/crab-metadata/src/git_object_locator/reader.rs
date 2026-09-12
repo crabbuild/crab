@@ -142,6 +142,55 @@ impl GitObjectLocatorSession {
         Self::open_with_published_checkpoint(store, repo_prefix, options).await
     }
 
+    /// Read the latest published catalog identity without opening its SlateDB checkpoint.
+    ///
+    /// The post-checkpoint marker is authoritative for this discovery step. A
+    /// missing marker means publication is still in progress; malformed or
+    /// mismatched marker content fails closed.
+    pub async fn latest_published_identity(
+        store: Arc<dyn ObjectStore>,
+        repo_prefix: &str,
+    ) -> Result<Option<GitObjectCatalogIdentity>> {
+        let path = git_object_locator_path(repo_prefix);
+        let Some(checkpoint) = reader_checkpoint_id(Arc::clone(&store), &path, None).await? else {
+            return Ok(None);
+        };
+        let Some(name) = checkpoint.name.as_deref() else {
+            return Ok(None);
+        };
+        let Some(digest) = name.strip_prefix(super::READER_CHECKPOINT_PREFIX) else {
+            return Ok(None);
+        };
+        let digest = crab_xet::hash::MerkleHash::from_hex(digest)
+            .map_err(|_| corrupt("checkpoint", "invalid published checkpoint name"))?;
+        let marker_path =
+            ObjectPath::from(super::catalog_checkpoint_marker_path(repo_prefix, digest));
+        let storage = crab_storage::Store::new(Arc::clone(&store));
+        let body = match storage.get_with_etag(&marker_path).await {
+            Ok((body, _)) => body,
+            Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
+            Err(source) => return Err(MetadataError::Storage { source }),
+        };
+        let marker: super::CatalogCheckpointMarker =
+            serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
+                path: marker_path.to_string(),
+                reason: format!("invalid catalog checkpoint marker JSON: {error}"),
+            })?;
+        let identity = marker
+            .identity()
+            .ok_or_else(|| MetadataError::CorruptObject {
+                path: marker_path.to_string(),
+                reason: "invalid catalog checkpoint marker identity".to_owned(),
+            })?;
+        if identity.catalog_digest != digest || !marker.matches_identity(identity) {
+            return Err(MetadataError::CorruptObject {
+                path: marker_path.to_string(),
+                reason: "catalog checkpoint marker does not match its name".to_owned(),
+            });
+        }
+        Ok(Some(identity))
+    }
+
     async fn open_with_published_checkpoint(
         store: Arc<dyn ObjectStore>,
         repo_prefix: &str,
@@ -1402,6 +1451,65 @@ mod tests {
             pack_size: pack.pack_size,
         };
         (object_ids, HashMap::from([(pack.pack_id, inventory)]))
+    }
+
+    #[tokio::test]
+    async fn latest_published_identity_comes_from_checkpoint_marker() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let pack = pack(1);
+        let coverage = GitLocatorCoverage {
+            generation: 7,
+            pack_index_hash: pack.pack_index_hash,
+        };
+        publish(Arc::clone(&store), pack, [3; 20], Some(coverage)).await;
+
+        let identity = GitObjectLocatorSession::latest_published_identity(store, "org/repo")
+            .await
+            .expect("discover identity")
+            .expect("published identity");
+
+        assert_eq!(
+            (
+                identity.generation,
+                identity.pack_index_hash,
+                identity.object_count
+            ),
+            (7, coverage.pack_index_hash, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_published_identity_rejects_malformed_marker() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let pack = pack(1);
+        publish(
+            Arc::clone(&store),
+            pack,
+            [3; 20],
+            Some(GitLocatorCoverage {
+                generation: 7,
+                pack_index_hash: pack.pack_index_hash,
+            }),
+        )
+        .await;
+        let identity =
+            GitObjectLocatorSession::latest_published_identity(Arc::clone(&store), "org/repo")
+                .await
+                .expect("discover identity")
+                .expect("published identity");
+        let marker = ObjectPath::from(super::super::catalog_checkpoint_marker_path(
+            "org/repo",
+            identity.catalog_digest,
+        ));
+        store
+            .put(&marker, bytes::Bytes::from_static(b"{").into())
+            .await
+            .expect("corrupt marker");
+
+        assert!(matches!(
+            GitObjectLocatorSession::latest_published_identity(store, "org/repo").await,
+            Err(MetadataError::CorruptObject { .. })
+        ));
     }
 
     #[tokio::test]

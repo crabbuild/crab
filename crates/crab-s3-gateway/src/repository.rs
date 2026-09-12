@@ -282,13 +282,13 @@ impl ReadViewCache {
         if let Some(view) = self.observed_since(requested_at).await {
             return Ok(view);
         }
-        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        let mut snapshot = crab_metadata::manifest_store::read_repository_snapshot(
             &repository.store,
             &repository.layout,
         )
         .await?;
         let observed_at = tokio::time::Instant::now();
-        let key = ReadViewKey {
+        let mut key = ReadViewKey {
             generation: snapshot.manifest.generation,
             snapshot_digest: snapshot.digest()?,
         };
@@ -315,7 +315,16 @@ impl ReadViewCache {
                     {
                         Ok(remote) => remote,
                         Err(crab_remote_git::Error::RepositoryIndexing { .. }) => {
-                            RemoteGitRepository::from_snapshot(
+                            snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+                                &repository.store,
+                                &repository.layout,
+                            )
+                            .await?;
+                            key = ReadViewKey {
+                                generation: snapshot.manifest.generation,
+                                snapshot_digest: snapshot.digest()?,
+                            };
+                            RemoteGitRepository::from_snapshot_with_catalog_tail(
                                 repository.layout.clone(),
                                 &snapshot,
                                 repository.identity.clone(),
@@ -328,7 +337,7 @@ impl ReadViewCache {
                         Err(error) => return Err(error.into()),
                     }
                 } else {
-                    RemoteGitRepository::from_snapshot(
+                    RemoteGitRepository::from_snapshot_with_catalog_tail(
                         repository.layout.clone(),
                         &snapshot,
                         repository.identity.clone(),

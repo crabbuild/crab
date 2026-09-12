@@ -134,6 +134,7 @@ pub(crate) struct RemoteGitReader {
     store: Store,
     repo_prefix: String,
     inventory: HashMap<MerkleHash, GitPackInventoryEntry>,
+    preferred_pack_indexes: Option<HashMap<MerkleHash, GitPackInventoryEntry>>,
     limits: ReaderLimits,
     runtime: Arc<RemoteGitRuntime>,
     identity: RepositoryIdentity,
@@ -150,6 +151,28 @@ impl RemoteGitReader {
         identity: RepositoryIdentity,
         generation: u64,
     ) -> Result<Self> {
+        Self::from_pinned_with_preferred_pack_indexes(
+            store,
+            repo_prefix,
+            inventory,
+            None::<[GitPackInventoryEntry; 0]>,
+            limits,
+            runtime,
+            identity,
+            generation,
+        )
+    }
+
+    pub(crate) fn from_pinned_with_preferred_pack_indexes(
+        store: Store,
+        repo_prefix: impl Into<String>,
+        inventory: impl IntoIterator<Item = GitPackInventoryEntry>,
+        preferred_pack_indexes: Option<impl IntoIterator<Item = GitPackInventoryEntry>>,
+        limits: ReaderLimits,
+        runtime: Arc<RemoteGitRuntime>,
+        identity: RepositoryIdentity,
+        generation: u64,
+    ) -> Result<Self> {
         let limits = limits.validate()?;
         let mut canonical = HashMap::new();
         for pack in inventory {
@@ -159,10 +182,26 @@ impl RemoteGitReader {
                 });
             }
         }
+        let preferred_pack_indexes = if let Some(packs) = preferred_pack_indexes {
+            let mut preferred = HashMap::new();
+            for pack in packs {
+                if canonical.get(&pack.pack_id) != Some(&pack)
+                    || preferred.insert(pack.pack_id, pack).is_some()
+                {
+                    return Err(Error::RepositoryState {
+                        reason: RepositoryStateError::InconsistentGeneration,
+                    });
+                }
+            }
+            (!preferred.is_empty()).then_some(preferred)
+        } else {
+            None
+        };
         Ok(Self {
             store,
             repo_prefix: repo_prefix.into(),
             inventory: canonical,
+            preferred_pack_indexes,
             limits,
             runtime,
             identity,
@@ -326,12 +365,6 @@ impl RemoteGitReader {
                 .lookup_batch_from_pack_indexes(requested, budget, cancellation)
                 .await;
         }
-        if requested.len() < PACK_INDEX_LOOKUP_MIN_OBJECTS || self.inventory.is_empty() {
-            return self
-                .lookup_batch_from_catalog(session, requested, cancellation)
-                .await;
-        }
-
         if session.coverage().is_some() {
             // A generation-bound catalog already contains the OID-to-pack
             // join. The operation layer has checked that coverage against its
@@ -341,24 +374,36 @@ impl RemoteGitReader {
             let mut lookups = self
                 .lookup_batch_from_catalog(session, requested, cancellation)
                 .await?;
-            let missing = lookups
+            if !lookups
                 .iter()
-                .enumerate()
-                .filter_map(|(index, lookup)| {
-                    matches!(lookup, GitObjectLookup::Miss).then_some((index, requested[index]))
-                })
-                .collect::<Vec<_>>();
-            if missing.is_empty() {
+                .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+            {
                 return Ok(lookups);
             }
-
-            let missing_ids = missing.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
-            let fallback = self
-                .lookup_batch_from_pack_indexes(&missing_ids, budget, cancellation)
+            if let Some(preferred) = &self.preferred_pack_indexes {
+                self.fill_pack_index_misses(
+                    &mut lookups,
+                    requested,
+                    preferred,
+                    budget,
+                    cancellation,
+                )
                 .await?;
-            for ((index, _), lookup) in missing.into_iter().zip(fallback) {
-                lookups[index] = lookup;
+                // Exact base coverage plus the complete journal-added tail is
+                // exhaustive. A remaining miss is definitive; scanning the
+                // historical base indexes would only duplicate the catalog.
+                return Ok(lookups);
+            } else if requested.len() < PACK_INDEX_LOOKUP_MIN_OBJECTS || self.inventory.is_empty() {
+                return Ok(lookups);
             }
+            self.fill_pack_index_misses(
+                &mut lookups,
+                requested,
+                &self.inventory,
+                budget,
+                cancellation,
+            )
+            .await?;
             return Ok(lookups);
         }
 
@@ -464,7 +509,48 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<Vec<GitObjectLookup>> {
-        let mut pack_ids = self.inventory.keys().copied().collect::<Vec<_>>();
+        self.lookup_batch_from_selected_pack_indexes(
+            requested,
+            &self.inventory,
+            budget,
+            cancellation,
+        )
+        .await
+    }
+
+    async fn fill_pack_index_misses(
+        &self,
+        lookups: &mut [GitObjectLookup],
+        requested: &[[u8; 20]],
+        inventory: &HashMap<MerkleHash, GitPackInventoryEntry>,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<()> {
+        let missing = lookups
+            .iter()
+            .enumerate()
+            .filter_map(|(index, lookup)| {
+                matches!(lookup, GitObjectLookup::Miss).then_some((index, requested[index]))
+            })
+            .collect::<Vec<_>>();
+        let missing_ids = missing.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+        let fallback = self
+            .lookup_batch_from_selected_pack_indexes(&missing_ids, inventory, budget, cancellation)
+            .await?;
+        for ((index, _), lookup) in missing.into_iter().zip(fallback) {
+            lookups[index] = lookup;
+        }
+        Ok(())
+    }
+
+    async fn lookup_batch_from_selected_pack_indexes(
+        &self,
+        requested: &[[u8; 20]],
+        inventory: &HashMap<MerkleHash, GitPackInventoryEntry>,
+        budget: &OperationBudget,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<GitObjectLookup>> {
+        let mut pack_ids = inventory.keys().copied().collect::<Vec<_>>();
         pack_ids.sort_unstable();
         let pack_count = pack_ids.len();
         // Do not retain every index for a repository-wide batch: pack count is
@@ -3150,6 +3236,91 @@ mod tests {
                 .all(|lookup| matches!(lookup, GitObjectLookup::Hit(_)))
         );
         session.close().await.expect("close catalog reader");
+    }
+
+    #[tokio::test]
+    async fn journal_overlay_miss_searches_the_bounded_pack_tail_first() {
+        let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let base_pack_id = MerkleHash::from_hex(&"11".repeat(32)).expect("base pack hash");
+        let tail_pack_id = MerkleHash::from_hex(&"33".repeat(32)).expect("tail pack hash");
+        let pack_index_hash = MerkleHash::from_hex(&"22".repeat(32)).expect("index hash");
+        let base_pack = GitPackLocatorRecord {
+            pack_id: base_pack_id,
+            committed_generation: 1,
+            pack_index_hash,
+            object_count: 1,
+            pack_size: 220,
+        };
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open catalog writer");
+        writer.bind_packs(&[base_pack]).await.expect("bind pack");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 1,
+                pack_index_hash,
+            })
+            .await
+            .expect("publish catalog coverage");
+        writer.close().await.expect("close catalog writer");
+        let session = GitObjectLocatorSession::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open catalog reader");
+
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        runtime
+            .insert_pack_index(
+                crate::runtime::PackIndexCacheKey::new(&identity, tail_pack_id),
+                Arc::new(PackIndex {
+                    object_ids: vec![gix_hash::ObjectId::from([2; 20])],
+                    pack_offsets: vec![100],
+                    crc32: vec![11],
+                    offset_order: vec![0],
+                    pack_data_end: 200,
+                    pack_checksum: [0; 20],
+                    source_bytes: 1,
+                }),
+            )
+            .await;
+        let base_inventory = GitPackInventoryEntry {
+            pack_id: base_pack_id,
+            object_count: 1,
+            pack_size: 220,
+        };
+        let tail_inventory = GitPackInventoryEntry {
+            pack_id: tail_pack_id,
+            object_count: 1,
+            pack_size: 220,
+        };
+        let reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+            Store::new(Arc::clone(&store)),
+            "org/repo",
+            [base_inventory, tail_inventory],
+            Some([tail_inventory]),
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), Arc::clone(&runtime));
+        let lookups = reader
+            .lookup_batch_for_read(&session, &[[2; 20]], &budget, &CancellationToken::new())
+            .await
+            .expect("tail lookup");
+
+        assert!(matches!(
+            lookups.as_slice(),
+            [GitObjectLookup::Hit(GitObjectLocator { pack_id, .. })] if *pack_id == tail_pack_id
+        ));
+        let misses = reader
+            .lookup_batch_for_read(&session, &[[4; 20]], &budget, &CancellationToken::new())
+            .await
+            .expect("catalog and tail miss");
+        assert!(matches!(misses.as_slice(), [GitObjectLookup::Miss]));
+        session.close().await.expect("close catalog reader");
+        runtime.shutdown().await;
     }
 
     #[test]

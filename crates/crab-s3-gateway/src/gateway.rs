@@ -2903,11 +2903,52 @@ impl S3 for Gateway {
         }
         let max_keys = max_keys.min(1000);
         let limit = usize::try_from(max_keys).map_err(|_| s3_error!(InvalidArgument))?;
-        let repo = self.open(repository).await?;
-        if repo.remote().refs().find(&reference).is_none() {
+        if limit == 0 {
             return empty_list_objects_response(&req, url_encode);
         }
-        if limit == 0 {
+        let encoded_ref = prefix
+            .split_once('/')
+            .map(|(value, _)| value)
+            .unwrap_or_default();
+        let ref_prefix = format!("{encoded_ref}/");
+        let after = req
+            .input
+            .continuation_token
+            .as_deref()
+            .or(req.input.start_after.as_deref());
+        let after = match after {
+            Some(after) => match after.strip_prefix(&ref_prefix) {
+                Some(path) => Some(path),
+                None if after < ref_prefix.as_str() => None,
+                None => return empty_list_objects_response(&req, url_encode),
+            },
+            None => None,
+        };
+        if let Some(page) = self
+            .complete_attribute_listing(
+                repository,
+                &reference,
+                &path_prefix,
+                after,
+                req.input
+                    .delimiter
+                    .as_deref()
+                    .filter(|delimiter| !delimiter.is_empty())
+                    .map(|_| b'/'),
+                limit,
+            )
+            .await?
+        {
+            return complete_attribute_listing_response(
+                &req,
+                encoded_ref,
+                page,
+                max_keys,
+                url_encode,
+            );
+        }
+        let repo = self.open(repository).await?;
+        if repo.remote().refs().find(&reference).is_none() {
             return empty_list_objects_response(&req, url_encode);
         }
         let operation = repo
@@ -2922,28 +2963,10 @@ impl S3 for Gateway {
                 .map_err(gateway_error)?;
             let commit = snapshot.commit(&operation).await.map_err(remote_error)?;
             let commit_modified = timestamp(commit.committer.seconds)?;
-            let encoded_ref = prefix
-                .split_once('/')
-                .map(|(value, _)| value)
-                .unwrap_or_default();
-            let ref_prefix = format!("{encoded_ref}/");
-            let after = req
-                .input
-                .continuation_token
-                .as_deref()
-                .or(req.input.start_after.as_deref());
-            let after = match after {
-                Some(after) => match after.strip_prefix(&ref_prefix) {
-                    Some(path) => Some(Bytes::copy_from_slice(path.as_bytes())),
-                    None if after < ref_prefix.as_str() => None,
-                    None => return empty_list_objects_response(&req, url_encode),
-                },
-                None => None,
-            };
             let listing = list_visible_tree_blobs(
                 &snapshot,
                 Bytes::copy_from_slice(path_prefix.as_bytes()),
-                after,
+                after.map(|path| Bytes::copy_from_slice(path.as_bytes())),
                 req.input
                     .delimiter
                     .as_deref()
@@ -3059,6 +3082,66 @@ impl S3 for Gateway {
         .await;
         finish(operation, result).await
     }
+}
+
+fn complete_attribute_listing_response(
+    req: &S3Request<ListObjectsV2Input>,
+    encoded_ref: &str,
+    page: crate::attributes::ManifestListingPage,
+    max_keys: i32,
+    url_encode: bool,
+) -> S3Result<S3Response<ListObjectsV2Output>> {
+    let mut contents = Vec::new();
+    let mut common_prefixes = Vec::new();
+    let mut next = None;
+    for item in page.items {
+        match item {
+            crate::attributes::ManifestListingItem::Object { path, attributes } => {
+                let key = format!("{encoded_ref}/{path}");
+                next = Some(key.clone());
+                contents.push(Object {
+                    key: Some(key),
+                    e_tag: Some(ETag::Strong(attributes.etag)),
+                    last_modified: Some(timestamp(
+                        i64::try_from(attributes.modified_seconds)
+                            .map_err(|_| s3_error!(InternalError))?,
+                    )?),
+                    size: i64::try_from(attributes.size).ok(),
+                    storage_class: Some(ObjectStorageClass::from_static("STANDARD")),
+                    ..Default::default()
+                });
+            }
+            crate::attributes::ManifestListingItem::CommonPrefix(path) => {
+                let key = format!("{encoded_ref}/{path}");
+                next = Some(key.clone());
+                common_prefixes.push(CommonPrefix { prefix: Some(key) });
+            }
+        }
+    }
+    if url_encode {
+        for object in &mut contents {
+            object.key = encode_list_option(object.key.take(), true);
+        }
+        for group in &mut common_prefixes {
+            group.prefix = encode_list_option(group.prefix.take(), true);
+        }
+    }
+    let key_count = contents.len().saturating_add(common_prefixes.len());
+    Ok(S3Response::new(ListObjectsV2Output {
+        name: Some(req.input.bucket.clone()),
+        prefix: encode_list_option(req.input.prefix.clone(), url_encode),
+        max_keys: Some(max_keys),
+        key_count: Some(i32::try_from(key_count).map_err(|_| s3_error!(InternalError))?),
+        continuation_token: req.input.continuation_token.clone(),
+        next_continuation_token: page.has_more.then_some(next).flatten(),
+        is_truncated: Some(page.has_more),
+        contents: (!contents.is_empty()).then_some(contents),
+        common_prefixes: (!common_prefixes.is_empty()).then_some(common_prefixes),
+        delimiter: encode_list_option(req.input.delimiter.clone(), url_encode),
+        encoding_type: req.input.encoding_type.clone(),
+        start_after: encode_list_option(req.input.start_after.clone(), url_encode),
+        ..Default::default()
+    }))
 }
 
 async fn list_visible_tree_blobs(
@@ -4061,6 +4144,37 @@ fn stored_to_pending(
 }
 
 impl Gateway {
+    async fn complete_attribute_listing(
+        &self,
+        repository: &Repository,
+        reference: &str,
+        prefix: &str,
+        after: Option<&str>,
+        delimiter: Option<u8>,
+        limit: usize,
+    ) -> S3Result<Option<crate::attributes::ManifestListingPage>> {
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await
+        .map_err(|error| gateway_error(error.into()))?;
+        let Some(tip) = snapshot.journal.refs.get(reference) else {
+            return Ok(None);
+        };
+        let tip = gix_hash::ObjectId::from_hex(tip.as_bytes())
+            .map_err(|_| s3_error!(InvalidObjectState))?;
+        let Some(manifest) = self
+            .mutations
+            .complete_manifest(repository, reference, tip)
+            .await
+            .map_err(gateway_error)?
+        else {
+            return Ok(None);
+        };
+        Ok(manifest.complete_listing(prefix, after, delimiter, limit))
+    }
+
     async fn list_refs(
         &self,
         req: &S3Request<ListObjectsV2Input>,
@@ -4771,8 +4885,8 @@ mod tests {
             auth,
             region: Arc::from("us-east-1"),
             admission: Admission::new(8, cancellation.clone(), metrics.clone()),
-            metrics,
-            local_cache,
+            metrics: metrics.clone(),
+            local_cache: Arc::clone(&local_cache),
             cancellation,
         };
         let repository = &gateway.repositories["repo"];
@@ -4825,7 +4939,29 @@ mod tests {
                 .unwrap();
         }
 
-        let first = gateway
+        // A fresh gateway has no branch actor or remote-Git caches. The
+        // durable attribute chain must still prove and serve the complete S3
+        // namespace without opening the repository-wide object catalog.
+        let listing_cancellation = CancellationToken::new();
+        let listing_runtime = Arc::new(RemoteGitRuntime::default());
+        let listing_gateway = Gateway {
+            repositories: Arc::clone(&gateway.repositories),
+            mutations: Arc::new(mutation::Coordinator::new(
+                Arc::clone(&listing_runtime),
+                options,
+                metrics.clone(),
+            )),
+            runtime: listing_runtime,
+            options,
+            auth: gateway.auth.clone(),
+            region: Arc::clone(&gateway.region),
+            admission: Admission::new(8, listing_cancellation.clone(), metrics.clone()),
+            metrics,
+            local_cache: Arc::clone(&local_cache),
+            cancellation: listing_cancellation,
+        };
+
+        let first = listing_gateway
             .list_objects_v2(list_request(ListObjectsV2Input {
                 bucket: "repo".to_owned(),
                 prefix: Some("main/prefix/".to_owned()),
@@ -4864,7 +5000,7 @@ mod tests {
                 Some(true),
             )
         );
-        let second = gateway
+        let second = listing_gateway
             .list_objects_v2(list_request(ListObjectsV2Input {
                 bucket: "repo".to_owned(),
                 prefix: Some("main/prefix/".to_owned()),
@@ -4896,7 +5032,7 @@ mod tests {
                 Some("main/prefix/b/"),
             )
         );
-        let last = gateway
+        let last = listing_gateway
             .list_objects_v2(list_request(ListObjectsV2Input {
                 bucket: "repo".to_owned(),
                 prefix: Some("main/prefix/".to_owned()),
@@ -4918,6 +5054,7 @@ mod tests {
             ),
             (Some("main/prefix/c".to_owned()), Some(1), Some(false), None)
         );
+        listing_gateway.shutdown().await;
         gateway.shutdown().await;
     }
 

@@ -40,6 +40,16 @@ impl CatalogCheckpointMarker {
             && self.object_count == identity.object_count
             && self.catalog_digest == identity.catalog_digest.to_string()
     }
+
+    pub(crate) fn identity(&self) -> Option<GitObjectCatalogIdentity> {
+        (self.version == CATALOG_CHECKPOINT_MARKER_VERSION).then_some(())?;
+        Some(GitObjectCatalogIdentity {
+            generation: self.generation,
+            pack_index_hash: MerkleHash::from_hex(&self.pack_index_hash).ok()?,
+            object_count: self.object_count,
+            catalog_digest: MerkleHash::from_hex(&self.catalog_digest).ok()?,
+        })
+    }
 }
 
 use crab_xet::hash::MerkleHash;

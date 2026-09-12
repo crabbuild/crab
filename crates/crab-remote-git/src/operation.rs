@@ -230,7 +230,7 @@ impl OperationContext {
         let span = operation_span(correlation_id, kind);
         check_cancelled(cancellation)?;
         check_cancelled(&runtime_cancellation)?;
-        let session = if open_catalog && let Some(catalog) = state.catalog_identity {
+        let session = if open_catalog && let Some(catalog) = state.lookup_catalog_identity {
             // Keep catalog acquisition and later page reads on the same budget.
             // The pinned repository store remains reusable by other operations.
             let store = state
@@ -1394,6 +1394,12 @@ mod tests {
             manifest_etag: "etag".to_owned(),
             shard_index_hash: Arc::from("shards"),
             catalog_identity: Some(GitObjectCatalogIdentity {
+                generation: 1,
+                pack_index_hash: MerkleHash::from([1; 32]),
+                object_count: 1,
+                catalog_digest: MerkleHash::from([2; 32]),
+            }),
+            lookup_catalog_identity: Some(GitObjectCatalogIdentity {
                 generation: 1,
                 pack_index_hash: MerkleHash::from([1; 32]),
                 object_count: 1,

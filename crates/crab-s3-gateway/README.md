@@ -169,9 +169,11 @@ Multi-delete retains one result and commit per successful entry; grouping never
 makes the whole request atomic. A process-local, 128 MiB warm-state budget may
 retain the exact-tip Git directories and S3 attribute manifest between batches.
 The cached parent is revalidated while holding the object-store ref lease before
-publication. It is discarded on a tip mismatch, idle-branch eviction, restart,
-or capacity pressure; object storage remains the authority and a cold request
-reconstructs the same state from immutable repository objects. The first cold
+publication. It is discarded on a tip mismatch, restart, or memory-pressure
+eviction; idle branch state remains reusable below the shared watermark. Object
+storage remains the authority and a cold request reconstructs the same state from
+immutable repository objects. Unborn branches skip catalog access and recheck
+absence under their ref lease before publication. The first cold
 publication and every 64 subsequent publication batches write a commit-identified
 attribute checkpoint into one bounded object-store slot per branch while holding
 the same ref lease. The final commit delta records the slot; a missing or
@@ -179,13 +181,22 @@ superseded slot falls back to the immutable delta chain. Checkpoint markers rema
 optional in the existing version-2 delta format. If the full manifest exceeds the
 existing 32 MiB manifest bound, publication keeps the delta chain authoritative
 and skips the checkpoint, so the optimization cannot reject an otherwise valid
-mutation. SlateDB is not required by this write path; its object catalog remains
+mutation. When the delta ancestry proves that the branch began empty and every
+commit came from the gateway, the checkpoint is also a complete sorted S3
+namespace index. `ListObjects` binds it to the current durable ref and pages it
+with only the newer per-commit deltas since the last successful checkpoint,
+without opening SlateDB or walking Git trees. A missing delta, legacy checkpoint,
+or Git-authored ancestor keeps canonical Git tree listing, so the accelerator
+cannot hide Git-written objects. SlateDB is not required by this write path; its
+object catalog remains
 a rebuildable derived index. During sustained writes, one background worker every
 64 local publication epochs folds the active ref journal into the object-store
 manifest and advances catalog coverage under the generation-owner and GC-writer
-fences. Clean read views then use exact catalog lookup instead of scanning every
-immutable pack index. Full commit-graph maintenance still waits for a five-second
-quiet window.
+fences. Read views use the newest catalog whose immutable pack inventory is a
+proven subset of their snapshot, then inspect only the remaining pack tail. This
+also covers the interval between manifest compaction and matching catalog
+publication without scanning every historical pack. Full commit-graph
+maintenance still waits for a five-second quiet window.
 
 Keys must be valid UTF-8 paths that Git trees can represent without loss. The
 gateway rejects ambiguous or unsafe components such as empty segments, `.`,

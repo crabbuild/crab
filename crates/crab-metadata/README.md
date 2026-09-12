@@ -89,6 +89,17 @@ freshness revalidation and protection against concurrent GC. This path scans
 the captured shard inventory, so it is not an acceleration-index performance
 claim.
 
+### Git object catalog checkpoints
+
+Each published Git object catalog checkpoint has a small identity marker written
+after SlateDB makes the checkpoint durable.
+`GitObjectLocatorSession::latest_published_identity` reads that marker without
+opening the large catalog.
+Callers may use the identity only after proving its immutable pack inventory is
+covered by their pinned repository snapshot, then open the named checkpoint for
+the actual lookup. A missing marker means publication is incomplete; malformed
+or name-mismatched marker content fails closed.
+
 ### Snapshot identity
 
 `RepositorySnapshot` also captures the validated canonical layout descriptor.

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crab_metadata::git_object_locator::{
-    GitLocatorCoverage, GitObjectLocatorSession, GitObjectLookup, GitPackInventoryEntry,
+    GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectLocatorSession, GitObjectLookup,
+    GitPackInventoryEntry,
 };
 use crab_metadata::manifest_store::{read_bulk_pack_list, read_manifest};
 use crab_metadata::ref_journal::{list_active_transactions, materialize_ref_journal};
@@ -321,10 +322,57 @@ impl RemoteGitRepository {
     pub async fn from_snapshot(
         layout: StoreLayout<Store>,
         snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        Self::from_snapshot_parts(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            cancellation,
+            None,
+        )
+    }
+
+    /// Open a snapshot using a proven base catalog plus its complete pack tail.
+    ///
+    /// If catalog coverage cannot be proven as a subset of the snapshot, this retains
+    /// the canonical pack-index path. Catalog coverage and the remaining immutable
+    /// packs form an exhaustive object lookup view, so a combined miss is definitive.
+    pub async fn from_snapshot_with_catalog_tail(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+        identity: RepositoryIdentity,
+        runtime: Arc<RemoteGitRuntime>,
+        options: RepositoryOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<Self> {
+        check_cancelled(cancellation)?;
+        check_cancelled(&runtime.background_cancellation())?;
+        let catalog_tail = snapshot_catalog_tail(&layout, snapshot, cancellation).await?;
+        Self::from_snapshot_parts(
+            layout,
+            snapshot,
+            identity,
+            runtime,
+            options,
+            cancellation,
+            catalog_tail,
+        )
+    }
+
+    fn from_snapshot_parts(
+        layout: StoreLayout<Store>,
+        snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
         mut identity: RepositoryIdentity,
         runtime: Arc<RemoteGitRuntime>,
         options: RepositoryOptions,
         cancellation: &CancellationToken,
+        catalog_tail: Option<(GitObjectCatalogIdentity, Vec<GitPackInventoryEntry>)>,
     ) -> Result<Self> {
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
@@ -347,10 +395,15 @@ impl RemoteGitRepository {
         let manifest = snapshot.materialized_manifest();
         let refs = RepositoryRefs::try_from(&manifest)?;
         let inventory = parse_inventory(&snapshot.journal.packs)?;
-        let reader = Arc::new(RemoteGitReader::from_pinned(
+        let (lookup_catalog_identity, preferred_pack_indexes) = match catalog_tail {
+            Some((identity, packs)) => (Some(identity), Some(packs)),
+            None => (None, None),
+        };
+        let reader = Arc::new(RemoteGitReader::from_pinned_with_preferred_pack_indexes(
             layout.store().clone(),
             layout.repo_prefix(),
             inventory.values().copied(),
+            preferred_pack_indexes,
             ReaderLimits::from_options(options),
             Arc::clone(&runtime),
             identity.clone(),
@@ -368,6 +421,7 @@ impl RemoteGitRepository {
                 shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                 manifest_etag: snapshot.manifest_etag.clone(),
                 catalog_identity: None,
+                lookup_catalog_identity,
                 inventory,
                 refs,
                 reader: Some(reader),
@@ -504,6 +558,7 @@ impl RemoteGitRepository {
                     shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
                     catalog_identity: None,
+                    lookup_catalog_identity: None,
                     inventory: std::collections::HashMap::new(),
                     refs,
                     reader: None,
@@ -641,6 +696,7 @@ impl RemoteGitRepository {
                     shard_index_hash: Arc::from(manifest.shard_index_hash.as_str()),
                     manifest_etag,
                     catalog_identity: Some(catalog_identity),
+                    lookup_catalog_identity: Some(catalog_identity),
                     inventory,
                     refs,
                     reader: Some(Arc::new(reader)),
@@ -1229,6 +1285,54 @@ async fn finish_locator_validation<T>(
     operation: Result<T>,
 ) -> Result<T> {
     finish_with_close(operation, session.close().await)
+}
+
+async fn snapshot_catalog_tail(
+    layout: &StoreLayout<Store>,
+    snapshot: &crab_metadata::manifest_store::RepositorySnapshot,
+    cancellation: &CancellationToken,
+) -> Result<Option<(GitObjectCatalogIdentity, Vec<GitPackInventoryEntry>)>> {
+    if snapshot.journal.packs.is_empty() {
+        return Ok(None);
+    }
+    check_cancelled(cancellation)?;
+    let complete = parse_inventory(&snapshot.journal.packs)?;
+    let identity = match GitObjectLocatorSession::latest_published_identity(
+        Arc::clone(layout.store().inner()),
+        layout.repo_prefix(),
+    )
+    .await
+    {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return Ok(None),
+        Err(error @ crab_metadata::error::MetadataError::CorruptObject { .. }) => {
+            return Err(Error::Metadata(error));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "snapshot lookup catalog unavailable; using immutable pack indexes");
+            return Ok(None);
+        }
+    };
+    let base = read_bulk_pack_list(
+        layout.store(),
+        layout,
+        &identity.pack_index_hash.to_string(),
+    )
+    .await?;
+    let base = parse_inventory(&base)?;
+    if base
+        .iter()
+        .any(|(pack_id, entry)| complete.get(pack_id) != Some(entry))
+    {
+        return Ok(None);
+    }
+    let tail = complete
+        .values()
+        .filter(|pack| !base.contains_key(&pack.pack_id))
+        .copied()
+        .collect::<Vec<_>>();
+    check_cancelled(cancellation)?;
+    Ok(Some((identity, tail)))
 }
 
 /// Parse references from a validated manifest without opening object storage.
@@ -1941,6 +2045,73 @@ mod tests {
                 .await
                 .expect("missing visibility proof")
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_overlay_accepts_older_catalog_with_complete_pack_subset() {
+        let fixture = open_fixture(2, Some(1)).await;
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
+            .await
+            .expect("layout");
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &fixture.store,
+            &fixture.layout,
+        )
+        .await
+        .expect("snapshot");
+        let runtime = Arc::new(RemoteGitRuntime::default());
+
+        let repository = RemoteGitRepository::from_snapshot_with_catalog_tail(
+            fixture.layout.clone(),
+            &snapshot,
+            RepositoryIdentity::new("memory", fixture.layout.repo_prefix(), 1).expect("identity"),
+            Arc::clone(&runtime),
+            RepositoryOptions::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("catalog-tail snapshot");
+
+        assert_eq!(
+            repository
+                .state
+                .lookup_catalog_identity
+                .map(|identity| identity.generation),
+            Some(1)
+        );
+        assert!(repository.state.catalog_identity.is_none());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_overlay_rejects_catalog_whose_pack_inventory_is_not_a_subset() {
+        let fixture = open_fixture(1, Some(1)).await;
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
+            .await
+            .expect("layout");
+        let mut snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &fixture.store,
+            &fixture.layout,
+        )
+        .await
+        .expect("snapshot");
+        snapshot.journal.packs[0].pack_id = "44".repeat(32);
+        snapshot.journal.packs[0].content_hash = "44".repeat(32);
+        let runtime = Arc::new(RemoteGitRuntime::default());
+
+        let repository = RemoteGitRepository::from_snapshot_with_catalog_tail(
+            fixture.layout.clone(),
+            &snapshot,
+            RepositoryIdentity::new("memory", fixture.layout.repo_prefix(), 1).expect("identity"),
+            Arc::clone(&runtime),
+            RepositoryOptions::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("canonical snapshot fallback");
+
+        assert!(repository.state.lookup_catalog_identity.is_none());
+        runtime.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

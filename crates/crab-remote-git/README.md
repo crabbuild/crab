@@ -13,6 +13,8 @@ Caller: authorize and resolve physical placement
        manifest generation + pack inventory + locator coverage
      or RemoteGitRepository::from_snapshot
        validated manifest + committed journal overlay
+     or RemoteGitRepository::from_snapshot_with_catalog_tail
+       compacted-base catalog + bounded journal-pack overlay
   -> OperationContext: shared budgets and cancellation
        snapshot -> tree / blob / history / diff
   -> OperationContext::finish: result + locator close
@@ -30,6 +32,7 @@ open, but selecting a snapshot returns `EmptyRepository`.
 | Shared admission and caches | `RemoteGitRuntime` | Process-wide; shut down after active contexts finish or drop |
 | Open a repository | `RemoteGitRepository::open` | Caller supplies authorized physical placement identity |
 | Open a committed journal view | `RemoteGitRepository::from_snapshot` | Caller supplies a validated snapshot, retention, and freshness policy; no catalog required |
+| Accelerate a committed snapshot | `RemoteGitRepository::from_snapshot_with_catalog_tail` | Any catalog whose immutable pack inventory is a subset of the snapshot combines with the remaining pack tail; a combined miss is definitive |
 | Reuse a handle | `is_current` | Checks manifest identity; journal freshness can require reopening |
 | Select a revision | `refs`, `resolve`, `snapshot` | Selection stays within pinned visible refs |
 | Browse content | `entry`, `list_directory`, `list_tree_blobs`, `list_tree_recursive`, `read_blob` | Paths are opaque `GitPath` bytes; bounded blob pages seek by prefix/continuation without reading bodies |

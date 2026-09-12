@@ -394,9 +394,11 @@ The process retains at most 256 warm branch queues and may reuse materialized
 Git directory state and the S3 attribute manifest optimistically. Publication
 revalidates the cached parent while holding the object-store ref lease; a tip
 mismatch discards the preparation and rebuilds against the winning snapshot.
-Warm state has a shared 128 MiB process budget; an idle branch yields its state
-when another branch becomes active. Capacity pressure or restart reconstructs
-the tree and manifest from immutable repository objects. To bound normal cold
+Warm state has a shared 128 MiB process budget. Idle branches remain reusable
+below the eviction watermark and yield state under memory pressure. Capacity
+pressure or restart reconstructs the tree and manifest from immutable repository
+objects. An unborn branch skips catalog access and begins from the empty Git tree;
+publication rechecks that absence under its ref lease. To bound normal cold
 attribute replay, the first cold publication and every 64 later publication
 batches replace one full, commit-identified manifest checkpoint in a bounded
 per-branch object-store slot. The final commit delta records that slot. Under the
@@ -409,14 +411,23 @@ above the existing 32 MiB manifest bound skips checkpointing without failing the
 mutation, and another checkpoint attempt follows after 64 publication batches.
 Deltas and the ref journal stay
 authoritative. The process cache and any SlateDB-derived catalog are neither
-authoritative nor required for recovery. Once a batch is drained, its worker is
+authoritative nor required for recovery. If the complete delta ancestry proves
+that the branch began empty and every commit came from the gateway, the
+checkpoint also forms a sorted S3 namespace index. `ListObjects` binds it to the
+current journal-projected ref and pages it without opening the Git catalog. Any
+missing delta, legacy checkpoint, or Git-authored ancestor removes that proof and
+requires canonical Git-tree listing. Once a batch is drained, its worker is
 owned by the gateway rather than the HTTP request that won local admission, so
 one disconnected caller cannot cancel the remaining accepted mutations.
 Every 64 local publication epochs, one coalesced background worker folds active
 ref-journal transactions into the object-store manifest and advances exact-object
 catalog coverage under the generation-owner and GC-writer fences, even when writes
-remain continuous. Clean read views use that catalog instead of scanning every
-pack index. Full commit-graph work still waits for a five-second quiet window.
+remain continuous. Read views bind the newest catalog whose immutable pack
+inventory is proven to be a subset of their pinned snapshot and search the
+remaining pack tail for newer objects. Their combined coverage is exhaustive, so
+a combined miss is definitive; complete pack-index scans remain only when no
+catalog inventory can be proven as a subset. Full commit-graph work still waits
+for a five-second quiet window.
 Maintenance failure never changes an already acknowledged mutation and the next
 cadence retries from durable journal state.
 

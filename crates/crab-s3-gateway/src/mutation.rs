@@ -32,6 +32,7 @@ const PACK_SCRATCH_BASE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_QUEUED_WRITES_PER_REF: usize = 64;
 const MAX_TRACKED_REFS: usize = 256;
 const MAX_WARM_BRANCH_STATE_BYTES: usize = 128 * 1024 * 1024;
+const WARM_BRANCH_STATE_EVICTION_BYTES: usize = MAX_WARM_BRANCH_STATE_BYTES * 3 / 4;
 const ATTRIBUTE_CHECKPOINT_BATCHES: usize = 64;
 const WRITE_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 const BATCH_COLLECTION_DELAY: Duration = Duration::from_millis(10);
@@ -257,6 +258,37 @@ impl Coordinator {
         self.admission.manifest(repository, branch, Some(tip))
     }
 
+    pub(crate) async fn complete_manifest(
+        &self,
+        repository: &Repository,
+        branch: &str,
+        tip: ObjectId,
+    ) -> crate::Result<Option<Arc<attributes::Manifest>>> {
+        if let Some(manifest) = self.manifest(&repository.config.name, branch, tip)
+            && manifest.is_complete()
+        {
+            return Ok(Some(manifest));
+        }
+        if let Some(manifest) =
+            self.admission
+                .complete_manifest(&repository.config.name, branch, tip)
+        {
+            return Ok(Some(manifest));
+        }
+        let manifest = attributes::load(repository, tip).await?;
+        if !manifest.is_complete() {
+            return Ok(None);
+        }
+        let manifest = Arc::new(manifest);
+        self.admission.store_complete_manifest(
+            &repository.config.name,
+            branch,
+            tip,
+            Arc::clone(&manifest),
+        );
+        Ok(Some(manifest))
+    }
+
     async fn apply_batch(
         repository: &Repository,
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
@@ -360,7 +392,14 @@ async fn apply(
 #[derive(Default)]
 struct WriteAdmission {
     refs: std::sync::Mutex<HashMap<String, Arc<RefQueue>>>,
+    complete_manifests: std::sync::Mutex<HashMap<String, CachedCompleteManifest>>,
     warm_bytes: Arc<AtomicUsize>,
+}
+
+struct CachedCompleteManifest {
+    tip: ObjectId,
+    manifest: Arc<attributes::Manifest>,
+    bytes: usize,
 }
 
 struct RefQueue {
@@ -575,6 +614,90 @@ impl RefQueue {
 }
 
 impl WriteAdmission {
+    fn complete_manifest(
+        &self,
+        repository: &str,
+        branch: &str,
+        tip: ObjectId,
+    ) -> Option<Arc<attributes::Manifest>> {
+        self.complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&format!("{repository}\0{branch}"))
+            .filter(|cached| cached.tip == tip)
+            .map(|cached| Arc::clone(&cached.manifest))
+    }
+
+    fn store_complete_manifest(
+        &self,
+        repository: &str,
+        branch: &str,
+        tip: ObjectId,
+        manifest: Arc<attributes::Manifest>,
+    ) {
+        let key = format!("{repository}\0{branch}");
+        let mut cached = self
+            .complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = cached.remove(&key) {
+            self.warm_bytes.fetch_sub(previous.bytes, Ordering::AcqRel);
+        }
+        let bytes = manifest.estimated_bytes();
+        if cached.len() >= MAX_TRACKED_REFS
+            || self
+                .warm_bytes
+                .load(Ordering::Acquire)
+                .saturating_add(bytes)
+                > MAX_WARM_BRANCH_STATE_BYTES
+        {
+            let removed = cached.drain().fold(0usize, |total, (_, entry)| {
+                total.saturating_add(entry.bytes)
+            });
+            self.warm_bytes.fetch_sub(removed, Ordering::AcqRel);
+        }
+        if self
+            .warm_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes)
+                    .filter(|next| *next <= MAX_WARM_BRANCH_STATE_BYTES)
+            })
+            .is_ok()
+        {
+            cached.insert(
+                key,
+                CachedCompleteManifest {
+                    tip,
+                    manifest,
+                    bytes,
+                },
+            );
+        }
+    }
+
+    fn clear_complete_manifest(&self, key: &str) {
+        let removed = self
+            .complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
+        if let Some(removed) = removed {
+            self.warm_bytes.fetch_sub(removed.bytes, Ordering::AcqRel);
+        }
+    }
+
+    fn clear_complete_manifests(&self) {
+        let removed = self
+            .complete_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain()
+            .fold(0usize, |total, (_, entry)| {
+                total.saturating_add(entry.bytes)
+            });
+        self.warm_bytes.fetch_sub(removed, Ordering::AcqRel);
+    }
+
     fn manifest(
         &self,
         repository: &str,
@@ -596,11 +719,20 @@ impl WriteAdmission {
         mutation: Mutation,
     ) -> Result<QueuedMutation> {
         let key = format!("{repository}\0{branch}");
+        self.clear_complete_manifest(&key);
+        if self.warm_bytes.load(Ordering::Acquire) > WARM_BRANCH_STATE_EVICTION_BYTES {
+            self.clear_complete_manifests();
+        }
         let queue = {
             let mut refs = self.refs.lock().map_err(|_| Error::AdmissionState)?;
-            for (candidate, queue) in refs.iter() {
-                if candidate != &key && queue.admitted.load(Ordering::Acquire) == 0 {
-                    queue.state.clear();
+            if self.warm_bytes.load(Ordering::Acquire) > WARM_BRANCH_STATE_EVICTION_BYTES {
+                for (candidate, queue) in refs.iter() {
+                    if self.warm_bytes.load(Ordering::Acquire) <= WARM_BRANCH_STATE_EVICTION_BYTES {
+                        break;
+                    }
+                    if candidate != &key && queue.admitted.load(Ordering::Acquire) == 0 {
+                        queue.state.clear();
+                    }
                 }
             }
             match refs.get(&key) {
@@ -1025,6 +1157,35 @@ async fn prepare_and_upload_batch(
             Err(Error::WarmStateMiss) => {}
             Err(error) => return Err(error),
         }
+    }
+    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        &repository.store,
+        &repository.layout,
+    )
+    .await?;
+    if !snapshot.journal.refs.contains_key(request.branch) {
+        // An unborn branch has no Git objects to reconstruct. Publication
+        // rechecks absence under the ref lease, so avoid opening the
+        // repository-wide locator merely to prove the empty starting tree.
+        let batch = build_batch(
+            None,
+            None,
+            None,
+            attributes::Manifest::empty_complete(),
+            None,
+            ATTRIBUTE_CHECKPOINT_BATCHES,
+            mutations,
+        )
+        .await?;
+        return upload_batch(
+            repository,
+            request.branch,
+            batch,
+            None,
+            cancel,
+            request.metrics,
+        )
+        .await;
     }
     let view = repository
         .read_views
@@ -2224,6 +2385,22 @@ mod tests {
     use gix_object::WriteTo as _;
     use std::collections::BTreeMap;
 
+    fn mutation(path: &[u8], upload_id: Option<&str>) -> Mutation {
+        Mutation {
+            path: crab_remote_git::GitPath::new(path.to_vec()).unwrap(),
+            change: Change::Put {
+                bytes: Bytes::from_static(b"content"),
+                track_lfs: false,
+                attributes: Box::new(attributes::PutAttributes {
+                    completion_upload_id: upload_id.map(str::to_owned),
+                    ..Default::default()
+                }),
+                condition: PutCondition::None,
+            },
+            principal: "user".to_owned(),
+        }
+    }
+
     #[test]
     fn generated_pack_reservation_covers_peak_temporary_copies() {
         let objects = vec![
@@ -2293,19 +2470,6 @@ mod tests {
     #[test]
     fn multipart_completion_stays_outside_ordinary_batches() {
         let admission = WriteAdmission::default();
-        let mutation = |path: &[u8], upload_id: Option<&str>| Mutation {
-            path: crab_remote_git::GitPath::new(path.to_vec()).unwrap(),
-            change: Change::Put {
-                bytes: Bytes::from_static(b"content"),
-                track_lfs: false,
-                attributes: Box::new(attributes::PutAttributes {
-                    completion_upload_id: upload_id.map(str::to_owned),
-                    ..Default::default()
-                }),
-                condition: PutCondition::None,
-            },
-            principal: "user".to_owned(),
-        };
         let first = admission
             .enqueue("repo", "refs/heads/main", mutation(b"first", None))
             .unwrap();
@@ -2368,6 +2532,31 @@ mod tests {
             0,
         );
         assert!(cache.take(None).is_none());
+    }
+
+    #[test]
+    fn idle_branch_state_is_retained_below_memory_pressure() {
+        let admission = WriteAdmission::default();
+        let first = admission
+            .enqueue("repo", "refs/heads/first", mutation(b"first", None))
+            .unwrap();
+        let first_queue = Arc::clone(&first.queue);
+        drop(first);
+        let tip = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        first_queue.state.store(
+            Some(tip),
+            None,
+            attributes::Manifest::default(),
+            WarmTree::default(),
+            0,
+        );
+
+        let second = admission
+            .enqueue("repo", "refs/heads/second", mutation(b"second", None))
+            .unwrap();
+
+        assert!(first_queue.state.take(Some(tip)).is_some());
+        drop(second);
     }
 
     async fn fixture() -> (
