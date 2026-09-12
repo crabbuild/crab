@@ -36,7 +36,7 @@ Complete these checks before the first install and every infrastructure change:
 4. Confirm the OIDC provider accepts the exact `/auth/callback` redirect URI.
 5. Confirm the ingress preserves the canonical `Host` header and streams bodies without buffering.
 6. Confirm port 8789 has no Service, ingress, or public load-balancer listener.
-7. Confirm the NetworkPolicy-capable CNI enforces the chart policy.
+7. Confirm the NetworkPolicy-capable CNI enforces the explicit public and monitoring source selectors.
 8. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
 9. Confirm the cluster can schedule two replicas in separate zones.
 10. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.

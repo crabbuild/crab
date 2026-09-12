@@ -1,5 +1,18 @@
+{{- range $key := list "app.kubernetes.io/name" "app.kubernetes.io/instance" }}
+{{- if hasKey $.Values.podLabels $key }}
+{{- fail (printf "podLabels.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
+{{- range $key := list "checksum/managed-config" "crab.build/rollout-token" "prometheus.io/scrape" "prometheus.io/path" "prometheus.io/port" }}
+{{- if hasKey $.Values.podAnnotations $key }}
+{{- fail (printf "podAnnotations.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
+{{- if and .Values.metrics.prometheusAnnotations (empty .Values.networkPolicy.metricsIngressFrom) }}
+{{- fail "networkPolicy.metricsIngressFrom is required when Prometheus annotations are enabled" }}
+{{- end }}
 metadata:
   name: {{ include "crab-http-server.fullname" . }}
   labels:

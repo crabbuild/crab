@@ -84,8 +84,9 @@ Choose `gke-values.example.yaml` or `aks-values.example.yaml` for those platform
 | `metrics` and `networkPolicy.metricsIngressFrom` | Your private Prometheus discovery and allowed scraper source |
 
 The chart rejects image tags, missing digests, unknown top-level values,
-automatic Kubernetes API credentials, fewer than two replicas, and a shutdown
-budget shorter than 630 seconds.
+automatic Kubernetes API credentials, disabled network isolation, unrestricted
+ingress or load balancers, overrides of chart-owned pod metadata, fewer than two
+replicas, and a shutdown budget shorter than 630 seconds.
 
 ## Create the application Secret
 
@@ -203,7 +204,11 @@ public management Service.
 
 ## Restrict network sources
 
-The default NetworkPolicy permits port 8788 from every source and blocks cross-pod access to port 8789 on enforcing CNI implementations. Restrict public sources with standard `namespaceSelector`, `podSelector`, or `ipBlock` entries:
+The NetworkPolicy blocks every source until you select the pods, namespaces, or
+IP ranges allowed to reach port 8788. Ingress and `LoadBalancer` modes reject an
+empty `publicIngressFrom`; Prometheus annotations reject an empty
+`metricsIngressFrom`. Select an ingress controller with a standard
+`namespaceSelector`, `podSelector`, or `ipBlock` entry:
 
 ```yaml
 networkPolicy:
@@ -213,7 +218,10 @@ networkPolicy:
           kubernetes.io/metadata.name: ingress-nginx
 ```
 
-Keep the policy enabled. Verify that your CNI enforces it and that kubelet readiness probes still succeed before exposing the ingress.
+The chart does not allow the policy to be disabled. Verify that your CNI
+enforces it and that kubelet readiness probes still succeed before exposing the
+ingress. A direct `LoadBalancer` additionally requires nonempty
+`service.loadBalancerSourceRanges`.
 
 ## Roll out configuration and secret changes
 

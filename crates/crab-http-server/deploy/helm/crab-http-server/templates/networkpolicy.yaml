@@ -11,14 +11,15 @@ spec:
       {{- include "crab-http-server.selectorLabels" . | nindent 6 }}
   policyTypes:
     - Ingress
+  {{- if or .Values.networkPolicy.publicIngressFrom .Values.networkPolicy.metricsIngressFrom }}
   ingress:
+    {{- with .Values.networkPolicy.publicIngressFrom }}
     - ports:
         - port: http
           protocol: TCP
-      {{- with .Values.networkPolicy.publicIngressFrom }}
       from:
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+    {{- end }}
     {{- with .Values.networkPolicy.metricsIngressFrom }}
     - ports:
         - port: management
@@ -26,4 +27,7 @@ spec:
       from:
         {{- toYaml . | nindent 8 }}
     {{- end }}
+  {{- else }}
+  ingress: []
+  {{- end }}
 {{- end }}

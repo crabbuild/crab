@@ -1,5 +1,11 @@
 apiVersion: v1
 kind: Service
+{{- if and (eq .Values.service.type "LoadBalancer") (empty .Values.service.loadBalancerSourceRanges) }}
+{{- fail "service.loadBalancerSourceRanges is required for a LoadBalancer" }}
+{{- end }}
+{{- if and (eq .Values.service.type "LoadBalancer") (empty .Values.networkPolicy.publicIngressFrom) }}
+{{- fail "networkPolicy.publicIngressFrom is required for a LoadBalancer" }}
+{{- end }}
 metadata:
   name: {{ include "crab-http-server.fullname" . }}
   labels:

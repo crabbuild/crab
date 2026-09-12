@@ -63,6 +63,7 @@ jobs:
                 --set ingress.host=git.example.com \
                 --set ingress.tlsSecretName=crab-http-server-tls \
                 --set metrics.prometheusAnnotations=true \
+                --set-json 'networkPolicy.publicIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"ingress-nginx"}}}]' \
                 --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
                 > "${rendered}"
             grep -F 'prometheus.io/scrape: "true"' "${rendered}"
@@ -77,6 +78,11 @@ jobs:
           done
 
           values="${chart}/eks-values.example.yaml"
+          default_rendered="${RUNNER_TEMP}/crab-http-server-default.yaml"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              > "${default_rendered}"
+          grep -F 'ingress: []' "${default_rendered}"
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" --values "${values}" \
               --set serviceAccount.automountServiceAccountToken=true \
@@ -101,9 +107,48 @@ jobs:
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" --values "${values}" \
               --set ingress.enabled=true --set ingress.host=git.example.com \
+              --set ingress.tlsSecretName=crab-http-server-tls >/dev/null 2>&1; then
+            echo "chart accepted ingress from every network source" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set metrics.prometheusAnnotations=true >/dev/null 2>&1; then
+            echo "chart accepted a metrics scraper without an allowed source" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set networkPolicy.enabled=false >/dev/null 2>&1; then
+            echo "chart accepted disabled network isolation" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set-json 'podLabels={"app.kubernetes.io/name":"other"}' >/dev/null 2>&1; then
+            echo "chart accepted an overridden selector label" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set-json 'podAnnotations={"prometheus.io/scrape":"true"}' >/dev/null 2>&1; then
+            echo "chart accepted an overridden management annotation" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set ingress.enabled=true --set ingress.host=git.example.com \
               --set ingress.tlsSecretName=crab-http-server-tls \
               --set service.type=LoadBalancer >/dev/null 2>&1; then
             echo "chart accepted a load balancer that bypasses ingress TLS" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set service.type=LoadBalancer \
+              --set-json 'networkPolicy.publicIngressFrom=[{"ipBlock":{"cidr":"203.0.113.0/24"}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted an unrestricted public load balancer" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \

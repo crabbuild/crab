@@ -104,7 +104,7 @@
       "additionalProperties": false,
       "required": ["enabled", "publicIngressFrom", "metricsIngressFrom"],
       "properties": {
-        "enabled": { "type": "boolean" },
+        "enabled": { "enum": [true] },
         "publicIngressFrom": { "type": "array", "items": { "type": "object" } },
         "metricsIngressFrom": { "type": "array", "items": { "type": "object" } }
       }
