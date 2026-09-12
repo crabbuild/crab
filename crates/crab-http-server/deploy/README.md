@@ -28,10 +28,10 @@ provider is release-qualified only after its live test matrix passes.
 Server release tags have their own contract, independent of the Crab CLI. An
 annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
 qualified AMD64/ARM64 image to GHCR with immutable version and source-commit
-tags, an SBOM, and provenance attestations. Exact-source qualification rejects
-fixable HIGH or CRITICAL image vulnerabilities before publication. Kubernetes
-deployments still pin the resulting manifest digest. The publisher never
-overwrites an existing version or source-commit tag.
+tags, an OCI Helm chart, an SBOM, and provenance attestations. Exact-source
+qualification rejects fixable HIGH or CRITICAL image vulnerabilities before
+publication. Kubernetes deployments still pin the resulting image manifest
+digest. The publisher never overwrites an existing image tag or chart version.
 
 ## Start locally with Docker Compose
 

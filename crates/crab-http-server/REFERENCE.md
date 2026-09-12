@@ -1141,7 +1141,7 @@ The remaining production gaps include:
 - Backup and restore qualification for Git and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
 - Live upgrade, rollback, alert-tuning, and disaster-recovery qualification
-- First tagged server image publication and registry-attestation verification
+- First tagged server image/chart publication and registry-attestation verification
 
 ## Ownership
 

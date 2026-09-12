@@ -66,6 +66,14 @@ gh attestation verify \
 
 Authenticate to GHCR first when the package is private. Also inspect the image
 index and confirm that every architecture scheduled by the cluster is present.
+Verify the OCI chart by its separately reported digest before installation:
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/crabbuild/charts/crab-http-server@sha256:qualified_chart_digest_here \
+  --repo crabbuild/crab \
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml
+```
 
 ## Deploy or upgrade
 
@@ -238,6 +246,6 @@ Record these gates against a dedicated storage root:
 - Confirm the management listener is unreachable through Service, ingress, and peer pods
 - Scrape every pod and exercise request, body-error, admission, catalog-health, and drain signals
 - Confirm no static provider credential exists in Secret, ConfigMap, pod environment, or rendered manifests
-- Verify the deployed image digest's signer workflow, source commit, AMD64/ARM64 index, SBOM, and provenance
+- Verify the deployed image and chart digests, signer workflow, source commit, AMD64/ARM64 index, SBOM, and provenance
 
 Static rendering, unit tests, and localhost RustFS tests don’t replace these gates. Keep the recorded evidence with the release decision.

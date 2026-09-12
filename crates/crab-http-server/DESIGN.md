@@ -209,11 +209,12 @@ Server releases use their own annotated `crab-http-server-vX.Y.Z` tag and do
 not inherit the CLI's version tag. The tag must match the server crate, resolve
 to `main`, and pass the exact-source container and Compose qualification before
 publishing. The registry receives one AMD64/ARM64 image index under immutable
-version and source-commit tags, BuildKit SBOM and provenance attestations, and a
-GitHub-signed registry attestation. Deployment profiles consume only its
-manifest digest. The exact-source qualification also scans the final runtime
-image and rejects fixable HIGH or CRITICAL vulnerabilities before publication.
-Existing version and source-commit tags fail closed instead of being replaced.
+version and source-commit tags, the same-version OCI Helm chart, BuildKit SBOM
+and provenance attestations, and GitHub-signed registry attestations.
+Deployment profiles consume the image manifest and chart digests. The
+exact-source qualification also scans the final runtime image and rejects
+fixable HIGH or CRITICAL vulnerabilities before publication. Existing image
+tags and chart versions fail closed instead of being replaced.
 
 ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
 three protected files to disposable scratch, unsets the injected environment

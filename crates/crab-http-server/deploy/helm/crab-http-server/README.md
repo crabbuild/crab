@@ -57,6 +57,9 @@ Maintainer releases publish `linux/amd64` and `linux/arm64` images to
 annotated `crab-http-server-vX.Y.Z` tag that matches this crate's version and is
 reachable from `main`. It qualifies that exact source, generates SBOM and
 provenance attestations, and publishes both the version and source-commit tags.
+The same release publishes this chart to
+`oci://ghcr.io/crabbuild/charts/crab-http-server` with the matching version and
+a registry-backed provenance attestation.
 
 Inspect a published version and record its manifest digest:
 
@@ -89,14 +92,27 @@ Copy the reported manifest digest into `image.digest`. Keep the repository in
 
 ## Configure one provider profile
 
-Copy the matching values file outside the checkout:
+With a source checkout, copy the matching values file to a private working
+directory:
 
 ```sh
 cp crates/crab-http-server/deploy/helm/crab-http-server/eks-values.example.yaml \
   /secure/crab-http-server-values.yaml
 ```
 
-Choose `gke-values.example.yaml` or `aks-values.example.yaml` for those platforms. Replace every example value in the copy:
+Without a source checkout, pull and unpack the released OCI chart first, then
+copy the provider example from that directory:
+
+```sh
+helm pull oci://ghcr.io/crabbuild/charts/crab-http-server \
+  --version 0.1.0 --untar --untardir /secure
+cp /secure/crab-http-server/eks-values.example.yaml \
+  /secure/crab-http-server-values.yaml
+```
+
+Authenticate with `helm registry login ghcr.io` first when the package is
+private. Choose `gke-values.example.yaml` or `aks-values.example.yaml` for
+those platforms. Replace every example value in the copy:
 
 | Value | Required change |
 | --- | --- |
@@ -148,6 +164,9 @@ helm upgrade --install crab-http-server \
   --values /secure/crab-http-server-values.yaml \
   --wait --timeout 15m
 ```
+
+When installing without a source checkout, replace the local chart path with
+`oci://ghcr.io/crabbuild/charts/crab-http-server` and add `--version 0.1.0`.
 
 The Deployment becomes ready only after a pod can read and validate the durable catalog. Confirm the rollout and inspect the catalog:
 
