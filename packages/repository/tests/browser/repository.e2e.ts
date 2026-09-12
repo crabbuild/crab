@@ -626,7 +626,7 @@ test("new issue Markdown toolbar formats selections and remains usable on mobile
   await expectNoAccessibilityViolations(page);
 });
 
-test("commit page presents changed files as a responsive status tree", async ({
+test("commit page keeps a sticky file tree beside independently scrolling diffs", async ({
   page,
 }) => {
   await page.goto(`/team/project?view=commit&rev=${oid}`);
@@ -650,16 +650,60 @@ test("commit page presents changed files as a responsive status tree", async ({
     exact: true,
   });
   await expect(modified).toHaveAttribute("aria-selected", "true");
+  const workspace = page.locator(".change-workspace");
   const diff = page.locator(".change-diff-pane");
-  await expect(diff).toContainText("src/index.ts");
-  await expect(diff).toContainText("Modified");
-  await expect(diff).toContainText("New content");
+  const panels = diff.locator(".diff-panel");
+  await expect(panels).toHaveCount(3);
+  await expect(
+    diff.getByRole("heading", { name: "src/index.ts", exact: true }),
+  ).toBeVisible();
+  await expect(
+    diff.getByRole("heading", { name: "src/lib/new.ts", exact: true }),
+  ).toBeVisible();
+  await expect(
+    diff.getByRole("heading", { name: "docs/old.md", exact: true }),
+  ).toBeVisible();
+  await expect(panels.first()).toContainText("Modified");
+  await expect(panels.first()).toContainText("New content");
 
-  const added = tree.getByRole("treeitem", { name: "new.ts", exact: true });
-  await added.click();
-  await expect(added).toHaveAttribute("aria-selected", "true");
-  await expect(diff).toContainText("src/lib/new.ts");
-  await expect(diff).toContainText("Added");
+  await expect(workspace).toHaveCSS("position", "sticky");
+  await expect(diff).toHaveCSS("overflow-y", "auto");
+  const treeScroll = tree.locator('[data-file-tree-virtualized-scroll="true"]');
+  await expect(treeScroll).toHaveCSS("overflow-y", "auto");
+
+  await workspace.evaluate((node) => {
+    node.style.height = "300px";
+    node.style.minHeight = "0";
+  });
+  await expect
+    .poll(() => diff.evaluate((node) => node.scrollHeight > node.clientHeight))
+    .toBe(true);
+
+  const deleted = tree.getByRole("treeitem", { name: "old.md", exact: true });
+  const deletedPanel = diff.locator(`#changed-file-${pathHex("docs/old.md")}`);
+  await deleted.click();
+  await expect(deleted).toHaveAttribute("aria-selected", "true");
+  await expect
+    .poll(() => diff.evaluate((node) => node.scrollTop))
+    .toBeGreaterThan(0);
+  await expect
+    .poll(async () => {
+      const paneTop = await diff.evaluate(
+        (node) => node.getBoundingClientRect().top,
+      );
+      const paneBottom = await diff.evaluate(
+        (node) => node.getBoundingClientRect().bottom,
+      );
+      const panelTop = await deletedPanel.evaluate(
+        (node) => node.getBoundingClientRect().top,
+      );
+      const panelBottom = await deletedPanel.evaluate(
+        (node) => node.getBoundingClientRect().bottom,
+      );
+      return panelTop >= paneTop && panelBottom <= paneBottom;
+    })
+    .toBe(true);
+  await expect(panels.first()).toBeAttached();
 
   await expect
     .poll(async () => {
@@ -673,7 +717,13 @@ test("commit page presents changed files as a responsive status tree", async ({
     })
     .toBeGreaterThanOrEqual(0);
 
+  await workspace.evaluate((node) => {
+    node.style.removeProperty("height");
+    node.style.removeProperty("min-height");
+  });
   await page.setViewportSize({ width: 600, height: 900 });
+  await expect(workspace).toHaveCSS("position", "static");
+  await expect(diff).toHaveCSS("overflow-y", "visible");
   await expect
     .poll(async () => {
       const treeBottom = await tree.evaluate(

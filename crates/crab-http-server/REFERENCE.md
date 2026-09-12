@@ -323,7 +323,7 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | Branch and tag picker | Search, keyboard navigation, default-branch state, and writer-only creation from the viewed commit |
 | Branches and tags | Natural sorting, protected/default labels, copied names, immutable tips, default comparison, and guarded deletion |
 | Tree and file workspace | Resizable lazy folder-first tree, preserved expansion, breadcrumbs, source, preview, blame, raw bytes, copy, download, edit, and delete |
-| History and comparison | Signed pagination, first-parent path history, commit changes in a status-aware file tree, split/unified diffs, and exact revision links |
+| History and comparison | Signed pagination, first-parent path history, a persistent change tree with independently scrolling jump-linked diffs, split/unified layouts, and exact revision links |
 | Go to file | Bounded full-tree fuzzy search without blob reads; `T` opens and focuses search |
 | Releases | Releases/Tags navigation, search, drafts, publication, edits, deletion, source ZIPs, and binary assets |
 | Pull requests | Conversation, Commits, Checks, Files changed, reviews, shared Markdown formatting, approval state, and merge controls |

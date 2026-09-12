@@ -1,4 +1,10 @@
-import { useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import type { GitStatus } from "@pierre/trees";
@@ -61,6 +67,10 @@ function changeStatus(kind: string): GitStatus {
   if (kind === "Added") return "added";
   if (kind === "Deleted") return "deleted";
   return "modified";
+}
+
+function changePanelId(pathHex: string) {
+  return `changed-file-${pathHex}`;
 }
 
 export function FileView({ repo, rev, path, name, theme, write }: Props) {
@@ -365,7 +375,13 @@ export function CommitView({
           </section>
         )}
       </Result>
-      <ChangeComparison state={changes} repo={repo} rev={rev} theme={theme} />
+      <ChangeComparison
+        state={changes}
+        repo={repo}
+        rev={rev}
+        theme={theme}
+        sticky
+      />
     </>
   );
 }
@@ -402,12 +418,14 @@ function ChangeComparison({
   rev,
   base,
   theme,
+  sticky = false,
 }: {
   state: ReturnType<typeof useRequest<Changes>>;
   repo: Repository;
   rev: string;
   base?: string;
   theme: "light" | "dark";
+  sticky?: boolean;
 }) {
   return (
     <Result state={state}>
@@ -419,6 +437,7 @@ function ChangeComparison({
           rev={rev}
           base={base}
           theme={theme}
+          sticky={sticky}
         />
       )}
     </Result>
@@ -431,15 +450,28 @@ function ChangeWorkspace({
   rev,
   base,
   theme,
+  sticky,
 }: {
   changes: Change[];
   repo: Repository;
   rev: string;
   base?: string;
   theme: "light" | "dark";
+  sticky: boolean;
 }) {
-  const [selected, setSelected] = useState(changes[0]?.path_hex ?? null);
-  const selectedChange = changes.find((change) => change.path_hex === selected);
+  const diffPane = useRef<HTMLDivElement>(null);
+
+  function scrollToChange(change: Change) {
+    const pane = diffPane.current;
+    const panel = document.getElementById(changePanelId(change.path_hex));
+    if (!pane || !panel) return;
+    const top =
+      pane.scrollTop +
+      panel.getBoundingClientRect().top -
+      pane.getBoundingClientRect().top;
+    pane.scrollTo({ top });
+  }
+
   return (
     <>
       <h3 id="changed-files-heading">
@@ -447,27 +479,34 @@ function ChangeWorkspace({
       </h3>
       {changes.length ? (
         <section
-          className="change-workspace"
+          className={`change-workspace${sticky ? " change-workspace-sticky" : ""}`}
           aria-labelledby="changed-files-heading"
         >
           <div className="change-tree-pane">
             <ChangeTree
               changes={changes}
-              selected={selectedChange?.path}
-              onSelect={setSelected}
+              selected={changes[0]?.path}
+              onSelect={scrollToChange}
             />
           </div>
-          <div className="change-diff-pane">
-            {selectedChange && (
-              <DiffView
-                key={selectedChange.path_hex}
-                repo={repo}
-                rev={rev}
-                base={base}
-                change={selectedChange}
-                theme={theme}
-              />
-            )}
+          <div
+            ref={diffPane}
+            className="change-diff-pane"
+            aria-label="Changed file diffs"
+          >
+            <div className="change-diff-list">
+              {changes.map((change, index) => (
+                <DiffView
+                  key={change.path_hex}
+                  repo={repo}
+                  rev={rev}
+                  base={base}
+                  change={change}
+                  theme={theme}
+                  eager={index === 0}
+                />
+              ))}
+            </div>
           </div>
         </section>
       ) : (
@@ -484,7 +523,7 @@ function ChangeTree({
 }: {
   changes: Change[];
   selected?: string;
-  onSelect: (path: string) => void;
+  onSelect: (change: Change) => void;
 }) {
   const paths = useMemo(
     () => new Map(changes.map((change) => [change.path, change])),
@@ -515,7 +554,7 @@ function ChangeTree({
       ),
     onSelectionChange(selectedPaths) {
       const change = paths.get(selectedPaths[0] ?? "");
-      if (change) select.current(change.path_hex);
+      if (change) select.current(change);
     },
   });
   return (
@@ -533,9 +572,37 @@ function DiffView({
   base,
   change,
   theme,
-}: Omit<Props, "name" | "path"> & { base?: string; change: Change }) {
+  eager,
+}: Omit<Props, "name" | "path"> & {
+  base?: string;
+  change: Change;
+  eager: boolean;
+}) {
+  const panel = useRef<HTMLElement>(null);
+  const [load, setLoad] = useState(eager);
+  useEffect(() => {
+    const node = panel.current;
+    if (load || !node) return;
+    if (!("IntersectionObserver" in window)) {
+      setLoad(true);
+      return;
+    }
+    const root = node.closest(".change-diff-pane");
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        setLoad(true);
+        observer.disconnect();
+      },
+      { root, rootMargin: "600px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [load]);
   const state = useRequest<Diff>(
-    endpoint(repo, "diff", { rev, base, path_hex: change.path_hex }),
+    load
+      ? endpoint(repo, "diff", { rev, base, path_hex: change.path_hex })
+      : null,
   );
   const [style, setStyle] = useState<"unified" | "split">("split");
   const options = useMemo(
@@ -570,41 +637,55 @@ function DiffView({
     return null;
   }, [state.data]);
   return (
-    <Result state={state}>
-      {(data) => (
-        <section className="panel diff-panel">
-          <div className="panel-header">
-            <div className="diff-file-heading">
-              <strong>{data.path}</strong>
-              <Label variant={changeVariant(change.kind)}>{change.kind}</Label>
-              {change.old?.mode !== change.new?.mode && (
-                <code>
-                  {change.old?.mode ?? "—"} → {change.new?.mode ?? "—"}
-                </code>
-              )}
-            </div>
-            <SegmentedControl
-              aria-label="Diff layout"
-              onChange={(index) => setStyle(index === 0 ? "split" : "unified")}
-            >
-              <SegmentedControl.Button selected={style === "split"}>
-                Split
-              </SegmentedControl.Button>
-              <SegmentedControl.Button selected={style === "unified"}>
-                Unified
-              </SegmentedControl.Button>
-            </SegmentedControl>
-          </div>
-          {files ? (
-            <MultiFileDiff {...files} options={options} style={diffColors} />
-          ) : (
-            <div className="notice">
-              Binary content changed. Browse the corresponding revision to
-              download it.
-            </div>
+    <section
+      ref={panel}
+      id={changePanelId(change.path_hex)}
+      className="panel diff-panel"
+      data-change-path={change.path}
+      aria-labelledby={`${changePanelId(change.path_hex)}-heading`}
+    >
+      <div className="panel-header">
+        <div className="diff-file-heading">
+          <h4 id={`${changePanelId(change.path_hex)}-heading`}>
+            {change.path}
+          </h4>
+          <Label variant={changeVariant(change.kind)}>{change.kind}</Label>
+          {change.old?.mode !== change.new?.mode && (
+            <code>
+              {change.old?.mode ?? "—"} → {change.new?.mode ?? "—"}
+            </code>
           )}
-        </section>
+        </div>
+        <SegmentedControl
+          aria-label={`Diff layout for ${change.path}`}
+          onChange={(index) => setStyle(index === 0 ? "split" : "unified")}
+        >
+          <SegmentedControl.Button selected={style === "split"}>
+            Split
+          </SegmentedControl.Button>
+          <SegmentedControl.Button selected={style === "unified"}>
+            Unified
+          </SegmentedControl.Button>
+        </SegmentedControl>
+      </div>
+      {load ? (
+        <Result state={state} showTiming={false}>
+          {() =>
+            files ? (
+              <MultiFileDiff {...files} options={options} style={diffColors} />
+            ) : (
+              <div className="notice">
+                Binary content changed. Browse the corresponding revision to
+                download it.
+              </div>
+            )
+          }
+        </Result>
+      ) : (
+        <div className="diff-placeholder muted" aria-hidden="true">
+          Diff loads as it comes into view.
+        </div>
       )}
-    </Result>
+    </section>
   );
 }

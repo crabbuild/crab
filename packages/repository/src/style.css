@@ -502,21 +502,28 @@ main {
   display: grid;
   grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
   align-items: stretch;
+  height: calc(100vh - 32px);
+  min-height: 520px;
+  max-height: 960px;
   overflow: hidden;
   border: 1px solid var(--borderColor-default);
   border-radius: var(--borderRadius-medium);
 }
+.change-workspace-sticky {
+  position: sticky;
+  top: 16px;
+}
 .change-tree-pane {
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
   background: var(--bgColor-muted);
   border-right: 1px solid var(--borderColor-default);
 }
 .change-file-tree {
-  position: sticky;
-  top: 16px;
   display: block;
-  height: min(68vh, 720px);
-  min-height: 360px;
+  height: 100%;
+  min-height: 0;
   color: var(--fgColor-default);
   --trees-accent-override: var(--fgColor-accent);
   --trees-bg-override: var(--bgColor-muted);
@@ -535,12 +542,26 @@ main {
 }
 .change-diff-pane {
   min-width: 0;
-  background: var(--bgColor-default);
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scroll-padding-top: 16px;
+  background: var(--bgColor-muted);
 }
 .change-diff-pane .diff-panel {
   margin: 0;
-  border: 0;
-  border-radius: 0;
+}
+.change-diff-list {
+  display: grid;
+  gap: 16px;
+  padding: 16px;
+}
+.diff-placeholder {
+  display: grid;
+  min-height: 140px;
+  place-items: center;
+  border-top: 1px solid var(--borderColor-muted);
 }
 .diff-file-heading {
   display: flex;
@@ -548,8 +569,10 @@ main {
   align-items: center;
   gap: 8px;
 }
-.diff-file-heading strong {
+.diff-file-heading h4 {
+  margin: 0;
   overflow: hidden;
+  font-size: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -830,7 +853,11 @@ main {
     flex-direction: column;
   }
   .change-workspace {
+    position: static;
     grid-template-columns: minmax(0, 1fr);
+    height: auto;
+    min-height: 0;
+    max-height: none;
   }
   .change-tree-pane {
     border-right: 0;
@@ -840,6 +867,12 @@ main {
     position: static;
     height: 240px;
     min-height: 0;
+  }
+  .change-diff-pane {
+    overflow: visible;
+  }
+  .change-diff-list {
+    padding: 12px;
   }
   .tree-sidebar {
     position: static;
