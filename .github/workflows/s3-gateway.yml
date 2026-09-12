@@ -1397,6 +1397,8 @@ jobs:
           else
             soak_status=1
           fi
+          stop_owner
+          trap - EXIT
           OWNER_LOG="${xet_root}/owner.jsonl" \
           OWNER_PROOF="${RUNNER_TEMP}/crab-s3-gateway-evidence/owner-proof.json" \
           OWNER_ALIVE="${owner_alive}" python3 - <<'PY'
