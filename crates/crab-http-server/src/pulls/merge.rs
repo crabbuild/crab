@@ -252,6 +252,7 @@ async fn execute(
     input: std::result::Result<Json<MergeInput>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
+    let repo = repo.as_ref();
     if !principal.can_write(&repo.config) {
         return Err(Error::MergePermission);
     }

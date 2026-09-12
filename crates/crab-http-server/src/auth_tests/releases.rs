@@ -70,7 +70,11 @@ async fn delete_release(
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_release_publishes_and_recovers_native_git_tags() {
     let h = Harness::new(false).await;
-    let repo = &h.server.repositories[&("team".into(), "private".into())];
+    let repo = h
+        .server
+        .repositories
+        .get(&("team".into(), "private".into()))
+        .unwrap();
     let alice = h.login().await;
     let session = h.json("/api/session", &alice).await;
     let csrf = session["csrf"].as_str().unwrap();
@@ -467,7 +471,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
             .unwrap()
             .is_empty()
     );
-    crate::repository_settings::replace_lifecycle(repo, 0, true)
+    crate::repository_settings::replace_lifecycle(&repo, 0, true)
         .await
         .unwrap();
     assert_eq!(
@@ -503,7 +507,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         delete_release(&h, &alice, csrf, 3, 1).await,
         StatusCode::FORBIDDEN
     );
-    crate::repository_settings::replace_lifecycle(repo, 1, false)
+    crate::repository_settings::replace_lifecycle(&repo, 1, false)
         .await
         .unwrap();
 

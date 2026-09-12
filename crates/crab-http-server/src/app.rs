@@ -306,11 +306,11 @@ pub(crate) async fn admit(
         .into_response()
 }
 
-pub(crate) fn repository<'a>(
-    server: &'a Server,
+pub(crate) fn repository(
+    server: &Server,
     principal: &Principal,
     key: &(String, String),
-) -> Result<&'a Repository> {
+) -> Result<Arc<Repository>> {
     server
         .repositories
         .get(key)

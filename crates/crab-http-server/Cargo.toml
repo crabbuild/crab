@@ -30,6 +30,7 @@ crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 rand = "0.9"
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
+object_store = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls"] }
 url = { version = "2", features = ["serde"] }
 serde = { workspace = true }
@@ -41,10 +42,10 @@ tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = "0.3"
+uuid = { workspace = true }
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-object_store = { workspace = true }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }

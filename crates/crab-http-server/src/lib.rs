@@ -7,12 +7,12 @@ mod assets;
 mod assignees;
 mod auth;
 mod branches;
+pub mod catalog;
 mod checks;
 mod config;
 mod contents;
 mod git;
 mod git_objects;
-mod initialize;
 mod issues;
 mod labels;
 mod lfs;
@@ -23,11 +23,12 @@ mod releases;
 mod repository_settings;
 mod server;
 mod statuses;
+mod storage_root;
 
 pub use config::{
     BranchProtection, Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember,
+    StorageConfig,
 };
-pub use initialize::initialize_repositories;
 pub use server::serve;
 
 /// Startup and server lifecycle errors with their original sources retained.
@@ -44,14 +45,16 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("invalid TOML configuration")]
     Toml(#[from] toml::de::Error),
+    #[error("JSON encoding failed")]
+    Json(#[from] serde_json::Error),
     #[error("object storage configuration failed")]
     Storage(#[from] crab_storage::StorageError),
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
     #[error("repository maintenance failed")]
     Maintenance(#[from] crab_write::WriteError),
-    #[error("repository initialization failed")]
-    Initialization(#[source] crab_write::WriteError),
+    #[error("repository catalog operation failed")]
+    Catalog(#[from] catalog::CatalogError),
     #[error("repository maintenance task failed")]
     Worker(#[from] tokio::task::JoinError),
     #[error("repository settings could not be loaded")]
