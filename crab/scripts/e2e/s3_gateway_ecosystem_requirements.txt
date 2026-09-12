@@ -1,0 +1,17 @@
+awswrangler==3.17.1
+boto3==1.36.4
+dask[dataframe]==2026.8.0
+deltalake==1.6.3
+duckdb==1.5.5
+fsspec==2026.7.0
+lancedb==0.38.0
+minio==7.2.20
+pandas==3.0.5
+polars==1.44.2
+pyarrow==25.0.1
+pyiceberg[sql-sqlite]==0.12.0
+pyspark==4.2.0
+s3cmd==2.4.0
+s3fs==2026.7.0
+sqlalchemy==2.0.43
+smart_open==8.0.1

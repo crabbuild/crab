@@ -124,6 +124,15 @@ eight sequential 64 MiB parts, reads the complete object back, and reads a
 range crossing a persisted part boundary. Both reads are compared with the
 local SHA-256 fixture, and upload/full-read/range-read timings are retained
 without credentials or object names.
+The same packaged-image job runs an identity-free ecosystem matrix against the
+gateway: AWS CLI and Boto3 (including SigV4 presigning), DuckDB CLI and Python,
+LanceDB, Spark S3A, PyArrow, Pandas, Polars, fsspec/s3fs, Dask, MinIO,
+smart_open, awswrangler, PyIceberg, Delta Lake, Java AWS SDK v2, Go AWS SDK v2,
+and s3cmd. Each fixture performs the client's normal object, dataframe, or
+table-format write/read path and checks exact bytes, rows, aggregates, ranges,
+listings, snapshots, or transaction versions as appropriate. Dependency
+versions and per-client timings are retained in
+`crab.s3-gateway-ecosystem` evidence.
 Finally, it kills the gateway while RustFS holds one live part, one frozen part,
 and one eligible synthetic missing-session orphan. The replacement must remove
 the orphan and release its capacity within two completed maintenance scans while
@@ -149,31 +158,55 @@ volume contains data that must be retained.
 ## Sustained-write qualification runner
 
 The repository includes a dependency-free signed-request workload runner for a
-dedicated gateway and direct S3-compatible baseline. It sends deterministic
-4 KiB `PutObject` requests from 16 concurrent writers, paginates the resulting
-keys, and records p50/p95 latency, throughput, failed requests, duplicate
-listing entries, missing acknowledged keys, and unexpected keys. Credentials
-are read only from the environment; they are never command-line arguments or
-written to the report:
+dedicated gateway, with an optional direct S3-compatible baseline. It sends
+deterministic 4 KiB `PutObject` requests from 16 concurrent writers, paginates
+the resulting keys, and records p50/p95 latency, throughput, failed requests,
+duplicate listing entries, missing acknowledged keys, and unexpected keys.
+It also retains complete time windows and compares the first and terminal
+cohorts so an acceptable aggregate cannot hide progressive degradation.
+Credentials are read only from the environment; they are never command-line
+arguments or written to the report:
 
 ```sh
 export S3_GATEWAY_WORKLOAD_ACCESS_KEY=...
 export S3_GATEWAY_WORKLOAD_SECRET_KEY=...
-export S3_BASELINE_WORKLOAD_ACCESS_KEY=...
-export S3_BASELINE_WORKLOAD_SECRET_KEY=...
 python3 -B crab/scripts/e2e/s3_gateway_workload.py \
   --gateway-endpoint https://gateway.example.invalid \
   --gateway-bucket logical-repository \
-  --baseline-endpoint https://s3.example.invalid \
-  --baseline-bucket isolated-baseline \
-  --duration-seconds 300 \
+  --duration-seconds 900 \
+  --window-seconds 60 \
   --report <external-workspace>/s3-gateway-workload.json
 ```
 
-Use an isolated prefix and bucket for every run. The direct endpoint is a
-transport/SDK baseline; it is not a substitute for a direct Crab SDK
-committed-write baseline, so this runner does not by itself close the Phase-8
-committed-write performance gate. The report is identity-free and the command
+Use an isolated prefix and bucket for every run. Add `--baseline-endpoint` and
+`--baseline-bucket` plus the `S3_BASELINE_WORKLOAD_*` credentials when a direct
+transport comparison is useful. That baseline is not a substitute for direct
+Crab SDK committed-write evidence. The report is identity-free and the command
 returns nonzero on any failed request, lost acknowledged key, unexpected key,
-duplicate listing entry, throughput regression below 90% of baseline, or p95
-latency above 125% of baseline.
+duplicate listing entry, terminal throughput below 80% of the startup cohort,
+or terminal p95 latency above 150% of startup. With a baseline it additionally
+requires at least 90% of baseline throughput and no more than 125% of its p95.
+
+## Ecosystem qualification runner
+
+Install the pinned Python dependencies into an isolated environment, then run
+the full client matrix against a dedicated gateway:
+
+```sh
+python3 -m venv <external-workspace>/s3-gateway-ecosystem-venv
+<external-workspace>/s3-gateway-ecosystem-venv/bin/pip install \
+  --requirement crab/scripts/e2e/s3_gateway_ecosystem_requirements.txt
+export PATH="<duckdb-cli-directory>:<external-workspace>/s3-gateway-ecosystem-venv/bin:$PATH"
+export S3_GATEWAY_ECOSYSTEM_ACCESS_KEY=...
+export S3_GATEWAY_ECOSYSTEM_SECRET_KEY=...
+python3 -B crab/scripts/e2e/s3_gateway_ecosystem.py \
+  --endpoint https://gateway.example.invalid \
+  --bucket logical-repository \
+  --work-dir <external-workspace>/s3-gateway-ecosystem-work \
+  --report <external-workspace>/s3-gateway-ecosystem.json
+```
+
+The full matrix also requires the AWS CLI, DuckDB CLI, s3cmd, Maven with Java
+17 or newer, and Go. The runner validates required commands before traffic,
+uses a random per-run prefix, suppresses child-process output on failure, and
+stores no endpoint, repository, prefix, or credential identity in its report.
