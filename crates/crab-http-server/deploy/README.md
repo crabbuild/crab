@@ -25,6 +25,12 @@ private probes and Prometheus metrics, a disruption budget, ingress isolation,
 optional Transport Layer Security (TLS) ingress, and optional autoscaling. A
 provider is release-qualified only after its live test matrix passes.
 
+Container CI stops the local writers, copies the complete storage root to an
+isolated object prefix, compares every key and object body, then verifies the
+restored catalog through native Git, issue, and LFS clients. This proves the
+portable recovery shape, but provider version selection and regional recovery
+still require a live drill.
+
 Server release tags have their own contract, independent of the Crab CLI. An
 annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
 qualified AMD64/ARM64 image to GHCR with immutable version and source-commit
@@ -59,8 +65,9 @@ flowchart LR
 The proxy shares the server's network namespace. It is the only process bound
 to Docker's published port; Crab still binds to loopback and keeps its
 unauthenticated local-trust invariant. The management listener and RustFS are
-not published to the host. This profile is for local development and
-evaluation, not remote or multi-user service.
+not published to the host. Compose waits until the catalog is valid and every
+repository can open its current Git view. This profile is for local development
+and evaluation, not remote or multi-user service.
 
 ### Operate the local stack
 

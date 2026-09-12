@@ -314,7 +314,7 @@ The two probe routes answer different operator questions:
 | Route | Success means | Failure contract |
 | --- | --- | --- |
 | `GET /healthz` | The HTTP process can answer | It does not inspect repository storage |
-| `GET /readyz` | The durable catalog can be read and validated within 10 seconds | HTTP 503 with `Retry-After: 5` |
+| `GET /readyz` | The durable catalog is valid and every cataloged repository can open its current Git view within 10 seconds | HTTP 503 with `Retry-After: 5` |
 | `GET /metrics` | Prometheus text exposes request/body lifetime, admission, catalog, repository, receive-worker, and drain signals | It does not perform a storage probe |
 
 Only the management listener serves probes. Every public request retains strict
@@ -1094,9 +1094,10 @@ Current local and CI evidence includes:
 - Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, cooperative restart recovery, and container `SIGKILL` during an in-flight push
 - OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
-- Container build, non-root identity, stop signal, health command, private metrics scrape, runtime inspection, strict Helm lint, and Kubernetes schema validation
+- Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, runtime inspection, strict Helm lint, and Kubernetes schema validation
+- Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
 
-These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. It does not establish every crash phase, multi-instance global admission, provider-scale performance, backup recovery, or complete manual accessibility.
+These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. Neither test establishes every crash phase, multi-instance global admission, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
 
 ### Keep qualification evidence honest
 
@@ -1108,7 +1109,7 @@ Use the following interpretation:
 | In-memory HTTP test | Routing, authorization, and response semantics | Provider behavior or restart durability |
 | RustFS integration | Real object-store persistence and independent-client result | Production load, region failure, or Internet latency |
 | Browser regression | Rendered behavior and automated accessibility rules | Storage durability or manual assistive technology |
-| Container CI | Reproducible image/runtime metadata and one in-flight `SIGKILL` outcome | Cloud orchestration, every crash phase, or upgrade safety |
+| Container CI | Reproducible image/runtime metadata, one in-flight `SIGKILL` outcome, and one isolated complete-root cold restore | Cloud orchestration, version-selected provider recovery, every crash phase, or upgrade safety |
 
 ## Completion requirements
 
@@ -1124,7 +1125,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, one complete-root cold restore, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
@@ -1138,7 +1139,7 @@ The remaining production gaps include:
 - LFS locking and resumed range downloads
 - Membership administration, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
-- Backup and restore qualification for Git and the complete `app/v1` namespace
+- Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
 - Live upgrade, rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification

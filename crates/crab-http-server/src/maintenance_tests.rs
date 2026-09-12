@@ -123,6 +123,64 @@ async fn close(server: &Server) {
     server.runtime.shutdown().await;
 }
 
+fn enable_catalog_readiness(server: &mut Arc<Server>) {
+    let store = repository(server).store.clone();
+    let server = Arc::get_mut(server).unwrap();
+    server.catalog = Some(CatalogStore::new(crate::storage_root::StorageRoot::memory(
+        store, "catalog",
+    )));
+    server.catalog_healthy.store(true, Ordering::Release);
+}
+
+#[tokio::test]
+async fn readiness_opens_every_repository_before_admitting_traffic() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn readiness_rejects_a_repository_that_still_needs_indexing() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    let repo = repository(&server);
+    let lease = commit_without_proof(&repo).await;
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("5")
+    );
+    assert_released(&repo).await;
+    lease.release().await.unwrap();
+    close(&server).await;
+}
+
 #[tokio::test]
 async fn expired_browser_cache_observes_journal_and_reports_missing_proof_without_rollback() {
     let server = fixture().await;

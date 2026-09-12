@@ -576,18 +576,7 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
 }
 
 async fn readiness(State(server): State<Arc<Server>>) -> Response {
-    let check = async {
-        if !server.catalog_healthy.load(Ordering::Acquire) {
-            return Err(crate::Error::Config("catalog refresh is unhealthy"));
-        }
-        let catalog = server
-            .catalog
-            .as_ref()
-            .ok_or(crate::Error::Config("catalog is unavailable"))?;
-        catalog.load().await?;
-        Ok::<_, crate::Error>(())
-    };
-    match tokio::time::timeout(Duration::from_secs(10), check).await {
+    match tokio::time::timeout(Duration::from_secs(10), check_readiness(&server)).await {
         Ok(Ok(())) => Json(json!({"status":"ready"})).into_response(),
         Ok(Err(error)) => {
             tracing::warn!(error = ?error, "repository readiness check failed");
@@ -598,6 +587,25 @@ async fn readiness(State(server): State<Arc<Server>>) -> Response {
             readiness_unavailable()
         }
     }
+}
+
+async fn check_readiness(server: &Server) -> Result<()> {
+    if !server.catalog_healthy.load(Ordering::Acquire) {
+        return Err(crate::Error::Config("catalog refresh is unhealthy"));
+    }
+    let catalog = server
+        .catalog
+        .as_ref()
+        .ok_or(crate::Error::Config("catalog is unavailable"))?;
+    catalog.load().await?;
+    for repository in server.repositories.values() {
+        // A pod must not enter endpoint routing while a fresh process would
+        // reject Git reads and trigger shared index maintenance on first use.
+        repository
+            .open_current(server, server.options, &server.cancellation)
+            .await?;
+    }
+    Ok(())
 }
 
 fn readiness_unavailable() -> Response {

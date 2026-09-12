@@ -75,12 +75,12 @@ scratch:
 
 startupProbe:
   periodSeconds: 5
-  timeoutSeconds: 3
+  timeoutSeconds: 12
   failureThreshold: 60
 
 readinessProbe:
   periodSeconds: 5
-  timeoutSeconds: 3
+  timeoutSeconds: 12
   failureThreshold: 2
 
 livenessProbe:

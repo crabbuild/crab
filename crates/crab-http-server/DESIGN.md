@@ -8,10 +8,12 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 > **Current status:** The runtime has a provider-neutral storage root, durable
 > CAS repository catalog, shared identity state, dynamic replica refresh,
 > private probes and bounded Prometheus metrics, a local Compose profile, and
-> hardened Helm profiles for EKS/GKE/AKS. The ECS Fargate profile cannot
-> preserve the full shutdown budget. Static artifacts do not constitute live
-> cloud qualification. Abrupt write-process crash recovery and index-receipt
-> reconstruction remain incomplete.
+> hardened Helm profiles for EKS/GKE/AKS. Container CI also exercises one
+> abrupt native receive and an isolated complete-root cold restore. The ECS
+> Fargate profile cannot preserve the full shutdown budget. Static artifacts
+> and local RustFS do not constitute live cloud qualification. Additional
+> write-process crash boundaries and index-receipt reconstruction remain
+> incomplete.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
@@ -143,9 +145,12 @@ contents ambiguous.
 ### Refresh replicas without invalidating requests
 
 At startup the server reads and validates the catalog, materializes each
-repository, and refuses readiness if the catalog is unavailable. Every replica
-polls the small catalog every five seconds. On a new version it constructs a
-complete next routing map and swaps it under a short synchronous write lock.
+repository, and refuses readiness if the catalog is unavailable or any
+cataloged repository cannot open its current Git view. This keeps a fresh pod
+out of endpoint routing while shared read-index maintenance is still pending.
+Every replica polls the small catalog every five seconds. On a new version it
+constructs a complete next routing map and swaps it under a short synchronous
+write lock.
 
 Handlers clone an `Arc<Repository>` at route admission. A catalog refresh can
 therefore remove or replace a route without invalidating a request already
@@ -825,7 +830,7 @@ The current implementation does not satisfy these production claims:
 - **Active-active coexistence:** Versioned coordinator writers do not share the native journal namespace gate or commitment authority.
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
 - **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
-- **Production scale:** Static EKS/GKE/AKS profiles do not establish Kubernetes-size push throughput, temporary-disk sizing, provider latency, cross-replica failover, or regional failure behavior. The ECS stop limit is shorter than the maximum operation budget.
+- **Production scale:** Static EKS/GKE/AKS profiles and the local cold-restore drill do not establish Kubernetes-size push throughput, temporary-disk sizing, provider latency, cross-replica failover, version-selected provider restore, or regional failure behavior. The ECS stop limit is shorter than the maximum operation budget.
 - **LFS locking:** The server transfers and verifies LFS objects but does not implement lock creation or push enforcement.
 
 Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabricated protected plan, fallback reader, or OID rewrite. Each shortcut violates an ownership or outcome invariant above.

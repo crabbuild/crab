@@ -89,7 +89,10 @@ kubectl --namespace crab rollout status deployment/crab-http-server \
   --timeout=15m
 ```
 
-The startup and readiness probes read the durable catalog. The liveness probe checks only whether the management process answers HTTP.
+The startup and readiness probes read the durable catalog and open the current
+Git view of every cataloged repository. A replacement pod stays out of endpoint
+routing while shared read-index maintenance is pending. The liveness probe
+checks only whether the management process answers HTTP.
 
 Verify each pod rather than relying on Deployment availability alone:
 
@@ -182,7 +185,7 @@ Use this triage map:
 
 | Symptom | Likely boundary | First action |
 | --- | --- | --- |
-| Readiness returns 503 | Catalog access, provider credentials, or invalid catalog | Inspect readiness warnings and workload identity events |
+| Readiness returns 503 | Catalog access, provider credentials, invalid catalog, or repository read-index maintenance | Inspect readiness warnings, workload identity events, and maintenance logs |
 | Public requests return 403 | Canonical host mismatch | Compare ingress host with `auth.public_url` and preserved `Host` |
 | Browser requests return 401 | OIDC session or membership | Verify issuer, clock, shared state key, and stable provider subject |
 | Git push disconnects | Ingress timeout, pod termination, or publication failure | Find the request ID, inspect logs, then compare the remote ref before retrying |
@@ -192,7 +195,7 @@ Use this triage map:
 
 Don’t repair object storage by editing catalog JSON, ref markers, manifests, or coordination records directly. Use the repository administration commands or a reviewed recovery tool.
 
-The container gate kills Crab after a new immutable pack appears during a 128 MB native push. A fresh process must expose exactly the old or new ref. The same push must become idempotently successful within the publication lease and recovery budget, and an independent clone must reconstruct every byte within that budget. Read indexing may reject an early clone while it converges. Repeat this test with provider storage and pod replacement before production use.
+The container gate kills Crab after a new immutable pack appears during a 128 MB native push. A fresh process must expose exactly the old or new ref. The same push must become idempotently successful within the publication lease and recovery budget, and an independent clone must reconstruct every byte within that budget. Readiness keeps the replacement out of endpoint routing while startup indexing converges; indexing triggered by a newly accepted write can still reject an early clone and must converge within the recovery budget. Repeat this test with provider storage and pod replacement before production use.
 
 ## Drain a deployment
 
@@ -229,7 +232,23 @@ Test restore without overwriting the active root:
 8. Record restored object counts, selected version, RPO, RTO, and failures.
 9. Delete the isolated test only after retaining the evidence.
 
-Crab has no point-in-time restore coordinator. Provider tooling must produce a consistent full-prefix view, and a live restore drill must prove it for your workload.
+The container gate repeats the portable core of this drill against RustFS. It
+stops source writers, performs an object-store-to-object-store copy, compares
+the complete relative key and size set, hashes every source/restored body, and
+starts an isolated server against the restored prefix. An independent client
+then verifies the catalog, Git commit, issue, and LFS object before the source
+stack returns to service.
+
+Do not round-trip a Crab root through an ordinary filesystem sync. Object
+storage can contain both a key such as `locks/internal/gc-fence/state` and
+children below `locks/internal/gc-fence/state/`; a filesystem cannot represent
+both at once. Use provider-native version restore or object-to-object copy that
+preserves the complete key namespace.
+
+Crab has no point-in-time restore coordinator. Provider tooling must produce a
+consistent full-prefix view, select the intended object versions, and retain
+provider metadata. A live restore drill must still prove RPO, RTO, shared OIDC
+state, and regional recovery for your workload.
 
 ## Qualify a release
 
