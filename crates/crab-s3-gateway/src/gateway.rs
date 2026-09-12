@@ -32,15 +32,16 @@ use crate::{
 const MAX_BUCKETS_PER_PAGE: usize = 10_000;
 const READINESS_CONCURRENCY: usize = 4;
 
+#[derive(Clone)]
 pub(crate) struct Repository {
     pub(crate) config: RepositoryConfig,
     pub(crate) store: Store,
     pub(crate) layout: StoreLayout<Store>,
     pub(crate) identity: RepositoryIdentity,
-    pub(crate) read_views: crate::repository::ReadViewCache,
+    pub(crate) read_views: Arc<crate::repository::ReadViewCache>,
     pub(crate) maintenance: Arc<crate::repository::WriteMaintenance>,
-    hydrator: crab_read::ShardHydrator,
-    lfs: crab_lfs::LfsObjectStore,
+    hydrator: Arc<crab_read::ShardHydrator>,
+    lfs: Arc<crab_lfs::LfsObjectStore>,
 }
 
 impl Repository {
@@ -85,14 +86,19 @@ impl Repository {
             layout.global_prefix().to_owned(),
         );
         Ok(Self {
-            hydrator: crab_read::ReadRuntimeBuilder::new(caching, read_layout, 16).build()?,
-            lfs: crab_lfs::LfsObjectStore::new(store.clone(), layout.repo_prefix()),
+            hydrator: Arc::new(
+                crab_read::ReadRuntimeBuilder::new(caching, read_layout, 16).build()?,
+            ),
+            lfs: Arc::new(crab_lfs::LfsObjectStore::new(
+                store.clone(),
+                layout.repo_prefix(),
+            )),
             identity: RepositoryIdentity::new(
                 format!("{}:{}", provider_name(config.provider), config.bucket),
                 config.prefix.clone(),
                 1,
             )?,
-            read_views: crate::repository::ReadViewCache::new(),
+            read_views: Arc::new(crate::repository::ReadViewCache::new()),
             maintenance: Arc::new(crate::repository::WriteMaintenance::new()),
             config,
             store,
@@ -813,10 +819,17 @@ impl Gateway {
             if blob.metadata.kind != EntryKind::Blob {
                 return Err(s3_error!(InvalidObjectState));
             }
-            let manifest = repo
-                .attributes(repository, snapshot.commit_oid())
-                .await
-                .map_err(gateway_error)?;
+            let manifest = match self.mutations.manifest(
+                &repository.config.name,
+                &address.reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => manifest,
+                None => repo
+                    .attributes(repository, snapshot.commit_oid())
+                    .await
+                    .map_err(gateway_error)?,
+            };
             let path = std::str::from_utf8(address.path.as_bytes())
                 .map_err(|_| s3_error!(InvalidObjectState))?;
             let attributes = manifest.object(path, blob.metadata.oid).cloned();
@@ -869,10 +882,17 @@ impl Gateway {
             }
             let path = std::str::from_utf8(address.path.as_bytes())
                 .map_err(|_| s3_error!(InvalidObjectState))?;
-            let attributes = view
-                .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
-                .await
-                .map_err(gateway_error)?;
+            let attributes = match self.mutations.manifest(
+                &repository.config.name,
+                &address.reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => manifest.object(path, entry.oid).cloned(),
+                None => view
+                    .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                    .await
+                    .map_err(gateway_error)?,
+            };
             if let Some(attributes) = attributes {
                 return Ok(ReadObjectMetadata {
                     blob_oid: entry.oid,
@@ -934,9 +954,17 @@ impl Gateway {
             }
             let path = std::str::from_utf8(address.path.as_bytes())
                 .map_err(|_| s3_error!(InvalidObjectState))?;
-            view.object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
-                .await
-                .map_err(gateway_error)
+            match self.mutations.manifest(
+                &repository.config.name,
+                &address.reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => Ok(manifest.object(path, entry.oid).cloned()),
+                None => view
+                    .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                    .await
+                    .map_err(gateway_error),
+            }
         }
         .await;
         finish(operation, result).await
@@ -2946,10 +2974,20 @@ impl S3 for Gateway {
                     crab_remote_git::TreeListingItem::CommonPrefix(_) => None,
                 })
                 .collect::<Vec<_>>();
-            let page_attributes =
-                crate::attributes::load_objects(repository, snapshot.commit_oid(), &page_objects)
-                    .await
-                    .map_err(gateway_error)?;
+            let page_attributes = match self.mutations.manifest(
+                &repository.config.name,
+                &reference,
+                snapshot.commit_oid(),
+            ) {
+                Some(manifest) => manifest.listing(&page_objects),
+                None => crate::attributes::load_objects(
+                    repository,
+                    snapshot.commit_oid(),
+                    &page_objects,
+                )
+                .await
+                .map_err(gateway_error)?,
+            };
             let mut contents = Vec::new();
             let mut common_prefixes = Vec::new();
             let mut next = None;
@@ -4256,6 +4294,7 @@ fn object_entry_error(kind: EntryKind) -> s3s::S3Error {
 
 fn mutation_error(error: mutation::Error) -> s3s::S3Error {
     match error {
+        mutation::Error::Batch(error) => shared_mutation_error(error),
         mutation::Error::NotDirectory
         | mutation::Error::IsDirectory
         | mutation::Error::InvalidAttributes => {
@@ -4288,6 +4327,35 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
         ),
         error => {
             tracing::error!(error = ?error, "S3 repository mutation failed");
+            s3_error!(InternalError)
+        }
+    }
+}
+
+fn shared_mutation_error(error: Arc<mutation::Error>) -> s3s::S3Error {
+    match error.as_ref() {
+        mutation::Error::Cancelled
+        | mutation::Error::Publication(crab_remote::publication::Error::Cancelled) => {
+            s3_error!(RequestTimeout)
+        }
+        mutation::Error::Overloaded
+        | mutation::Error::AdmissionTimeout
+        | mutation::Error::Capacity(_) => slow_down_error(),
+        mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => s3_error!(
+            OperationAborted,
+            "A conflicting branch write won; retry the request"
+        ),
+        mutation::Error::Coordination(crab_coordination::CoordinationError::PushLockHeld {
+            ..
+        })
+        | mutation::Error::Publication(crab_remote::publication::Error::Coordination(
+            crab_coordination::CoordinationError::PushLockHeld { .. },
+        )) => s3_error!(
+            OperationAborted,
+            "The write outcome is being reconciled; retry the request"
+        ),
+        _ => {
+            tracing::error!(error = ?error, "S3 repository mutation batch failed");
             s3_error!(InternalError)
         }
     }

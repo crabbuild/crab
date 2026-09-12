@@ -73,6 +73,7 @@ struct MetricsInner {
     methods: [MethodMetrics; METHOD_COUNT],
     admission: [AdmissionMetrics; RequestClass::ALL.len()],
     multipart_maintenance: MultipartMaintenanceMetrics,
+    mutations: MutationMetrics,
     backend: backend::BackendMetrics,
     cache: cache::CacheMetrics,
     filesystem: filesystem::FilesystemMetrics,
@@ -102,6 +103,15 @@ struct MultipartMaintenanceMetrics {
     failures: [Counter; MAINTENANCE_FAILURES.len()],
     duration: Histogram,
     last_success: Gauge,
+}
+
+struct MutationMetrics {
+    batches: Counter,
+    requests: Counter,
+    commits: Counter,
+    input_bytes: Counter,
+    duration: Histogram,
+    queue_wait: Histogram,
 }
 
 #[derive(Clone, Copy)]
@@ -150,6 +160,7 @@ impl Metrics {
         let admission =
             RequestClass::ALL.map(|class| AdmissionMetrics::new(&recorder, class.label()));
         let multipart_maintenance = MultipartMaintenanceMetrics::new(&recorder);
+        let mutations = MutationMetrics::new(&recorder);
         let backend = backend::BackendMetrics::new(&recorder);
         let cache = cache::CacheMetrics::new(&recorder);
         let filesystem = filesystem::FilesystemMetrics::new(&recorder, scratch_path);
@@ -160,6 +171,7 @@ impl Metrics {
                 methods,
                 admission,
                 multipart_maintenance,
+                mutations,
                 backend,
                 cache,
                 filesystem,
@@ -194,6 +206,37 @@ impl Metrics {
 
     pub(crate) fn record_admission(&self, class: RequestClass, outcome: AdmissionOutcome) {
         self.inner.admission[class.index()].events[outcome.index()].increment(1);
+    }
+
+    pub(crate) fn start_mutation_batch(
+        &self,
+        requests: usize,
+        input_bytes: usize,
+    ) -> MutationBatchObservation {
+        self.inner.mutations.batches.increment(1);
+        self.inner
+            .mutations
+            .requests
+            .increment(saturating_u64(requests));
+        self.inner
+            .mutations
+            .input_bytes
+            .increment(saturating_u64(input_bytes));
+        MutationBatchObservation {
+            metrics: self.clone(),
+            started: Instant::now(),
+        }
+    }
+
+    pub(crate) fn record_mutation_queue_wait(&self, seconds: f64) {
+        self.inner.mutations.queue_wait.record(seconds);
+    }
+
+    pub(crate) fn record_mutation_commits(&self, commits: usize) {
+        self.inner
+            .mutations
+            .commits
+            .increment(saturating_u64(commits));
     }
 
     pub(crate) fn record_maintenance_failure(&self, failure: MaintenanceFailure, count: usize) {
@@ -432,6 +475,52 @@ impl MultipartMaintenanceMetrics {
     }
 }
 
+impl MutationMetrics {
+    fn new(recorder: &impl Recorder) -> Self {
+        Self {
+            batches: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_batches_total"),
+                &METADATA,
+            ),
+            requests: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_batch_requests_total"),
+                &METADATA,
+            ),
+            commits: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_batch_commits_total"),
+                &METADATA,
+            ),
+            input_bytes: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_batch_input_bytes_total"),
+                &METADATA,
+            ),
+            duration: recorder.register_histogram(
+                &Key::from_static_name("crab_s3_gateway_mutation_batch_duration_seconds"),
+                &METADATA,
+            ),
+            queue_wait: recorder.register_histogram(
+                &Key::from_static_name("crab_s3_gateway_mutation_queue_wait_seconds"),
+                &METADATA,
+            ),
+        }
+    }
+}
+
+pub(crate) struct MutationBatchObservation {
+    metrics: Metrics,
+    started: Instant,
+}
+
+impl Drop for MutationBatchObservation {
+    fn drop(&mut self) {
+        self.metrics
+            .inner
+            .mutations
+            .duration
+            .record(self.started.elapsed().as_secs_f64());
+    }
+}
+
 pub(crate) struct RequestObservation {
     metrics: Metrics,
     method: usize,
@@ -629,6 +718,36 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_s3_gateway_admission_events_total",
         "Admission decisions by request class and bounded outcome.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_batches_total",
+        "Bounded same-ref mutation batches executed by this process.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_batch_requests_total",
+        "S3 mutations admitted into bounded same-ref batches.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_batch_commits_total",
+        "Git commits durably published by bounded same-ref batches.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_batch_input_bytes_total",
+        "Logical mutation bytes admitted into bounded same-ref batches.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_s3_gateway_mutation_batch_duration_seconds"),
+        Some(Unit::Seconds),
+        "Full bounded same-ref batch execution duration.".into(),
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_s3_gateway_mutation_queue_wait_seconds"),
+        Some(Unit::Seconds),
+        "Per-request wait before a same-ref mutation batch starts.".into(),
     );
     describe_counter(
         recorder,

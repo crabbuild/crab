@@ -64,6 +64,12 @@ the last verified maintenance snapshot until the periodic revalidation. The shar
 anchor parser also serves native push, repack and history recovery; malformed index
 hashes retain their source errors.
 
+`generation::ensure_catalog_readable` owns generation election and both GC-writer
+fences while compacting committed ref-journal entries and advancing exact-object
+catalog coverage. It is the bounded-cadence path for continuously active services;
+it deliberately omits commit-graph traversal. `generation::ensure_readable` uses
+the same lifecycle and additionally builds the commit graph for a quiet generation.
+
 `generation::maintain_commit_graph` derives a missing generation-bound split
 commit graph through bounded `crab-remote-git` batches after catalog readiness.
 It reuses the preceding generation's validated graph when available, uploads
@@ -106,6 +112,14 @@ and renewed through completion; passing an earlier snapshot is not a concurrency
 check. Existing committed journal edits count toward the old-value comparison,
 even before generation compaction. The function preserves exact new OIDs, tag
 peeling, HEAD changes, uploaded pack/shard references and visibility evidence.
+
+`journal::commit_existing_ref_edit` is the bounded fast path for a caller that
+retains one existing ref's exact visible transaction together with its old OID.
+While holding that ref's lease, it verifies the small mutable head and immutable
+parent transaction before publishing the update, so its work is independent of
+repository pack count. A mismatch returns `RefChanged`. Ref creation, deletion,
+multi-ref publication and namespace changes must use `commit_edits` with a full
+coherent snapshot.
 
 Creations and deletions additionally hold the renewable `git-ref-namespace`
 internal lease, reread the coherent repository snapshot, and validate the final

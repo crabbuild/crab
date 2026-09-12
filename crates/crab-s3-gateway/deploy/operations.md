@@ -150,6 +150,35 @@ and queued requests with pending scratch bytes, filesystem available bytes,
 gateway RSS/CPU, node ephemeral-storage usage, and backend in-flight calls.
 Inspect the pod for eviction or volume errors. Do not infer the `emptyDir`
 policy cap from `statvfs` when the node runtime does not expose it as a quota.
+For same-branch writes, divide
+`rate(crab_s3_gateway_mutation_batch_requests_total[5m])` and
+`rate(crab_s3_gateway_mutation_batch_commits_total[5m])` by
+`rate(crab_s3_gateway_mutation_batches_total[5m])`. Ratios near one under
+concurrent load mean requests are not overlapping inside the 10 ms collection
+window; a healthy overlapping burst should amortize multiple commits over one
+pack. Rising `crab_s3_gateway_mutation_queue_wait_seconds` with stable batch
+duration identifies local admission pressure. Rising
+`crab_s3_gateway_mutation_batch_duration_seconds` with backend latency identifies
+publication pressure instead. A growing batch duration accompanied by a large
+increase in backend range and HEAD calls indicates cold Git-state discovery.
+Confirm the process is not restarting and that another active branch is not
+evicting the shared 128 MiB exact-tip warm state before increasing client
+fanout; eviction changes performance, never correctness. A healthy repository
+maintains at most one commit-identified attribute-checkpoint slot per written
+branch, refreshed on the first cold publication and every 64 subsequent
+publication batches while its full manifest remains within 32 MiB. Repeated long
+attribute-delta replays after successful writes indicate that checkpoint PUTs are
+failing, the slot is unreadable or superseded, or the manifest is above that bound.
+Check backend errors first; never repair this by forcing a ref update or treating
+SlateDB as authoritative.
+The gateway also attempts one catalog-maintenance pass every 64 local publication
+epochs during continuous traffic. The elected worker folds the active ref journal
+into the object-store manifest and advances exact-object catalog coverage while
+holding the generation-owner and GC-writer fences. A growing active-journal
+backlog or stale catalog despite that cadence indicates owner/manifest-lock
+contention or backend failures; inspect `S3 bounded catalog maintenance failed`
+warnings. Commit-graph maintenance intentionally waits for a five-second quiet
+window or may be run by `crab metadb owner`.
 
 Safe action:
 

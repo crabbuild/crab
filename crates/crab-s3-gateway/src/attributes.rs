@@ -166,43 +166,120 @@ impl Checksums {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Manifest {
     objects: BTreeMap<String, ObjectAttributes>,
+    estimated_bytes: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyManifest {
     version: u32,
     objects: BTreeMap<String, ObjectAttributes>,
 }
 
+#[derive(Serialize)]
+struct CheckpointPayload<'a> {
+    version: u32,
+    commit: String,
+    objects: &'a BTreeMap<String, ObjectAttributes>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCheckpoint {
+    version: u32,
+    commit: String,
+    objects: BTreeMap<String, ObjectAttributes>,
+}
+
+pub(crate) struct PreparedCheckpoint {
+    slot: String,
+    bytes: Bytes,
+}
+
+impl PreparedCheckpoint {
+    pub(crate) fn slot(&self) -> &str {
+        &self.slot
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Delta {
     version: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    checkpoint: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint_slot: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     parent: Option<String>,
     changes: BTreeMap<String, Option<ObjectAttributes>>,
 }
 
 impl Manifest {
+    fn from_objects(objects: BTreeMap<String, ObjectAttributes>) -> Self {
+        let estimated_bytes = objects.iter().fold(0usize, |total, (path, attributes)| {
+            total.saturating_add(estimated_object_bytes(path, attributes))
+        });
+        Self {
+            objects,
+            estimated_bytes,
+        }
+    }
+
     pub(crate) fn object(&self, path: &str, oid: ObjectId) -> Option<&ObjectAttributes> {
         self.objects
             .get(path)
             .filter(|attributes| attributes.blob_oid == oid.to_string())
     }
 
+    pub(crate) fn update(&mut self, path: String, attributes: Option<ObjectAttributes>) {
+        self.apply(BTreeMap::from([(path, attributes)]));
+    }
+
+    pub(crate) fn listing(
+        &self,
+        objects: &[(String, ObjectId)],
+    ) -> BTreeMap<String, ListingAttributes> {
+        objects
+            .iter()
+            .filter_map(|(path, oid)| {
+                self.object(path, *oid)
+                    .map(|attributes| (path.clone(), attributes.into()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+
     fn apply(&mut self, changes: BTreeMap<String, Option<ObjectAttributes>>) {
         for (path, attributes) in changes {
             match attributes {
                 Some(attributes) => {
-                    self.objects.insert(path, attributes);
+                    let added = estimated_object_bytes(&path, &attributes);
+                    if let Some(previous) = self.objects.insert(path.clone(), attributes) {
+                        self.estimated_bytes = self
+                            .estimated_bytes
+                            .saturating_sub(estimated_object_bytes(&path, &previous));
+                    }
+                    self.estimated_bytes = self.estimated_bytes.saturating_add(added);
                 }
                 None => {
-                    self.objects.remove(&path);
+                    if let Some(previous) = self.objects.remove(&path) {
+                        self.estimated_bytes = self
+                            .estimated_bytes
+                            .saturating_sub(estimated_object_bytes(&path, &previous));
+                    }
                 }
             }
         }
     }
+}
+
+fn estimated_object_bytes(path: &str, attributes: &ObjectAttributes) -> usize {
+    path.len()
+        .saturating_add(serde_json::to_vec(attributes).map_or(usize::MAX, |bytes| bytes.len()))
 }
 
 pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Result<Manifest> {
@@ -218,10 +295,18 @@ pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Re
         match load_stored(repository, commit).await? {
             None => break,
             Some(Stored::Legacy(legacy)) => {
-                manifest.objects = legacy.objects;
+                manifest = Manifest::from_objects(legacy.objects);
                 break;
             }
             Some(Stored::Delta(delta)) => {
+                if delta.checkpoint
+                    && let Some(checkpoint) =
+                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
+                            .await?
+                {
+                    manifest = checkpoint;
+                    break;
+                }
                 current = parse_parent(delta.parent.as_deref())?;
                 retain_newest_changes(&mut changes, delta.changes);
             }
@@ -261,6 +346,13 @@ pub(crate) async fn load_object(
                     .cloned());
             }
             Some(Stored::Delta(delta)) => {
+                if delta.checkpoint
+                    && let Some(checkpoint) =
+                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
+                            .await?
+                {
+                    return Ok(checkpoint.object(path, oid).cloned());
+                }
                 if let Some(attributes) = delta.changes.get(path) {
                     return Ok(attributes
                         .as_ref()
@@ -304,7 +396,6 @@ pub(crate) async fn load_objects(
                 return Ok(resolved);
             }
             Some(Stored::Delta(delta)) => {
-                current = parse_parent(delta.parent.as_deref())?;
                 for (path, attributes) in delta.changes {
                     let Some(oid) = unresolved.remove(&path) else {
                         continue;
@@ -315,6 +406,19 @@ pub(crate) async fn load_objects(
                         resolved.insert(path, (&attributes).into());
                     }
                 }
+                if delta.checkpoint
+                    && let Some(manifest) =
+                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
+                            .await?
+                {
+                    for (path, oid) in unresolved {
+                        if let Some(attributes) = manifest.object(&path, oid) {
+                            resolved.insert(path, attributes.into());
+                        }
+                    }
+                    return Ok(resolved);
+                }
+                current = parse_parent(delta.parent.as_deref())?;
             }
         }
     }
@@ -327,12 +431,16 @@ pub(crate) async fn save_delta(
     parent: Option<ObjectId>,
     path: String,
     attributes: Option<ObjectAttributes>,
+    checkpoint: bool,
+    checkpoint_slot: Option<String>,
 ) -> crate::Result<()> {
     let target = repository
         .layout
         .repo_path(&format!("s3/attributes/{commit}.json"));
     let bytes = serde_json::to_vec(&Delta {
         version: VERSION,
+        checkpoint,
+        checkpoint_slot,
         parent: parent.map(|oid| oid.to_string()),
         changes: BTreeMap::from([(path, attributes)]),
     })
@@ -345,6 +453,113 @@ pub(crate) async fn save_delta(
         .put_exact(&target, Bytes::from(bytes))
         .await?;
     Ok(())
+}
+
+pub(crate) fn prepare_checkpoint(
+    branch: &str,
+    commit: ObjectId,
+    manifest: &Manifest,
+) -> crate::Result<Option<PreparedCheckpoint>> {
+    if u64::try_from(manifest.estimated_bytes()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
+        return Ok(None);
+    }
+    let bytes = serde_json::to_vec(&CheckpointPayload {
+        version: LEGACY_VERSION,
+        commit: commit.to_string(),
+        objects: &manifest.objects,
+    })
+    .map_err(|source| crate::Error::Attributes { source })?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(PreparedCheckpoint {
+        slot: blake3::hash(branch.as_bytes()).to_hex().to_string(),
+        bytes: Bytes::from(bytes),
+    }))
+}
+
+pub(crate) async fn publish_checkpoint(
+    repository: &Repository,
+    checkpoint: &PreparedCheckpoint,
+) -> crate::Result<()> {
+    repository
+        .store
+        .put_overwrite(
+            &checkpoint_slot_path(repository, &checkpoint.slot)?,
+            checkpoint.bytes.clone(),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn load_checkpoint(
+    repository: &Repository,
+    commit: ObjectId,
+    slot: Option<&str>,
+) -> crate::Result<Option<Manifest>> {
+    let path = match slot {
+        Some(slot) => checkpoint_slot_path(repository, slot)?,
+        None => legacy_checkpoint_path(repository, commit),
+    };
+    let bytes = match repository
+        .store
+        .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
+        .await
+    {
+        Ok((bytes, _)) => bytes,
+        Err(crab_storage::StorageError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let objects = match slot {
+        Some(_) => {
+            let stored = serde_json::from_slice::<StoredCheckpoint>(&bytes)
+                .map_err(|source| crate::Error::Attributes { source })?;
+            if stored.version != LEGACY_VERSION {
+                return Err(crate::Error::Config(
+                    "unsupported S3 attribute checkpoint version",
+                ));
+            }
+            if stored.commit != commit.to_string() {
+                return Ok(None);
+            }
+            stored.objects
+        }
+        None => {
+            let stored = serde_json::from_slice::<LegacyManifest>(&bytes)
+                .map_err(|source| crate::Error::Attributes { source })?;
+            if stored.version != LEGACY_VERSION {
+                return Err(crate::Error::Config(
+                    "unsupported S3 attribute checkpoint version",
+                ));
+            }
+            stored.objects
+        }
+    };
+    Ok(Some(Manifest::from_objects(objects)))
+}
+
+fn checkpoint_slot_path(
+    repository: &Repository,
+    slot: &str,
+) -> crate::Result<object_store::path::Path> {
+    if slot.len() != blake3::OUT_LEN * 2
+        || !slot
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(crate::Error::Config(
+            "S3 attribute checkpoint slot is corrupt",
+        ));
+    }
+    Ok(repository
+        .layout
+        .repo_path(&format!("s3/attribute-checkpoints/branches/{slot}.json")))
+}
+
+fn legacy_checkpoint_path(repository: &Repository, commit: ObjectId) -> object_store::path::Path {
+    repository
+        .layout
+        .repo_path(&format!("s3/attribute-checkpoints/{commit}.json"))
 }
 
 enum Stored {
@@ -441,6 +656,43 @@ mod tests {
         assert_eq!(
             selected["older"].as_ref().map(|value| value.etag.as_str()),
             Some("old")
+        );
+    }
+
+    #[test]
+    fn version_two_delta_without_checkpoint_marker_remains_compatible() {
+        let delta: Delta = serde_json::from_str(r#"{"version":2,"changes":{}}"#).unwrap();
+
+        assert!(!delta.checkpoint);
+    }
+
+    #[test]
+    fn manifest_memory_estimate_tracks_replacement_and_removal() {
+        let mut manifest = Manifest::default();
+        manifest.update("object".to_owned(), Some(attributes("first")));
+        manifest.update("object".to_owned(), Some(attributes("replacement")));
+        let rebuilt = Manifest::from_objects(manifest.objects.clone());
+        assert_eq!(manifest.estimated_bytes(), rebuilt.estimated_bytes());
+
+        manifest.update("object".to_owned(), None);
+        assert_eq!(manifest.estimated_bytes(), 0);
+    }
+
+    #[test]
+    fn oversized_manifest_skips_checkpoint_before_serialization() {
+        let manifest = Manifest {
+            objects: BTreeMap::new(),
+            estimated_bytes: MAX_MANIFEST_BYTES as usize + 1,
+        };
+
+        assert!(
+            prepare_checkpoint(
+                "refs/heads/main",
+                ObjectId::empty_tree(gix_hash::Kind::Sha1),
+                &manifest,
+            )
+            .unwrap()
+            .is_none()
         );
     }
 }

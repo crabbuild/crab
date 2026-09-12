@@ -71,6 +71,47 @@ pub async fn ensure_readable(
     ttl: Duration,
     cancel: &CancellationToken,
 ) -> Result<()> {
+    ensure_readable_state(
+        store,
+        layout,
+        ttl,
+        cancel,
+        Some(CommitGraphMaintenance {
+            identity,
+            runtime,
+            options,
+        }),
+    )
+    .await
+}
+
+/// Elect one owner and publish committed repository state needed for object lookup.
+///
+/// This bounded maintenance path compacts the ref journal and advances exact-object
+/// catalog coverage, but deliberately leaves commit-graph construction to
+/// [`ensure_readable`]. Every acquired lease and GC fence is released before return.
+pub async fn ensure_catalog_readable(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    ensure_readable_state(store, layout, ttl, cancel, None).await
+}
+
+struct CommitGraphMaintenance<'a> {
+    identity: &'a RepositoryIdentity,
+    runtime: Arc<RemoteGitRuntime>,
+    options: RepositoryOptions,
+}
+
+async fn ensure_readable_state(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    ttl: Duration,
+    cancel: &CancellationToken,
+    commit_graph: Option<CommitGraphMaintenance<'_>>,
+) -> Result<()> {
     let mut context = PushLockAcquireContext::new(Arc::clone(store.inner()));
     let mut owner = match context
         .try_acquire_internal(layout.repo_prefix(), GIT_GENERATION_OWNER_RESOURCE, ttl)
@@ -97,9 +138,20 @@ pub async fn ensure_readable(
             else {
                 return Ok(());
             };
-            maintain_commit_graph(store, layout, &manifest, identity, runtime, options, cancel)
-                .await
-                .map(drop)
+            let Some(commit_graph) = commit_graph else {
+                return Ok(());
+            };
+            maintain_commit_graph(
+                store,
+                layout,
+                &manifest,
+                commit_graph.identity,
+                commit_graph.runtime,
+                commit_graph.options,
+                cancel,
+            )
+            .await
+            .map(drop)
         }
         .await;
         for fence in [repo, global] {

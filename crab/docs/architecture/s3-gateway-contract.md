@@ -7,10 +7,13 @@ tracked by the gateway crate and its test reports, not by this document.
 ## Release model
 
 The gateway exposes existing Crab repositories through the S3 REST protocol.
-Each successful `PutObject`, `CopyObject`, `DeleteObject`, or completed multipart
-upload publishes one commit immediately to the addressed branch. `DeleteObjects`
-performs ordered, individually reported mutations and is not atomic across keys.
-A delete of a missing key succeeds without advancing the branch.
+Each successful state-changing `PutObject`, `CopyObject`, `DeleteObject`, or
+completed multipart upload owns one commit on the addressed branch. Compatible
+same-branch mutations may share one bounded publication transaction, but their
+commits form a FIFO parent chain and no success is returned before that
+transaction is durable. `DeleteObjects` performs ordered, individually reported
+mutations and is not atomic across keys. A delete of a missing key succeeds
+without advancing the branch.
 
 Repository history is the only version model. The gateway does not
 implement AWS bucket versioning, delete markers, or version-ID parameters. A
@@ -376,6 +379,46 @@ verified reconstruction through a single bounded backpressure slot and cancels
 reconstruction when the response is dropped; a complete GET withholds its
 terminal chunk until the whole-file hash and declared size verify. Successful
 writes are returned only after their committed outcome is durable and read-ready.
+Each process collects compatible same-branch mutations for at most 10 ms and
+drains at most 32 requests or 32 MiB of Git mutation payload per batch. A single
+larger mutation proceeds alone. The batch evaluates conditions in FIFO order,
+builds one commit per successful state change, uploads one deduplicated Git pack,
+routing trusted generated objects directly through one bounded decoded spool and
+canonical pack preparation rather than an artificial pack inflate cycle. It
+advances the ref from the original parent to the final commit with one active
+journal marker. Failed conditions publish no commit. Multipart completion always
+runs alone because its durable plan receipt owns an independent exactly-once
+outcome. A competing process is serialized by the object-store ref lease; the
+losing bounded batch is rebuilt against the winning tip.
+The process retains at most 256 warm branch queues and may reuse materialized
+Git directory state and the S3 attribute manifest optimistically. Publication
+revalidates the cached parent while holding the object-store ref lease; a tip
+mismatch discards the preparation and rebuilds against the winning snapshot.
+Warm state has a shared 128 MiB process budget; an idle branch yields its state
+when another branch becomes active. Capacity pressure or restart reconstructs
+the tree and manifest from immutable repository objects. To bound normal cold
+attribute replay, the first cold publication and every 64 later publication
+batches replace one full, commit-identified manifest checkpoint in a bounded
+per-branch object-store slot. The final commit delta records that slot. Under the
+same ref lease, the gateway revalidates the parent, publishes the final journal
+transaction, and then attempts to replace the slot before acknowledging the
+batch. Only the journal winner writes the checkpoint. A crash or checkpoint-write failure leaves
+a missing or stale slot, so readers replay immutable deltas. A superseded slot has
+the same fallback; malformed checkpoint content fails closed. A manifest
+above the existing 32 MiB manifest bound skips checkpointing without failing the
+mutation, and another checkpoint attempt follows after 64 publication batches.
+Deltas and the ref journal stay
+authoritative. The process cache and any SlateDB-derived catalog are neither
+authoritative nor required for recovery. Once a batch is drained, its worker is
+owned by the gateway rather than the HTTP request that won local admission, so
+one disconnected caller cannot cancel the remaining accepted mutations.
+Every 64 local publication epochs, one coalesced background worker folds active
+ref-journal transactions into the object-store manifest and advances exact-object
+catalog coverage under the generation-owner and GC-writer fences, even when writes
+remain continuous. Clean read views use that catalog instead of scanning every
+pack index. Full commit-graph work still waits for a five-second quiet window.
+Maintenance failure never changes an already acknowledged mutation and the next
+cadence retries from durable journal state.
 
 The temporary-storage requirement is proportional to each in-progress request
 body, copied range, or non-streaming source assembly, not to a Crab/Xet GET or a
@@ -403,8 +446,9 @@ bounded while avoiding serial startup latency. It returns unavailable when any
 refresh fails or the ten-second probe deadline expires; `/livez` remains a
 storage-free process check.
 
-The private metrics listener reports cache attempts by the fixed
-memory/local/service and hit/miss/failure dimensions, verified hit bytes, local
+The private metrics listener reports mutation batch, request, commit, Git input
+byte, execution-duration, and queue-wait measurements. It also reports cache
+attempts by the fixed memory/local/service and hit/miss/failure dimensions, verified hit bytes, local
 persistence failures, and aggregate catalog entry/byte accounting. Catalog
 gauges come from a coalesced read-only SQLite probe on each scrape; probe health
 and last-success time distinguish genuine zero usage from an unreadable
