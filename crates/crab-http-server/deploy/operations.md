@@ -32,14 +32,15 @@ Complete these checks before the first install and every infrastructure change:
 
 1. Confirm bucket or container versioning and retention policies.
 2. Confirm the workload identity grants access only below the configured root.
-3. Confirm all replicas use the same provider, container, root prefix, OIDC client, public URL, and state key.
-4. Confirm the OIDC provider accepts the exact `/auth/callback` redirect URI.
-5. Confirm the ingress preserves the canonical `Host` header and streams bodies without buffering.
-6. Confirm port 8789 has no Service, ingress, or public load-balancer listener.
-7. Confirm the NetworkPolicy-capable CNI enforces the explicit public and monitoring source selectors.
-8. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
-9. Confirm the cluster can schedule two replicas in separate zones.
-10. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
+3. Confirm egress policies and proxies preserve provider identity, object storage, DNS, and the configured OIDC endpoints.
+4. Confirm all replicas use the same provider, container, root prefix, OIDC client, public URL, and state key.
+5. Confirm the OIDC provider accepts the exact `/auth/callback` redirect URI.
+6. Confirm the ingress preserves the canonical `Host` header and streams bodies without buffering.
+7. Confirm port 8789 has no Service, ingress, or public load-balancer listener.
+8. Confirm the NetworkPolicy-capable CNI enforces the explicit public and monitoring source selectors.
+9. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
+10. Confirm the cluster can schedule two replicas in separate zones.
+11. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
 
 Render and validate the release before applying it:
 

@@ -50,6 +50,31 @@ Grant access only below the configured root. Don’t put static cloud keys in th
 
 Use [the Terraform provider roots](../../terraform/README.md) to create dedicated versioned storage and workload identity for an existing cluster. Skip them when your platform team already manages those resources.
 
+### Preserve workload-identity egress
+
+The chart's NetworkPolicy controls ingress only. If the namespace or cluster has
+a separate default-deny egress policy, allow DNS plus the exact identity,
+storage, and OIDC destinations used by the deployment:
+
+| Platform | Identity egress required from Crab pods |
+| --- | --- |
+| EKS | EKS Pod Identity Agent at `169.254.170.23:80` or `[fd00:ec2::23]:80` |
+| GKE | GKE metadata server at `169.254.169.254:80`, or `169.254.169.252:988` on clusters that use that endpoint |
+| AKS | `login.microsoftonline.com:443`, or the matching sovereign-cloud authority |
+
+Every platform also needs HTTPS access to its object-storage endpoint and the
+configured OIDC issuer's discovery, JSON Web Key Set, authorization, and token
+endpoints. Prefer provider private endpoints and approved egress gateways when
+available. Kubernetes NetworkPolicy has no portable fully qualified domain name
+selector, so the chart cannot safely manufacture these provider- and
+network-specific rules.
+
+When EKS pods use an outbound proxy, add the Pod Identity link-local addresses
+to `NO_PROXY`; otherwise the SDK can send credential requests to the proxy.
+See the provider contracts for [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html),
+[GKE Workload Identity Federation](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/workload-identity),
+and [AKS outbound workload-identity rules](https://learn.microsoft.com/en-us/azure/aks/outbound-rules-control-egress).
+
 ## Select an immutable image
 
 Maintainer releases publish `linux/amd64` and `linux/arm64` images to
@@ -316,8 +341,10 @@ networkPolicy:
 
 The chart does not allow the policy to be disabled. Verify that your CNI
 enforces it and that kubelet readiness probes still succeed before exposing the
-ingress. The Service is always private `ClusterIP`; public traffic has one
-supported path through the TLS ingress.
+ingress. This chart-owned policy intentionally has no `Egress` policy type; any
+cluster-owned egress policy must preserve the destinations above. The Service
+is always private `ClusterIP`; public traffic has one supported path through
+the TLS ingress.
 
 ## Roll out configuration and secret changes
 
