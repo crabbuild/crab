@@ -384,6 +384,37 @@ test.beforeEach(async ({ page }) => {
         },
       });
     }
+    if (url.pathname.endsWith("/blame"))
+      return route.fulfill({
+        json: {
+          ranges: [
+            {
+              start: 1,
+              lines: 2,
+              commit: {
+                oid: "1".repeat(40),
+                tree: "2".repeat(40),
+                parents: [],
+                author: "Alice",
+                author_seconds: 1_690_000_000,
+                message: "Start the project documentation",
+              },
+            },
+            {
+              start: 3,
+              lines: 3,
+              commit: {
+                oid: "3".repeat(40),
+                tree: "4".repeat(40),
+                parents: ["1".repeat(40)],
+                author: "Bob",
+                author_seconds: 1_700_000_000,
+                message: "Explain repository navigation",
+              },
+            },
+          ],
+        },
+      });
     if (url.pathname.endsWith("/issues"))
       return route.fulfill({
         json: {
@@ -606,6 +637,87 @@ test("Markdown files switch between source and a repository-aware preview", asyn
   );
   await page.getByRole("button", { name: "Code", exact: true }).click();
   await expect(preview).toHaveCount(0);
+});
+
+test("blame and source panes resize with pointer and keyboard controls", async ({
+  page,
+}) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  await page.getByRole("button", { name: "Blame", exact: true }).click();
+
+  const separator = page.getByRole("separator", {
+    name: "Resize blame pane",
+  });
+  const blamePane = page.getByLabel("Blame commits");
+  const sourcePane = page.getByLabel("File source");
+  await expect(separator).toHaveAttribute("aria-valuenow", "48");
+  await expect(blamePane).toBeVisible();
+  await expect(sourcePane).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+
+  const initialWidth = (await blamePane.boundingBox())?.width ?? 0;
+  const handle = await separator.boundingBox();
+  if (!handle) throw new Error("Blame resize handle is not visible");
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2 + 120, handle.y + 20);
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await blamePane.boundingBox())?.width ?? 0)
+    .toBeGreaterThan(initialWidth + 80);
+
+  await separator.press("Home");
+  await expect(separator).toHaveAttribute("aria-valuenow", "25");
+  await separator.press("ArrowRight");
+  await expect(separator).toHaveAttribute("aria-valuenow", "30");
+  await separator.dblclick();
+  await expect(separator).toHaveAttribute("aria-valuenow", "48");
+});
+
+test("blame commit messages open their commit details", async ({ page }) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  await page.getByRole("button", { name: "Blame", exact: true }).click();
+
+  const message = page.getByRole("link", {
+    name: "Start the project documentation",
+    exact: true,
+  });
+  await expect(message).toHaveAttribute(
+    "href",
+    `/team/project?view=commit&rev=${"1".repeat(40)}`,
+  );
+  await message.click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Make the repository easier to browse",
+      exact: true,
+    }),
+  ).toBeVisible();
+});
+
+test("footer groups the Crab mark and tagline into one compact signature", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const footer = page.locator(".site-footer");
+  const brand = footer.getByRole("link", { name: "Crab repositories" });
+  const tagline = footer.getByText("Git for any file at any scale");
+  await expect(brand.locator(".footer-brand-mark")).toBeVisible();
+  await expect(tagline).toBeVisible();
+  const spacing = await footer.evaluate((node) => {
+    const brand = node.querySelector(".footer-brand")?.getBoundingClientRect();
+    const tagline = node
+      .querySelector(".footer-tagline")
+      ?.getBoundingClientRect();
+    return brand && tagline
+      ? tagline.left - brand.right
+      : Number.POSITIVE_INFINITY;
+  });
+  expect(spacing).toBeLessThanOrEqual(12);
 });
 
 test("Go to file finds a deep repository path before its directory is expanded", async ({

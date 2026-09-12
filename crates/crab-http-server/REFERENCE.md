@@ -273,6 +273,7 @@ Health probes accept the listener's loopback `Host` even when OIDC uses another 
 ## Repository browser and application APIs
 
 The browser and JavaScript Object Notation (JSON) API share the same authorization, snapshot, publication, and storage contracts. Browser links keep a selected branch for navigation and pin historical pages to a full commit OID.
+The blame view links commit OIDs and subjects to immutable commit details. Its attribution and source panes are separated by a pointer- and keyboard-resizable handle; arrow keys resize incrementally, Home and End select the supported bounds, and double-click restores the default.
 
 ### Scan the browser feature map
 

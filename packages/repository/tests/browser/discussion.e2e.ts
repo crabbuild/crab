@@ -159,9 +159,20 @@ test("comment edits restore focus and Markdown preview posts reset to Write", as
   const card = page.locator("#comment-1");
   const edit = card.getByRole("button", { name: "Edit comment", exact: true });
   await edit.click();
-  await expect(
-    page.getByRole("textbox", { name: "Edit comment", exact: true }),
-  ).toBeFocused();
+  const editComment = page.getByRole("textbox", {
+    name: "Edit comment",
+    exact: true,
+  });
+  await expect(editComment).toBeFocused();
+  const focusBorder = await editComment.evaluate((textarea) => {
+    const style = getComputedStyle(textarea);
+    return {
+      boxShadow: style.boxShadow,
+      outlineWidth: style.outlineWidth,
+    };
+  });
+  expect(focusBorder.outlineWidth).toBe("0px");
+  expect(focusBorder.boxShadow).toMatch(/1px inset$/);
   await card.getByRole("button", { name: "Cancel edit", exact: true }).click();
   await expect(edit).toBeFocused();
   await edit.click();

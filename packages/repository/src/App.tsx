@@ -320,8 +320,18 @@ export function App() {
           )}
         </main>
         <footer className="site-footer">
-          <span className="brand-small">Crab,</span>
-          <span>Git for any file at any scale</span>
+          <Link
+            className="footer-brand"
+            href="/"
+            aria-label="Crab repositories"
+          >
+            <span className="footer-brand-mark" aria-hidden="true" />
+            <strong>Crab</strong>
+          </Link>
+          <span className="footer-divider" aria-hidden="true">
+            ·
+          </span>
+          <span className="footer-tagline">Git for any file at any scale</span>
         </footer>
       </BaseStyles>
     </ThemeProvider>

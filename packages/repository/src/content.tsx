@@ -1,4 +1,10 @@
-import { useMemo, useState, type CSSProperties } from "react";
+import {
+  useMemo,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+} from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
 import { IconButton, Label, SegmentedControl } from "@primer/react";
 import {
@@ -37,6 +43,16 @@ const diffColors = {
   "--diffs-deletion-color-override": "var(--button-danger-fgColor-rest)",
   "--diffs-modified-color-override": "var(--fgColor-accent)",
 } as CSSProperties;
+const DEFAULT_BLAME_PANE_WIDTH = 48;
+const MIN_BLAME_PANE_WIDTH = 25;
+const MAX_BLAME_PANE_WIDTH = 75;
+
+function clampBlamePaneWidth(width: number) {
+  return Math.min(
+    MAX_BLAME_PANE_WIDTH,
+    Math.max(MIN_BLAME_PANE_WIDTH, Math.round(width)),
+  );
+}
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} bytes`;
@@ -48,6 +64,9 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
     endpoint(repo, "file", { rev, path_hex: path }),
   );
   const [view, setView] = useState<"code" | "preview" | "blame">("code");
+  const [blamePaneWidth, setBlamePaneWidth] = useState(
+    DEFAULT_BLAME_PANE_WIDTH,
+  );
   const [copied, setCopied] = useState(false);
   const blame = useRequest<Blame>(
     view === "blame" ? endpoint(repo, "blame", { rev, path_hex: path }) : null,
@@ -209,8 +228,19 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
                     </strong>
                   </span>
                 </div>
-                <div className="blame-view-grid">
-                  <div className="blame-rows" aria-label="Blame commits">
+                <div
+                  className="blame-view-grid"
+                  style={
+                    {
+                      "--blame-pane-width": `${blamePaneWidth}%`,
+                    } as CSSProperties
+                  }
+                >
+                  <div
+                    id="blame-commit-pane"
+                    className="blame-rows"
+                    aria-label="Blame commits"
+                  >
                     {blame.data.ranges.map((range) => (
                       <div
                         className="blame-row"
@@ -223,6 +253,7 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
                           {range.start}–{range.start + range.lines - 1}
                         </code>
                         <Link
+                          className="blame-oid"
                           href={repoHref(repo, {
                             view: "commit",
                             rev: range.commit.oid,
@@ -233,17 +264,84 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
                         <span className="blame-author">
                           {range.commit.author}
                         </span>
-                        <span className="blame-message">
+                        <Link
+                          className="blame-message"
+                          href={repoHref(repo, {
+                            view: "commit",
+                            rev: range.commit.oid,
+                          })}
+                        >
                           {range.commit.message.split("\n")[0]}
-                        </span>
+                        </Link>
                       </div>
                     ))}
                   </div>
-                  <div className="blame-source">
+                  <button
+                    type="button"
+                    className="blame-resizer"
+                    role="separator"
+                    aria-label="Resize blame pane"
+                    aria-controls="blame-commit-pane blame-source-pane"
+                    aria-orientation="vertical"
+                    aria-valuemin={MIN_BLAME_PANE_WIDTH}
+                    aria-valuemax={MAX_BLAME_PANE_WIDTH}
+                    aria-valuenow={blamePaneWidth}
+                    aria-valuetext={`${blamePaneWidth}% blame, ${100 - blamePaneWidth}% source`}
+                    title="Drag or use arrow keys to resize"
+                    onDoubleClick={() =>
+                      setBlamePaneWidth(DEFAULT_BLAME_PANE_WIDTH)
+                    }
+                    onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
+                      let width: number | undefined;
+                      if (event.key === "ArrowLeft") width = blamePaneWidth - 5;
+                      if (event.key === "ArrowRight")
+                        width = blamePaneWidth + 5;
+                      if (event.key === "Home") width = MIN_BLAME_PANE_WIDTH;
+                      if (event.key === "End") width = MAX_BLAME_PANE_WIDTH;
+                      if (width === undefined) return;
+                      event.preventDefault();
+                      setBlamePaneWidth(clampBlamePaneWidth(width));
+                    }}
+                    onPointerDown={(event: PointerEvent<HTMLButtonElement>) => {
+                      event.preventDefault();
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                    }}
+                    onPointerMove={(event: PointerEvent<HTMLButtonElement>) => {
+                      if (
+                        !event.currentTarget.hasPointerCapture(event.pointerId)
+                      )
+                        return;
+                      const grid = event.currentTarget.parentElement;
+                      if (!grid) return;
+                      event.preventDefault();
+                      const bounds = grid.getBoundingClientRect();
+                      setBlamePaneWidth(
+                        clampBlamePaneWidth(
+                          ((event.clientX - bounds.left) / bounds.width) * 100,
+                        ),
+                      );
+                    }}
+                    onPointerUp={(event: PointerEvent<HTMLButtonElement>) => {
+                      event.currentTarget.releasePointerCapture(
+                        event.pointerId,
+                      );
+                    }}
+                  />
+                  <div
+                    id="blame-source-pane"
+                    className="blame-source"
+                    aria-label="File source"
+                    tabIndex={0}
+                  >
                     <File
                       file={file}
                       options={options}
-                      style={{ "--diffs-line-height": "20px" } as CSSProperties}
+                      style={
+                        {
+                          "--diffs-line-height": "20px",
+                          "--diffs-overflow-override": "visible",
+                        } as CSSProperties
+                      }
                     />
                   </div>
                 </div>
