@@ -1595,6 +1595,7 @@ mod tests {
                     access: RepositoryAccess::Write,
                 }],
                 protected_branches: vec![],
+                git_blob_max_bytes: 1024 * 1024,
                 max_active_multipart_uploads,
                 multipart_staging_bytes_per_upload,
                 multipart_upload_ttl_seconds,

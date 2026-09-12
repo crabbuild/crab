@@ -19,6 +19,7 @@ provider = "s3"
 bucket = "crab-s3-gateway-qualification"
 prefix = "repositories/qualification"
 default_branch = "main"
+git_blob_max_bytes = 1048576
 max_active_multipart_uploads = 16
 multipart_staging_bytes_per_upload = 5368709120
 multipart_upload_ttl_seconds = 3600

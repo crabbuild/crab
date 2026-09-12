@@ -32,6 +32,9 @@ bucket = "physical-storage-bucket"
 prefix = "repositories/analytics"
 default_branch = "main"
 protected_branches = ["release"]
+# Objects larger than this are stored through Git LFS. The default is 1 MiB;
+# configure the same value on every gateway serving this repository.
+git_blob_max_bytes = 1048576
 # These persisted limits bound durable multipart staging across every gateway
 # instance serving this repository. Open uploads expire after seven days.
 max_active_multipart_uploads = 1024
