@@ -415,6 +415,93 @@ test.beforeEach(async ({ page }) => {
           ],
         },
       });
+    if (url.pathname.endsWith("/changes"))
+      return route.fulfill({
+        json: {
+          base: null,
+          commit: oid,
+          changes: [
+            {
+              path: "src/index.ts",
+              path_hex: pathHex("src/index.ts"),
+              kind: "Modified",
+              old: {
+                path: "src/index.ts",
+                path_hex: pathHex("src/index.ts"),
+                kind: "Blob",
+                oid: "1".repeat(40),
+                mode: "100644",
+              },
+              new: {
+                path: "src/index.ts",
+                path_hex: pathHex("src/index.ts"),
+                kind: "Blob",
+                oid: "2".repeat(40),
+                mode: "100644",
+              },
+            },
+            {
+              path: "src/lib/new.ts",
+              path_hex: pathHex("src/lib/new.ts"),
+              kind: "Added",
+              old: null,
+              new: {
+                path: "src/lib/new.ts",
+                path_hex: pathHex("src/lib/new.ts"),
+                kind: "Blob",
+                oid: "3".repeat(40),
+                mode: "100644",
+              },
+            },
+            {
+              path: "docs/old.md",
+              path_hex: pathHex("docs/old.md"),
+              kind: "Deleted",
+              old: {
+                path: "docs/old.md",
+                path_hex: pathHex("docs/old.md"),
+                kind: "Blob",
+                oid: "4".repeat(40),
+                mode: "100644",
+              },
+              new: null,
+            },
+          ],
+        },
+      });
+    if (url.pathname.endsWith("/diff")) {
+      const path = ["src/index.ts", "src/lib/new.ts", "docs/old.md"].find(
+        (candidate) => pathHex(candidate) === url.searchParams.get("path_hex"),
+      );
+      if (!path) throw new Error("Unexpected changed-file fixture path");
+      const added = path === "src/lib/new.ts";
+      const deleted = path === "docs/old.md";
+      return route.fulfill({
+        json: {
+          base: null,
+          commit: oid,
+          path,
+          old: added
+            ? null
+            : {
+                oid: "5".repeat(40),
+                size: 12,
+                mode: "100644",
+                classification: "OrdinaryGit",
+                text: "Old content\n",
+              },
+          new: deleted
+            ? null
+            : {
+                oid: "6".repeat(40),
+                size: 12,
+                mode: "100644",
+                classification: "OrdinaryGit",
+                text: "New content\n",
+              },
+        },
+      });
+    }
     if (url.pathname.endsWith("/issues"))
       return route.fulfill({
         json: {
@@ -465,7 +552,9 @@ test("repository views pass automated WCAG A and AA checks", async ({
     for (const location of [
       "/team/project",
       `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+      `/team/project?view=commit&rev=${oid}`,
       "/team/project?view=issues",
+      "/team/project?view=issues&issue=new",
       "/team/project?view=branches",
       "/team/project?view=settings",
     ]) {
@@ -474,6 +563,129 @@ test("repository views pass automated WCAG A and AA checks", async ({
       await expectNoAccessibilityViolations(page);
     }
   }
+});
+
+test("new issue Markdown toolbar formats selections and remains usable on mobile", async ({
+  page,
+}) => {
+  await page.goto("/team/project?view=issues&issue=new");
+  const editor = page.locator(".discussion-editor");
+  const toolbar = editor.getByRole("toolbar", {
+    name: "Description formatting",
+  });
+  await expect(
+    toolbar.getByRole("button", { name: "Add heading", exact: true }),
+  ).toBeVisible();
+  await expect(
+    toolbar.getByRole("button", { name: "Add a task list", exact: true }),
+  ).toBeVisible();
+  await expect(
+    toolbar.getByRole("button", { name: "Mention a user", exact: true }),
+  ).toBeVisible();
+
+  const description = editor.getByRole("textbox", {
+    name: "Description",
+    exact: true,
+  });
+  await description.fill("Ship safely");
+  await description.evaluate((input: HTMLTextAreaElement) =>
+    input.setSelectionRange(5, 11),
+  );
+  await toolbar
+    .getByRole("button", { name: "Add bold text", exact: true })
+    .click();
+  await expect(description).toHaveValue("Ship **safely**");
+  await expect(description).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+i");
+  await expect(description).toHaveValue("Ship **_safely_**");
+
+  await editor.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect(toolbar).toBeHidden();
+  await expect(
+    editor
+      .getByRole("tabpanel", { name: "Preview", exact: true })
+      .locator("strong em"),
+  ).toHaveText("safely");
+
+  await editor.getByRole("tab", { name: "Write", exact: true }).click();
+  await description.fill("test\nship");
+  await description.selectText();
+  await toolbar
+    .getByRole("button", { name: "Add a task list", exact: true })
+    .click();
+  await expect(description).toHaveValue("- [ ] test\n- [ ] ship");
+
+  await page.setViewportSize({ width: 320, height: 900 });
+  await toolbar
+    .getByRole("button", { name: "Mention a user", exact: true })
+    .focus();
+  const bounds = await toolbar.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(320);
+  await expectNoAccessibilityViolations(page);
+});
+
+test("commit page presents changed files as a responsive status tree", async ({
+  page,
+}) => {
+  await page.goto(`/team/project?view=commit&rev=${oid}`);
+
+  await expect(
+    page.getByRole("heading", { name: "3 changed files", exact: true }),
+  ).toBeVisible();
+  const tree = page.locator('file-tree-container[aria-label="Changed files"]');
+  await expect(
+    tree.getByRole("treeitem", { name: "docs", exact: true }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    tree.getByRole("treeitem", { name: "src", exact: true }),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    tree.getByRole("treeitem", { name: "lib", exact: true }),
+  ).toHaveAttribute("aria-expanded", "true");
+
+  const modified = tree.getByRole("treeitem", {
+    name: "index.ts",
+    exact: true,
+  });
+  await expect(modified).toHaveAttribute("aria-selected", "true");
+  const diff = page.locator(".change-diff-pane");
+  await expect(diff).toContainText("src/index.ts");
+  await expect(diff).toContainText("Modified");
+  await expect(diff).toContainText("New content");
+
+  const added = tree.getByRole("treeitem", { name: "new.ts", exact: true });
+  await added.click();
+  await expect(added).toHaveAttribute("aria-selected", "true");
+  await expect(diff).toContainText("src/lib/new.ts");
+  await expect(diff).toContainText("Added");
+
+  await expect
+    .poll(async () => {
+      const treeRight = await tree.evaluate(
+        (node) => node.getBoundingClientRect().right,
+      );
+      const diffLeft = await diff.evaluate(
+        (node) => node.getBoundingClientRect().left,
+      );
+      return diffLeft - treeRight;
+    })
+    .toBeGreaterThanOrEqual(0);
+
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect
+    .poll(async () => {
+      const treeBottom = await tree.evaluate(
+        (node) => node.getBoundingClientRect().bottom,
+      );
+      const diffTop = await diff.evaluate(
+        (node) => node.getBoundingClientRect().top,
+      );
+      return diffTop - treeBottom;
+    })
+    .toBeGreaterThanOrEqual(0);
+  await expectNoAccessibilityViolations(page);
 });
 
 test("overview groups files with their commit and opens the tree when navigating", async ({
@@ -674,6 +886,48 @@ test("blame and source panes resize with pointer and keyboard controls", async (
   await expect(separator).toHaveAttribute("aria-valuenow", "30");
   await separator.dblclick();
   await expect(separator).toHaveAttribute("aria-valuenow", "48");
+});
+
+test("file tree and content panes resize with pointer and keyboard controls", async ({
+  page,
+}) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+  );
+
+  const separator = page.getByRole("separator", {
+    name: "Resize file tree pane",
+  });
+  const treePane = page.locator(".tree-sidebar");
+  const contentPane = page.locator(".code-main");
+  await expect(separator).toHaveAttribute("aria-valuenow", "356");
+  await expect(treePane).toBeVisible();
+  await expect(contentPane).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+
+  const initialWidth = (await treePane.boundingBox())?.width ?? 0;
+  const handle = await separator.boundingBox();
+  if (!handle) throw new Error("File tree resize handle is not visible");
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2 + 120, handle.y + 20);
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await treePane.boundingBox())?.width ?? 0)
+    .toBeGreaterThan(initialWidth + 80);
+
+  await separator.press("Home");
+  await expect(separator).toHaveAttribute("aria-valuenow", "240");
+  await separator.press("ArrowRight");
+  await expect(separator).toHaveAttribute("aria-valuenow", "264");
+  await separator.dblclick();
+  await expect(separator).toHaveAttribute("aria-valuenow", "356");
+
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect(separator).toBeHidden();
+  await expect(treePane).toBeVisible();
+  await expect(contentPane).toBeVisible();
+  await expectNoAccessibilityViolations(page);
 });
 
 test("blame commit messages open their commit details", async ({ page }) => {

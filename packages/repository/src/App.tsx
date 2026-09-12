@@ -1,4 +1,12 @@
-import { Suspense, lazy, useEffect, useLayoutEffect, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   BaseStyles,
   Button,
@@ -41,6 +49,7 @@ import {
 import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
 import { FileBreadcrumb, FileNavigation } from "./file-navigation";
+import { PaneResizer } from "./pane-resizer";
 import {
   CreateFile,
   DeleteFile,
@@ -89,6 +98,14 @@ const Settings = lazy(() =>
   import("./settings").then((module) => ({ default: module.Settings })),
 );
 type Theme = "light" | "dark" | "auto";
+const DEFAULT_TREE_PANE_WIDTH = 356;
+const MIN_TREE_PANE_WIDTH = 240;
+const MAX_TREE_PANE_WIDTH = 640;
+const TREE_PANE_KEYBOARD_STEP = 24;
+
+function clampTreePaneWidth(width: number, max = MAX_TREE_PANE_WIDTH) {
+  return Math.min(max, Math.max(MIN_TREE_PANE_WIDTH, Math.round(width)));
+}
 
 export function App() {
   const location = useLocation();
@@ -426,7 +443,27 @@ function RepositoryPage({
   const kind = url.searchParams.get("kind") ?? "Tree";
   const [showTree, setShowTree] = useState(Boolean(path));
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
+  const [treePaneWidth, setTreePaneWidth] = useState(DEFAULT_TREE_PANE_WIDTH);
+  const [treePaneMax, setTreePaneMax] = useState(MAX_TREE_PANE_WIDTH);
+  const fileLayout = useRef<HTMLDivElement>(null);
   useEffect(() => setShowTree(Boolean(path)), [path]);
+  useLayoutEffect(() => {
+    const layout = fileLayout.current;
+    if (!layout || !showTree) return;
+    const updateLimit = () => {
+      if (matchMedia("(max-width: 640px)").matches) return;
+      const max = Math.max(
+        MIN_TREE_PANE_WIDTH,
+        Math.min(MAX_TREE_PANE_WIDTH, Math.floor(layout.clientWidth / 2)),
+      );
+      setTreePaneMax(max);
+      setTreePaneWidth((width) => clampTreePaneWidth(width, max));
+    };
+    updateLimit();
+    const observer = new ResizeObserver(updateLimit);
+    observer.observe(layout);
+    return () => observer.disconnect();
+  }, [showTree]);
   const overview = view === "code" && !path && !showTree;
   const fileWorkspace = view === "code" && !overview;
   const issuesView = view === "issues" || view === "labels";
@@ -854,6 +891,7 @@ function RepositoryPage({
                           />
                         )}
                         <div
+                          ref={fileLayout}
                           className={
                             overview
                               ? "code-layout overview-layout"
@@ -861,9 +899,17 @@ function RepositoryPage({
                                 ? "code-layout"
                                 : "code-layout no-sidebar"
                           }
+                          style={
+                            {
+                              "--tree-pane-width": `${treePaneWidth}px`,
+                            } as CSSProperties
+                          }
                         >
                           {showTree && (
-                            <aside className="tree-sidebar">
+                            <aside
+                              id="repository-file-tree"
+                              className="tree-sidebar"
+                            >
                               <div className="tree-sidebar-header">
                                 <Button
                                   size="small"
@@ -939,7 +985,25 @@ function RepositoryPage({
                               />
                             </aside>
                           )}
-                          <div className="code-main">
+                          {showTree && (
+                            <PaneResizer
+                              className="tree-resizer"
+                              label="Resize file tree pane"
+                              controls="repository-file-tree repository-file-content"
+                              value={treePaneWidth}
+                              min={MIN_TREE_PANE_WIDTH}
+                              max={treePaneMax}
+                              defaultValue={DEFAULT_TREE_PANE_WIDTH}
+                              step={TREE_PANE_KEYBOARD_STEP}
+                              unit="pixels"
+                              valueText={`${treePaneWidth} pixels wide`}
+                              onChange={setTreePaneWidth}
+                            />
+                          )}
+                          <div
+                            id="repository-file-content"
+                            className="code-main"
+                          >
                             {!showTree && !overview && (
                               <FileNavigation
                                 repo={repo}

@@ -1,11 +1,7 @@
-import {
-  useMemo,
-  useState,
-  type CSSProperties,
-  type KeyboardEvent,
-  type PointerEvent,
-} from "react";
+import { useMemo, useRef, useState, type CSSProperties } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
+import { FileTree, useFileTree } from "@pierre/trees/react";
+import type { GitStatus } from "@pierre/trees";
 import { IconButton, Label, SegmentedControl } from "@primer/react";
 import {
   CopyIcon,
@@ -20,6 +16,7 @@ import {
   repoHref,
   useRequest,
   type Blame,
+  type Change,
   type Changes,
   type Commit,
   type Content,
@@ -27,7 +24,9 @@ import {
   type Repository,
 } from "./api";
 import { Link, Result, date, short } from "./ui";
+import { compareFileItems } from "./entry-sort";
 import { RepositoryMarkdown } from "./repository-markdown";
+import { PaneResizer } from "./pane-resizer";
 
 type Props = {
   repo: Repository;
@@ -47,16 +46,21 @@ const DEFAULT_BLAME_PANE_WIDTH = 48;
 const MIN_BLAME_PANE_WIDTH = 25;
 const MAX_BLAME_PANE_WIDTH = 75;
 
-function clampBlamePaneWidth(width: number) {
-  return Math.min(
-    MAX_BLAME_PANE_WIDTH,
-    Math.max(MIN_BLAME_PANE_WIDTH, Math.round(width)),
-  );
-}
-
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes.toLocaleString()} bytes`;
   return `${(bytes / 1024).toFixed(2)} KB`;
+}
+
+function changeVariant(kind: string) {
+  if (kind === "Added") return "success" as const;
+  if (kind === "Deleted") return "danger" as const;
+  return "secondary" as const;
+}
+
+function changeStatus(kind: string): GitStatus {
+  if (kind === "Added") return "added";
+  if (kind === "Deleted") return "deleted";
+  return "modified";
 }
 
 export function FileView({ repo, rev, path, name, theme, write }: Props) {
@@ -276,56 +280,18 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
                       </div>
                     ))}
                   </div>
-                  <button
-                    type="button"
+                  <PaneResizer
                     className="blame-resizer"
-                    role="separator"
-                    aria-label="Resize blame pane"
-                    aria-controls="blame-commit-pane blame-source-pane"
-                    aria-orientation="vertical"
-                    aria-valuemin={MIN_BLAME_PANE_WIDTH}
-                    aria-valuemax={MAX_BLAME_PANE_WIDTH}
-                    aria-valuenow={blamePaneWidth}
-                    aria-valuetext={`${blamePaneWidth}% blame, ${100 - blamePaneWidth}% source`}
-                    title="Drag or use arrow keys to resize"
-                    onDoubleClick={() =>
-                      setBlamePaneWidth(DEFAULT_BLAME_PANE_WIDTH)
-                    }
-                    onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
-                      let width: number | undefined;
-                      if (event.key === "ArrowLeft") width = blamePaneWidth - 5;
-                      if (event.key === "ArrowRight")
-                        width = blamePaneWidth + 5;
-                      if (event.key === "Home") width = MIN_BLAME_PANE_WIDTH;
-                      if (event.key === "End") width = MAX_BLAME_PANE_WIDTH;
-                      if (width === undefined) return;
-                      event.preventDefault();
-                      setBlamePaneWidth(clampBlamePaneWidth(width));
-                    }}
-                    onPointerDown={(event: PointerEvent<HTMLButtonElement>) => {
-                      event.preventDefault();
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                    }}
-                    onPointerMove={(event: PointerEvent<HTMLButtonElement>) => {
-                      if (
-                        !event.currentTarget.hasPointerCapture(event.pointerId)
-                      )
-                        return;
-                      const grid = event.currentTarget.parentElement;
-                      if (!grid) return;
-                      event.preventDefault();
-                      const bounds = grid.getBoundingClientRect();
-                      setBlamePaneWidth(
-                        clampBlamePaneWidth(
-                          ((event.clientX - bounds.left) / bounds.width) * 100,
-                        ),
-                      );
-                    }}
-                    onPointerUp={(event: PointerEvent<HTMLButtonElement>) => {
-                      event.currentTarget.releasePointerCapture(
-                        event.pointerId,
-                      );
-                    }}
+                    label="Resize blame pane"
+                    controls="blame-commit-pane blame-source-pane"
+                    value={blamePaneWidth}
+                    min={MIN_BLAME_PANE_WIDTH}
+                    max={MAX_BLAME_PANE_WIDTH}
+                    defaultValue={DEFAULT_BLAME_PANE_WIDTH}
+                    step={5}
+                    unit="percent"
+                    valueText={`${blamePaneWidth}% blame, ${100 - blamePaneWidth}% source`}
+                    onChange={setBlamePaneWidth}
                   />
                   <div
                     id="blame-source-pane"
@@ -443,59 +409,121 @@ function ChangeComparison({
   base?: string;
   theme: "light" | "dark";
 }) {
-  const [selected, setSelected] = useState<string | null>(null);
   return (
     <Result state={state}>
       {(value) => (
-        <>
-          <h3>
-            {value.changes.length} changed{" "}
-            {value.changes.length === 1 ? "file" : "files"}
-          </h3>
-          <section className="panel change-list">
-            {value.changes.map((change) => (
-              <button
-                key={change.path_hex}
-                className={selected === change.path_hex ? "selected" : ""}
-                onClick={() => setSelected(change.path_hex)}
-              >
-                <Label
-                  variant={
-                    change.kind === "Added"
-                      ? "success"
-                      : change.kind === "Deleted"
-                        ? "danger"
-                        : "secondary"
-                  }
-                >
-                  {change.kind}
-                </Label>
-                <span>{change.path}</span>
-                {change.old?.mode !== change.new?.mode && (
-                  <code>
-                    {change.old?.mode ?? "—"} → {change.new?.mode ?? "—"}
-                  </code>
-                )}
-              </button>
-            ))}
-          </section>
-          {selected ? (
-            <DiffView
-              key={selected}
-              repo={repo}
-              rev={rev}
-              base={base}
-              path={selected}
-              theme={theme}
-            />
-          ) : (
-            value.changes.length > 0 && (
-              <p className="muted">Select a changed file to view its diff.</p>
-            )
-          )}
-        </>
+        <ChangeWorkspace
+          key={`${value.base ?? "root"}:${value.commit}`}
+          changes={value.changes}
+          repo={repo}
+          rev={rev}
+          base={base}
+          theme={theme}
+        />
       )}
     </Result>
+  );
+}
+
+function ChangeWorkspace({
+  changes,
+  repo,
+  rev,
+  base,
+  theme,
+}: {
+  changes: Change[];
+  repo: Repository;
+  rev: string;
+  base?: string;
+  theme: "light" | "dark";
+}) {
+  const [selected, setSelected] = useState(changes[0]?.path_hex ?? null);
+  const selectedChange = changes.find((change) => change.path_hex === selected);
+  return (
+    <>
+      <h3 id="changed-files-heading">
+        {changes.length} changed {changes.length === 1 ? "file" : "files"}
+      </h3>
+      {changes.length ? (
+        <section
+          className="change-workspace"
+          aria-labelledby="changed-files-heading"
+        >
+          <div className="change-tree-pane">
+            <ChangeTree
+              changes={changes}
+              selected={selectedChange?.path}
+              onSelect={setSelected}
+            />
+          </div>
+          <div className="change-diff-pane">
+            {selectedChange && (
+              <DiffView
+                key={selectedChange.path_hex}
+                repo={repo}
+                rev={rev}
+                base={base}
+                change={selectedChange}
+                theme={theme}
+              />
+            )}
+          </div>
+        </section>
+      ) : (
+        <p className="muted">This comparison has no changed files.</p>
+      )}
+    </>
+  );
+}
+
+function ChangeTree({
+  changes,
+  selected,
+  onSelect,
+}: {
+  changes: Change[];
+  selected?: string;
+  onSelect: (path: string) => void;
+}) {
+  const paths = useMemo(
+    () => new Map(changes.map((change) => [change.path, change])),
+    [changes],
+  );
+  const select = useRef(onSelect);
+  select.current = onSelect;
+  const { model } = useFileTree({
+    paths: changes.map((change) => change.path),
+    gitStatus: changes.map((change) => ({
+      path: change.path,
+      status: changeStatus(change.kind),
+    })),
+    initialExpansion: "open",
+    initialSelectedPaths: selected ? [selected] : [],
+    flattenEmptyDirectories: false,
+    density: "default",
+    itemHeight: 32,
+    icons: { set: "minimal", colored: false },
+    renaming: false,
+    dragAndDrop: false,
+    sort: (left, right) =>
+      compareFileItems(
+        left.basename,
+        left.isDirectory,
+        right.basename,
+        right.isDirectory,
+      ),
+    onSelectionChange(selectedPaths) {
+      const change = paths.get(selectedPaths[0] ?? "");
+      if (change) select.current(change.path_hex);
+    },
+  });
+  return (
+    <FileTree
+      model={model}
+      className="change-file-tree"
+      aria-label="Changed files"
+    />
   );
 }
 
@@ -503,11 +531,11 @@ function DiffView({
   repo,
   rev,
   base,
-  path,
+  change,
   theme,
-}: Omit<Props, "name"> & { base?: string }) {
+}: Omit<Props, "name" | "path"> & { base?: string; change: Change }) {
   const state = useRequest<Diff>(
-    endpoint(repo, "diff", { rev, base, path_hex: path }),
+    endpoint(repo, "diff", { rev, base, path_hex: change.path_hex }),
   );
   const [style, setStyle] = useState<"unified" | "split">("split");
   const options = useMemo(
@@ -546,7 +574,15 @@ function DiffView({
       {(data) => (
         <section className="panel diff-panel">
           <div className="panel-header">
-            <strong>{data.path}</strong>
+            <div className="diff-file-heading">
+              <strong>{data.path}</strong>
+              <Label variant={changeVariant(change.kind)}>{change.kind}</Label>
+              {change.old?.mode !== change.new?.mode && (
+                <code>
+                  {change.old?.mode ?? "—"} → {change.new?.mode ?? "—"}
+                </code>
+              )}
+            </div>
             <SegmentedControl
               aria-label="Diff layout"
               onChange={(index) => setStyle(index === 0 ? "split" : "unified")}
