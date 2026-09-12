@@ -1,6 +1,12 @@
 name: HTTP server container
 
 on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: "Exact Git ref or commit to qualify"
+        required: false
+        type: string
   pull_request:
     paths:
       - ".dockerignore"
@@ -26,6 +32,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
       - name: Validate deployment profiles
         run: |
           set -euo pipefail
@@ -170,6 +178,17 @@ jobs:
           --file crates/crab-http-server/deploy/Dockerfile
           --tag crab-http-server:test
           .
+      - name: Reject fixable high-severity image vulnerabilities
+        run: >-
+          docker run --rm
+          --volume /var/run/docker.sock:/var/run/docker.sock
+          aquasec/trivy@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+          image
+          --scanners vuln
+          --severity HIGH,CRITICAL
+          --ignore-unfixed
+          --exit-code 1
+          crab-http-server:test
       - name: Verify runtime contract
         run: |
           test "$(docker image inspect crab-http-server:test --format '{{.Config.User}}')" = "crab:crab"
@@ -180,6 +199,10 @@ jobs:
             -s /etc/ssl/certs/ca-certificates.crt
           docker run --rm --entrypoint /usr/bin/test crab-http-server:test \
             -x /usr/bin/sleep
+          expected_version="$(sed -n 's/^version = "\(.*\)"/\1/p' \
+            crates/crab-http-server/Cargo.toml | head -1)"
+          test "$(docker run --rm crab-http-server:test --version)" = \
+            "crab-http-server ${expected_version}"
           docker run --rm crab-http-server:test --help | grep -F -- "--config"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"
       - name: Exercise the Compose quick start and restart

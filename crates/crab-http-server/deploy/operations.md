@@ -54,6 +54,19 @@ helm template crab-http-server \
 
 Review the rendered image digest, Service ports, ServiceAccount, NetworkPolicy, Secret name, storage URL, and ingress host. Keep the rendered file private because inline server configuration appears in it.
 
+For an official image, verify GitHub provenance against the pinned digest and
+the dedicated server release workflow:
+
+```sh
+gh attestation verify \
+  oci://ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
+  --repo crabbuild/crab \
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml
+```
+
+Authenticate to GHCR first when the package is private. Also inspect the image
+index and confirm that every architecture scheduled by the cluster is present.
+
 ## Deploy or upgrade
 
 Use a rolling upgrade with the chart’s zero-unavailable strategy:
@@ -225,5 +238,6 @@ Record these gates against a dedicated storage root:
 - Confirm the management listener is unreachable through Service, ingress, and peer pods
 - Scrape every pod and exercise request, body-error, admission, catalog-health, and drain signals
 - Confirm no static provider credential exists in Secret, ConfigMap, pod environment, or rendered manifests
+- Verify the deployed image digest's signer workflow, source commit, AMD64/ARM64 index, SBOM, and provenance
 
 Static rendering, unit tests, and localhost RustFS tests don’t replace these gates. Keep the recorded evidence with the release decision.

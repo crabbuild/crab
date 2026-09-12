@@ -1083,7 +1083,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
 | Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
-| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml` |
+| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml` and `.github/workflows/http-server-release.yml` |
 
 ### Understand what has been qualified
 
@@ -1141,6 +1141,7 @@ The remaining production gaps include:
 - Backup and restore qualification for Git and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
 - Live upgrade, rollback, alert-tuning, and disaster-recovery qualification
+- First tagged server image publication and registry-attestation verification
 
 ## Ownership
 

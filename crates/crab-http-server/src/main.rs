@@ -8,7 +8,7 @@ use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(about = "Serve and administer Crab repositories")]
+#[command(version, about = "Serve and administer Crab repositories")]
 struct Arguments {
     #[arg(long)]
     config: PathBuf,

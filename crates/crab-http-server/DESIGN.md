@@ -205,6 +205,16 @@ cache and coordination identities from colliding across clouds.
 
 Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. One Helm chart owns inline or external configuration, the Deployment, Service, ServiceAccount, disruption budget, probes, security context, topology spread, scratch volume, ingress NetworkPolicy, optional TLS ingress, optional autoscaling, and digest-pinned image. Provider value files contain the storage URL, OIDC settings, workload-identity annotations or labels, and required environment. The chart requires network isolation and rejects public ingress or metrics discovery without an explicit allowed source. The private ClusterIP Service exposes port 8788 only inside the cluster, and TLS ingress is the only supported public path; port 8789 remains private for liveness, storage-aware readiness, and Prometheus metrics. Metrics retain request observations through response-body completion and use only bounded method, outcome, and admission-class labels. On termination, Kubernetes marks the endpoint non-ready while a 15-second pre-stop delay keeps the process serving; the remaining pod grace period covers Crab's complete ten-minute drain.
 
+Server releases use their own annotated `crab-http-server-vX.Y.Z` tag and do
+not inherit the CLI's version tag. The tag must match the server crate, resolve
+to `main`, and pass the exact-source container and Compose qualification before
+publishing. The registry receives one AMD64/ARM64 image index under immutable
+version and source-commit tags, BuildKit SBOM and provenance attestations, and a
+GitHub-signed registry attestation. Deployment profiles consume only its
+manifest digest. The exact-source qualification also scans the final runtime
+image and rejects fixable HIGH or CRITICAL vulnerabilities before publication.
+Existing version and source-commit tags fail closed instead of being replaced.
+
 ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
 three protected files to disposable scratch, unsets the injected environment
 variables, and execs the same binary. Repository, catalog, and session state

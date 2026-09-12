@@ -25,6 +25,14 @@ private probes and Prometheus metrics, a disruption budget, ingress isolation,
 optional Transport Layer Security (TLS) ingress, and optional autoscaling. A
 provider is release-qualified only after its live test matrix passes.
 
+Server release tags have their own contract, independent of the Crab CLI. An
+annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
+qualified AMD64/ARM64 image to GHCR with immutable version and source-commit
+tags, an SBOM, and provenance attestations. Exact-source qualification rejects
+fixable HIGH or CRITICAL image vulnerabilities before publication. Kubernetes
+deployments still pin the resulting manifest digest. The publisher never
+overwrites an existing version or source-commit tag.
+
 ## Start locally with Docker Compose
 
 Docker Engine with Compose v2 is the only prerequisite. From the repository
@@ -87,7 +95,13 @@ volume, including the catalog and every repository. The defaults need no
 The dependency images are version- and digest-pinned. `RUSTFS_IMAGE`,
 `AWS_CLI_IMAGE`, and `CADDY_IMAGE` exist for controlled mirrors; keep them
 pinned when overriding. To use a prebuilt server image, set
-`CRAB_HTTP_SERVER_IMAGE` and add `--no-build` to `up`.
+`CRAB_HTTP_SERVER_IMAGE` to its manifest digest and add `--no-build` to `up`:
+
+```sh
+CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
+  docker compose --file crates/crab-http-server/deploy/compose.yaml \
+    up --detach --no-build --wait
+```
 
 ## Deploy for a team
 

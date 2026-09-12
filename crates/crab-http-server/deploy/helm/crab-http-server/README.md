@@ -50,9 +50,31 @@ Grant access only below the configured root. Don’t put static cloud keys in th
 
 Use [the Terraform provider roots](../../terraform/README.md) to create dedicated versioned storage and workload identity for an existing cluster. Skip them when your platform team already manages those resources.
 
-## Publish an immutable image
+## Select an immutable image
 
-Build from the repository root and push the architectures used by your cluster:
+Maintainer releases publish `linux/amd64` and `linux/arm64` images to
+`ghcr.io/crabbuild/crab-http-server`. The release workflow accepts only an
+annotated `crab-http-server-vX.Y.Z` tag that matches this crate's version and is
+reachable from `main`. It qualifies that exact source, generates SBOM and
+provenance attestations, and publishes both the version and source-commit tags.
+
+Inspect a published version and record its manifest digest:
+
+```sh
+docker buildx imagetools inspect ghcr.io/crabbuild/crab-http-server:0.1.0
+gh attestation verify \
+  oci://ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
+  --repo crabbuild/crab \
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml
+```
+
+Authenticate to GHCR first when the package is private. Put
+`ghcr.io/crabbuild/crab-http-server` in `image.repository` and the recorded
+`sha256:` value in `image.digest`; the chart never deploys a mutable tag.
+
+Until a server release is published, or when maintaining a custom downstream
+image, build from the repository root and push the architectures used by your
+cluster:
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 --push \
@@ -62,7 +84,8 @@ docker buildx imagetools inspect \
   registry.example.com/crab-http-server:release_name_here
 ```
 
-Copy the reported manifest digest into `image.digest`. Keep the repository in `image.repository`; don’t put a tag in that value.
+Copy the reported manifest digest into `image.digest`. Keep the repository in
+`image.repository`; don’t put a tag in that value.
 
 ## Configure one provider profile
 
