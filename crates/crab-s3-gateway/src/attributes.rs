@@ -521,8 +521,7 @@ pub(crate) async fn save_delta(
     repository: &Repository,
     commit: ObjectId,
     parent: Option<ObjectId>,
-    path: String,
-    attributes: Option<ObjectAttributes>,
+    changes: BTreeMap<String, Option<ObjectAttributes>>,
     checkpoint: bool,
     checkpoint_slot: Option<String>,
 ) -> crate::Result<()> {
@@ -534,7 +533,7 @@ pub(crate) async fn save_delta(
         checkpoint,
         checkpoint_slot,
         parent: parent.map(|oid| oid.to_string()),
-        changes: BTreeMap::from([(path, attributes)]),
+        changes,
     })
     .map_err(|source| crate::Error::Attributes { source })?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {

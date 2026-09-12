@@ -4938,6 +4938,32 @@ mod tests {
                 .await
                 .unwrap();
         }
+        let lfs_pointer = crab_git::LfsPointer {
+            oid: [7; 32],
+            size: 10 * 1024 * 1024,
+            extensions: Vec::new(),
+        }
+        .serialize();
+        gateway
+            .mutations
+            .apply(
+                repository,
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(b"lfs/model.bin".to_vec()).unwrap(),
+                mutation::Change::Put {
+                    bytes: Bytes::from(lfs_pointer),
+                    track_lfs: true,
+                    attributes: Box::new(crate::attributes::PutAttributes {
+                        logical_size: Some(10 * 1024 * 1024),
+                        ..Default::default()
+                    }),
+                    condition: mutation::PutCondition::None,
+                },
+                "user",
+                &gateway.cancellation,
+            )
+            .await
+            .unwrap();
 
         // A fresh gateway has no branch actor or remote-Git caches. The
         // durable attribute chain must still prove and serve the complete S3
@@ -5053,6 +5079,23 @@ mod tests {
                 last.next_continuation_token,
             ),
             (Some("main/prefix/c".to_owned()), Some(1), Some(false), None)
+        );
+        let lfs = listing_gateway
+            .list_objects_v2(list_request(ListObjectsV2Input {
+                bucket: "repo".to_owned(),
+                prefix: Some("main/lfs/".to_owned()),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(
+            lfs.contents
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|object| object.key)
+                .collect::<Vec<_>>(),
+            ["main/lfs/.gitattributes", "main/lfs/model.bin"]
         );
         listing_gateway.shutdown().await;
         gateway.shutdown().await;

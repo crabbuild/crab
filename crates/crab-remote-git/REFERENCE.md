@@ -132,8 +132,9 @@ in place. High-throughput services may use `from_snapshot_with_catalog_tail`. It
 reads the immutable pack inventory named by the latest catalog checkpoint and
 proves that inventory is a subset of the pinned snapshot. Object lookups use that
 catalog and search only the remaining pack tail on a miss. If no checkpoint can
-be proven as a subset, the canonical complete pack-index path remains; a miss in
-both the proven catalog and complete tail is definitive.
+be proven as a subset or the derived catalog cannot open, the canonical complete
+pack-index path remains; a miss in both the proven catalog and complete tail is
+definitive.
 
 ### Generated response packs
 

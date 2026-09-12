@@ -136,6 +136,7 @@ pub(crate) struct ReadViewCache {
 pub(crate) struct WriteMaintenance {
     epoch: AtomicU64,
     active: AtomicUsize,
+    next_catalog_maintenance_epoch: AtomicU64,
     catalog_maintenance_running: std::sync::atomic::AtomicBool,
     state: StdMutex<MaintenanceState>,
 }
@@ -150,6 +151,7 @@ impl WriteMaintenance {
         Self {
             epoch: AtomicU64::new(0),
             active: AtomicUsize::new(0),
+            next_catalog_maintenance_epoch: AtomicU64::new(CATALOG_MAINTENANCE_EPOCHS),
             catalog_maintenance_running: std::sync::atomic::AtomicBool::new(false),
             state: StdMutex::new(MaintenanceState {
                 scheduled: CancellationToken::new(),
@@ -204,16 +206,28 @@ impl WriteMaintenance {
     }
 
     fn claim_catalog_maintenance(&self, epoch: u64) -> bool {
-        epoch.is_multiple_of(CATALOG_MAINTENANCE_EPOCHS)
-            && self
+        if epoch < self.next_catalog_maintenance_epoch.load(Ordering::Acquire)
+            || self
                 .catalog_maintenance_running
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
+                .is_err()
+        {
+            return false;
+        }
+        self.next_catalog_maintenance_epoch.store(
+            epoch.saturating_add(CATALOG_MAINTENANCE_EPOCHS),
+            Ordering::Release,
+        );
+        true
     }
 
     fn finish_catalog_maintenance(&self) {
         self.catalog_maintenance_running
             .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -246,18 +260,23 @@ pub(crate) fn schedule_catalog_maintenance(
     let maintenance = Arc::clone(&repository.maintenance);
     let cancel = cancel.child_token();
     tokio::spawn(async move {
-        let result = crab_write::generation::ensure_catalog_readable(
-            &store,
-            &layout,
-            MAINTENANCE_TTL,
-            &cancel,
-        )
-        .await;
-        maintenance.finish_catalog_maintenance();
-        match result {
-            Ok(_) => {}
-            Err(crab_write::WriteError::Cancelled) if cancel.is_cancelled() => {}
-            Err(error) => tracing::warn!(%error, "S3 bounded catalog maintenance failed"),
+        loop {
+            let result = crab_write::generation::ensure_catalog_readable(
+                &store,
+                &layout,
+                MAINTENANCE_TTL,
+                &cancel,
+            )
+            .await;
+            maintenance.finish_catalog_maintenance();
+            match result {
+                Ok(_) => {}
+                Err(crab_write::WriteError::Cancelled) if cancel.is_cancelled() => return,
+                Err(error) => tracing::warn!(%error, "S3 bounded catalog maintenance failed"),
+            }
+            if !maintenance.claim_catalog_maintenance(maintenance.current_epoch()) {
+                return;
+            }
         }
     });
 }
@@ -485,10 +504,11 @@ mod tests {
         let maintenance = WriteMaintenance::new();
 
         assert!(!maintenance.claim_catalog_maintenance(63));
-        assert!(maintenance.claim_catalog_maintenance(64));
+        assert!(maintenance.claim_catalog_maintenance(65));
         assert!(!maintenance.claim_catalog_maintenance(128));
         maintenance.finish_catalog_maintenance();
-        assert!(maintenance.claim_catalog_maintenance(128));
+        assert!(!maintenance.claim_catalog_maintenance(128));
+        assert!(maintenance.claim_catalog_maintenance(129));
     }
 
     #[test]

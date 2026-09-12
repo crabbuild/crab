@@ -820,7 +820,8 @@ pack inventory is a proven subset of its snapshot, then searches only the
 remaining pack tail. This remains valid while manifest compaction and catalog
 publication briefly differ and keeps common object lookup bounded without waiting
 for an idle window; a complete pack scan remains the fallback when no catalog
-inventory can be proven as a subset. Commit-graph maintenance still requires a
+inventory can be proven as a subset or the derived catalog cannot open.
+Commit-graph maintenance still requires a
 five-second quiet window.
 
 ### 4.2 PUT and DELETE execution rules

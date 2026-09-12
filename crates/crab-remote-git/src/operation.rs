@@ -251,7 +251,15 @@ impl OperationContext {
                     ),
                 ) => session.map_err(|_| Error::Timeout {
                     operation: "open locator",
-                })??,
+                })?,
+            };
+            let session = match session {
+                Ok(session) => session,
+                Err(error) if state.catalog_identity.is_none() => {
+                    tracing::warn!(%error, "snapshot lookup catalog unavailable; using immutable pack indexes");
+                    GitObjectLocatorSession::without_catalog()
+                }
+                Err(error) => return Err(error.into()),
             };
             let session = TrackedLocatorSession::new(session, Arc::clone(&state.runtime));
             // A handle pins the immutable catalog opened with its refs. Using
@@ -1436,6 +1444,50 @@ mod tests {
             transfer.finish::<()>(Err(Error::Cancelled)).await,
             Err(Error::Cancelled)
         ));
+    }
+
+    #[tokio::test]
+    async fn snapshot_accelerator_falls_back_when_its_catalog_cannot_open() {
+        let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(object_store);
+        let runtime = Arc::new(crate::RemoteGitRuntime::default());
+        let state = Arc::new(crate::state::RepositoryState {
+            store: store.clone(),
+            layout: StoreLayout::new(store, "org/repo".to_owned()),
+            runtime: Arc::clone(&runtime),
+            identity: crate::RepositoryIdentity::new("memory", "org/repo", 1)
+                .expect("repository identity"),
+            options: crate::RepositoryOptions::default(),
+            generation: 1,
+            git_validation_digest: Arc::from("validation"),
+            manifest_etag: "etag".to_owned(),
+            shard_index_hash: Arc::from("shards"),
+            catalog_identity: None,
+            lookup_catalog_identity: Some(GitObjectCatalogIdentity {
+                generation: 1,
+                pack_index_hash: MerkleHash::from([1; 32]),
+                object_count: 1,
+                catalog_digest: MerkleHash::from([2; 32]),
+            }),
+            inventory: HashMap::new(),
+            refs: crate::RepositoryRefs::default(),
+            reader: None,
+            commit_graph: None,
+            shallow_closure: None,
+        });
+
+        let cancellation = CancellationToken::new();
+        let operation = OperationContext::open(
+            state,
+            OperationKind::Snapshot,
+            &cancellation,
+            crate::OperationLimits::default(),
+        )
+        .await
+        .expect("canonical pack-index fallback");
+
+        operation.finish(Ok(())).await.expect("close operation");
+        runtime.shutdown().await;
     }
 
     #[derive(Clone, Default)]

@@ -360,8 +360,13 @@ impl Coordinator {
                 }
             }
         }
-        if let Some((epoch, maintenance_cancel)) = repository.maintenance.finish(cancel) {
-            crate::repository::schedule_catalog_maintenance(repository, cancel, epoch);
+        let idle_maintenance = repository.maintenance.finish(cancel);
+        crate::repository::schedule_catalog_maintenance(
+            repository,
+            cancel,
+            repository.maintenance.current_epoch(),
+        );
+        if let Some((epoch, maintenance_cancel)) = idle_maintenance {
             crate::repository::schedule_readability(
                 repository,
                 runtime,
@@ -1035,6 +1040,21 @@ async fn apply_with_fences(
         )
         .await?;
         let Some(publication) = prepared.publication.as_ref() else {
+            if prepared.requires_revalidation {
+                let lease = RefLease::acquire(repository, request.branch, cancel).await?;
+                let current = prepared_parent_is_current(
+                    repository,
+                    request.branch,
+                    prepared.tip,
+                    prepared.transaction.as_deref(),
+                )
+                .await;
+                lease.release().await;
+                if !current? {
+                    repository.read_views.invalidate().await;
+                    continue;
+                }
+            }
             if let Some(state) = request.state {
                 state.store(
                     prepared.tip,
@@ -1104,6 +1124,7 @@ struct PreparedBatch {
     attributes: attributes::Manifest,
     tree: WarmTree,
     batches_since_checkpoint: usize,
+    requires_revalidation: bool,
 }
 
 struct BuiltBatch {
@@ -1149,6 +1170,7 @@ async fn prepare_and_upload_batch(
                     request.branch,
                     batch,
                     cached.transaction,
+                    true,
                     cancel,
                     request.metrics,
                 )
@@ -1182,6 +1204,7 @@ async fn prepare_and_upload_batch(
             request.branch,
             batch,
             None,
+            false,
             cancel,
             request.metrics,
         )
@@ -1230,6 +1253,7 @@ async fn prepare_and_upload_batch(
         request.branch,
         batch,
         None,
+        false,
         cancel,
         request.metrics,
     )
@@ -1300,6 +1324,7 @@ async fn upload_batch(
     branch: &str,
     batch: BuiltBatch,
     expected_transaction: Option<String>,
+    requires_revalidation: bool,
     cancel: &CancellationToken,
     metrics: &Metrics,
 ) -> Result<PreparedBatch> {
@@ -1322,6 +1347,7 @@ async fn upload_batch(
             attributes,
             tree,
             batches_since_checkpoint,
+            requires_revalidation,
         });
     };
     let commit_count = commits.len();
@@ -1355,7 +1381,38 @@ async fn upload_batch(
         attributes,
         tree,
         batches_since_checkpoint,
+        requires_revalidation,
     })
+}
+
+async fn prepared_parent_is_current(
+    repository: &Repository,
+    branch: &str,
+    expected_tip: Option<ObjectId>,
+    expected_transaction: Option<&str>,
+) -> Result<bool> {
+    if let Some(expected_transaction) = expected_transaction {
+        let head = crab_metadata::ref_journal::read_ref_head(
+            &repository.store,
+            &repository.layout,
+            branch,
+        )
+        .await?;
+        return Ok(head.visible_transaction.as_deref() == Some(expected_transaction));
+    }
+    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        &repository.store,
+        &repository.layout,
+    )
+    .await?;
+    let current = snapshot
+        .journal
+        .refs
+        .get(branch)
+        .map(|oid| oid.parse::<ObjectId>())
+        .transpose()
+        .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
+    Ok(current == expected_tip)
 }
 
 async fn upload_built_batch(
@@ -1382,8 +1439,7 @@ async fn upload_built_batch(
             (
                 built.commit,
                 built.parent,
-                built.path.clone(),
-                built.attributes.clone(),
+                built.attribute_changes.clone(),
                 built.commit == final_commit && checkpoint_slot.is_some(),
                 (built.commit == final_commit)
                     .then(|| checkpoint_slot.clone())
@@ -1468,13 +1524,12 @@ async fn upload_built_batch(
     };
     let attributes_upload = async {
         futures_util::future::try_join_all(attribute_deltas.into_iter().map(
-            |(commit, parent, path, attributes, checkpoint, checkpoint_slot)| {
+            |(commit, parent, changes, checkpoint, checkpoint_slot)| {
                 attributes::save_delta(
                     repository,
                     commit,
                     parent,
-                    path,
-                    attributes,
+                    changes,
                     checkpoint,
                     checkpoint_slot,
                 )
@@ -1619,8 +1674,7 @@ struct BuiltCommit {
     commit: ObjectId,
     etag: Option<String>,
     objects: Vec<(Kind, Vec<u8>)>,
-    path: String,
-    attributes: Option<attributes::ObjectAttributes>,
+    attribute_changes: std::collections::BTreeMap<String, Option<attributes::ObjectAttributes>>,
 }
 
 enum Build {
@@ -1993,11 +2047,24 @@ async fn build_commit(
             (None, None, None)
         }
     };
+    let seconds = now_seconds()?;
     let mut objects = Vec::new();
+    let mut attribute_changes = std::collections::BTreeMap::new();
     if let Some(bytes) = changed {
         objects.push((Kind::Blob, bytes));
     }
     if let Some(attributes) = lfs_attributes {
+        let attributes_path = push_component(&directory_path, b".gitattributes")?;
+        let attributes_path = std::str::from_utf8(attributes_path.as_bytes())
+            .map_err(|_| std::io::Error::other("S3 attribute path is not UTF-8"))?
+            .to_owned();
+        let generated_attributes = attributes::ObjectAttributes::new(
+            attributes.oid,
+            crate::gateway::md5_hex(&attributes.bytes),
+            attributes.bytes.len() as u64,
+            seconds,
+            attributes::PutAttributes::default(),
+        );
         replace_entry(
             leaf_entries,
             b".gitattributes",
@@ -2007,6 +2074,7 @@ async fn build_commit(
                 oid: attributes.oid,
             }),
         );
+        attribute_changes.insert(attributes_path, Some(generated_attributes));
         objects.push((Kind::Blob, attributes.bytes));
     }
     let mut tree_oid = None;
@@ -2033,7 +2101,6 @@ async fn build_commit(
         replace_entry(&mut frames[depth - 1].entries, directory_name, entry);
     }
     let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
-    let seconds = now_seconds()?;
     let object_attributes = pending_attributes.map(|(oid, pending, size)| {
         attributes::ObjectAttributes::new(
             oid,
@@ -2043,25 +2110,23 @@ async fn build_commit(
             *pending,
         )
     });
-    let attribute_identity = serde_json::to_vec(&(
-        path_string,
-        parent.map(|oid| oid.to_string()),
-        &object_attributes,
-    ))
-    .map_err(|source| Error::Attributes(Box::new(crate::Error::Attributes { source })))?;
+    attribute_changes.insert(path_string.to_owned(), object_attributes.clone());
+    let attribute_identity = serde_json::to_vec(&attribute_changes)
+        .map_err(|source| Error::Attributes(Box::new(crate::Error::Attributes { source })))?;
     let attribute_digest = blake3::hash(&attribute_identity).to_hex();
     let commit_bytes = commit_bytes(tree, parent, principal, seconds, attribute_digest.as_str());
     let commit = object_id(Kind::Commit, &commit_bytes)?;
     objects.push((Kind::Commit, commit_bytes));
     tree_state.commit(frames, &objects)?;
-    manifest.update(path_string.to_owned(), object_attributes.clone());
+    for (path, attributes) in &attribute_changes {
+        manifest.update(path.clone(), attributes.clone());
+    }
     Ok(Build::Commit(Box::new(BuiltCommit {
         parent,
         commit,
         etag,
         objects,
-        path: path_string.to_owned(),
-        attributes: object_attributes,
+        attribute_changes,
     })))
 }
 
@@ -2968,18 +3033,30 @@ mod tests {
         .await
         .unwrap();
 
+        let stored_attributes = read(
+            &repository,
+            Arc::clone(&runtime),
+            &cancel,
+            "nested/.gitattributes",
+        )
+        .await;
         assert_eq!(
-            read(
-                &repository,
-                Arc::clone(&runtime),
-                &cancel,
-                "nested/.gitattributes",
-            )
-            .await,
+            stored_attributes,
             format!(
                 "README.md text\n{}\n",
                 lfs_attributes_line(filename.as_bytes())
             )
+        );
+        let commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let attributes_oid = object_id(Kind::Blob, &stored_attributes).unwrap();
+        let attributes_etag = crate::gateway::md5_hex(&stored_attributes);
+        assert!(manifest.is_complete());
+        assert_eq!(
+            manifest
+                .object("nested/.gitattributes", attributes_oid)
+                .map(|attributes| attributes.etag.as_str()),
+            Some(attributes_etag.as_str())
         );
         assert_eq!(
             read(
@@ -3730,6 +3807,59 @@ mod tests {
         assert_eq!(
             read(&repository, Arc::clone(&runtime), &cancel, "second.txt").await,
             "second"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn warm_precondition_failure_revalidates_the_object_store_ref() {
+        let (repository, runtime, cancel) = fixture().await;
+        let local = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        );
+        let competing = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&local, &repository, &cancel, "seed.txt", b"seed").await;
+        coordinated_put(
+            &competing,
+            &repository,
+            &cancel,
+            "created-elsewhere.txt",
+            b"winner",
+        )
+        .await;
+
+        let result = local
+            .apply(
+                &repository,
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(b"created-elsewhere.txt".to_vec()).unwrap(),
+                Change::Put {
+                    bytes: Bytes::from_static(b"loser"),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::IfNoneMatchAny,
+                },
+                "user",
+                &cancel,
+            )
+            .await;
+
+        assert!(matches!(result, Err(Error::PreconditionFailed)));
+        assert_eq!(
+            read(
+                &repository,
+                Arc::clone(&runtime),
+                &cancel,
+                "created-elsewhere.txt",
+            )
+            .await,
+            "winner"
         );
         runtime.shutdown().await;
     }

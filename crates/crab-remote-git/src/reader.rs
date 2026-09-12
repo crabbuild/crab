@@ -193,7 +193,7 @@ impl RemoteGitReader {
                     });
                 }
             }
-            (!preferred.is_empty()).then_some(preferred)
+            Some(preferred)
         } else {
             None
         };
@@ -3300,7 +3300,7 @@ mod tests {
             Some([tail_inventory]),
             ReaderLimits::default(),
             Arc::clone(&runtime),
-            identity,
+            identity.clone(),
             1,
         )
         .expect("reader");
@@ -3319,6 +3319,32 @@ mod tests {
             .await
             .expect("catalog and tail miss");
         assert!(matches!(misses.as_slice(), [GitObjectLookup::Miss]));
+
+        let exact_reader = RemoteGitReader::from_pinned_with_preferred_pack_indexes(
+            Store::new(Arc::clone(&store)),
+            "org/repo",
+            [base_inventory],
+            Some([]),
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .expect("exact catalog reader");
+        let exact_misses = exact_reader
+            .lookup_batch_for_read(
+                &session,
+                &vec![[4; 20]; PACK_INDEX_LOOKUP_MIN_OBJECTS],
+                &budget,
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("exact catalog miss");
+        assert!(
+            exact_misses
+                .iter()
+                .all(|lookup| matches!(lookup, GitObjectLookup::Miss))
+        );
         session.close().await.expect("close catalog reader");
         runtime.shutdown().await;
     }

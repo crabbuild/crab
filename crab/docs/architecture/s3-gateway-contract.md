@@ -391,8 +391,9 @@ runs alone because its durable plan receipt owns an independent exactly-once
 outcome. A competing process is serialized by the object-store ref lease; the
 losing bounded batch is rebuilt against the winning tip.
 The process retains at most 256 warm branch queues and may reuse materialized
-Git directory state and the S3 attribute manifest optimistically. Publication
-revalidates the cached parent while holding the object-store ref lease; a tip
+Git directory state and the S3 attribute manifest optimistically. The owner
+revalidates the cached parent while holding the object-store ref lease before
+publishing a commit or returning a prepared no-op or precondition result; a tip
 mismatch discards the preparation and rebuilds against the winning snapshot.
 Warm state has a shared 128 MiB process budget. Idle branches remain reusable
 below the eviction watermark and yield state under memory pressure. Capacity
@@ -426,7 +427,8 @@ remain continuous. Read views bind the newest catalog whose immutable pack
 inventory is proven to be a subset of their pinned snapshot and search the
 remaining pack tail for newer objects. Their combined coverage is exhaustive, so
 a combined miss is definitive; complete pack-index scans remain only when no
-catalog inventory can be proven as a subset. Full commit-graph work still waits
+catalog inventory can be proven as a subset or the derived catalog cannot open.
+Full commit-graph work still waits
 for a five-second quiet window.
 Maintenance failure never changes an already acknowledged mutation and the next
 cadence retries from durable journal state.

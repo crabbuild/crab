@@ -6,7 +6,9 @@ use crab_metadata::git_object_locator::{
     GitLocatorCoverage, GitObjectCatalogIdentity, GitObjectLocatorSession, GitObjectLookup,
     GitPackInventoryEntry,
 };
-use crab_metadata::manifest_store::{read_bulk_pack_list, read_manifest};
+use crab_metadata::manifest_store::{
+    read_bulk_pack_list, read_bulk_pack_list_with_limit, read_manifest,
+};
 use crab_metadata::ref_journal::{list_active_transactions, materialize_ref_journal};
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
@@ -1313,13 +1315,31 @@ async fn snapshot_catalog_tail(
             return Ok(None);
         }
     };
-    let base = read_bulk_pack_list(
-        layout.store(),
-        layout,
-        &identity.pack_index_hash.to_string(),
-    )
-    .await?;
-    let base = parse_inventory(&base)?;
+    let maximum_base_packs = u64::try_from(complete.len()).unwrap_or(u64::MAX);
+    let catalog_pack_index_hash = identity.pack_index_hash.to_string();
+    let base = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(Error::Cancelled),
+        result = read_bulk_pack_list_with_limit(
+            layout.store(),
+            layout,
+            &catalog_pack_index_hash,
+            maximum_base_packs,
+        ) => match result {
+            Ok(base) => base,
+            Err(error) => {
+                tracing::warn!(%error, "snapshot lookup catalog inventory unavailable; using immutable pack indexes");
+                return Ok(None);
+            }
+        }
+    };
+    let base = match parse_inventory(&base) {
+        Ok(base) => base,
+        Err(error) => {
+            tracing::warn!(%error, "snapshot lookup catalog inventory is invalid; using immutable pack indexes");
+            return Ok(None);
+        }
+    };
     if base
         .iter()
         .any(|(pack_id, entry)| complete.get(pack_id) != Some(entry))
@@ -2097,6 +2117,44 @@ mod tests {
         .expect("snapshot");
         snapshot.journal.packs[0].pack_id = "44".repeat(32);
         snapshot.journal.packs[0].content_hash = "44".repeat(32);
+        let runtime = Arc::new(RemoteGitRuntime::default());
+
+        let repository = RemoteGitRepository::from_snapshot_with_catalog_tail(
+            fixture.layout.clone(),
+            &snapshot,
+            RepositoryIdentity::new("memory", fixture.layout.repo_prefix(), 1).expect("identity"),
+            Arc::clone(&runtime),
+            RepositoryOptions::default(),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("canonical snapshot fallback");
+
+        assert!(repository.state.lookup_catalog_identity.is_none());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_overlay_falls_back_when_catalog_inventory_is_unavailable() {
+        let fixture = open_fixture(1, Some(1)).await;
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&fixture.store, &fixture.layout)
+            .await
+            .expect("layout");
+        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+            &fixture.store,
+            &fixture.layout,
+        )
+        .await
+        .expect("snapshot");
+        let catalog_inventory = fixture.layout.repo_path(&format!(
+            "metadata/pack/indexes/{}.json",
+            fixture.manifest.pack_index_hash
+        ));
+        fixture
+            .backend
+            .delete(&catalog_inventory)
+            .await
+            .expect("remove catalog inventory");
         let runtime = Arc::new(RemoteGitRuntime::default());
 
         let repository = RemoteGitRepository::from_snapshot_with_catalog_tail(

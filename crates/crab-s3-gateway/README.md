@@ -169,7 +169,8 @@ Multi-delete retains one result and commit per successful entry; grouping never
 makes the whole request atomic. A process-local, 128 MiB warm-state budget may
 retain the exact-tip Git directories and S3 attribute manifest between batches.
 The cached parent is revalidated while holding the object-store ref lease before
-publication. It is discarded on a tip mismatch, restart, or memory-pressure
+publishing a commit or returning a prepared no-op or precondition result. It is
+discarded on a tip mismatch, restart, or memory-pressure
 eviction; idle branch state remains reusable below the shared watermark. Object
 storage remains the authority and a cold request reconstructs the same state from
 immutable repository objects. Unborn branches skip catalog access and recheck
