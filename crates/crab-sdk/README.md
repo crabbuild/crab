@@ -1,7 +1,7 @@
 # Crab SDK for Rust
 
 [![Rust SDK](https://github.com/crabbuild/crab/actions/workflows/sdk.yml/badge.svg)](https://github.com/crabbuild/crab/actions/workflows/sdk.yml)
-[![MSRV](https://img.shields.io/badge/MSRV-1.91-blue)](https://github.com/crabbuild/crab/blob/main/Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.97-blue)](https://github.com/crabbuild/crab/blob/main/Cargo.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](../../LICENSE)
 
 `crab-sdk` is the asynchronous Rust client for Crab repositories. One `Client`
@@ -28,7 +28,7 @@ crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", defaul
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-The minimum supported Rust version is 1.91.
+The minimum supported Rust version is 1.97.
 
 ## Feature flags
 

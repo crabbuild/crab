@@ -122,7 +122,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target-dir", type=Path, required=True)
-    parser.add_argument("--toolchain", default="1.91.1")
+    parser.add_argument("--toolchain", default="1.97.0")
     parser.add_argument("--allow-dirty", action="store_true")
     args = parser.parse_args()
     output = args.output.resolve()

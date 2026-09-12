@@ -31,7 +31,7 @@ members = [
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/crabbuild/crab"
-rust-version = "1.91"
+rust-version = "1.97"
 
 [workspace.dependencies]
 crab-auth = { version = "=0.1.0", path = "crates/crab-auth", default-features = false }
