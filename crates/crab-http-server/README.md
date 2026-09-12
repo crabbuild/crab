@@ -68,7 +68,7 @@ and a canonical HTTPS origin. For container deployment, use the
 | Configure identity, membership, sessions, and protection | [Team sign-in](REFERENCE.md#team-sign-in) |
 | Clone and fetch with scoped Git tokens | [Git HTTP reads](REFERENCE.md#git-http-reads) |
 | Transfer LFS objects | [Git LFS](REFERENCE.md#git-lfs-transfers) |
-| Push, handle uncertain publication, and inspect limits | [Native push](REFERENCE.md#native-git-push), [write design](WRITE-DESIGN.md) |
+| Push, handle uncertain publication, and inspect limits | [Native push](REFERENCE.md#native-git-push), [write design](DESIGN.md) |
 | Work on issues, pull requests, reviews, or merges | [Collaboration](REFERENCE.md#issues-pull-requests-and-reviews) |
 | Report CI results or enforce merge checks | [Statuses and checks](REFERENCE.md#commit-statuses-and-required-checks) |
 
