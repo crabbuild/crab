@@ -37,7 +37,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{- define "crab-http-server.image" -}}
-{{- printf "%s@%s" (required "image.repository is required" .Values.image.repository) (required "image.digest is required" .Values.image.digest) }}
+{{- $repository := required "image.repository is required" .Values.image.repository -}}
+{{- if contains "@" $repository -}}
+{{- fail "image.repository must not contain a digest; set image.digest separately" -}}
+{{- end -}}
+{{- if contains ":" (last (splitList "/" $repository)) -}}
+{{- fail "image.repository must not contain a tag; set image.digest instead" -}}
+{{- end -}}
+{{- printf "%s@%s" $repository (required "image.digest is required" .Values.image.digest) }}
 {{- end }}
 
 {{- define "crab-http-server.configMapName" -}}

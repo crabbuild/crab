@@ -117,6 +117,20 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set image.repository=registry.example.com/crab-http-server:latest \
+              >/dev/null 2>&1; then
+            echo "chart accepted a mutable image tag" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
+              --set image.repository=registry.example.com/crab-http-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+              >/dev/null 2>&1; then
+            echo "chart accepted a digest in image.repository" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" --values "${values}" \
               --set config.existingConfigMap=another-config \
               >/dev/null 2>&1; then
             echo "chart accepted two configuration sources" >&2
