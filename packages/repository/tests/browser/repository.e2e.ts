@@ -47,7 +47,12 @@ async function routePreviewFiles(
   page: Page,
   files: Record<
     string,
-    { text: string | null; bytes: Uint8Array; textTruncated?: boolean }
+    {
+      text: string | null;
+      bytes: Uint8Array;
+      size?: number;
+      textTruncated?: boolean;
+    }
   >,
 ) {
   await page.route("**/api/repos/team/project/file?*", async (route) => {
@@ -59,7 +64,7 @@ async function routePreviewFiles(
     return route.fulfill({
       json: {
         oid,
-        size: file.bytes.byteLength,
+        size: file.size ?? file.bytes.byteLength,
         mode: "100644",
         classification: "OrdinaryGit",
         text: file.text,
@@ -73,9 +78,35 @@ async function routePreviewFiles(
       ([name]) => pathHex(name) === path,
     )?.[1];
     if (!file) return route.fallback();
+    const range = route.request().headers()["range"];
+    if (range) {
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+      if (!match) return route.fulfill({ status: 416 });
+      const start = Number(match[1]);
+      const end = Math.min(
+        match[2] ? Number(match[2]) + 1 : file.bytes.byteLength,
+        file.bytes.byteLength,
+      );
+      return route.fulfill({
+        status: 206,
+        body: Buffer.from(file.bytes.slice(start, end)),
+        contentType: "application/octet-stream",
+        headers: {
+          "accept-ranges": "bytes",
+          "content-range": `bytes ${start}-${end - 1}/${file.bytes.byteLength}`,
+        },
+      });
+    }
     return route.fulfill({
-      body: Buffer.from(file.bytes),
+      body:
+        route.request().method() === "HEAD"
+          ? undefined
+          : Buffer.from(file.bytes),
       contentType: "application/octet-stream",
+      headers: {
+        "accept-ranges": "bytes",
+        "content-length": String(file.bytes.byteLength),
+      },
     });
   });
 }
@@ -1040,7 +1071,11 @@ test("format-aware previews explore data, office files, media, and databases loc
     "diagram.svg": { text: svg, bytes: strToU8(svg) },
     "report.xlsx": { text: null, bytes: workbook },
     "runs.sqlite": { text: null, bytes: sqlite },
-    "features.parquet": { text: null, bytes: parquet },
+    "features.parquet": {
+      text: null,
+      bytes: parquet,
+      size: 5 * 1024 * 1024 * 1024,
+    },
     "batch.arrow": { text: null, bytes: arrow },
     "handbook.pdf": {
       text: null,
@@ -1055,13 +1090,19 @@ test("format-aware previews explore data, office files, media, and databases loc
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("metrics.csv")}&kind=Blob`,
   );
-  await page.getByRole("button", { name: "Preview", exact: true }).click();
-  const csvExplorer = page.getByRole("region", {
-    name: "CSV dataset data explorer",
+  const csvWorkbench = page.getByRole("region", {
+    name: "metrics.csv query workbench",
   });
-  await expect(csvExplorer).toContainText("large");
-  await csvExplorer.getByPlaceholder("Search loaded rows").fill("small");
-  await expect(csvExplorer.getByRole("row")).toHaveCount(2);
+  await expect(csvWorkbench.getByRole("cell", { name: "large" })).toBeVisible();
+  await csvWorkbench
+    .getByRole("textbox", { name: "SQL query" })
+    .fill("SELECT model, score FROM data WHERE score > 0.95");
+  await csvWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(csvWorkbench.getByRole("cell", { name: "0.98" })).toBeVisible();
+  await csvWorkbench.getByRole("button", { name: "Chart" }).click();
+  await expect(
+    csvWorkbench.getByRole("region", { name: "Query result chart" }),
+  ).toBeVisible();
   await expectNoAccessibilityViolations(page);
 
   await page.goto(
@@ -1095,9 +1136,14 @@ test("format-aware previews explore data, office files, media, and databases loc
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("features.parquet")}&kind=Blob`,
   );
-  await expect(
-    page.getByRole("region", { name: "Parquet dataset data explorer" }),
-  ).toContainText("0.91");
+  const parquetWorkbench = page.getByRole("region", {
+    name: "features.parquet query workbench",
+  });
+  await expect(parquetWorkbench).toContainText("5.00 GB");
+  await expect(parquetWorkbench).toContainText("2 source rows");
+  await parquetWorkbench.getByRole("button", { name: "Count rows" }).click();
+  await parquetWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(parquetWorkbench.getByRole("cell", { name: "2" })).toBeVisible();
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("batch.arrow")}&kind=Blob`,

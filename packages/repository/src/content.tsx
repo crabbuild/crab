@@ -84,9 +84,7 @@ function changePanelId(pathHex: string) {
 
 export function FileView({ repo, rev, path, name, theme, write }: Props) {
   const preview = previewDescriptor(name);
-  const previewFirst =
-    preview !== null &&
-    !["markdown", "delimited", "json"].includes(preview.kind);
+  const previewFirst = preview !== null && preview.kind !== "markdown";
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev, path_hex: path }),
   );

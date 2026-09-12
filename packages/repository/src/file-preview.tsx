@@ -1,12 +1,17 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Spinner } from "@primer/react";
 import type { Repository } from "./api";
 import { DataTable } from "./data-explorer";
 import { RepositoryMarkdown } from "./repository-markdown";
 import {
   extension,
-  parseDelimited,
-  parseJsonTable,
   parseSafetensors,
   type PreviewDescriptor,
 } from "./file-preview-model";
@@ -19,7 +24,6 @@ import {
   loadArrow,
   loadGguf,
   loadNumpy,
-  loadParquet,
   loadSqlite,
   type DatabasePreview,
 } from "./file-preview-loaders";
@@ -27,6 +31,11 @@ import { PdfPreview } from "./pdf-preview";
 import { GenericFilePreview } from "./generic-file-preview";
 
 const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
+const DataWorkbench = lazy(() =>
+  import("./data-workbench").then((module) => ({
+    default: module.DataWorkbench,
+  })),
+);
 
 type Props = {
   descriptor: PreviewDescriptor;
@@ -106,30 +115,6 @@ function PreviewNotice({
       {children}
     </div>
   );
-}
-
-function TextDataPreview({
-  descriptor,
-  name,
-  text,
-}: Pick<Props, "descriptor" | "name" | "text">) {
-  try {
-    const data =
-      descriptor.kind === "delimited"
-        ? parseDelimited(text ?? "", extension(name) === "tsv" ? "\t" : ",")
-        : parseJsonTable(
-            text ?? "",
-            ["jsonl", "ndjson"].includes(extension(name)),
-          );
-    return <DataTable data={data} name={descriptor.label} />;
-  } catch (error) {
-    return (
-      <PreviewNotice error>
-        <strong>This file could not be parsed as {descriptor.label}.</strong>
-        <p>{error instanceof Error ? error.message : "The data is invalid."}</p>
-      </PreviewNotice>
-    );
-  }
 }
 
 type Notebook = {
@@ -499,13 +484,11 @@ function StructuredBinaryPreview({
       </AsyncValue>
     );
   const loader =
-    descriptor.kind === "parquet"
-      ? () => loadParquet(bytes)
-      : descriptor.kind === "arrow"
-        ? () => loadArrow(bytes)
-        : descriptor.kind === "numpy"
-          ? () => loadNumpy(bytes, name)
-          : () => archiveInventory(bytes, extension(name));
+    descriptor.kind === "arrow"
+      ? () => loadArrow(bytes)
+      : descriptor.kind === "numpy"
+        ? () => loadNumpy(bytes, name)
+        : () => archiveInventory(bytes, extension(name));
   return (
     <AsyncValue cacheKey={`${descriptor.kind}:${name}`} load={loader}>
       {(value) => <DataTable data={value} name={descriptor.label} />}
@@ -587,16 +570,26 @@ export function FilePreview(props: Props) {
         text={props.text}
       />
     );
-  if (
-    ["delimited", "json"].includes(props.descriptor.kind) &&
-    props.text !== null
-  )
+  if (["delimited", "json", "parquet"].includes(props.descriptor.kind)) {
+    const fileExtension = extension(props.name);
+    const format =
+      props.descriptor.kind === "parquet"
+        ? "parquet"
+        : props.descriptor.kind === "delimited"
+          ? fileExtension === "tsv"
+            ? "tsv"
+            : "csv"
+          : ["jsonl", "ndjson"].includes(fileExtension)
+            ? "jsonl"
+            : "json";
     return (
-      <TextDataPreview
-        descriptor={props.descriptor}
+      <DataWorkbench
+        format={format}
         name={props.name}
-        text={props.text}
+        size={props.size}
+        url={props.blobUrl}
       />
     );
+  }
   return <BinaryPreview {...props} />;
 }

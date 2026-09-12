@@ -1,7 +1,6 @@
 import {
   extension,
   parseNumpyHeader,
-  tableFromValues,
   type TableData,
 } from "./file-preview-model";
 import { unzipSelected } from "./file-preview-office";
@@ -49,31 +48,6 @@ export async function loadSqlite(bytes: Uint8Array): Promise<DatabasePreview> {
   } finally {
     database.close();
   }
-}
-
-export async function loadParquet(bytes: Uint8Array): Promise<TableData> {
-  const [{ parquetMetadataAsync, parquetReadObjects }, { compressors }] =
-    await Promise.all([import("hyparquet"), import("hyparquet-compressors")]);
-  const file = bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  ) as ArrayBuffer;
-  const metadata = await parquetMetadataAsync(file);
-  const totalRows = Number(metadata.num_rows);
-  const rows = await parquetReadObjects({
-    file,
-    compressors,
-    rowStart: 0,
-    rowEnd: Math.min(totalRows, 500),
-  });
-  return {
-    ...tableFromValues(rows),
-    totalRows,
-    note:
-      totalRows > rows.length
-        ? `Showing ${rows.length.toLocaleString()} of ${totalRows.toLocaleString()} rows.`
-        : undefined,
-  };
 }
 
 export async function loadArrow(bytes: Uint8Array): Promise<TableData> {
