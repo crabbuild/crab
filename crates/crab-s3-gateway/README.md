@@ -1,346 +1,363 @@
 # Crab S3 gateway
 
-`crab-s3-gateway` presents configured Crab repositories as S3 buckets. Existing
-S3 clients use their normal endpoint, region, access-key, and secret-key
-configuration. Object keys use `REF/path`, for example
-`s3://my-repository/main/data/model.bin`.
+`crab-s3-gateway` exposes configured [Crab](https://crab.build)
+repositories through the S3 REST API. Applications keep using their existing
+S3 operations and configure the gateway endpoint, region, and credentials.
 
-The gateway accepts S3 SigV4 header signing and presigned-query URLs, plus
-legacy SigV2 header and presigned-query authentication, through `s3s`. It maps
-each access key to a Crab principal and authorizes that principal against the
-logical repository catalog. Gateway credentials may be long-lived or configured
-temporary SigV4 credential triples. Temporary credentials require a protected
-session-token file and an RFC 3339 expiry; missing, wrong, unsigned, duplicate,
-or expired tokens fail before repository authorization. The gateway does not
-issue or refresh STS credentials and does not support SigV4a. Client credentials
-remain independent of the cloud credentials used for the backing object store.
-HMAC-signed SigV4 streaming requests verify every chained chunk before
-publication. Their `aws-chunked` transport encoding is removed from stored
-object metadata, matching S3; any accompanying application encoding remains.
+```text
+S3 client  ->  crab-s3-gateway  ->  Crab repository  ->  S3, GCS, or Azure
+                  |                       |
+             S3 auth and API        Git history and
+             compatibility          Xet deduplication
+```
 
-The client-compatible surface includes bucket listing/head/location/versioning
-discovery, object GET/HEAD/PUT/DELETE/COPY/attributes/tagging, V1/V2 object
-listing, multi-delete, and durable multipart create/upload/copy/list/abort/complete.
-GET/HEAD support conditions, checksum mode, and a single byte range. PUT,
-single-object DELETE, and multipart completion support atomic strong `If-Match`;
-PUT and multipart completion also support `If-None-Match: *` writes.
-Content-MD5 and modeled S3 checksum headers are validated and persisted. XML
-tagging and multi-delete bodies require either Content-MD5 or a modeled
-checksum header, matching current official SDK request shapes.
-multipart full-object and composite checksum profiles are returned by object
-and part inspection APIs. Path-style addressing is always available. Set
-`endpoint_domain` to also accept virtual-hosted requests. Single PUTs and
-multipart parts support up to 5 GiB, and multipart completion supports S3's
-50 TB object limit. Explicit `STANDARD` storage-class hints and the
-`RestoreStatus` listing hint are accepted. Empty trailing-slash PUT and DELETE
-requests are treated as validated virtual directory hints for filesystem
-clients; they do not create marker blobs because Git trees represent
-directories.
-Each UploadPart transfer uses a unique immutable backend object. A successful
-replacement reclaims the prior unreferenced payload, while a registration that
-loses to Abort or completion reclaims only its own payload. This prevents
-same-part concurrency from deleting the winning bytes or accumulating every
-replaced version.
-Each repository has a bounded durable slot catalog shared by every gateway
-instance. `max_active_multipart_uploads` caps non-terminal sessions,
-`multipart_staging_bytes_per_upload` independently caps registered part bytes
-and the combined bytes of reserved in-flight transfers plus retired replacement
-payloads awaiting deletion, and
-`multipart_upload_ttl_seconds` persists the Open-session expiry chosen when the
-upload starts. The defaults are 1,024 sessions, S3's 50 TB object ceiling, and
-seven days. Every instance serving the same repository must use the same three
-values. During a same-number replacement burst, physical temporary storage can
-therefore reach twice the configured per-upload budget, but a process crash
-cannot create unaccounted payloads. Transfers stop at the persisted session
-expiry. A once-per-minute reconciler aborts expired Open sessions, retries terminal
-cleanup, reclaims stalled transfer reservations after a ten-minute provider-drain
-grace period, and reclaims expired slots whose process died before writing the
-session record. A terminal session retains its distributed slot until every
-reserved transfer is cleaned, preventing a late backend write from escaping
-quota accounting. For a frozen Completing session, the reconciler reads only
-the current object's Git-bound attributes or resolves its deterministic
-ref-journal publication plan,
-then closes the session only when durable evidence proves that publication
-succeeded. Plan evidence remains valid after a later write replaces the object.
-A session without committed evidence remains fenced for an identical client
-retry.
-The reconciler walks the repository catalog in four-entry batches and streams
-completion recovery with bounded concurrency, so it does not retain a full
-catalog snapshot or a second queue of per-repository results.
+Each logical S3 bucket maps to one configured Crab repository. An object key
+selects a Git ref and a repository path:
 
-Repositories written by older Crab builds may not have the verified Git
-visibility evidence required by current background readability maintenance. If
-the gateway reports that visibility repair is required, run `crab fsck
---repair` against the same repository to backfill historical generations, then
-run `crab metadb owner --once` to fully verify and publish the current
-catalog-bound proof. A repaired self-contained proof remains usable for
-integrity checks after an older catalog checkpoint retires; current accelerated
-Git reads still require the owner-published catalog-bound proof. The gateway
-deliberately does not infer this proof from unverified objects inside a request
-or background sweep. New gateway writes carry their own immutable visibility
-evidence and continue the repaired proof.
+```text
+s3://<logical-repository>/<ref>/<path>
+s3://analytics/main/tables/events.parquet
+```
 
-Large payloads use bounded-memory request spools and Crab's verified LFS content
-path. Multipart completion keeps objects through 64 MiB in a local spool. Above
-that threshold it hashes and validates the durable selected parts, then replays
-them directly into LFS without assembling the logical object on local disk.
-The pointer commit atomically adds an exact, same-directory LFS tracking rule,
-so Git clones materialize gateway-authored large objects without local attribute
-workarounds. LFS publication chooses an aligned backend part size from the final
-object length, keeping every supported multipart object within its provider's
-part-count and part-size limits. S3 uses at most 10,000 5 GiB parts, GCS uses at
-most 10,000 5 GiB parts and caps objects at 5 TiB, and Azure uses at most 50,000
-4,000 MiB blocks. Parts above the normal retained-payload budget upload
-synchronously rather than retaining two multi-gigabyte payloads.
-Successful publication records the provider's completion validator, so later
-range requests bind to the verified object version without rehashing the whole
-object for every slice.
-Objects already stored as Crab/Xet pointers retain Xet deduplication: partial
-GET and copy-source ranges limit reconstruction to overlapping Xet chunks and
-partial GET streams selected bytes through one bounded backpressure slot and
-cancels reconstruction on disconnect without response-sized scratch. Copy-source
-ranges still use bounded temporary storage because publication requires a fully
-verified source before mutation. Low-coverage cold reads fetch bounded xorb
-ranges; the cache may fetch a complete verified xorb for high-coverage reads.
-Complete GETs retain whole-file verification through a bounded stream and report
-success only after its terminal chunk is verified. Legacy
-Crab and LFS pointers project their content digest as an opaque ETag, so HEAD,
-listings, conditions, and range admission do not hydrate object payloads.
-Every process uses one cache instance shared by all configured repositories.
-The required `[cache]` section supplies an absolute writable directory and a
-positive `max_bytes` retention ceiling; startup proves descriptor-relative
-publish and removal and initializes the cache catalog before opening the
-listener. Keep this cache on a private volume separate from request scratch so
-eviction and upload admission do not compete for the same free-space signal.
-The complete frozen surface and deliberate exclusions are in the protocol
-contract linked below.
+Reads can address branches, tags, or complete commit IDs. Writes publish a Git
+commit immediately and are accepted only on writable branches.
 
-## Read and write performance model
+## When to use it
 
-Requests share immutable repository read views keyed by the compacted generation
-and committed journal state. Ref snapshots, parsed Git trees, and S3 attributes
-are singleflight-cached inside that view. HEAD and attributed LIST requests use
-the committed size and ETag without opening blob payloads. Object LIST pages
-seek from the requested prefix and continuation in canonical complete-path byte
-order, visit only enough tree entries for `MaxKeys` plus one lookahead, and
-collapse delimiter subtrees before descent. Page cost therefore does not scale
-with every preceding or following object in the repository.
-Legacy Git commits can contain paths outside the S3 key profile; LIST filters
-those blobs and delimiter groups before emitting a page, while prefixes naming
-invalid path components fail as `InvalidArgument`. Continuation scanning keeps
-the same bounded page/lookahead allocation while advancing past filtered raw
-tree entries.
-The in-memory singleflight maps clear at bounded entry counts, so a long-lived
-read generation cannot grow with the number of distinct refs and object paths
-served through it.
-The attribute loader projects each emitted object to ETag, size, and modification
-time before retaining the page, so multipart part/checksum metadata cannot make a
-large object listing grow with historical upload detail.
-Root branch-prefix listings retain only the `MaxKeys + 1` smallest encoded
-prefixes while scanning the immutable ref catalog, preserving S3 order and
-pagination without duplicating every branch name for large repositories.
-Multipart-upload listings scan the bounded durable slot catalog with bounded
-concurrency and retain only the metadata needed for the current S3 page; the
-recorded part payload map is released before the next listing decision.
+Use the gateway when an application already speaks S3 but the data should live
+in a versioned, deduplicated Crab repository. The gateway is designed for data
+tools, SDKs, and services that need ordinary object operations, listings, byte
+ranges, checksums, conditional writes, or multipart uploads.
 
-The per-process `max_in_flight_requests` budget is split into reserved control,
-read, and transfer pools so large uploads cannot starve bucket discovery,
-metadata, or range reads. Each pool admits a bounded FIFO burst for up to 60
-seconds before returning S3 `SlowDown` with `Retry-After: 1`; request bodies are
-not consumed while waiting. Standard S3 SDK retry policies handle this response;
-custom clients should retry with exponential backoff and jitter. The default
-budget is 32 and should be tuned from measured CPU, memory, file-descriptor, and
-scratch usage rather than client fanout alone. The S3 listener also caps live
-TCP connections at four times this request budget, while a separate 16-connection
-management reserve keeps probes available during S3 connection pressure; excess
-connections are closed before spawning a task. The transport parser accepts at
-most 128 HTTP/1 headers with a 128 KiB buffer and a 30-second header-read
-deadline; HTTP/2 is limited to 64 concurrent streams and a 128 KiB header list,
-with a 30-second keep-alive ping and a 10-second acknowledgement deadline. Each
-XML operation that `s3s` buffers, including multipart completion, is also bounded
-by the 60-second request-body idle timeout; streamed object and part uploads keep
-their existing body timeout and backpressure path. Object response streams also
-use a 60-second per-frame idle timeout: a stalled provider or Xet reconstruction
-releases read admission and is dropped, while a continuously producing large
-download has no total-transfer deadline.
-PutObject, UploadPart, and copied source range uses a request-local temporary
-file. Large multipart completion rereads durable parts instead of creating an
-additional full-object spool, so its local scratch does not scale with the
-assembled object size. Deployments must still place `TMPDIR` on
-capacity-managed scratch storage sized for concurrent request bodies. The
-gateway atomically reserves declared bodies before reading them and reserves
-unknown streams in bounded increments. Xet reconstructions that materialize
-local files and generated Git packs share the same process-wide capacity gate;
-partial Xet GETs use bounded in-memory backpressure instead. The gate retains
-10% of the filesystem outside reservations, with a 64 MiB minimum and 1 GiB
-maximum, and returns retryable S3 `SlowDown` before admitted work can consume
-that headroom.
-Give each replica its own scratch mount; reservations are process-local while
-filesystem probes account for already materialized bytes from every writer.
-Registered multipart staging is bounded by the configured active-slot count
-times the per-upload byte budget. Transfers that have not registered yet add at
-most one 5 GiB payload per admitted transfer request; the transfer admission
-pool bounds that crash window. An interrupted replacement can retain its
-superseded immutable payload until the upload completes, aborts, or expires.
+The gateway is not an AWS control-plane emulator. It intentionally does not
+create buckets, manage IAM or bucket policies, issue STS credentials, or expose
+AWS bucket version IDs. Git history remains the version model. See the
+[protocol contract](../../crab/docs/architecture/s3-gateway-contract.md) for
+the exact supported and excluded surface.
 
-Each mutation rewrites only the target path's ancestor trees and persists one
-path-local attribute delta. Immutable pack, index, visibility, and attribute
-artifacts are prepared and uploaded before the destination ref lease; the lease
-contains only branch revalidation and journal publication. Same-ref requests are
-admitted through a bounded FIFO queue, while different refs may prepare in
-parallel. A new write cancels maintenance that is still in the idle debounce.
-Once a pass starts canonical publication, it drains across the manifest,
-catalog, and visibility boundary; a write that arrives during that pass is
-coalesced into a follow-up pass. Successful journal publication is immediately
-readable by the gateway; catalog compaction and commit-graph maintenance continue
-after the write burst becomes idle. This prevents cancellation from leaving an
-intermediate manifest generation without its verified visibility proof.
+## Quick start with Docker Compose
 
-Run `crab metadb owner` as one continuously supervised worker for each backing
-repository. The owner performs bounded geometric repack outside request
-acknowledgement, along with catalog, visibility, and commit-graph maintenance.
-Monitor its `geometric_repack_packs`, `action`, and maintenance byte fields; a
-persistently nonzero candidate count means the worker is absent, repeatedly
-deferred by its maintenance budget, or failing. `crab repack` remains the
-explicit catch-up command for an already fragmented repository.
+The checked Compose stack runs two gateway instances against an isolated
+RustFS backend. It is a development and qualification environment, not a
+production configuration.
 
-## Build and run
+From the repository root:
 
 ```sh
-cargo build --release -p crab-s3-gateway --locked
-crab-s3-gateway --config /etc/crab/s3-gateway.toml --initialize
-crab-s3-gateway --config /etc/crab/s3-gateway.toml
-crab-s3-gateway --config /etc/crab/s3-gateway.toml --healthcheck
-crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check
+mkdir -p /path/to/crab-s3-gateway-smoke
+umask 077
+printf '%s' 'gateway-qualification-secret' \
+  > /path/to/crab-s3-gateway-smoke/gateway-secret
+sudo chown 10001:10001 /path/to/crab-s3-gateway-smoke/gateway-secret
+chmod 0600 /path/to/crab-s3-gateway-smoke/gateway-secret
+
+export RUSTFS_ACCESS_KEY=crab
+export RUSTFS_SECRET_KEY=crab
+export CRAB_S3_GATEWAY_IMAGE=crab-s3-gateway:local
+export CRAB_S3_GATEWAY_CONFIG="$PWD/crates/crab-s3-gateway/deploy/compose.gateway.toml"
+export CRAB_S3_GATEWAY_SECRET_FILE=/path/to/crab-s3-gateway-smoke/gateway-secret
+
+docker build \
+  -f crates/crab-s3-gateway/deploy/Dockerfile \
+  -t "$CRAB_S3_GATEWAY_IMAGE" .
+docker compose -f crates/crab-s3-gateway/deploy/compose.yaml up -d rustfs
+```
+
+Create the isolated physical bucket, initialize the Crab repository, and start
+the gateway:
+
+```sh
+AWS_ACCESS_KEY_ID="$RUSTFS_ACCESS_KEY" \
+AWS_SECRET_ACCESS_KEY="$RUSTFS_SECRET_KEY" \
+AWS_DEFAULT_REGION=us-east-1 \
+aws --endpoint-url http://127.0.0.1:19000 s3api create-bucket \
+  --bucket crab-s3-gateway-qualification
+
+docker compose -f crates/crab-s3-gateway/deploy/compose.yaml \
+  --profile initialize run --rm gateway-init
+docker compose -f crates/crab-s3-gateway/deploy/compose.yaml up -d gateway
+docker compose -f crates/crab-s3-gateway/deploy/compose.yaml exec gateway \
+  crab-s3-gateway --config /etc/crab/s3-gateway.toml --readiness-check
+```
+
+The S3 endpoint is now `http://127.0.0.1:18080`. Use logical bucket
+`gateway-repository`, region `us-east-1`, access key `gateway-qualification`,
+secret `gateway-qualification-secret`, and path-style addressing.
+
+```sh
+AWS_ACCESS_KEY_ID=gateway-qualification \
+AWS_SECRET_ACCESS_KEY=gateway-qualification-secret \
+AWS_DEFAULT_REGION=us-east-1 \
+aws --endpoint-url http://127.0.0.1:18080 \
+  s3 cp ./example.parquet s3://gateway-repository/main/data/example.parquet
+```
+
+The [Compose qualification guide](deploy/README.md) covers the second gateway,
+multipart recovery, metrics, retained evidence, workload tests, and safe
+teardown.
+
+## Configure a client
+
+Configure clients with four values:
+
+- endpoint: the gateway's S3 listener
+- region: the gateway's configured `region`
+- access key and secret: a gateway credential, not backend cloud credentials
+- addressing style: path-style, unless `endpoint_domain` and wildcard DNS/TLS
+  are configured for virtual-hosted requests
+
+For example, Boto3 needs no Crab-specific adapter:
+
+```python
+import boto3
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url="http://127.0.0.1:18080",
+    region_name="us-east-1",
+    aws_access_key_id="gateway-qualification",
+    aws_secret_access_key="gateway-qualification-secret",
+)
+
+s3.put_object(
+    Bucket="gateway-repository",
+    Key="main/data/example.json",
+    Body=b'{"ready":true}\n',
+    ContentType="application/json",
+)
+
+response = s3.get_object(
+    Bucket="gateway-repository",
+    Key="main/data/example.json",
+    Range="bytes=0-14",
+)
+print(response["Body"].read())
+```
+
+Temporary SigV4 credentials also require the configured session token. The
+gateway accepts SigV4 headers, presigned SigV4 queries, signed streaming
+uploads, and legacy SigV2 headers and queries. It does not support SigV4a or
+issue/refresh STS credentials.
+
+## Namespace and Git behavior
+
+One configured repository is one logical bucket. Its backing provider bucket
+and prefix are never returned to clients.
+
+The first key component selects a ref:
+
+| Key | Meaning | Writable |
+| --- | --- | --- |
+| `main/path/file` | Branch `refs/heads/main` | Yes, unless protected |
+| `feature%2Fdata/path/file` | Branch `refs/heads/feature/data` | Yes, unless protected |
+| `refs%2Ftags%2Fv1/path/file` | Tag `refs/tags/v1` | No |
+| `<40-hex-commit>/path/file` | Exact Git commit | No |
+
+An empty listing prefix returns the authorized branch prefixes. Reads pin one
+commit for a consistent view. Each successful PUT, COPY, single DELETE, or
+completed multipart upload publishes one commit. Multi-delete reports and
+publishes its entries individually.
+
+Keys must be valid UTF-8 paths that Git trees can represent without loss. The
+gateway rejects ambiguous or unsafe components such as empty segments, `.`,
+`..`, and `.git`. Empty trailing-slash PUT and DELETE requests are accepted as
+virtual directory hints but are not stored as marker objects.
+
+## S3 compatibility
+
+The supported data-plane surface includes:
+
+| Area | Operations and behavior |
+| --- | --- |
+| Bucket discovery | `ListBuckets`, `HeadBucket`, `GetBucketLocation`, `GetBucketVersioning` |
+| Objects | `GetObject`, `HeadObject`, `PutObject`, `DeleteObject`, `CopyObject`, `GetObjectAttributes` |
+| Listings | `ListObjects`, `ListObjectsV2`, delimiter and continuation semantics |
+| Metadata | user metadata, standard content headers, tagging, ETags, modeled checksums |
+| Conditions | read conditions; strong `If-Match`; `If-None-Match: *` where documented |
+| Ranges | one open, closed, or suffix byte range; multipart part-number reads |
+| Batch delete | `DeleteObjects`, including quiet mode and per-key results |
+| Multipart | create, upload, upload-copy, list, abort, and complete with durable recovery |
+
+Single PUTs and multipart parts may be as large as 5 GiB. Completed multipart
+objects may be as large as 50 TB, subject to the backing provider's own object
+and multipart limits. Checksums are validated before publication. Unsupported
+modeled fields fail explicitly rather than being silently ignored.
+
+Notable exclusions include bucket creation/deletion, ACLs, bucket policies,
+AWS version IDs, browser POST policies, Select, object lock, retention,
+replication, notifications, and server-side-encryption request headers. The
+[protocol contract](../../crab/docs/architecture/s3-gateway-contract.md) is the
+canonical compatibility reference; this README is only an overview.
+
+## Large objects, range reads, and deduplication
+
+Large uploads use bounded temporary spools and Crab's verified LFS path.
+Multipart completion does not assemble objects larger than 64 MiB into a second
+full-size local file; it validates and replays durable parts directly into LFS.
+
+Objects already represented by Crab/Xet keep their deduplication. A byte-range
+GET reconstructs only overlapping Xet chunks and streams the selected bytes
+through bounded backpressure. It does not hydrate the complete logical file or
+create response-sized scratch. Complete GETs retain whole-file verification.
+
+The process uses a required local read cache shared by its configured
+repositories. Put the cache on a private, capacity-limited volume separate from
+request scratch. Cache contents are disposable; Crab repository state remains
+authoritative.
+
+## Configuration
+
+Start from [`deploy/gateway.example.toml`](deploy/gateway.example.toml). A
+minimal configuration defines:
+
+- separate S3 and private management listeners
+- a region and per-process request budget
+- an absolute cache directory and retention limit
+- access keys mapped to Crab principals, with secrets read from protected files
+- logical repositories, backing placements, member access, protected branches,
+  and durable multipart limits
+
+```toml
+listen = "0.0.0.0:8080"
+management_listen = "0.0.0.0:8081"
+region = "us-east-1"
+max_in_flight_requests = 32
+
+[cache]
+directory = "/var/lib/crab/cache-volume/cache"
+max_bytes = 2147483648
+
+[[credentials]]
+access_key = "issued-access-key"
+secret_key_file = "/run/secrets/crab-s3-secret"
+principal = "service-account:analytics"
+
+[[repositories]]
+name = "analytics"
+provider = "s3"
+bucket = "physical-storage-bucket"
+prefix = "repositories/analytics"
+default_branch = "main"
+protected_branches = ["release"]
+
+[[repositories.members]]
+principal = "service-account:analytics"
+access = "write"
+```
+
+Backend access uses Crab's provider credential chain. For S3-compatible
+backends, the shared storage layer recognizes `AWS_ENDPOINT_URL_S3`,
+`AWS_ALLOW_HTTP`, and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`. These backend
+credentials are independent of client-facing gateway credentials.
+
+Secret files must be private to the process owner or effective group. Never put
+secrets on the command line or in the TOML file. Set `endpoint_domain` only
+when deployment DNS and TLS cover its wildcard hosts.
+
+Every gateway instance serving the same repository must use identical
+multipart session, byte-budget, and expiry settings. Run one continuously
+supervised `crab metadb owner` worker per backing repository for catalog,
+visibility, commit-graph, and geometric repack maintenance.
+
+## Initialize and run
+
+Build from the repository root. Keep Cargo artifacts on the mounted workspace
+volume:
+
+```sh
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-s3-gateway \
+  cargo build --release -p crab-s3-gateway --locked
+
+/Volumes/Workspace/crabbuild-target/crab-s3-gateway/release/crab-s3-gateway \
+  --config /etc/crab/s3-gateway.toml --initialize
+/Volumes/Workspace/crabbuild-target/crab-s3-gateway/release/crab-s3-gateway \
+  --config /etc/crab/s3-gateway.toml
 ```
 
 `--initialize` creates missing canonical Crab metadata only for empty configured
-prefixes, then exits. It is safe to run repeatedly. Normal serving never
-initializes or converts repository storage.
+prefixes, then exits. It is idempotent. Normal serving never initializes,
+migrates, or converts repository storage.
 
-The S3 and management listeners are deliberately separate. `GET /livez` on
-`management_listen` reports only that the process can serve requests. `GET
-/readyz` freshly reads and constructs every configured repository's current
-immutable view with bounded four-repository concurrency; it returns `503
-Service Unavailable` with `Retry-After: 5` when any repository is unsafe to
-serve. `GET /metrics` returns Prometheus 0.0.4 text
-for bounded HTTP method/outcome counts, full response-stream duration and
-in-flight requests, response-body errors/aborts, and the bounded response-idle
-timeout subset, plus control/read/transfer admission capacity, queue pressure,
-and outcomes. It also reports aggregate
-multipart-maintenance cycles, completed lifecycle actions, failure reasons,
-cycle duration, and the last cycle in which every configured repository was
-healthy. Per-slot failures make that cycle degraded instead of disappearing
-into a successful sweep. Content-spool, Xet-reconstruction, and generated-pack
-series expose currently owned temporary files and logical reserved bytes,
-cumulative bytes written, and bounded create/write/flush/read failures.
-Ownership remains charged until the spool, response stream, or pack upload
-drops, including cancellation and disconnect.
-Backend series cover the complete logical object-store call and response-stream
-lifetime for GET, HEAD, range, PUT, delete, list, copy, and multipart lifecycle
-operations. They expose fixed success/failure classes, active calls, duration,
-body bytes delivered, and payload bytes accepted by successful writes. These
-are logical Crab transport operations; provider-internal HTTP retries may make
-more wire requests than the counters report. Scratch-filesystem gauges report
-the total, free, and process-available bytes seen at the configured process
-temporary directory on every scrape. A separate probe-success gauge and failure
-counter make mount loss distinguishable from genuine zero capacity; a failed
-probe clears all three capacity gauges rather than retaining stale values.
-Separate headroom, pending-reservation, and bounded rejection series expose
-capacity admission before the filesystem reports an I/O failure.
-Cache series report fixed memory/local/service read attempts by hit, miss, or
-failure; verified bytes returned by each cache layer; and best-effort local
-persistence failures. Per-scrape gauges read aggregate entry, retained,
-reserved, and temporary-byte totals from the existing SQLite catalog without
-walking payload files. Probe health, failures, and last-success time distinguish
-an empty cache from an unavailable or malformed catalog. Concurrent scrapes
-coalesce rather than queue catalog probes.
-Metric labels are fixed enums; they never contain
-repository names, refs, keys, upload IDs, principals, access keys, or secrets.
-The gateway also suppresses protocol-library debug/trace events that contain
-complete signed requests and malformed-body events that contain raw payloads.
-This credential boundary cannot be disabled through `RUST_LOG`; other gateway
-debug logging remains operator-configurable.
-The corresponding CLI checks are suitable for container and orchestration
-probes. The metrics endpoint is unauthenticated by design; scrape it only over
-the private management network and never publish that listener through the S3
-ingress.
+SIGTERM and SIGINT trigger graceful connection draining.
 
-The backing provider uses Crab's existing environment credential chain. Set
-the usual AWS, GCP, or Azure credentials for the selected provider. For an
-S3-compatible endpoint, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, and
-`AWS_VIRTUAL_HOSTED_STYLE_REQUEST` are supported by the shared storage layer.
-Repository placement prefixes are canonicalized with the shared object-store
-path rules at startup; two logical repositories that would resolve to the same
-provider/bucket/prefix are rejected before any listener opens.
+## Health and observability
 
-`endpoint_domain` is the gateway's public host name, without a scheme. When it
-is set, both `https://endpoint.example/repository/key` and
-`https://repository.endpoint.example/key` address the same logical bucket.
-The deployment's DNS and TLS certificate must cover the wildcard host.
+The management listener is intentionally separate and unauthenticated. Keep it
+private.
 
-See `deploy/gateway.example.toml` for configuration and
-`crab/docs/architecture/s3-gateway-contract.md` for the protocol contract.
-For a temporary client credential, add `session_token_file` and `expires_at` to
-the same `[[credentials]]` entry. Both are required together, the token file is
-subject to the same private-permission check as the secret-key file, and the
-process must be rolled before the configured credential expires.
-Terminate with SIGTERM or SIGINT for graceful connection draining.
+| Endpoint or command | Purpose |
+| --- | --- |
+| `GET /livez` or `--healthcheck` | Process can accept requests |
+| `GET /readyz` or `--readiness-check` | Every configured repository has a fresh, safe read view |
+| `GET /metrics` | Prometheus request, admission, multipart, backend, cache, and scratch metrics |
 
-Production deployments should bind to a private listener and terminate TLS at
-an ingress, load balancer, or service mesh. Do not expose the plain HTTP
-listener beyond a trusted network boundary.
+Readiness returns `503 Service Unavailable` with `Retry-After: 5` when any
+repository cannot be served safely. Metric labels never contain repository
+names, refs, keys, upload IDs, principals, access keys, or secrets.
 
-Build the checked image from the repository root with:
+Requests use bounded control, read, and transfer admission pools. A saturated
+pool waits for bounded capacity, then returns S3 `SlowDown` with
+`Retry-After: 1`. Standard S3 SDK retry policies handle this response; custom
+clients should use exponential backoff with jitter. Scratch capacity is also
+reserved before work begins so overload fails predictably instead of filling
+the filesystem.
+
+Operational alerts, capacity guidance, credential rotation, maintenance,
+backup/restore, upgrades, and rollback are documented in the
+[operations runbook](deploy/operations.md).
+
+## Deployment
+
+Build the checked container from the repository root:
 
 ```sh
 docker build -f crates/crab-s3-gateway/deploy/Dockerfile -t crab-s3-gateway .
 ```
 
-The isolated Docker Compose qualification procedure and retained evidence
-contract are in `deploy/README.md`. Successful packaged-image runs retain a
-machine-verified report for 90 days. The report includes a real duplicated
-64 MiB Crab/Xet fixture, projected ETags, an exact throttled 16 MiB range, and
-proof that metadata and range delivery used no Xet reconstruction scratch. It
-also traverses 10,032 logical 64 MiB objects in 1,000-key pages, verifies exact
-ordering and uniqueness, late-prefix continuation and delimiter groups, and
-enforces both a two-minute absolute traversal budget and a 125% ceiling against
-an equivalent direct RustFS listing without Xet hydration. The fixture's 627 GiB
-logical namespace shares one Git pointer blob and one deduped Xet object.
-The pinned Boto3 qualification also uploads a deterministic 512 MiB object as
-eight sequential 64 MiB multipart parts, verifies a complete GET, and verifies
-a range that crosses a persisted part boundary against the source SHA-256.
-Multipart registration is measured with equal one-part upload counts at 8 MiB
-and 64 MiB: the durable control records must remain within 64 KiB, differ by no
-more than 64 bytes, and leave no staged payload after abort.
-The packaged-image gate also runs two Compose gateway instances with independent
-caches against one RustFS-backed repository. It replaces the primary during a
-multipart upload, continues and completes that upload through the standby, and
-verifies the completed bytes through both instances. It then kills a gateway with
-live, frozen, and eligible orphaned multipart payloads on RustFS. A restarted
-process must reclaim only the orphan within two completed scans, release its
-capacity slot, preserve the live and frozen payloads, and leave no fixture
-payloads after explicit cleanup.
-Stale, dirty, incomplete, skipped, unmeasured, or identity-bearing reports fail
-the evidence gate.
-The statically validated Kubernetes workload and EKS values are in
-`deploy/helm/crab-s3-gateway/`. They are deployment assets, not evidence of a
-live EKS qualification. Operational alert response, scaling, credential
-rotation, repository maintenance, backup/restore, and upgrade/rollback are in
-the [operations runbook](deploy/operations.md).
+Production deployments should terminate TLS at a trusted ingress, load
+balancer, or service mesh. Expose the S3 listener only through that ingress and
+the management listener only to the workload's probe network. Run the container
+as its non-root user with a read-only root filesystem, a bounded scratch mount,
+a separate bounded cache mount, and read-only credential files.
 
-The ECS Fargate CloudFormation profile and parameter example are in
-`deploy/ecs/`. The template uses an immutable image digest, existing
-VPC/subnets/security groups, Secrets Manager references, a least-privilege
-backend task role, separate scratch/cache volumes, and an internal TLS ALB.
-It is cfn-lint and contract checked in CI, but live Fargate deployment and
-replacement evidence remain unqualified.
+Deployment assets are available for:
 
-Run it with a read-only root filesystem, a capacity-limited writable scratch
-mount at `/var/lib/crab/tmp`, a separate bounded cache mount whose child path
-matches `[cache].directory`, the configuration mounted at
-`/etc/crab/s3-gateway.toml`, and credential files mounted read-only for UID/GID
-10001. Credential files may be owner-only or readable only by the process's
-effective group; group write/execute and all other-user access are rejected.
-Expose port 8080 only through the S3 ingress and port 8081 only to the workload's
-probe network.
+- [Docker Compose](deploy/README.md)
+- [Kubernetes and EKS](deploy/helm/crab-s3-gateway/README.md)
+- [ECS Fargate](deploy/ecs/README.md)
+
+Static validation of an artifact is not evidence of a live cloud deployment.
+The deployment guides state their current qualification boundary.
+
+## Development and qualification
+
+Run focused crate checks from the repository root, with a target directory
+dedicated to this checkout:
+
+```sh
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-s3-gateway \
+  cargo test -p crab-s3-gateway --locked
+CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-s3-gateway \
+  cargo clippy -p crab-s3-gateway --all-targets --locked -- -D warnings
+cargo fmt --check -p crab-s3-gateway
+```
+
+The Compose qualification exercises signed AWS CLI and Boto3 requests,
+checksums, streaming uploads, multipart restart and multi-instance recovery,
+large-object full and range reads, Xet deduplication, bounded listing, and
+cleanup. The accepted release matrix and the distinction between checked-in,
+local, and live-cloud evidence are defined in the protocol contract.
+
+## Further reading
+
+- [Protocol contract](../../crab/docs/architecture/s3-gateway-contract.md) —
+  canonical S3 behavior and exclusions
+- [Architecture and implementation record](../../crab/docs/architecture/crab-s3-gateway.md) —
+  ownership, data flow, and phased qualification
+- [Compose qualification](deploy/README.md) — local packaged-image smoke and
+  retained evidence
+- [Operations runbook](deploy/operations.md) — production alerts and procedures
+- [Example configuration](deploy/gateway.example.toml) — complete annotated
+  configuration
+- [Boto3 qualification client](../../crab/scripts/e2e/s3_gateway_boto3.py) —
+  executable official-SDK coverage
