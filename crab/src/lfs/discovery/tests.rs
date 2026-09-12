@@ -86,8 +86,7 @@ fn rev_list_parser_accepts_line_delimited_named_objects() {
 #[test]
 fn range_scan_does_not_fall_back_when_rev_list_fails() {
     let dir = tempfile::tempdir().unwrap();
-    let status = Command::new("git")
-        .current_dir(dir.path())
+    let status = git_command_in(dir.path(), GitObjectAccess::LocalOnly)
         .args(["init", "--quiet"])
         .status()
         .unwrap();
@@ -113,8 +112,7 @@ fn range_scan_streams_line_delimited_rev_list_and_cat_file_records() {
         vec!["config", "user.name", "Test"],
     ] {
         assert!(
-            Command::new("git")
-                .current_dir(dir.path())
+            git_command_in(dir.path(), GitObjectAccess::LocalOnly)
                 .args(args)
                 .status()
                 .unwrap()
@@ -135,24 +133,21 @@ fn range_scan_streams_line_delimited_rev_list_and_cat_file_records() {
     )
     .unwrap();
     assert!(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["add", "."])
             .status()
             .unwrap()
             .success()
     );
     assert!(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["commit", "--quiet", "-m", "fixture"])
             .status()
             .unwrap()
             .success()
     );
     let head = String::from_utf8(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap()
@@ -179,8 +174,7 @@ fn range_scan_excludes_all_base_manifest_ref_tips() {
         vec!["config", "user.name", "Test"],
     ] {
         assert!(
-            Command::new("git")
-                .current_dir(dir.path())
+            git_command_in(dir.path(), GitObjectAccess::LocalOnly)
                 .args(args)
                 .status()
                 .unwrap()
@@ -196,24 +190,21 @@ fn range_scan_excludes_all_base_manifest_ref_tips() {
     };
     std::fs::write(dir.path().join("base.bin"), base_pointer.serialize()).unwrap();
     assert!(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["add", "base.bin"])
             .status()
             .unwrap()
             .success()
     );
     assert!(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["commit", "--quiet", "-m", "base"])
             .status()
             .unwrap()
             .success()
     );
     let base = String::from_utf8(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap()
@@ -231,24 +222,21 @@ fn range_scan_excludes_all_base_manifest_ref_tips() {
     };
     std::fs::write(dir.path().join("new.bin"), new_pointer.serialize()).unwrap();
     assert!(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["add", "new.bin"])
             .status()
             .unwrap()
             .success()
     );
     assert!(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["commit", "--quiet", "-m", "new"])
             .status()
             .unwrap()
             .success()
     );
     let head = String::from_utf8(
-        Command::new("git")
-            .current_dir(dir.path())
+        git_command_in(dir.path(), GitObjectAccess::LocalOnly)
             .args(["rev-parse", "HEAD"])
             .output()
             .unwrap()
