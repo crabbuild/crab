@@ -168,7 +168,9 @@ helm upgrade --install crab-http-server \
 When installing without a source checkout, replace the local chart path with
 `oci://ghcr.io/crabbuild/charts/crab-http-server` and add `--version 0.1.0`.
 
-The Deployment becomes ready only after a pod can read and validate the durable catalog. Confirm the rollout and inspect the catalog:
+The Deployment becomes ready only after a pod can read and validate the durable
+catalog and open the current Git view of every discovered repository. Confirm
+the rollout and inspect the catalog:
 
 ```sh
 kubectl --namespace crab rollout status deployment/crab-http-server --timeout=15m
