@@ -350,7 +350,9 @@ reachable from a hosted runner. Select a dedicated self-hosted runner label for
 private EKS or AKS endpoints. For GKE, also select `internal` when that runner
 reaches the private control-plane address, or `connect-gateway` when the runner
 identity is authorized for the fleet gateway. A self-hosted runner needs Bash,
-`kubectl`, Git LFS, `curl`, and `jq`.
+`kubectl`, Git LFS, `curl`, `jq`, and the provider CLI used by its selected
+authentication path. The AKS path installs a pinned `kubelogin` release before
+requesting non-admin cluster credentials.
 
 The environment needs one secret:
 

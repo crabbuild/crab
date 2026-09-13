@@ -237,6 +237,12 @@ jobs:
           tenant-id: ${{ env.AZURE_TENANT_ID }}
           subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Install kubelogin for non-admin AKS access
+        if: inputs.provider == 'aks'
+        uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.3
+        with:
+          kubelogin-version: v0.2.19
+
       - name: Select the AKS cluster
         if: inputs.provider == 'aks'
         uses: azure/aks-set-context@60623acbdcbbdcf799ad50a1adf8703874339f8b # v5.0.0
