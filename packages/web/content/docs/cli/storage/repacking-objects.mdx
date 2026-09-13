@@ -32,11 +32,14 @@ flowchart LR
    object was added or lost.
 5. Uploads only newly generated pack, index, and reverse-index objects, and
    repairs missing metadata sidecars.
-6. Atomically updates the manifest using compare-and-swap (CAS).
-7. Rebinds the existing Git visibility and complete commit-graph proofs to the
-   replacement generation, then publishes exact locators and a generation
-   receipt. Repairable post-CAS failures never invalidate the committed
-   manifest.
+6. Stages a zero-edit catalog visibility handoff, then atomically updates the
+   manifest using compare-and-swap (CAS). The handoff preserves incremental ref
+   history across the new pack-index identity without serializing the complete
+   OID dictionary.
+7. Completes the visibility handoff, rebinds the commit-graph proof, then
+   publishes exact locators and a generation receipt. Repack rebinds a legacy
+   materialized visibility proof when no catalog-bound proof exists. Repairable
+   post-CAS failures never invalidate the committed manifest.
 
 Old pack files leave the active manifest after the update, but immutable
 recovery history continues to reference them. Repack therefore reduces the

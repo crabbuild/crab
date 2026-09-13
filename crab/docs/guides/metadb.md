@@ -107,10 +107,14 @@ advance the object catalog, repair visibility, rebuild or compact the split
 commit graph, rebuild the shallow-closure index, or roll up the smallest
 non-geometric pack suffix.
 An eligible pack suffix is repacked before commit-graph or shallow-closure
-rebuilding when the object catalog covers the pinned generation. Stale catalog
-coverage is advanced first because bounded repack uses it to materialize any
-REF_DELTA bases discovered in the selected packs. Folding an active ref journal completes that cycle
-and restarts the quiet window before repack or derived work. Repeated bounded
+rebuilding when both the object catalog and visibility proof cover the pinned
+generation. Stale catalog coverage is advanced first because bounded repack
+uses it to materialize any REF_DELTA bases discovered in the selected packs.
+A pending catalog-bound visibility handoff is completed before repack, which
+then stages its own zero-edit handoff to preserve incremental ref history across
+the new pack-index identity without serializing the repository's OID dictionary.
+Folding an active ref journal completes that cycle and restarts the quiet window
+before repack or derived work. Repeated bounded
 cycles observe the configured poll interval, so pack convergence cannot
 monopolize the owner or continuously contend with foreground writes. Any
 manifest or active-transaction change restarts the quiet window; `--once`

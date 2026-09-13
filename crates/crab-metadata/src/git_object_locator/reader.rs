@@ -628,10 +628,7 @@ impl GitObjectLocatorSession {
         reader: &slatedb::DbReader,
         ordinals: &[GitObjectOrdinal],
     ) -> Result<Option<Vec<Option<super::GitObjectMetadata>>>> {
-        let requested = u64::try_from(ordinals.len()).unwrap_or(u64::MAX);
-        if ordinals.len() < MIN_SCAN_LOOKUP_OBJECTS {
-            return Ok(None);
-        }
+        let expected = self.identity.map_or(0, |identity| identity.object_count);
         let first = *ordinals
             .iter()
             .min()
@@ -643,11 +640,20 @@ impl GitObjectLocatorSession {
         let span = u64::from(last)
             .saturating_sub(u64::from(first))
             .saturating_add(1);
-        if span > requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) {
-            return Ok(None);
-        }
+        let strategy = ordinal_lookup_strategy(ordinals.len(), expected, self.active_ssts, span);
+        let (row_limit, lookup_mode) = match strategy {
+            LookupStrategy::Exact => return Ok(None),
+            LookupStrategy::Scan { row_limit } => (
+                u64::try_from(row_limit).unwrap_or(u64::MAX),
+                "ordinal_metadata_scan",
+            ),
+            LookupStrategy::FullScan { row_limit } => (
+                u64::try_from(row_limit).unwrap_or(u64::MAX),
+                "ordinal_metadata_full_scan",
+            ),
+        };
         tracing::debug!(
-            locator_lookup_mode = "ordinal_metadata_scan",
+            locator_lookup_mode = lookup_mode,
             requested_objects = ordinals.len(),
             ordinal_span = span,
             "compact Git ordinal metadata lookup selected"
@@ -670,7 +676,7 @@ impl GitObjectLocatorSession {
         let mut metadata = vec![None; ordinals.len()];
         while let Some(row) = rows.next().await.map_err(read_error)? {
             rows_scanned = rows_scanned.saturating_add(1);
-            if rows_scanned > span {
+            if rows_scanned > row_limit {
                 return Err(corrupt(
                     "ordinal_metadata",
                     "Git catalog ordinal metadata scan returned too many rows",
@@ -701,7 +707,7 @@ impl GitObjectLocatorSession {
             }
         }
         tracing::debug!(
-            locator_lookup_mode = "ordinal_metadata_scan",
+            locator_lookup_mode = lookup_mode,
             requested_objects = ordinals.len(),
             rows_scanned,
             "compact Git ordinal metadata lookup completed"
@@ -715,10 +721,6 @@ impl GitObjectLocatorSession {
         ordinals: &[GitObjectOrdinal],
     ) -> Result<Option<Vec<Option<[u8; 20]>>>> {
         let expected = self.identity.map_or(0, |identity| identity.object_count);
-        let requested = u64::try_from(ordinals.len()).unwrap_or(u64::MAX);
-        if ordinals.len() < MIN_SCAN_LOOKUP_OBJECTS || expected == 0 {
-            return Ok(None);
-        }
         let first = *ordinals
             .iter()
             .min()
@@ -730,11 +732,19 @@ impl GitObjectLocatorSession {
         let span = u64::from(last)
             .saturating_sub(u64::from(first))
             .saturating_add(1);
-        if span > requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) {
-            return Ok(None);
-        }
+        let strategy = ordinal_lookup_strategy(ordinals.len(), expected, self.active_ssts, span);
+        let (row_limit, lookup_mode) = match strategy {
+            LookupStrategy::Exact => return Ok(None),
+            LookupStrategy::Scan { row_limit } => {
+                (u64::try_from(row_limit).unwrap_or(u64::MAX), "ordinal_scan")
+            }
+            LookupStrategy::FullScan { row_limit } => (
+                u64::try_from(row_limit).unwrap_or(u64::MAX),
+                "ordinal_full_scan",
+            ),
+        };
         tracing::debug!(
-            locator_lookup_mode = "ordinal_scan",
+            locator_lookup_mode = lookup_mode,
             requested_objects = ordinals.len(),
             ordinal_span = span,
             "compact Git ordinal lookup selected"
@@ -757,7 +767,7 @@ impl GitObjectLocatorSession {
         let mut objects = vec![None; ordinals.len()];
         while let Some(row) = rows.next().await.map_err(read_error)? {
             rows_scanned = rows_scanned.saturating_add(1);
-            if rows_scanned > span {
+            if rows_scanned > row_limit {
                 return Err(corrupt(
                     "ordinal",
                     "Git catalog ordinal scan returned too many rows",
@@ -784,7 +794,7 @@ impl GitObjectLocatorSession {
             }
         }
         tracing::debug!(
-            locator_lookup_mode = "ordinal_scan",
+            locator_lookup_mode = lookup_mode,
             requested_objects = ordinals.len(),
             rows_scanned,
             "compact Git ordinal lookup completed"
@@ -933,6 +943,34 @@ fn lookup_strategy(
     }
     LookupStrategy::Scan {
         row_limit: requested_objects.saturating_mul(MAX_SCAN_AMPLIFICATION),
+    }
+}
+
+fn ordinal_lookup_strategy(
+    requested_objects: usize,
+    inventory_objects: u64,
+    active_ssts: u64,
+    ordinal_span: u64,
+) -> LookupStrategy {
+    if requested_objects < MIN_SCAN_LOOKUP_OBJECTS {
+        return LookupStrategy::Exact;
+    }
+    let requested = u64::try_from(requested_objects).unwrap_or(u64::MAX);
+    if ordinal_span <= requested.saturating_mul(MAX_SCAN_AMPLIFICATION as u64) {
+        return LookupStrategy::Scan {
+            row_limit: usize::try_from(ordinal_span).unwrap_or(usize::MAX),
+        };
+    }
+    match lookup_strategy(
+        requested_objects,
+        inventory_objects,
+        active_ssts,
+        // Ordinals are dense ordered keys with an exact numeric span. Unlike
+        // random SHA-1 keys, a catalog-wide range scan has a known row bound.
+        OidKeySpan::Narrow,
+    ) {
+        LookupStrategy::FullScan { row_limit } => LookupStrategy::FullScan { row_limit },
+        LookupStrategy::Exact | LookupStrategy::Scan { .. } => LookupStrategy::Exact,
     }
 }
 
@@ -1360,6 +1398,22 @@ mod tests {
         assert_eq!(
             lookup_strategy(28_929, 1_611_847, 2, OidKeySpan::Broad),
             LookupStrategy::Exact
+        );
+    }
+
+    #[test]
+    fn layered_catalog_scans_large_sparse_ordinal_batches() {
+        assert_eq!(
+            ordinal_lookup_strategy(191_620, 1_604_000, 6, 1_603_990),
+            LookupStrategy::FullScan {
+                row_limit: 1_604_000,
+            }
+        );
+        assert_eq!(
+            ordinal_lookup_strategy(77_572, 1_604_000, 2, 1_603_990),
+            LookupStrategy::FullScan {
+                row_limit: 1_604_000,
+            }
         );
     }
 
