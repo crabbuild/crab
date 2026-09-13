@@ -357,6 +357,7 @@ pub(crate) async fn receive(
             let path = directory.path().join("receive");
             let mut file = tokio::fs::File::create(&path).await?;
             let mut stream = request.into_body().into_data_stream();
+            let mut body_hasher = blake3::Hasher::new_derive_key("crab http receive body v1");
             let mut size = 0_u64;
             loop {
                 let chunk = tokio::select! {
@@ -371,6 +372,7 @@ pub(crate) async fn receive(
                     .checked_add(chunk.len() as u64)
                     .filter(|size| *size <= MAX_BODY)
                     .ok_or(ReceiveError::TooLarge)?;
+                body_hasher.update(&chunk);
                 file.write_all(&chunk).await?;
             }
             file.flush().await?;
@@ -380,6 +382,7 @@ pub(crate) async fn receive(
                 &principal,
                 &(owner, name),
                 directory,
+                *body_hasher.finalize().as_bytes(),
                 &worker_cancel,
             )
             .await

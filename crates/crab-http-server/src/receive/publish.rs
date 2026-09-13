@@ -11,6 +11,7 @@ use crab_lfs::LfsLockManager;
 use crab_metadata::{git_visibility, manifest_store, ref_journal::RefJournalEdit};
 use crab_read::{dependency_proof::DependencyProofLimits, pointer_proof::PointerProofLimits};
 use crab_remote_git::RepositoryOptions;
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::{ReceiveError, Result, check_cancelled, validate};
@@ -21,6 +22,35 @@ use crate::{
 
 const TTL: Duration = Duration::from_secs(300);
 const MAX_ACTIVE_LFS_LOCKS: usize = 10_000;
+
+#[derive(Serialize)]
+struct NativePlanBinding<'a> {
+    repository_owner: &'a str,
+    repository_name: &'a str,
+    actor_issuer: &'a str,
+    actor_subject: &'a str,
+    body_digest: [u8; 32],
+}
+
+fn native_plan_id(
+    key: &(String, String),
+    principal: &Principal,
+    body_digest: [u8; 32],
+) -> Result<String> {
+    let identity = principal.identity().ok_or(ReceiveError::Forbidden)?;
+    let binding = NativePlanBinding {
+        repository_owner: &key.0,
+        repository_name: &key.1,
+        actor_issuer: &identity.issuer,
+        actor_subject: &identity.subject,
+        body_digest,
+    };
+    let request_digest = crab_metadata::receipts::publication_request_digest(&binding)?;
+    // Native Git has no idempotency header. A fixed nonce makes an identical
+    // wire request resolve to the same durable plan after a lost response.
+    let plan = crab_metadata::receipts::publication_plan_id(&request_digest, &[0; 16]);
+    Ok(blake3::Hash::from(plan).to_hex().to_string())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Publication {
@@ -35,8 +65,15 @@ pub(super) struct PackPublication {
 
 struct ReceiveInput {
     pack: Option<BufReader<std::fs::File>>,
+    plan_id: Option<String>,
     publication: Publication,
     visibility_bases: BTreeMap<String, (String, gix_hash::ObjectId)>,
+}
+
+struct PublishAttempt<'a> {
+    directory: tempfile::TempDir,
+    holders: &'a BTreeMap<String, String>,
+    plan_id: Option<String>,
 }
 
 pub(super) async fn run(
@@ -44,6 +81,7 @@ pub(super) async fn run(
     principal: &Principal,
     key: &(String, String),
     directory: tempfile::TempDir,
+    body_digest: [u8; 32],
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let path = directory.path().join("receive");
@@ -59,6 +97,7 @@ pub(super) async fn run(
     if request.updates.is_empty() {
         return Ok(vec![]);
     }
+    let plan_id = native_plan_id(key, principal, body_digest)?;
     run_request(
         server,
         principal,
@@ -67,6 +106,7 @@ pub(super) async fn run(
         request,
         ReceiveInput {
             pack: Some(input),
+            plan_id: Some(plan_id),
             publication: Publication::NativePush,
             visibility_bases: BTreeMap::new(),
         },
@@ -96,6 +136,7 @@ pub(crate) async fn publish_existing_objects(
         request,
         ReceiveInput {
             pack: None,
+            plan_id: None,
             publication,
             visibility_bases: BTreeMap::new(),
         },
@@ -239,6 +280,7 @@ pub(super) async fn publish_pack(
         request,
         ReceiveInput {
             pack: Some(pack),
+            plan_id: None,
             publication: publication.kind,
             visibility_bases,
         },
@@ -280,7 +322,7 @@ async fn run_request(
                 &leased_entry,
                 &request,
                 input,
-                directory.path(),
+                directory,
                 &holders,
                 &cancel,
             )
@@ -296,8 +338,70 @@ async fn publish(
     entry: &Repository,
     request: &receive_wire::ReceiveRequest,
     input: ReceiveInput,
-    directory: &std::path::Path,
+    directory: tempfile::TempDir,
     holders: &BTreeMap<String, String>,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>> {
+    let Some(plan_id) = input.plan_id.clone() else {
+        return publish_attempt(
+            server,
+            principal,
+            entry,
+            request,
+            input,
+            PublishAttempt {
+                directory,
+                holders,
+                plan_id: None,
+            },
+            cancel,
+        )
+        .await;
+    };
+    let attempt = PublishAttempt {
+        directory,
+        holders,
+        plan_id: Some(plan_id.clone()),
+    };
+    let result = crab_remote::publication::with_plan(
+        &entry.store,
+        &entry.layout,
+        &plan_id,
+        TTL,
+        cancel,
+        move |plan_cancel| async move {
+            publish_attempt(
+                server,
+                principal,
+                entry,
+                request,
+                input,
+                attempt,
+                &plan_cancel,
+            )
+            .await
+        },
+    )
+    .await;
+    match result {
+        Ok(response) => Ok(response),
+        Err(error @ ReceiveError::Write(_))
+        | Err(
+            error @ ReceiveError::Metadata(
+                crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. },
+            ),
+        ) => recover_native_plan(server, entry, request, &plan_id, cancel, error).await,
+        Err(error) => Err(error),
+    }
+}
+
+async fn publish_attempt<'a>(
+    server: &Server,
+    principal: &Principal,
+    entry: &Repository,
+    request: &receive_wire::ReceiveRequest,
+    input: ReceiveInput,
+    attempt: PublishAttempt<'a>,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     check_cancelled(cancel)?;
@@ -344,13 +448,14 @@ async fn publish(
         }
         return Err(ReceiveError::Protected);
     }
+    let visibility_bases = input.visibility_bases;
     let prepared = match validate::prepare(
         repository.clone(),
         entry.layout.clone(),
-        directory.to_owned(),
+        attempt.directory.path().to_owned(),
         input.pack,
         request.updates.clone(),
-        input.visibility_bases,
+        visibility_bases,
         cancel,
     )
     .await
@@ -376,7 +481,7 @@ async fn publish(
     };
     let changed_path_hashes = prepared.plan().changed_path_hashes().clone();
     let artifacts = prepared
-        .upload(&snapshot, dependency_limits(), holders, cancel)
+        .upload(&snapshot, dependency_limits(), attempt.holders, cancel)
         .await
         .map_err(validate::map_error)?;
     let head = if prepared.plan().refs().is_empty()
@@ -394,7 +499,15 @@ async fn publish(
             .cloned()
     };
     let outcome = if changed_path_hashes.is_empty() {
-        commit_prepared(principal, entry, artifacts, head, cancel).await
+        commit_prepared(
+            principal,
+            entry,
+            artifacts,
+            head,
+            attempt.plan_id.as_deref(),
+            cancel,
+        )
+        .await
     } else {
         let subject = principal.identity().ok_or(ReceiveError::Forbidden)?.subject;
         // Lock endpoints take this lease for every mutation. Keep the final lock
@@ -421,7 +534,15 @@ async fn publish(
                 }) {
                     return Err(ReceiveError::Locked);
                 }
-                commit_prepared(principal, entry, artifacts, head, &lease_cancel).await
+                commit_prepared(
+                    principal,
+                    entry,
+                    artifacts,
+                    head,
+                    attempt.plan_id.as_deref(),
+                    &lease_cancel,
+                )
+                .await
             },
         )
         .await
@@ -441,12 +562,60 @@ async fn publish(
         Err(error) => return Err(error),
     };
     if let crab_remote::publication::CommitOutcome::Indeterminate { source, .. } = outcome {
-        // Native Git has no durable client recovery token. Fail transport without
-        // emitting a per-ref rejection for a potentially committed marker.
+        // The deterministic native plan can recover a committed receipt after
+        // transport loss, but an absent receipt is not proof of rejection.
         return Err(ReceiveError::Write(*source));
     }
     // Acknowledge known ref commitment even if read indexes remain pending.
     // A lost acknowledgement is indeterminate; matching refs cannot prove it.
+    let _readiness = crab_remote::publication::finish_committed(async {
+        entry.invalidate().await;
+        let repository = entry
+            .open_current(server, RepositoryOptions::default(), cancel)
+            .await?;
+        Ok::<_, crate::Error>(repository.generation())
+    })
+    .await;
+    let mut bytes = Vec::new();
+    if request.report_status {
+        receive_wire::report(&mut bytes, &request.updates, None, None)?;
+    }
+    Ok(bytes)
+}
+
+async fn recover_native_plan(
+    server: &Server,
+    entry: &Repository,
+    request: &receive_wire::ReceiveRequest,
+    plan_id: &str,
+    cancel: &CancellationToken,
+    original: ReceiveError,
+) -> Result<Vec<u8>> {
+    let receipt = match crab_metadata::plan_receipt::resolve_plan_receipt(
+        &entry.store,
+        &entry.layout,
+        plan_id,
+    )
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            tracing::warn!(%plan_id, %error, "native receive plan reconciliation was inconclusive");
+            return Err(original);
+        }
+    };
+    let Some(receipt) = receipt else {
+        return Err(original);
+    };
+    if !matches!(
+        receipt.commit,
+        crab_metadata::plan_receipt::PlanCommit::RefJournal { .. }
+    ) {
+        tracing::error!(%plan_id, "native receive plan receipt used an unexpected commit authority");
+        return Err(original);
+    }
+    // The receipt proves the ref visibility boundary. Index readiness remains
+    // best-effort and cannot turn a recovered commit into a rejection.
     let _readiness = crab_remote::publication::finish_committed(async {
         entry.invalidate().await;
         let repository = entry
@@ -467,6 +636,7 @@ async fn commit_prepared(
     entry: &Repository,
     artifacts: crab_remote::prepare::Artifacts<'_>,
     head: Option<String>,
+    plan_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<crab_remote::publication::CommitOutcome> {
     check_cancelled(cancel)?;
@@ -481,8 +651,14 @@ async fn commit_prepared(
     {
         return Err(ReceiveError::Archived);
     }
+    let options = crab_write::journal::CommitOptions::new(TTL, cancel);
+    let options = if let Some(plan_id) = plan_id {
+        options.with_plan(plan_id)
+    } else {
+        options
+    };
     artifacts
-        .commit(head, crab_write::journal::CommitOptions::new(TTL, cancel))
+        .commit(head, options)
         .await
         .map_err(validate::map_error)
 }

@@ -781,7 +781,14 @@ An absent marker counts as rejection only when every edited ref's immutable comp
 
 `RefJournalCommitUncertain` preserves the transaction ID, original write error, and readback error. `crab_remote::publication::journal_outcome` maps it to `CommitOutcome::Indeterminate` instead of ordinary rejection.
 
-The HTTP protocol has no durable Crab recovery token. It therefore fails the transport without emitting a per-ref rejection for an indeterminate marker. Operators inspect remote refs and server logs before retrying, but matching ref values alone cannot attribute a historical transaction.
+Native Git has no idempotency header or Crab recovery-token field. The HTTP
+server therefore hashes the exact receive wire body together with the
+repository and authenticated subject, and uses that stable binding as the
+publication plan identity. A repeated identical push can resolve a committed
+plan receipt after a lost response or a pod restart without parsing the pack
+again. If no receipt proves commitment, the server still fails the transport
+without emitting a per-ref rejection; it must not replay an ambiguous plan
+merely because the current ref value looks unchanged.
 
 ### Never roll back after the marker attempt
 
@@ -977,7 +984,7 @@ The ignored RustFS commands and fresh-prefix requirements live in [Native Git pu
 The current implementation does not satisfy these production claims:
 
 - **Abrupt process crash:** Existing tests use cooperative cancellation, graceful shutdown, and fresh server instances. They do not kill the process at every marker and cleanup boundary.
-- **Durable client receipt:** Native Git receives no Crab transaction token. An indeterminate marker still requires operator inspection.
+- **Durable client receipt:** Native Git now gets deterministic server-side plan attribution for an identical wire retry. A marker with no committed receipt remains intentionally indeterminate and needs operator inspection or a newly prepared client request; the protocol still cannot carry a portable recovery token.
 - **Index receipt reconstruction:** Missing sidecar or visibility evidence cannot yet be rebuilt from a durable verified receipt after restart.
 - **Active-active coexistence:** Versioned coordinator writers do not share the native journal namespace gate or commitment authority.
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
