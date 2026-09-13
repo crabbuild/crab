@@ -388,6 +388,12 @@ struct GenerationOwnerIdentity {
     commit_graph_hash: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationOwnerActivity {
+    identity: GenerationOwnerIdentity,
+    active_transactions_digest: [u8; 32],
+}
+
 impl From<&crab_metadata::manifests::Manifest> for GenerationOwnerIdentity {
     fn from(manifest: &crab_metadata::manifests::Manifest) -> Self {
         Self {
@@ -414,12 +420,27 @@ struct CommitGraphMaintenance {
     bytes_written: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RepackMaintenance {
+    action: &'static str,
+    bytes_read: u64,
+    bytes_written: u64,
+    superseded: bool,
+}
+
 const GENERATION_OWNER_GRAPH_REBUILD_MAX_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 const GENERATION_OWNER_ONCE_RETRY_LIMIT: u32 = 3;
 const GENERATION_OWNER_ONCE_RETRY_INTERVAL_SECS: u64 = 2;
 const GENERATION_OWNER_MIN_QUIESCENCE: std::time::Duration = std::time::Duration::from_secs(5);
 const GENERATION_OWNER_STABLE_REVALIDATION: std::time::Duration =
     std::time::Duration::from_mins(10);
+
+fn generation_owner_repack_has_priority(
+    geometric_repack_packs: u64,
+    catalog_current: bool,
+) -> bool {
+    geometric_repack_packs > 0 && catalog_current
+}
 
 fn generation_owner_quiescence(interval_secs: u64) -> std::time::Duration {
     std::time::Duration::from_secs(interval_secs).max(GENERATION_OWNER_MIN_QUIESCENCE)
@@ -486,28 +507,39 @@ async fn generation_owner_loop(
 ) -> Result<()> {
     let mut consecutive_errors = 0_u32;
     let mut once_errors = 0_u32;
-    // Continuous owners require an elapsed quiet window before starting
-    // repository-sized derived work. One-shot runs remain explicitly eager.
     let quiescence = generation_owner_quiescence(interval_secs);
-    let mut derived_work_after = (!once).then(|| std::time::Instant::now() + quiescence);
+    let mut observed_activity = None;
     let mut completed_work = None;
     loop {
         if cancel.is_cancelled() {
             return Ok(());
         }
-        match Box::pin(generation_owner_sample(
-            store,
-            router,
-            lock_ttl,
-            interval_secs,
-            config,
-            once || derived_work_after
-                .is_none_or(|eligible_at| std::time::Instant::now() >= eligible_at),
-            completed_work.as_ref(),
-            cancel,
-        ))
-        .await
-        {
+        let sample = async {
+            let maintenance_ready = if once {
+                true
+            } else {
+                let activity = generation_owner_activity(store, router).await?;
+                generation_owner_activity_is_quiet(
+                    activity,
+                    &mut observed_activity,
+                    std::time::Instant::now(),
+                    quiescence,
+                )
+            };
+            generation_owner_sample(
+                store,
+                router,
+                lock_ttl,
+                interval_secs,
+                config,
+                maintenance_ready,
+                completed_work.as_ref(),
+                cancel,
+            )
+            .await
+        }
+        .await;
+        match sample {
             Ok(mut sample) => {
                 consecutive_errors = 0;
                 once_errors = 0;
@@ -519,10 +551,6 @@ async fn generation_owner_loop(
                     return Ok(());
                 }
                 match sample.action {
-                    "ref_journal_compaction" => {
-                        derived_work_after = Some(std::time::Instant::now() + quiescence);
-                        completed_work = None;
-                    }
                     "quiescence_wait" => {}
                     "none" => {
                         completed_work = Some(CompletedGenerationOwnerWork {
@@ -535,7 +563,12 @@ async fn generation_owner_loop(
                 }
                 // A compaction restarts the elapsed quiet window instead of
                 // immediately opening the large catalog/repack path.
-                if sample.superseded && sample.action != "ref_journal_compaction" {
+                if sample.superseded
+                    && !matches!(
+                        sample.action,
+                        "ref_journal_compaction" | "geometric_repack" | "geometric_repack_bounded"
+                    )
+                {
                     continue;
                 }
             }
@@ -579,6 +612,42 @@ async fn generation_owner_loop(
     }
 }
 
+async fn generation_owner_activity(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+) -> Result<GenerationOwnerActivity> {
+    let (manifest, _) = crate::metadata::manifest::read_manifest(store, router).await?;
+    let active =
+        crate::metadata::manifest::list_active_ref_journal_transactions(store, router).await?;
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"crab.metadb.owner.activity.v1\0");
+    digest.update(&(active.len() as u64).to_be_bytes());
+    for transaction in active {
+        digest.update(transaction.as_bytes());
+    }
+    Ok(GenerationOwnerActivity {
+        identity: GenerationOwnerIdentity::from(&manifest),
+        active_transactions_digest: *digest.finalize().as_bytes(),
+    })
+}
+
+fn generation_owner_activity_is_quiet(
+    activity: GenerationOwnerActivity,
+    observed: &mut Option<(GenerationOwnerActivity, std::time::Instant)>,
+    now: std::time::Instant,
+    quiescence: std::time::Duration,
+) -> bool {
+    match observed {
+        Some((previous, since)) if previous == &activity => {
+            now.duration_since(*since) >= quiescence
+        }
+        _ => {
+            *observed = Some((activity, now));
+            false
+        }
+    }
+}
+
 fn generation_owner_once_retryable(error: &CrabError) -> bool {
     matches!(
         error,
@@ -600,6 +669,16 @@ async fn generation_owner_sample(
     let (manifest, _) = crate::metadata::manifest::read_manifest(store, router).await?;
     let identity = GenerationOwnerIdentity::from(&manifest);
     let generation = manifest.generation;
+    if !derived_work_ready {
+        return Ok(empty_owner_sample(
+            identity,
+            generation,
+            "quiescence_wait",
+            interval_secs,
+            false,
+            started,
+        ));
+    }
     if crate::git::push::compact_ref_journal_for_owner(
         store,
         router,
@@ -609,22 +688,15 @@ async fn generation_owner_sample(
     )
     .await?
     {
+        // Ref-journal activity proves foreground writers are still advancing the
+        // repository. Return after the bounded compaction so the loop restarts its
+        // quiet window; a repository-sized repack here would compete with those writes.
         return Ok(empty_owner_sample(
             identity,
             generation,
             "ref_journal_compaction",
             interval_secs,
             true,
-            started,
-        ));
-    }
-    if !derived_work_ready {
-        return Ok(empty_owner_sample(
-            identity,
-            generation,
-            "quiescence_wait",
-            interval_secs,
-            false,
             started,
         ));
     }
@@ -646,6 +718,25 @@ async fn generation_owner_sample(
         u64::try_from(crate::cmd::repack::generation_owner_repack_count(&packs))
             .unwrap_or(u64::MAX);
     let anchor = crab_write::generation::committed_manifest_anchor(&manifest)?;
+    let catalog_current = object_catalog_covers_anchor(store, router, anchor).await?;
+    let deferred_repack =
+        if generation_owner_repack_has_priority(geometric_repack_packs, catalog_current) {
+            let repack =
+                run_generation_owner_repack(store, router, lock_ttl, config, cancel).await?;
+            if repack.superseded {
+                return Ok(repack_owner_sample(
+                    &manifest,
+                    &packs,
+                    geometric_repack_packs,
+                    repack,
+                    interval_secs,
+                    started,
+                ));
+            }
+            Some(repack)
+        } else {
+            None
+        };
     let maintenance = maintain_object_catalog(store, router, &manifest, &packs, lock_ttl, cancel)
         .await
         .map_err(|error| {
@@ -794,48 +885,14 @@ async fn generation_owner_sample(
         }
     }
     if graph.action == "none" && geometric_repack_packs > 0 {
-        crate::replication::ensure_active_active_maintenance_admitted(
-            config,
-            "generation-owner geometric repack",
-        )?;
-        let repack_config = crate::cmd::repack::RepackConfig {
-            lock_ttl,
-            ..Default::default()
+        let repack = match deferred_repack {
+            Some(repack) => repack,
+            None => run_generation_owner_repack(store, router, lock_ttl, config, cancel).await?,
         };
-        let repack = crate::cmd::repack::run_bounded_repack(
-            store,
-            router.repo_prefix(),
-            &repack_config,
-            crate::cmd::repack::RepackBudget::generation_owner(),
-            cancel,
-        )
-        .await?;
-        match repack {
-            crate::cmd::repack::RepackRunResult::Completed { outcome, bounded } => {
-                graph.action = if bounded {
-                    "geometric_repack_bounded"
-                } else {
-                    "geometric_repack"
-                };
-                graph.bytes_read = outcome.bytes_read;
-                graph.bytes_written = outcome.bytes_written;
-                superseded = true;
-            }
-            crate::cmd::repack::RepackRunResult::Deferred {
-                resource,
-                actual,
-                maximum,
-            } => {
-                graph.action = "geometric_repack_deferred";
-                info!(
-                    generation,
-                    resource,
-                    actual,
-                    maximum,
-                    "generation-owner geometric repack deferred by maintenance budget"
-                );
-            }
-        }
+        graph.action = repack.action;
+        graph.bytes_read = repack.bytes_read;
+        graph.bytes_written = repack.bytes_written;
+        superseded = repack.superseded;
     }
     Ok(GenerationOwnerSample {
         identity,
@@ -858,6 +915,118 @@ async fn generation_owner_sample(
         superseded,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
     })
+}
+
+async fn object_catalog_covers_anchor(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    anchor: Option<crab_write::generation::CommittedManifestAnchor>,
+) -> Result<bool> {
+    let Some(anchor) = anchor else {
+        return Ok(true);
+    };
+    let identity =
+        crab_metadata::git_object_locator::GitObjectLocatorSession::latest_published_identity(
+            Arc::clone(store.inner()),
+            router.repo_prefix(),
+        )
+        .await?;
+    Ok(identity.is_some_and(|identity| {
+        identity.generation == anchor.generation
+            && identity.pack_index_hash == anchor.pack_index_hash
+    }))
+}
+
+async fn run_generation_owner_repack(
+    store: &crate::storage::store::Store,
+    router: &crate::storage::StoreLayout,
+    lock_ttl: std::time::Duration,
+    config: &Config,
+    cancel: &CancellationToken,
+) -> Result<RepackMaintenance> {
+    crate::replication::ensure_active_active_maintenance_admitted(
+        config,
+        "generation-owner geometric repack",
+    )?;
+    let repack_config = crate::cmd::repack::RepackConfig {
+        lock_ttl,
+        ..Default::default()
+    };
+    match crate::cmd::repack::run_bounded_repack(
+        store,
+        router.repo_prefix(),
+        &repack_config,
+        crate::cmd::repack::RepackBudget::generation_owner(),
+        cancel,
+    )
+    .await?
+    {
+        crate::cmd::repack::RepackRunResult::Completed { outcome, bounded } => {
+            Ok(RepackMaintenance {
+                action: if bounded {
+                    "geometric_repack_bounded"
+                } else {
+                    "geometric_repack"
+                },
+                bytes_read: outcome.bytes_read,
+                bytes_written: outcome.bytes_written,
+                superseded: true,
+            })
+        }
+        crate::cmd::repack::RepackRunResult::Deferred {
+            resource,
+            actual,
+            maximum,
+        } => {
+            info!(
+                repo_prefix = %router.repo_prefix(),
+                resource,
+                actual,
+                maximum,
+                "generation-owner geometric repack deferred by maintenance budget"
+            );
+            Ok(RepackMaintenance {
+                action: "geometric_repack_deferred",
+                bytes_read: 0,
+                bytes_written: 0,
+                superseded: false,
+            })
+        }
+    }
+}
+
+fn repack_owner_sample(
+    manifest: &crab_metadata::manifests::Manifest,
+    packs: &[crab_metadata::manifests::PackManifestEntry],
+    geometric_repack_packs: u64,
+    repack: RepackMaintenance,
+    interval_secs: u64,
+    started: std::time::Instant,
+) -> GenerationOwnerSample {
+    GenerationOwnerSample {
+        identity: GenerationOwnerIdentity::from(manifest),
+        generation: manifest.generation,
+        action: repack.action,
+        maintenance_reason: generation_owner_reason(repack.action),
+        // Repack publication changes the manifest generation by design, but
+        // the loop still observes its configured cadence to leave foreground
+        // ref publication a fair share of storage and CPU.
+        next_eligibility_secs: interval_secs,
+        locator_advanced: false,
+        visibility: "deferred",
+        active_packs: u64::try_from(packs.len()).unwrap_or(u64::MAX),
+        active_pack_bytes: packs.iter().map(|pack| pack.size).sum(),
+        geometric_repack_packs,
+        catalog_layers: 0,
+        catalog_bytes: 0,
+        locator_sweep: crab_metadata::git_object_locator::LocatorSweepStats::default(),
+        commit_graph_layers: 0,
+        commit_graph_bytes: 0,
+        maintenance_bytes_read: repack.bytes_read,
+        maintenance_bytes_written: repack.bytes_written,
+        superseded: repack.superseded,
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    }
 }
 
 fn idle_owner_sample(
@@ -3940,6 +4109,13 @@ mod tests {
     }
 
     #[test]
+    fn generation_owner_prioritizes_repack_only_after_catalog_catch_up() {
+        assert!(generation_owner_repack_has_priority(1, true));
+        assert!(!generation_owner_repack_has_priority(1, false));
+        assert!(!generation_owner_repack_has_priority(0, true));
+    }
+
+    #[test]
     fn generation_owner_reason_is_stable_for_each_action() {
         let reasons = [
             ("ref_journal_compaction", "active_ref_journal"),
@@ -3985,6 +4161,49 @@ mod tests {
             generation_owner_quiescence(30),
             std::time::Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn generation_owner_quiet_window_restarts_when_repository_activity_changes() {
+        let started = std::time::Instant::now();
+        let identity = GenerationOwnerIdentity::from(
+            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+        );
+        let first = GenerationOwnerActivity {
+            identity: identity.clone(),
+            active_transactions_digest: [1; 32],
+        };
+        let changed = GenerationOwnerActivity {
+            identity,
+            active_transactions_digest: [2; 32],
+        };
+        let quiescence = std::time::Duration::from_secs(60);
+        let mut observed = None;
+
+        assert!(!generation_owner_activity_is_quiet(
+            first.clone(),
+            &mut observed,
+            started,
+            quiescence,
+        ));
+        assert!(generation_owner_activity_is_quiet(
+            first,
+            &mut observed,
+            started + quiescence,
+            quiescence,
+        ));
+        assert!(!generation_owner_activity_is_quiet(
+            changed.clone(),
+            &mut observed,
+            started + quiescence,
+            quiescence,
+        ));
+        assert!(generation_owner_activity_is_quiet(
+            changed,
+            &mut observed,
+            started + quiescence + quiescence,
+            quiescence,
+        ));
     }
 
     #[test]
@@ -4205,13 +4424,35 @@ mod tests {
         crate::core::remote_layout::initialize(&store, &router)
             .await
             .expect("initialize layout");
-        crate::metadata::manifest::create_manifest_with_etag(
+        let packs = ["b", "c"].map(|digit| {
+            let pack_id = digit.repeat(64);
+            crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: 100,
+                content_hash: pack_id,
+                ref_tips: Vec::new(),
+                object_count: 1,
+            }
+        });
+        let (pack_index_hash, _, pack_index) =
+            crate::metadata::manifest::compact_pack_index(0, &packs)
+                .expect("compact test pack index");
+        crate::metadata::manifest::upload_segmented_bulk(
             &store,
             &router,
-            &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
+            &crab_metadata::manifests::BulkData {
+                shard_index: crab_metadata::segmented::SegmentWrite::default(),
+                pack_index,
+            },
         )
         .await
-        .expect("create manifest");
+        .expect("upload test pack index");
+        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        manifest.pack_index_hash = pack_index_hash;
+        manifest.seal_git_validation();
+        crate::metadata::manifest::create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .expect("create manifest");
         let head =
             crate::metadata::manifest::read_ref_journal_head(&store, &router, "refs/heads/main")
                 .await
@@ -4249,7 +4490,7 @@ mod tests {
             std::time::Duration::from_secs(60),
             60,
             &Config::default(),
-            false,
+            true,
             None,
             &CancellationToken::new(),
         )
@@ -4260,6 +4501,7 @@ mod tests {
         assert_eq!(sample.maintenance_reason, "active_ref_journal");
         assert_eq!(sample.next_eligibility_secs, 60);
         assert!(sample.superseded);
+        assert_eq!(sample.geometric_repack_packs, 0);
         let snapshot = crate::metadata::manifest::read_repository_snapshot(&store, &router)
             .await
             .expect("read compacted repository");

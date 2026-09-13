@@ -25,6 +25,9 @@ is still required before either platform is advertised as supported.
 - Every replica serving one repository must use identical active-upload,
   per-upload staging-byte, and upload-TTL limits; those values define one shared
   durable capacity contract.
+- Treat repository plus branch as the write-affinity key. Affinity preserves
+  process-local batching; the shared ref lease and CAS still enforce correctness
+  after failover or rebalance. Never route by a rewritten signed URL.
 - Run Crab maintenance commands from a dedicated operator checkout whose
   `crab.toml` points at exactly the repository placement used by the gateway.
   Use the same backend identity and configuration policy as production.
@@ -161,24 +164,43 @@ duration identifies local admission pressure. Rising
 `crab_s3_gateway_mutation_batch_duration_seconds` with backend latency identifies
 publication pressure instead. A growing batch duration accompanied by a large
 increase in backend range and HEAD calls indicates cold Git-state discovery.
+Divide `rate(crab_s3_gateway_mutation_fence_burst_batches_total[5m])` by
+`rate(crab_s3_gateway_mutation_fence_bursts_total[5m])` to measure GC-fence
+amortization. The ratio is bounded by eight. A ratio near one during sustained
+same-ref traffic means collection gaps are ending each worker burst; rising
+queue wait at the cap indicates that one serialized ref has reached its write
+ceiling. Each batch still publishes a distinct pack and journal transaction,
+so this ratio must not be interpreted as coarser Git history.
 Confirm the process is not restarting and that another active branch is not
 evicting the shared 128 MiB exact-tip warm state before increasing client
 fanout; eviction changes performance, never correctness. A healthy repository
 maintains at most one commit-identified attribute-checkpoint slot per written
 branch, refreshed on the first cold publication and every 64 subsequent
-publication batches while its full manifest remains within 32 MiB. Repeated long
+publication batches while its decoded estimate remains within 128 MiB and its
+gzip payload remains within the 32 MiB stored-object bound. Earlier plain JSON
+checkpoints remain readable. Repeated long
 attribute-delta replays after successful writes indicate that checkpoint PUTs are
 failing, the slot is unreadable or superseded, or the manifest is above that bound.
+An oversized decoded manifest remains on its authoritative delta chain; the hot
+path rechecks its maintained size estimate without cloning or serializing the
+full map.
+The normal single-process lineage advances the slot from the scheduler's proven
+predecessor with ETag CAS; repeated ancestry replay during publication indicates
+a restart, cross-process slot contention, or divergent Git history.
 Check backend errors first; never repair this by forcing a ref update or treating
 SlateDB as authoritative.
 The gateway also attempts one catalog-maintenance pass every 64 local publication
-epochs during continuous traffic. The elected worker folds the active ref journal
-into the object-store manifest and advances exact-object catalog coverage while
-holding the generation-owner and GC-writer fences. A growing active-journal
-backlog or stale catalog despite that cadence indicates owner/manifest-lock
+epochs during continuous traffic. The elected worker folds one captured active
+journal wave into the object-store manifest, advances exact-object catalog
+coverage for that generation even when newer journal transactions exist, and
+then yields. It does not chase the moving journal or immediately launch another
+pass; later traffic becomes eligible after the next 64 epochs. A growing
+active-journal backlog or stale catalog despite that cadence indicates owner/manifest-lock
 contention or backend failures; inspect `S3 bounded catalog maintenance failed`
-warnings. Commit-graph maintenance intentionally waits for a five-second quiet
-window or may be run by `crab metadb owner`.
+warnings. The continuous repository owner fingerprints the manifest and active
+ref transactions; any change restarts its configured quiet window before
+journal, graph, or repack maintenance. `crab metadb owner --once` bypasses that
+wait and belongs in an approved maintenance window.
 
 Safe action:
 
@@ -272,11 +294,47 @@ Run exactly one continuously supervised owner per repository:
 crab metadb owner --interval 30 --jsonl
 ```
 
-Persistently nonzero `geometric_repack_packs`, repeated
+The continuous owner starts maintenance only after the manifest and active ref
+transactions remain unchanged for the configured interval. It then prioritizes
+an eligible geometric rollup before rebuilding derived indexes when locator
+coverage is current; stale locator coverage is advanced first so cross-pack
+REF_DELTA bases can be read safely. The owner waits for
+the configured interval between bounded rollups. Foreground activity restarts
+the quiet window, avoiding maintenance contention while the gateway's bounded
+catalog cadence preserves read coverage. Disjoint canonical packs are structurally concatenated after their
+content identity and committed indexes are checked, avoiding a repeated
+inflation scan of already publication-validated objects. Budget-deferred
+rollups do not prevent catalog, visibility, or graph repair. Overlapping pack
+inventories use header-scanned delta dependencies, thin-pack repair, and an
+exact-object rewrite; stable packs are not downloaded wholesale. Persistently
+nonzero `geometric_repack_packs`, repeated
 `geometric_pack_threshold`, or growing maintenance bytes without a completed
 action means the owner is absent, budget-limited, or failing. `--once` performs
-one action, not the whole backlog. Use `crab repack --dry-run --json` for a
-bounded inventory and `crab repack --json` only in an approved catch-up window.
+one bounded maintenance cycle, not the whole backlog. Use
+`crab repack --dry-run --json` for a bounded inventory and `crab repack --json`
+only in an approved catch-up window.
+
+Scale replicas across independent repository/branch publication domains. A
+single branch is a single Git ref and intentionally serializes durable updates;
+randomly spreading that branch across replicas loses local batch coalescing and
+adds lease/CAS contention without increasing safe commit parallelism. Monitor
+per-ref queue pressure alongside global admission pressure before adding pods.
+An ordinary worker shares GC-writer fences across no more than eight consecutive
+batches; each batch reacquires the ref lease and revalidates its parent, and the
+worker releases the shared fences before an isolated multipart completion. This
+bounds GC exclusion while removing repeated fence round trips from a hot local
+queue.
+
+For broad-directory write amplification, compare
+`crab_s3_gateway_mutation_generated_tree_bytes_total` with
+`crab_s3_gateway_mutation_generated_pack_bytes_total`. Warm traffic should also
+advance `crab_s3_gateway_mutation_cross_pack_tree_deltas_total`; supplied base
+decoding is visible in
+`crab_s3_gateway_mutation_external_tree_base_bytes_total`. A flat cross-pack
+counter with growing tree bytes means requests are repeatedly cold, have reached
+the bounded delta-depth reset, or do not share a branch owner. Correlate that
+signal with queue wait and backend latency before changing replica count or
+affinity.
 
 The gateway expires Open multipart sessions and retries terminal cleanup once
 per minute. Transfers retain durable quota until late writers are fenced and

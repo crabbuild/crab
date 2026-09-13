@@ -456,6 +456,17 @@ fn verify_prepared_with_native_git(accepted: &IncomingPack, temp: &Path) {
         .prepare(temp, 16 * 1024 * 1024, &AtomicBool::new(false))
         .unwrap()
         .unwrap();
+    let path = prepared.pack_path().parent().unwrap().to_owned();
+    verify_prepared_artifacts_with_native_git(accepted, &prepared, temp);
+    drop(prepared);
+    assert!(!path.exists());
+}
+
+fn verify_prepared_artifacts_with_native_git(
+    accepted: &IncomingPack,
+    prepared: &PreparedPack,
+    temp: &Path,
+) -> Vec<u8> {
     let bytes = std::fs::read(prepared.pack_path()).unwrap();
     assert_eq!(prepared.content_hash(), blake3::hash(&bytes));
     assert_eq!(prepared.size(), bytes.len() as u64);
@@ -467,9 +478,10 @@ fn verify_prepared_with_native_git(accepted: &IncomingPack, temp: &Path) {
         prepared.size(),
     )
     .unwrap();
-    let kinds =
+    let mut kinds =
         crate::decode_pack_kind_metadata(&std::fs::read(prepared.kinds_path()).unwrap(), locations)
             .unwrap();
+    kinds.sort_unstable_by_key(|(oid, _)| *oid);
     let expected = accepted
         .objects()
         .map(|o| (o.oid, o.kind))
@@ -491,9 +503,13 @@ fn verify_prepared_with_native_git(accepted: &IncomingPack, temp: &Path) {
     ] {
         std::fs::copy(source, base.with_extension(extension)).unwrap();
     }
-    git(
+    let verification = git(
         client.path(),
-        &["verify-pack", base.with_extension("idx").to_str().unwrap()],
+        &[
+            "verify-pack",
+            "-v",
+            base.with_extension("idx").to_str().unwrap(),
+        ],
         b"",
     );
     let oracle = client.path().join("oracle.idx");
@@ -527,10 +543,154 @@ fn verify_prepared_with_native_git(accepted: &IncomingPack, temp: &Path) {
             accepted.read_object(&object.oid).unwrap().unwrap().data
         );
     }
-    let path = prepared.pack_path().parent().unwrap().to_owned();
-    drop(prepared);
-    assert!(!path.exists());
     assert!(accepted.directory.path().exists());
+    verification
+}
+
+#[test]
+fn generated_delta_bases_produce_bounded_native_git_tree_deltas() {
+    use std::sync::atomic::AtomicBool;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut base = Vec::new();
+    let mut changed_offset = 0;
+    for index in 0..4_000 {
+        base.extend_from_slice(format!("100644 item-{index:05}\0").as_bytes());
+        if index == 2_000 {
+            changed_offset = base.len();
+        }
+        base.extend_from_slice(&[((index % 251) + 1) as u8; 20]);
+    }
+    let mut target = base.clone();
+    target[changed_offset] ^= 1;
+    let base_oid = object_id(Kind::Tree, &base);
+    let target_oid = object_id(Kind::Tree, &target);
+    let accepted = IncomingPack::from_generated_objects(
+        [(Kind::Tree, target), (Kind::Tree, base)],
+        temp.path(),
+        ReceiveLimits {
+            max_pack_bytes: 16 * 1024 * 1024,
+            max_objects: 10,
+            max_object_bytes: 1024 * 1024,
+            max_inflated_bytes: 2 * 1024 * 1024,
+            max_delta_depth: 8,
+        },
+        || false,
+    )
+    .unwrap();
+    let flag = AtomicBool::new(false);
+    let full = accepted
+        .prepare(temp.path(), 16 * 1024 * 1024, &flag)
+        .unwrap()
+        .unwrap();
+    let delta = accepted
+        .prepare_with_delta_bases(
+            temp.path(),
+            16 * 1024 * 1024,
+            &flag,
+            &BTreeMap::from([(target_oid, base_oid)]),
+            1,
+            1024 * 1024,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert!(delta.size() < full.size());
+    let verification = verify_prepared_artifacts_with_native_git(&accepted, &delta, temp.path());
+    let target_line = String::from_utf8(verification)
+        .unwrap()
+        .lines()
+        .find(|line| line.starts_with(&target_oid.to_string()))
+        .unwrap()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let base_hex = base_oid.to_string();
+    assert_eq!(target_line.get(5).map(String::as_str), Some("1"));
+    assert_eq!(
+        target_line.get(6).map(String::as_str),
+        Some(base_hex.as_str())
+    );
+}
+
+#[test]
+fn generated_external_tree_base_produces_bounded_cross_pack_ref_delta() {
+    use std::sync::atomic::AtomicBool;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut base = Vec::new();
+    let mut changed_offset = 0;
+    for index in 0..4_000 {
+        base.extend_from_slice(format!("100644 item-{index:05}\0").as_bytes());
+        if index == 2_000 {
+            changed_offset = base.len();
+        }
+        base.extend_from_slice(&[((index % 251) + 1) as u8; 20]);
+    }
+    let mut target = base.clone();
+    target[changed_offset] ^= 1;
+    let base_oid = object_id(Kind::Tree, &base);
+    let target_oid = object_id(Kind::Tree, &target);
+    let accepted = IncomingPack::from_generated_objects(
+        [(Kind::Tree, target.clone())],
+        temp.path(),
+        ReceiveLimits {
+            max_pack_bytes: 16 * 1024 * 1024,
+            max_objects: 10,
+            max_object_bytes: 1024 * 1024,
+            max_inflated_bytes: 2 * 1024 * 1024,
+            max_delta_depth: 8,
+        },
+        || false,
+    )
+    .unwrap();
+    let flag = AtomicBool::new(false);
+    let full = accepted
+        .prepare(temp.path(), 16 * 1024 * 1024, &flag)
+        .unwrap()
+        .unwrap();
+    let delta = accepted
+        .prepare_with_external_delta_bases(
+            temp.path(),
+            16 * 1024 * 1024,
+            &flag,
+            &BTreeMap::from([(target_oid, base_oid)]),
+            &BTreeMap::from([(
+                target_oid,
+                ExternalDeltaBase::new(base_oid, Kind::Tree, base.clone(), 0),
+            )]),
+            8,
+            1024 * 1024,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert!(delta.size() < full.size());
+    assert_eq!(delta.delta_depth(&target_oid), Some(1));
+    assert_eq!(full.external_delta_count(), 0);
+    assert_eq!(delta.external_delta_count(), 1);
+    let client = tempfile::tempdir_in(temp.path()).unwrap();
+    git(client.path(), &["init", "--bare", "-q"], b"");
+    let written = git(
+        client.path(),
+        &["hash-object", "-w", "-t", "tree", "--stdin"],
+        &base,
+    );
+    let base_hex = base_oid.to_string();
+    assert_eq!(written.strip_suffix(b"\n"), Some(base_hex.as_bytes()));
+    git(
+        client.path(),
+        &["index-pack", "--fix-thin", "--stdin"],
+        &std::fs::read(delta.pack_path()).unwrap(),
+    );
+    assert_eq!(
+        git(
+            client.path(),
+            &["cat-file", "tree", &target_oid.to_string()],
+            b""
+        ),
+        target
+    );
 }
 
 #[test]

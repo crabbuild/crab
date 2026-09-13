@@ -17377,7 +17377,7 @@ pub(crate) async fn rebuild_split_commit_graph_from_remote_packs_if_current(
         &storage_router,
         &packs,
         maximum_bytes,
-        4_096,
+        MAX_BOUNDED_REMOTE_GIT_PACKS,
         cancel,
     )
     .await?;
@@ -17452,7 +17452,7 @@ pub(crate) async fn rebuild_shallow_closure_index_from_remote_packs_if_current(
         &storage_router,
         &packs,
         maximum_bytes,
-        4_096,
+        MAX_BOUNDED_REMOTE_GIT_PACKS,
         cancel,
     )
     .await?;
@@ -17510,6 +17510,7 @@ struct MaterializedRemoteGitPacks {
 }
 
 const REMOTE_PACK_MATERIALIZATION_CONCURRENCY: usize = 4;
+const MAX_BOUNDED_REMOTE_GIT_PACKS: usize = 4_096;
 
 async fn run_bounded_pack_materialization<F, Fut>(
     packs: Vec<PackManifestEntry>,

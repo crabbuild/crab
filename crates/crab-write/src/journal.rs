@@ -370,10 +370,11 @@ async fn compact_ref_journal_until_idle(
     router: &StoreLayout<Store>,
     pusher: Option<String>,
     cancel: &CancellationToken,
+    max_passes: usize,
 ) -> Result<Option<crab_metadata::manifest_store::RefJournalCompaction>> {
     let mut latest = None;
     let mut passes = 0;
-    while passes < MAX_REF_JOURNAL_COMPACTION_PASSES {
+    while passes < max_passes {
         // Cancellation stops the next wave, never the in-flight manifest CAS
         // and holder cleanup for a transaction that is already committed.
         check_cancelled(cancel)?;
@@ -440,11 +441,12 @@ async fn compact_ref_journal_with_lock(
     mut lock: PushLock,
     pusher: Option<String>,
     cancel: &CancellationToken,
+    max_passes: usize,
 ) -> Result<bool> {
     let operation = crab_coordination::while_renewing(
         &mut lock,
         Some(cancel),
-        compact_ref_journal_until_idle(store, router, pusher, cancel),
+        compact_ref_journal_until_idle(store, router, pusher, cancel, max_passes),
     )
     .await;
     let release = lock.release().await.map_err(WriteError::from);
@@ -484,7 +486,41 @@ pub async fn compact_for_owner(
     else {
         return Ok(false);
     };
-    compact_ref_journal_with_lock(store, router, lock, pusher, cancel).await
+    compact_ref_journal_with_lock(
+        store,
+        router,
+        lock,
+        pusher,
+        cancel,
+        MAX_REF_JOURNAL_COMPACTION_PASSES,
+    )
+    .await
+}
+
+/// Fold one captured journal wave into the manifest, then yield ownership.
+///
+/// This is the sustained-traffic counterpart to [`compact_for_owner`]. Newer
+/// transactions remain authoritative in the journal and are handled by a later
+/// owner pass.
+pub(crate) async fn compact_once_for_owner(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    lock_ttl: Duration,
+    pusher: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    check_cancelled(cancel)?;
+    let active = crab_metadata::ref_journal::list_active_transactions(store, router).await?;
+    let Some(transaction_id) = active.first() else {
+        return Ok(false);
+    };
+    let Some(lock) =
+        acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl, cancel)
+            .await?
+    else {
+        return Ok(false);
+    };
+    compact_ref_journal_with_lock(store, router, lock, pusher, cancel, 1).await
 }
 
 /// Make one bounded, non-blocking reader repair attempt for an active ref journal.
@@ -523,8 +559,14 @@ pub async fn compact_for_reader(
         let mut compacted = false;
         while Instant::now() < deadline {
             check_cancelled(cancel)?;
-            let pass =
-                compact_ref_journal_until_idle(store, router, pusher.clone(), cancel).await?;
+            let pass = compact_ref_journal_until_idle(
+                store,
+                router,
+                pusher.clone(),
+                cancel,
+                MAX_REF_JOURNAL_COMPACTION_PASSES,
+            )
+            .await?;
             if pass.is_none() {
                 break;
             }
