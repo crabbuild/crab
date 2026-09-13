@@ -1228,7 +1228,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
 | Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
-| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml`, `.github/workflows/http-server-release.yml`, the Helm catalog test, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` |
+| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml`, `.github/workflows/http-server-release.yml`, `.github/workflows/http-server-kubernetes-live.yml`, the Helm storage test, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` |
 
 ### Understand what has been qualified
 
@@ -1269,7 +1269,7 @@ The server is complete only when a real account can perform the workflow and obs
 
 | Surface | Required evidence | Status |
 | --- | --- | --- |
-| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, reproducible container, and portable cross-replica gate | Implemented; each provider release still requires a recorded live run |
+| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, reproducible container, and portable cross-replica gate | Implemented with a protected GitHub OIDC evidence workflow; each provider release still requires a successful recorded live run |
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
@@ -1292,7 +1292,7 @@ The remaining production gaps include:
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
-- Recorded EKS, GKE, and AKS live runs; rollback, alert-tuning, and disaster-recovery qualification
+- Successful EKS, GKE, and AKS live-workflow receipts; rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification
 
 ## Ownership

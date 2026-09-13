@@ -297,6 +297,7 @@ script from a trusted operator workstation with `kubectl`, Git LFS, `curl`, and
 
 ```sh
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
+export CRAB_HTTP_SERVER_EXPECTED_IMAGE=registry.example.com/crab-http-server@sha256:qualified_digest_here
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
@@ -308,6 +309,8 @@ Replace `eks` with `gke` or `aks`. The explicit rollout approval is required
 because this test creates and retains a uniquely named branch in the dedicated
 repository and performs a rolling restart of the Deployment. Never run it
 against a repository where qualification branches are forbidden by policy.
+The expected image is required for release evidence; the script rejects a
+deployment whose manifest reference differs.
 
 The test fails unless it can prove all of these boundaries:
 
@@ -332,6 +335,51 @@ image digest, repository, qualification branch and commit, payload digest,
 rollout probes, and completion time. Retain it with the release record. The
 Git token remains only in process memory and must still be rotated or revoked
 after qualification according to team policy.
+
+### Retain evidence with GitHub Actions
+
+`.github/workflows/http-server-kubernetes-live.yml` runs the same gate from a
+protected GitHub environment. Dispatch it from the release tag, select the
+provider, provide the dedicated repository and HTTPS origin, paste the exact
+deployed `repository@sha256:...` image, and explicitly approve the write and
+rolling restart. The job rejects a different deployed image and retains the
+verified receipt for 90 days.
+
+Use `ubuntu-latest` only when the cluster API and public Crab origin are
+reachable from a hosted runner. Select a dedicated self-hosted runner label for
+private EKS or AKS endpoints. For GKE, also select `internal` when that runner
+reaches the private control-plane address, or `connect-gateway` when the runner
+identity is authorized for the fleet gateway. A self-hosted runner needs Bash,
+`kubectl`, Git LFS, `curl`, and `jq`.
+
+The environment needs one secret:
+
+| Secret | Purpose |
+| --- | --- |
+| `CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN` | Write-scoped Crab token for only the dedicated qualification repository |
+
+Configure only the variables for the selected platform:
+
+| Platform | Protected-environment variables |
+| --- | --- |
+| EKS | `CRAB_HTTP_SERVER_EKS_GITHUB_ROLE_ARN`, `CRAB_HTTP_SERVER_EKS_REGION`, `CRAB_HTTP_SERVER_EKS_CLUSTER` |
+| GKE | `CRAB_HTTP_SERVER_GKE_GITHUB_IDENTITY_PROVIDER`, `CRAB_HTTP_SERVER_GKE_GITHUB_SERVICE_ACCOUNT`, `CRAB_HTTP_SERVER_GKE_PROJECT`, `CRAB_HTTP_SERVER_GKE_CLUSTER`, `CRAB_HTTP_SERVER_GKE_LOCATION` |
+| AKS | `CRAB_HTTP_SERVER_AKS_GITHUB_CLIENT_ID`, `CRAB_HTTP_SERVER_AKS_TENANT_ID`, `CRAB_HTTP_SERVER_AKS_SUBSCRIPTION_ID`, `CRAB_HTTP_SERVER_AKS_RESOURCE_GROUP`, `CRAB_HTTP_SERVER_AKS_CLUSTER` |
+
+These identify a GitHub OIDC federation dedicated to qualification; they are
+not the pod's storage workload identity. Give the runner identity only enough
+cloud permission to obtain user credentials for the named cluster. Bind it in
+Kubernetes to read the Deployment, Service, Ingress, NetworkPolicy,
+PodDisruptionBudget, HorizontalPodAutoscaler, pods, and hosting nodes; execute
+and port-forward to Crab pods; and patch only the Crab Deployment for the
+approved restart. Do not grant the runner object-storage credentials or
+cluster-admin. Protect the environment with required reviewers and restrict
+which release tags may deploy to it.
+
+Use the provider's GitHub federation guidance for the runner identity:
+[AWS IAM OIDC](https://github.com/aws-actions/configure-aws-credentials#oidc),
+[Google Cloud Workload Identity Federation](https://github.com/google-github-actions/auth#workload-identity-federation),
+or [Azure Login with OIDC](https://github.com/Azure/login#login-with-openid-connect-oidc).
 
 An unpacked OCI chart contains the same script at
 `crab-http-server/qualification/qualify-kubernetes.sh`, so this gate does not

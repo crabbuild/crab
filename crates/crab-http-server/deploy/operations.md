@@ -41,6 +41,7 @@ Complete these checks before the first install and every infrastructure change:
 9. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
 10. Confirm the cluster can schedule two replicas in separate zones.
 11. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
+12. For automated live qualification, confirm the protected GitHub environment uses OIDC, required reviewers, release-tag restrictions, and cluster-scoped credentials without storage access.
 
 Render and validate the release before applying it:
 
@@ -287,6 +288,7 @@ access**. Run the same provider-neutral test on EKS, GKE, and AKS:
 
 ```sh
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
+export CRAB_HTTP_SERVER_EXPECTED_IMAGE=registry.example.com/crab-http-server@sha256:qualified_digest_here
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
@@ -302,6 +304,13 @@ uninterrupted Git discovery while Kubernetes replaces every pod. It leaves a
 unique branch as durable evidence and writes a secret-free JSON receipt. Review
 and retain that receipt with the image and chart attestations; revoke the
 qualification token afterward.
+
+For repeatable retained evidence, dispatch
+`.github/workflows/http-server-kubernetes-live.yml` from the release tag. Its
+protected environment obtains short-lived cluster credentials through GitHub
+OIDC, checks the expected image digest, runs the same gate, verifies the
+receipt, and uploads it. Keep this runner identity separate from Crab's pod
+storage identity and restrict it to the named cluster and Deployment.
 
 A failed run is a failed release gate. Preserve pod events, ingress logs,
 application request IDs, the evidence path, and the unique branch before

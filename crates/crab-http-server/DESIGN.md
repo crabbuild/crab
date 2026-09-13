@@ -256,7 +256,8 @@ flowchart LR
     Provider --> Helm
     Helm --> Fresh[Fresh-pod storage contract test]
     Helm --> Replicas[Two-zone replicas]
-    Replicas --> Live[Cross-replica live gate]
+    Actions[Protected GitHub OIDC workflow] --> Live[Cross-replica live gate]
+    Replicas --> Live
     Live --> Receipt[Secret-free JSON receipt]
 ```
 
@@ -272,6 +273,12 @@ initiation, direct token use against two replicas, cross-replica Git and LFS,
 lock-owner publication, uninterrupted reads during rollout, and byte-identical
 state after replacement. Its JSON receipt binds the evidence to the provider,
 immutable image, repository, commit, payload digest, and completion time.
+The optional manual GitHub workflow uses a protected environment and a
+separate short-lived OIDC runner identity to reach an existing cluster. It
+requires the expected image digest, explicit rollout approval, and a dedicated
+repository, then retains the verified receipt. The runner does not need direct
+storage authority.
+
 Helm upgrades are atomic and keep bounded revision history; the chart refuses a
 disruption budget or placement override that would make its availability claim
 impossible.
@@ -924,7 +931,7 @@ The design is backed by component, composition, provider, and independent-client
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
 | HTTP composition | `crab-http-server::receive` | `receive_tests.rs`, `receive_fault_tests.rs`, authentication tests, and RustFS ignored tests |
-| Multi-cloud runtime | Helm chart and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus recorded EKS, GKE, or AKS cross-replica rollout receipt |
+| Multi-cloud runtime | Helm chart, `.github/workflows/http-server-kubernetes-live.yml`, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus recorded EKS, GKE, or AKS cross-replica rollout receipt bound to the deployed digest |
 
 ### Interpret the live fixtures
 

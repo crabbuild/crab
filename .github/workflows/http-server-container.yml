@@ -48,6 +48,18 @@ jobs:
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
           bash -n crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh
+          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
+            CRAB_HTTP_SERVER_EXPECTED_IMAGE=crab-http-server:mutable \
+            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+              eks crab crab-http-server https://git.example.com \
+              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
+              > /dev/null 2> "${RUNNER_TEMP}/invalid-image-error"; then
+            echo "qualification accepted a mutable expected image" >&2
+            exit 1
+          fi
+          grep -F 'CRAB_HTTP_SERVER_EXPECTED_IMAGE must be an immutable image reference.' \
+            "${RUNNER_TEMP}/invalid-image-error"
           docker run --rm --volume "$PWD:/src:ro" "$shellcheck_image" \
             /src/crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
             /src/crates/crab-http-server/tests/qualify_backup_restore.sh \

@@ -7,7 +7,7 @@ unset GIT_CURL_VERBOSE GIT_TRACE GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA \
 
 usage() {
   echo "usage: qualify-kubernetes.sh PROVIDER NAMESPACE DEPLOYMENT HTTPS_ORIGIN OWNER REPOSITORY EVIDENCE_FILE" >&2
-  echo "Set CRAB_HTTP_SERVER_GIT_TOKEN and CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true." >&2
+  echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, and CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true." >&2
   exit 2
 }
 
@@ -20,10 +20,15 @@ owner="$5"
 repository="$6"
 evidence_file="$7"
 git_token="${CRAB_HTTP_SERVER_GIT_TOKEN:?set CRAB_HTTP_SERVER_GIT_TOKEN to a write-scoped token for the qualification repository}"
+expected_image="${CRAB_HTTP_SERVER_EXPECTED_IMAGE:?set CRAB_HTTP_SERVER_EXPECTED_IMAGE to the exact deployed repository@sha256 image}"
 test "${CRAB_HTTP_SERVER_APPROVE_ROLLOUT:-}" = true || {
   echo "Set CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true to approve a rolling restart." >&2
   exit 2
 }
+if [[ ! "$expected_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+  echo "CRAB_HTTP_SERVER_EXPECTED_IMAGE must be an immutable image reference." >&2
+  exit 2
+fi
 
 case "$provider" in
   eks | gke | aks) ;;
@@ -204,6 +209,10 @@ jq --exit-status '
     .name == "scratch" and (.emptyDir.sizeLimit | length) > 0)
 ' "$deployment_json" >/dev/null
 image="$(jq --raw-output '.spec.template.spec.containers[] | select(.name == "crab-http-server") | .image' "$deployment_json")"
+if [ "$image" != "$expected_image" ]; then
+  echo "The deployed image does not match CRAB_HTTP_SERVER_EXPECTED_IMAGE." >&2
+  exit 1
+fi
 selector_json="$(jq --compact-output '.spec.selector.matchLabels' "$deployment_json")"
 selector="$(jq --raw-output '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' "$deployment_json")"
 

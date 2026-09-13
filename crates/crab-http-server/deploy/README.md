@@ -148,7 +148,7 @@ Complete the setup in this order:
 5. Create the Kubernetes Secret and install the chart.
 6. Run `helm test` to prove a fresh workload can read, list, write, conditionally update, and delete through its cloud workload identity.
 7. Create the first repository through a running pod.
-8. Run the portable multi-replica qualification before admitting critical repositories.
+8. Run the portable multi-replica qualification locally or through the protected GitHub Actions workflow before admitting critical repositories.
 
 Do not grant team members direct write credentials for the storage root. Git,
 LFS, browser, and administration traffic must pass through the server so its
