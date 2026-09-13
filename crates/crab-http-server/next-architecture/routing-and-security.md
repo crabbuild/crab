@@ -1,6 +1,6 @@
 # HTTP routing, peer protocol, and security
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 Read [ownership and load balancing](ownership-and-load-balancing.md) for acquisition
 and movement, and [commit publication](storage-protocol.md#commit-publication-and-response-gating)

@@ -1,6 +1,6 @@
 # Deployment, lifecycle, and operations
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 The fleet runs identical `crab-http-server` processes with embedded replication.
 No separate Celld servers, scheduler service, or SQLite database servers are

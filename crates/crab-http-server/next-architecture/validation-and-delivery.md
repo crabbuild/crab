@@ -1,6 +1,6 @@
 # Validation, delivery, and worked examples
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 ## Validation and real-repository qualification
 

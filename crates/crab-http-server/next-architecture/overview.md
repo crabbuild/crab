@@ -1,6 +1,6 @@
 # Architecture, scope, and guarantees
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 The system boundaries below lead to the detailed
 [storage protocol](storage-protocol.md),

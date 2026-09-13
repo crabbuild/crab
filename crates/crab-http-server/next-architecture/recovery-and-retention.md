@@ -1,6 +1,6 @@
 # Recovery, compaction, and backups
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 Restore begins at the [authoritative control record](storage-protocol.md#authoritative-control-record)
 and runs under a [recovering activation](ownership-and-load-balancing.md#acquisition-and-restore).

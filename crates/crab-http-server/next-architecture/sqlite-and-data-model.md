@@ -1,6 +1,6 @@
 # SQLite runtime and application data model
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).

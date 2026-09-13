@@ -1,6 +1,6 @@
 # Current implementation and evidence
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 ## Current implementation and evidence
 

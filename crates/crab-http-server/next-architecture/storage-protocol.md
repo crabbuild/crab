@@ -1,6 +1,6 @@
 # Object storage and commit publication
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 This document owns the durable control and publication contract.
 [Ownership](ownership-and-load-balancing.md) defines who may propose a transition;

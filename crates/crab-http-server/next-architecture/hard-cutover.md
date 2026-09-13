@@ -1,6 +1,6 @@
 # Hard cutover and future upgrades
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 The transition imports the [current collaboration storage](current-implementation.md)
 into the [repository SQL model](sqlite-and-data-model.md), then publishes each

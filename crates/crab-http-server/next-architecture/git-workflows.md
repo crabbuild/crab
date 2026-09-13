@@ -1,6 +1,6 @@
 # Git and application workflows
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 These workflows combine [published SQL state](storage-protocol.md) with the
 existing Git publication boundary. Their pending state lives in the

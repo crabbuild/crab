@@ -85,7 +85,7 @@ and a canonical HTTPS origin. For container deployment, use the
 ## Find the relevant contract
 
 For the proposed SQLite/LTX storage and multi-node ownership architecture, read
-[the next-generation design index](NEXT_ARCHITECTURE.md). Focused topics under
+[the next-generation design index](next-architecture/README.md). Focused topics under
 `next-architecture/` cover [ownership and load balancing](next-architecture/ownership-and-load-balancing.md),
 [SQLite/LTX publication](next-architecture/storage-protocol.md),
 [Kubernetes operation](next-architecture/deployment-and-operations.md), and the

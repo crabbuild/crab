@@ -1,6 +1,6 @@
 # Ownership, placement, and load balancing
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 ## Balancing responsibilities
 

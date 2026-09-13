@@ -1,6 +1,6 @@
 # Celld architecture and Rust integration
 
-[Design index](../NEXT_ARCHITECTURE.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Proposed architecture; not implemented.
 
 ## Per-cell SQLite in Celld
 
