@@ -801,7 +801,11 @@ sequenceDiagram
     B->>H: POST /locks/verify
     H->>S: List active records
     H-->>B: theirs: Alice's lock
-    Note over B: Standard pre-push hook stops the conflicting push
+    Note over B: Standard pre-push hook gives early feedback
+    B->>H: receive-pack changes the locked path
+    H->>S: Acquire repository LFS-lock guard
+    H->>S: Recheck active locks before ref commit
+    H-->>B: Reject every updated ref
     A->>H: POST /locks/{id}/unlock
     H->>S: Owner + ID checked CAS tombstone
     H-->>A: 200 released lock
@@ -821,6 +825,16 @@ budget and shares bounded server admission. `ref` and `refspec` remain
 authorization hints as defined by version 1 of the protocol; locks are not
 branch-scoped.
 
+Lock create and unlock operations share one durable repository guard with Git
+publication. Receive validates every newly introduced commit, hashes its exact
+raw Git paths, and rechecks as many as 10,000 active lock records immediately
+before committing the ref transaction. Additions, deletions, content or mode
+changes, tree/leaf replacements, and both sides of a rename count as changes.
+Merge commits are compared with every parent. A change followed by a revert in
+the same push still counts; comparing only the final trees would let an
+intermediate locked edit bypass policy. Storage, coordination, cancellation,
+and lock-limit failures reject the push rather than skipping enforcement.
+
 When `locksverify` is unset, Git LFS probes the endpoint and may print the exact
 configuration command needed to enable enforcement. Teams should set the
 URL-scoped value to `true`; the pre-push hook then reports the caller's locks,
@@ -831,9 +845,15 @@ fails closed on verification errors, and halts a push that changes a path in
 git config lfs.https://git.example.com/git/team/project.git/info/lfs.locksverify true
 ```
 
-This is client-side cooperation, not an authoritative receive rule: a modified
-client or a push that bypasses Git LFS hooks can still avoid verification.
-Server-side changed-path lock enforcement remains a production gap.
+This client setting provides early feedback, but a modified client can bypass
+it. The server-side receive rule remains authoritative and rejects the same
+conflicting path before ref publication. An owner's own lock does not block
+that owner.
+
+Only the server workload identity should have write access to the storage root.
+A principal with direct object-store write access is an operator outside the
+HTTP authorization boundary and can mutate lock records or any other
+repository state.
 
 ## Native Git push
 
@@ -1152,8 +1172,8 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | OIDC, membership, sessions, tokens, and CSRF | `src/auth.rs` | `src/auth_tests.rs` and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
-| Native receive and recovery | `src/receive.rs` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
-| LFS transfer, range-resume, and file-lock contracts | `src/lfs.rs` | `src/lfs_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
+| Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
+| LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
 | Browser Git writes and settings | `src/contents.rs`, `src/branches.rs` | `src/auth_tests/branches.rs` |
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
@@ -1173,6 +1193,7 @@ Current local and CI evidence includes:
 - Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
 - LFS partial download and byte-identical range resume through the Compose Caddy/server/RustFS stack, including safe full-response fallback for multiple ranges
 - Stock Git LFS lock, list, verify-on-push, and unlock against the Compose Caddy/server/RustFS stack
+- Native Git rejection when another subject owns a changed path, including a change-and-revert history whose final tree matches the original
 
 These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. Neither test establishes every crash phase, multi-instance global admission, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
 
@@ -1213,7 +1234,6 @@ The remaining production gaps include:
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
 - Multi-instance global admission and production throughput qualification
-- Server-authoritative LFS lock enforcement for clients that bypass the standard Git LFS pre-push hook
 - Membership administration, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace

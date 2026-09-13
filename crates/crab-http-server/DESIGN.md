@@ -518,10 +518,10 @@ Publication proof bypasses receipts and replica fallback. Existing ordinary LFS 
 
 The primary LFS OID and size identify stored bytes after extension processing. Extension hashes describe client transform inputs, not extra server objects. See the [Git LFS extension specification](https://github.com/git-lfs/git-lfs/blob/main/docs/extensions.md).
 
-### Coordinate lock-aware clients
+### Make LFS locks authoritative at publication
 
-LFS file locks are repository-path coordination records, not publication
-authority. The HTTP adapter authenticates the repository request, stores the
+LFS file locks are repository-path policy inputs at the Git publication
+boundary. The HTTP adapter authenticates the repository request, stores the
 stable provider subject through `crab-lfs::LfsLockManager`, and resolves display
 names only while forming a response.
 
@@ -531,11 +531,17 @@ flowchart LR
     HTTP[HTTP auth and limits]
     Manager[CAS lock manager]
     Record[(lfs/locks/blake3(path))]
+    Plan[Validated changed-path hashes]
+    Guard[Renewing lfs-locks lease]
     Push[receive-pack]
+    Journal[Atomic ref journal]
 
     Client --> HTTP --> Manager --> Record
-    Client -. standard pre-push verification .-> Push
-    Record -. not yet authoritative .-> Push
+    Client -. early pre-push verification .-> Push
+    Push --> Plan --> Guard
+    HTTP --> Guard
+    Guard --> Record
+    Guard --> Journal
 ```
 
 A conditional create makes one path exclusive across replicas. Release writes
@@ -545,14 +551,30 @@ responses without creating a second state transition. Bounded list scans return
 ID-sorted pages; verification divides that page using the authenticated
 subject.
 
-The standard Git LFS pre-push hook stops a cooperative client when an updated
-path belongs to another subject. Native receive currently validates Git and
-pointer closure without retaining a changed-path-to-lock proof, so the server
-cannot make the lock an authorization condition yet. Doing that correctly
-requires the validated receive plan to carry exact changed paths into the
-publication boundary and recheck lock ownership against the admitted ref
-snapshot. An HTTP-only or browser-only check would leave sibling writers able
-to violate the invariant.
+The receive plan retains fixed-size Blake3 identities of exact raw Git paths
+changed by every newly introduced commit. It walks to the already visible
+repository frontier, compares merge commits with every parent, expands
+tree/leaf replacements, and treats a rename as deletion plus addition. This
+history-wide proof prevents a change-and-revert pair in one push from hiding a
+locked edit. Hashing preserves non-UTF-8 Git path identity without adding
+attacker-controlled strings to the long-lived plan; a collision can only cause
+a conservative rejection because lock paths are compared by the same identity.
+
+Lock creation, unlock, and the final receive check share the renewing
+`lfs-locks` repository lease. Receive already holds ref leases and GC fences,
+then acquires this guard, reads at most 10,001 active records, rejects an
+over-limit set, verifies that no changed hash belongs to another subject, and
+commits the journal before releasing the guard. Therefore either the lock
+mutation linearizes first and the push observes it, or the push commits first
+and the later lock applies to subsequent changes. Storage or coordination
+failure is fail-closed.
+
+The standard Git LFS pre-push hook remains useful for earlier feedback, but it
+is not trusted. Native pushes, browser content publication, and pull merges all
+reach the same receive publication boundary. The supported deployment gives
+object-store write authority only to server workloads; a direct storage writer
+is an operator outside this authorization model and could mutate any Crab
+state, not only locks.
 
 ### Retain CPU admission after caller cancellation
 
@@ -814,12 +836,13 @@ The design is backed by component, composition, provider, and independent-client
 | --- | --- | --- |
 | Receive framing and report status | `crab-git::receive_wire` | Native command, deletion, empty-pack, unpack-failure, and atomic-report tests |
 | Full and thin-pack quarantine | `crab-git::incoming_pack` | Native fixtures and remote-base reconstruction tests |
-| Ref and graph validity | `crab-git::receive_plan` | Graph-kind, namespace, stale-tip, malformed-tree, and policy tests |
+| Ref, graph, and changed-path validity | `crab-git::receive_plan` | Graph-kind, namespace, stale-tip, malformed-tree, rename, intermediate-commit, and policy tests |
 | Self-contained pack and sidecars | `IncomingPack::prepare` | Independent Git index and byte reconstruction tests |
 | Per-ref visibility | `receive_plan::plan_visibility` | Additive, replacement, tag, shared-subtree, malformed, and limit tests |
 | Crab pointer proof | `crab-read::pointer_proof` | Repeated chunk, empty file, corruption, deletion, limit, and cancellation tests |
 | Snapshot-bound lookup | `FileIndexLookupSession::for_snapshot` | Later-generation isolation, scan budget, and retained-admission tests |
 | Combined Crab and LFS proof | `dependency_proof` and `LfsObjectStore` | Mixed pointer, deduplication, corruption, receipt bypass, and origin-only tests |
+| Authoritative LFS path locking | `receive_plan::changed_paths`, `crab-lfs::LfsLockManager`, and `receive::publish` | Raw-path unit cases, shared-guard HTTP test, and native change-and-revert rejection |
 | Leases and uncertain outcome | `crab-remote::publication` | Contention, durable-holder recovery, marker readback, and cancellation tests |
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
@@ -867,9 +890,6 @@ The current implementation does not satisfy these production claims:
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
 - **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
 - **Production scale:** Static EKS/GKE/AKS profiles and the local cold-restore drill do not establish Kubernetes-size push throughput, temporary-disk sizing, provider latency, cross-replica failover, version-selected provider restore, or regional failure behavior. The ECS stop limit is shorter than the maximum operation budget.
-- **Server-authoritative LFS locking:** Lock creation, listing, client-side
-  pre-push verification, and release are implemented. Native receive does not
-  yet reject a client that bypasses Git LFS verification.
 
 Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabricated protected plan, fallback reader, or OID rewrite. Each shortcut violates an ownership or outcome invariant above.
 

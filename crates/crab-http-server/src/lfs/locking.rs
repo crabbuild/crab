@@ -6,10 +6,12 @@ use axum::{
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
+use crab_coordination::LFS_LOCKS_RESOURCE;
 use crab_lfs::{LfsLockError, LfsLockManager, LockRecord};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio_util::sync::CancellationToken;
 
 use super::{CONTENT_TYPE, Error, Result, ensure_active, repository};
 use crate::{
@@ -145,6 +147,44 @@ async fn operation<T>(
     }
 }
 
+async fn mutation<T, F, Fut>(server: &Server, repository: &Repository, action: F) -> Result<T>
+where
+    F: FnOnce(CancellationToken) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let _permit = server.admission.try_acquire().map_err(|_| Error::Busy)?;
+    let cancel = server.cancellation.child_token();
+    // Receive holds this same lease through its lock check and ref commit. A lock
+    // mutation therefore lands wholly before or after an authoritative push.
+    let work = crab_remote::publication::with_internal_lease(
+        &repository.store,
+        &repository.layout,
+        LFS_LOCKS_RESOURCE,
+        BUDGET,
+        &cancel,
+        |lease_cancel| async move {
+            tokio::select! {
+                () = lease_cancel.cancelled() => Err(Error::Cancelled),
+                result = action(lease_cancel.clone()) => result,
+            }
+        },
+    );
+    tokio::pin!(work);
+    let timeout = tokio::time::sleep(BUDGET);
+    tokio::pin!(timeout);
+    tokio::select! {
+        result = &mut work => result,
+        () = server.cancellation.cancelled() => {
+            cancel.cancel();
+            work.await
+        }
+        () = &mut timeout => {
+            cancel.cancel();
+            work.await
+        }
+    }
+}
+
 async fn page(
     server: &Server,
     manager: &LfsLockManager,
@@ -176,16 +216,23 @@ pub(crate) async fn create_lock(
     ensure_active(&entry).await?;
     let identity = principal.identity().ok_or(Error::Forbidden)?;
     let manager = LfsLockManager::lfs(entry.store.clone(), &entry.config.prefix);
-    let record = match operation(&server, manager.lock(&input.path, &identity.subject)).await {
+    let path = input.path;
+    let subject = identity.subject;
+    let result = mutation(&server, &entry, move |_cancel| async move {
+        match manager.lock(&path, &subject).await {
+            Ok(record) => Ok(Ok(record)),
+            Err(LfsLockError::Conflict { .. }) => match manager.find_by_path(&path).await {
+                Ok(record) => Ok(Err(record)),
+                Err(LfsLockError::NotFound { .. }) => Err(Error::LockConflict),
+                Err(error) => Err(error.into()),
+            },
+            Err(error) => Err(error.into()),
+        }
+    })
+    .await?;
+    let record = match result {
         Ok(record) => record,
-        Err(Error::Lock(LfsLockError::Conflict { .. })) => {
-            let existing = match operation(&server, manager.find_by_path(&input.path)).await {
-                Ok(record) => record,
-                Err(Error::Lock(LfsLockError::NotFound { .. })) => {
-                    return Err(Error::LockConflict);
-                }
-                Err(error) => return Err(error),
-            };
+        Err(existing) => {
             return Ok((
                 StatusCode::CONFLICT,
                 [(header::CONTENT_TYPE, CONTENT_TYPE)],
@@ -196,7 +243,6 @@ pub(crate) async fn create_lock(
             )
                 .into_response());
         }
-        Err(error) => return Err(error),
     };
     Ok((
         StatusCode::CREATED,
@@ -292,19 +338,22 @@ pub(crate) async fn unlock_lock(
     let entry = repository(&server, &principal, &owner, &name, true)?;
     let identity = principal.identity().ok_or(Error::Forbidden)?;
     let manager = LfsLockManager::lfs(entry.store.clone(), &entry.config.prefix);
-    let current = operation(&server, manager.find_by_id_including_released(&id)).await?;
-    if !input.force && current.owner != identity.subject {
-        return Err(Error::LockOwner);
-    }
-    let record = if input.force {
-        operation(&server, manager.force_unlock_with_id(&current.path, &id)).await?
-    } else {
-        operation(
-            &server,
-            manager.unlock_with_id(&current.path, &identity.subject, Some(&id)),
-        )
-        .await?
-    };
+    let subject = identity.subject;
+    let force = input.force;
+    let record = mutation(&server, &entry, move |_cancel| async move {
+        let current = manager.find_by_id_including_released(&id).await?;
+        if !force && current.owner != subject {
+            return Err(Error::LockOwner);
+        }
+        if force {
+            Ok(manager.force_unlock_with_id(&current.path, &id).await?)
+        } else {
+            Ok(manager
+                .unlock_with_id(&current.path, &subject, Some(&id))
+                .await?)
+        }
+    })
+    .await?;
     Ok((
         [(header::CONTENT_TYPE, CONTENT_TYPE)],
         Json(LockResponse {

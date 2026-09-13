@@ -99,6 +99,63 @@ async fn native_http_push_publishes_exact_objects_and_rejects_rewrites_atomicall
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_http_receive_rejects_locked_paths_even_when_the_tip_reverts() {
+    let server = maintenance_tests::fixture().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = CancellationToken::new();
+    let stopped = stop.clone();
+    let app = router(Arc::clone(&server));
+    let http = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(stopped.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path();
+    let url = format!("http://127.0.0.1:{port}/git/team/repo.git");
+    success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    std::fs::write(path.join("locked.bin"), "original\n").unwrap();
+    success(path, &["add", "locked.bin"]).await;
+    success(path, &["commit", "-m", "base"]).await;
+    let base = success(path, &["rev-parse", "HEAD"]).await;
+    success(path, &["push", &url, "main"]).await;
+
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let manager = crab_lfs::LfsLockManager::lfs(repo.store.clone(), &repo.config.prefix);
+    manager.lock("locked.bin", "another-subject").await.unwrap();
+    std::fs::write(path.join("locked.bin"), "changed\n").unwrap();
+    success(path, &["commit", "-am", "change locked path"]).await;
+    std::fs::write(path.join("locked.bin"), "original\n").unwrap();
+    success(path, &["commit", "-am", "revert locked path"]).await;
+    let rejected = git(path, &["push", &url, "main"]).await;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("path is locked by another user"));
+    assert!(
+        success(path, &["ls-remote", &url, "refs/heads/main"])
+            .await
+            .starts_with(&base)
+    );
+
+    manager.force_unlock("locked.bin").await.unwrap();
+    manager.lock("locked.bin", "operator").await.unwrap();
+    success(path, &["push", &url, "main"]).await;
+
+    stop.cancel();
+    http.await.unwrap();
+    server.cancellation.cancel();
+    server.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires an isolated local RustFS bucket/prefix and environment credentials"]
 async fn native_http_push_rustfs() {
     let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
@@ -358,21 +415,35 @@ async fn exercise(server: Arc<Server>, branch: &str) {
     );
     reader.close().unwrap();
 
+    let browser_payload = serde_json::json!({
+        "branch": format!("refs/heads/{branch}"),
+        "expected_head": second,
+        "path_hex": "646f63732f62726f777365722e747874",
+        "content": "created without a checkout\n",
+        "message": "Create browser file"
+    });
+    let manager = crab_lfs::LfsLockManager::lfs(repo.store.clone(), &repo.config.prefix);
+    manager
+        .lock("docs/browser.txt", "another-subject")
+        .await
+        .unwrap();
+    let locked = reqwest::Client::new()
+        .post(format!(
+            "http://127.0.0.1:{port}/api/repos/team/repo/contents"
+        ))
+        .header("content-type", "application/json")
+        .body(browser_payload.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(locked.status(), StatusCode::CONFLICT);
+    manager.force_unlock("docs/browser.txt").await.unwrap();
     let response = reqwest::Client::new()
         .post(format!(
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
-        .body(
-            serde_json::json!({
-                "branch": format!("refs/heads/{branch}"),
-                "expected_head": second,
-                "path_hex": "646f63732f62726f777365722e747874",
-                "content": "created without a checkout\n",
-                "message": "Create browser file"
-            })
-            .to_string(),
-        )
+        .body(browser_payload.to_string())
         .send()
         .await
         .unwrap();

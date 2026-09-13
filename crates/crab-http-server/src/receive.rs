@@ -34,6 +34,8 @@ pub(crate) enum ReceiveError {
     Forbidden,
     #[error("protected branch requires a pull request")]
     Protected,
+    #[error("changed path is locked by another user")]
+    Locked,
     #[error("repository is archived and read-only")]
     Archived,
     #[error("Git transfers are busy")]
@@ -74,6 +76,10 @@ pub(crate) enum ReceiveError {
     Settings(#[source] Box<crate::app::Error>),
     #[error("receive coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("LFS lock lookup failed")]
+    LfsLock(#[from] crab_lfs::LfsLockError),
+    #[error("active LFS lock set exceeds the receive safety limit")]
+    LfsLockLimit,
     #[error("receive publication failed")]
     Write(#[from] crab_write::WriteError),
     #[error("pointer content rejected")]
@@ -209,6 +215,10 @@ impl IntoResponse for ReceiveError {
             Self::Protected => (
                 StatusCode::FORBIDDEN,
                 "Protected branch requires a pull request",
+            ),
+            Self::Locked => (
+                StatusCode::CONFLICT,
+                "A changed path is locked by another user",
             ),
             Self::Archived => (
                 StatusCode::FORBIDDEN,

@@ -14,6 +14,7 @@ use crate::{
 type Result<T> = std::result::Result<T, ReceivePlanError>;
 type SourceError = Box<dyn std::error::Error + Send + Sync>;
 
+mod changed_paths;
 mod visibility;
 pub use visibility::{RefVisibility, VisibilitySource, plan_visibility};
 
@@ -65,6 +66,7 @@ pub struct ValidatedRefUpdates {
     refs: BTreeMap<String, ObjectId>,
     peeled: BTreeMap<String, ObjectId>,
     pointers: Vec<PointerDependency>,
+    changed_path_hashes: BTreeSet<[u8; 32]>,
 }
 impl ValidatedRefUpdates {
     /// Returns the complete candidate ref map.
@@ -78,6 +80,10 @@ impl ValidatedRefUpdates {
     /// Returns pointers in inspected objects, including imported thin-pack bases.
     pub fn pointers(&self) -> &[PointerDependency] {
         &self.pointers
+    }
+    /// Returns Blake3 identities for exact raw paths changed by newly introduced commits.
+    pub fn changed_path_hashes(&self) -> &BTreeSet<[u8; 32]> {
+        &self.changed_path_hashes
     }
 }
 
@@ -144,6 +150,13 @@ pub enum ReceivePlanError {
 struct Node {
     kind: Kind,
     links: Vec<(ObjectId, Kind)>,
+    tree: Vec<TreeEntry>,
+}
+#[derive(Clone)]
+struct TreeEntry {
+    name: Vec<u8>,
+    oid: ObjectId,
+    mode: u16,
 }
 struct Validator<'a, S, C> {
     incoming: &'a IncomingPack,
@@ -286,6 +299,7 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
             peeled.insert(update.name.clone(), current);
         }
     }
+    let changed_path_hashes = validator.changed_path_hashes(updates)?;
     Ok(ValidatedRefUpdates {
         refs,
         peeled,
@@ -294,6 +308,7 @@ pub fn validate<S: GraphSource, C: Fn() -> bool>(
             .into_iter()
             .map(|(blob, pointer)| PointerDependency { blob, pointer })
             .collect(),
+        changed_path_hashes,
     })
 }
 
@@ -381,6 +396,7 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
     }
     fn parse(&mut self, oid: ObjectId, object: BaseObject) -> Result<Node> {
         let mut links = Vec::new();
+        let mut tree = Vec::new();
         let parse_error = |source| ReceivePlanError::Parse { oid, source };
         match object.kind {
             Kind::Commit => {
@@ -459,6 +475,11 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
                     if let Some(kind) = kind {
                         links.push((target, kind));
                     }
+                    tree.push(TreeEntry {
+                        name: entry.filename.to_vec(),
+                        oid: target,
+                        mode: entry.mode.value(),
+                    });
                     previous = Some(entry);
                 }
             }
@@ -486,6 +507,7 @@ impl<'a, S: GraphSource, C: Fn() -> bool> Validator<'a, S, C> {
         Ok(Node {
             kind: object.kind,
             links,
+            tree,
         })
     }
     fn connected(&mut self, mut pending: Vec<(ObjectId, Option<Kind>)>) -> Result<()> {

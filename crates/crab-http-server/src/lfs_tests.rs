@@ -258,6 +258,42 @@ async fn lfs_lock_lifecycle_is_paginated_partitioned_and_retry_safe() {
 }
 
 #[tokio::test]
+async fn lfs_lock_mutations_share_the_receive_publication_guard() {
+    let server = maintenance_tests::fixture().await;
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let lease = crab_coordination::PushLock::acquire_internal(
+        repo.store.inner(),
+        repo.layout.repo_prefix(),
+        crab_coordination::LFS_LOCKS_RESOURCE,
+        Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let locks = "/git/team/repo.git/info/lfs/locks";
+    let blocked = request(
+        &server,
+        "POST",
+        locks,
+        Body::from(json!({"path":"models/guarded.bin"}).to_string()),
+    )
+    .await;
+    assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+    lease.release().await.unwrap();
+    let created = request(
+        &server,
+        "POST",
+        locks,
+        Body::from(json!({"path":"models/guarded.bin"}).to_string()),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    server.runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn lfs_lock_inputs_are_bounded() {
     let server = maintenance_tests::fixture().await;
     let locks = "/git/team/repo.git/info/lfs/locks";

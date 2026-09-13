@@ -105,18 +105,24 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        if matches!(
-            self,
-            Self::Storage(_)
-                | Self::Json(_)
-                | Self::Clock(_)
-                | Self::Repository(_)
-                | Self::Merge(_)
-                | Self::MergeObject(_)
-                | Self::Release(_)
-                | Self::ReleaseAssetIo(_)
-                | Self::ReleaseAssetWorker(_)
-        ) {
+        let expected_lock_conflict = matches!(
+            &self,
+            Self::Merge(error) if matches!(error.as_ref(), crate::receive::ReceiveError::Locked)
+        );
+        if !expected_lock_conflict
+            && matches!(
+                self,
+                Self::Storage(_)
+                    | Self::Json(_)
+                    | Self::Clock(_)
+                    | Self::Repository(_)
+                    | Self::Merge(_)
+                    | Self::MergeObject(_)
+                    | Self::Release(_)
+                    | Self::ReleaseAssetIo(_)
+                    | Self::ReleaseAssetWorker(_)
+            )
+        {
             tracing::error!(error = ?self, "collaboration request failed");
         }
         let (status, code, message) = match &self {
@@ -250,6 +256,15 @@ impl IntoResponse for Error {
                 "invalid_request",
                 "Invalid JSON request or request body too large",
             ),
+            Self::Merge(error)
+                if matches!(error.as_ref(), crate::receive::ReceiveError::Locked) =>
+            {
+                (
+                    StatusCode::CONFLICT,
+                    "path_locked",
+                    "A changed path is locked by another user",
+                )
+            }
             Self::Merge(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "merge_failed",

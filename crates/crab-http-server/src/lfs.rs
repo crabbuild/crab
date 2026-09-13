@@ -63,6 +63,8 @@ pub(crate) enum Error {
     Object(#[from] LfsError),
     #[error("LFS lock operation failed")]
     Lock(#[from] LfsLockError),
+    #[error("LFS lock coordination failed")]
+    Coordination(#[from] crab_coordination::CoordinationError),
     #[error("invalid stored LFS lock timestamp")]
     LockTimestamp,
     #[error("LFS request stream failed")]
@@ -73,6 +75,15 @@ pub(crate) enum Error {
     Worker(#[from] tokio::task::JoinError),
     #[error("repository settings failed")]
     Settings(#[source] Box<app::Error>),
+}
+
+impl From<crab_remote::publication::Error> for Error {
+    fn from(error: crab_remote::publication::Error) -> Self {
+        match error {
+            crab_remote::publication::Error::Cancelled => Self::Cancelled,
+            crab_remote::publication::Error::Coordination(error) => Self::Coordination(error),
+        }
+    }
 }
 
 impl IntoResponse for Error {

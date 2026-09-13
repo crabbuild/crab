@@ -149,6 +149,10 @@ Complete the setup in this order:
 6. Create the first repository through a running pod.
 7. Run the live qualification gates before admitting critical repositories.
 
+Do not grant team members direct write credentials for the storage root. Git,
+LFS, browser, and administration traffic must pass through the server so its
+authorization, locking, and atomic publication rules remain authoritative.
+
 [The infrastructure bootstrap guide](terraform/README.md) creates storage and identity. [The Kubernetes deployment guide](helm/crab-http-server/README.md) contains install commands. [The operations runbook](operations.md) covers rollout, rollback, rotation, incidents, and restore qualification.
 
 ## Repository lifecycle
