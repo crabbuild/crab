@@ -165,7 +165,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
         drawSelection(),
         bracketMatching(),
         closeBrackets(),
-        autocompletion(),
+        autocompletion({ interactionDelay: 0 }),
         highlightActiveLine(),
         keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
         editorTheme,
