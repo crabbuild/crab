@@ -375,7 +375,7 @@ Sources: [manifest store](../../../crates/crab-metadata/src/manifest_store.rs),
 | `packs/pack-{pack-id}.idx` | Git OID-to-pack-offset lookup | Immutable, bound to the corresponding pack |
 | `packs/pack-{pack-id}.rev` | Reverse index between pack and index order | Immutable, bound to the corresponding pack/index |
 | `packs/pack-{pack-id}.meta` | Derived pack metadata | Replaceable under owner validation |
-| `packs/pack-{pack-id}.kinds` | Object-kind evidence in pack-offset order | Immutable; bound to pack checksum and object count |
+| `packs/pack-{pack-id}.kinds` | Object-kind and sparse external REF_DELTA-base evidence in pack-offset order | Immutable; bound to pack checksum and object count; version 1 kind-only readers remain supported |
 
 These five objects are a pack family, not five full copies of the repository.
 Readers use different sidecars to avoid scanning or inflating the entire

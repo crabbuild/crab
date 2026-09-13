@@ -107,11 +107,25 @@ struct MultipartMaintenanceMetrics {
 
 struct MutationMetrics {
     batches: Counter,
+    fence_bursts: Counter,
+    fence_burst_batches: Counter,
     requests: Counter,
     commits: Counter,
     input_bytes: Counter,
+    generated_object_bytes: Counter,
+    generated_tree_bytes: Counter,
+    generated_pack_bytes: Counter,
+    external_tree_base_bytes: Counter,
+    cross_pack_tree_deltas: Counter,
     duration: Histogram,
     queue_wait: Histogram,
+    checkpoints_scheduled: Counter,
+    checkpoints_coalesced: Counter,
+    checkpoints_superseded: Counter,
+    checkpoints_published: Counter,
+    checkpoint_failures: Counter,
+    checkpoint_prepare_duration: Histogram,
+    checkpoint_publish_duration: Histogram,
 }
 
 #[derive(Clone, Copy)]
@@ -237,6 +251,83 @@ impl Metrics {
             .mutations
             .commits
             .increment(saturating_u64(commits));
+    }
+
+    pub(crate) fn record_mutation_fence_burst(&self, batches: usize) {
+        self.inner.mutations.fence_bursts.increment(1);
+        self.inner
+            .mutations
+            .fence_burst_batches
+            .increment(saturating_u64(batches));
+    }
+
+    pub(crate) fn record_generated_pack(
+        &self,
+        object_bytes: usize,
+        tree_bytes: usize,
+        pack_bytes: u64,
+        external_tree_base_bytes: usize,
+        cross_pack_tree_deltas: u32,
+    ) {
+        let metrics = &self.inner.mutations;
+        metrics
+            .generated_object_bytes
+            .increment(saturating_u64(object_bytes));
+        metrics
+            .generated_tree_bytes
+            .increment(saturating_u64(tree_bytes));
+        metrics.generated_pack_bytes.increment(pack_bytes);
+        metrics
+            .external_tree_base_bytes
+            .increment(saturating_u64(external_tree_base_bytes));
+        metrics
+            .cross_pack_tree_deltas
+            .increment(u64::from(cross_pack_tree_deltas));
+    }
+
+    pub(crate) fn record_checkpoint_scheduled(&self, coalesced: bool) {
+        self.inner.mutations.checkpoints_scheduled.increment(1);
+        if coalesced {
+            self.inner.mutations.checkpoints_coalesced.increment(1);
+        }
+    }
+
+    pub(crate) fn record_checkpoint_superseded(&self) {
+        self.inner.mutations.checkpoints_superseded.increment(1);
+    }
+
+    pub(crate) fn record_checkpoint_published(&self) {
+        self.inner.mutations.checkpoints_published.increment(1);
+    }
+
+    pub(crate) fn record_checkpoint_failure(&self) {
+        self.inner.mutations.checkpoint_failures.increment(1);
+    }
+
+    pub(crate) async fn observe_checkpoint_prepare<F, T>(&self, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let started = Instant::now();
+        let result = future.await;
+        self.inner
+            .mutations
+            .checkpoint_prepare_duration
+            .record(started.elapsed().as_secs_f64());
+        result
+    }
+
+    pub(crate) async fn observe_checkpoint_publish<F, T>(&self, future: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let started = Instant::now();
+        let result = future.await;
+        self.inner
+            .mutations
+            .checkpoint_publish_duration
+            .record(started.elapsed().as_secs_f64());
+        result
     }
 
     pub(crate) fn record_maintenance_failure(&self, failure: MaintenanceFailure, count: usize) {
@@ -482,6 +573,14 @@ impl MutationMetrics {
                 &Key::from_static_name("crab_s3_gateway_mutation_batches_total"),
                 &METADATA,
             ),
+            fence_bursts: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_fence_bursts_total"),
+                &METADATA,
+            ),
+            fence_burst_batches: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_fence_burst_batches_total"),
+                &METADATA,
+            ),
             requests: recorder.register_counter(
                 &Key::from_static_name("crab_s3_gateway_mutation_batch_requests_total"),
                 &METADATA,
@@ -494,12 +593,64 @@ impl MutationMetrics {
                 &Key::from_static_name("crab_s3_gateway_mutation_batch_input_bytes_total"),
                 &METADATA,
             ),
+            generated_object_bytes: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_generated_object_bytes_total"),
+                &METADATA,
+            ),
+            generated_tree_bytes: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_generated_tree_bytes_total"),
+                &METADATA,
+            ),
+            generated_pack_bytes: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_generated_pack_bytes_total"),
+                &METADATA,
+            ),
+            external_tree_base_bytes: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_external_tree_base_bytes_total"),
+                &METADATA,
+            ),
+            cross_pack_tree_deltas: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_mutation_cross_pack_tree_deltas_total"),
+                &METADATA,
+            ),
             duration: recorder.register_histogram(
                 &Key::from_static_name("crab_s3_gateway_mutation_batch_duration_seconds"),
                 &METADATA,
             ),
             queue_wait: recorder.register_histogram(
                 &Key::from_static_name("crab_s3_gateway_mutation_queue_wait_seconds"),
+                &METADATA,
+            ),
+            checkpoints_scheduled: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_attribute_checkpoints_scheduled_total"),
+                &METADATA,
+            ),
+            checkpoints_coalesced: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_attribute_checkpoints_coalesced_total"),
+                &METADATA,
+            ),
+            checkpoints_superseded: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_attribute_checkpoints_superseded_total"),
+                &METADATA,
+            ),
+            checkpoints_published: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_attribute_checkpoints_published_total"),
+                &METADATA,
+            ),
+            checkpoint_failures: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_attribute_checkpoint_failures_total"),
+                &METADATA,
+            ),
+            checkpoint_prepare_duration: recorder.register_histogram(
+                &Key::from_static_name(
+                    "crab_s3_gateway_attribute_checkpoint_prepare_duration_seconds",
+                ),
+                &METADATA,
+            ),
+            checkpoint_publish_duration: recorder.register_histogram(
+                &Key::from_static_name(
+                    "crab_s3_gateway_attribute_checkpoint_publish_duration_seconds",
+                ),
                 &METADATA,
             ),
         }
@@ -726,6 +877,16 @@ fn describe_metrics(recorder: &impl Recorder) {
     );
     describe_counter(
         recorder,
+        "crab_s3_gateway_mutation_fence_bursts_total",
+        "Bounded runs of mutation batches sharing GC writer fences.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_fence_burst_batches_total",
+        "Mutation batches executed while a bounded GC writer-fence burst was held.",
+    );
+    describe_counter(
+        recorder,
         "crab_s3_gateway_mutation_batch_requests_total",
         "S3 mutations admitted into bounded same-ref batches.",
     );
@@ -739,6 +900,31 @@ fn describe_metrics(recorder: &impl Recorder) {
         "crab_s3_gateway_mutation_batch_input_bytes_total",
         "Logical mutation bytes admitted into bounded same-ref batches.",
     );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_generated_object_bytes_total",
+        "Decoded Git object bytes supplied to generated pack preparation.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_generated_tree_bytes_total",
+        "Decoded Git tree bytes supplied to generated pack preparation.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_generated_pack_bytes_total",
+        "Compressed bytes in generated Git packs, including pack trailers.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_external_tree_base_bytes_total",
+        "Decoded warm tree base bytes supplied to generated pack preparation.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_mutation_cross_pack_tree_deltas_total",
+        "Generated Git tree entries using verified bases from earlier packs.",
+    );
     recorder.describe_histogram(
         KeyName::from_const_str("crab_s3_gateway_mutation_batch_duration_seconds"),
         Some(Unit::Seconds),
@@ -748,6 +934,41 @@ fn describe_metrics(recorder: &impl Recorder) {
         KeyName::from_const_str("crab_s3_gateway_mutation_queue_wait_seconds"),
         Some(Unit::Seconds),
         "Per-request wait before a same-ref mutation batch starts.".into(),
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_attribute_checkpoints_scheduled_total",
+        "Commit-bound attribute checkpoints submitted to background publication.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_attribute_checkpoints_coalesced_total",
+        "Pending attribute checkpoints replaced by a newer checkpoint for the same ref.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_attribute_checkpoints_superseded_total",
+        "Prepared attribute checkpoints skipped because a newer checkpoint is pending.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_attribute_checkpoints_published_total",
+        "Attribute checkpoints successfully published by background workers.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_attribute_checkpoint_failures_total",
+        "Background attribute checkpoint preparation or publication failures.",
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_s3_gateway_attribute_checkpoint_prepare_duration_seconds"),
+        Some(Unit::Seconds),
+        "Background attribute checkpoint serialization duration.".into(),
+    );
+    recorder.describe_histogram(
+        KeyName::from_const_str("crab_s3_gateway_attribute_checkpoint_publish_duration_seconds"),
+        Some(Unit::Seconds),
+        "Background attribute checkpoint storage publication duration.".into(),
     );
     describe_counter(
         recorder,

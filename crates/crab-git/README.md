@@ -162,7 +162,29 @@ object IDs/kinds/bytes, and removes its files when dropped.
 `IncomingPack::from_generated_objects` gives trusted in-process Git object
 builders the same bounded identity spool without first compressing and then
 inflating an artificial wire pack. `prepare` remains mandatory and produces the
-same independently readable canonical pack and verified sidecars.
+same independently readable canonical pack and checksummed standard sidecars.
+`prepare_with_delta_bases` additionally accepts caller-proven generated-object
+relationships. It writes only self-contained OFS deltas, caps chain depth and
+eligible object size, falls back to full entries when a base is absent or a
+delta is not smaller, and records pack offsets and entry CRCs during the one
+bounded write. `prepare_with_external_delta_bases` may instead encode a bounded
+REF delta when the caller supplies the decoded base, its immutable object ID,
+kind, and verified prior depth. Preparation recomputes the base identity and
+falls back to a full entry for unknown, mismatched, over-depth, oversized, or
+unprofitable candidates. Such a prepared pack depends on the surrounding object
+database; a native Git transfer must materialize that closure or repair the thin
+pack with `git index-pack --fix-thin`. Preparation emits Git v2 and reverse indexes directly, then
+reopens them through the production locator to prove their checksum, pack
+identity, and exact object inventory. Tests compare these artifacts byte for
+byte with native `git index-pack`, repair external-base packs through native Git,
+and reconstruct every object with Git.
+
+Bounded consolidation structurally concatenates disjoint pack inventories. If
+selected packs overlap, callers provide the REF_DELTA bases discovered by the
+header scan; consolidation installs those verified objects temporarily, repairs
+the selected thin packs with native Git, and emits a self-contained pack whose
+index must equal the selected OID set. This preserves cross-pack deduplication
+without requiring the stable pack prefix to participate in the rewrite.
 
 This is an integrity boundary, not a Git publisher. It validates the complete pack
 checksum, compressed streams, entry framing and delta reconstruction. Callers

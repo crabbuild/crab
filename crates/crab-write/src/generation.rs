@@ -133,6 +133,9 @@ async fn ensure_readable_state(
             }
         };
         let mut result = async {
+            if commit_graph.is_none() {
+                return make_catalog_readable(store, layout, ttl, cancel).await;
+            }
             let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
             let Some(manifest) = make_readable(store, layout, ttl, manifest.pusher, cancel).await?
             else {
@@ -161,6 +164,39 @@ async fn ensure_readable_state(
     });
     let result = crab_coordination::while_renewing(&mut owner, Some(cancel), maintenance).await;
     result.and(owner.release().await.map_err(Into::into))
+}
+
+async fn make_catalog_readable(
+    store: &Store,
+    layout: &StoreLayout<Store>,
+    lock_ttl: Duration,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    let (base, _) = manifest_store::read_manifest(store, layout).await?;
+    crate::journal::compact_once_for_owner(store, layout, lock_ttl, base.pusher, cancel).await?;
+    check_cancelled(cancel)?;
+    let (manifest, _) = manifest_store::read_manifest(store, layout).await?;
+    let packs = if manifest.pack_index_hash.is_empty() {
+        Vec::new()
+    } else {
+        manifest_store::read_bulk_pack_list(store, layout, &manifest.pack_index_hash).await?
+    };
+    if maintain_catalog(store, layout, &manifest, &packs, lock_ttl, cancel)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    check_cancelled(cancel)?;
+    let visible = manifest.refs.is_empty()
+        || crab_metadata::git_visibility::ensure_catalog_bound(store, layout, &manifest).await?;
+    if !visible {
+        return Err(WriteError::VisibilityUnavailable {
+            generation: manifest.generation,
+        });
+    }
+    Ok(())
 }
 
 /// Complete the read path for already committed refs using their verified visibility evidence.

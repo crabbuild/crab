@@ -15,8 +15,11 @@ const REVERSE_ENTRY_LEN: usize = 4;
 const REVERSE_TRAILER_LEN: usize = SHA1_LEN * 2;
 const KIND_METADATA_MAGIC: &[u8; 8] = b"CRBKIND1";
 const KIND_METADATA_VERSION: u32 = 1;
+const KIND_METADATA_EXTERNAL_BASE_VERSION: u32 = 2;
 const KIND_METADATA_HEADER_LEN: usize = KIND_METADATA_MAGIC.len() + 4 + 8 + SHA1_LEN;
 const KIND_METADATA_TRAILER_LEN: usize = 32;
+const KIND_METADATA_EXTERNAL_COUNT_LEN: usize = 8;
+const KIND_METADATA_EXTERNAL_ENTRY_LEN: usize = 8 + SHA1_LEN;
 const PACK_INDEX_V2_FIXED_BYTES: u64 = 8 + (256 * 4) + (SHA1_LEN as u64 * 2);
 const PACK_INDEX_V2_MAX_BYTES_PER_OBJECT: u64 = SHA1_LEN as u64 + 4 + 4 + 8;
 const REVERSE_INDEX_FIXED_BYTES: u64 = REVERSE_HEADER_LEN as u64 + REVERSE_TRAILER_LEN as u64;
@@ -32,6 +35,13 @@ pub struct PackObjectLocation {
     pub entry_len: u64,
     /// CRC32 over the complete packed entry.
     pub crc32: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PackIndexEntry {
+    pub(crate) oid: gix_hash::ObjectId,
+    pub(crate) crc32: u32,
+    pub(crate) offset: u64,
 }
 
 /// Errors returned while deriving or validating pack object locations.
@@ -98,6 +108,18 @@ pub enum PackLocatorError {
         source: std::io::Error,
     },
 
+    /// Pack-index filesystem I/O failed.
+    #[error("git pack-index I/O failed for {path}: {source}")]
+    IndexIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Pack-index bytes could not represent the requested object inventory.
+    #[error("invalid git pack index {path}: {reason}")]
+    InvalidIndex { path: PathBuf, reason: String },
+
     /// Reverse-index bytes were structurally invalid or disagreed with the index.
     #[error("invalid git reverse index {path}: {reason}")]
     InvalidReverseIndex { path: PathBuf, reason: String },
@@ -109,6 +131,84 @@ pub enum PackLocatorError {
     /// A kind sidecar did not match its immutable pack index.
     #[error("invalid git pack kind metadata: {reason}")]
     InvalidKindMetadata { reason: String },
+}
+
+pub(crate) fn write_pack_index_v2(
+    entries: &mut [PackIndexEntry],
+    index_path: &Path,
+    pack_checksum: gix_hash::ObjectId,
+) -> Result<(), PackLocatorError> {
+    entries.sort_unstable_by_key(|entry| entry.oid);
+    if entries.windows(2).any(|pair| pair[0].oid == pair[1].oid) {
+        return Err(PackLocatorError::InvalidIndex {
+            path: index_path.to_owned(),
+            reason: "pack index contains duplicate object IDs".to_owned(),
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(
+        8_usize
+            .saturating_add(256 * 4)
+            .saturating_add(entries.len().saturating_mul(36))
+            .saturating_add(40),
+    );
+    bytes.extend_from_slice(b"\xfftOc");
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    let mut fanout = [0_u32; 256];
+    for entry in entries.iter() {
+        let bucket = usize::from(entry.oid.as_bytes()[0]);
+        fanout[bucket] = fanout[bucket]
+            .checked_add(1)
+            .ok_or(PackLocatorError::Overflow {
+                path: index_path.to_owned(),
+            })?;
+    }
+    let mut cumulative = 0_u32;
+    for count in fanout {
+        cumulative = cumulative
+            .checked_add(count)
+            .ok_or(PackLocatorError::Overflow {
+                path: index_path.to_owned(),
+            })?;
+        bytes.extend_from_slice(&cumulative.to_be_bytes());
+    }
+    for entry in entries.iter() {
+        bytes.extend_from_slice(entry.oid.as_bytes());
+    }
+    for entry in entries.iter() {
+        bytes.extend_from_slice(&entry.crc32.to_be_bytes());
+    }
+    let mut large_offsets = Vec::new();
+    for entry in entries.iter() {
+        let encoded = if entry.offset > 0x7fff_ffff {
+            let position =
+                u32::try_from(large_offsets.len()).map_err(|_| PackLocatorError::Overflow {
+                    path: index_path.to_owned(),
+                })?;
+            if position > 0x7fff_ffff {
+                return Err(PackLocatorError::Overflow {
+                    path: index_path.to_owned(),
+                });
+            }
+            large_offsets.push(entry.offset);
+            position | 0x8000_0000
+        } else {
+            u32::try_from(entry.offset).map_err(|_| PackLocatorError::Overflow {
+                path: index_path.to_owned(),
+            })?
+        };
+        bytes.extend_from_slice(&encoded.to_be_bytes());
+    }
+    for offset in large_offsets {
+        bytes.extend_from_slice(&offset.to_be_bytes());
+    }
+    bytes.extend_from_slice(pack_checksum.as_bytes());
+    let index_checksum: [u8; 20] = Sha1::digest(&bytes).into();
+    bytes.extend_from_slice(&index_checksum);
+    std::fs::write(index_path, bytes).map_err(|source| PackLocatorError::IndexIo {
+        path: index_path.to_owned(),
+        source,
+    })
 }
 
 /// Iterator over verified locations in increasing pack-offset order.
@@ -269,6 +369,16 @@ pub fn pack_kind_metadata_size(object_count: u64) -> Option<u64> {
         .checked_add(KIND_METADATA_TRAILER_LEN as u64)
 }
 
+/// Return the maximum byte size of a valid object-kind sidecar.
+#[must_use]
+pub fn max_pack_kind_metadata_size(object_count: u64) -> Option<u64> {
+    (KIND_METADATA_HEADER_LEN as u64)
+        .checked_add(object_count)?
+        .checked_add(KIND_METADATA_EXTERNAL_COUNT_LEN as u64)?
+        .checked_add(object_count.checked_mul(KIND_METADATA_EXTERNAL_ENTRY_LEN as u64)?)?
+        .checked_add(KIND_METADATA_TRAILER_LEN as u64)
+}
+
 /// Encode one compact, checksummed object-kind sidecar.
 ///
 /// Entries are ordered by increasing pack offset, matching
@@ -279,11 +389,71 @@ pub fn encode_pack_kind_metadata(
     pack_checksum: gix_hash::ObjectId,
     kinds: &[gix_object::Kind],
 ) -> Result<Vec<u8>, PackLocatorError> {
-    if pack_checksum.as_bytes().len() != SHA1_LEN {
-        return Err(PackLocatorError::InvalidKindMetadata {
-            reason: "kind metadata supports only SHA-1 pack checksums".to_owned(),
-        });
+    encode_pack_kind_metadata_v1(pack_checksum, kinds)
+}
+
+/// Encode kinds plus sparse identities for bases that live outside this pack.
+pub fn encode_pack_kind_metadata_with_external_deltas(
+    pack_checksum: gix_hash::ObjectId,
+    entries: &[(gix_object::Kind, Option<gix_hash::ObjectId>)],
+) -> Result<Vec<u8>, PackLocatorError> {
+    if entries.iter().all(|(_, base)| base.is_none()) {
+        return encode_pack_kind_metadata_v1(
+            pack_checksum,
+            &entries.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(),
+        );
     }
+    validate_kind_metadata_checksum(pack_checksum)?;
+    let object_count = u64::try_from(entries.len()).map_err(|_| PackLocatorError::Overflow {
+        path: PathBuf::from("pack kind metadata"),
+    })?;
+    let external_count = u64::try_from(entries.iter().filter(|(_, base)| base.is_some()).count())
+        .map_err(|_| PackLocatorError::Overflow {
+        path: PathBuf::from("pack kind metadata"),
+    })?;
+    let capacity = (KIND_METADATA_HEADER_LEN as u64)
+        .checked_add(object_count)
+        .and_then(|size| size.checked_add(KIND_METADATA_EXTERNAL_COUNT_LEN as u64))
+        .and_then(|size| {
+            size.checked_add(external_count.checked_mul(KIND_METADATA_EXTERNAL_ENTRY_LEN as u64)?)
+        })
+        .and_then(|size| size.checked_add(KIND_METADATA_TRAILER_LEN as u64))
+        .ok_or_else(|| PackLocatorError::Overflow {
+            path: PathBuf::from("pack kind metadata"),
+        })?;
+    let mut bytes =
+        Vec::with_capacity(
+            usize::try_from(capacity).map_err(|_| PackLocatorError::Overflow {
+                path: PathBuf::from("pack kind metadata"),
+            })?,
+        );
+    encode_kind_metadata_header(
+        &mut bytes,
+        KIND_METADATA_EXTERNAL_BASE_VERSION,
+        object_count,
+        pack_checksum,
+    );
+    bytes.extend(entries.iter().map(|(kind, _)| kind_code(*kind)));
+    bytes.extend_from_slice(&external_count.to_le_bytes());
+    for (index, (_, base)) in entries.iter().enumerate() {
+        let Some(base) = base else {
+            continue;
+        };
+        let index = u64::try_from(index).map_err(|_| PackLocatorError::Overflow {
+            path: PathBuf::from("pack kind metadata"),
+        })?;
+        bytes.extend_from_slice(&index.to_le_bytes());
+        bytes.extend_from_slice(base.as_bytes());
+    }
+    append_kind_metadata_digest(&mut bytes);
+    Ok(bytes)
+}
+
+fn encode_pack_kind_metadata_v1(
+    pack_checksum: gix_hash::ObjectId,
+    kinds: &[gix_object::Kind],
+) -> Result<Vec<u8>, PackLocatorError> {
+    validate_kind_metadata_checksum(pack_checksum)?;
     let object_count = u64::try_from(kinds.len()).map_err(|_| PackLocatorError::Overflow {
         path: PathBuf::from("pack kind metadata"),
     })?;
@@ -296,16 +466,45 @@ pub fn encode_pack_kind_metadata(
         path: PathBuf::from("pack kind metadata"),
     })?;
     let mut bytes = Vec::with_capacity(capacity);
-    bytes.extend_from_slice(KIND_METADATA_MAGIC);
-    bytes.extend_from_slice(&KIND_METADATA_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&object_count.to_le_bytes());
-    bytes.extend_from_slice(pack_checksum.as_bytes());
+    encode_kind_metadata_header(
+        &mut bytes,
+        KIND_METADATA_VERSION,
+        object_count,
+        pack_checksum,
+    );
     for kind in kinds {
         bytes.push(kind_code(*kind));
     }
-    let digest = blake3::hash(&bytes);
-    bytes.extend_from_slice(digest.as_bytes());
+    append_kind_metadata_digest(&mut bytes);
     Ok(bytes)
+}
+
+fn validate_kind_metadata_checksum(
+    pack_checksum: gix_hash::ObjectId,
+) -> Result<(), PackLocatorError> {
+    if pack_checksum.as_bytes().len() != SHA1_LEN {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: "kind metadata supports only SHA-1 pack checksums".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn encode_kind_metadata_header(
+    bytes: &mut Vec<u8>,
+    version: u32,
+    object_count: u64,
+    pack_checksum: gix_hash::ObjectId,
+) {
+    bytes.extend_from_slice(KIND_METADATA_MAGIC);
+    bytes.extend_from_slice(&version.to_le_bytes());
+    bytes.extend_from_slice(&object_count.to_le_bytes());
+    bytes.extend_from_slice(pack_checksum.as_bytes());
+}
+
+fn append_kind_metadata_digest(bytes: &mut Vec<u8>) {
+    let digest = blake3::hash(bytes);
+    bytes.extend_from_slice(digest.as_bytes());
 }
 
 /// Decode and bind one kind sidecar to its verified pack locations.
@@ -326,11 +525,56 @@ pub fn decode_pack_kind_metadata_iter(
 ) -> Result<PackKindMetadataIter, PackLocatorError> {
     let pack_checksum = locations.pack_checksum();
     let object_count = locations.object_count();
-    let kinds = decode_pack_kind_metadata_payload(bytes, pack_checksum, object_count)?;
+    let kinds = decode_pack_kind_metadata_payload(bytes, pack_checksum, object_count)?
+        .into_iter()
+        .map(|(kind, _)| kind)
+        .collect::<Vec<_>>();
     Ok(PackKindMetadataIter {
         locations,
         kinds: kinds.into_iter(),
     })
+}
+
+/// Decode object kinds and cross-pack base identities in pack-offset order.
+pub fn decode_pack_kind_metadata_with_external_deltas(
+    bytes: &[u8],
+    locations: PackLocationIter,
+) -> Result<
+    Vec<(
+        gix_hash::ObjectId,
+        gix_object::Kind,
+        Option<gix_hash::ObjectId>,
+    )>,
+    PackLocatorError,
+> {
+    let pack_checksum = locations.pack_checksum();
+    let object_count = locations.object_count();
+    let metadata = decode_pack_kind_metadata_payload(bytes, pack_checksum, object_count)?;
+    locations
+        .zip(metadata)
+        .map(|(location, (kind, external_delta_base))| {
+            location.and_then(|location| {
+                if external_delta_base == Some(location.oid) {
+                    return Err(PackLocatorError::InvalidKindMetadata {
+                        reason: format!(
+                            "object {} uses itself as an external delta base",
+                            location.oid
+                        ),
+                    });
+                }
+                Ok((location.oid, kind, external_delta_base))
+            })
+        })
+        .collect()
+}
+
+/// Decode sidecar records in increasing pack-offset order.
+pub fn decode_pack_kind_metadata_records(
+    bytes: &[u8],
+    pack_checksum: gix_hash::ObjectId,
+    object_count: u64,
+) -> Result<Vec<(gix_object::Kind, Option<gix_hash::ObjectId>)>, PackLocatorError> {
+    decode_pack_kind_metadata_payload(bytes, pack_checksum, object_count)
 }
 
 /// Validate one kind sidecar against a pack checksum and object count.
@@ -346,21 +590,10 @@ fn decode_pack_kind_metadata_payload(
     bytes: &[u8],
     pack_checksum: gix_hash::ObjectId,
     object_count: u64,
-) -> Result<Vec<gix_object::Kind>, PackLocatorError> {
-    let expected_len = usize::try_from(pack_kind_metadata_size(object_count).ok_or_else(|| {
-        PackLocatorError::InvalidKindMetadata {
-            reason: "sidecar length overflowed".to_owned(),
-        }
-    })?)
-    .map_err(|_| PackLocatorError::InvalidKindMetadata {
-        reason: "object count does not fit in usize".to_owned(),
-    })?;
-    if bytes.len() != expected_len {
+) -> Result<Vec<(gix_object::Kind, Option<gix_hash::ObjectId>)>, PackLocatorError> {
+    if bytes.len() < KIND_METADATA_HEADER_LEN + KIND_METADATA_TRAILER_LEN {
         return Err(PackLocatorError::InvalidKindMetadata {
-            reason: format!(
-                "length {} does not match expected {expected_len}",
-                bytes.len()
-            ),
+            reason: "sidecar is truncated".to_owned(),
         });
     }
     if bytes.get(..KIND_METADATA_MAGIC.len()) != Some(KIND_METADATA_MAGIC) {
@@ -373,7 +606,7 @@ fn decode_pack_kind_metadata_payload(
         read_u32_le(bytes, version_start).ok_or_else(|| PackLocatorError::InvalidKindMetadata {
             reason: "truncated version".to_owned(),
         })?;
-    if version != KIND_METADATA_VERSION {
+    if version != KIND_METADATA_VERSION && version != KIND_METADATA_EXTERNAL_BASE_VERSION {
         return Err(PackLocatorError::InvalidKindMetadata {
             reason: format!("unsupported version {version}"),
         });
@@ -391,6 +624,10 @@ fn decode_pack_kind_metadata_payload(
             ),
         });
     }
+    let object_count =
+        usize::try_from(object_count).map_err(|_| PackLocatorError::InvalidKindMetadata {
+            reason: "object count does not fit in usize".to_owned(),
+        })?;
     let checksum_start = count_start + 8;
     let checksum_end = checksum_start + SHA1_LEN;
     if bytes.get(checksum_start..checksum_end) != Some(pack_checksum.as_bytes()) {
@@ -405,10 +642,84 @@ fn decode_pack_kind_metadata_payload(
         });
     }
     let kind_start = checksum_end;
-    bytes[kind_start..digest_start]
+    let kind_end = kind_start.checked_add(object_count).ok_or_else(|| {
+        PackLocatorError::InvalidKindMetadata {
+            reason: "kind payload length overflowed".to_owned(),
+        }
+    })?;
+    let kind_bytes =
+        bytes
+            .get(kind_start..kind_end)
+            .ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+                reason: "kind payload is truncated".to_owned(),
+            })?;
+    let mut metadata = kind_bytes
         .iter()
-        .map(|code| decode_kind_code(*code))
-        .collect()
+        .map(|code| decode_kind_code(*code).map(|kind| (kind, None)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if version == KIND_METADATA_VERSION {
+        if kind_end != digest_start {
+            return Err(PackLocatorError::InvalidKindMetadata {
+                reason: "version 1 sidecar has trailing payload".to_owned(),
+            });
+        }
+        return Ok(metadata);
+    }
+
+    let external_count =
+        read_u64_le(bytes, kind_end).ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+            reason: "external delta count is truncated".to_owned(),
+        })?;
+    let external_count =
+        usize::try_from(external_count).map_err(|_| PackLocatorError::InvalidKindMetadata {
+            reason: "external delta count does not fit in memory".to_owned(),
+        })?;
+    if external_count > object_count {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: "external delta count exceeds object count".to_owned(),
+        });
+    }
+    let records_start = kind_end + KIND_METADATA_EXTERNAL_COUNT_LEN;
+    let records_len = external_count
+        .checked_mul(KIND_METADATA_EXTERNAL_ENTRY_LEN)
+        .ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+            reason: "external delta payload length overflowed".to_owned(),
+        })?;
+    if records_start.checked_add(records_len) != Some(digest_start) {
+        return Err(PackLocatorError::InvalidKindMetadata {
+            reason: "external delta payload length does not match its count".to_owned(),
+        });
+    }
+    for record in bytes[records_start..digest_start]
+        .as_chunks::<KIND_METADATA_EXTERNAL_ENTRY_LEN>()
+        .0
+    {
+        let index =
+            read_u64_le(record, 0).ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+                reason: "external delta object index is truncated".to_owned(),
+            })?;
+        let index = usize::try_from(index).map_err(|_| PackLocatorError::InvalidKindMetadata {
+            reason: "external delta object index does not fit in memory".to_owned(),
+        })?;
+        let entry =
+            metadata
+                .get_mut(index)
+                .ok_or_else(|| PackLocatorError::InvalidKindMetadata {
+                    reason: "external delta object index exceeds object count".to_owned(),
+                })?;
+        if entry.1.is_some() {
+            return Err(PackLocatorError::InvalidKindMetadata {
+                reason: "external delta object index is duplicated".to_owned(),
+            });
+        }
+        let base = <[u8; SHA1_LEN]>::try_from(&record[8..]).map_err(|_| {
+            PackLocatorError::InvalidKindMetadata {
+                reason: "external delta base identity is truncated".to_owned(),
+            }
+        })?;
+        entry.1 = Some(gix_hash::ObjectId::from(base));
+    }
+    Ok(metadata)
 }
 
 /// Iterator over object IDs and kinds in increasing pack-offset order.
@@ -776,8 +1087,10 @@ mod tests {
     use sha1::{Digest, Sha1};
 
     use super::{
-        PackLocationIter, PackLocatorError, decode_pack_kind_metadata, encode_pack_kind_metadata,
-        max_pack_index_size, pack_kind_metadata_size, pack_reverse_index_size,
+        PackLocationIter, PackLocatorError, decode_pack_kind_metadata,
+        decode_pack_kind_metadata_with_external_deltas, encode_pack_kind_metadata,
+        encode_pack_kind_metadata_with_external_deltas, max_pack_index_size,
+        max_pack_kind_metadata_size, pack_kind_metadata_size, pack_reverse_index_size,
         write_pack_reverse_index,
     };
 
@@ -962,6 +1275,44 @@ mod tests {
     }
 
     #[test]
+    fn pack_kind_metadata_marks_external_delta_entries() {
+        let fixture = PackFixture::new();
+        let locations = PackLocationIter::open(&fixture.idx, &fixture.rev, fixture.pack_len())
+            .expect("open locations");
+        let bytes = encode_pack_kind_metadata_with_external_deltas(
+            locations.pack_checksum(),
+            &[
+                (gix_object::Kind::Blob, None),
+                (
+                    gix_object::Kind::Tree,
+                    Some(gix_hash::ObjectId::from([0x51; 20])),
+                ),
+                (gix_object::Kind::Commit, None),
+            ],
+        )
+        .expect("encode kind metadata");
+
+        let decoded = decode_pack_kind_metadata_with_external_deltas(&bytes, locations)
+            .expect("decode kind metadata");
+
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|(_, kind, external)| (*kind, *external))
+                .collect::<Vec<_>>(),
+            vec![
+                (gix_object::Kind::Blob, None),
+                (
+                    gix_object::Kind::Tree,
+                    Some(gix_hash::ObjectId::from([0x51; 20])),
+                ),
+                (gix_object::Kind::Commit, None),
+            ]
+        );
+        assert!(bytes.len() as u64 <= max_pack_kind_metadata_size(3).unwrap());
+    }
+
+    #[test]
     fn pack_sidecar_bounds_cover_valid_fixture_files_and_overflow_safely() {
         let fixture = PackFixture::new();
         let object_count = 3;
@@ -982,6 +1333,7 @@ mod tests {
         assert_eq!(max_pack_index_size(u64::MAX), None);
         assert_eq!(pack_reverse_index_size(u64::MAX), None);
         assert_eq!(pack_kind_metadata_size(u64::MAX), None);
+        assert_eq!(max_pack_kind_metadata_size(u64::MAX), None);
     }
 
     #[test]

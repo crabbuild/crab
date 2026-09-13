@@ -1,6 +1,6 @@
 //! Local Git pack consolidation with complete object-graph verification.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +11,10 @@ use crate::pack::{
     PackError, VerifiedPackIdentity, install_pack_files_from_paths_with_identity,
     verify_and_hash_pack_file,
 };
-use crate::pack_locator::{PackLocationIter, PackLocatorError, write_pack_reverse_index};
+use crate::pack_locator::{
+    PackIndexEntry, PackLocationIter, PackLocatorError, write_pack_index_v2,
+    write_pack_reverse_index,
+};
 use sha1::{Digest, Sha1};
 
 const DEFAULT_REPACK_INDEX_CONCURRENCY: usize = 8;
@@ -38,6 +41,17 @@ pub struct RepackSource {
     /// This lets the response producer avoid hashing the same immutable pack
     /// body again while installing its already-verified sidecars.
     pub verified_identity: Option<VerifiedPackIdentity>,
+}
+
+/// One verified object required to resolve a selected pack's REF_DELTA entry.
+#[derive(Debug, Clone)]
+pub struct RepackDeltaBase {
+    /// Git object ID bound to `kind` and `data`.
+    pub oid: gix_hash::ObjectId,
+    /// Canonical Git object kind.
+    pub kind: gix_object::Kind,
+    /// Uncompressed object payload without the Git object header.
+    pub data: Vec<u8>,
 }
 
 /// One authorized annotated tag considered for shallow fetch inclusion.
@@ -400,7 +414,7 @@ pub fn consolidate_pack_suffix(
         .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
             parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
         });
-    consolidate_pack_suffix_with_options(sources, concurrency, ConsolidationValidation::Full)
+    consolidate_pack_suffix_with_options(sources, &[], concurrency, ConsolidationValidation::Full)
 }
 
 /// Consolidate immutable source packs for a generated response pack.
@@ -416,7 +430,12 @@ pub fn consolidate_pack_suffix_for_response(
         .map_or(DEFAULT_REPACK_INDEX_CONCURRENCY, |parallelism| {
             parallelism.get().min(DEFAULT_REPACK_INDEX_CONCURRENCY)
         });
-    consolidate_pack_suffix_with_options(sources, concurrency, ConsolidationValidation::Response)
+    consolidate_pack_suffix_with_options(
+        sources,
+        &[],
+        concurrency,
+        ConsolidationValidation::Response,
+    )
 }
 
 /// Consolidate selected packs with bounded local index parallelism.
@@ -428,17 +447,54 @@ pub fn consolidate_pack_suffix_with_concurrency(
     sources: &[RepackSource],
     index_concurrency: usize,
 ) -> Result<GeometricRepackedRepository, RepackError> {
-    consolidate_pack_suffix_with_options(sources, index_concurrency, ConsolidationValidation::Full)
+    consolidate_pack_suffix_with_options(
+        sources,
+        &[],
+        index_concurrency,
+        ConsolidationValidation::Full,
+    )
+}
+
+/// Consolidate canonical packs already admitted by Crab publication.
+///
+/// The immutable body identity and committed index pair are revalidated, but
+/// object inflation is not repeated. Publication must have quarantined and
+/// hash-verified every object before placing the pack in the manifest.
+pub fn consolidate_committed_pack_suffix_with_concurrency(
+    sources: &[RepackSource],
+    index_concurrency: usize,
+) -> Result<GeometricRepackedRepository, RepackError> {
+    consolidate_committed_pack_suffix_with_delta_bases(sources, &[], index_concurrency)
+}
+
+/// Consolidate committed packs with verified REF_DELTA bases.
+///
+/// Bases are installed only as temporary loose objects. They make thin-pack
+/// repair independent of selected-pack order but are not added to the selected
+/// object universe or replacement unless already present in `sources`.
+pub fn consolidate_committed_pack_suffix_with_delta_bases(
+    sources: &[RepackSource],
+    delta_bases: &[RepackDeltaBase],
+    index_concurrency: usize,
+) -> Result<GeometricRepackedRepository, RepackError> {
+    consolidate_pack_suffix_with_options(
+        sources,
+        delta_bases,
+        index_concurrency,
+        ConsolidationValidation::Committed,
+    )
 }
 
 #[derive(Clone, Copy)]
 enum ConsolidationValidation {
     Full,
+    Committed,
     Response,
 }
 
 fn consolidate_pack_suffix_with_options(
     sources: &[RepackSource],
+    delta_bases: &[RepackDeltaBase],
     index_concurrency: usize,
     validation: ConsolidationValidation,
 ) -> Result<GeometricRepackedRepository, RepackError> {
@@ -463,7 +519,10 @@ fn consolidate_pack_suffix_with_options(
     initialize_bare_repository(&source_git)?;
     let pack_dir = source_git.join("objects/pack");
     let install_started = Instant::now();
-    let collect_source_oids = matches!(validation, ConsolidationValidation::Full);
+    let collect_source_oids = matches!(
+        validation,
+        ConsolidationValidation::Full | ConsolidationValidation::Committed
+    );
     let (mut source_oids, source_indexes) =
         install_source_packs(&pack_dir, sources, index_concurrency, collect_source_oids)?;
     tracing::debug!(
@@ -472,64 +531,156 @@ fn consolidate_pack_suffix_with_options(
         elapsed_ms = install_started.elapsed().as_millis() as u64,
         "installed source packs for consolidation"
     );
-    if collect_source_oids {
+    let source_objects_are_disjoint = if collect_source_oids {
         // Selected suffixes may reference stable packs outside this operation;
         // validate each selected pack's own body and index without requiring a
         // complete repository graph.
-        let verify_started = Instant::now();
-        for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
-            let mut verify = Command::new("git");
-            verify
-                .arg("verify-pack")
-                .arg("--")
-                .args(index_batch)
-                .stdout(Stdio::null());
-            run_git(&mut verify, "verify consolidated source packs")?;
+        if matches!(validation, ConsolidationValidation::Full) {
+            let verify_started = Instant::now();
+            for index_batch in source_indexes.chunks(MAX_VERIFY_PACKS_PER_COMMAND) {
+                let mut verify = Command::new("git");
+                verify
+                    .arg("verify-pack")
+                    .arg("--")
+                    .args(index_batch)
+                    .stdout(Stdio::null());
+                run_git(&mut verify, "verify consolidated source packs")?;
+            }
+            tracing::debug!(
+                source_pack_count = source_indexes.len(),
+                elapsed_ms = verify_started.elapsed().as_millis() as u64,
+                "verified consolidated source packs"
+            );
         }
-        tracing::debug!(
-            source_pack_count = source_indexes.len(),
-            elapsed_ms = verify_started.elapsed().as_millis() as u64,
-            "verified consolidated source packs"
-        );
         source_oids.sort_unstable();
+        let disjoint = !source_oids.windows(2).any(|pair| pair[0] == pair[1]);
         source_oids.dedup();
+        disjoint
+    } else {
+        false
+    };
+
+    // Complete packs with disjoint object sets can be joined without Git's
+    // expensive delta search. OFS_DELTA distances and entry CRCs remain valid
+    // when an entire source body moves by one constant offset. The source-body
+    // verification above plus the rebuilt index and exact OID comparison prove
+    // the replacement object universe without reinflating every growing tree.
+    if source_objects_are_disjoint {
+        let expected_oids = source_oids
+            .iter()
+            .copied()
+            .map(gix_hash::ObjectId::from)
+            .collect::<Vec<_>>();
+        let concatenated = concatenate_complete_pack_inventory_inner(sources, false)?;
+        let pack_path = pack_dir.join("pack-crab-rollup-concatenated.pack");
+        std::fs::copy(concatenated.pack_path(), &pack_path)
+            .map_err(|source| io_error(format!("copy {}", pack_path.display()), source))?;
+        let index_path = pack_path.with_extension("idx");
+        let index_started = Instant::now();
+        let pack_checksum = gix_hash::ObjectId::from_hex(concatenated.git_sha1.as_bytes())
+            .map_err(|error| RepackError::SourceIntegrity {
+                pack_id: concatenated.pack_id.clone(),
+                reason: format!("concatenated pack has an invalid SHA-1 checksum: {error}"),
+            })?;
+        write_concatenated_pack_index(sources, &index_path, pack_checksum)?;
+        tracing::debug!(
+            source_pack_count = sources.len(),
+            elapsed_ms = index_started.elapsed().as_millis() as u64,
+            "concatenated disjoint Git packs"
+        );
+        let generated = verified_generated_pack(
+            pack_path,
+            GeneratedPackValidation::Structural,
+            Some(&expected_oids),
+            None,
+        )?;
+        return Ok(GeometricRepackedRepository {
+            _workspace: workspace,
+            packs: vec![generated],
+        });
     }
 
-    let pack_list = workspace.path().join("selected-packs.txt");
-    let mut input = File::create(&pack_list)
-        .map_err(|source| io_error(format!("create {}", pack_list.display()), source))?;
-    for source in sources {
-        let pack_name = format!("pack-{}.pack", source.canonical_id);
-        writeln!(input, "{pack_name}")
-            .map_err(|source| io_error(format!("write {}", pack_list.display()), source))?;
-    }
-    drop(input);
-    let stdin = File::open(&pack_list)
-        .map_err(|source| io_error(format!("open {}", pack_list.display()), source))?;
-    let output_prefix = pack_dir.join("pack-crab-rollup");
     let pack_generation_started = Instant::now();
-    run_git(
-        Command::new("git")
-            .arg(format!("--git-dir={}", source_git.display()))
-            .arg("pack-objects")
-            .arg("--quiet")
-            .arg("--stdin-packs")
-            .arg("--reuse-delta")
-            .arg("--reuse-object")
-            .arg("--delta-base-offset")
-            .arg("--depth=64")
-            .arg(&output_prefix)
-            .stdin(Stdio::from(stdin))
-            .stdout(Stdio::null()),
-        "consolidate selected Git packs",
-    )?;
+    let generated_pack_dir = if delta_bases.is_empty() {
+        let pack_list = workspace.path().join("selected-packs.txt");
+        let mut input = File::create(&pack_list)
+            .map_err(|source| io_error(format!("create {}", pack_list.display()), source))?;
+        for source in sources {
+            let pack_name = format!("pack-{}.pack", source.canonical_id);
+            writeln!(input, "{pack_name}")
+                .map_err(|source| io_error(format!("write {}", pack_list.display()), source))?;
+        }
+        drop(input);
+        let stdin = File::open(&pack_list)
+            .map_err(|source| io_error(format!("open {}", pack_list.display()), source))?;
+        let output_prefix = pack_dir.join("pack-crab-rollup");
+        run_git(
+            Command::new("git")
+                .arg(format!("--git-dir={}", source_git.display()))
+                .arg("pack-objects")
+                .arg("--quiet")
+                .arg("--stdin-packs")
+                .arg("--reuse-delta")
+                .arg("--reuse-object")
+                .arg("--delta-base-offset")
+                .arg("--depth=64")
+                .arg(&output_prefix)
+                .stdin(Stdio::from(stdin))
+                .stdout(Stdio::null()),
+            "consolidate selected Git packs",
+        )?;
+        pack_dir
+    } else {
+        let resolved_git = workspace.path().join("resolved.git");
+        initialize_bare_repository(&resolved_git)?;
+        install_delta_bases(&resolved_git, delta_bases)?;
+        for source in sources {
+            let stdin = File::open(&source.path)
+                .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
+            run_git(
+                Command::new("git")
+                    .arg(format!("--git-dir={}", resolved_git.display()))
+                    .args(["index-pack", "--fix-thin", "--stdin"])
+                    .stdin(Stdio::from(stdin))
+                    .stdout(Stdio::null()),
+                "resolve selected Git pack delta bases",
+            )?;
+        }
+        let object_list = workspace.path().join("selected-objects.txt");
+        let mut input = File::create(&object_list)
+            .map_err(|source| io_error(format!("create {}", object_list.display()), source))?;
+        for oid in &source_oids {
+            writeln!(input, "{}", gix_hash::ObjectId::from(*oid))
+                .map_err(|source| io_error(format!("write {}", object_list.display()), source))?;
+        }
+        drop(input);
+        let stdin = File::open(&object_list)
+            .map_err(|source| io_error(format!("open {}", object_list.display()), source))?;
+        let resolved_pack_dir = resolved_git.join("objects/pack");
+        let output_prefix = resolved_pack_dir.join("pack-crab-rollup");
+        run_git(
+            Command::new("git")
+                .arg(format!("--git-dir={}", resolved_git.display()))
+                .arg("pack-objects")
+                .arg("--quiet")
+                .arg("--reuse-delta")
+                .arg("--reuse-object")
+                .arg("--delta-base-offset")
+                .arg("--depth=64")
+                .arg(&output_prefix)
+                .stdin(Stdio::from(stdin))
+                .stdout(Stdio::null()),
+            "consolidate resolved Git pack objects",
+        )?;
+        resolved_pack_dir
+    };
     tracing::debug!(
         source_pack_count = sources.len(),
         elapsed_ms = pack_generation_started.elapsed().as_millis() as u64,
         "consolidated selected Git packs"
     );
-    let pack_path = std::fs::read_dir(&pack_dir)
-        .map_err(|source| io_error(format!("read {}", pack_dir.display()), source))?
+    let pack_path = std::fs::read_dir(&generated_pack_dir)
+        .map_err(|source| io_error(format!("read {}", generated_pack_dir.display()), source))?
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .find(|path| {
@@ -545,10 +696,15 @@ fn consolidate_pack_suffix_with_options(
         })?;
     let generated_validation = match validation {
         ConsolidationValidation::Full => GeneratedPackValidation::Full,
-        ConsolidationValidation::Response => GeneratedPackValidation::Structural,
+        ConsolidationValidation::Committed | ConsolidationValidation::Response => {
+            GeneratedPackValidation::Structural
+        }
     };
     let generated = verified_generated_pack(pack_path, generated_validation, None, None)?;
-    if matches!(validation, ConsolidationValidation::Full) {
+    if matches!(
+        validation,
+        ConsolidationValidation::Full | ConsolidationValidation::Committed
+    ) {
         let mut generated_locations = PackLocationIter::open(
             generated.index_path(),
             generated.reverse_index_path(),
@@ -592,6 +748,13 @@ fn consolidate_pack_suffix_with_options(
 pub fn concatenate_complete_pack_inventory(
     sources: &[RepackSource],
 ) -> Result<ConcatenatedPack, RepackError> {
+    concatenate_complete_pack_inventory_inner(sources, true)
+}
+
+fn concatenate_complete_pack_inventory_inner(
+    sources: &[RepackSource],
+    validate_sources: bool,
+) -> Result<ConcatenatedPack, RepackError> {
     if sources.len() < 2 {
         return Err(RepackError::SourceIntegrity {
             pack_id: "complete-pack-concatenation".to_owned(),
@@ -613,7 +776,9 @@ pub fn concatenate_complete_pack_inventory(
                 reason: "duplicate source pack id".to_owned(),
             });
         }
-        validate_source(source)?;
+        if validate_sources {
+            validate_source(source)?;
+        }
         let mut input = File::open(&source.path)
             .map_err(|error| io_error(format!("open {}", source.path.display()), error))?;
         let mut header = [0_u8; 12];
@@ -727,6 +892,68 @@ pub fn concatenate_complete_pack_inventory(
         object_count: total_objects,
         git_sha1: checksum.iter().map(|byte| format!("{byte:02x}")).collect(),
     })
+}
+
+fn write_concatenated_pack_index(
+    sources: &[RepackSource],
+    index_path: &Path,
+    pack_checksum: gix_hash::ObjectId,
+) -> Result<(), RepackError> {
+    let object_count = sources.iter().try_fold(0_u64, |total, source| {
+        total
+            .checked_add(source.object_count)
+            .ok_or_else(|| RepackError::SourceIntegrity {
+                pack_id: "complete-pack-concatenation".to_owned(),
+                reason: "concatenated index object count overflow".to_owned(),
+            })
+    })?;
+    let capacity = usize::try_from(object_count).map_err(|_| RepackError::SourceIntegrity {
+        pack_id: "complete-pack-concatenation".to_owned(),
+        reason: "concatenated index object count exceeds platform capacity".to_owned(),
+    })?;
+    let mut entries = Vec::with_capacity(capacity);
+    let mut body_offset = 12_u64;
+    for source in sources {
+        let locations =
+            PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?;
+        for location in locations {
+            let location = location?;
+            let relative = location.pack_offset.checked_sub(12).ok_or_else(|| {
+                RepackError::SourceIntegrity {
+                    pack_id: source.canonical_id.clone(),
+                    reason: "source object precedes its pack body".to_owned(),
+                }
+            })?;
+            let offset =
+                body_offset
+                    .checked_add(relative)
+                    .ok_or_else(|| RepackError::SourceIntegrity {
+                        pack_id: source.canonical_id.clone(),
+                        reason: "concatenated pack offset overflow".to_owned(),
+                    })?;
+            entries.push(PackIndexEntry {
+                oid: location.oid,
+                crc32: location.crc32,
+                offset,
+            });
+        }
+        let body_size =
+            source
+                .size
+                .checked_sub(32)
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: source.canonical_id.clone(),
+                    reason: "source pack is too short for header and checksum".to_owned(),
+                })?;
+        body_offset =
+            body_offset
+                .checked_add(body_size)
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: source.canonical_id.clone(),
+                    reason: "concatenated pack length overflow".to_owned(),
+                })?;
+    }
+    write_pack_index_v2(&mut entries, index_path, pack_checksum).map_err(RepackError::from)
 }
 
 struct InstalledSourcePack {
@@ -917,6 +1144,88 @@ fn source_pack_inventory_object_ids(
     }
     source_oids.sort_unstable();
     Ok(source_oids)
+}
+
+/// Return REF_DELTA bases needed by native selected-pack consolidation.
+///
+/// Disjoint complete packs use Crab's byte-preserving concatenation path and
+/// therefore need no materialized bases. When duplicate OIDs require native
+/// Git to rewrite the selected object set, this scans only entry headers. All
+/// bases are returned so thin-pack repair is independent of pack order.
+pub fn selected_pack_ref_delta_base_ids(
+    sources: &[RepackSource],
+) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
+    let inventory = source_pack_inventory_object_ids(sources)?;
+    if !inventory.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Ok(Vec::new());
+    }
+    let mut bases = BTreeSet::new();
+    for source in sources {
+        let reader = BufReader::new(
+            File::open(&source.path)
+                .map_err(|error| io_error(format!("open {}", source.path.display()), error))?,
+        );
+        let entries = gix_pack::data::input::BytesToEntriesIter::new_from_header(
+            reader,
+            gix_pack::data::input::Mode::Verify,
+            gix_pack::data::input::EntryDataMode::Ignore,
+            gix_hash::Kind::Sha1,
+        )
+        .map_err(|error| RepackError::SourceIntegrity {
+            pack_id: source.canonical_id.clone(),
+            reason: format!("cannot scan pack entry headers: {error}"),
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| RepackError::SourceIntegrity {
+                pack_id: source.canonical_id.clone(),
+                reason: format!("cannot scan pack entry: {error}"),
+            })?;
+            if let gix_pack::data::entry::Header::RefDelta { base_id } = entry.header {
+                bases.insert(base_id);
+            }
+        }
+    }
+    Ok(bases.into_iter().collect())
+}
+
+fn install_delta_bases(source_git: &Path, bases: &[RepackDeltaBase]) -> Result<(), RepackError> {
+    let mut verified = BTreeMap::new();
+    for base in bases {
+        if crate::incoming_pack::object_id(base.kind, &base.data) != base.oid {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: base.oid.to_string(),
+                reason: "external delta base identity mismatch".to_owned(),
+            });
+        }
+        if let Some(existing) = verified.insert(base.oid, (base.kind, base.data.as_slice()))
+            && existing != (base.kind, base.data.as_slice())
+        {
+            return Err(RepackError::SourceIntegrity {
+                pack_id: base.oid.to_string(),
+                reason: "conflicting external delta bases".to_owned(),
+            });
+        }
+    }
+    for (oid, (kind, data)) in verified {
+        let hex = oid.to_string();
+        let object_dir = source_git.join("objects").join(&hex[..2]);
+        std::fs::create_dir_all(&object_dir)
+            .map_err(|error| io_error(format!("create {}", object_dir.display()), error))?;
+        let object_path = object_dir.join(&hex[2..]);
+        let file = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&object_path)
+            .map_err(|error| io_error(format!("create {}", object_path.display()), error))?;
+        let mut encoder = flate2::write::ZlibEncoder::new(file, flate2::Compression::fast());
+        write!(encoder, "{} {}\0", kind, data.len())
+            .and_then(|()| encoder.write_all(data))
+            .map_err(|error| io_error(format!("write {}", object_path.display()), error))?;
+        encoder
+            .finish()
+            .map_err(|error| io_error(format!("finish {}", object_path.display()), error))?;
+    }
+    Ok(())
 }
 
 /// Generate the exact self-contained pack for an existing shallow client's negotiation.
@@ -1418,7 +1727,7 @@ fn io_error(context: impl Into<String>, source: io::Error) -> RepackError {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Output;
+    use std::{collections::BTreeMap, process::Output, sync::atomic::AtomicBool};
 
     use super::*;
 
@@ -1963,6 +2272,50 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(actual, expected);
+        let consolidated = consolidate_pack_suffix_with_concurrency(&sources, 2)?;
+        let consolidated_pack =
+            consolidated
+                .packs()
+                .first()
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: "concatenation-fast-path".to_owned(),
+                    reason: "disjoint consolidation produced no pack".to_owned(),
+                })?;
+        assert_eq!(consolidated_pack.pack_id, concatenated.pack_id);
+        assert_eq!(consolidated_pack.object_count, expected.len() as u64);
+        assert_eq!(
+            std::fs::read(consolidated_pack.index_path())
+                .map_err(|source| io_error("read rebuilt concatenated index", source))?,
+            std::fs::read(&index_path)
+                .map_err(|source| io_error("read Git concatenated index", source))?,
+        );
+        run_git(
+            Command::new("git")
+                .arg("verify-pack")
+                .arg("-v")
+                .arg(consolidated_pack.index_path())
+                .stdout(Stdio::null()),
+            "verify concatenated maintenance index with Git",
+        )?;
+        let committed = consolidate_committed_pack_suffix_with_concurrency(&sources, 2)?;
+        let committed_pack =
+            committed
+                .packs()
+                .first()
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: "committed-concatenation-fast-path".to_owned(),
+                    reason: "committed disjoint consolidation produced no pack".to_owned(),
+                })?;
+        assert_eq!(committed_pack.pack_id, concatenated.pack_id);
+        assert_eq!(committed_pack.object_count, expected.len() as u64);
+        run_git(
+            Command::new("git")
+                .arg("verify-pack")
+                .arg("-v")
+                .arg(committed_pack.index_path())
+                .stdout(Stdio::null()),
+            "verify committed concatenation index with Git",
+        )?;
         assert!(source_pack_inventory_matches_object_ids(
             &sources, &expected
         )?);
@@ -1983,6 +2336,288 @@ mod tests {
             &expected[..expected.len() - 1],
         )?);
         Ok(())
+    }
+
+    #[test]
+    fn committed_repack_preserves_cross_pack_base_identity_after_source_replacement()
+    -> Result<(), RepackError> {
+        let root = tempfile::tempdir().map_err(|source| io_error("create test root", source))?;
+        let limits = crate::incoming_pack::ReceiveLimits {
+            max_pack_bytes: 16 * 1024 * 1024,
+            max_objects: 10,
+            max_object_bytes: 1024 * 1024,
+            max_inflated_bytes: 4 * 1024 * 1024,
+            max_delta_depth: 8,
+        };
+        let flag = AtomicBool::new(false);
+        let base = vec![b'a'; 256 * 1024];
+        let mut target = base.clone();
+        target[128 * 1024] = b'b';
+        let base_oid = crate::incoming_pack::object_id(gix_object::Kind::Blob, &base);
+        let target_oid = crate::incoming_pack::object_id(gix_object::Kind::Blob, &target);
+        let base_incoming = crate::incoming_pack::IncomingPack::from_generated_objects(
+            [(gix_object::Kind::Blob, base.clone())],
+            root.path(),
+            limits,
+            || false,
+        )
+        .map_err(|source| RepackError::SourceIntegrity {
+            pack_id: "base-fixture".to_owned(),
+            reason: source.to_string(),
+        })?;
+        let base_pack = base_incoming
+            .prepare(root.path(), 16 * 1024 * 1024, &flag)
+            .map_err(|source| RepackError::SourceIntegrity {
+                pack_id: "base-fixture".to_owned(),
+                reason: source.to_string(),
+            })?
+            .ok_or_else(|| RepackError::SourceIntegrity {
+                pack_id: "base-fixture".to_owned(),
+                reason: "base fixture produced no pack".to_owned(),
+            })?;
+        let dependent_incoming = crate::incoming_pack::IncomingPack::from_generated_objects(
+            [(gix_object::Kind::Blob, target.clone())],
+            root.path(),
+            limits,
+            || false,
+        )
+        .map_err(|source| RepackError::SourceIntegrity {
+            pack_id: "dependent-fixture".to_owned(),
+            reason: source.to_string(),
+        })?;
+        let dependent_pack = dependent_incoming
+            .prepare_with_external_delta_bases(
+                root.path(),
+                16 * 1024 * 1024,
+                &flag,
+                &BTreeMap::from([(target_oid, base_oid)]),
+                &BTreeMap::from([(
+                    target_oid,
+                    crate::incoming_pack::ExternalDeltaBase::new(
+                        base_oid,
+                        gix_object::Kind::Blob,
+                        base.clone(),
+                        0,
+                    ),
+                )]),
+                8,
+                1024 * 1024,
+            )
+            .map_err(|source| RepackError::SourceIntegrity {
+                pack_id: "dependent-fixture".to_owned(),
+                reason: source.to_string(),
+            })?
+            .ok_or_else(|| RepackError::SourceIntegrity {
+                pack_id: "dependent-fixture".to_owned(),
+                reason: "dependent fixture produced no pack".to_owned(),
+            })?;
+        let auxiliary = |value: &'static [u8], name: &str| {
+            let incoming = crate::incoming_pack::IncomingPack::from_generated_objects(
+                [(gix_object::Kind::Blob, value.to_vec())],
+                root.path(),
+                limits,
+                || false,
+            )
+            .map_err(|source| RepackError::SourceIntegrity {
+                pack_id: name.to_owned(),
+                reason: source.to_string(),
+            })?;
+            incoming
+                .prepare(root.path(), 16 * 1024 * 1024, &flag)
+                .map_err(|source| RepackError::SourceIntegrity {
+                    pack_id: name.to_owned(),
+                    reason: source.to_string(),
+                })?
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: name.to_owned(),
+                    reason: "auxiliary fixture produced no pack".to_owned(),
+                })
+        };
+        let dependent_auxiliary = auxiliary(b"dependent auxiliary", "dependent-auxiliary")?;
+        let base_auxiliary = auxiliary(b"base auxiliary", "base-auxiliary")?;
+
+        let overlapping = b"overlapping auxiliary".to_vec();
+        let overlapping_oid = crate::incoming_pack::object_id(gix_object::Kind::Blob, &overlapping);
+        let overlapping_pack = |unique: &'static [u8], name: &str| {
+            let incoming = crate::incoming_pack::IncomingPack::from_generated_objects(
+                [
+                    (gix_object::Kind::Blob, overlapping.clone()),
+                    (gix_object::Kind::Blob, unique.to_vec()),
+                ],
+                root.path(),
+                limits,
+                || false,
+            )
+            .map_err(|source| RepackError::SourceIntegrity {
+                pack_id: name.to_owned(),
+                reason: source.to_string(),
+            })?;
+            incoming
+                .prepare(root.path(), 16 * 1024 * 1024, &flag)
+                .map_err(|source| RepackError::SourceIntegrity {
+                    pack_id: name.to_owned(),
+                    reason: source.to_string(),
+                })?
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: name.to_owned(),
+                    reason: "overlapping fixture produced no pack".to_owned(),
+                })
+        };
+        let overlapping_a = overlapping_pack(b"unique a", "overlapping-a")?;
+        let overlapping_b = overlapping_pack(b"unique b", "overlapping-b")?;
+        let rewrite_sources = [
+            source_descriptor(dependent_pack.pack_path().to_owned())?,
+            source_descriptor(base_pack.pack_path().to_owned())?,
+            source_descriptor(overlapping_a.pack_path().to_owned())?,
+            source_descriptor(overlapping_b.pack_path().to_owned())?,
+        ];
+        assert_eq!(
+            selected_pack_ref_delta_base_ids(&rewrite_sources)?,
+            vec![base_oid]
+        );
+        let rewritten = consolidate_committed_pack_suffix_with_delta_bases(
+            &rewrite_sources,
+            &[RepackDeltaBase {
+                oid: base_oid,
+                kind: gix_object::Kind::Blob,
+                data: base.clone(),
+            }],
+            2,
+        )?;
+        let rewritten_pack =
+            rewritten
+                .packs()
+                .first()
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: "cross-pack-rewrite".to_owned(),
+                    reason: "cross-pack rewrite produced no pack".to_owned(),
+                })?;
+        assert_eq!(rewritten_pack.object_count, 5);
+        let standalone = root.path().join("standalone.git");
+        initialize_bare_repository(&standalone)?;
+        let standalone_pack_dir = standalone.join("objects/pack");
+        for (source, extension) in [
+            (rewritten_pack.pack_path(), "pack"),
+            (rewritten_pack.index_path(), "idx"),
+            (rewritten_pack.reverse_index_path(), "rev"),
+        ] {
+            std::fs::copy(
+                source,
+                standalone_pack_dir.join(format!("pack-rewritten.{extension}")),
+            )
+            .map_err(|error| io_error("install rewritten pack", error))?;
+        }
+        let standalone_arg = standalone.to_str().ok_or_else(|| {
+            io_error(
+                "encode standalone validation repository path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        assert_eq!(
+            git_with_stdin(
+                &[
+                    "--git-dir",
+                    standalone_arg,
+                    "cat-file",
+                    "blob",
+                    &target_oid.to_string()
+                ],
+                b"",
+            ),
+            target
+        );
+        assert_eq!(
+            git_with_stdin(
+                &[
+                    "--git-dir",
+                    standalone_arg,
+                    "cat-file",
+                    "blob",
+                    &overlapping_oid.to_string(),
+                ],
+                b"",
+            ),
+            overlapping
+        );
+
+        let dependent_sources = [
+            source_descriptor(dependent_pack.pack_path().to_owned())?,
+            source_descriptor(dependent_auxiliary.pack_path().to_owned())?,
+        ];
+        let dependent_repacked =
+            consolidate_committed_pack_suffix_with_concurrency(&dependent_sources, 2)?;
+        let base_sources = [
+            source_descriptor(base_pack.pack_path().to_owned())?,
+            source_descriptor(base_auxiliary.pack_path().to_owned())?,
+        ];
+        let base_repacked = consolidate_committed_pack_suffix_with_concurrency(&base_sources, 2)?;
+        let repository = root.path().join("validation.git");
+        initialize_bare_repository(&repository)?;
+        let pack_dir = repository.join("objects/pack");
+        for (index, pack) in base_repacked.packs().iter().enumerate() {
+            let prefix = pack_dir.join(format!("pack-base-{index}"));
+            for (source, extension) in [
+                (pack.pack_path(), "pack"),
+                (pack.index_path(), "idx"),
+                (pack.reverse_index_path(), "rev"),
+            ] {
+                std::fs::copy(source, prefix.with_extension(extension))
+                    .map_err(|error| io_error("install cross-pack fixture", error))?;
+            }
+        }
+        let repository_arg = repository.to_str().ok_or_else(|| {
+            io_error(
+                "encode validation repository path",
+                io::Error::new(io::ErrorKind::InvalidData, "path is not UTF-8"),
+            )
+        })?;
+        let target_hex = target_oid.to_string();
+        let base_hex = base_oid.to_string();
+        assert_eq!(
+            git_with_stdin(
+                &["--git-dir", repository_arg, "cat-file", "blob", &base_hex],
+                b"",
+            ),
+            base
+        );
+        let dependent =
+            dependent_repacked
+                .packs()
+                .first()
+                .ok_or_else(|| RepackError::SourceIntegrity {
+                    pack_id: "dependent-replacement".to_owned(),
+                    reason: "dependent replacement produced no pack".to_owned(),
+                })?;
+        git_with_stdin(
+            &[
+                "--git-dir",
+                repository_arg,
+                "index-pack",
+                "--fix-thin",
+                "--stdin",
+            ],
+            &std::fs::read(dependent.pack_path())
+                .map_err(|error| io_error("read dependent replacement pack", error))?,
+        );
+        assert_eq!(
+            git_with_stdin(
+                &["--git-dir", repository_arg, "cat-file", "blob", &target_hex],
+                b"",
+            ),
+            target
+        );
+        run_git(
+            Command::new("git")
+                .arg(format!("--git-dir={repository_arg}"))
+                .args(["update-ref", "refs/tags/cross-pack-target", &target_hex]),
+            "pin cross-pack target",
+        )?;
+        run_git(
+            Command::new("git")
+                .arg(format!("--git-dir={repository_arg}"))
+                .args(["fsck", "--strict", "--full", "--no-reflogs"]),
+            "validate cross-pack replacement repository",
+        )
     }
 
     #[test]

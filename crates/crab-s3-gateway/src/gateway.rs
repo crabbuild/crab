@@ -471,6 +471,7 @@ impl Gateway {
             mutations: Arc::new(mutation::Coordinator::new(
                 Arc::clone(&runtime),
                 options,
+                cancellation.clone(),
                 metrics.clone(),
             )),
             runtime,
@@ -729,6 +730,7 @@ impl Gateway {
 
     pub(crate) async fn shutdown(&self) {
         self.cancellation.cancel();
+        self.mutations.shutdown().await;
         self.runtime.shutdown().await;
     }
 
@@ -4961,6 +4963,7 @@ mod tests {
             mutations: Arc::new(mutation::Coordinator::new(
                 Arc::clone(&runtime),
                 options,
+                cancellation.clone(),
                 metrics.clone(),
             )),
             runtime,
@@ -5058,6 +5061,7 @@ mod tests {
             mutations: Arc::new(mutation::Coordinator::new(
                 Arc::clone(&listing_runtime),
                 options,
+                listing_cancellation.clone(),
                 metrics.clone(),
             )),
             runtime: listing_runtime,
@@ -5639,6 +5643,7 @@ mod tests {
             mutations: Arc::new(mutation::Coordinator::new(
                 Arc::clone(&runtime),
                 options,
+                cancellation.clone(),
                 metrics.clone(),
             )),
             runtime,
