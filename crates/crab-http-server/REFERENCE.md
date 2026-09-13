@@ -998,7 +998,7 @@ The current symbolic HEAD cannot be deleted. Git reports `deletion is prohibited
 
 A disconnect or deadline signals cancellation. Owned workers retain transfer admission and renew GC fences until cleanup finishes. Cancellation before the active marker leaves refs unchanged.
 
-After a marker attempt, the transaction can be committed even when the client loses the response. An inconclusive outcome returns HTTP 503 without inventing a per-ref rejection. Inspect remote refs before retrying. Matching current refs alone do not prove which historical transaction committed.
+After a marker attempt, the transaction can be committed even when the client loses the response. The server binds the exact receive wire body, repository, and authenticated subject to a deterministic publication plan. Retrying that identical wire request can resolve its durable plan receipt after a lost response or pod restart and return the normal Git success report without publishing a second transaction. An inconclusive outcome with no committed receipt still returns HTTP 503 without inventing a per-ref rejection; do not change the request and blindly replay it, because matching current refs alone do not prove which historical transaction committed.
 
 Successful ref commitment and read readiness are distinct. The server can acknowledge a known journal commit while later catalog work remains pending. A subsequent read runs repair under generation-owner election.
 
@@ -1324,7 +1324,7 @@ The server is complete only when a real account can perform the workflow and obs
 
 The remaining production gaps include:
 
-- Durable application-level push receipts and abrupt-crash coverage beyond the qualified in-flight native-push boundary
+- Broader abrupt-crash coverage beyond the qualified in-flight native-push boundary, plus a portable client recovery token (native Git can only recover an identical wire request through the server-side plan receipt)
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
 - Production throughput and provider-level admission qualification

@@ -11,6 +11,7 @@ use tower::ServiceExt;
 #[derive(Clone, Copy, Debug)]
 enum Fault {
     LostMarkerReply,
+    LostMarkerReadback,
     RejectedMarker,
     CancelAfterHead,
     CancelAfterMarker,
@@ -61,7 +62,12 @@ impl ObjectStore for FaultStore {
             self.committed
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        if marker && matches!(self.fault, Fault::LostMarkerReply) {
+        if marker
+            && matches!(
+                self.fault,
+                Fault::LostMarkerReply | Fault::LostMarkerReadback
+            )
+        {
             return Err(disconnected());
         }
         if (marker && matches!(self.fault, Fault::CancelAfterMarker))
@@ -77,6 +83,12 @@ impl ObjectStore for FaultStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
+        if matches!(self.fault, Fault::LostMarkerReadback)
+            && self.committed.load(std::sync::atomic::Ordering::SeqCst)
+            && location.as_ref().starts_with(&self.marker_prefix)
+        {
+            return Err(disconnected());
+        }
         if matches!(self.fault, Fault::ReadinessAfterMarker)
             && self.committed.load(std::sync::atomic::Ordering::SeqCst)
             && location.as_ref() == self.manifest_path
@@ -140,8 +152,9 @@ async fn body() -> (Vec<u8>, String) {
     (body, oid)
 }
 
-const FAULTS: [Fault; 5] = [
+const FAULTS: [Fault; 6] = [
     Fault::LostMarkerReply,
+    Fault::LostMarkerReadback,
     Fault::RejectedMarker,
     Fault::CancelAfterHead,
     Fault::ReadinessAfterMarker,
@@ -343,6 +356,54 @@ async fn prepared_artifacts_preserve_plan_attribution_through_compaction() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_receive_replays_an_identical_wire_request_from_its_receipt() {
+    let (body, oid) = body().await;
+    let server = maintenance_tests::fixture().await;
+    let request = || {
+        Request::builder()
+            .method("POST")
+            .uri("/git/team/repo.git/git-receive-pack")
+            .header("host", "localhost:8788")
+            .header("content-type", "application/x-git-receive-pack-request")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+
+    let first = router(Arc::clone(&server))
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = first.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&first_body).contains("ok refs/heads/main"));
+
+    let replay = router(Arc::clone(&server))
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    let replay_body = replay.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&replay_body).contains("ok refs/heads/main"));
+
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let snapshot =
+        crab_metadata::manifest_store::read_repository_snapshot(&repo.store, &repo.layout)
+            .await
+            .unwrap();
+    assert_eq!(snapshot.journal.refs.get("refs/heads/main"), Some(&oid));
+    assert!(snapshot.journal.transactions.is_empty());
+
+    server.cancellation.cancel();
+    server.receives.close();
+    server.receives.wait().await;
+    server.finish_maintenance().await.unwrap();
+    server.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn receive_faults_preserve_exact_commit_outcomes_and_repair_on_restart() {
     let (body, oid) = body().await;
     for fault in FAULTS {
@@ -459,11 +520,18 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
         .unwrap();
     let status = response.status();
     let response = response.into_body().collect().await.unwrap().to_bytes();
-    let committed = matches!(
+    let acknowledged = matches!(
         fault,
         Fault::LostMarkerReply | Fault::CancelAfterMarker | Fault::ReadinessAfterMarker
     );
-    if committed {
+    let committed = matches!(
+        fault,
+        Fault::LostMarkerReply
+            | Fault::LostMarkerReadback
+            | Fault::CancelAfterMarker
+            | Fault::ReadinessAfterMarker
+    );
+    if acknowledged {
         assert_eq!(status, StatusCode::OK, "{fault:?}");
         assert!(String::from_utf8_lossy(&response).contains("ok refs/heads/main"));
     } else {
@@ -495,7 +563,7 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
         // evidence. A new lease holder may replace it on an explicit retry.
         assert_eq!(
             head.head.prepared_transaction.is_some(),
-            matches!(fault, Fault::RejectedMarker),
+            matches!(fault, Fault::RejectedMarker | Fault::LostMarkerReadback),
             "{fault:?}"
         );
     }
@@ -540,7 +608,7 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
     if committed {
         assert_eq!(value["refs"][0]["oid"], oid);
     }
-    if !committed {
+    if matches!(fault, Fault::LostMarkerReadback) {
         let retry = router(Arc::clone(&restarted))
             .oneshot(
                 Request::builder()
@@ -554,6 +622,26 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
             .await
             .unwrap();
         assert_eq!(retry.status(), StatusCode::OK, "retry after {fault:?}");
+        let retry_body = retry.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&retry_body).contains("ok refs/heads/main"));
+    } else if !committed {
+        let retry = router(Arc::clone(&restarted))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/git/team/repo.git/git-receive-pack")
+                    .header("host", "localhost:8788")
+                    .header("content-type", "application/x-git-receive-pack-request")
+                    .body(Body::from(body.to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retry.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ambiguous retry after {fault:?} must remain unreplayed"
+        );
         let snapshot =
             crab_metadata::manifest_store::read_repository_snapshot(&origin, &origin_layout)
                 .await
@@ -564,13 +652,16 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
                 .refs
                 .get("refs/heads/main")
                 .map(String::as_str),
-            Some(oid)
+            None
         );
         for head in crab_metadata::ref_journal::list_ref_heads(&origin, &origin_layout)
             .await
             .unwrap()
         {
-            assert!(head.head.prepared_transaction.is_none());
+            assert_eq!(
+                head.head.prepared_transaction.is_some(),
+                matches!(fault, Fault::RejectedMarker)
+            );
         }
     }
     let blob = router(Arc::clone(&restarted))
@@ -585,7 +676,21 @@ async fn exercise(mut server: Arc<Server>, fault: Fault, body: &[u8], oid: &str)
         )
         .await
         .unwrap();
-    assert_eq!(blob.status(), StatusCode::OK, "{fault:?}");
+    assert_eq!(
+        blob.status(),
+        if committed {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        },
+        "{fault:?}"
+    );
+    if !committed {
+        restarted.cancellation.cancel();
+        restarted.finish_maintenance().await.unwrap();
+        restarted.runtime.shutdown().await;
+        return;
+    }
     assert_eq!(
         blob.into_body()
             .collect()
