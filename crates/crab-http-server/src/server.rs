@@ -39,6 +39,17 @@ const GIT_ADMISSION_CAPACITY: usize = 4;
 const APP_ADMISSION_CAPACITY: usize = 8;
 const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
 
+fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
+    TransferAdmission::new(
+        catalog.root().store.clone(),
+        catalog
+            .root()
+            .path(".crab/http-server/v1/admission")
+            .to_string(),
+        GIT_ADMISSION_CAPACITY,
+    )
+}
+
 pub(crate) struct Repository {
     pub config: RepositoryConfig,
     pub store: Store,
@@ -309,14 +320,7 @@ pub async fn serve(config: Config) -> Result<()> {
             ..Default::default()
         },
     )?;
-    let transfer_admission = TransferAdmission::new(
-        catalog.root().store.clone(),
-        catalog
-            .root()
-            .path(".crab/http-server/v1/admission")
-            .to_string(),
-        GIT_ADMISSION_CAPACITY,
-    );
+    let transfer_admission = transfer_admission(&catalog);
     transfer_admission.probe().await?;
     let server = Arc::new(Server {
         repositories: repositories.into(),
@@ -374,6 +378,19 @@ pub async fn serve(config: Config) -> Result<()> {
         .map(|_| ())
         .map_err(crate::Error::from)
         .and(maintenance)
+}
+
+/// Validate the durable catalog and the storage coordination write path.
+///
+/// # Errors
+///
+/// Returns the original configuration, storage, catalog, or coordination
+/// error when the configured workload cannot satisfy the server contract.
+pub async fn probe_storage(config: &Config) -> Result<()> {
+    let catalog = CatalogStore::from_config(config)?;
+    catalog.load().await?;
+    transfer_admission(&catalog).probe().await?;
+    Ok(())
 }
 
 async fn materialize_catalog(

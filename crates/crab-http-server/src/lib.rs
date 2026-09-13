@@ -31,7 +31,7 @@ pub use config::{
     BranchProtection, Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember,
     StorageConfig,
 };
-pub use server::serve;
+pub use server::{probe_storage, serve};
 
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]

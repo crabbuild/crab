@@ -22,6 +22,8 @@ enum Command {
     Serve,
     /// Check the management listener's readiness endpoint.
     Healthcheck,
+    /// Validate catalog reads and conditional coordination writes.
+    StorageProbe,
     /// Create, adopt, or list cataloged repositories.
     Repository {
         #[command(subcommand)]
@@ -98,6 +100,7 @@ async fn main() -> crab_http_server::Result<()> {
     match arguments.command.unwrap_or(Command::Serve) {
         Command::Serve => crab_http_server::serve(config).await,
         Command::Healthcheck => healthcheck(&config).await,
+        Command::StorageProbe => crab_http_server::probe_storage(&config).await,
         Command::Repository { command } => repository(&config, command).await,
     }
 }

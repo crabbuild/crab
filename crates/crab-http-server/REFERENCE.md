@@ -190,8 +190,13 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
   --members-file /secure/members.toml
 
 "$SERVER" --config /secure/server.toml repository list
+"$SERVER" --config /secure/server.toml storage-probe
 "$SERVER" --config /secure/server.toml serve
 ```
+
+`storage-probe` validates the catalog read path and performs a dedicated
+holder-checked CAS acquire/release. Use it in deployment preflight to catch
+missing conditional-write permissions before serving traffic.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:
