@@ -8,6 +8,7 @@
 {{- fail (printf "podAnnotations.%s is owned by the chart" $key) }}
 {{- end }}
 {{- end }}
+{{- include "crab-http-server.validateAvailability" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

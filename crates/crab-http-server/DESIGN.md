@@ -218,7 +218,8 @@ overlay supplies the image, OIDC, ingress, and monitoring policy.
 One Helm chart owns the runtime contract:
 
 - Deployment, ServiceAccount, private ClusterIP Service, and disruption budget
-- Security context, topology spread, bounded scratch, and graceful termination
+- Security context, hard two-node/two-zone spread, bounded scratch, and graceful
+  termination
 - Storage-aware probes and a fresh-workload catalog test
 - TLS ingress plus mandatory source-restricted NetworkPolicy
 - Optional autoscaling, private `PodMonitor`, and bounded baseline alerts
@@ -256,6 +257,9 @@ initiation, direct token use against two replicas, cross-replica Git and LFS,
 lock-owner publication, uninterrupted reads during rollout, and byte-identical
 state after replacement. Its JSON receipt binds the evidence to the provider,
 immutable image, repository, commit, payload digest, and completion time.
+Helm upgrades are atomic and keep bounded revision history; the chart refuses a
+disruption budget or placement override that would make its availability claim
+impossible.
 
 Server releases use their own annotated `crab-http-server-vX.Y.Z` tag and do
 not inherit the CLI's version tag. The tag must match the server crate, resolve

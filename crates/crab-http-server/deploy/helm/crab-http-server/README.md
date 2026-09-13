@@ -29,7 +29,8 @@ management-port source.
 
 Create these resources before installing Crab:
 
-- A Kubernetes 1.29 or newer cluster across at least two zones
+- A Kubernetes 1.29 or newer cluster with at least two schedulable nodes across
+  at least two zones, plus capacity for one rollout surge pod
 - Helm 3
 - A NetworkPolicy-capable Container Network Interface (CNI)
 - A versioned S3 bucket, Google Cloud Storage (GCS) bucket, or Azure Blob container
@@ -172,7 +173,8 @@ Replace or verify every example value across the two overlays:
 The chart rejects image tags, missing digests, unknown top-level values,
 automatic Kubernetes API credentials, disabled network isolation, unrestricted
 ingress, direct load balancers, overrides of chart-owned pod metadata, fewer
-than two replicas, and a shutdown budget shorter than 630 seconds.
+than two replicas, an impossible disruption budget, soft or single-domain
+placement, and a shutdown budget shorter than 630 seconds.
 
 `config.existingConfigMap` is an advanced escape hatch for teams that own the
 complete `server.toml`. Do not combine it with the generated provider overlay,
@@ -214,7 +216,7 @@ helm upgrade --install crab-http-server \
   --namespace crab --create-namespace \
   --values /secure/crab-provider-values.yaml \
   --values /secure/crab-team-values.yaml \
-  --wait --timeout 15m
+  --atomic --history-max 10 --timeout 15m
 ```
 
 When installing without a source checkout, replace the local chart path with
@@ -449,7 +451,7 @@ helm upgrade crab-http-server \
   --values /secure/crab-provider-values.yaml \
   --values /secure/crab-team-values.yaml \
   --set-string rolloutToken="$(date -u +%Y%m%dT%H%M%SZ)" \
-  --wait --timeout 15m
+  --atomic --history-max 10 --timeout 15m
 ```
 
 Rotate the OIDC client secret without changing the state key. Changing the state key invalidates browser sessions and in-flight OIDC transactions.

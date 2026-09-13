@@ -95,3 +95,29 @@ state_key_file = "/run/secrets/crab/state-key"
 {{- end -}}
 {{- end -}}
 {{- end }}
+
+{{- define "crab-http-server.validateAvailability" -}}
+{{- $minimumReplicas := int .Values.replicaCount -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- $minimumReplicas = int .Values.autoscaling.minReplicas -}}
+{{- end -}}
+{{- if ge (int .Values.podDisruptionBudget.minAvailable) $minimumReplicas -}}
+{{- fail "podDisruptionBudget.minAvailable must be lower than the minimum replicas so one pod can be voluntarily disrupted" -}}
+{{- end -}}
+{{- $zoneReady := false -}}
+{{- $hostReady := false -}}
+{{- range .Values.topologySpreadConstraints -}}
+{{- if and (eq .topologyKey "topology.kubernetes.io/zone") (eq (int .maxSkew) 1) (ge (int (default 0 .minDomains)) 2) (eq .whenUnsatisfiable "DoNotSchedule") -}}
+{{- $zoneReady = true -}}
+{{- end -}}
+{{- if and (eq .topologyKey "kubernetes.io/hostname") (eq (int .maxSkew) 1) (ge (int (default 0 .minDomains)) 2) (eq .whenUnsatisfiable "DoNotSchedule") -}}
+{{- $hostReady = true -}}
+{{- end -}}
+{{- end -}}
+{{- if not $zoneReady -}}
+{{- fail "topologySpreadConstraints must hard-spread replicas across at least two zones with maxSkew 1" -}}
+{{- end -}}
+{{- if not $hostReady -}}
+{{- fail "topologySpreadConstraints must hard-spread replicas across at least two nodes with maxSkew 1" -}}
+{{- end -}}
+{{- end }}

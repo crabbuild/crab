@@ -90,7 +90,7 @@ helm upgrade --install crab-http-server \
   --namespace crab --create-namespace \
   --values /secure/crab-provider-values.yaml \
   --values /secure/crab-team-values.yaml \
-  --wait --timeout 15m
+  --atomic --history-max 10 --timeout 15m
 kubectl --namespace crab rollout status deployment/crab-http-server \
   --timeout=15m
 ```
@@ -177,7 +177,7 @@ helm upgrade crab-http-server \
   --values /secure/crab-provider-values.yaml \
   --values /secure/crab-team-values.yaml \
   --set-string rolloutToken="$(date -u +%Y%m%dT%H%M%SZ)" \
-  --wait --timeout 15m
+  --atomic --history-max 10 --timeout 15m
 ```
 
 Verify a new sign-in after the rollout. Existing sessions remain valid because they use the durable state key and shared object-storage records.

@@ -360,6 +360,25 @@ jobs:
             echo "chart accepted a shutdown budget shorter than pre-stop plus drain" >&2
             exit 1
           fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set podDisruptionBudget.minAvailable=2 >/dev/null 2>&1; then
+            echo "chart accepted a disruption budget that blocks every minimum replica" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set-string 'topologySpreadConstraints[0].whenUnsatisfiable=ScheduleAnyway' \
+              >/dev/null 2>&1; then
+            echo "chart accepted soft zone placement" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set 'topologySpreadConstraints[1].minDomains=1' >/dev/null 2>&1; then
+            echo "chart accepted single-node placement" >&2
+            exit 1
+          fi
 
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${terraform_image}" fmt -check -recursive "${terraform_root}"

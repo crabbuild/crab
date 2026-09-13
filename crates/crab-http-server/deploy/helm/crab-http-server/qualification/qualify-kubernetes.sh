@@ -160,6 +160,7 @@ service_json="${work_dir}/service.json"
 policy_json="${work_dir}/network-policy.json"
 ingress_json="${work_dir}/ingress.json"
 pdb_json="${work_dir}/pdb.json"
+hpa_json="${work_dir}/hpa.json"
 pods_json="${work_dir}/pods.json"
 
 kubectl config current-context >/dev/null
@@ -182,6 +183,17 @@ jq --exit-status '
   (.spec.template.spec.securityContext.runAsUser == 10001) and
   (.spec.template.spec.securityContext.runAsGroup == 10001) and
   (.spec.template.spec.securityContext.seccompProfile.type == "RuntimeDefault") and
+  (.spec.selector.matchLabels as $selector |
+    any(.spec.template.spec.topologySpreadConstraints[]?;
+      .topologyKey == "topology.kubernetes.io/zone" and
+      .maxSkew == 1 and .minDomains >= 2 and
+      .whenUnsatisfiable == "DoNotSchedule" and
+      .labelSelector.matchLabels == $selector) and
+    any(.spec.template.spec.topologySpreadConstraints[]?;
+      .topologyKey == "kubernetes.io/hostname" and
+      .maxSkew == 1 and .minDomains >= 2 and
+      .whenUnsatisfiable == "DoNotSchedule" and
+      .labelSelector.matchLabels == $selector)) and
   (.spec.template.spec.containers[] | select(.name == "crab-http-server") |
     (.image | test("@sha256:[0-9a-f]{64}$")) and
     (.securityContext.allowPrivilegeEscalation == false) and
@@ -221,8 +233,17 @@ jq --exit-status --argjson selector "$selector_json" '
   ([.spec.ingress[]?.ports[]?.port] | all(. == "http" or . == "management"))
 ' "$policy_json" >/dev/null
 kubectl --namespace "$namespace" get poddisruptionbudget "$deployment" -o json > "$pdb_json"
-jq --exit-status --argjson selector "$selector_json" '
-  (.spec.minAvailable == 1) and
+minimum_replicas="$(jq --raw-output '.spec.replicas' "$deployment_json")"
+kubectl --namespace "$namespace" get horizontalpodautoscaler "$deployment" \
+  --ignore-not-found -o json > "$hpa_json"
+if [ -s "$hpa_json" ]; then
+  minimum_replicas="$(jq --raw-output '.spec.minReplicas' "$hpa_json")"
+fi
+jq --exit-status --argjson selector "$selector_json" \
+  --argjson minimum "$minimum_replicas" '
+  ((.spec.minAvailable | type) == "number") and
+  (.spec.minAvailable >= 1) and
+  (.spec.minAvailable < $minimum) and
   (.spec.selector.matchLabels == $selector)
 ' "$pdb_json" >/dev/null
 kubectl --namespace "$namespace" get ingress "$deployment" -o json > "$ingress_json"
