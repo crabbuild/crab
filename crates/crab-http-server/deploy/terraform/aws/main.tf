@@ -1,5 +1,12 @@
 locals {
-  auth_prefix = "${var.root_prefix}/.crab/http-server/v1/auth/"
+  auth_prefix         = "${var.root_prefix}/.crab/http-server/v1/auth/"
+  bucket_list_actions = ["s3:ListBucket"]
+  object_actions = [
+    "s3:AbortMultipartUpload",
+    "s3:DeleteObject",
+    "s3:GetObject",
+    "s3:PutObject",
+  ]
 }
 
 resource "aws_s3_bucket" "repositories" {
@@ -113,11 +120,8 @@ resource "aws_iam_role" "server" {
 
 data "aws_iam_policy_document" "storage" {
   statement {
-    sid = "ListApplicationRoot"
-    actions = [
-      "s3:ListBucket",
-      "s3:ListBucketMultipartUploads",
-    ]
+    sid       = "ListApplicationRoot"
+    actions   = local.bucket_list_actions
     resources = [aws_s3_bucket.repositories.arn]
 
     condition {
@@ -128,14 +132,8 @@ data "aws_iam_policy_document" "storage" {
   }
 
   statement {
-    sid = "ManageApplicationObjects"
-    actions = [
-      "s3:AbortMultipartUpload",
-      "s3:DeleteObject",
-      "s3:GetObject",
-      "s3:ListMultipartUploadParts",
-      "s3:PutObject",
-    ]
+    sid       = "ManageApplicationObjects"
+    actions   = local.object_actions
     resources = ["${aws_s3_bucket.repositories.arn}/${var.root_prefix}/*"]
   }
 }

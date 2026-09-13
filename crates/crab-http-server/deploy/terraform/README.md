@@ -23,6 +23,20 @@ flowchart LR
 
 The modules create dedicated storage because GCS and Azure role assignments can’t enforce Crab’s full list contract at an arbitrary object prefix. The application still uses a nonempty `repositories` root inside that dedicated bucket or container.
 
+The runtime identities contain data-plane permissions only:
+
+| Platform | Runtime grant | Boundary |
+| --- | --- | --- |
+| EKS | `ListBucket` plus object read, write, delete, and multipart abort | Listing is restricted to the configured application prefix; object actions are restricted to its objects |
+| GKE | `roles/storage.objectAdmin` | Dedicated bucket |
+| AKS | `Storage Blob Data Contributor` | Dedicated container |
+
+Crab's S3 client keeps multipart part identifiers in memory and sends them when
+completing or aborting an upload. The EKS role therefore does not grant
+bucket-wide multipart-upload listing or part listing. Abandoned uploads are
+bounded by the provider lifecycle rule instead of a broader runtime
+permission.
+
 ## Prepare the existing cluster
 
 Authenticate Terraform with an administrator identity that can create storage and workload identities. Meet the provider prerequisite before applying its root:

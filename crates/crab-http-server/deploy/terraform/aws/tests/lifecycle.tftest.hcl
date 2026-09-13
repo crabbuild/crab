@@ -42,6 +42,27 @@ run "bounds_recovery_versions_and_multipart_uploads" {
   }
 }
 
+run "grants_only_runtime_storage_actions" {
+  command = plan
+
+  assert {
+    condition = toset(local.bucket_list_actions) == toset([
+      "s3:ListBucket",
+    ])
+    error_message = "The pod identity may list objects only through the prefix-restricted ListBucket action."
+  }
+
+  assert {
+    condition = toset(local.object_actions) == toset([
+      "s3:AbortMultipartUpload",
+      "s3:DeleteObject",
+      "s3:GetObject",
+      "s3:PutObject",
+    ])
+    error_message = "The pod identity must grant exactly the object operations used by Crab and object_store multipart uploads."
+  }
+}
+
 run "rejects_an_unsafe_recovery_window" {
   command = plan
 
