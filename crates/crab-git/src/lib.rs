@@ -33,8 +33,8 @@ pub use lfs_pointer::{
 };
 pub use odb_adapter::{CrabOdb, NoopXorbResolver, OdbError, XorbBlobResolver};
 pub use pack::{
-    InstalledPack, PackError, initialize_bare_git_dir, install_pack_file_from_path,
-    object_kinds_from_git_dir, verify_pack_sha1,
+    IndexedPack, InstalledPack, PackError, index_pack_file, initialize_bare_git_dir,
+    install_pack_file_from_path, object_kinds_from_git_dir, verify_pack_sha1,
 };
 pub use pack_locator::{
     PackKindMetadataIter, PackLocationIter, PackLocatorError, PackObjectLocation,

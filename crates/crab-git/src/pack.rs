@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha1::{Digest, Sha1};
 
@@ -70,6 +71,17 @@ pub enum PackError {
     /// `git index-pack` succeeded but did not create the requested index.
     #[error("git index-pack succeeded but produced no index at {path}")]
     IndexMissing { path: PathBuf },
+
+    /// Gitoxide could not rebuild a pack index from an immutable pack body.
+    #[error("gitoxide pack indexing failed")]
+    BundleIndex {
+        #[source]
+        source: gix_pack::bundle::write::Error,
+    },
+
+    /// Pack indexing was stopped by the caller.
+    #[error("git pack indexing cancelled")]
+    Cancelled,
 
     /// A temporary bare Git object database could not be initialized.
     #[error("failed to initialize bare git object database {path}: {detail}")]
@@ -241,6 +253,17 @@ pub struct InstalledPack {
     pub idx_path: PathBuf,
     /// Final required `.rev` path, named by the caller's canonical pack id.
     pub rev_path: PathBuf,
+}
+
+/// Verified pack body and locally rebuilt Git locator sidecars.
+#[derive(Debug)]
+pub struct IndexedPack {
+    /// The generated Git v2 pack index.
+    pub index_path: PathBuf,
+    /// The generated Git reverse index.
+    pub reverse_path: PathBuf,
+    /// The BLAKE3 identity of the complete pack body.
+    pub content_hash: [u8; 32],
 }
 
 /// Install an already-downloaded pack file into a local Git pack directory.
@@ -763,6 +786,119 @@ pub(crate) fn verify_and_hash_pack_file(path: &Path) -> Result<(String, [u8; 32]
         reason: "pack content hash was not computed".to_owned(),
     })?;
     Ok((git_sha1, content_hash, size))
+}
+
+/// Rebuild standard Git locator sidecars from a verified pack body.
+///
+/// The source pack is never modified. Gitoxide writes a verified copy and its
+/// version 2 index below `output_dir`; the returned paths are valid until the
+/// caller removes that directory.
+///
+/// # Errors
+///
+/// Returns an integrity error when the pack, generated index, object count, or
+/// reverse index does not match the supplied expectations. Returns
+/// [`PackError::Cancelled`] when `cancelled` is set before or during indexing.
+pub fn index_pack_file(
+    pack_path: &Path,
+    output_dir: &Path,
+    expected_size: u64,
+    expected_object_count: u64,
+    cancelled: &AtomicBool,
+) -> Result<IndexedPack> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(PackError::Cancelled);
+    }
+    let (git_sha1, content_hash, size) = verify_and_hash_pack_file(pack_path)?;
+    if size != expected_size {
+        return Err(PackError::InvalidPackFile {
+            path: pack_path.to_owned(),
+            reason: format!("pack size is {size} bytes; expected {expected_size} bytes"),
+        });
+    }
+    let mut header = [0_u8; 12];
+    let mut header_file = std::fs::File::open(pack_path)
+        .map_err(|source| io_error(format!("open {}", pack_path.display()), source))?;
+    std::io::Read::read_exact(&mut header_file, &mut header)
+        .map_err(|source| io_error(format!("read {}", pack_path.display()), source))?;
+    let declared_object_count = u64::from(u32::from_be_bytes([
+        header[8], header[9], header[10], header[11],
+    ]));
+    if declared_object_count != expected_object_count {
+        return Err(PackError::InvalidPackFile {
+            path: pack_path.to_owned(),
+            reason: format!(
+                "pack header declares {declared_object_count} objects; expected {expected_object_count}"
+            ),
+        });
+    }
+    std::fs::create_dir_all(output_dir)
+        .map_err(|source| io_error(format!("create {}", output_dir.display()), source))?;
+
+    let outcome = gix_pack::Bundle::write_to_directory(
+        &mut std::io::BufReader::new(
+            std::fs::File::open(pack_path)
+                .map_err(|source| io_error(format!("open {}", pack_path.display()), source))?,
+        ),
+        Some(output_dir),
+        &mut gix_features::progress::Discard,
+        cancelled,
+        None::<gix_object::find::Never>,
+        gix_pack::bundle::write::Options {
+            thread_limit: Some(1),
+            iteration_mode: gix_pack::data::input::Mode::Verify,
+            index_version: gix_pack::index::Version::V2,
+            object_hash: gix_hash::Kind::Sha1,
+        },
+    )
+    .map_err(|source| {
+        if cancelled.load(Ordering::Acquire) {
+            PackError::Cancelled
+        } else {
+            PackError::BundleIndex { source }
+        }
+    })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err(PackError::Cancelled);
+    }
+    let indexed_pack = outcome.data_path.ok_or_else(|| PackError::IndexMissing {
+        path: pack_path.to_owned(),
+    })?;
+    let index_path = outcome.index_path.ok_or_else(|| PackError::IndexMissing {
+        path: pack_path.to_owned(),
+    })?;
+    let object_count = u64::from(outcome.index.num_objects);
+    if object_count != expected_object_count || outcome.index.data_hash.to_string() != git_sha1 {
+        return Err(PackError::InvalidPackFile {
+            path: index_path.clone(),
+            reason: format!(
+                "generated index identity is {} objects with pack checksum {}; expected {} objects with checksum {}",
+                object_count, outcome.index.data_hash, expected_object_count, git_sha1
+            ),
+        });
+    }
+    let reverse_path = index_path.with_extension("rev");
+    crate::pack_locator::write_pack_reverse_index(&index_path, &reverse_path)?;
+    let locations = crate::pack_locator::PackLocationIter::open(
+        &index_path,
+        &reverse_path,
+        std::fs::metadata(&indexed_pack)
+            .map_err(|source| io_error(format!("metadata {}", indexed_pack.display()), source))?
+            .len(),
+    )?;
+    if locations.pack_checksum().to_string() != git_sha1
+        || locations.object_count() as u64 != expected_object_count
+    {
+        return Err(PackError::InvalidPackFile {
+            path: index_path,
+            reason: "generated locator sidecars failed identity validation".to_owned(),
+        });
+    }
+    Ok(IndexedPack {
+        index_path,
+        reverse_path,
+        content_hash,
+    })
 }
 
 fn verify_pack_file(path: &Path, hash_content: bool) -> Result<(String, Option<[u8; 32]>, u64)> {

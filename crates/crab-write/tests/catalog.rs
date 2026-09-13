@@ -54,7 +54,16 @@ async fn catalog_reads_metadata_without_kind_sidecars_or_a_local_repository() {
     catalog_recovery(false).await;
 }
 
+#[tokio::test]
+async fn catalog_rebuilds_missing_pack_sidecars_from_the_canonical_pack() {
+    catalog_recovery_mode(true, true).await;
+}
+
 async fn catalog_recovery(with_kind_sidecar: bool) {
+    catalog_recovery_mode(with_kind_sidecar, false).await;
+}
+
+async fn catalog_recovery_mode(with_kind_sidecar: bool, missing_sidecars: bool) {
     let fixture = tempfile::tempdir().unwrap();
     git(fixture.path(), &["init", "--bare", "--quiet"], b"");
     let blob = String::from_utf8(git(
@@ -176,70 +185,78 @@ async fn catalog_recovery(with_kind_sidecar: bool) {
     };
     let index_path = layout.pack_index_path(&pack.pack_id);
     let (index_bytes, _) = store.get_with_etag(&index_path).await.unwrap();
-    store.delete(&index_path).await.unwrap();
-    store
-        .put(&index_path, Bytes::from_static(b"truncated index"))
+    if missing_sidecars {
+        store.delete(&index_path).await.unwrap();
+        store
+            .delete(&layout.pack_reverse_index_path(&pack.pack_id))
+            .await
+            .unwrap();
+    } else {
+        store.delete(&index_path).await.unwrap();
+        store
+            .put(&index_path, Bytes::from_static(b"truncated index"))
+            .await
+            .unwrap();
+        let mut failed_writer = GitObjectLocatorWriter::open_for_publication(
+            Arc::clone(store.inner()),
+            layout.repo_prefix(),
+            3,
+        )
         .await
         .unwrap();
-    let mut failed_writer = GitObjectLocatorWriter::open_for_publication(
-        Arc::clone(store.inner()),
-        layout.repo_prefix(),
-        3,
-    )
-    .await
-    .unwrap();
-    let cancelled = CancellationToken::new();
-    cancelled.cancel();
-    let cancelled_result = publish_inventory(
-        &mut failed_writer,
-        &store,
-        &layout,
-        &mut HashMap::new(),
-        anchor,
-        std::slice::from_ref(&pack),
-        true,
-        &cancelled,
-    )
-    .await;
-    let mut local = HashMap::from([(MerkleHash::from_hex(&pack.pack_id).unwrap(), mismatched)]);
-    let mismatch_result = publish_inventory(
-        &mut failed_writer,
-        &store,
-        &layout,
-        &mut local,
-        anchor,
-        std::slice::from_ref(&pack),
-        true,
-        &CancellationToken::new(),
-    )
-    .await;
-    let failed = publish_inventory(
-        &mut failed_writer,
-        &store,
-        &layout,
-        &mut HashMap::new(),
-        anchor,
-        std::slice::from_ref(&pack),
-        true,
-        &CancellationToken::new(),
-    )
-    .await;
-    let failed_coverage = failed_writer.coverage();
-    failed_writer.close().await.unwrap();
-    assert_eq!(
-        (
-            matches!(cancelled_result, Err(crab_write::WriteError::Cancelled)),
-            matches!(
-                mismatch_result,
-                Err(crab_write::WriteError::CorruptObject { .. })
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let cancelled_result = publish_inventory(
+            &mut failed_writer,
+            &store,
+            &layout,
+            &mut HashMap::new(),
+            anchor,
+            std::slice::from_ref(&pack),
+            true,
+            &cancelled,
+        )
+        .await;
+        let mut local = HashMap::from([(MerkleHash::from_hex(&pack.pack_id).unwrap(), mismatched)]);
+        let mismatch_result = publish_inventory(
+            &mut failed_writer,
+            &store,
+            &layout,
+            &mut local,
+            anchor,
+            std::slice::from_ref(&pack),
+            true,
+            &CancellationToken::new(),
+        )
+        .await;
+        let failed = publish_inventory(
+            &mut failed_writer,
+            &store,
+            &layout,
+            &mut HashMap::new(),
+            anchor,
+            std::slice::from_ref(&pack),
+            true,
+            &CancellationToken::new(),
+        )
+        .await;
+        let failed_coverage = failed_writer.coverage();
+        failed_writer.close().await.unwrap();
+        assert_eq!(
+            (
+                matches!(cancelled_result, Err(crab_write::WriteError::Cancelled)),
+                matches!(
+                    mismatch_result,
+                    Err(crab_write::WriteError::CorruptObject { .. })
+                ),
+                failed.is_err(),
+                failed_coverage
             ),
-            failed.is_err(),
-            failed_coverage
-        ),
-        (true, true, true, None)
-    );
-    store.delete(&index_path).await.unwrap();
-    store.put(&index_path, index_bytes).await.unwrap();
+            (true, true, true, None)
+        );
+        store.delete(&index_path).await.unwrap();
+        store.put(&index_path, index_bytes).await.unwrap();
+    }
     let mut writer = GitObjectLocatorWriter::open_for_publication(
         Arc::clone(store.inner()),
         layout.repo_prefix(),
@@ -256,7 +273,7 @@ async fn catalog_recovery(with_kind_sidecar: bool) {
             generation: 1,
             pack_index_hash: MerkleHash::from_hex(&manifest.pack_index_hash).unwrap(),
         },
-        &[pack],
+        std::slice::from_ref(&pack),
         true,
         &CancellationToken::new(),
     )
@@ -264,6 +281,20 @@ async fn catalog_recovery(with_kind_sidecar: bool) {
     let close = writer.close().await;
     close.unwrap();
     assert!(result.unwrap().0);
+    if missing_sidecars {
+        assert!(
+            store
+                .get_with_etag(&layout.pack_index_path(&pack.pack_id))
+                .await
+                .is_ok()
+        );
+        assert!(
+            store
+                .get_with_etag(&layout.pack_reverse_index_path(&pack.pack_id))
+                .await
+                .is_ok()
+        );
+    }
     if with_kind_sidecar {
         assert_eq!(store.get_with_etag(&kinds_path).await.unwrap().0, kinds);
     } else {
