@@ -132,6 +132,7 @@ Monitor these platform and application signals:
 | `crab_http_server_requests_total` and request duration | Error rate or tail duration changes from the recorded baseline |
 | Response-body errors and aborts | A stream fails after headers or a client/proxy disconnects early |
 | Admission available permits | A class remains saturated instead of returning to capacity |
+| `crab_http_server_transfer_admission_rejections_total` | `capacity` grows under shared-slot pressure, or `coordination` grows when storage-backed admission fails |
 | `crab_http_server_catalog_healthy` | Any pod reports `0` |
 | `crab_http_server_catalog_refresh_failures_total` | The counter increases |
 | `crab_http_server_receive_workers` | Workers remain after request traffic settles |
@@ -144,8 +145,9 @@ Scrape `GET /metrics` on each pod's private management port. The chart can add
 a Prometheus Operator `PodMonitor` and a management-port NetworkPolicy rule for
 an explicit monitoring source. Keep port 8789 absent from public Services and
 ingress. Alert thresholds need a workload baseline; start with catalog health,
-new catalog-refresh failures, sustained zero admission permits, response-body
-errors, and unexpected drain state.
+new catalog-refresh failures, sustained zero local admission permits, repeated
+deployment-wide admission rejections, response-body errors, and unexpected
+drain state.
 
 ## Roll back a failed release
 
@@ -217,6 +219,8 @@ attach the runbook URL through Helm values:
 | `CrabHttpServerCatalogUnavailable` | A replica reports catalog failure continuously | Check workload identity, provider availability, and catalog warnings before rolling pods |
 | `CrabHttpServerCatalogRefreshFailing` | More than three refresh failures in 15 minutes | Correlate provider errors and catalog versions across replicas |
 | `CrabHttpServerGitAdmissionExhausted` | A replica has no free Git permits for a sustained interval | Inspect active transfers and latency; scale only after checking storage saturation |
+| `CrabHttpServerDeploymentAdmissionRejecting` | Shared transfer capacity rejected repeated work across replicas | Inspect transfer duration and object-storage saturation; scaling replicas alone does not add transfer slots |
+| `CrabHttpServerTransferCoordinationFailing` | Storage-backed admission repeatedly failed | Check workload identity, object-store availability, and conditional-write permissions |
 | `CrabHttpServerHighErrorRate` | More than 5% of at least 20 requests return 5xx | Group completion logs by request ID and identify the failing route and storage boundary |
 
 Keep these defaults until a live load test establishes a better baseline.

@@ -93,7 +93,7 @@ async fn lfs_batch_upload_download_is_verified_and_idempotent() {
         response.into_body().collect().await.unwrap().to_bytes(),
         "hello"
     );
-    assert_eq!(server.git_admission.available_permits(), 4);
+    assert_eq!(server.transfer_admission.available_permits(), 4);
     server.runtime.shutdown().await;
 }
 
@@ -556,7 +556,14 @@ async fn lfs_download_does_not_publish_verification_receipts() {
         .put(&path, Bytes::from_static(b"hello"))
         .await
         .unwrap();
-    let before: Vec<_> = repo.store.inner().list(None).try_collect().await.unwrap();
+    let prefix = object_store::path::Path::from(repo.layout.repo_prefix());
+    let before: Vec<_> = repo
+        .store
+        .inner()
+        .list(Some(&prefix))
+        .try_collect()
+        .await
+        .unwrap();
 
     let response = request(
         &server,
@@ -566,7 +573,13 @@ async fn lfs_download_does_not_publish_verification_receipts() {
     )
     .await;
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let after: Vec<_> = repo.store.inner().list(None).try_collect().await.unwrap();
+    let after: Vec<_> = repo
+        .store
+        .inner()
+        .list(Some(&prefix))
+        .try_collect()
+        .await
+        .unwrap();
     server.runtime.shutdown().await;
     assert_eq!((bytes, after), (Bytes::from_static(b"hello"), before));
 }
@@ -600,7 +613,10 @@ async fn lfs_corrupt_download_fails_its_body_and_releases_admission() {
     let result = response.into_body().collect().await;
     server.runtime.shutdown().await;
     assert_eq!(
-        (result.is_err(), server.git_admission.available_permits()),
+        (
+            result.is_err(),
+            server.transfer_admission.available_permits(),
+        ),
         (true, 4)
     );
 }
@@ -683,7 +699,7 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
     tokio::time::timeout(Duration::from_secs(2), server.receives.wait())
         .await
         .unwrap();
-    assert_eq!(server.git_admission.available_permits(), 4);
+    assert_eq!(server.transfer_admission.available_permits(), 4);
     server.runtime.shutdown().await;
 }
 
@@ -806,7 +822,7 @@ async fn cancelled_lfs_response_fails_http_body_and_releases_capacity() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(server.git_admission.available_permits(), 3);
+        assert_eq!(server.transfer_admission.available_permits(), 3);
         if cancel {
             server.cancellation.cancel();
         }
@@ -826,6 +842,6 @@ async fn cancelled_lfs_response_fails_http_body_and_releases_capacity() {
         } else {
             assert_eq!(&result.unwrap()[..], b"hello");
         }
-        assert_eq!(server.git_admission.available_permits(), 4);
+        assert_eq!(server.transfer_admission.available_permits(), 4);
     }
 }

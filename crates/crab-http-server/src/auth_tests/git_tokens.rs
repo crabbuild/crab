@@ -316,7 +316,13 @@ async fn git_tokens_are_read_scoped_and_revoked_with_the_browser_session() {
     }
     {
         use tower::ServiceExt as _;
-        let _busy = h.server.git_admission.acquire_many(4).await.unwrap();
+        let _busy = h
+            .server
+            .transfer_admission
+            .local
+            .acquire_many(4)
+            .await
+            .unwrap();
         let authorization = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
             format!("crab:{token}"),

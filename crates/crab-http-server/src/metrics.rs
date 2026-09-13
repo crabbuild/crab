@@ -17,6 +17,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 const METHOD_COUNT: usize = 6;
 const OUTCOME_COUNT: usize = 7;
 const ADMISSION_COUNT: usize = 4;
+const TRANSFER_REJECTION_COUNT: usize = 2;
 const DURATION_BUCKETS_SECONDS: [f64; 16] = [
     0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
     600.0,
@@ -26,6 +27,7 @@ const OUTCOME_LABELS: [&str; OUTCOME_COUNT] =
     ["1xx", "2xx", "3xx", "4xx", "5xx", "other", "cancelled"];
 pub(crate) const ADMISSION_LABELS: [&str; ADMISSION_COUNT] =
     ["read", "git_transfer", "application", "maintenance"];
+const TRANSFER_REJECTION_LABELS: [&str; TRANSFER_REJECTION_COUNT] = ["capacity", "coordination"];
 const METADATA: Metadata<'static> = Metadata::new(
     "crab_http_server",
     Level::INFO,
@@ -46,6 +48,7 @@ struct MetricsInner {
     draining: Gauge,
     receive_workers: Gauge,
     catalog_refresh_failures: Counter,
+    transfer_admission_rejections: [Counter; TRANSFER_REJECTION_COUNT],
 }
 
 struct MethodMetrics {
@@ -103,6 +106,15 @@ impl Metrics {
                     &Key::from_static_name("crab_http_server_catalog_refresh_failures_total"),
                     &METADATA,
                 ),
+                transfer_admission_rejections: TRANSFER_REJECTION_LABELS.map(|reason| {
+                    recorder.register_counter(
+                        &key(
+                            "crab_http_server_transfer_admission_rejections_total",
+                            &[("reason", reason)],
+                        ),
+                        &METADATA,
+                    )
+                }),
             }),
         })
     }
@@ -121,6 +133,10 @@ impl Metrics {
 
     pub(crate) fn record_catalog_refresh_failure(&self) {
         self.inner.catalog_refresh_failures.increment(1);
+    }
+
+    pub(crate) fn record_transfer_admission_rejection(&self, coordination: bool) {
+        self.inner.transfer_admission_rejections[usize::from(coordination)].increment(1);
     }
 
     pub(crate) fn render(&self, snapshot: RuntimeSnapshot) -> String {
@@ -365,7 +381,7 @@ fn describe_metrics(recorder: &impl Recorder) {
     describe_gauge(
         recorder,
         "crab_http_server_admission_available_permits",
-        "Available permits in each process-local admission class.",
+        "Available fast-path permits in this process; Git transfers also require a deployment-wide storage lease.",
     );
     describe_gauge(
         recorder,
@@ -396,6 +412,11 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_http_server_catalog_refresh_failures_total",
         "Catalog refresh attempts that failed or moved backwards.",
+    );
+    describe_counter(
+        recorder,
+        "crab_http_server_transfer_admission_rejections_total",
+        "Transfers rejected by deployment-wide capacity or coordination failures.",
     );
 }
 
@@ -458,6 +479,8 @@ mod tests {
     #[tokio::test]
     async fn completed_request_exports_bounded_full_body_metrics() {
         let metrics = Metrics::new().unwrap();
+        metrics.record_transfer_admission_rejection(false);
+        metrics.record_transfer_admission_rejection(true);
         let observation = metrics.start_request(&Method::GET).response(StatusCode::OK);
         let body = Body::new(ObservedBody::new(Body::from("response"), observation));
         assert_eq!(
@@ -479,6 +502,12 @@ mod tests {
             rendered
                 .contains("crab_http_server_admission_available_permits{class=\"git_transfer\"} 3")
         );
+        assert!(rendered.contains(
+            "crab_http_server_transfer_admission_rejections_total{reason=\"capacity\"} 1"
+        ));
+        assert!(rendered.contains(
+            "crab_http_server_transfer_admission_rejections_total{reason=\"coordination\"} 1"
+        ));
         assert!(!rendered.contains("repository=\""));
     }
 

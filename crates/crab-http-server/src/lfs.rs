@@ -86,6 +86,16 @@ impl From<crab_remote::publication::Error> for Error {
     }
 }
 
+impl From<crate::transfer_admission::Error> for Error {
+    fn from(error: crate::transfer_admission::Error) -> Self {
+        match error {
+            crate::transfer_admission::Error::Busy => Self::Busy,
+            crate::transfer_admission::Error::Cancelled => Self::Cancelled,
+            crate::transfer_admission::Error::Coordination(error) => Self::Coordination(error),
+        }
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         if let Self::RangeNotSatisfiable { size } = &self {
@@ -339,10 +349,8 @@ pub(crate) async fn download(
     } else {
         None
     };
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| Error::Busy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancel).await?;
     let guard = cancel.clone().drop_guard();
     let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
     let deadline = tokio::time::Instant::now() + BUDGET;
@@ -487,10 +495,8 @@ pub(crate) async fn upload(
             "LFS uploads require identity content encoding",
         ));
     }
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| Error::Busy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancel).await?;
     let _guard = cancel.clone().drop_guard();
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();

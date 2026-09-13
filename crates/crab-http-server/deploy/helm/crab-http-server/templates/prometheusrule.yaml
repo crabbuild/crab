@@ -66,6 +66,28 @@ spec:
             {{- with .Values.metrics.prometheusRule.runbookUrl }}
             runbook_url: {{ . | quote }}
             {{- end }}
+        - alert: CrabHttpServerDeploymentAdmissionRejecting
+          expr: sum(increase(crab_http_server_transfer_admission_rejections_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }},reason="capacity"}[10m])) > 5
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Crab deployment-wide transfer admission is rejecting work
+            description: Shared transfer capacity rejected more than five requests in ten minutes; inspect transfer latency and object-storage saturation before scaling.
+            {{- with .Values.metrics.prometheusRule.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
+        - alert: CrabHttpServerTransferCoordinationFailing
+          expr: sum(increase(crab_http_server_transfer_admission_rejections_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }},reason="coordination"}[15m])) > 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Crab transfer admission coordination is failing
+            description: Storage-backed transfer admission failed more than three times in fifteen minutes; inspect workload identity and conditional object-store operations.
+            {{- with .Values.metrics.prometheusRule.runbookUrl }}
+            runbook_url: {{ . | quote }}
+            {{- end }}
         - alert: CrabHttpServerHighErrorRate
           expr: (sum(rate(crab_http_server_requests_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }},outcome="5xx"}[10m])) / clamp_min(sum(rate(crab_http_server_requests_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }}}[10m])), 0.001)) > 0.05 and sum(increase(crab_http_server_requests_total{namespace={{ $namespace | quote }},pod=~{{ $podPattern | quote }}}[10m])) >= 20
           for: 10m

@@ -30,6 +30,7 @@ use crate::{
     branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, releases,
     repository_settings::{self, BranchProtections, RepositoryLifecycle},
     statuses,
+    transfer_admission::TransferAdmission,
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
@@ -224,7 +225,7 @@ pub(crate) struct Server {
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
-    pub git_admission: Arc<Semaphore>,
+    pub transfer_admission: TransferAdmission,
     pub app_admission: Semaphore,
     maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
@@ -236,6 +237,26 @@ pub(crate) struct Server {
 }
 
 impl Server {
+    pub(crate) async fn acquire_transfer(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<
+        crate::transfer_admission::TransferPermit,
+        crate::transfer_admission::Error,
+    > {
+        let result = self.transfer_admission.try_acquire(cancellation).await;
+        match &result {
+            Err(crate::transfer_admission::Error::Busy) => {
+                self.metrics.record_transfer_admission_rejection(false);
+            }
+            Err(crate::transfer_admission::Error::Coordination(_)) => {
+                self.metrics.record_transfer_admission_rejection(true);
+            }
+            Ok(_) | Err(crate::transfer_admission::Error::Cancelled) => {}
+        }
+        result
+    }
+
     async fn finish_maintenance(&self) -> Result<()> {
         let mut result = Ok(());
         for repository in self.repositories.values() {
@@ -288,6 +309,14 @@ pub async fn serve(config: Config) -> Result<()> {
             ..Default::default()
         },
     )?;
+    let transfer_admission = TransferAdmission::new(
+        catalog.root().store.clone(),
+        catalog
+            .root()
+            .path(".crab/http-server/v1/admission")
+            .to_string(),
+        GIT_ADMISSION_CAPACITY,
+    );
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
@@ -299,7 +328,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .map(Authentication::cursor_key)
             .unwrap_or_else(rand::random),
         admission: Semaphore::new(READ_ADMISSION_CAPACITY),
-        git_admission: Arc::new(Semaphore::new(GIT_ADMISSION_CAPACITY)),
+        transfer_admission,
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         auth,
@@ -336,6 +365,8 @@ pub async fn serve(config: Config) -> Result<()> {
     server.cancellation.cancel();
     server.receives.close();
     server.receives.wait().await;
+    server.transfer_admission.close();
+    server.transfer_admission.wait().await;
     let maintenance = server.finish_maintenance().await;
     runtime.shutdown().await;
     result
@@ -559,7 +590,7 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         receive_workers: server.receives.len(),
         admission_available: [
             server.admission.available_permits(),
-            server.git_admission.available_permits(),
+            server.transfer_admission.available_permits(),
             server.app_admission.available_permits(),
             server.maintenance_admission.available_permits(),
         ],
@@ -883,7 +914,11 @@ mod tests {
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
-            git_admission: Arc::new(Semaphore::new(1)),
+            transfer_admission: TransferAdmission::new(
+                Store::new(Arc::new(object_store::memory::InMemory::new())),
+                "test/.crab/http-server/v1/admission".into(),
+                1,
+            ),
             app_admission: Semaphore::new(1),
             maintenance_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),

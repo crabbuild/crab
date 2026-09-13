@@ -413,7 +413,7 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         "base_oid":created.1["base_oid"],
         "head_oid":created.1["head_oid"]
     });
-    let busy = Arc::clone(&server.git_admission)
+    let busy = Arc::clone(&server.transfer_admission.local)
         .acquire_many_owned(4)
         .await
         .unwrap();

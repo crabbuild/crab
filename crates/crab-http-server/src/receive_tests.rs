@@ -70,14 +70,14 @@ async fn disconnected_receive_drains_intake_and_returns_transfer_capacity() {
     })
     .await
     .unwrap();
-    assert_eq!(server.git_admission.available_permits(), 3);
+    assert_eq!(server.transfer_admission.available_permits(), 3);
     client.abort();
     let _ = client.await;
     server.receives.close();
     tokio::time::timeout(Duration::from_secs(2), server.receives.wait())
         .await
         .unwrap();
-    assert_eq!(server.git_admission.available_permits(), 4);
+    assert_eq!(server.transfer_admission.available_permits(), 4);
     let repo = server
         .repositories
         .get(&("team".into(), "repo".into()))

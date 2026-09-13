@@ -337,7 +337,8 @@ The HTTP worker owns the request after admission. A disconnected handler cannot 
 ```mermaid
 flowchart TD
     A[Validate Host, repository, token, and content headers]
-    B[Acquire one of four transfer slots]
+    B[Acquire a local fast-path permit]
+    B2[Claim one of four deployment-wide CAS slots]
     C[Spool at most 2 GiB to a private temporary file]
     D[Parse shallow lines, ref commands, and capabilities]
     E[Acquire sorted ref leases and both GC fences]
@@ -352,8 +353,16 @@ flowchart TD
     N[Attempt read readiness]
     O[Return Git report-status]
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N --> O
+    A --> B --> B2 --> C --> D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N --> O
 ```
+
+All replicas contend for the same fixed slots beneath the deployment root at
+`.crab/http-server/v1/admission`. Each five-minute slot lease renews every
+third of its lifetime. Response-body or worker completion releases it;
+renewal failure cancels the owned transfer; an abrupt process loss makes the
+slot reusable after its lease expires. This covers Git fetch and push, LFS
+upload and download, archives, and release assets without repository-specific
+configuration.
 
 The implementation spreads this sequence across four owners:
 
@@ -631,7 +640,7 @@ state, not only locks.
 
 Shard scans, hashing, recipe extraction, and pointer reconstruction use blocking workers. A timed-out caller can return while its bounded worker continues cleanup, but the worker retains its semaphore permit until exit.
 
-Four shard scans, four Crab pointer proofs, and four LFS bodies can overlap per process at their respective stages. These stage limits supplement the four receive and transfer slots; they do not replace the whole-request deadline.
+Four shard scans, four Crab pointer proofs, and four LFS bodies can overlap per process at their respective stages. These stage limits supplement the four deployment-wide receive and transfer slots; they do not replace the whole-request deadline.
 
 ## Hold publication authority
 
@@ -940,7 +949,7 @@ The current implementation does not satisfy these production claims:
 - **Index receipt reconstruction:** Missing sidecar or visibility evidence cannot yet be rebuilt from a durable verified receipt after restart.
 - **Active-active coexistence:** Versioned coordinator writers do not share the native journal namespace gate or commitment authority.
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
-- **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
+- **Multi-instance non-transfer admission:** Interactive-read, application, and maintenance admission remain process-local. Long-running transfer admission is deployment-wide, but still needs provider-scale load qualification.
 - **Production scale:** The portable live gate qualifies one cross-replica
   rollout when an operator runs it, but no EKS/GKE/AKS receipt is checked in.
   It does not establish Kubernetes-size push throughput, temporary-disk sizing,

@@ -342,7 +342,12 @@ autoscaling:
   targetCPUUtilizationPercentage: 70
 ```
 
-CPU scaling protects general request capacity. It does not create a cluster-wide Git admission limit: transfer and maintenance admission remain process-local.
+CPU scaling protects general request capacity. It does not raise long-running
+transfer capacity: every replica shares four renewable object-store CAS slots
+for Git, LFS, archive, and release-asset transfers. Application, interactive
+read, and maintenance admission remain process-local. Scale only after the
+shared-admission rejection counter and storage latency show that more general
+request capacity will help.
 
 ## Scrape Prometheus metrics
 
@@ -402,8 +407,9 @@ networkPolicy:
 The `PodMonitor` labels must match the Prometheus `podMonitorSelector`; the rule
 labels must independently match its `ruleSelector`. The rules alert on missing
 metrics, sustained catalog failure, repeated catalog refresh failures,
-sustained Git admission exhaustion, and a five-percent 5xx rate after a minimum
-traffic floor. They are disabled by default because the `PrometheusRule` custom
+sustained local Git admission exhaustion, repeated deployment-wide transfer
+rejections, and a five-percent 5xx rate after a minimum traffic floor. They are
+disabled by default because the `PrometheusRule` custom
 resource must already exist. The chart rejects rules without metrics discovery
 or an explicit private scraper source. Route the included `critical` and
 `warning` severities through Alertmanager, then tune thresholds only from
@@ -461,7 +467,7 @@ Rotate the OIDC client secret without changing the state key. Changing the state
 The chart is portable deployment evidence, not provider qualification. Before production use, run a dedicated live test for push, fetch, LFS upload/download, OIDC callback routing across replicas, rolling replacement, and object-store restore.
 
 The current server still lacks complete abrupt-process-crash qualification,
-cluster-wide admission, provider-scale throughput evidence, and a
+provider-scale admission and throughput evidence, and a
 version-selected provider restore drill. Local container CI proves the portable
 complete-root copy and independent restored reads, not a cloud recovery point.
 Prefer Kubernetes over AWS Fargate for long streams: Fargate limits container

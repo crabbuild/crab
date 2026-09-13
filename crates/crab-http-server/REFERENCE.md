@@ -327,6 +327,10 @@ repository names, paths, principals, request IDs, or storage keys. Request
 duration and in-flight gauges retain ownership through the response body, so a
 long Git, LFS, archive, or release stream remains visible after its handler has
 returned. Body errors and client aborts have separate counters.
+The `git_transfer` available-permit gauge describes the current process's
+fast-path guard. The `crab_http_server_transfer_admission_rejections_total`
+counter distinguishes deployment-wide `capacity` rejection from
+`coordination` failure.
 
 ### Choose an orchestrator
 
@@ -1124,7 +1128,7 @@ This table collects process and transport limits that otherwise span several rou
 | --- | ---: | --- |
 | Interactive repository reads | 16 concurrent, 2 minutes, 8 MiB response | `server.rs` and `crab-remote-git` |
 | Collaboration handlers | 8 concurrent, 30s | `app.rs` and route middleware |
-| Git fetch, push, and LFS transfers | 4 concurrent | Shared `git_admission` semaphore |
+| Git fetch, push, LFS, archives, and release assets | 4 concurrent across the deployment | Process-local fast-path semaphore plus renewable object-store CAS slots under `.crab/http-server/v1/admission` |
 | Read-readiness publication | 2 repositories concurrently, 3-minute cooperative budget | `maintenance.rs` |
 | OIDC callbacks | 8 concurrent, 10s per provider request | `auth.rs` |
 | Archive transfer | 10 minutes, 3 GiB encoded response | `archive.rs` |
@@ -1140,8 +1144,9 @@ Server shutdown follows this order:
 2. Cancel request-scoped work
 3. Drain Axum connections
 4. Close and drain receive workers
-5. Drain retained maintenance jobs and lease cleanup
-6. Shut down the shared remote-read runtime
+5. Release and drain deployment-wide transfer leases
+6. Drain retained maintenance jobs and lease cleanup
+7. Shut down the shared remote-read runtime
 
 Stateful publication futures are drained instead of aborted. This prevents a dropped handler from abandoning a marker attempt or releasing a GC fence before cleanup finishes.
 
@@ -1200,7 +1205,7 @@ Current local and CI evidence includes:
 - Stock Git LFS lock, list, verify-on-push, and unlock against the Compose Caddy/server/RustFS stack
 - Native Git rejection when another subject owns a changed path, including a change-and-revert history whose final tree matches the original
 
-These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. Neither test establishes every crash phase, multi-instance global admission, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
+These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. In-memory multi-instance tests prove that independent server admission gates share and reuse fixed storage slots. These tests do not establish every crash phase, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
 
 The packaged Kubernetes gate makes live evidence repeatable, but its existence
 is not provider qualification. Only a successful EKS, GKE, or AKS run and its
@@ -1242,7 +1247,7 @@ The remaining production gaps include:
 - Durable application-level push receipts and abrupt-crash coverage beyond the qualified in-flight native-push boundary
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
-- Multi-instance global admission and production throughput qualification
+- Production throughput and provider-level admission qualification
 - Membership administration, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace

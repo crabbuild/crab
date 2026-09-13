@@ -186,6 +186,7 @@ impl Harness {
             required_approvals: 1,
             required_checks: vec!["ci/test".into()],
         }];
+        let admission_store = store.clone();
         let repository = Repository {
             config: RepositoryConfig {
                 owner: "team".into(),
@@ -229,7 +230,11 @@ impl Harness {
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
             admission: Semaphore::new(16),
-            git_admission: Arc::new(Semaphore::new(4)),
+            transfer_admission: crate::transfer_admission::TransferAdmission::new(
+                admission_store,
+                "test/.crab/http-server/v1/admission".into(),
+                4,
+            ),
             app_admission: Semaphore::new(8),
             maintenance_admission: Arc::new(Semaphore::new(2)),
             cancellation: CancellationToken::new(),

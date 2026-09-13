@@ -80,6 +80,8 @@ pub(crate) enum Error {
     ReleaseAssetIo(#[source] std::io::Error),
     #[error("Release asset worker failed")]
     ReleaseAssetWorker(#[source] tokio::task::JoinError),
+    #[error("Release asset transfer admission failed")]
+    ReleaseAssetCoordination(#[source] crab_coordination::CoordinationError),
     #[error("Release tag publication failed")]
     Release(#[source] Box<crate::receive::ReceiveError>),
     #[error("Pull request merge failed")]
@@ -121,6 +123,7 @@ impl IntoResponse for Error {
                     | Self::Release(_)
                     | Self::ReleaseAssetIo(_)
                     | Self::ReleaseAssetWorker(_)
+                    | Self::ReleaseAssetCoordination(_)
             )
         {
             tracing::error!(error = ?self, "collaboration request failed");
@@ -245,6 +248,13 @@ impl IntoResponse for Error {
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
                 "Invalid release asset body",
+            ),
+            Self::ReleaseAssetIo(_)
+            | Self::ReleaseAssetWorker(_)
+            | Self::ReleaseAssetCoordination(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "asset_storage",
+                "Release asset storage is unavailable. Retry shortly",
             ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,

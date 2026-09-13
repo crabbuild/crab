@@ -13,6 +13,7 @@ const TTL: Duration = Duration::from_secs(60);
 
 pub(super) async fn fixture() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
     crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
         .await
@@ -45,7 +46,11 @@ pub(super) async fn fixture() -> Arc<Server> {
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
-        git_admission: Arc::new(Semaphore::new(4)),
+        transfer_admission: crate::transfer_admission::TransferAdmission::new(
+            admission_store,
+            "test/.crab/http-server/v1/admission".into(),
+            4,
+        ),
         app_admission: Semaphore::new(8),
         maintenance_admission: Arc::new(Semaphore::new(2)),
         cancellation: CancellationToken::new(),

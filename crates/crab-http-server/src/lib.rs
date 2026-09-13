@@ -25,6 +25,7 @@ mod repository_settings;
 mod server;
 mod statuses;
 mod storage_root;
+mod transfer_admission;
 
 pub use config::{
     BranchProtection, Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember,
