@@ -56,3 +56,6 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ulid = "1"
 url = "2.5"
+
+[dev-dependencies]
+gix-pack = { workspace = true, features = ["sha1"] }

@@ -8,7 +8,10 @@ use crab_metadata::git_object_locator::{
     GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
     GitPackInventoryEntry,
 };
-use crab_storage::{Store, repo_pack_index_path, repo_pack_path, repo_pack_reverse_index_path};
+use crab_storage::{
+    Store, repo_pack_index_path, repo_pack_kind_metadata_path, repo_pack_path,
+    repo_pack_reverse_index_path,
+};
 use crab_xet::hash::MerkleHash;
 use futures_util::stream::{self, StreamExt};
 use gix_pack::data::entry::Header;
@@ -106,6 +109,12 @@ struct CoalescedRange {
     start: u64,
     end: u64,
     entries: Vec<(gix_hash::ObjectId, GitObjectLocator)>,
+}
+
+struct DeltaReadState {
+    max_object_bytes: u64,
+    remaining_depth: usize,
+    ancestors: HashSet<gix_hash::ObjectId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,8 +243,11 @@ impl RemoteGitReader {
                 session,
                 requested,
                 locator,
-                self.limits.max_object_bytes,
-                self.limits.max_delta_depth,
+                DeltaReadState {
+                    max_object_bytes: self.limits.max_object_bytes,
+                    remaining_depth: self.limits.max_delta_depth,
+                    ancestors: HashSet::new(),
+                },
                 budget,
                 cancellation,
             )
@@ -341,10 +353,14 @@ impl RemoteGitReader {
             session,
             requested,
             locator,
-            self.limits
-                .max_object_bytes
-                .max(crab_git::MAX_LFS_POINTER_SIZE as u64),
-            self.limits.max_delta_depth,
+            DeltaReadState {
+                max_object_bytes: self
+                    .limits
+                    .max_object_bytes
+                    .max(crab_git::MAX_LFS_POINTER_SIZE as u64),
+                remaining_depth: self.limits.max_delta_depth,
+                ancestors: HashSet::new(),
+            },
             budget,
             cancellation,
         )
@@ -566,12 +582,27 @@ impl RemoteGitReader {
         while let Some(result) = indexes.next().await {
             let (pack_id, index) = result?;
             for (position, oid) in requested.iter().enumerate() {
-                if !matches!(lookups[position], GitObjectLookup::Miss) {
+                if matches!(
+                    lookups[position],
+                    GitObjectLookup::Hit(GitObjectLocator {
+                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                            delta_base_oid: None,
+                            ..
+                        },
+                        ..
+                    })
+                ) {
                     continue;
                 }
                 let object_id = gix_hash::ObjectId::from(*oid);
                 if let Some(location) = index.location_for(&object_id)? {
-                    lookups[position] = GitObjectLookup::Hit(GitObjectLocator {
+                    let delta_base_oid = index
+                        .external_delta_bases
+                        .get(&object_id)
+                        .map(|base| base.as_bytes().try_into())
+                        .transpose()
+                        .map_err(|_| Error::UnsupportedObjectFormat)?;
+                    let candidate = GitObjectLocator {
                         // Pack indexes provide a complete immutable location but
                         // not the catalog's dense ordinal. Batch object reads use
                         // only the location; catalog APIs continue to use the
@@ -579,9 +610,26 @@ impl RemoteGitReader {
                         ordinal: 0,
                         pack_id,
                         location,
-                        metadata: Default::default(),
-                    });
-                    remaining = remaining.saturating_sub(1);
+                        metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                            delta_base_oid,
+                            ..Default::default()
+                        },
+                    };
+                    let replace = match lookups[position] {
+                        GitObjectLookup::Miss => true,
+                        GitObjectLookup::Hit(existing) => {
+                            delta_base_oid.is_none()
+                                || (existing.metadata.delta_base_oid.is_some()
+                                    && pack_id < existing.pack_id)
+                        }
+                        GitObjectLookup::Corrupt => false,
+                    };
+                    if replace {
+                        if delta_base_oid.is_none() {
+                            remaining = remaining.saturating_sub(1);
+                        }
+                        lookups[position] = GitObjectLookup::Hit(candidate);
+                    }
                 }
             }
             if remaining == 0 {
@@ -973,42 +1021,47 @@ impl RemoteGitReader {
         session: &GitObjectLocatorSession,
         requested: gix_hash::ObjectId,
         locator: GitObjectLocator,
-        max_object_bytes: u64,
-        remaining_delta_depth: usize,
+        mut delta: DeltaReadState,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<GitObject> {
+        if !delta.ancestors.insert(requested) {
+            return Err(Error::Corrupt {
+                stage: CorruptionStage::Delta,
+            });
+        }
         let packed = self
-            .read_packed_entry(requested, locator, max_object_bytes, budget, cancellation)
+            .read_packed_entry(
+                requested,
+                locator,
+                delta.max_object_bytes,
+                budget,
+                cancellation,
+            )
             .await?;
         self.resolve_packed_entry(
             session,
             requested,
             locator,
             packed,
-            max_object_bytes,
-            remaining_delta_depth,
+            delta,
             budget,
             cancellation,
         )
         .await
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "delta resolution carries explicit session, verification, budget, and cancellation inputs"
-    )]
     async fn resolve_packed_entry(
         self: &Arc<Self>,
         session: &GitObjectLocatorSession,
         requested: gix_hash::ObjectId,
         locator: GitObjectLocator,
         packed: PackedEntry,
-        max_object_bytes: u64,
-        remaining_delta_depth: usize,
+        delta: DeltaReadState,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<GitObject> {
+        let max_object_bytes = delta.max_object_bytes;
         if let Some(kind) = packed.header.as_kind() {
             verify_object(requested, kind, &packed.inflated)?;
             return Ok(GitObject {
@@ -1017,7 +1070,7 @@ impl RemoteGitReader {
                 data: packed.inflated,
             });
         }
-        if remaining_delta_depth == 0 {
+        if delta.remaining_depth == 0 {
             return Err(Error::LimitExceeded {
                 limit: "delta depth",
                 actual: 1,
@@ -1059,8 +1112,10 @@ impl RemoteGitReader {
                 session,
                 base_oid,
                 base_locator,
-                max_object_bytes,
-                remaining_delta_depth - 1,
+                DeltaReadState {
+                    remaining_depth: delta.remaining_depth - 1,
+                    ..delta
+                },
                 budget,
                 cancellation,
             ))
@@ -1496,6 +1551,7 @@ impl RemoteGitReader {
         )?;
         let store = self.store.clone();
         let size = source_size;
+        let kind_path = repo_pack_kind_metadata_path(&self.repo_prefix, &pack_id);
         let flight_runtime = Arc::clone(&self.runtime);
         let work_runtime = Arc::clone(&self.runtime);
         let index = flight_runtime
@@ -1513,17 +1569,35 @@ impl RemoteGitReader {
                         bytes = store.range_get(&path, 0..size) => bytes?,
                     };
                     observe_storage_read("range_get", bytes.len() as u64);
-                    drop(origin_permit);
                     check_cancelled(&shared_cancellation)?;
                     if bytes.len() as u64 != size {
                         return Err(Error::Corrupt {
                             stage: CorruptionStage::PackIndex,
                         });
                     }
+                    let kind_maximum = crab_git::max_pack_kind_metadata_size(
+                        inventory.object_count,
+                    )
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    })?;
+                    let kind_metadata =
+                        match store.get_with_etag_bounded(&kind_path, kind_maximum).await {
+                            Ok((bytes, _)) => {
+                                observe_storage_read("pack_kind_metadata", bytes.len() as u64);
+                                Some(bytes)
+                            }
+                            Err(crab_storage::StorageError::NotFound { .. }) => None,
+                            Err(error) => return Err(error.into()),
+                        };
+                    drop(origin_permit);
+                    check_cancelled(&shared_cancellation)?;
                     let decode_permit = work_runtime.decode_permit(&shared_cancellation).await?;
                     let token = shared_cancellation.clone();
                     let index = work_runtime
-                        .spawn_blocking(move || parse_pack_index(pack_id, inventory, bytes, &token))
+                        .spawn_blocking(move || {
+                            parse_pack_index(pack_id, inventory, bytes, kind_metadata, &token)
+                        })
                         .await
                         .map_err(|source| Error::DecodeTask { source })??;
                     drop(decode_permit);
@@ -2101,6 +2175,7 @@ pub(crate) struct PackIndex {
     pub(crate) offset_order: Vec<u32>,
     pub(crate) pack_data_end: u64,
     pub(crate) pack_checksum: [u8; 20],
+    pub(crate) external_delta_bases: HashMap<gix_hash::ObjectId, gix_hash::ObjectId>,
     pub(crate) source_bytes: u64,
 }
 
@@ -2177,6 +2252,13 @@ impl PackIndex {
                 self.offset_order
                     .capacity()
                     .saturating_mul(std::mem::size_of::<u32>()),
+            )
+            .saturating_add(
+                self.external_delta_bases
+                    .capacity()
+                    .saturating_mul(
+                        std::mem::size_of::<(gix_hash::ObjectId, gix_hash::ObjectId)>(),
+                    ),
             )
     }
 }
@@ -2326,6 +2408,7 @@ fn parse_pack_index(
     pack_id: MerkleHash,
     inventory: GitPackInventoryEntry,
     bytes: Bytes,
+    kind_metadata: Option<Bytes>,
     cancellation: &CancellationToken,
 ) -> Result<PackIndex> {
     check_cancelled(cancellation)?;
@@ -2456,6 +2539,29 @@ fn parse_pack_index(
             });
         }
     }
+    let mut external_delta_bases = HashMap::new();
+    if let Some(kind_metadata) = kind_metadata {
+        let records = crab_git::decode_pack_kind_metadata_records(
+            &kind_metadata,
+            gix_hash::ObjectId::from(pack_checksum),
+            inventory.object_count,
+        )
+        .map_err(|_| Error::Corrupt {
+            stage: CorruptionStage::PackIndex,
+        })?;
+        for (pack_position, (_, base)) in records.into_iter().enumerate() {
+            let Some(base) = base else {
+                continue;
+            };
+            let index_position = *offset_order.get(pack_position).ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })? as usize;
+            let oid = *object_ids.get(index_position).ok_or(Error::Corrupt {
+                stage: CorruptionStage::PackIndex,
+            })?;
+            external_delta_bases.insert(oid, base);
+        }
+    }
     Ok(PackIndex {
         object_ids,
         pack_offsets,
@@ -2463,6 +2569,7 @@ fn parse_pack_index(
         offset_order,
         pack_data_end,
         pack_checksum,
+        external_delta_bases,
         source_bytes,
     })
 }
@@ -3031,6 +3138,7 @@ mod tests {
             offset_order: vec![0, 2, 1],
             pack_data_end: 400,
             pack_checksum: [0; 20],
+            external_delta_bases: HashMap::new(),
             source_bytes: 1,
         };
 
@@ -3063,6 +3171,7 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [0; 20],
+                    external_delta_bases: HashMap::new(),
                     source_bytes: 1,
                 }),
             )
@@ -3099,6 +3208,70 @@ mod tests {
                 },
                 ..
             })] if *actual_pack == pack_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn pack_index_lookup_prefers_a_self_contained_duplicate() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
+        let external_pack = MerkleHash::from_hex(&"11".repeat(32)).expect("pack hash");
+        let full_pack = MerkleHash::from_hex(&"22".repeat(32)).expect("pack hash");
+        let oid = gix_hash::ObjectId::from([1; 20]);
+        for (pack_id, external_delta_bases) in [
+            (
+                external_pack,
+                HashMap::from([(oid, gix_hash::ObjectId::from([2; 20]))]),
+            ),
+            (full_pack, HashMap::new()),
+        ] {
+            runtime
+                .insert_pack_index(
+                    crate::runtime::PackIndexCacheKey::new(&identity, pack_id),
+                    Arc::new(PackIndex {
+                        object_ids: vec![oid],
+                        pack_offsets: vec![100],
+                        crc32: vec![11],
+                        offset_order: vec![0],
+                        pack_data_end: 200,
+                        pack_checksum: [0; 20],
+                        external_delta_bases,
+                        source_bytes: 1,
+                    }),
+                )
+                .await;
+        }
+        let reader = RemoteGitReader::from_pinned(
+            Store::new(Arc::new(InMemory::new())),
+            "repository",
+            [external_pack, full_pack].map(|pack_id| GitPackInventoryEntry {
+                pack_id,
+                object_count: 1,
+                pack_size: 220,
+            }),
+            ReaderLimits::default(),
+            Arc::clone(&runtime),
+            identity,
+            1,
+        )
+        .expect("reader");
+        let budget = OperationBudget::new(crate::OperationLimits::default(), runtime);
+
+        let lookups = reader
+            .lookup_batch_from_pack_indexes(&[[1; 20]], &budget, &CancellationToken::new())
+            .await
+            .expect("pack-index lookup");
+
+        assert!(matches!(
+            lookups.as_slice(),
+            [GitObjectLookup::Hit(GitObjectLocator {
+                pack_id,
+                metadata: crab_metadata::git_object_locator::GitObjectMetadata {
+                    delta_base_oid: None,
+                    ..
+                },
+                ..
+            })] if *pack_id == full_pack
         ));
     }
 
@@ -3168,6 +3341,7 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [0; 20],
+                    external_delta_bases: HashMap::new(),
                     source_bytes: 1,
                 }),
             )
@@ -3279,6 +3453,7 @@ mod tests {
                     offset_order: vec![0],
                     pack_data_end: 200,
                     pack_checksum: [0; 20],
+                    external_delta_bases: HashMap::new(),
                     source_bytes: 1,
                 }),
             )

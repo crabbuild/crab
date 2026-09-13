@@ -3,6 +3,7 @@
 use crab_write::generation::CommittedManifestAnchor;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(test)]
@@ -24,6 +25,11 @@ use crate::metadata::manifest::{
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_coordination::PushLock;
+use crab_remote_git::{
+    ObjectLimits as RemoteObjectLimits, OperationKind as RemoteOperationKind,
+    OperationLimits as RemoteOperationLimits, RemoteGitRepository, RemoteGitRuntime,
+    RepositoryIdentity as RemoteRepositoryIdentity, RepositoryOptions as RemoteRepositoryOptions,
+};
 use crab_storage::{repo_pack_index_path, repo_pack_path, repo_pack_reverse_index_path};
 use crab_xet::hash::MerkleHash;
 
@@ -35,9 +41,9 @@ const MAX_REPACK_DOWNLOAD_CONCURRENCY: usize = 16;
 // without allowing one repository to monopolize maintenance or disk I/O.
 // A batch is restartable after a lease interruption and accounts for all
 // three immutable source artifacts per pack.
-const GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS: usize = 128;
+const GENERATION_OWNER_REPACK_MAX_SOURCE_PACKS: usize = 256;
 const GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const GENERATION_OWNER_REPACK_MAX_SOURCE_REQUESTS: u64 = 384;
+const GENERATION_OWNER_REPACK_MAX_SOURCE_REQUESTS: u64 = 768;
 const GENERATION_OWNER_REPACK_MAX_ELAPSED: Duration = Duration::from_mins(10);
 const SOURCE_ARTIFACT_REQUESTS_PER_PACK: u64 = 3;
 
@@ -427,24 +433,33 @@ async fn run_repack_locked(
     }
 
     let refs = manifest.refs.values().cloned().collect::<BTreeSet<_>>();
-    let download_dir_for_pack = download_dir.clone();
-    let source_packs = selected_packs;
+    let sources = selected_packs
+        .iter()
+        .map(|pack| crab_git::repack::RepackSource {
+            canonical_id: pack.pack_id.clone(),
+            path: download_dir.join(format!("pack-{}.pack", pack.pack_id)),
+            index_path: download_dir.join(format!("pack-{}.idx", pack.pack_id)),
+            reverse_index_path: download_dir.join(format!("pack-{}.rev", pack.pack_id)),
+            size: pack.size,
+            object_count: pack.object_count,
+            verified_identity: None,
+        })
+        .collect::<Vec<_>>();
+    let scan_sources = sources.clone();
+    let delta_base_ids = tokio::task::spawn_blocking(move || {
+        crab_git::repack::selected_pack_ref_delta_base_ids(&scan_sources).map_err(CrabError::from)
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("repack base scan join failed: {error}")))??;
+    let delta_bases =
+        read_repack_delta_bases(store, router, &manifest, &delta_base_ids, cancel).await?;
     let repacked_repository = tokio::task::spawn_blocking(move || {
-        let sources = source_packs
-            .iter()
-            .map(|pack| crab_git::repack::RepackSource {
-                canonical_id: pack.pack_id.clone(),
-                path: download_dir_for_pack.join(format!("pack-{}.pack", pack.pack_id)),
-                index_path: download_dir_for_pack.join(format!("pack-{}.idx", pack.pack_id)),
-                reverse_index_path: download_dir_for_pack
-                    .join(format!("pack-{}.rev", pack.pack_id)),
-                size: pack.size,
-                object_count: pack.object_count,
-                verified_identity: None,
-            })
-            .collect::<Vec<_>>();
-        crab_git::repack::consolidate_pack_suffix_with_concurrency(&sources, download_concurrency)
-            .map_err(CrabError::from)
+        crab_git::repack::consolidate_committed_pack_suffix_with_delta_bases(
+            &sources,
+            &delta_bases,
+            download_concurrency,
+        )
+        .map_err(CrabError::from)
     })
     .await
     .map_err(|error| CrabError::Internal(format!("repack worker join failed: {error}")))??;
@@ -667,6 +682,96 @@ pub(crate) fn generation_owner_repack_count(packs: &[PackManifestEntry]) -> usiz
         &packs.iter().map(|pack| pack.size).collect::<Vec<_>>(),
         2,
     )
+}
+
+async fn read_repack_delta_bases(
+    store: &Store,
+    router: &StoreLayout,
+    manifest: &Manifest,
+    base_ids: &[gix_hash::ObjectId],
+    cancel: &CancellationToken,
+) -> Result<Vec<crab_git::repack::RepackDeltaBase>> {
+    if base_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base_count = u64::try_from(base_ids.len()).unwrap_or(u64::MAX).max(1);
+    let object_limits = RemoteObjectLimits {
+        max_packed_entry_bytes: 128 * 1024 * 1024,
+        max_inflated_entry_bytes: 128 * 1024 * 1024,
+        max_object_bytes: 128 * 1024 * 1024,
+        ..RemoteObjectLimits::default()
+    };
+    let operation_limits = RemoteOperationLimits {
+        max_duration: GENERATION_OWNER_REPACK_MAX_ELAPSED,
+        max_logical_objects: base_count,
+        // One requested base may itself have the maximum 128-entry delta chain.
+        // Allow bounded range and index reads for that entire closure.
+        max_storage_requests: base_count.saturating_mul(512).saturating_add(64),
+        max_fetched_bytes: GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES,
+        max_inflated_bytes: GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES,
+        max_response_bytes: GENERATION_OWNER_REPACK_MAX_SOURCE_BYTES,
+        ..RemoteOperationLimits::default()
+    };
+    let options = RemoteRepositoryOptions::new(object_limits, operation_limits)
+        .map_err(repack_remote_error)?;
+    let bucket = store.bucket_identity();
+    let identity = RemoteRepositoryIdentity::new(
+        format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container),
+        router.repo_prefix().to_owned(),
+        1,
+    )
+    .map_err(repack_remote_error)?;
+    let repository = RemoteGitRepository::open(
+        store.as_storage().clone(),
+        crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        ),
+        identity,
+        Arc::new(RemoteGitRuntime::default()),
+        options,
+        cancel,
+    )
+    .await
+    .map_err(repack_remote_error)?;
+    if repository.generation() != manifest.generation {
+        return Err(CrabError::Internal(
+            "repository generation changed while resolving repack delta bases".to_owned(),
+        ));
+    }
+    let operation = repository
+        .operation(RemoteOperationKind::Repository, cancel)
+        .await
+        .map_err(repack_remote_error)?;
+    let objects = operation.read_objects(base_ids).await;
+    let objects = operation
+        .finish(objects)
+        .await
+        .map_err(repack_remote_error)?;
+    if objects.len() != base_ids.len()
+        || objects
+            .iter()
+            .zip(base_ids)
+            .any(|(object, expected)| object.oid != *expected)
+    {
+        return Err(CrabError::CorruptObject {
+            path: router.repo_prefix().to_owned(),
+            reason: "repack delta-base lookup returned the wrong object set".to_owned(),
+        });
+    }
+    Ok(objects
+        .into_iter()
+        .map(|object| crab_git::repack::RepackDeltaBase {
+            oid: object.oid,
+            kind: object.kind,
+            data: object.data.to_vec(),
+        })
+        .collect())
+}
+
+fn repack_remote_error(error: impl std::fmt::Display) -> CrabError {
+    CrabError::Protocol(format!("remote Git repack base resolution failed: {error}"))
 }
 
 fn outcome(

@@ -768,14 +768,39 @@ one immutable starting view, evaluates conditions sequentially against an
 in-memory evolving tree and attribute manifest, and builds one commit per
 successful state change. It deduplicates the generated objects into one pack,
 spools those trusted objects once before producing the canonical pack and
-verified sidecars, and uploads them with every commit-bound attribute delta and
-one visibility proof, then acquires the ref lease. Under the lease it captures a
-bounded ref-journal head and parent transaction for warm existing-ref updates;
+checksummed standard sidecars, encodes caller-proven successive tree versions
+as bounded OFS deltas within a batch and REF deltas across warm batches, and
+uploads the pack with every commit-bound attribute delta and one visibility
+proof, then acquires the ref lease. Cross-pack bases are explicit immutable Git
+object IDs. Preparation accepts them only with decoded bytes and a verified
+prior depth, recomputes their identities, and emits a full entry after a cold
+start, unknown depth, or depth eight. Crab readers resolve those IDs across
+canonical packs. Repack preserves the complete object universe even when a base
+moves into a replacement pack, fetch materializes external dependencies into a
+self-contained client response, and GC retains the current and historical pack
+inventories that supply reachable object IDs. The quarantine has
+already reconstructed and hash-verified every
+object; preparation records each generated entry's offset and CRC while writing
+it, then emits standard Git v2 and reverse indexes without decoding the pack a
+second time. Locator, checksum, object-inventory, and kind-sidecar checks remain
+mandatory before upload, with native Git as the compatibility oracle in tests.
+Generated packs at or below 8 MiB use one exact, retry-safe backend PUT instead
+of paying multipart start, part, and completion round trips; larger packs remain
+streamed from disk through bounded multipart upload. Under the lease it
+captures a bounded ref-journal head and parent transaction for warm existing-ref
+updates;
 cold creation and namespace-changing paths still capture a coherent repository
 snapshot. It revalidates the original parent and either advances the ref directly
 to the final commit with one journal transaction or releases and rebuilds the
-bounded batch. Journal success is the acknowledgement point;
-catalog compaction and commit-graph maintenance run asynchronously because the
+bounded batch. Journal success is the acknowledgement point. One ref worker may
+retain the global and repository GC-writer fences across at most eight
+consecutive ordinary batches. Every batch still reacquires its ref lease,
+revalidates its parent, emits its own pack and transaction, and preserves one
+commit per successful S3 state change. Planned multipart completion is removed
+from the burst and executes only after those shared fences are released. This
+removes repeated provider fence round trips while bounding how long a hot ref
+can delay GC. Catalog compaction and commit-graph maintenance run asynchronously
+because the
 repository read view consumes committed journal transactions directly. The
 object-store ref journal, immutable active marker, and lease are authoritative;
 SlateDB remains a rebuildable derived index and is not part of admission or
@@ -787,16 +812,30 @@ competing writer forces a cold rebuild. Idle states remain reusable until memory
 pressure requires eviction; capacity pressure or restart falls back to immutable
 repository objects. An unborn branch bypasses the object catalog because it has
 no starting Git tree, while publication still rechecks absence under its ref
-lease. Cold reconstruction prepares a full, commit-identified attribute
-checkpoint; warm state does the same after each 64 publication batches. After
+lease. Cold publication marks a full, commit-identified attribute checkpoint;
+warm state does the same after each 64 publication batches. After
 validating the parent under the ref lease, publication commits the journal and
-then attempts to replace one bounded checkpoint slot for that branch. A crash or
-checkpoint-write failure leaves a missing or stale slot, which readers ignore
-while replaying immutable deltas. Only the journal winner writes the checkpoint. The final
-version-2 delta carries optional checkpoint and slot fields, so existing deltas
-require neither migration nor a schema-version bump. A manifest above the existing
-32 MiB bound keeps its authoritative delta chain and retries checkpointing after
-another 64 publication batches instead of failing the write. Drained batches run
+acknowledges without serializing or uploading the derived checkpoint. The winning
+commit's immutable version-2 delta carries optional checkpoint and slot fields;
+a bounded background scheduler receives the exact committed in-memory manifest,
+coalesces pending work per ref, serializes outside the async runtime, and
+conditionally replaces the branch slot only when ancestry proves it is newer.
+During one process lineage, the scheduler carries the manifest's proven
+predecessor checkpoint. A matching slot can therefore advance with one
+ETag-guarded replacement without replaying the intervening deltas; CAS conflict,
+restart, or divergent Git history retains the canonical ancestry-validation
+path. It does not reread the preceding delta chain merely
+to build derived state. A
+crash, shutdown, or checkpoint-write failure leaves a missing or stale slot,
+which readers ignore while replaying immutable deltas. This requires neither
+migration nor a schema-version bump. New checkpoints are gzip encoded, retain
+the existing 32 MiB stored-object bound, and decode under a 128 MiB limit;
+earlier plain JSON checkpoints remain readable. A manifest above that decoded
+limit keeps its authoritative delta chain and skips checkpoint cloning and
+serialization.
+The hot path rechecks the maintained size estimate after each later batch so
+deletions can restore eligibility, instead of failing or periodically copying an
+oversized manifest. Drained batches run
 under gateway ownership so disconnecting the caller
 that acquired local admission cannot abandon peer requests. A new foreground
 write cancels an in-flight maintenance pass so
@@ -804,9 +843,12 @@ derived catalog work releases its fences and yields to S3 mutation traffic. The
 gateway schedules maintenance again after the local write burst is idle and
 prevents overlapping maintenance waves from advancing ahead of visibility proof
 publication. Sustained traffic additionally claims one catalog-maintenance pass
-every 64 local publication epochs. The elected worker compacts durable journal
-entries and advances exact-object catalog coverage under the generation-owner and
-GC-writer fences.
+every 64 local publication epochs. The elected worker compacts one captured
+durable journal wave, advances exact-object catalog coverage for that generation
+even when newer transactions exist, and then yields under the generation-owner
+and GC-writer fences. It neither chases the moving journal for additional waves
+nor starts an immediate catch-up pass; later traffic becomes eligible at the next
+bounded interval. Quiet-window maintenance retains its exhaustive behavior.
 
 When an attribute delta ancestry proves that a branch began empty and every
 commit came from the gateway, its checkpoint is also a complete materialized S3
@@ -823,6 +865,14 @@ for an idle window; a complete pack scan remains the fallback when no catalog
 inventory can be proven as a subset or the derived catalog cannot open.
 Commit-graph maintenance still requires a
 five-second quiet window.
+
+Generation-owner repack runs ahead of graph maintenance only when the exact
+object catalog already covers the pinned manifest. A stale catalog advances in
+its own bounded cycle first. For overlapping selected pack inventories, repack
+scans REF_DELTA headers, materializes only those base objects through the pinned
+catalog, repairs each selected thin pack, and rewrites the exact selected OID
+set into a self-contained replacement. Stable-prefix pack bodies remain remote;
+publication retains manifest CAS and full object-set verification.
 
 ### 4.2 PUT and DELETE execution rules
 

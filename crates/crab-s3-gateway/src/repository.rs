@@ -260,23 +260,18 @@ pub(crate) fn schedule_catalog_maintenance(
     let maintenance = Arc::clone(&repository.maintenance);
     let cancel = cancel.child_token();
     tokio::spawn(async move {
-        loop {
-            let result = crab_write::generation::ensure_catalog_readable(
-                &store,
-                &layout,
-                MAINTENANCE_TTL,
-                &cancel,
-            )
-            .await;
-            maintenance.finish_catalog_maintenance();
-            match result {
-                Ok(_) => {}
-                Err(crab_write::WriteError::Cancelled) if cancel.is_cancelled() => return,
-                Err(error) => tracing::warn!(%error, "S3 bounded catalog maintenance failed"),
-            }
-            if !maintenance.claim_catalog_maintenance(maintenance.current_epoch()) {
-                return;
-            }
+        let result = crab_write::generation::ensure_catalog_readable(
+            &store,
+            &layout,
+            MAINTENANCE_TTL,
+            &cancel,
+        )
+        .await;
+        maintenance.finish_catalog_maintenance();
+        match result {
+            Ok(_) => {}
+            Err(crab_write::WriteError::Cancelled) if cancel.is_cancelled() => {}
+            Err(error) => tracing::warn!(%error, "S3 bounded catalog maintenance failed"),
         }
     });
 }

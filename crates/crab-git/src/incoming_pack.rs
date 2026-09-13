@@ -16,7 +16,7 @@ use sha1::{Digest, Sha1};
 use crate::delta;
 
 mod prepared;
-pub use prepared::{PreparePackError, PreparedPack};
+pub use prepared::{ExternalDeltaBase, PreparePackError, PreparedPack};
 
 type Result<T> = std::result::Result<T, IncomingPackError>;
 
@@ -99,8 +99,8 @@ impl IncomingPack {
     /// Object identities, count, individual size, aggregate decoded bytes, and
     /// cancellation are checked while writing the private spool. The caller must
     /// still call [`IncomingPack::prepare`] to enforce the encoded-pack limit and
-    /// build verified index sidecars. This path is for objects constructed by the
-    /// caller, not untrusted Git pack input.
+    /// build checksummed standard index sidecars. This path is for objects
+    /// constructed by the caller, not untrusted Git pack input.
     pub fn from_generated_objects<C>(
         objects: impl IntoIterator<Item = (Kind, Vec<u8>)>,
         directory: &Path,

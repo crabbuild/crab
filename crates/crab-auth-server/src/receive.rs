@@ -1438,7 +1438,7 @@ async fn load_service_pack_kind_metadata(
     rev_path: &Path,
 ) -> Result<Option<Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>>> {
     let path = router.pack_kind_metadata_path(&pack.pack_id);
-    let maximum = crab_git::pack_locator::pack_kind_metadata_size(pack.object_count)
+    let maximum = crab_git::pack_locator::max_pack_kind_metadata_size(pack.object_count)
         .ok_or_else(|| invalid("Git kind metadata size overflows its bound"))?;
     let bytes = match store.get_with_etag_bounded(&path, maximum).await {
         Ok((bytes, _)) => bytes,
