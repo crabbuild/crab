@@ -121,3 +121,38 @@ state_key_file = "/run/secrets/crab/state-key"
 {{- fail "topologySpreadConstraints must hard-spread replicas across at least two nodes with maxSkew 1" -}}
 {{- end -}}
 {{- end }}
+
+{{- define "crab-http-server.validateExtraEnv" -}}
+{{- /* Provider admission injects workload identity after render. Values may select an AWS region, but must not replace identity or storage authority. */ -}}
+{{- $seen := dict -}}
+{{- $genericProviderOptions := list
+  "ACCESS_KEY_ID" "SECRET_ACCESS_KEY" "DEFAULT_REGION" "REGION"
+  "BUCKET" "BUCKET_NAME" "ENDPOINT_URL" "ENDPOINT" "SESSION_TOKEN" "TOKEN"
+  "VIRTUAL_HOSTED_STYLE_REQUEST" "S3_EXPRESS" "IMDSV1_FALLBACK" "METADATA_ENDPOINT"
+  "UNSIGNED_PAYLOAD" "CHECKSUM_ALGORITHM" "CONTAINER_CREDENTIALS_RELATIVE_URI"
+  "CONTAINER_CREDENTIALS_FULL_URI" "CONTAINER_AUTHORIZATION_TOKEN_FILE"
+  "WEB_IDENTITY_TOKEN_FILE" "ROLE_ARN" "ROLE_SESSION_NAME" "ENDPOINT_URL_STS"
+  "SKIP_SIGNATURE" "COPY_IF_NOT_EXISTS" "CONDITIONAL_PUT" "DISABLE_TAGGING"
+  "DISABLE_BULK_DELETE" "REQUEST_PAYER" "ALLOW_HTTP" "SERVER_SIDE_ENCRYPTION"
+  "SSE_KMS_KEY_ID" "SSE_BUCKET_KEY_ENABLED" "SSE_CUSTOMER_KEY_BASE64"
+  "SERVICE_ACCOUNT" "SERVICE_ACCOUNT_PATH" "SERVICE_ACCOUNT_KEY" "BASE_URL"
+  "APPLICATION_CREDENTIALS" "BEARER_TOKEN" "MASTER_KEY" "ACCOUNT_KEY" "ACCESS_KEY"
+  "ACCOUNT_NAME" "CLIENT_ID" "CLIENT_SECRET" "TENANT_ID" "AUTHORITY_ID"
+  "AUTHORITY_HOST" "SAS_KEY" "SAS_TOKEN" "USE_EMULATOR" "IDENTITY_ENDPOINT"
+  "MSI_ENDPOINT" "OBJECT_ID" "MSI_RESOURCE_ID" "FEDERATED_TOKEN_FILE"
+  "USE_FABRIC_ENDPOINT" "USE_AZURE_CLI" "CONTAINER_NAME" "FABRIC_TOKEN_SERVICE_URL"
+  "FABRIC_WORKLOAD_HOST" "FABRIC_SESSION_TOKEN" "FABRIC_CLUSTER_IDENTIFIER"
+  "CREDENTIAL_TYPE" "ENCRYPTION_KEY" -}}
+{{- range $index, $entry := .Values.extraEnv -}}
+{{- $name := upper (default "" $entry.name) -}}
+{{- if hasKey $seen $name -}}
+{{- fail (printf "extraEnv[%d].name %q duplicates another environment variable" $index $entry.name) -}}
+{{- end -}}
+{{- $_ := set $seen $name true -}}
+{{- $providerPrefixed := or (hasPrefix "AWS_" $name) (hasPrefix "GOOGLE_" $name) (hasPrefix "AZURE_" $name) -}}
+{{- $regionOnly := or (eq $name "AWS_REGION") (eq $name "AWS_DEFAULT_REGION") -}}
+{{- if or (and $providerPrefixed (not $regionOnly)) (has $name $genericProviderOptions) -}}
+{{- fail (printf "extraEnv[%d].name %q is not allowed; use workload identity and the provider-native storage endpoint" $index $entry.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

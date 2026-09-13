@@ -114,6 +114,46 @@ jobs:
             exit 1
           fi
 
+          for forbidden_env in \
+            AWS_SECRET_ACCESS_KEY aws_secret_access_key GOOGLE_BASE_URL \
+            AZURE_STORAGE_SAS_TOKEN endpoint; do
+            if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+              "${helm_image}" template qualification "${chart}" \
+                --values "${chart}/team-values.example.yaml" \
+                --values "${chart}/eks-values.example.yaml" \
+                --set-json "extraEnv=[{\"name\":\"${forbidden_env}\",\"value\":\"unsafe\"}]" \
+                >/dev/null 2> "${RUNNER_TEMP}/forbidden-env-error"; then
+              echo "chart accepted forbidden cloud environment variable ${forbidden_env}" >&2
+              exit 1
+            fi
+            grep -F 'use workload identity and the provider-native storage endpoint' \
+              "${RUNNER_TEMP}/forbidden-env-error"
+          done
+
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --values "${chart}/team-values.example.yaml" \
+              --values "${chart}/eks-values.example.yaml" \
+              --set-json 'extraEnv=[{"name":"AWS_SECRET_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"static-cloud-key","key":"secret"}}}]' \
+              >/dev/null 2> "${RUNNER_TEMP}/forbidden-secret-ref-error"; then
+            echo "chart accepted a static cloud credential Secret reference" >&2
+            exit 1
+          fi
+          grep -F 'use workload identity and the provider-native storage endpoint' \
+            "${RUNNER_TEMP}/forbidden-secret-ref-error"
+
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --values "${chart}/team-values.example.yaml" \
+              --values "${chart}/eks-values.example.yaml" \
+              --set-json 'extraEnv=[{"name":"RUST_LOG","value":"info"},{"name":"rust_log","value":"debug"}]' \
+              >/dev/null 2> "${RUNNER_TEMP}/duplicate-env-error"; then
+            echo "chart accepted duplicate environment variable names" >&2
+            exit 1
+          fi
+          grep -F 'duplicates another environment variable' \
+            "${RUNNER_TEMP}/duplicate-env-error"
+
           for values in eks-values.example.yaml gke-values.example.yaml aks-values.example.yaml; do
             values_path="${chart}/${values}"
             profile_values=(--values "${chart}/team-values.example.yaml" --values "${values_path}")

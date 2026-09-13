@@ -223,7 +223,38 @@
     "nodeSelector": { "type": "object" },
     "tolerations": { "type": "array", "items": { "type": "object" } },
     "affinity": { "type": "object" },
-    "extraEnv": { "type": "array", "items": { "type": "object" } }
+    "extraEnv": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "value": { "type": "string" },
+          "valueFrom": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "maxProperties": 1,
+            "properties": {
+              "fieldRef": { "type": "object" },
+              "resourceFieldRef": { "type": "object" },
+              "configMapKeyRef": { "type": "object" },
+              "secretKeyRef": { "type": "object" }
+            }
+          }
+        },
+        "oneOf": [
+          { "required": ["value"] },
+          { "required": ["valueFrom"] }
+        ]
+      }
+    }
   },
   "definitions": {
     "probe": {

@@ -205,7 +205,32 @@ for mode in enforce audit warn; do
 done
 kubectl --namespace "$namespace" rollout status "deployment/${deployment}" --timeout=15m
 kubectl --namespace "$namespace" get deployment "$deployment" -o json > "$deployment_json"
+# Recheck the admitted Deployment so qualification does not assume that it came
+# from the chart or that its values passed render-time validation.
 jq --exit-status '
+  def forbidden_cloud_env:
+    ascii_upcase as $name |
+    (((($name | startswith("AWS_")) or
+       ($name | startswith("GOOGLE_")) or
+       ($name | startswith("AZURE_"))) and
+      $name != "AWS_REGION" and $name != "AWS_DEFAULT_REGION") or
+     (["ACCESS_KEY_ID", "SECRET_ACCESS_KEY", "DEFAULT_REGION", "REGION",
+       "BUCKET", "BUCKET_NAME", "ENDPOINT_URL", "ENDPOINT", "SESSION_TOKEN", "TOKEN",
+       "VIRTUAL_HOSTED_STYLE_REQUEST", "S3_EXPRESS", "IMDSV1_FALLBACK", "METADATA_ENDPOINT",
+       "UNSIGNED_PAYLOAD", "CHECKSUM_ALGORITHM", "CONTAINER_CREDENTIALS_RELATIVE_URI",
+       "CONTAINER_CREDENTIALS_FULL_URI", "CONTAINER_AUTHORIZATION_TOKEN_FILE",
+       "WEB_IDENTITY_TOKEN_FILE", "ROLE_ARN", "ROLE_SESSION_NAME", "ENDPOINT_URL_STS",
+       "SKIP_SIGNATURE", "COPY_IF_NOT_EXISTS", "CONDITIONAL_PUT", "DISABLE_TAGGING",
+       "DISABLE_BULK_DELETE", "REQUEST_PAYER", "ALLOW_HTTP", "SERVER_SIDE_ENCRYPTION",
+       "SSE_KMS_KEY_ID", "SSE_BUCKET_KEY_ENABLED", "SSE_CUSTOMER_KEY_BASE64",
+       "SERVICE_ACCOUNT", "SERVICE_ACCOUNT_PATH", "SERVICE_ACCOUNT_KEY", "BASE_URL",
+       "APPLICATION_CREDENTIALS", "BEARER_TOKEN", "MASTER_KEY", "ACCOUNT_KEY", "ACCESS_KEY",
+       "ACCOUNT_NAME", "CLIENT_ID", "CLIENT_SECRET", "TENANT_ID", "AUTHORITY_ID",
+       "AUTHORITY_HOST", "SAS_KEY", "SAS_TOKEN", "USE_EMULATOR", "IDENTITY_ENDPOINT",
+       "MSI_ENDPOINT", "OBJECT_ID", "MSI_RESOURCE_ID", "FEDERATED_TOKEN_FILE",
+       "USE_FABRIC_ENDPOINT", "USE_AZURE_CLI", "CONTAINER_NAME", "FABRIC_TOKEN_SERVICE_URL",
+       "FABRIC_WORKLOAD_HOST", "FABRIC_SESSION_TOKEN", "FABRIC_CLUSTER_IDENTIFIER",
+       "CREDENTIAL_TYPE", "ENCRYPTION_KEY"] | index($name)) != null);
   (.metadata.generation == .status.observedGeneration) and
   (.status.readyReplicas >= 2) and
   (.status.availableReplicas >= 2) and
@@ -238,6 +263,7 @@ jq --exit-status '
     (.securityContext.allowPrivilegeEscalation == false) and
     (.securityContext.readOnlyRootFilesystem == true) and
     (.securityContext.capabilities.drop == ["ALL"]) and
+    all(.env[]?; (.name | forbidden_cloud_env | not)) and
     (.lifecycle.preStop.exec.command == ["/usr/bin/sleep", "15"])) and
   any(.spec.template.spec.volumes[]?;
     .name == "scratch" and (.emptyDir.sizeLimit | length) > 0)
@@ -542,6 +568,7 @@ jq --null-input \
       oidc_login_redirect: true,
       oidc_secure_flow_cookie: true,
       restricted_namespace: true,
+      workload_identity_only: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,

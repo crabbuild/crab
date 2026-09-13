@@ -9,6 +9,7 @@
 {{- end }}
 {{- end }}
 {{- include "crab-http-server.validateAvailability" . }}
+{{- include "crab-http-server.validateExtraEnv" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

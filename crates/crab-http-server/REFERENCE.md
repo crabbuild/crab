@@ -357,7 +357,31 @@ counter distinguishes deployment-wide `capacity` rejection from
 
 ### Choose an orchestrator
 
-Use the portable Helm chart for an EKS, GKE, or AKS team deployment. Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. S3 and GCS retain noncurrent versions for a configurable 90-day recovery window and abort one-day-old incomplete multipart uploads; Azure versions remain unexpired because its lifecycle API cannot express the same safe noncurrent-age boundary. The chart runs at least two replicas, exposes only the public port, pins an image digest, drops Linux capabilities, uses a read-only root filesystem, mounts bounded disposable scratch, applies a disruption budget and ingress NetworkPolicy, and supports optional TLS ingress, autoscaling, and Prometheus Operator pod discovery and alerts. The setup pins the dedicated namespace to the Restricted Pod Security policy so admission also protects later pod changes. The `PodMonitor` selects the private management port directly without creating a management Service. The chart leaves egress provider-neutral; cluster policy must allow DNS, the workload-identity exchange, object storage, and OIDC endpoints. During pod termination, a 15-second pre-stop delay lets endpoint and ingress routes converge before `SIGTERM`; the 630-second pod grace period then preserves the complete application drain budget.
+Use the portable Helm chart for an EKS, GKE, or AKS team deployment. The
+provider Terraform roots create dedicated versioned storage and workload
+identity for an existing cluster.
+
+| Boundary | Enforced contract |
+| --- | --- |
+| Image | Immutable digest only |
+| Availability | At least two replicas, disruption budget, and hard node/zone spread |
+| Container | Non-root, no Linux capabilities, read-only root, and bounded scratch |
+| Network | Public application port only, ingress NetworkPolicy, and optional TLS ingress |
+| Identity | Provider ServiceAccount integration; no static credentials or credential-source overrides in `extraEnv` |
+| Storage transport | No custom provider endpoint, signature bypass, or cleartext override in `extraEnv` |
+| Admission | Dedicated namespace pinned to the Restricted Pod Security policy |
+| Observability | Optional autoscaling, `PodMonitor`, and alert rules; management port remains private |
+| Shutdown | 15-second route-convergence delay plus a 630-second application drain budget |
+
+`AWS_REGION` and `AWS_DEFAULT_REGION` are the only provider-prefixed
+environment values accepted because EKS needs explicit routing without static
+credentials. Cluster egress policy must still allow DNS, workload-identity
+exchange, object storage, and OIDC endpoints.
+
+S3 and GCS retain noncurrent versions for a configurable 90-day recovery
+window and abort one-day-old incomplete multipart uploads. Azure versions
+remain unexpired because its lifecycle API cannot express the same safe
+noncurrent-age boundary.
 
 The chart rejects disruption budgets that leave no minimum replica evictable
 and requires hard placement across at least two nodes and two zones. Use atomic

@@ -179,7 +179,16 @@ The chart rejects image tags, missing digests, unknown top-level values,
 automatic Kubernetes API credentials, disabled network isolation, unrestricted
 ingress, direct load balancers, overrides of chart-owned pod metadata, fewer
 than two replicas, an impossible disruption budget, soft or single-domain
-placement, and a shutdown budget shorter than 630 seconds.
+placement, a shutdown budget shorter than 630 seconds, duplicate environment
+variables, and cloud credential or storage-endpoint overrides in `extraEnv`.
+
+Use `extraEnv` only for non-credential process settings such as `RUST_LOG` or
+an organization proxy. The EKS, GKE, and AKS identity integrations inject or
+resolve their credentials after Helm renders the workload; do not copy access
+keys, bearer tokens, client secrets, identity endpoints, or provider endpoint
+overrides into a values file. `AWS_REGION` and `AWS_DEFAULT_REGION` are the only
+provider-prefixed values accepted because the EKS profile needs an explicit
+region while still obtaining credentials through Pod Identity.
 
 The PodDisruptionBudget keeps the configured minimum of ready replicas during
 voluntary disruption and uses `AlwaysAllow` for unhealthy pods. A running but
@@ -189,7 +198,7 @@ remain protected by `minAvailable`.
 `config.existingConfigMap` is an advanced escape hatch for teams that own the
 complete `server.toml`. Do not combine it with the generated provider overlay,
 because that overlay intentionally sets `config.storageUrl`; instead, carry
-only its `serviceAccount`, `podLabels`, and `extraEnv` identity values into a
+only its `serviceAccount`, `podLabels`, and permitted region values into a
 separate overlay. The chart accepts exactly one configuration source.
 
 ## Create the application Secret
@@ -353,10 +362,11 @@ The test fails unless it can prove all of these boundaries:
 
 The script writes a secret-free JSON evidence receipt containing the provider,
 image digest, release tag and source commit, repository, qualification branch
-and commit, payload digest, explicit successful checks, rollout probes and
-failures, and completion time. Retain it with the release record. The Git token
-remains only in process memory and must still be rotated or revoked after
-qualification according to team policy.
+and commit, payload digest, explicit successful checks including the
+workload-identity-only deployment boundary, rollout probes and failures, and
+completion time. Retain it with the release record. The Git token remains only
+in process memory and must still be rotated or revoked after qualification
+according to team policy.
 
 ### Retain evidence with GitHub Actions
 
