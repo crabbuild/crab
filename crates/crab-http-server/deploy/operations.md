@@ -317,9 +317,9 @@ access**. Run the same provider-neutral test on EKS, GKE, and AKS:
 
 ```sh
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
-export CRAB_HTTP_SERVER_EXPECTED_IMAGE=registry.example.com/crab-http-server@sha256:qualified_digest_here
-export CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0
-export CRAB_HTTP_SERVER_SOURCE_SHA="$(git rev-list -n 1 "$CRAB_HTTP_SERVER_RELEASE_TAG")"
+export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
+export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
+export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
