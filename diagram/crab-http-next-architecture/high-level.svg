@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1240" role="img" aria-labelledby="title description">
+  <title id="title">crab-http-server next architecture — high-level design</title>
+  <desc id="description">Proposed Kubernetes deployment. Browser, Git and API clients enter any Crab Pod through a TLS edge. Collaboration requests run on the repository owner, locally or through authenticated peer transport. The owner writes one SQLite database per repository UUID and captures WAL changes as LTX. It uploads LTX and manifests before conditionally publishing ownership and the durable head in one control record. The existing Git runtime serves Git operations against object storage. Local databases are disposable and restore from the published LTX graph. Deployment uses a hard cutover with offline import and verification.</desc>
+  <defs>
+    <style>
+      text { font-family: 'SF Mono', 'Cascadia Code', 'DejaVu Sans Mono', monospace; }
+      .title { fill: #f8fafc; font-size: 34px; font-weight: 700; letter-spacing: -1px; }
+      .subtitle { fill: #94a3b8; font-size: 16px; }
+      .eyebrow { fill: #22d3ee; font-size: 12px; font-weight: 700; letter-spacing: 2px; }
+      .region { fill: #fbbf24; font-size: 14px; font-weight: 700; letter-spacing: 0.5px; }
+      .name { fill: #f8fafc; font-size: 21px; font-weight: 600; }
+      .label { fill: #cbd5e1; font-size: 15px; }
+      .muted { fill: #94a3b8; font-size: 13px; }
+      .flow { fill: #e2e8f0; font-size: 13px; font-weight: 500; }
+      .note-title { fill: #f8fafc; font-size: 16px; font-weight: 600; }
+      .foot { fill: #94a3b8; font-size: 12px; }
+      .line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="0.5" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+    <marker id="cyan" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7Z" fill="#22d3ee"/>
+    </marker>
+    <marker id="green" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7Z" fill="#34d399"/>
+    </marker>
+    <marker id="violet" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7Z" fill="#a78bfa"/>
+    </marker>
+    <marker id="orange" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+      <path d="M0 0 L9 3.5 L0 7Z" fill="#fb923c"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="1240" fill="#0f172a"/>
+  <rect width="1440" height="1240" fill="url(#grid)"/>
+  <rect x="60" y="113" width="1320" height="2" fill="url(#accent)"/>
+
+  <rect x="60" y="345" width="1320" height="390" rx="16" fill="#0b1923" fill-opacity="0.65" stroke="#fbbf24" stroke-opacity="0.7" stroke-dasharray="8 5"/>
+  <rect x="60" y="820" width="1320" height="205" rx="16" fill="#19132f" fill-opacity="0.55" stroke="#a78bfa" stroke-opacity="0.8"/>
+
+  <path d="M720 210 V250" class="line" stroke="#22d3ee" marker-end="url(#cyan)"/>
+  <path d="M720 310 V385" class="line" stroke="#22d3ee" marker-end="url(#cyan)"/>
+  <path d="M630 470 V505 H420 V535" class="line" stroke="#34d399" marker-end="url(#green)"/>
+  <path d="M910 425 H1135 V545" class="line" stroke="#34d399" marker-end="url(#green)"/>
+  <path d="M90 917 H35 V425 H530" class="line" stroke="#a78bfa" stroke-dasharray="6 6" stroke-opacity="0.7" marker-end="url(#violet)"/>
+  <path d="M740 610 H960" class="line" stroke="#fb923c" stroke-dasharray="6 5" marker-end="url(#orange)"/>
+  <path d="M570 655 V762 H710 V865" class="line" stroke="#a78bfa" marker-end="url(#violet)"/>
+  <path d="M475 655 V775 H275 V865" class="line" stroke="#a78bfa" marker-end="url(#violet)"/>
+  <path d="M1135 650 V865" class="line" stroke="#34d399" marker-end="url(#green)"/>
+
+  <rect x="530" y="145" width="380" height="65" rx="10" fill="#0f172a"/>
+  <rect x="530" y="145" width="380" height="65" rx="10" fill="#083344" fill-opacity="0.5" stroke="#22d3ee" stroke-width="1.5"/>
+  <rect x="530" y="250" width="380" height="60" rx="10" fill="#0f172a"/>
+  <rect x="530" y="250" width="380" height="60" rx="10" fill="#78350f" fill-opacity="0.28" stroke="#fbbf24" stroke-width="1.5"/>
+  <rect x="530" y="385" width="380" height="85" rx="10" fill="#0f172a"/>
+  <rect x="530" y="385" width="380" height="85" rx="10" fill="#083344" fill-opacity="0.5" stroke="#22d3ee" stroke-width="1.5"/>
+
+  <rect x="100" y="535" width="640" height="150" rx="12" fill="#0f172a"/>
+  <rect x="100" y="535" width="640" height="150" rx="12" fill="#064e3b" fill-opacity="0.25" stroke="#34d399" stroke-width="1.5"/>
+  <rect x="130" y="585" width="250" height="70" rx="8" fill="#0f172a"/>
+  <rect x="130" y="585" width="250" height="70" rx="8" fill="#4c1d95" fill-opacity="0.35" stroke="#a78bfa"/>
+  <rect x="430" y="585" width="280" height="70" rx="8" fill="#0f172a"/>
+  <rect x="430" y="585" width="280" height="70" rx="8" fill="#064e3b" fill-opacity="0.45" stroke="#34d399"/>
+  <path d="M380 620 H430" class="line" stroke="#34d399" marker-end="url(#green)"/>
+
+  <rect x="960" y="545" width="350" height="105" rx="10" fill="#0f172a"/>
+  <rect x="960" y="545" width="350" height="105" rx="10" fill="#064e3b" fill-opacity="0.4" stroke="#34d399" stroke-width="1.5"/>
+
+  <rect x="90" y="865" width="370" height="105" rx="10" fill="#0f172a"/>
+  <rect x="90" y="865" width="370" height="105" rx="10" fill="#4c1d95" fill-opacity="0.35" stroke="#a78bfa" stroke-width="1.5"/>
+  <rect x="510" y="865" width="400" height="105" rx="10" fill="#0f172a"/>
+  <rect x="510" y="865" width="400" height="105" rx="10" fill="#4c1d95" fill-opacity="0.35" stroke="#a78bfa" stroke-width="1.5"/>
+  <rect x="960" y="865" width="350" height="105" rx="10" fill="#0f172a"/>
+  <rect x="960" y="865" width="350" height="105" rx="10" fill="#4c1d95" fill-opacity="0.35" stroke="#a78bfa" stroke-width="1.5"/>
+
+  <rect x="140" y="696" width="560" height="22" rx="4" fill="#0c1826"/>
+  <rect x="957" y="696" width="355" height="22" rx="4" fill="#0c1826"/>
+  <rect x="155" y="783" width="265" height="21" rx="4" fill="#0f172a"/>
+  <rect x="628" y="779" width="215" height="21" rx="4" fill="#0f172a"/>
+  <rect x="1040" y="779" width="190" height="21" rx="4" fill="#0f172a"/>
+  <rect x="77" y="831" width="365" height="24" rx="4" fill="#16152c"/>
+  <rect x="1030" y="831" width="331" height="24" rx="4" fill="#16152c"/>
+
+  <text x="720" y="174" class="name" text-anchor="middle">Browser · Git · API clients</text>
+  <text x="720" y="197" class="muted" text-anchor="middle">UI / clone / fetch / push / CI</text>
+  <text x="720" y="277" class="name" text-anchor="middle">TLS edge + public Service</text>
+  <text x="720" y="298" class="muted" text-anchor="middle">Requests can enter any healthy Pod</text>
+
+  <text x="85" y="172" class="eyebrow">REPOSITORY OWNERSHIP</text>
+  <text x="85" y="203" class="note-title">One UUID → one active writer</text>
+  <text x="85" y="229" class="label">Each Pod owns many repositories.</text>
+  <text x="85" y="253" class="label">Ownership can move between Pods.</text>
+  <text x="1030" y="172" class="eyebrow">DISPOSABLE COMPUTE</text>
+  <text x="1030" y="203" class="note-title">Local SQLite is recoverable</text>
+  <text x="1030" y="229" class="label">Restore from the published</text>
+  <text x="1030" y="253" class="label">LTX graph after Pod loss.</text>
+
+  <text x="85" y="372" class="region">CRAB HTTP FLEET · KUBERNETES DEPLOYMENT</text>
+  <text x="1355" y="372" class="muted" text-anchor="end">1 Pod for development · 3 recommended for production</text>
+  <text x="720" y="414" class="name" text-anchor="middle">Authenticate + route by UUID</text>
+  <text x="720" y="439" class="label" text-anchor="middle">Any entry Pod</text>
+  <text x="720" y="459" class="muted" text-anchor="middle">Resolve the repository owner when needed</text>
+  <text x="290" y="411" class="flow" text-anchor="middle">Owner lookup / routing hint</text>
+  <text x="290" y="483" class="flow" text-anchor="middle">Collaboration: local or peer mTLS :8790</text>
+  <text x="1135" y="492" class="flow" text-anchor="middle">Git operations: any Pod</text>
+
+  <text x="420" y="563" class="name" text-anchor="middle">Repository owner · AppCell</text>
+  <text x="255" y="614" class="name" text-anchor="middle">SQLite + WAL</text>
+  <text x="255" y="641" class="muted" text-anchor="middle">One database per repository</text>
+  <text x="570" y="614" class="name" text-anchor="middle">Embedded Rust LTX</text>
+  <text x="570" y="641" class="muted" text-anchor="middle">Capture + publication gate</text>
+  <text x="420" y="673" class="muted" text-anchor="middle">Issues · PRs · reviews · labels · checks · release metadata</text>
+  <text x="420" y="711" class="label" text-anchor="middle">Owner may be a different Pod from the request entry.</text>
+
+  <text x="850" y="589" class="muted" text-anchor="middle">Merge / tag intent</text>
+  <text x="850" y="635" class="muted" text-anchor="middle">Durable outbox</text>
+  <text x="1135" y="578" class="name" text-anchor="middle">Existing Git runtime</text>
+  <text x="1135" y="606" class="label" text-anchor="middle">Read / receive / publication</text>
+  <text x="1135" y="633" class="muted" text-anchor="middle">Canonical ref locks + GC fences</text>
+  <text x="1135" y="711" class="label" text-anchor="middle">Git has its own commit boundary.</text>
+
+  <text x="285" y="798" class="flow" text-anchor="middle">2 · Publish head with owner CAS</text>
+  <text x="735" y="794" class="flow" text-anchor="middle">1 · Upload LTX + manifest</text>
+  <text x="1135" y="794" class="flow" text-anchor="middle">Existing storage path</text>
+
+  <text x="85" y="848" class="region" style="fill:#a78bfa">OBJECT STORAGE · DURABLE AUTHORITY</text>
+  <text x="1355" y="848" class="muted" text-anchor="end">RustFS / qualified S3, GCS or Azure</text>
+  <text x="275" y="899" class="name" text-anchor="middle">Owner + published head</text>
+  <text x="275" y="925" class="label" text-anchor="middle">One conditional control record</text>
+  <text x="275" y="950" class="muted" text-anchor="middle">Session · epoch · exact recovery root</text>
+  <text x="710" y="899" class="name" text-anchor="middle">Immutable LTX + manifests</text>
+  <text x="710" y="925" class="label" text-anchor="middle">Snapshots + committed page changes</text>
+  <text x="710" y="950" class="muted" text-anchor="middle">Restore only the published graph</text>
+  <text x="1135" y="899" class="name" text-anchor="middle">Git + large objects</text>
+  <text x="1135" y="925" class="label" text-anchor="middle">Refs · journal · packs · LFS</text>
+  <text x="1135" y="950" class="muted" text-anchor="middle">Release asset bytes stay here</text>
+  <text x="720" y="1003" class="muted" text-anchor="middle">Catalog, identity and repository policy retain their direct object-store records.</text>
+
+  <rect x="60" y="1050" width="1320" height="65" rx="10" fill="#064e3b" fill-opacity="0.28" stroke="#34d399" stroke-opacity="0.4"/>
+  <text x="85" y="1077" class="eyebrow" style="fill:#34d399">APPLICATION WRITE SUCCESS</text>
+  <text x="85" y="1101" class="label">Local COMMIT → upload LTX + manifest → owner/head CAS accepted → HTTP success</text>
+  <text x="1355" y="1101" class="muted" text-anchor="end">Local commit alone is not durable.</text>
+
+  <text x="60" y="1152" class="eyebrow" style="fill:#fbbf24">HARD CUTOVER</text>
+  <text x="240" y="1152" class="label">Stop old fleet → offline import + verify → start new fleet → reopen traffic</text>
+  <path d="M60 1180 H1380" stroke="#334155"/>
+  <path d="M60 1207 H90" class="line" stroke="#34d399"/>
+  <text x="102" y="1211" class="foot">Request / data path</text>
+  <path d="M320 1207 H350" class="line" stroke="#a78bfa" stroke-dasharray="5 4"/>
+  <text x="362" y="1211" class="foot">Ownership lookup</text>
+  <text x="1380" y="1211" class="foot" text-anchor="end">PROPOSED DESIGN · SQLite/LTX runtime not yet implemented</text>
+
+  <text x="60" y="36" class="eyebrow">CRAB / HIGH-LEVEL SYSTEM DESIGN</text>
+  <text x="60" y="78" class="title">crab-http-server · next architecture</text>
+  <text x="60" y="102" class="subtitle">Repository-scoped SQLite · embedded LTX replication · object-store authority</text>
+</svg>

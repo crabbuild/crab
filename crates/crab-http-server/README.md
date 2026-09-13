@@ -85,8 +85,12 @@ and a canonical HTTPS origin. For container deployment, use the
 ## Find the relevant contract
 
 For the proposed SQLite/LTX storage and multi-node ownership architecture, read
-[the next-generation technical design](NEXT_ARCHITECTURE.md). It separates
-intended behavior and acceptance gates from the current implementation.
+[the next-generation design index](NEXT_ARCHITECTURE.md). Focused topics under
+`next-architecture/` cover [ownership and load balancing](next-architecture/ownership-and-load-balancing.md),
+[SQLite/LTX publication](next-architecture/storage-protocol.md),
+[Kubernetes operation](next-architecture/deployment-and-operations.md), and the
+[hard cutover](next-architecture/hard-cutover.md). These describe intended
+behavior and acceptance gates separately from the current implementation.
 
 | Task | Read |
 | --- | --- |
