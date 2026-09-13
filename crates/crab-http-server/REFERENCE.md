@@ -190,6 +190,9 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
   --members-file /secure/members.toml
 
 "$SERVER" --config /secure/server.toml repository list
+"$SERVER" --config /secure/server.toml repository set-members \
+  --owner your-team --name your-project \
+  --members-file /secure/members.toml
 "$SERVER" --config /secure/server.toml storage-probe
 "$SERVER" --config /secure/server.toml serve
 ```
@@ -604,6 +607,13 @@ name and explicit grant. Supply records through `--members-file` when creating
 or adopting a repository. Use `--members-file -` to read the document from
 standard input, including through `kubectl exec --stdin`:
 
+```sh
+kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  repository set-members --owner your-team --name your-project \
+  --members-file - < /secure/crab-members.toml
+```
+
 | Access | Capabilities |
 | --- | --- |
 | `read` | Browse, fetch, download LFS, and participate in issues, pull requests, comments, and reviews |
@@ -617,6 +627,14 @@ one `admin` member. It rejects an empty or read/write-only membership before
 touching repository storage, preventing creation of a repository that no
 authenticated operator can administer. Unauthenticated loopback deployments
 may omit membership.
+
+`repository set-members` replaces the complete membership array with one
+conditional catalog update. A concurrent catalog mutation returns a conflict;
+inspect `repository list`, reconcile the desired membership, and issue the
+command again. Every healthy replica observes the change on its next
+five-second catalog poll and swaps routing only after materialization succeeds.
+Requests already holding the previous repository handle finish against that
+snapshot.
 
 An authenticated account without membership sees an empty catalog. Unauthorized
 and absent repositories both return HTTP 404 after authentication. Catalog
@@ -1251,7 +1269,7 @@ The server is complete only when a real account can perform the workflow and obs
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
-| Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; membership administration and provider revocation remain |
+| Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; operator membership replacement exists, while browser administration and provider revocation remain |
 | Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
@@ -1266,7 +1284,7 @@ The remaining production gaps include:
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
 - Production throughput and provider-level admission qualification
-- Membership administration, provider back-channel logout, and immediate provider revocation
+- Browser membership administration, membership audit history, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage

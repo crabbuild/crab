@@ -143,7 +143,9 @@ canonical metadata reads before the same CAS insertion.
 For an authenticated deployment, the administration CLI requires an initial
 administrator before either operation reaches storage. Membership can stream
 from standard input so Kubernetes operators do not need to persist repository
-identities in a ConfigMap or copy a file into a pod.
+identities in a ConfigMap or copy a file into a pod. Later `set-members`
+replacements use one catalog CAS attempt: a concurrent catalog writer returns a
+conflict instead of silently rebasing a stale access-control decision.
 
 The server does not infer public names from object paths. That would make
 listing permissions, rename behavior, partial uploads, and unrelated bucket

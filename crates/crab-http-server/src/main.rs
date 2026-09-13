@@ -38,6 +38,8 @@ enum RepositoryCommand {
     Create(CreateRepository),
     /// Publish an existing canonical Crab repository to the catalog.
     Adopt(AdoptRepository),
+    /// Replace a cataloged repository's membership.
+    SetMembers(SetRepositoryMembers),
     /// Print the durable repository catalog as JSON.
     List,
 }
@@ -70,6 +72,16 @@ struct AdoptRepository {
     identity: RepositoryIdentity,
 }
 
+#[derive(Args)]
+struct SetRepositoryMembers {
+    #[arg(long)]
+    owner: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long, help = "TOML file containing a members array, or - for stdin")]
+    members_file: PathBuf,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MembersFile {
@@ -80,20 +92,33 @@ impl RepositoryIdentity {
     fn members(&self, authenticated: bool) -> crab_http_server::Result<Vec<RepositoryMember>> {
         let members = match &self.members_file {
             None => Vec::new(),
-            Some(path) if path == Path::new("-") => read_members(std::io::stdin().lock())?,
-            Some(path) => read_members(std::fs::File::open(path)?)?,
+            Some(path) => members_from_path(path)?,
         };
-        if authenticated
-            && !members
-                .iter()
-                .any(|member| member.access == RepositoryAccess::Admin)
-        {
-            return Err(crab_http_server::Error::Config(
-                "authenticated repositories require at least one admin member",
-            ));
-        }
-        Ok(members)
+        validate_members(members, authenticated)
     }
+}
+
+fn members_from_path(path: &Path) -> crab_http_server::Result<Vec<RepositoryMember>> {
+    if path == Path::new("-") {
+        return read_members(std::io::stdin().lock());
+    }
+    read_members(std::fs::File::open(path)?)
+}
+
+fn validate_members(
+    members: Vec<RepositoryMember>,
+    authenticated: bool,
+) -> crab_http_server::Result<Vec<RepositoryMember>> {
+    if authenticated
+        && !members
+            .iter()
+            .any(|member| member.access == RepositoryAccess::Admin)
+    {
+        return Err(crab_http_server::Error::Config(
+            "authenticated repositories require at least one admin member",
+        ));
+    }
+    Ok(members)
 }
 
 fn read_members(mut reader: impl Read) -> crab_http_server::Result<Vec<RepositoryMember>> {
@@ -180,6 +205,17 @@ async fn repository(
                 .await?;
             println!("{}", serde_json::to_string_pretty(&record)?);
         }
+        RepositoryCommand::SetMembers(arguments) => {
+            let members = validate_members(
+                members_from_path(&arguments.members_file)?,
+                config.auth.is_some(),
+            )?;
+            let catalog = CatalogStore::from_config(config)?;
+            let record = catalog
+                .set_members(&arguments.owner, &arguments.name, members)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+        }
         RepositoryCommand::List => {
             let catalog = CatalogStore::from_config(config)?;
             let (document, _) = catalog.load().await?;
@@ -236,6 +272,32 @@ mod tests {
         assert_eq!(members.len(), 1);
         assert_eq!(members[0].subject, "alice-sub");
         assert_eq!(members[0].access, RepositoryAccess::Admin);
+    }
+
+    #[test]
+    fn set_members_command_requires_an_explicit_members_file() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "repository",
+            "set-members",
+            "--owner",
+            "team",
+            "--name",
+            "project",
+            "--members-file",
+            "-",
+        ])
+        .unwrap();
+        let Command::Repository {
+            command: RepositoryCommand::SetMembers(update),
+        } = arguments.command.unwrap()
+        else {
+            panic!("repository set-members command was not parsed");
+        };
+
+        assert_eq!(update.members_file, Path::new("-"));
     }
 
     #[test]

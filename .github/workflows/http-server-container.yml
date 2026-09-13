@@ -426,6 +426,7 @@ jobs:
           docker run --rm crab-http-server:test --help | grep -F -- "--config"
           docker run --rm crab-http-server:test --help | grep -F -- "storage-probe"
           docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "create"
+          docker run --rm crab-http-server:test --config /dev/null repository --help | grep -F -- "set-members"
       - name: Exercise Compose startup, restore, crash recovery, and restart
         env:
           CRAB_HTTP_SERVER_IMAGE: crab-http-server:test
@@ -458,6 +459,16 @@ jobs:
           jq --exit-status \
             '.owner == "demo" and .name == "stdin-members" and (.members | any(.subject == "ci-admin" and .access == "admin"))' \
             "${RUNNER_TEMP}/crab-http-server-stdin-repository.json"
+          printf '%s\n' \
+            'members = [{ subject = "ci-owner", name = "CI Owner", access = "admin" }, { subject = "ci-reader", name = "CI Reader", access = "read" }]' \
+            | docker compose --file crates/crab-http-server/deploy/compose.yaml \
+                run --rm --no-deps --no-TTY repository-init \
+                  --config /etc/crab/server.toml repository set-members \
+                  --owner demo --name stdin-members --members-file - \
+            > "${RUNNER_TEMP}/crab-http-server-updated-members.json"
+          jq --exit-status \
+            '.members | length == 2 and any(.subject == "ci-owner" and .access == "admin") and any(.subject == "ci-reader" and .access == "read")' \
+            "${RUNNER_TEMP}/crab-http-server-updated-members.json"
           curl --fail --silent --show-error \
             --dump-header "${RUNNER_TEMP}/crab-http-server-headers" \
             --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \

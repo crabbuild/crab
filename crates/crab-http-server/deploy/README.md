@@ -171,6 +171,9 @@ crab-http-server --config server.toml repository adopt \
   --owner my-team --name existing --prefix imports/existing \
   --members-file members.toml
 
+crab-http-server --config server.toml repository set-members \
+  --owner my-team --name my-project --members-file members.toml
+
 crab-http-server --config server.toml repository list
 ```
 
@@ -180,9 +183,12 @@ require at least one `admin` member when creating or adopting a repository;
 unauthenticated loopback deployments may omit membership.
 
 `create` initializes canonical Crab layout and manifest objects before its CAS
-catalog publish. `adopt` requires those objects to exist already. Every running
-replica refreshes the catalog and begins routing a successful change within
-five seconds; in-flight requests retain the previous repository handle.
+catalog publish. `adopt` requires those objects to exist already. `set-members`
+uses one conditional catalog update and reports a conflict instead of replaying
+a stale decision over a concurrent change. Every running replica checks the
+catalog every five seconds and swaps routing after the new document
+materializes successfully; in-flight requests retain the previous repository
+handle.
 
 ## Why Lambda is excluded
 

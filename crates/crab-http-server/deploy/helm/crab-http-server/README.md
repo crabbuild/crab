@@ -246,7 +246,9 @@ qualification below for that boundary.
 
 Run repository administration through a pod that already has configuration
 and workload identity. First create a private local membership file using the
-OIDC provider's stable `sub` claim for the initial administrator:
+OIDC provider's stable `sub` claim for the initial administrator. After the
+administrator signs in, Crab displays that subject on the empty repository
+page and returns it from `/api/session`:
 
 ```toml
 members = [
@@ -268,8 +270,22 @@ kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
 Authenticated repository creation and adoption fail unless the supplied
 membership contains at least one administrator; this prevents creating a
 repository that nobody can manage or open. Every healthy replica discovers the
-new record within five seconds. Use `repository adopt` instead when the target
-prefix already contains a canonical Crab repository.
+new record on its next five-second catalog poll and routes it after
+materialization succeeds. Use `repository adopt` instead when the target prefix
+already contains a canonical Crab repository.
+
+Use the same private-file pattern to replace membership later:
+
+```sh
+kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  repository set-members --owner your_team --name your_project \
+  --members-file - < /secure/crab-members.toml
+```
+
+The command uses one conditional catalog update and fails on a concurrent
+catalog change. Review `repository list` before retrying so a stale operator
+decision cannot overwrite newer membership.
 
 ## Qualify the live deployment
 

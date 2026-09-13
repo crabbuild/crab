@@ -121,6 +121,27 @@ that a newly scheduled workload can load the configuration, Secret, cloud
 identity, and durable root with the coordination permissions the server needs;
 it does not prove the public ingress or cross-replica data plane.
 
+## Manage repository membership
+
+Keep the desired complete membership array in a private operator file. Replace
+membership through a running pod rather than editing the catalog object:
+
+```sh
+kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  repository set-members --owner your_team --name your_project \
+  --members-file - < /secure/crab-members.toml
+```
+
+Authenticated deployments require the replacement to retain at least one
+administrator. The command makes one conditional catalog update. If another
+operator changed the catalog concurrently, inspect `repository list`, reconcile
+the full intended membership, and retry. Healthy replicas enforce the new
+membership after their next five-second catalog poll and successful
+materialization; already admitted requests retain their prior repository
+snapshot. This operator command does not provide an audit history, so record
+the reviewed input and command outcome in the team's change system.
+
 ## Observe requests and capacity
 
 Each public response includes `x-request-id`. Its completion log records the same `request_id`, HTTP method, path, status, and elapsed milliseconds. Set `RUST_LOG` through `extraEnv` when you need a different tracing filter.
