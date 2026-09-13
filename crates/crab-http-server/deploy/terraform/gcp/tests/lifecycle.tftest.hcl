@@ -62,6 +62,15 @@ run "bounds_recovery_versions_and_multipart_uploads" {
   }
 }
 
+run "grants_object_use_without_object_administration" {
+  command = plan
+
+  assert {
+    condition     = google_storage_bucket_iam_member.server.role == "roles/storage.objectUser"
+    error_message = "The workload identity must use Storage Object User without object IAM administration."
+  }
+}
+
 run "rejects_an_unsafe_recovery_window" {
   command = plan
 

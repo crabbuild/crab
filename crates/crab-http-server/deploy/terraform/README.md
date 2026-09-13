@@ -28,7 +28,7 @@ The runtime identities contain data-plane permissions only:
 | Platform | Runtime grant | Boundary |
 | --- | --- | --- |
 | EKS | `ListBucket` plus object read, write, delete, and multipart abort | Listing is restricted to the configured application prefix; object actions are restricted to its objects |
-| GKE | `roles/storage.objectAdmin` | Dedicated bucket |
+| GKE | `roles/storage.objectUser` | Dedicated bucket |
 | AKS | `Storage Blob Data Contributor` | Dedicated container |
 
 Crab's S3 client keeps multipart part identifiers in memory and sends them when
