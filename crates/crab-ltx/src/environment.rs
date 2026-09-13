@@ -74,6 +74,16 @@ pub struct Host {
     pub(crate) sqlite_vfs: Option<String>,
     #[cfg(feature = "replica")]
     pub(crate) executor: Arc<dyn Executor>,
+    #[cfg(feature = "replica")]
+    pub(crate) paged_driver: crate::paged_io::DriverSlot,
+    #[cfg(feature = "replica")]
+    io_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    job_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    recovery_slots: Arc<tokio::sync::Semaphore>,
+    #[cfg(feature = "replica")]
+    recovery: Option<Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 
 impl Host {
@@ -141,7 +151,72 @@ impl Host {
     #[must_use]
     pub fn with_executor(mut self, executor: Arc<dyn Executor>) -> Self {
         self.executor = executor;
+        self.paged_driver = Arc::new(std::sync::Mutex::new(std::sync::Weak::new()));
         self
+    }
+
+    /// Shares an object-store request ceiling across hosts and databases.
+    ///
+    /// Defaults share 32 permits process-wide. Closing the semaphore rejects
+    /// new I/O; permits are held across provider retries and released on drop.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_io_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.io_slots = slots;
+        self
+    }
+
+    /// Shares a blocking-job ceiling, including jobs whose callers cancel.
+    ///
+    /// Defaults share up to 16 jobs process-wide, capped by available CPUs.
+    /// Independent paged workers do not consume these slots, avoiding deadlock.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_job_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.job_slots = slots;
+        self
+    }
+
+    /// Bounds simultaneous full restore, resume, bundling and remote compaction.
+    ///
+    /// Defaults share two slots process-wide. Admission precedes body downloads
+    /// and stays with non-cancellable jobs. This bounds cohorts, not process RSS;
+    /// size per-database `Limits` and these slots to the service memory budget.
+    #[cfg(feature = "replica")]
+    #[must_use]
+    pub fn with_recovery_slots(mut self, slots: Arc<tokio::sync::Semaphore>) -> Self {
+        self.recovery_slots = slots;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) async fn for_recovery(&self) -> crate::Result<Self> {
+        let mut host = self.clone();
+        if host.recovery.is_none() {
+            host.recovery = Some(Arc::new(
+                self.recovery_slots
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| crate::CrabError::Other(Box::new(e)))?,
+            ));
+        }
+        Ok(host)
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn without_recovery(mut self) -> Self {
+        self.recovery = None;
+        self
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) async fn io_permit(&self) -> crate::Result<tokio::sync::OwnedSemaphorePermit> {
+        self.io_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| crate::CrabError::Other(Box::new(e)))
     }
 
     #[cfg(feature = "replica")]
@@ -149,8 +224,19 @@ impl Host {
         &self,
         operation: impl FnOnce() -> T + Send + 'static,
     ) -> crate::Result<T> {
+        let permit = self
+            .job_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|e| crate::CrabError::Other(Box::new(e)))?;
         let (send, receive) = tokio::sync::oneshot::channel();
+        let recovery = self.recovery.clone();
         self.executor.dispatch(Box::new(move || {
+            // Dispatched work can outlive its future. Keep admission with the
+            // job, not the waiter, so cancellation cannot oversubscribe the pool.
+            let _permit = permit;
+            let _recovery = recovery;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
                 .map_err(|_| crate::CrabError::InvalidState("host job panicked"));
             let _ = send.send(result);
@@ -163,12 +249,39 @@ impl Host {
 
 impl Default for Host {
     fn default() -> Self {
+        #[cfg(feature = "replica")]
+        static IO: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+        #[cfg(feature = "replica")]
+        static JOBS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+        #[cfg(feature = "replica")]
+        static RECOVERY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+            std::sync::OnceLock::new();
         Self {
             filesystem: Arc::new(DirectFileSystem),
             clock: Arc::new(SystemClock),
             sqlite_vfs: None,
             #[cfg(feature = "replica")]
             executor: Arc::new(TokioExecutor),
+            #[cfg(feature = "replica")]
+            paged_driver: crate::paged_io::default_slot(),
+            #[cfg(feature = "replica")]
+            io_slots: IO
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(32)))
+                .clone(),
+            #[cfg(feature = "replica")]
+            job_slots: JOBS
+                .get_or_init(|| {
+                    Arc::new(tokio::sync::Semaphore::new(
+                        std::thread::available_parallelism().map_or(1, |n| n.get().min(16)),
+                    ))
+                })
+                .clone(),
+            #[cfg(feature = "replica")]
+            recovery_slots: RECOVERY
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+                .clone(),
+            #[cfg(feature = "replica")]
+            recovery: None,
         }
     }
 }
@@ -406,5 +519,54 @@ mod tests {
         let host = Host::default().with_executor(Arc::new(DroppingExecutor));
         assert!(host.run(|| 42).await.is_err());
         assert_eq!(Host::default().run(|| 42).await.unwrap(), 42);
+    }
+
+    #[cfg(feature = "replica")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_waiters_do_not_release_running_job_or_recovery_admission() {
+        let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+        let recovery = Arc::new(tokio::sync::Semaphore::new(1));
+        let host = Host::default()
+            .with_job_slots(jobs.clone())
+            .with_recovery_slots(recovery.clone());
+        let scope = host.for_recovery().await.unwrap();
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let task = tokio::spawn(async move {
+            scope
+                .run(move || {
+                    let _ = started.send(());
+                    let _ = blocked.recv();
+                })
+                .await
+        });
+        entered.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(jobs.available_permits(), 0);
+        assert_eq!(recovery.available_permits(), 0);
+        release.send(()).unwrap();
+        let _job = tokio::time::timeout(Duration::from_secs(2), jobs.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        let _recovery = tokio::time::timeout(Duration::from_secs(2), recovery.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[cfg(feature = "replica")]
+    #[tokio::test]
+    async fn closed_admission_returns_errors_instead_of_panicking() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        slots.close();
+        let host = Host::default()
+            .with_io_slots(slots.clone())
+            .with_job_slots(slots.clone())
+            .with_recovery_slots(slots);
+        assert!(host.run(|| 1).await.is_err());
+        assert!(host.io_permit().await.is_err());
+        assert!(host.for_recovery().await.is_err());
     }
 }

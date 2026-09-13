@@ -1,7 +1,10 @@
 //! Celld-inspired pinned page maps; authenticated indexes replace unchecked tails.
 
 use crate::{CrabError, Position, Replica, Result, replica::RemoteSegment};
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
+
+mod map;
+use map::PageMap;
 
 const ENTRY_BYTES: usize = 60;
 const FRAME_PREFIX: usize = crate::ltx::PAGE_HEADER_SIZE + 4;
@@ -24,13 +27,16 @@ struct Locator {
 #[derive(Clone)]
 pub struct PagedDatabase {
     replica: Replica,
-    pages: Arc<BTreeMap<u32, Locator>>,
+    pages: Arc<PageMap>,
     page_size: u32,
     count: u32,
     position: Position,
 }
 
 impl PagedDatabase {
+    pub(crate) fn belongs_to(&self, replica: &Replica) -> bool {
+        Arc::ptr_eq(&self.replica.identity, &replica.identity)
+    }
     pub(crate) fn host(&self) -> crate::Host {
         self.replica.host.clone()
     }
@@ -142,7 +148,7 @@ impl PagedDatabase {
     /// Opens a read-only SQLite VFS over this pinned cut, with no local database.
     ///
     /// SQLite calls are blocking. Run queries on a dedicated or blocking thread.
-    /// The VFS uses its own I/O thread/runtime, never a caller runtime's block_on.
+    /// The VFS shares an independent I/O worker, never a caller runtime's block_on.
     pub fn open_sqlite(self) -> Result<crate::PagedConnection> {
         crate::paged_vfs::open(self)
     }
@@ -153,28 +159,46 @@ pub(crate) async fn build(
     segments: &[RemoteSegment],
     position: Position,
 ) -> Result<PagedDatabase> {
-    let mut indexes = Vec::new();
-    for segment in segments {
-        indexes.push((segment.clone(), replica.index(segment).await?));
-    }
+    let indexes = crate::replica::io::ordered(segments.iter().cloned().map(|segment| {
+        let replica = replica.clone();
+        async move {
+            let bytes = replica.index(&segment).await?;
+            Ok((segment, bytes))
+        }
+    }))
+    .await?;
     replica
         .host
         .clone()
-        .run(move || build_map(replica, indexes, position))
+        .run(move || extend(replica, None, indexes, position))
         .await?
 }
 
-fn build_map(
+pub(crate) fn extend(
     replica: Replica,
+    base: Option<PagedDatabase>,
     indexes: Vec<(RemoteSegment, Vec<u8>)>,
     position: Position,
 ) -> Result<PagedDatabase> {
-    let mut pages = BTreeMap::new();
-    let mut count = 0;
-    let mut page_size = 0;
+    let (mut pages, mut count, mut page_size, mut previous_position) = match base {
+        Some(base) => (
+            Arc::unwrap_or_clone(base.pages),
+            base.count,
+            base.page_size,
+            base.position,
+        ),
+        None => (PageMap::default(), 0, 0, Position::default()),
+    };
     for (segment, bytes) in indexes {
         let segment = Arc::new(segment);
         let info = &segment.info;
+        if previous_position.txid.checked_add(1) != Some(info.min_txid)
+            || info.max_txid < info.min_txid
+            || info.pre_checksum != previous_position.checksum
+            || (page_size != 0 && page_size != info.page_size)
+        {
+            return Err(CrabError::LTXCorrupted);
+        }
         page_size = info.page_size;
         count = info.database_pages;
         let lock = crate::ltx::lock_pgno(page_size);
@@ -183,10 +207,10 @@ fn build_map(
         }
         // Apply each truncation before the next delta; a later regrowth must not
         // revive old pages from a version predating that truncation.
-        pages.retain(|pgno, _| *pgno <= count);
+        pages.truncate(count);
         let mut previous = 0;
         let mut end = crate::ltx::HEADER_SIZE as u64;
-        for entry in bytes.chunks_exact(ENTRY_BYTES) {
+        for entry in bytes.as_chunks::<ENTRY_BYTES>().0 {
             let pgno = u32::from_be_bytes(array(&entry[..4])?);
             let offset = u64::from_be_bytes(array(&entry[4..12])?);
             let size = u64::from_be_bytes(array(&entry[12..20])?);
@@ -222,16 +246,19 @@ fn build_map(
         if pages.len() as u64 != u64::from(count) - u64::from(lock <= count) {
             return Err(CrabError::LTXCorrupted);
         }
-        let checksum = pages
-            .values()
-            .fold(crate::CHECKSUM_FLAG, |sum, loc| sum ^ loc.checksum)
-            | crate::CHECKSUM_FLAG;
-        if checksum != info.post_checksum {
+        if pages.checksum() != info.post_checksum {
             return Err(CrabError::ChecksumMismatch);
         }
+        previous_position = info.position();
     }
+    if previous_position != position {
+        return Err(CrabError::ChecksumMismatch);
+    }
+    // A returned view may live for days; it must not retain a temporary
+    // recovery reservation from the operation that constructed its page map.
+    let host = replica.host.clone().without_recovery();
     Ok(PagedDatabase {
-        replica,
+        replica: replica.with_host(host),
         pages: Arc::new(pages),
         page_size,
         count,

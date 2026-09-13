@@ -8,6 +8,11 @@ impl Replica {
     /// Native objects and old bundles remain retained. Readers use the manifest's
     /// location directly: transport errors never select an unverified fallback.
     pub async fn bundle(&self, expected: &ReplicaHead) -> Result<ReplicaHead> {
+        self.check_head(expected)?;
+        self.recovery_scope().await?.bundle_inner(expected).await
+    }
+
+    async fn bundle_inner(&self, expected: &ReplicaHead) -> Result<ReplicaHead> {
         if expected.etag.is_none() {
             return Err(CrabError::InvalidState("historical head is read-only"));
         }
@@ -30,23 +35,19 @@ impl Replica {
             .run(move || crate::bundle::Bundle::encode(entries, limits))
             .await??;
         let hash = *blake3::hash(bundle.bytes()).as_bytes();
-        self.layout
-            .store()
-            .put(
-                &self.object_path(&hash, "bundle"),
-                Bytes::copy_from_slice(bundle.bytes()),
-            )
-            .await?;
+        self.put(
+            &self.object_path(&hash, "bundle"),
+            Bytes::copy_from_slice(bundle.bytes()),
+        )
+        .await?;
         let mut segments = expected.manifest.segments.clone();
         for (segment, row) in segments.iter_mut().zip(bundle.rows()) {
             let index = self.index(segment).await?;
-            self.layout
-                .store()
-                .put(
-                    &self.object_path(&segment.index_hash, "idx"),
-                    Bytes::from(index),
-                )
-                .await?;
+            self.put(
+                &self.object_path(&segment.index_hash, "idx"),
+                Bytes::from(index),
+            )
+            .await?;
             segment.epoch = self.epoch.clone();
             segment.bundle = Some(BundleLocation {
                 hash,
@@ -75,11 +76,6 @@ impl Replica {
                 return Err(CrabError::InvalidState("historical head is read-only"));
             }
         }
-        let mut segments = expected
-            .map(|h| h.manifest.segments.clone())
-            .unwrap_or_default();
-        let mut inputs = self.download(&segments).await?;
-        let mut infos: Vec<_> = segments.iter().map(|s| s.info.clone()).collect();
         let repository = self.layout.repo_path("").to_string();
         let rows: Vec<_> = bundle
             .rows()
@@ -87,10 +83,7 @@ impl Replica {
             .enumerate()
             .filter(|(_, row)| row.repository == repository && row.epoch == self.epoch)
             .collect();
-        if rows.is_empty()
-            || rows.len().saturating_add(segments.len()) > self.limits.max_segments
-            || bundle.bytes().len() as u64 > self.limits.max_plan_bytes
-        {
+        if rows.is_empty() || bundle.bytes().len() as u64 > self.limits.max_plan_bytes {
             return Err(CrabError::Limit("bundle selection"));
         }
         let target = rows
@@ -99,47 +92,32 @@ impl Replica {
             .1
             .info
             .position();
-        for (index, row) in &rows {
-            inputs.push(bundle.segment(*index)?.to_vec());
-            infos.push(row.info.clone());
-        }
-        let limits = self.limits;
-        self.host
-            .run(move || VerifiedLocalPlan::from_bytes(inputs, &infos, target, limits))
-            .await??;
+        self.admit_append(
+            expected,
+            rows.iter().map(|(_, row)| row.info.clone()),
+            target,
+        )?;
         let hash = *blake3::hash(bundle.bytes()).as_bytes();
-        self.layout
-            .store()
-            .put(
-                &self.object_path(&hash, "bundle"),
-                Bytes::copy_from_slice(bundle.bytes()),
-            )
-            .await?;
-        for (index, row) in rows {
-            let bytes = bundle.segment(index)?.to_vec();
-            let index = self
-                .host
-                .run(move || crate::paged::encode_index(&bytes))
-                .await??;
-            let index_hash = *blake3::hash(&index).as_bytes();
-            let index_size = index.len() as u64;
-            self.layout
-                .store()
-                .put(&self.object_path(&index_hash, "idx"), Bytes::from(index))
-                .await?;
-            segments.push(RemoteSegment {
-                epoch: self.epoch.clone(),
-                level: 0,
-                bundle: Some(BundleLocation {
-                    hash,
-                    offset: row.offset,
-                    size: bundle.bytes().len() as u64,
-                }),
-                info: row.info.clone(),
-                index_hash,
-                index_size,
-            });
-        }
-        self.publish(segments, target, expected).await
+        let inputs = rows
+            .into_iter()
+            .map(|(index, row)| {
+                Ok((
+                    bundle.segment(index)?.to_vec(),
+                    row.info.clone(),
+                    Some(BundleLocation {
+                        hash,
+                        offset: row.offset,
+                        size: bundle.bytes().len() as u64,
+                    }),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (prepared, pages) = self.prepare_append(inputs, expected, target).await?;
+        self.put(
+            &self.object_path(&hash, "bundle"),
+            Bytes::copy_from_slice(bundle.bytes()),
+        )
+        .await?;
+        self.publish_append(prepared, pages, expected).await
     }
 }

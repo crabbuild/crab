@@ -342,8 +342,9 @@ impl ManagedDb {
     /// Captures pending commits, then writes a full checksum-bearing snapshot.
     ///
     /// Its range is `1..=position.txid`. The snapshot can replace all preceding
-    /// cuts in a new manifest, but this method never publishes or deletes them.
-    pub fn snapshot(&mut self, destination: &Path) -> Result<LocalSegment> {
+    /// cuts in a new manifest. The second return value owns every newly captured
+    /// cut: publish it to continue an existing head. Neither output is published.
+    pub fn snapshot(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
         self.ensure_active()?;
         let result = self.snapshot_inner(destination);
         if result.is_err() {
@@ -352,7 +353,7 @@ impl ManagedDb {
         result
     }
 
-    fn snapshot_inner(&mut self, destination: &Path) -> Result<LocalSegment> {
+    fn snapshot_inner(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)> {
         let batch = self.capture_inner()?;
         let mut bytes = Vec::new();
         let pos: Position = self.db.snapshot_to_writer(&mut bytes)?.into();
@@ -366,7 +367,7 @@ impl ManagedDb {
         let segment = LocalSegment::new(destination.to_owned(), info);
         #[cfg(feature = "replica")]
         self.retained.push(segment.clone());
-        Ok(segment)
+        Ok((segment, batch))
     }
 
     /// Returns the local file path; it must not be independently mutated.

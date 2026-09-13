@@ -19,7 +19,7 @@ for the publication, ownership and hard-cutover work that remains.
 | `transaction(closure)` | One locally committed SQL transaction; no remote-durability claim |
 | `capture()` | Ordered `CaptureBatch` containing every newly generated cut and its endpoint, including checkpoint cuts |
 | `checkpoint(mode)` | Capture barrier plus PASSIVE/FULL/RESTART/TRUNCATE; returns every generated cut |
-| `snapshot(path)` | Captures pending work, then creates a standalone `1..=txid` snapshot |
+| `snapshot(path)` | Returns `(LocalSegment, CaptureBatch)`: standalone `1..=txid` snapshot plus every newly captured cut |
 | `VerifiedLocalPlan::new(files, target, limits)` | Owns verified bytes of an explicitly selected snapshot-plus-deltas chain |
 | `restore_exact(plan, path)` | Installs a new SQLite file at exactly the verified endpoint; never overwrites |
 | `compact_exact(plan, path)` | Compacts that complete chain into a verified standalone snapshot; never deletes inputs |
@@ -37,6 +37,21 @@ previous maximum TXID plus one. Validation rejects gaps, overlaps, missing files
 wrong digests, wrong metadata/target, invalid page order/index offsets, missing
 snapshot or growth pages, and checksum-disabled files. Every applied cut's
 rolling database checksum is verified, not just the final trailer.
+
+Snapshot capture transfers ownership of pending cuts just like `capture()` and
+`checkpoint()`. When continuing an existing remote head, retain and publish the
+returned batch; do not append the full snapshot to that existing delta chain:
+
+```rust,no_run
+# #[cfg(feature = "replica")]
+# async fn snapshot_publication(writer: &mut crab_ltx::ManagedDb, replica: &crab_ltx::Replica,
+#     head: crab_ltx::ReplicaHead, snapshot_path: &std::path::Path) -> crab_ltx::Result<()> {
+let (snapshot, pending) = writer.snapshot(snapshot_path)?;
+let head = replica.replicate(&pending, Some(&head)).await?;
+// `snapshot` is an independent full recovery artifact, not another delta.
+# Ok(())
+# }
+```
 
 Writers emit checksum-bearing LTX v3 **sized-block** files (LTX v0.5.2 layout).
 Readers accept both sized-block and older LZ4-frame files when checksummed.
@@ -94,17 +109,17 @@ Crab's existing credential/provider builders; wrap it in a repository
 | `Replica::new(layout, epoch, limits)` | Explicit caller-owned epoch; rejects staged stores and invalid epoch components |
 | `head().await` | Reads the one named epoch head, never lists objects to infer latest |
 | `open_exact(manifest_digest).await` | Reopens a pinned immutable recovery root after restart; no mutable-head read or mutation token |
-| `replicate(&batch, expected_head).await` | Verifies the entire chain, uploads immutable LTX and page indexes, then CASes the epoch head |
+| `replicate(&batch, expected_head).await` | Fully verifies new cuts against authenticated predecessor page state, uploads LTX/indexes, then CASes the epoch head |
 | `restore(&head, destination).await` | Downloads only the pinned plan and installs a verified new SQLite file |
 | `compact(&head).await` | Publishes one verified full snapshot with head CAS; retains all source objects |
-| `compact_range(&head, range, level).await` | Compacts selected contiguous segments; verifies the range endpoint and final image before CAS |
-| `inherit(&source, &parent).await` | Starts a fresh epoch from a pinned predecessor; retains explicit origin locations and parent identity |
+| `compact_range(&head, range, level).await` | Downloads only selected bodies; proves exact reduced page bytes and the replacement indexed state before CAS |
+| `inherit(&source, &parent).await` | Admits limits before I/O; verifies destination indexes and object sizes, then pins a new epoch without downloading LTX bodies |
 | `resume(&head, path).await` | Full exact restore into a fresh session, continuing the inherited TXID/checksum |
 | `bundle(&head).await` | Verbatim LTX envelope, authenticated sidecars and exact bundle extents; CAS replacement, no fallback reads |
 | `replicate_bundle(&bundle, expected).await` | Direct capture publication from this repository/epoch's bundle rows, without standalone LTX uploads |
 | `paged(&head).await` | Builds an immutable page map from authenticated indexes without full LTX downloads |
 | `PagedDatabase::read_page(pgno).await` | Exact range GET, compressed-frame BLAKE3 and decoded-page checksum verification |
-| `PagedDatabase::open_sqlite()` | Read-only SQLite VFS over that pinned cut; SQL faults use a dedicated I/O thread/runtime |
+| `PagedDatabase::open_sqlite()` | Read-only SQLite VFS over that pinned cut; SQL faults use a shared, independently progressing I/O worker |
 | `PagedDatabase::open_writable(path)` | Writable sparse SQLite activation; checksum-seeded continuation without full download |
 | `read_run(first, max_pages).await` | Coalesced authenticated range reads, at most 1 MiB decoded |
 | `ManagedDb::hydrate_step(pages)` | Bounded background work through the same sparse VFS as foreground SQL |
@@ -199,6 +214,29 @@ An inherited manifest contains a flattened exact plan and pins the predecessor
 epoch/digest/position; it never rediscovers ancestors by listing or follows a
 mutable parent head. V2 hard-replaces the unreleased V1 shape; there is no
 compatibility reader. LTX wire encoding and checksums remain unchanged.
+
+Both native and bundled appends use one verifier. Every new LTX file is checked
+in full, including its digest, file CRC, header and decoded pages. Applying its
+authenticated index to the predecessor map proves coverage, truncation/regrowth,
+TXID continuity and each intermediate database checksum. Live publication receipts
+retain an immutable map; reopened receipts fetch hash-pinned indexes, never
+historical LTX bodies. A map is reusable only within the same `Replica` instance
+or its clones; another instance reconstructs it through its own store. Failed
+verification or CAS never mutates the predecessor map.
+
+Inheritance validates source identity and destination resource limits before
+any reads. It builds the map from destination indexes and HEAD-checks referenced
+native/bundle object sizes. It does not copy or eagerly verify their bodies.
+Sparse reads verify demanded frames; full restore verifies every body, while
+range compaction verifies selected bodies against their pinned indexes and proves
+the replacement state from the complete indexed plan. Thus same-size body corruption is detected
+when read, not necessarily at inheritance. Authorized manifests/indexes and
+continued object retention are required; this is not a background integrity scrub.
+Cold index loading still costs work proportional to history/pages. Live appends
+copy a directory of shared 256-page metadata blocks and only modified blocks;
+rolling checksums avoid a full locator scan. This reduces update cost, not total
+metadata residency.
+
 `bundle::Bundle` validates standalone envelopes, including multiple repository
 identities. `replicate_bundle` selects matching repository/epoch rows for direct
 publication; each repository retains the envelope in its own namespace. Head
@@ -211,6 +249,8 @@ or an already-committed head whose response was lost. Retain the batch, reload
 Never retry a domain SQL mutation automatically. Compaction uses the expected
 head token; a concurrent write makes the compaction CAS fail rather than rewind
 the head. It never deletes inputs, so pinned older heads remain readable.
+Due compaction levels also promote a singleton, allowing an idle repository's
+last segment to progress through L1/L2/L3 without requiring another write.
 
 S3/RustFS, GCS and Azure use the existing Crab provider implementations; only
 the recorded RustFS run below constitutes live cloud-protocol proof here.
@@ -230,27 +270,29 @@ page bytes. Never open a sparse file independently through the default SQLite VF
 
 `hydration()` reports resolved cut pages (hydrated or superseded by writes/truncate).
 `hydrate_step()` is a bounded owner-driven step, not a detached task. Call it on
-the database worker between foreground operations. Range read-ahead holds one
-verified run of at most 64 pages/1 MiB; it does not reproduce Celld's B-tree-child
-prediction heuristics. Use a blocking executor for SQL. Each open view owns one
-bounded-queue I/O thread with a separate Tokio runtime; remote page faults have
-an individual 30-second transport deadline (queue wait is additional).
+the database worker between foreground operations. Range read-ahead fetches at most
+64 pages/1 MiB into a shared FIFO cache capped at 8 MiB decoded payload, with
+additional bounded bookkeeping. It does not reproduce Celld's B-tree-child prediction.
+Use a blocking executor for SQL. Overlapping views share an independent Tokio
+I/O worker: process-wide by default, or per injected executor host and its clones.
+The worker permits 32 concurrent faults and 256 queued requests; a full queue
+fails with a capacity error. The 30-second fault deadline includes queued wait.
 `take_read_error()` (immutable) or `take_io_error()` (managed sparse writer)
 retains the underlying range/decode failure when SQLite reports an I/O code.
 One immutable VFS and one writable wrapper per selected base VFS live for the process;
 each active view is registered separately. Closing a view removes discovery,
 while each already-open SQLite file holds its own page-source reference. The
-last close frees that view's resources and joins its worker. Leaked SQL statements
+last close frees that view's source; the last view sharing a worker joins it.
+Closed-view cached bytes remain bounded and age out through FIFO eviction. Leaked SQL statements
 also leak their SQLite/page-source state, never leave dangling VFS pointers.
 SQL is trusted application code: SQLite's process-global view registry is not
 an authorization boundary. Do not expose arbitrary SQL/ATTACH to API callers.
 
-Full-chain replication verification currently re-downloads and replays the
-previous plan on every publish. Remote plan admission includes index bytes;
-the local `Limits` remain admission bounds, not RSS limits. Page maps retain one
-locator per live page plus fetched indexes during construction. These choices
-favor bounded, verifiable behavior; they are not qualified for large-cell or
-high-write-rate production workloads.
+Replication fully verifies new cuts against the predecessor map without historical
+body downloads. Remote plan admission includes index bytes; local `Limits` remain
+admission bounds, not RSS limits. Page maps retain one locator per live page plus
+fetched indexes during construction. The [scalability assessment](SCALABILITY.md)
+records what remains before qualifying 1K–10K active databases per node.
 
 ## Session, filesystem and execution rules
 
@@ -297,8 +339,8 @@ These are admission bounds, **not an RSS or disk quota**. Snapshot capture and
 restore materialize database-sized buffers. Plans retain compressed input bytes;
 verification/restore/compaction may hold multiple database images and page
 buffers. Each cut clones/scans the packed checksum index (eight bytes per page,
-about 2 MiB per GiB at 4 KiB pages). Compaction currently verifies full input and
-output images rather than providing bounded streaming memory. One failed capture
+about 2 MiB per GiB at 4 KiB pages). Compaction buffers selected decoded pages and
+encoded output rather than providing bounded streaming memory. One failed capture
 can leave additional bounded artifacts on disk before aggregate accounting
 rejects its result. The server must reserve headroom and throttle aggregate cells.
 
@@ -321,6 +363,16 @@ Both seams are needed to simulate local machine faults coherently.
 and blocking pool; `Worker::join` supervises teardown after queue closure. The
 worker still drives a Tokio runtime while idle so pooled provider connections
 continue progressing. Dispatch cancellation never rolls back side effects.
+Default hosts share 32 object-store request slots, up to 16 CPU job slots (capped
+by available CPUs), and two large-recovery slots. `with_io_slots`, `with_job_slots`
+and `with_recovery_slots` accept shared Tokio semaphores for explicit service
+budgets. Recovery admission precedes body downloads for restore, resume, bundle
+and compaction. Cancelled dispatched jobs retain their CPU/recovery reservation
+until the work finishes; returned database handles do not retain that reservation.
+Closed semaphores reject new work. These are concurrency ceilings, not byte-weighted
+memory admission, bounded caller task queues or admission for synchronous local APIs.
+SQL, capture, snapshot, activation and request scheduling still need host policy.
+
 The clock controls capture timestamps and checkpoint ages; compaction receives
 explicit monotonic times from its owner. No default provider or dependency
 versions change. See the [parity matrix](PARITY.md) for qualification boundaries.
@@ -342,6 +394,19 @@ Not implemented here: HTTP owner/control CAS, owner election, metrics export,
 remote retention/GC, encryption/key management, application schema or HTTP integration.
 
 ## Verification
+
+Latest scalability-audit proof (2026-09-13, macOS): 68 runtime tests and five
+doctests pass with `replica`; 29 runtime tests and five doctests pass with minimal
+features. Shared-worker/cache bounds, ordered concurrent reads, cancellation-safe
+admission, copy-on-write metadata and selected-body compaction have regression
+coverage. The isolated RustFS fixture passes separately in 5.66 seconds; its
+disposable container/bucket were removed. This is library correctness evidence,
+not a 1K–10K active-database or 1,000 TPS capacity result. See
+[SCALABILITY.md](SCALABILITY.md) for sizing assumptions and remaining gates.
+Strict Clippy passes on Rust 1.98 with `replica`; formatting passes. The scoped
+architecture checks still reject missing `crab-ltx` release/dependency policy
+entries and its `object_store/fs` feature ownership. Those integration gates are
+not waived or qualified by this test run; policy inventories remain unchanged.
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-b347" cargo test -p crab-ltx --locked
@@ -393,6 +458,19 @@ for both feature sets and formatting. The isolated RustFS fixture passed again
 in 6.36 seconds; its disposable container/bucket were removed. The page-size
 fixture now persists its header and asserts the actual page size before testing
 partial writes, preventing a default-size run from masquerading as coverage.
+
+Publication/lazy-takeover corrections (same date): 58 runtime tests and 5
+compiling doctests pass with `replica`; 29 runtime tests pass without default
+features. New regressions cover snapshot-cut ownership, pre-I/O inheritance
+limits, singleton promotion, native/bundle appends with live and reopened heads,
+cross-store cache isolation, and lazy corruption detection. Live appends read
+zero history bytes; cold appends read only indexes. A 2 MB predecessor opens as
+writable sparse SQL with less than 500 KB total inheritance/activation reads in
+the instrumented fixture. False post-state checksums with valid file CRCs remain
+rejected on both append paths. Strict Clippy passes on Rust 1.97 for both feature
+sets. The separate isolated RustFS round trip passed in 4.68 seconds; its
+disposable container and bucket were removed. These are bounded fixtures, not
+production throughput, memory or power-loss qualification.
 
 RustFS image used:
 `rustfs/rustfs@sha256:b7014e0ce2bc703c1316b3ef760e29dfae61fe4a50d1a66fa89638e0f8ea211f`.

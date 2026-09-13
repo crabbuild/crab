@@ -6,104 +6,10 @@ use rusqlite::{Connection, OpenFlags, ffi};
 use std::{
     collections::HashMap,
     ffi::{CStr, c_char, c_int, c_void},
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex, OnceLock},
 };
 
-type Request = (u32, mpsc::SyncSender<Result<Vec<u8>>>);
-
-pub(crate) struct Io {
-    sender: Option<tokio::sync::mpsc::Sender<Request>>,
-    gate: Mutex<()>,
-    worker: Option<Box<dyn crate::environment::Worker>>,
-}
-
-impl Io {
-    pub(crate) fn new(database: PagedDatabase) -> Result<Self> {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel::<Request>(1);
-        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-        let host = database.host();
-        let worker = host.executor.start_worker(Box::new(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let _ = ready_tx.send(Err(error));
-                    return;
-                }
-            };
-            if ready_tx.send(Ok(())).is_err() {
-                return;
-            }
-            let mut cache = std::collections::BTreeMap::new();
-            // Keep the driver running between faults: pooled provider
-            // connections can be reused by uploads on another runtime.
-            // Blocking this thread on std::mpsc would strand those requests.
-            runtime.block_on(async {
-                while let Some((pgno, reply)) = receiver.recv().await {
-                    if let Some(page) = cache.remove(&pgno) {
-                        let _ = reply.send(Ok(page));
-                        continue;
-                    }
-                    // A separate runtime avoids deadlocking a caller's current-thread
-                    // runtime. A stalled provider cannot hold a SQLite read forever.
-                    let result = async {
-                        tokio::time::timeout(
-                            std::time::Duration::from_secs(30),
-                            database.read_run(pgno, 64),
-                        )
-                        .await
-                        .map_err(|e| CrabError::Other(Box::new(e)))?
-                    }
-                    .await;
-                    let result = result.and_then(|run| {
-                        // Only one bounded decoded run is retained. A failed
-                        // prefetch never inserts unchecked bytes into the cache.
-                        cache.clear();
-                        cache.extend(run);
-                        cache.remove(&pgno).ok_or(CrabError::LTXCorrupted)
-                    });
-                    let _ = reply.send(result);
-                }
-            });
-        }))?;
-        let io = Self {
-            sender: Some(sender),
-            gate: Mutex::new(()),
-            worker: Some(worker),
-        };
-        ready_rx
-            .recv()
-            .map_err(|e| CrabError::Other(Box::new(e)))??;
-        Ok(io)
-    }
-
-    pub(crate) fn page(&self, pgno: u32) -> Result<Vec<u8>> {
-        // One request at a time makes try_send bounded and nonblocking even
-        // when SQLite is called inside a runtime. The I/O worker never takes it.
-        let _gate = self
-            .gate
-            .lock()
-            .map_err(|_| CrabError::InvalidState("paged request gate poisoned"))?;
-        let (reply, response) = mpsc::sync_channel(1);
-        self.sender
-            .as_ref()
-            .ok_or(CrabError::InvalidState("paged I/O closed"))?
-            .try_send((pgno, reply))
-            .map_err(|e| CrabError::Other(Box::new(e)))?;
-        response.recv().map_err(|e| CrabError::Other(Box::new(e)))?
-    }
-}
-
-impl Drop for Io {
-    fn drop(&mut self) {
-        self.sender.take();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
+use crate::paged_io::Io;
 
 struct App {
     io: Io,

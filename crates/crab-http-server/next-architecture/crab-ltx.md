@@ -14,14 +14,14 @@ manifests to owner/head CAS, UI durability and hard cutover remain future implem
 | --- | --- |
 | SQLite lifecycle | `ManagedDb` owns three connections and a serialized transaction callback; WAL read-lock and managed checkpoints retained |
 | Capture | Checksum-bearing sized-block LTX, all cuts returned; SQLite WAL-hook frame boundary checked before checkpointing |
-| Snapshot | Full local snapshot at the captured endpoint |
+| Snapshot | Full local snapshot plus ownership of every newly generated capture cut |
 | Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified bytes; new-file installation |
-| Compaction | Full snapshots and exact delta ranges; range endpoint and final image comparison; caller-driven level scheduling |
+| Compaction | Full snapshots and selected-body delta ranges; exact reduced bytes and replacement indexed state verified; caller-driven level scheduling |
 | Remote replication (`replica` feature) | Existing `crab-storage` transport; immutable LTX/index/manifest objects; conditional epoch-head publication |
 | Remote recovery/compaction | Pinned cross-epoch inheritance, exact restore/resume, bundle locations and compaction guarded by head CAS |
 | Paged SQL | Authenticated immutable views and writable sparse activation; incremental hydration, bounded range read-ahead |
 | Failure/retention | Capture failure fences the handle; fresh-directory reactivation; exact published local cuts can be pruned |
-| Host facilities | Injectable local filesystem through claims/install/pruning/sparse creation; named SQLite base VFS, clock, blocking dispatch and independent paged worker lifecycle |
+| Host facilities | Injectable filesystem/base VFS/clock/executor; shared page-fault worker/cache and I/O/job/recovery concurrency budgets |
 | Not wired | HTTP owner/control publication, leases/routing, domain SQL, server executor and responses |
 
 Source and usage: [crate README](../../crab-ltx/README.md),
@@ -35,7 +35,8 @@ exercises upload/head publication, source loss, paged SQL and remote compaction.
 ### Remote library versus HTTP authority
 
 The optional `Replica` is an exact-plan orchestration layer, not a repository
-actor or lease service. It verifies the complete snapshot/delta chain, uploads
+actor or lease service. It verifies new cuts against an authenticated predecessor
+page map (reused by live receipts, rebuilt from indexes after restart), uploads
 content-addressed LTX and authenticated page indexes, persists an immutable
 manifest, then conditionally changes a per-epoch head. `ReplicaHead::manifest_digest()`
 is the frozen recovery root; `open_exact()` reopens it without reading an
@@ -50,6 +51,10 @@ mutable epoch head. There is no independent lease acquisition or remote GC.
 The library now supports both immutable views and writable sparse activation.
 `PagedDatabase::open_writable` seeds the checksum index from authenticated page
 metadata and continues the inherited TXID without downloading the full database.
+`inherit` admits destination limits before I/O, verifies destination indexes and
+referenced object sizes, and publishes the pinned parent without reading bodies.
+Body corruption fails on authenticated page demand; full restore still verifies
+the complete chain. This requires trusted publication metadata and object retention.
 Foreground faults and owner-driven hydration share write/truncate bookkeeping;
 capture/snapshot reads also use the VFS. Each frame is BLAKE3/CRC verified.
 The existing full-restore server activation protocol remains a valid initial
@@ -63,8 +68,17 @@ and sparse activation. Its filesystem and SQLite base VFS must share a namespace
 the VFS registration must remain process-lifetime. The executor separates finite
 blocking jobs from independently progressing, joined page-fault workers. Do not
 queue those workers behind the SQL threads synchronously waiting for them.
-These hooks enable host fault injection; they do not implement server admission,
-owner timers, distributed fencing or a deterministic cluster simulator.
+Default hosts share bounded I/O/job/recovery concurrency; custom shared semaphores
+set service-specific ceilings. Dispatched jobs retain admission after caller
+cancellation. Views share a bounded page cache and I/O worker, not one thread each.
+These hooks do not implement SQL admission, resident-database eviction, owner
+timers, distributed fencing or a deterministic cluster simulator.
+
+The requested capacity is 1K–10K active databases per node, 100–5,000 MB each,
+with 1,000 TPS (aggregate per node assumed pending confirmation). This is a target,
+not current qualification. The [scalability assessment](../../crab-ltx/SCALABILITY.md)
+records measured regressions, current resource bounds and the required metadata,
+streaming and node-level qualification work. Raising `Limits` alone is insufficient.
 
 The [Celld comparison](celld-and-rust.md) explains the system-level differences.
 This document owns the reusable crate boundary and the changes needed to meet
@@ -323,7 +337,7 @@ impl ManagedDb {
         operation: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
     ) -> Result<T>;
     fn capture(&mut self) -> Result<CaptureBatch>;
-    fn snapshot(&mut self, destination: &Path) -> Result<LocalSegment>;
+    fn snapshot(&mut self, destination: &Path) -> Result<(LocalSegment, CaptureBatch)>;
     fn close(self) -> Result<()>;
 }
 
@@ -439,8 +453,10 @@ assumed property of the reused APIs.
 ## Compaction and cleanup
 
 The implemented API uses the upstream compactor on a verified snapshot chain
-or an exact contiguous delta span. It compares the range endpoint and final
-restored bytes with the original plan before publication. Preserve
+or an exact contiguous delta span. Remote range compaction authenticates the original
+indexed plan, downloads only selected bodies, binds them to their index digests,
+compares the output with independently reduced selected page bytes, and verifies
+the replacement indexed plan before publication. Preserve
 the final database state/checksum and encode one qualified representation.
 The library returns a local immutable candidate. The server uploads it and
 publishes a replacement manifest with the same application revision; a failed

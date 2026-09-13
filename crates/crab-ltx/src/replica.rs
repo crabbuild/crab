@@ -10,7 +10,9 @@ use crate::{CaptureBatch, CrabError, Limits, Position, Result, SegmentInfo, Veri
 
 const HEAD_BYTES: u64 = 1 << 20;
 
+mod append;
 mod bundles;
+pub(crate) mod io;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +58,9 @@ pub struct ReplicaHead {
     etag: Option<ETag>,
     digest: [u8; 32],
     key: String,
+    // An immutable, verified page map is scoped to this replica instance. A
+    // receipt used with another store must rebuild its indexes at that store.
+    pages: Option<crate::PagedDatabase>,
 }
 
 impl ReplicaHead {
@@ -88,6 +93,7 @@ impl ReplicaHead {
 /// No operation lists objects, elects an owner, or deletes source artifacts.
 #[derive(Clone)]
 pub struct Replica {
+    pub(crate) identity: std::sync::Arc<()>,
     pub(crate) host: crate::Host,
     layout: StoreLayout<Store>,
     epoch: String,
@@ -115,7 +121,7 @@ impl Replica {
                 || bytes.saturating_add(segment.info.size_bytes) > self.limits.max_file_bytes
                 || count == 128
             {
-                if count >= 2 {
+                if count > 0 {
                     return Ok(Some(start..index));
                 }
                 count = 0;
@@ -129,7 +135,7 @@ impl Replica {
                 count += 1;
             }
         }
-        Ok((count >= 2).then_some(start..head.segment_count()))
+        Ok((count > 0).then_some(start..head.segment_count()))
     }
     /// Binds a caller-owned repository layout and unique epoch to a replica.
     pub fn new(layout: StoreLayout<Store>, epoch: &str, limits: Limits) -> Result<Self> {
@@ -139,6 +145,7 @@ impl Replica {
             ));
         }
         Ok(Self {
+            identity: std::sync::Arc::new(()),
             host: crate::Host::default(),
             layout,
             epoch: epoch.to_owned(),
@@ -148,6 +155,7 @@ impl Replica {
 
     /// Reads only this epoch's named head; absence is not inferred from a listing.
     pub async fn head(&self) -> Result<Option<ReplicaHead>> {
+        let _permit = self.host.io_permit().await?;
         let key = self.path("head.json");
         let (body, etag) = match self
             .layout
@@ -166,6 +174,7 @@ impl Replica {
             etag: Some(etag),
             digest: *blake3::hash(&body).as_bytes(),
             key: key.to_string(),
+            pages: None,
         }))
     }
 
@@ -174,6 +183,7 @@ impl Replica {
     /// The returned historical view has no mutation token. Restore and paging
     /// accept it; publication/compaction require a current `head()` receipt.
     pub async fn open_exact(&self, digest: [u8; 32]) -> Result<ReplicaHead> {
+        let _permit = self.host.io_permit().await?;
         let key = self.object_path(&digest, "manifest.json");
         let (body, _) = self
             .layout
@@ -190,6 +200,7 @@ impl Replica {
             etag: None,
             digest,
             key: self.path("head.json").to_string(),
+            pages: None,
         })
     }
 
@@ -199,7 +210,8 @@ impl Replica {
     /// error or cancellation: immutable PUTs are retryable, but a head PUT may
     /// already have committed. Re-read `head()` and reconcile the exact plan
     /// before another write; never acknowledge an error as remote durability.
-    /// Verification currently replays the bounded complete chain on each call.
+    /// New cuts are fully verified against an authenticated predecessor page map.
+    /// Reopened heads fetch indexes only; live receipts reuse their immutable map.
     pub async fn replicate(
         &self,
         batch: &CaptureBatch,
@@ -217,42 +229,29 @@ impl Replica {
                 .cloned()
                 .ok_or(CrabError::TxNotAvailable);
         }
-        let mut remote = expected
-            .map(|h| h.manifest.segments.clone())
-            .unwrap_or_default();
-        if remote.len().saturating_add(batch.segments.len()) > self.limits.max_segments {
-            return Err(CrabError::Limit("plan segments"));
-        }
-        let mut inputs = self.download(&remote).await?;
-        let mut infos: Vec<_> = remote.iter().map(|s| s.info.clone()).collect();
+        self.admit_append(
+            expected,
+            batch.segments.iter().map(|s| s.info().clone()),
+            batch.position,
+        )?;
         let local = batch.segments.clone();
-        let limits = self.limits;
-        let target = batch.position;
-        let old_count = inputs.len();
         let host = self.host.clone();
-        let plan = self
+        let inputs = self
             .host
             .run(move || {
-                let mut total: u64 = inputs.iter().map(|b| b.len() as u64).sum();
-                for segment in local {
-                    total = total
-                        .checked_add(segment.info().size_bytes)
-                        .ok_or(CrabError::Limit("plan bytes"))?;
-                    if total > limits.max_plan_bytes
-                        || segment.info().size_bytes > limits.max_file_bytes
-                    {
-                        return Err(CrabError::Limit("plan bytes"));
-                    }
-                    inputs.push(host.read(segment.path(), segment.info().size_bytes)?);
-                    infos.push(segment.info().clone());
-                }
-                VerifiedLocalPlan::from_bytes(inputs, &infos, target, limits)
+                local
+                    .into_iter()
+                    .map(|segment| {
+                        let bytes = host.read(segment.path(), segment.info().size_bytes)?;
+                        Ok((bytes, segment.info().clone(), None))
+                    })
+                    .collect::<Result<Vec<_>>>()
             })
             .await??;
-        for (bytes, local) in plan.inputs.into_iter().skip(old_count).zip(&batch.segments) {
-            remote.push(self.upload(bytes, local.info().clone()).await?);
-        }
-        self.publish(remote, target, expected).await
+        let (prepared, pages) = self
+            .prepare_append(inputs, expected, batch.position)
+            .await?;
+        self.publish_append(prepared, pages, expected).await
     }
 
     /// Downloads and verifies a pinned head, then atomically restores a new file.
@@ -260,10 +259,13 @@ impl Replica {
     /// Once installation enters the blocking executor it is not abortable.
     /// Keep the destination exclusive and supervise this future through completion.
     pub async fn restore(&self, head: &ReplicaHead, destination: &Path) -> Result<Position> {
-        let plan = self.verified(head).await?;
+        self.check_head(head)?;
+        let scope = self.recovery_scope().await?;
+        let plan = scope.verified(head).await?;
         let destination = destination.to_owned();
         let host = self.host.clone();
-        self.host
+        scope
+            .host
             .run(move || host.restore(&plan, &destination))
             .await?
     }
@@ -278,7 +280,7 @@ impl Replica {
             .await
     }
 
-    /// Replaces an exact contiguous manifest span, proving both endpoint images.
+    /// Replaces an exact span with a byte-verified merge and authenticated endpoint.
     ///
     /// Levels 1 through 8 merge lower-level files; level 9 is a full snapshot.
     /// All inputs remain available to pinned historical manifests.
@@ -288,6 +290,20 @@ impl Replica {
         range: std::ops::Range<usize>,
         level: u8,
     ) -> Result<ReplicaHead> {
+        self.check_head(expected)?;
+        self.recovery_scope()
+            .await?
+            .compact_range_inner(expected, range, level)
+            .await
+    }
+
+    async fn compact_range_inner(
+        &self,
+        expected: &ReplicaHead,
+        range: std::ops::Range<usize>,
+        level: u8,
+    ) -> Result<ReplicaHead> {
+        self.check_head(expected)?;
         if expected.etag.is_none() {
             return Err(CrabError::InvalidState("historical head is read-only"));
         }
@@ -303,63 +319,105 @@ impl Replica {
         {
             return Err(CrabError::InvalidState("invalid compaction level or range"));
         }
-        let plan = self.verified(expected).await?;
-        let selected = range.clone();
+        // Validate every original index state, including cuts removed by this
+        // compaction. Only the selected LTX bodies need downloading and merging.
+        self.paged(expected).await?;
+        let bytes = self.download(inputs).await?;
+        let selected = inputs.to_vec();
+        let limits = self.limits;
         let (bytes, info) = self
             .host
-            .run(move || crate::recovery::compact_range_bytes(&plan, selected))
+            .run(move || {
+                for (segment, bytes) in selected.iter().zip(&bytes) {
+                    let index = crate::paged::encode_index(bytes)?;
+                    if *blake3::hash(&index).as_bytes() != segment.index_hash {
+                        return Err(CrabError::ChecksumMismatch);
+                    }
+                }
+                let infos: Vec<_> = selected.iter().map(|s| s.info.clone()).collect();
+                crate::recovery::compact_inputs(&bytes, &infos, limits)
+            })
             .await??;
         let mut segment = self.upload(bytes, info).await?;
         segment.level = level;
         let mut segments = expected.manifest.segments.clone();
         segments.splice(range, [segment]);
-        self.publish(segments, expected.position(), Some(expected))
-            .await
+        let pages = crate::paged::build(self.clone(), &segments, expected.position()).await?;
+        let mut head = self
+            .publish(segments, expected.position(), Some(expected))
+            .await?;
+        head.pages = Some(pages);
+        Ok(head)
     }
 
     /// Starts a fresh epoch from an explicitly pinned predecessor in this repository.
     ///
-    /// Copies the verified plan, not the data objects. Later writes to the old
-    /// epoch cannot alter this root. Epoch allocation and fencing are caller-owned.
+    /// Admits the pinned plan before I/O, verifies destination indexes and object
+    /// sizes, and defers body verification to authenticated page reads. No data
+    /// objects are copied. Epoch allocation, fencing and retention are caller-owned.
     pub async fn inherit(&self, source: &Replica, parent: &ReplicaHead) -> Result<ReplicaHead> {
         if self.epoch == source.epoch || self.layout.repo_path("") != source.layout.repo_path("") {
             return Err(CrabError::InvalidState(
                 "invalid predecessor repository or epoch",
             ));
         }
-        source.verified(parent).await?;
-        // Verify against the destination store too: identical repository paths
-        // on different stores must not publish a root with missing objects.
+        source.check_head(parent)?;
         let segments = parent.manifest.segments.clone();
-        let inputs = self.download(&segments).await?;
-        let infos: Vec<_> = segments.iter().map(|s| s.info.clone()).collect();
-        let limits = self.limits;
         let position = parent.position();
-        self.host
-            .run(move || VerifiedLocalPlan::from_bytes(inputs, &infos, position, limits))
-            .await??;
-        self.publish_with_parent(
-            segments,
+        let predecessor = Some(Parent {
+            epoch: source.epoch.clone(),
+            digest: parent.digest,
             position,
-            None,
-            Some(Parent {
-                epoch: source.epoch.clone(),
-                digest: parent.digest,
-                position,
-            }),
-        )
-        .await
+        });
+        self.validate_manifest(&Manifest {
+            version: 2,
+            epoch: self.epoch.clone(),
+            position,
+            segments: segments.clone(),
+            parent: predecessor.clone(),
+        })?;
+        // Resolve against the destination, not a source receipt's cached map.
+        // Equal repository paths do not prove equal backing stores or routes.
+        let pages = crate::paged::build(self.clone(), &segments, position).await?;
+        for segment in &segments {
+            let (key, size) = match &segment.bundle {
+                Some(bundle) => (
+                    self.epoch_object_path(&segment.epoch, &bundle.hash, "bundle"),
+                    bundle.size,
+                ),
+                None => (
+                    self.epoch_object_path(&segment.epoch, &segment.info.blake3, "ltx"),
+                    segment.info.size_bytes,
+                ),
+            };
+            let _permit = self.host.io_permit().await?;
+            if self.layout.store().head(&key).await?.size != size {
+                return Err(CrabError::ChecksumMismatch);
+            }
+        }
+        let mut head = self
+            .publish_with_parent(segments, position, None, predecessor)
+            .await?;
+        head.pages = Some(pages);
+        Ok(head)
     }
 
     /// Restores an exact cut and starts a fresh local writer continuing its TXID.
     pub async fn resume(&self, head: &ReplicaHead, destination: &Path) -> Result<crate::ManagedDb> {
-        let plan = self.verified(head).await?;
+        self.check_head(head)?;
+        let scope = self.recovery_scope().await?;
+        let plan = scope.verified(head).await?;
         let destination = destination.to_owned();
         let limits = self.limits;
         let host = self.host.clone();
-        self.host
+        scope
+            .host
             .run(move || crate::ManagedDb::resume_with_host(&plan, &destination, limits, host))
             .await?
+    }
+
+    async fn recovery_scope(&self) -> Result<Self> {
+        Ok(self.clone().with_host(self.host.for_recovery().await?))
     }
 
     /// Opens a pinned page map without downloading LTX page bodies.
@@ -385,11 +443,11 @@ impl Replica {
     }
 
     async fn download(&self, segments: &[RemoteSegment]) -> Result<Vec<Vec<u8>>> {
-        let mut inputs = Vec::new();
-        for segment in segments {
-            inputs.push(self.frame(segment, 0, segment.info.size_bytes).await?);
-        }
-        Ok(inputs)
+        io::ordered(segments.iter().cloned().map(|segment| {
+            let replica = self.clone();
+            async move { replica.frame(&segment, 0, segment.info.size_bytes).await }
+        }))
+        .await
     }
 
     async fn upload(&self, bytes: Vec<u8>, info: SegmentInfo) -> Result<RemoteSegment> {
@@ -405,9 +463,9 @@ impl Replica {
         let index_hash = *blake3::hash(&index).as_bytes();
         let index_size = index.len() as u64;
         let key = self.object_path(&info.blake3, "ltx");
-        self.layout.store().put(&key, Bytes::from(bytes)).await?;
+        self.put(&key, Bytes::from(bytes)).await?;
         let key = self.object_path(&index_hash, "idx");
-        self.layout.store().put(&key, Bytes::from(index)).await?;
+        self.put(&key, Bytes::from(index)).await?;
         Ok(RemoteSegment {
             epoch: self.epoch.clone(),
             level: 0,
@@ -458,7 +516,8 @@ impl Replica {
         // Persist a content-addressed recovery root before the mutable pointer;
         // external control can pin it without trusting a former owner's head.
         let manifest_key = self.object_path(&digest, "manifest.json");
-        self.layout.store().put(&manifest_key, body.clone()).await?;
+        self.put(&manifest_key, body.clone()).await?;
+        let _permit = self.host.io_permit().await?;
         let etag = match expected {
             Some(head) => {
                 self.layout
@@ -484,6 +543,7 @@ impl Replica {
             etag: Some(etag),
             digest,
             key: key.to_string(),
+            pages: None,
         })
     }
 
@@ -560,6 +620,7 @@ impl Replica {
     }
 
     pub(crate) async fn index(&self, segment: &RemoteSegment) -> Result<Vec<u8>> {
+        let _permit = self.host.io_permit().await?;
         let key = self.epoch_object_path(&segment.epoch, &segment.index_hash, "idx");
         let (bytes, _) = self
             .layout
@@ -597,6 +658,7 @@ impl Replica {
         };
         let start = base.checked_add(offset).ok_or(CrabError::LTXCorrupted)?;
         let end = base.checked_add(end).ok_or(CrabError::LTXCorrupted)?;
+        let _permit = self.host.io_permit().await?;
         let bytes = self.layout.store().range_get(&key, start..end).await?;
         if bytes.len() as u64 != size {
             return Err(CrabError::LTXCorrupted);

@@ -188,7 +188,12 @@ pub fn compact_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<Loc
 }
 
 pub(crate) fn compact_bytes(plan: &VerifiedLocalPlan) -> Result<(Vec<u8>, SegmentInfo)> {
-    compact_range_bytes(plan, 0..plan.inputs.len())
+    let infos = plan
+        .inputs
+        .iter()
+        .map(|bytes| ltx::decode_file(bytes).map(|file| SegmentInfo::from_decoded(bytes, &file)))
+        .collect::<Result<Vec<_>>>()?;
+    compact_inputs(&plan.inputs, &infos, plan.limits)
 }
 
 pub(crate) fn continuation(plan: &VerifiedLocalPlan) -> Result<(PageChecksums, u32, u32)> {
@@ -207,61 +212,86 @@ pub(crate) fn continuation(plan: &VerifiedLocalPlan) -> Result<(PageChecksums, u
     Ok((checksums, page_size, count))
 }
 
-pub(crate) fn compact_range_bytes(
-    plan: &VerifiedLocalPlan,
-    range: std::ops::Range<usize>,
+// Callers prove predecessor/intermediate database states using either an owned
+// verified plan or authenticated indexes. This proves the merge's page bytes
+// independently, without materializing unrelated prefix/suffix database images.
+pub(crate) fn compact_inputs(
+    inputs: &[Vec<u8>],
+    infos: &[SegmentInfo],
+    limits: Limits,
 ) -> Result<(Vec<u8>, SegmentInfo)> {
-    let inputs = plan
-        .inputs
-        .get(range.clone())
-        .filter(|inputs| !inputs.is_empty())
-        .ok_or(CrabError::TxNotAvailable)?;
-    let readers = plan.inputs[range.clone()]
+    let first = infos.first().ok_or(CrabError::TxNotAvailable)?;
+    let last = infos.last().ok_or(CrabError::TxNotAvailable)?;
+    if inputs.len() != infos.len() || inputs.len() > limits.max_segments {
+        return Err(CrabError::Limit("compaction inputs"));
+    }
+    let mut expected = std::collections::BTreeMap::new();
+    let mut previous = None;
+    let mut total = 0u64;
+    for (bytes, info) in inputs.iter().zip(infos) {
+        total = total
+            .checked_add(bytes.len() as u64)
+            .ok_or(CrabError::Limit("plan bytes"))?;
+        if total > limits.max_plan_bytes {
+            return Err(CrabError::Limit("plan bytes"));
+        }
+        verify_segment(bytes, info, limits)?;
+        if info.page_size != first.page_size
+            || previous.is_some_and(|position: Position| {
+                position.txid.checked_add(1) != Some(info.min_txid)
+                    || position.checksum != info.pre_checksum
+            })
+        {
+            return Err(CrabError::LTXCorrupted);
+        }
+        expected.retain(|page, _| *page <= info.database_pages);
+        expected.extend(ltx::decode_file_with_pages(bytes)?.1);
+        previous = Some(info.position());
+    }
+    let readers = inputs
         .iter()
         .map(|bytes| Cursor::new(bytes.as_slice()))
         .collect();
-    let mut compactor = crate::compactor::Compactor::new(Vec::new(), readers);
+    let writer = BoundedWriter {
+        bytes: Vec::new(),
+        limit: limits.max_file_bytes,
+    };
+    let mut compactor = crate::compactor::Compactor::new(writer, readers);
     compactor.compact()?;
-    let bytes = compactor.into_writer();
-    if bytes.len() as u64 > plan.limits.max_file_bytes {
-        return Err(CrabError::Limit("compacted file bytes"));
-    }
-    let file = ltx::decode_file(&bytes)?;
+    let bytes = compactor.into_writer().bytes;
+    let (file, pages) = ltx::decode_file_with_pages(&bytes)?;
     let info = SegmentInfo::from_decoded(&bytes, &file);
-    let compacted = VerifiedLocalPlan {
-        inputs: plan.inputs[..range.start]
+    if info.min_txid != first.min_txid
+        || info.pre_checksum != first.pre_checksum
+        || info.position() != last.position()
+        || info.database_pages != last.database_pages
+        || info.page_size != first.page_size
+        || !pages
             .iter()
-            .cloned()
-            .chain(std::iter::once(bytes.clone()))
-            .chain(plan.inputs[range.end..].iter().cloned())
-            .collect(),
-        position: plan.position,
-        limits: plan.limits,
-    };
-    if compacted.image()? != plan.image()? {
-        return Err(CrabError::ChecksumMismatch);
-    }
-    // Verify the range endpoint as well as the final image: a later snapshot
-    // must not conceal an invalid intermediate compaction.
-    let target = ltx::decode_file(inputs.last().ok_or(CrabError::TxNotAvailable)?)?;
-    let position = Position {
-        txid: target.header.max_txid.0,
-        checksum: target.trailer.post_apply_checksum,
-    };
-    let original_prefix = VerifiedLocalPlan {
-        inputs: plan.inputs[..range.end].to_vec(),
-        position,
-        limits: plan.limits,
-    };
-    let compacted_prefix = VerifiedLocalPlan {
-        inputs: compacted.inputs[..range.start + 1].to_vec(),
-        position,
-        limits: plan.limits,
-    };
-    if original_prefix.image()? != compacted_prefix.image()? {
+            .map(|(page, data)| (*page, data.as_slice()))
+            .eq(expected.iter().map(|(page, data)| (*page, data.as_slice())))
+    {
         return Err(CrabError::ChecksumMismatch);
     }
     Ok((bytes, info))
+}
+
+struct BoundedWriter {
+    bytes: Vec<u8>,
+    limit: u64,
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if (self.bytes.len() as u64).saturating_add(bytes.len() as u64) > self.limit {
+            return Err(std::io::Error::other("compacted file byte limit exceeded"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) fn reject_sidecars(path: &Path, host: &crate::Host) -> Result<()> {

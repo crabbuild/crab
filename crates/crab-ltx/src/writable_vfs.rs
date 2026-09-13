@@ -1,7 +1,7 @@
 //! Writable sparse-file adaptation of Celld paged_vfs.rs; see UPSTREAM.md.
 //! A static VFS and per-open Arc ownership keep SQLite discovery memory-safe.
 
-use crate::{CrabError, PagedDatabase, Result, paged_vfs::Io};
+use crate::{CrabError, PagedDatabase, Result, paged_io::Io};
 use rusqlite::{Connection, ffi};
 use std::{
     collections::HashMap,

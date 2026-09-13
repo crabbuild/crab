@@ -366,6 +366,30 @@ mod remote {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn many_views_share_one_host_io_worker() {
+        let (_directory, _faults, host, mut writer) = fixture();
+        let jobs = Arc::new(Jobs::default());
+        let replica = replica(host.with_executor(jobs.clone()));
+        let head = replica
+            .replicate(&writer.capture().unwrap(), None)
+            .await
+            .unwrap();
+        let mut views = Vec::new();
+        for _ in 0..16 {
+            views.push(replica.paged(&head).await.unwrap().open_sqlite().unwrap());
+        }
+        assert_eq!(
+            jobs.started.load(Ordering::SeqCst),
+            1,
+            "view count must not multiply I/O threads"
+        );
+        drop(views);
+        drop(head);
+        drop(replica);
+        assert_eq!(jobs.joined.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn published_pruning_retries_after_removal_but_failed_parent_sync() {
         let (_directory, faults, host, mut writer) = fixture();
         let replica = replica(host);

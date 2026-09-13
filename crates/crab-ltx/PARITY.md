@@ -9,19 +9,20 @@ are in [UPSTREAM.md](UPSTREAM.md); executable usage is in [README.md](README.md)
 
 | Celld capability | Crab implementation | Evidence / adaptation |
 | --- | --- | --- |
-| Managed WAL capture and snapshots | `ManagedDb::{transaction,capture,snapshot}` | Real SQLite, WAL-hook committed boundary, CRC oracle, process kill and source loss |
+| Managed WAL capture and snapshots | `ManagedDb::{transaction,capture,snapshot}` | Snapshot returns its newly generated capture batch as well as the full artifact; publish/snapshot/publish regression |
 | Checkpoint modes | `ManagedDb::checkpoint`, four `CheckpointMode` variants | Every generated cut returned; errors fence the writer |
 | File/object-store transport | `Replica` with existing `crab-storage::Store` | RustFS publication/CAS proof; filesystem CAS updates fail closed when unsupported |
 | Exact restore | `VerifiedLocalPlan`, `Replica::{open_exact,restore}` | Every intermediate checksum and exact object digest verified |
-| Epoch-chain continuation | `Replica::inherit`, `resume`, sparse activation | Flattened pinned plan plus parent identity, explicit object epochs; late old-epoch writes ignored |
+| Epoch-chain continuation | `Replica::inherit`, `resume`, sparse activation | Pre-I/O destination admission; index-only inheritance plus object HEAD checks; late old-epoch writes ignored |
 | Bundle envelope | `bundle::Bundle::{encode,decode,segment}` | CRB1 retains repository/string epoch, exact TXID range and digest; bounded rows, no overlaps/trailing payload |
 | Bundle-backed transport | `Replica::{bundle,replicate_bundle}` and explicit manifest extents | Direct matching-row publication; restore, paging and compaction share one resolver; corrupt bundle never falls back to native objects |
-| Range/level compaction | `Replica::compact_range`, `compact` | Both span endpoint and final image compared; publication CAS retains source objects |
-| Level timing/selection | `CompactionSchedule` | Owner-driven monotonic deadlines; at most 128 files per selected run; no listing discovery |
+| Range/level compaction | `Replica::compact_range`, `compact` | Selected bodies only; exact reduced pages plus complete indexed-state verification; publication CAS retains source objects |
+| Level timing/selection | `CompactionSchedule` | Owner-driven monotonic deadlines; at most 128 files per run, including singleton promotion; no listing discovery |
 | Paged reads | `PagedDatabase::{read_page,read_run,open_sqlite}` | Hash-pinned indexes and per-frame BLAKE3/CRC; range limits and short-read tests |
 | Writable sparse VFS | `PagedDatabase::open_writable` | Fresh sparse file, inherited page CRC seed, normal SQLite WAL/SHM/locks; capture reads also traverse VFS |
 | Incremental hydration | `ManagedDb::{hydration,hydrate_step}` | Bounded owner-paced work; writes/truncations supersede old cut pages; failed fetches remain retryable |
-| Prefetch/read-ahead | Coalesced verified runs plus one-run I/O cache | Up to 64 pages/1 MiB; conservative adjacent-page policy instead of Celld's B-tree prediction |
+| Prefetch/read-ahead | Coalesced verified runs plus shared FIFO cache | Up to 64 pages/1 MiB per run, 8 MiB cached decoded payload; no Celld B-tree prediction |
+| Shared resource admission | Shared worker, I/O/job/recovery semaphores on `Host` | Bounded concurrent ordered reads; cancellation retains permits with dispatched jobs, not long-lived handles |
 | Local restart / release | Exact-root local resume (also without `replica`) and `prune_published` | Fresh directory; no promotion of unacknowledged leftovers; pruning retries ambiguous directory sync |
 | Host facilities | `Host`, `FileSystem`, `FileIo`, `Clock`, `Executor`, `Worker`, named SQLite base VFS | Injectable claims/install/sparse allocation, capture and WAL observation; worker startup/join and blocking dispatch; scope below |
 
@@ -33,6 +34,8 @@ are in [UPSTREAM.md](UPSTREAM.md); executable usage is in [README.md](README.md)
 2. **Exact manifests replace discovery.** No bucket listing, latest-TXID heuristic,
    stale epoch search or local-database fallback determines a restore plan.
    Inheritance pins the predecessor digest and copies its exact descriptors.
+   Destination index digests, coverage and intermediate checksums are verified
+   before publication; body hashes are verified on page demand, not eagerly.
    Compaction does not follow mutable parents or choose inputs from a listing.
 3. **Bundle location is explicit.** The envelope's rows are verified on creation;
    published extents and index digests authorize ranged reads. A range reader
@@ -68,8 +71,8 @@ integration hooks, not a bundled deterministic machine simulator.
 
 The clock covers timestamps/checkpoint ages. The executor covers verification,
 encoding, restore and compaction dispatch, plus independently progressing paged
-worker startup/join. The paged worker retains its dedicated Tokio runtime and
-30-second fault deadline, avoiding caller-runtime deadlock and keeping pooled
+worker startup/join. Overlapping views share a worker and its independent Tokio runtime;
+the 30-second fault deadline includes queued wait, avoiding caller-runtime deadlock and keeping pooled
 provider connections alive while SQL is idle. Defaults retain the existing
 filesystem/SQLite/Tokio dependencies.
 
@@ -78,7 +81,9 @@ publishes the matching repository/epoch rows without standalone LTX uploads;
 each replica retains its own envelope copy and CASes its head independently.
 Node-wide group-commit aggregation scheduling and shared-bundle GC are not supplied. Background
 hydration/compaction are callable bounded operations, not an autonomous daemon.
-The embedding server owns work admission, worker counts, timers and cancellation.
+The library shares bounded I/O, blocking-job and recovery concurrency by default;
+hosts can inject shared semaphore budgets. The embedding server still owns SQL
+admission, byte-weighted memory budgets, activation counts, timers and cancellation.
 
 Celld's node log, actors, follower durability, placement, owner election and HTTP
 response gate are outside its LTX crate and outside this change. Crab's combined
@@ -109,9 +114,25 @@ local resume and every checkpoint mode. Cross-page partial sparse writes cover
 preserve mixed bundle/native plans. Verification commands and live evidence are
 recorded in [README.md](README.md#verification).
 
+Publication regressions additionally cover snapshot-generated cuts, all destination
+admission limits before I/O, idle singleton promotion, and native/bundle appends
+with both live and reopened receipts. Incremental verification rejects a forged
+post-state even with a valid file CRC. Instrumented takeover checks index-only
+inheritance and sparse SQL activation; missing destination objects fail before
+publication, while same-size body corruption fails when read. Cached maps cannot
+be reused by another replica instance/store.
+
 Remaining qualification: exhaustive pager partial-write/fsync and power-loss
 simulation, multi-process sparse crash/recovery, broad Linux and
 Windows proof, external Celld/Litestream golden fixtures, fuzzing and measured
-memory/latency. Full-chain publication verification still downloads/replays the
-complete bounded plan. The feature set is not yet a production-ready HTTP backend,
+memory/latency. Native/bundle appends now fully verify only new LTX cuts, extending
+an immutable authenticated predecessor page map. Live receipts avoid history
+downloads; reopened receipts fetch indexes only. Full restore still downloads/replays
+the bounded plan. Range compaction downloads only selected bodies, authenticates
+their generated indexes, compares independently reduced page bytes, and validates
+the full replacement indexed plan. Sparse takeover is index/metadata-only until SQL
+faults pages. Copy-on-write metadata blocks and rolling checksums remove whole-map
+copying/scanning on each remote append, but all live-page locators remain resident.
+See [SCALABILITY.md](SCALABILITY.md) for the 1K–10K database target and remaining gates.
+The feature set is not yet a production-ready HTTP backend,
 nor a claim of complete Celld performance, simulator or operational parity.

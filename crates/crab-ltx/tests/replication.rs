@@ -80,7 +80,7 @@ fn snapshot_matches_delta_restore_byte_for_byte() {
     insert(&mut db, "two");
     let next = db.capture().unwrap();
     batch.segments.extend(next.segments);
-    let snapshot = db.snapshot(&temp.path().join("snapshot.ltx")).unwrap();
+    let (snapshot, _) = db.snapshot(&temp.path().join("snapshot.ltx")).unwrap();
     assert_eq!(snapshot.info().position(), next.position);
     let plan = VerifiedLocalPlan::new(&batch.segments, next.position, Limits::default()).unwrap();
     let snapshot_plan =

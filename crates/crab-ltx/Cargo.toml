@@ -24,7 +24,7 @@ object_store = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "sync", "time", "net"] }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "sync", "time", "net", "macros"] }
 
 [dev-dependencies]
 object_store = { workspace = true, features = ["fs"] }

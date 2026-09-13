@@ -31,6 +31,8 @@ pub mod bundle;
 #[cfg(feature = "replica")]
 mod paged;
 #[cfg(feature = "replica")]
+mod paged_io;
+#[cfg(feature = "replica")]
 mod paged_vfs;
 #[cfg(feature = "replica")]
 mod replica;
@@ -75,7 +77,7 @@ fn ltx_file_path(root: &str, level: u32, min: Txid, max: Txid) -> String {
 // Derived from Celld's lib.rs at the revision in UPSTREAM.md (Apache-2.0).
 // Only validated WAL headers and pages enter this private checksum routine.
 fn wal_checksum(big_endian: bool, mut s0: u32, mut s1: u32, bytes: &[u8]) -> (u32, u32) {
-    for chunk in bytes.chunks_exact(8) {
+    for chunk in bytes.as_chunks::<8>().0 {
         let a = [chunk[0], chunk[1], chunk[2], chunk[3]];
         let b = [chunk[4], chunk[5], chunk[6], chunk[7]];
         let (a, b) = if big_endian {
