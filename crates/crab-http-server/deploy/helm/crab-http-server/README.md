@@ -388,12 +388,12 @@ policy.
 
 `.github/workflows/http-server-kubernetes-live.yml` runs the same gate from a
 protected GitHub environment. Dispatch it from the release tag, select the
-provider, provide the dedicated repository and HTTPS origin, paste the exact
-deployed `repository@sha256:...` image, and explicitly approve the write and
-rolling restart. The job accepts only the official Crab image, verifies its
-signed provenance against the selected release tag, rejects a different
-deployed image, signs the verified receipt, and retains the receipt plus its
-offline attestation bundle for 90 days.
+provider, provide the dedicated repository and HTTPS origin, and explicitly
+approve the write and rolling restart. The job downloads and verifies the
+tag's signed release record, derives the expected image and chart without
+operator transcription, verifies both registry attestations, rejects a
+different deployed image, signs the verified receipt, and retains the receipt
+plus its offline attestation bundle for 90 days.
 
 After downloading the workflow artifact, verify its receipt against the exact
 qualification workflow and release tag:

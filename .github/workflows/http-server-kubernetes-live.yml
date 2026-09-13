@@ -52,10 +52,6 @@ on:
         description: Dedicated qualification repository name
         required: true
         type: string
-      expected_image:
-        description: Exact deployed image, including its sha256 manifest digest
-        required: true
-        type: string
       approve_rollout:
         description: I approve a write and rolling restart of this deployment
         required: true
@@ -153,12 +149,64 @@ jobs:
             echo "source_sha=$source_sha"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Download and verify the release record
+        id: release-record
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+
+          release_dir="${RUNNER_TEMP}/crab-http-server-release"
+          manifest="$release_dir/crab-http-server-release.json"
+          bundle="$release_dir/crab-http-server-release.attestation.json"
+          mkdir -p "$release_dir"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'crab-http-server-release*' \
+            --dir "$release_dir"
+          test -s "$manifest"
+          test -s "$bundle"
+
+          gh attestation verify "$manifest" \
+            --bundle "$bundle" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/http-server-release.yml" \
+            --source-ref "refs/tags/${RELEASE_TAG}" \
+            --source-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          official_image="ghcr.io/${owner}/crab-http-server"
+          official_chart="oci://ghcr.io/${owner}/charts/crab-http-server"
+          version="${RELEASE_TAG#crab-http-server-v}"
+          jq --exit-status \
+            --arg tag "$RELEASE_TAG" \
+            --arg version "$version" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg image "$official_image" \
+            --arg chart "$official_chart" \
+            '.schema == 1 and .tag == $tag and .version == $version and
+             .source_commit == $source_sha and
+             .image.repository == $image and
+             (.image.digest | test("^sha256:[0-9a-f]{64}$")) and
+             .image.reference == ($image + "@" + .image.digest) and
+             .image.platforms == ["linux/amd64", "linux/arm64"] and
+             .chart.repository == $chart and
+             (.chart.digest | test("^sha256:[0-9a-f]{64}$")) and
+             .chart.reference == ($chart + "@" + .chart.digest)' \
+            "$manifest" >/dev/null
+          {
+            echo "expected_image=$(jq --raw-output .image.reference "$manifest")"
+            echo "expected_chart=$(jq --raw-output .chart.reference "$manifest")"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Validate selected provider inputs
         shell: bash
         env:
           PROVIDER: ${{ inputs.provider }}
-          EXPECTED_IMAGE: ${{ inputs.expected_image }}
-          OFFICIAL_IMAGE: ghcr.io/${{ github.repository_owner }}/crab-http-server
           GIT_TOKEN: ${{ secrets.CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN }}
         run: |
           set -euo pipefail
@@ -172,13 +220,6 @@ jobs:
           }
 
           require_value CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN "$GIT_TOKEN"
-          official_image="${OFFICIAL_IMAGE,,}"
-          image_repository="${EXPECTED_IMAGE%@sha256:*}"
-          if [ "$image_repository" != "$official_image" ] ||
-            [[ ! "$EXPECTED_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::expected_image must be the official immutable ${official_image}@sha256 reference."
-            exit 1
-          fi
           case "$PROVIDER" in
             eks)
               require_value CRAB_HTTP_SERVER_EKS_GITHUB_ROLE_ARN "$AWS_ROLE_ARN"
@@ -205,16 +246,23 @@ jobs:
               ;;
           esac
 
-      - name: Verify the release image provenance
+      - name: Verify the release artifact provenance
         shell: bash
         env:
-          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          EXPECTED_CHART: ${{ steps.release-record.outputs.expected_chart }}
+          EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
           set -euo pipefail
           gh attestation verify "oci://${EXPECTED_IMAGE}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/http-server-release.yml" \
+            --source-ref "refs/tags/${RELEASE_TAG}" \
+            --source-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners
+          gh attestation verify "$EXPECTED_CHART" \
             --repo "${GITHUB_REPOSITORY}" \
             --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/http-server-release.yml" \
             --source-ref "refs/tags/${RELEASE_TAG}" \
@@ -291,7 +339,7 @@ jobs:
           OWNER: ${{ inputs.owner }}
           REPOSITORY: ${{ inputs.repository }}
           CRAB_HTTP_SERVER_GIT_TOKEN: ${{ secrets.CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN }}
-          CRAB_HTTP_SERVER_EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          CRAB_HTTP_SERVER_EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           CRAB_HTTP_SERVER_RELEASE_TAG: ${{ steps.release.outputs.tag }}
           CRAB_HTTP_SERVER_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           CRAB_HTTP_SERVER_APPROVE_ROLLOUT: "true"
@@ -312,7 +360,7 @@ jobs:
           ORIGIN: ${{ inputs.origin }}
           OWNER: ${{ inputs.owner }}
           REPOSITORY: ${{ inputs.repository }}
-          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |

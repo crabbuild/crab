@@ -340,9 +340,10 @@ with the image and chart attestations; revoke the qualification token afterward.
 For repeatable retained evidence, dispatch
 `.github/workflows/http-server-kubernetes-live.yml` from the release tag. Its
 protected environment obtains short-lived cluster credentials through GitHub
-OIDC, verifies that the official image digest was signed by the server release
-workflow from the selected tag, runs the same gate, verifies and signs the
-receipt, and uploads it with an offline attestation bundle. Keep this runner
+OIDC, verifies the selected tag's signed release record and both registry
+artifacts, derives the expected deployment image from that record, runs the
+same gate, verifies and signs the receipt, and uploads it with an offline
+attestation bundle. Keep this runner
 identity separate from Crab's pod storage identity and restrict it to the named
 cluster and Deployment.
 
