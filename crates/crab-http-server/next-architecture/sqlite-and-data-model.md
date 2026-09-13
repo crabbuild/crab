@@ -4,6 +4,7 @@
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
+The [crab-ltx design](crab-ltx.md) defines the reused engine and its adaptations.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
 the [offline importer](hard-cutover.md) must preserve domain identities and retry
 semantics when constructing these tables.
@@ -65,6 +66,11 @@ capture layer emits complete LTX coverage and a post-apply checksum covering tha
 revision. Partial WAL tails and uncommitted transactions are excluded. WAL salt
 changes require an explicit validated transition, not concatenation of offsets
 from different WAL generations.
+
+The pinned Celld L0 writer does not supply this rolling checksum unchanged: it
+uses the no-checksum flag. The [capture checksum adaptation](crab-ltx.md#capture-results-and-checksum-contract)
+is a required integration gate. File CRC or an uploaded TXID with checksum zero
+cannot stand in for the verified database position described here.
 
 If a WAL hook is used, it only signals work and records lightweight state. It
 must not await object storage or treat a hook error as a rollback: SQLite calls

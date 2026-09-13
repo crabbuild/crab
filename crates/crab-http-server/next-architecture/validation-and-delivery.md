@@ -150,7 +150,7 @@ Do not introduce placeholder backends or partially wired production routes.
 | Phase | Work | Exit evidence |
 | --- | --- | --- |
 | 1. Protocol foundation | Control schema/transitions, immutable manifest graph, provider capability diagnosis | Model/property tests and independent RustFS CAS race |
-| 2. Replication mechanics | Approved Rust LTX integration, managed SQLite capture/checkpoint, exact restore | Real WAL lifecycle, golden fixtures, cold restore |
+| 2. Replication mechanics | [Pinned Celld source integration](crab-ltx.md), managed capture/checkpoint, rolling checksum and explicit-plan restore | Import/notices audit, real WAL lifecycle, checksum oracle, golden fixtures and cold restore |
 | 3. Single-node issue slice | SQL issue/comment model, dedup, response barrier, tracked cancellation | Browser create/edit/retry, kill process, restore from RustFS |
 | 4. Multi-node ownership | Session identity, leases, peer TLS, route policy, cold capacity admission, strong owner reads | Wrong-node routing, competing acquisition, overload, stale owner and lost-response tests |
 | 5. Domain parity | PR/reviews, labels/assignees, statuses/checks, release metadata/assets | Existing domain/API suites plus real UI workflows |
@@ -165,8 +165,9 @@ from the outset. Do not implement a legacy-serving adapter, backend toggle or
 migration-aware intermediate release. The offline importer preserves the source
 data contract without making the old store reachable from request handlers.
 
-The first two phases must resolve dependency approval, capture API and control
-serialization. The cross-domain phase must resolve canonical Git evidence before
+Celld source reuse is approved. The first two phases must complete dependency
+alignment, attribution, capture/checksum qualification and control serialization.
+The cross-domain phase must resolve canonical Git evidence before
 automated outbox failover is enabled. Garbage collection is delivered only after
 pinning and backup retention are proven.
 

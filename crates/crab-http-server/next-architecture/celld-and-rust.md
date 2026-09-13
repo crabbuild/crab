@@ -2,6 +2,11 @@
 
 [Design index](README.md) · Proposed architecture; not implemented.
 
+Reuse of Celld's replication source is selected and approved. The dedicated
+[crab-ltx design](crab-ltx.md) specifies the pinned import, attribution,
+dependency alignment, rolling-checksum adaptation and explicit-plan restore.
+This document describes the surrounding Celld/Crab architecture comparison.
+
 ## Per-cell SQLite in Celld
 
 The reference is Celld commit
@@ -68,6 +73,7 @@ and [Crab's internal protocol](routing-and-security.md#internal-protocol).
 
 ### What to adopt from Celld
 
+Use Celld's existing Rust source as the implementation baseline for `crab-ltx`.
 Celld separates its in-process LTX machinery from the surrounding ownership and
 response durability protocol. Its replication library captures committed WAL,
 provides restore and compaction machinery, and supports additional paging and
@@ -97,24 +103,29 @@ Sources: [Crab workspace manifest](../../../Cargo.toml),
 [pinned Celld manifest](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/Cargo.toml),
 and [LTX manifest](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/crates/ltx/Cargo.toml).
 
-Source vendoring, overrides, or dependency patches require the repository's
-explicit approval process at implementation time. This document imports no
-dependency and changes no lockfile.
+Source reuse of the pinned `celld-ltx` subtree is approved. The import must retain
+applicable Apache-2.0 and BSD notices and record local modifications, as detailed
+in [licensing and attribution](crab-ltx.md#licensing-and-attribution). Dependency
+alignment and correctness remain implementation gates; this document imports no
+source code and changes no lockfile. Unrelated dependency patches are outside
+this approval.
 
 The official Litestream Go embedding API is described as unstable and has
 SQLite driver integration constraints. It does not supply a Rust-native
 implementation by linking a Go library into this process.
 [Litestream Go library documentation](https://litestream.io/guides/go-library/)
 
-`ltx-rs` is a candidate file-format building block; its advertised scope is the
-LTX format. A codec alone does not supply WAL lifecycle, durable acknowledgement,
-or ownership transfer. [ltx-rs repository](https://github.com/superfly/ltx-rs)
+`ltx-rs` was considered as a file-format building block. The selected source is
+`celld-ltx`, which includes the managed WAL lifecycle needed here. A codec alone
+does not supply durable acknowledgement or ownership transfer.
+[ltx-rs repository](https://github.com/superfly/ltx-rs)
 
 ### Code ownership
 
-Introduce `crates/crab-ltx` only as a bounded owner of actual replication
-mechanics. Keep HTTP routing, repository policy and AppCell placement inside
-`crab-http-server`.
+Implement `crates/crab-ltx` as the owner of reused replication mechanics with the
+[required adaptations](crab-ltx.md#reuse-map-and-required-adaptations). Keep HTTP
+routing, repository policy, publication orchestration and AppCell placement
+inside `crab-http-server`.
 
 ```text
 crates/crab-ltx/
@@ -122,7 +133,7 @@ crates/crab-ltx/
   LTX encode/decode and checksums
   exact-position restore
   snapshot and compaction mechanics
-  narrow replication storage boundary
+  explicit local artifact inputs and outputs
 
 crates/crab-http-server/src/
   cells.rs             activation and runtime ownership
@@ -146,6 +157,10 @@ Wire types remain crate-private unless another actual consumer needs them.
 ### Interface shape
 
 Conceptual Rust signatures, not upstream Celld APIs or compiling implementation:
+
+These are server-layer interfaces. `ReplicatedDatabase` owns the domain command
+boundary and calls the lower-level [crab-ltx API](crab-ltx.md#proposed-library-api);
+the reusable crate does not know `AppCommand` or HTTP response types.
 
 ```rust
 struct RepositoryCellId(Uuid);

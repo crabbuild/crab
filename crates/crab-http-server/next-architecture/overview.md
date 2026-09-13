@@ -16,7 +16,7 @@ The system boundaries below lead to the detailed
 | Application database | One SQLite database per catalog UUID | Transactions and indexes stay within a repository |
 | Local disk | Disposable database, WAL, replication staging, and Git scratch | Recovery must work after losing every Crab Pod disk |
 | Durable application data | Immutable LTX objects plus a published recovery manifest | Uploaded objects become authoritative only through publication |
-| Replication integration | Embedded Rust subsystem inspired by Celld | One Crab process; no Go runtime or Litestream sidecar |
+| Replication integration | Pinned `celld-ltx` source adapted into `crab-ltx` | Reuse managed WAL/codec mechanics in one Crab process with the specified correctness adaptations |
 | First durability mode | Object-store durability before success | No peer-fsync acknowledgement or replica quorum in the first version |
 | Write authority | One CAS control record containing owner and published head | Commit publication and takeover compete on the same key |
 | Placement unit | Repository AppCell | One server can own many repositories |
@@ -235,7 +235,7 @@ move is a separate quiesced migration and cannot be inferred from a name change.
 
 | Decision | Proposed direction | Evidence required |
 | --- | --- | --- |
-| Exact imported LTX surface | Minimal approved Celld-derived capture/codec/restore | License review, source pin and feature/dependency audit |
+| Exact imported LTX surface | Celld source reuse approved; [capture/codec/restore integration](crab-ltx.md) selected | Source inventory/notices, dependency alignment, rolling-checksum and exact-restore qualification |
 | Manifest representation | Bounded immutable pages and explicit end positions | Restore/cost benchmarks and frozen fixtures |
 | Initial LTX encoding | One explicitly qualified reader/writer capability | Round-trip and golden decoder tests |
 | Peer TLS provisioning | Operator or platform workload PKI | Pod IP/DNS verification and certificate rotation test |

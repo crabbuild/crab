@@ -36,6 +36,7 @@ and deployment boundaries.
 | [Architecture, scope, and guarantees](overview.md) | System diagram, data ownership, safety properties, and design decisions. |
 | [Current implementation and evidence](current-implementation.md) | Existing HTTP, Git, application storage, deployment, and test boundaries. |
 | [Celld architecture and Rust integration](celld-and-rust.md) | Per-cell LTX mechanics, differences from Celld, dependency strategy, and Rust ownership. |
+| [crab-ltx source integration and crate design](crab-ltx.md) | Approved Celld source reuse, licenses, capture/checksum adaptations, exact restore, and qualification. |
 | [Object storage and commit publication](storage-protocol.md) | Control record, immutable recovery graph, publication CAS, and response gating. |
 | [Ownership, placement, and load balancing](ownership-and-load-balancing.md) | Leases, activation, capacity admission, idle handoff, and fleet balancing. |
 | [SQLite runtime and application data model](sqlite-and-data-model.md) | WAL capture, checkpoints, read consistency, schema, transactions, and retries. |
@@ -51,6 +52,7 @@ For the multi-node design, read [ownership and load balancing](ownership-and-loa
 then [peer routing](routing-and-security.md) and
 [Kubernetes deployment](deployment-and-operations.md).
 For storage implementation, read [Celld and Rust integration](celld-and-rust.md),
+[the crab-ltx design](crab-ltx.md),
 [commit publication](storage-protocol.md), and
 [SQLite execution](sqlite-and-data-model.md).
 

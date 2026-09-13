@@ -7,6 +7,9 @@ and runs under a [recovering activation](ownership-and-load-balancing.md#acquisi
 The [validation plan](validation-and-delivery.md) defines the fault evidence
 required before enabling writes or destructive collection.
 
+The [crab-ltx explicit-plan restore](crab-ltx.md#exact-restore-and-snapshot-reuse)
+reuses Celld's apply mechanics while excluding remote latest-state discovery.
+
 ## Recovery and failure behavior
 
 ### Exact restore
