@@ -31,6 +31,11 @@ The runtime identities contain data-plane permissions only:
 | GKE | `roles/storage.objectUser` | Dedicated bucket |
 | AKS | `Storage Blob Data Contributor` | Dedicated container |
 
+Do not grant the same storage boundary to cluster node, VM, or default
+Kubernetes identities. The live gate proves the Crab pods carry the selected
+provider's workload-identity wiring; removing ambient node access ensures a
+successful storage probe cannot silently use broader fallback authority.
+
 The S3 bucket policy rejects non-AWS-service requests made without TLS. Azure
 Storage likewise requires HTTPS. Storage data remains private to authorized
 provider identities even when a public provider endpoint is reachable.

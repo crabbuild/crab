@@ -99,8 +99,14 @@ jobs:
               exit 1
             fi
           done
-          bash -n crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh
+          bash -n \
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
+            crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
+          crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh
+          immutable_chart=oci://registry.example.com/charts/crab-http-server@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
           if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
+            CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE=crab-http-server:mutable \
             CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
             bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
@@ -114,6 +120,20 @@ jobs:
             "${RUNNER_TEMP}/invalid-image-error"
           immutable_image=registry.example.com/crab-http-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
+            CRAB_HTTP_SERVER_EXPECTED_CHART=mutable-chart \
+            CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
+            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+              eks crab crab-http-server https://git.example.com \
+              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
+              > /dev/null 2> "${RUNNER_TEMP}/invalid-chart-error"; then
+            echo "qualification accepted a mutable expected chart" >&2
+            exit 1
+          fi
+          grep -F 'CRAB_HTTP_SERVER_EXPECTED_CHART must be an immutable OCI chart reference.' \
+            "${RUNNER_TEMP}/invalid-chart-error"
+          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
+            CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
             CRAB_HTTP_SERVER_RELEASE_TAG=invalid \
             CRAB_HTTP_SERVER_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -128,6 +148,7 @@ jobs:
           grep -F 'CRAB_HTTP_SERVER_RELEASE_TAG must be a stable crab-http-server-vX.Y.Z tag.' \
             "${RUNNER_TEMP}/invalid-release-tag-error"
           if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
+            CRAB_HTTP_SERVER_EXPECTED_CHART="$immutable_chart" \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
             CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0 \
             CRAB_HTTP_SERVER_SOURCE_SHA=invalid \
@@ -146,6 +167,8 @@ jobs:
             /src/crates/crab-http-server/tests/qualify_backup_restore.sh \
             /src/crates/crab-http-server/deploy/generate-release-manifest.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/verify-workload-identity.sh \
+            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/test-workload-identity.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh
           docker run --rm \
@@ -275,6 +298,10 @@ jobs:
             | grep -F 'crab-http-server/templates/tests/catalog.yaml'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/qualify-kubernetes.sh'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/verify-workload-identity.sh'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/test-workload-identity.sh'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/rbac.example.yaml'
 

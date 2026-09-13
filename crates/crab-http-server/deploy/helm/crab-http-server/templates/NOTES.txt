@@ -18,5 +18,6 @@
 4. Publish Service/{{ include "crab-http-server.fullname" . }} through an HTTPS ingress or load balancer.
 {{- end }}
 
-The management port is intentionally absent from the Service and NetworkPolicy.
+The management port is absent from the Service. NetworkPolicy admits it only
+from the peers in networkPolicy.metricsIngressFrom.
 Change rolloutToken on a Helm upgrade after changing an externally managed ConfigMap or Secret.

@@ -31,7 +31,8 @@ Protect the entire configured root as one recovery unit. Don’t restore only th
 Complete these checks before the first install and every infrastructure change:
 
 1. Confirm bucket or container versioning and retention policies.
-2. Confirm the workload identity grants access only below the configured root.
+2. Confirm the workload identity grants access only below the configured root,
+   while node, VM, and default Kubernetes identities have no access to it.
 3. Confirm egress policies and proxies preserve provider identity, object storage, DNS, and the configured OIDC endpoints.
 4. Confirm all replicas use the same provider, container, root prefix, OIDC client, public URL, and state key.
 5. Confirm the OIDC provider accepts the exact `/auth/callback` redirect URI.
@@ -318,6 +319,7 @@ access**. Run the same provider-neutral test on EKS, GKE, and AKS:
 ```sh
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
 export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
+export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
@@ -329,13 +331,15 @@ bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-
 
 The rollout approval is deliberately explicit. The script checks the rendered
 runtime controls, provider-matching placement across nodes and zones, readiness
-on every pod, public OIDC initiation, effective management-port NetworkPolicy
-isolation from an ordinary peer, direct authenticated Git traffic through two
-distinct replicas, byte-identical LFS transfer, lock-owner publication, and
-uninterrupted Git discovery while Kubernetes replaces every pod. It leaves a
-unique branch as durable evidence and writes a secret-free JSON receipt bound
-to the supplied release tag and source commit. Review and retain that receipt
-with the image and chart attestations; revoke the qualification token afterward.
+on every pod, the provider-native workload identity injection on both original
+and replacement pods, the installed signed chart version, public OIDC
+initiation, effective management-port NetworkPolicy isolation from an ordinary
+peer, direct authenticated Git traffic through two distinct replicas,
+byte-identical LFS transfer, lock-owner publication, and uninterrupted Git
+discovery while Kubernetes replaces every pod. It leaves a unique branch as
+durable evidence and writes a secret-free JSON receipt bound to the supplied
+release tag, source commit, image, and chart. Review and retain that receipt
+with the release record; revoke the qualification token afterward.
 
 For repeatable retained evidence, dispatch
 `.github/workflows/http-server-kubernetes-live.yml` from the release tag. Its

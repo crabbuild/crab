@@ -338,6 +338,7 @@ identity fields:
 ```sh
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
 export CRAB_HTTP_SERVER_EXPECTED_IMAGE="$(jq --raw-output .image.reference crab-http-server-release.json)"
+export CRAB_HTTP_SERVER_EXPECTED_CHART="$(jq --raw-output .chart.reference crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_RELEASE_TAG="$(jq --raw-output .tag crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_SOURCE_SHA="$(jq --raw-output .source_commit crab-http-server-release.json)"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
@@ -359,9 +360,12 @@ The test fails unless it can prove all of these boundaries:
 
 - At least two ready replicas run on separate nodes and zones whose provider
   identities match the declared EKS, GKE, or AKS target
+- Every original and replacement pod has the provider's admitted workload
+  identity contract: EKS Pod Identity token injection, GKE's annotated
+  Kubernetes-to-Google service account link, or AKS Workload ID token injection
 - The Deployment uses an immutable digest, a private ClusterIP Service, the
-  chart NetworkPolicy, TLS ingress, hardened containers, and no automatic
-  Kubernetes API token
+  signed release's chart version, the chart NetworkPolicy, TLS ingress,
+  hardened containers, and no automatic Kubernetes API token
 - A short-lived Restricted peer pod cannot reach the private management port,
   proving that the cluster CNI enforces the rendered NetworkPolicy
 - Every existing and replacement pod passes storage-backed readiness
@@ -376,10 +380,11 @@ The test fails unless it can prove all of these boundaries:
 - Every pod is replaced and the committed branch remains byte-identical
 
 The script writes a secret-free JSON evidence receipt containing the provider,
-image digest, release tag and source commit, repository, qualification branch
-and commit, payload digest, explicit successful checks including the
-workload-identity-only deployment boundary, rollout probes and failures, and
-the management-network-isolation result. It also records completion time.
+image and chart digests, release tag and source commit, workload identity
+mechanism and Kubernetes ServiceAccount, repository, qualification branch and
+commit, payload digest, rollout probes and failures, and explicit successful
+checks including the installed chart version and management-network-isolation
+result. It also records completion time.
 Retain it with the release record. The Git token remains only in process memory
 and must still be rotated or revoked after qualification according to team
 policy.
@@ -439,12 +444,12 @@ These identify a GitHub OIDC federation dedicated to qualification; they are
 not the pod's storage workload identity. Give the runner identity only enough
 cloud permission to obtain user credentials for the named cluster. Bind it in
 Kubernetes to read the named Namespace, Deployment, Service, Ingress,
-NetworkPolicy, PodDisruptionBudget, HorizontalPodAutoscaler, pods, and hosting
-nodes; execute and port-forward to Crab pods; create and delete the short-lived
-Restricted network-isolation probe pod; and patch only the Crab Deployment for
-the approved restart. Do not grant the runner object-storage credentials or
-cluster-admin. Protect the environment with required reviewers and restrict
-which release tags may deploy to it.
+NetworkPolicy, PodDisruptionBudget, HorizontalPodAutoscaler, workload
+ServiceAccount, pods, and hosting nodes; execute and port-forward to Crab pods;
+create and delete the short-lived Restricted network-isolation probe pod; and
+patch only the Crab Deployment for the approved restart. Do not grant the
+runner object-storage credentials or cluster-admin. Protect the environment
+with required reviewers and restrict which release tags may deploy to it.
 
 Start from `qualification/rbac.example.yaml`. Replace its provider-mapped
 group, namespace, and Deployment resource name before applying it. Keep Crab in

@@ -339,6 +339,7 @@ jobs:
           OWNER: ${{ inputs.owner }}
           REPOSITORY: ${{ inputs.repository }}
           CRAB_HTTP_SERVER_GIT_TOKEN: ${{ secrets.CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN }}
+          CRAB_HTTP_SERVER_EXPECTED_CHART: ${{ steps.release-record.outputs.expected_chart }}
           CRAB_HTTP_SERVER_EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           CRAB_HTTP_SERVER_RELEASE_TAG: ${{ steps.release.outputs.tag }}
           CRAB_HTTP_SERVER_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
@@ -360,6 +361,7 @@ jobs:
           ORIGIN: ${{ inputs.origin }}
           OWNER: ${{ inputs.owner }}
           REPOSITORY: ${{ inputs.repository }}
+          EXPECTED_CHART: ${{ steps.release-record.outputs.expected_chart }}
           EXPECTED_IMAGE: ${{ steps.release-record.outputs.expected_image }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
@@ -372,20 +374,27 @@ jobs:
             --arg deployment "$DEPLOYMENT" \
             --arg origin "${ORIGIN%/}" \
             --arg repository "${OWNER}/${REPOSITORY}" \
+            --arg chart "$EXPECTED_CHART" \
             --arg image "$EXPECTED_IMAGE" \
             --arg release_tag "$RELEASE_TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            '.schema == 2 and .provider == $provider and
+            '.schema == 3 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
-             .image == $image and
+             .image == $image and .chart == $chart and
              .qualification_source.release_tag == $release_tag and
              .qualification_source.commit == $source_sha and
+             (.workload_identity.service_account | length) > 0 and
+             .workload_identity.mechanism ==
+               (if $provider == "eks" then "eks-pod-identity"
+                elif $provider == "gke" then "gke-workload-identity-federation"
+                else "aks-workload-identity" end) and
              .replica_count >= 2 and .zone_count >= 2 and
              .rollout_probes >= 1 and .rollout_probe_failures == 0 and
              .checks.oidc_login_redirect == true and
              .checks.oidc_secure_flow_cookie == true and
              .checks.restricted_namespace == true and
+             .checks.release_chart_version == true and
              .checks.workload_identity_only == true and
              .checks.management_network_isolation == true and
              .checks.cross_replica_git == true and

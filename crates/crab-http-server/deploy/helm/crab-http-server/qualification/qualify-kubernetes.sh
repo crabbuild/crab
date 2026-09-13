@@ -7,8 +7,8 @@ unset GIT_CURL_VERBOSE GIT_TRACE GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA \
 
 usage() {
   echo "usage: qualify-kubernetes.sh PROVIDER NAMESPACE DEPLOYMENT HTTPS_ORIGIN OWNER REPOSITORY EVIDENCE_FILE" >&2
-  echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, CRAB_HTTP_SERVER_RELEASE_TAG," >&2
-  echo "CRAB_HTTP_SERVER_SOURCE_SHA, and CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true." >&2
+  echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, CRAB_HTTP_SERVER_EXPECTED_CHART," >&2
+  echo "CRAB_HTTP_SERVER_RELEASE_TAG, CRAB_HTTP_SERVER_SOURCE_SHA, and CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true." >&2
   exit 2
 }
 
@@ -22,12 +22,17 @@ repository="$6"
 evidence_file="$7"
 git_token="${CRAB_HTTP_SERVER_GIT_TOKEN:?set CRAB_HTTP_SERVER_GIT_TOKEN to a write-scoped token for the qualification repository}"
 expected_image="${CRAB_HTTP_SERVER_EXPECTED_IMAGE:?set CRAB_HTTP_SERVER_EXPECTED_IMAGE to the exact deployed repository@sha256 image}"
+expected_chart="${CRAB_HTTP_SERVER_EXPECTED_CHART:?set CRAB_HTTP_SERVER_EXPECTED_CHART to the exact oci:// chart@sha256 reference}"
 test "${CRAB_HTTP_SERVER_APPROVE_ROLLOUT:-}" = true || {
   echo "Set CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true to approve a rolling restart." >&2
   exit 2
 }
 if [[ ! "$expected_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
   echo "CRAB_HTTP_SERVER_EXPECTED_IMAGE must be an immutable image reference." >&2
+  exit 2
+fi
+if [[ ! "$expected_chart" =~ ^oci://[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+  echo "CRAB_HTTP_SERVER_EXPECTED_CHART must be an immutable OCI chart reference." >&2
   exit 2
 fi
 release_tag="${CRAB_HTTP_SERVER_RELEASE_TAG:?set CRAB_HTTP_SERVER_RELEASE_TAG to the qualified crab-http-server-vX.Y.Z tag}"
@@ -179,6 +184,7 @@ chmod 0600 "$curl_config"
 deployment_json="${work_dir}/deployment.json"
 namespace_json="${work_dir}/namespace.json"
 service_json="${work_dir}/service.json"
+service_account_json="${work_dir}/service-account.json"
 policy_json="${work_dir}/network-policy.json"
 ingress_json="${work_dir}/ingress.json"
 pdb_json="${work_dir}/pdb.json"
@@ -273,6 +279,15 @@ jq --exit-status '
   any(.spec.template.spec.volumes[]?;
     .name == "scratch" and (.emptyDir.sizeLimit | length) > 0)
 ' "$deployment_json" >/dev/null
+release_version="${release_tag#crab-http-server-v}"
+expected_chart_label="crab-http-server-${release_version}"
+jq --exit-status \
+  --arg chart "$expected_chart_label" \
+  --arg version "$release_version" '
+  .metadata.labels["helm.sh/chart"] == $chart and
+  .metadata.labels["app.kubernetes.io/version"] == $version and
+  .metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
+' "$deployment_json" >/dev/null
 image="$(jq --raw-output '.spec.template.spec.containers[] | select(.name == "crab-http-server") | .image' "$deployment_json")"
 if [ "$image" != "$expected_image" ]; then
   echo "The deployed image does not match CRAB_HTTP_SERVER_EXPECTED_IMAGE." >&2
@@ -280,6 +295,10 @@ if [ "$image" != "$expected_image" ]; then
 fi
 selector_json="$(jq --compact-output '.spec.selector.matchLabels' "$deployment_json")"
 selector="$(jq --raw-output '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' "$deployment_json")"
+service_account="$(jq --raw-output '.spec.template.spec.serviceAccountName // ""' "$deployment_json")"
+test -n "$service_account"
+kubectl --namespace "$namespace" get serviceaccount "$service_account" \
+  -o json > "$service_account_json"
 
 kubectl --namespace "$namespace" get service "$deployment" -o json > "$service_json"
 jq --exit-status --argjson selector "$selector_json" '
@@ -378,6 +397,13 @@ check_pod_health() {
   done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
 }
 
+check_workload_identity() {
+  workload_identity_mechanism="$(
+    "$(dirname -- "$0")/verify-workload-identity.sh" \
+      "$provider" "$service_account" "$service_account_json" "$pods_json"
+  )"
+}
+
 check_management_isolation() {
   local target_host
   local target_ip
@@ -462,6 +488,7 @@ EOF
 
 load_ready_pods
 check_placement
+check_workload_identity
 check_management_isolation
 check_pod_health
 jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid' \
@@ -609,6 +636,7 @@ test "$probe_failures" -eq 0
 
 load_ready_pods
 check_placement
+check_workload_identity
 check_pod_health
 jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid' \
   "$pods_json" | sort > "${work_dir}/new-uids"
@@ -630,8 +658,11 @@ jq --null-input \
   --arg deployment "$deployment" \
   --arg origin "$origin" \
   --arg image "$image" \
+  --arg chart "$expected_chart" \
   --arg release_tag "$release_tag" \
   --arg source_sha "$source_sha" \
+  --arg service_account "$service_account" \
+  --arg workload_identity_mechanism "$workload_identity_mechanism" \
   --arg repository "${owner}/${repository}" \
   --arg branch "$branch" \
   --arg commit "$final_oid" \
@@ -643,9 +674,13 @@ jq --null-input \
   --argjson zone_count "$zone_count" \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
-  '{schema: 2, provider: $provider, namespace: $namespace, deployment: $deployment,
-    origin: $origin, image: $image,
+  '{schema: 3, provider: $provider, namespace: $namespace, deployment: $deployment,
+    origin: $origin, image: $image, chart: $chart,
     qualification_source: {release_tag: $release_tag, commit: $source_sha},
+    workload_identity: {
+      service_account: $service_account,
+      mechanism: $workload_identity_mechanism
+    },
     repository: $repository, branch: $branch,
     commit: $commit, payload_sha256: $payload_sha256,
     replica_count: $replica_count, zone_count: $zone_count,
@@ -656,6 +691,7 @@ jq --null-input \
       oidc_login_redirect: true,
       oidc_secure_flow_cookie: true,
       restricted_namespace: true,
+      release_chart_version: true,
       workload_identity_only: true,
       management_network_isolation: true,
       cross_replica_git: true,

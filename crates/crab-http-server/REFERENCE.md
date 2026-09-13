@@ -1282,7 +1282,10 @@ workflow-attested JSON receipt establish that release's cross-replica rollout
 result. The gate also launches a short-lived Restricted peer pod and fails if
 the cluster CNI permits it to reach the private management listener. The
 protected workflow first verifies the deployed image provenance against the
-exact server release tag and source commit.
+exact server release tag and source commit. It now derives the expected image
+and chart from the tag's signed release record. The live gate also rejects a
+mismatched installed chart version or missing provider-native workload identity
+injection on either the original or replacement pods.
 
 The chart's disruption budget protects healthy capacity with `minAvailable`
 and marks unhealthy pods `AlwaysAllow` for eviction. This preserves voluntary

@@ -268,16 +268,19 @@ from version creation, not from the transition to noncurrent state.
 
 On termination, Kubernetes removes the endpoint, waits 15 seconds for routing
 to converge, then gives Crab its complete ten-minute drain budget. The live
-gate checks provider identity and placement, every pod's readiness, public OIDC
+gate checks provider placement, the admitted EKS Pod Identity, GKE Workload
+Identity Federation, or AKS Workload ID contract on every original and
+replacement pod, the signed chart version, every pod's readiness, public OIDC
 initiation, direct token use against two replicas, cross-replica Git and LFS,
 lock-owner publication, uninterrupted reads during rollout, and byte-identical
 state after replacement. Its JSON receipt binds the evidence to the provider,
-immutable image, repository, commit, payload digest, and completion time.
+immutable image and chart, workload identity mechanism and ServiceAccount,
+repository, commit, payload digest, and completion time.
 The optional manual GitHub workflow uses a protected environment and a
 separate short-lived OIDC runner identity to reach an existing cluster. It
-requires the expected image digest, explicit rollout approval, and a dedicated
-repository, then retains the verified receipt. The runner does not need direct
-storage authority.
+derives the expected artifacts from the tag's signed release record and
+requires explicit rollout approval and a dedicated repository, then retains
+the verified receipt. The runner does not need direct storage authority.
 
 Helm upgrades are atomic and keep bounded revision history; the chart refuses a
 disruption budget or placement override that would make its availability claim
@@ -934,7 +937,7 @@ The design is backed by component, composition, provider, and independent-client
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
 | HTTP composition | `crab-http-server::receive` | `receive_tests.rs`, `receive_fault_tests.rs`, authentication tests, and RustFS ignored tests |
-| Multi-cloud runtime | Helm chart, `.github/workflows/http-server-kubernetes-live.yml`, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus an attested EKS, GKE, or AKS cross-replica rollout receipt bound to the release source and deployed digest |
+| Multi-cloud runtime | Helm chart, `.github/workflows/http-server-kubernetes-live.yml`, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus an attested EKS, GKE, or AKS cross-replica rollout receipt bound to the release source, image/chart digests, and admitted provider workload identity |
 
 ### Interpret the live fixtures
 
