@@ -156,6 +156,33 @@ async fn readiness_opens_every_repository_before_admitting_traffic() {
 }
 
 #[tokio::test]
+async fn readiness_rejects_a_server_that_is_draining() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    server.cancellation.cancel();
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("5")
+    );
+    close(&server).await;
+}
+
+#[tokio::test]
 async fn readiness_rejects_a_repository_that_still_needs_indexing() {
     let mut server = fixture().await;
     enable_catalog_readiness(&mut server);

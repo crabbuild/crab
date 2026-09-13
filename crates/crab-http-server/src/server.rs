@@ -681,6 +681,9 @@ async fn readiness(State(server): State<Arc<Server>>) -> Response {
 }
 
 async fn check_readiness(server: &Server) -> Result<()> {
+    if server.cancellation.is_cancelled() {
+        return Err(crate::Error::Config("server is draining"));
+    }
     if !server.catalog_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
     }
