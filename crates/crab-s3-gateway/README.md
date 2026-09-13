@@ -159,9 +159,24 @@ DELETE, or completed multipart upload owns one commit. Compatible same-branch
 requests wait up to 10 ms for a bounded batch of at most 32 requests or 32 MiB
 of Git payload. Their conditions are evaluated in FIFO order, their commits form
 one parent chain, and their Git objects share one pack and ref-journal
-publication. Trusted generated objects enter one bounded decoded spool before
+publication. One ref worker may retain the global and repository GC-writer
+fences for at most eight consecutive ordinary batches. Every batch still owns
+its own ref lease, parent revalidation, pack, commit chain, and journal
+transaction; multipart completion releases the shared fences before its
+isolated publication plan executes. The cap amortizes object-store fence
+round trips without allowing a busy branch to exclude GC indefinitely.
+Trusted generated objects enter one bounded decoded spool before
 canonical pack and sidecar preparation; they are not compressed and reinflated
-as synthetic wire input. A single larger request runs alone. Multipart completion also runs
+as synthetic wire input. Caller-proven predecessor relationships delta-compress
+successive generated tree versions inside a batch and, while warm state retains
+a verified prior depth, across packs by immutable Git object ID. A cold process,
+an unknown base depth, or depth eight emits a new full base. Pack offsets and
+entry CRCs are collected during that write, so preparation can emit standard
+Git indexes without decoding every growing tree a second time; checksum,
+inventory, locator, repack, GC-retention, fetch-materialization, and native-Git
+tests guard compatibility. Generated packs through 8 MiB use one idempotent exact
+backend PUT; larger packs retain bounded, retryable multipart streaming. A
+single larger request runs alone. Multipart completion also runs
 alone so its durable exactly-once receipt cannot be coupled to another request.
 Once drained, a gateway-owned worker retains the batch even if an originating
 HTTP connection closes; one disconnected client cannot cancel peer mutations.
@@ -175,14 +190,28 @@ eviction; idle branch state remains reusable below the shared watermark. Object
 storage remains the authority and a cold request reconstructs the same state from
 immutable repository objects. Unborn branches skip catalog access and recheck
 absence under their ref lease before publication. The first cold
-publication and every 64 subsequent publication batches write a commit-identified
-attribute checkpoint into one bounded object-store slot per branch while holding
-the same ref lease. The final commit delta records the slot; a missing or
-superseded slot falls back to the immutable delta chain. Checkpoint markers remain
-optional in the existing version-2 delta format. If the full manifest exceeds the
-existing 32 MiB manifest bound, publication keeps the delta chain authoritative
-and skips the checkpoint, so the optimization cannot reject an otherwise valid
-mutation. When the delta ancestry proves that the branch began empty and every
+publication and every 64 subsequent publication batches mark a commit for one
+bounded attribute-checkpoint slot per branch. Journal publication remains the
+acknowledgement point; a bounded background scheduler receives the exact
+committed in-memory manifest, coalesces newer work for the same ref, serializes
+outside the async runtime, and uses conditional replacement plus ancestry checks
+so an older worker cannot displace a newer checkpoint. It does not reread 64
+deltas to prepare derived state. During one process lineage, the scheduler
+carries the manifest's proven predecessor; when the branch slot still names that
+predecessor, one ETag-guarded replacement also avoids replaying those deltas
+during publication. A competing writer or
+divergent Git history falls back to canonical ancestry validation. A missing,
+delayed, failed, or superseded slot
+falls back to the immutable delta chain. Checkpoint markers remain optional in
+the existing version-2 delta format. Eligible checkpoints are gzip encoded and
+retain the existing 32 MiB stored-object bound; readers also accept earlier
+plain JSON checkpoints. If the manifest's maintained decoded-size estimate
+exceeds 128 MiB, publication keeps the delta chain authoritative and
+skips the checkpoint before cloning or serializing the manifest. Eligibility is
+rechecked after each later batch, so deletion can make a checkpoint possible
+again without adding repository-sized work to oversized writes. The optimization
+cannot reject an otherwise valid mutation. When the delta
+ancestry proves that the branch began empty and every
 commit came from the gateway, the checkpoint is also a complete sorted S3
 namespace index. `ListObjects` binds it to the current durable ref and pages it
 with only the newer per-commit deltas since the last successful checkpoint,
@@ -191,9 +220,12 @@ or Git-authored ancestor keeps canonical Git tree listing, so the accelerator
 cannot hide Git-written objects. SlateDB is not required by this write path; its
 object catalog remains
 a rebuildable derived index. During sustained writes, one background worker every
-64 local publication epochs folds the active ref journal into the object-store
-manifest and advances catalog coverage under the generation-owner and GC-writer
-fences. Read views use the newest catalog whose immutable pack inventory is a
+64 local publication epochs folds one captured ref-journal wave into the
+object-store manifest and advances catalog coverage for that generation under
+the generation-owner and GC-writer fences. It yields after that bounded pass;
+newer transactions remain authoritative and become eligible after another 64
+epochs instead of triggering an immediate catch-up loop. Read views use the
+newest catalog whose immutable pack inventory is a
 proven subset of their snapshot, then inspect only the remaining pack tail. This
 also covers the interval between manifest compaction and matching catalog
 publication without scanning every historical pack. Full commit-graph
@@ -305,7 +337,38 @@ Every gateway instance serving the same repository must use an identical Git
 blob limit and identical multipart session, byte-budget, and expiry settings.
 Run one continuously supervised `crab metadb owner` worker per backing
 repository for catalog, visibility, commit-graph, and geometric repack
-maintenance.
+maintenance. Eligible pack suffixes are rolled up before graph-derived indexes
+are rebuilt when object-catalog coverage is current. If coverage trails the
+manifest, the owner advances it first so selected-pack REF_DELTA dependencies
+can be resolved without downloading the stable pack prefix. The continuous owner requires the manifest and active ref transactions
+to remain unchanged for one poll interval before it starts this work; every
+foreground change restarts that quiet window. `--once` is eager and belongs in
+an operator-approved maintenance window. Bounded repack cycles observe the
+owner poll interval, so catch-up work cannot form a zero-delay loop competing
+continuously with foreground requests.
+When the selected canonical packs have disjoint object inventories, the owner
+checks their immutable identities and committed indexes, copies each packed
+entry body once, and rebuilds one standard aggregate index. It does not
+reinflate already publication-validated historical trees. A budget deferral
+still lets derived-index repair run, preventing maintenance starvation. When
+selected packs overlap, the owner scans their headers, materializes only their
+REF_DELTA base objects, repairs thin inputs, and checks that the resulting
+self-contained pack has exactly the selected object IDs.
+
+One branch is one Git ref and therefore one serialized publication domain.
+Additional replicas improve availability and scale independent repositories and
+branches, but they cannot make concurrent writes to the same ref commit in
+parallel. Generated packs use bounded tree deltas across warm batches, avoiding
+a repeated full broad-directory tree in every pack. REF_DELTA bases are immutable
+Git object IDs retained by the repository object inventory; readers resolve them
+across packs, repack preserves the complete object universe, and client fetch
+materializes required bases. The depth-eight and cold-start full entries bound
+both reconstruction and recovery cost. Prefer load-balancer affinity on repository plus branch (the
+bucket and first key component) so same-branch requests reach one process-local
+batch;
+the shared ref lease and CAS remain authoritative when affinity changes. Preserve
+the signed Host, path, query, and headers when routing. Scale very high write
+fanout across branches, then merge through ordinary Git policy.
 
 ## Initialize and run
 
@@ -355,6 +418,10 @@ For write-efficiency diagnosis, compare
 `crab_s3_gateway_mutation_batch_commits_total` with
 `crab_s3_gateway_mutation_batches_total`. The first ratio is requests drained
 per local execution and the second is commits amortized over each durable pack.
+Compare `crab_s3_gateway_mutation_fence_burst_batches_total` with
+`crab_s3_gateway_mutation_fence_bursts_total` to see how many consecutive
+ordinary batches amortize one GC-fence acquisition. The ratio is bounded by
+eight; a value near one means traffic is too sparse to benefit.
 `crab_s3_gateway_mutation_queue_wait_seconds` and
 `crab_s3_gateway_mutation_batch_duration_seconds` separate collection/admission
 delay from object-store publication latency. These metrics use no repository,

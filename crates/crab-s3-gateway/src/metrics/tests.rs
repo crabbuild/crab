@@ -140,15 +140,45 @@ fn mutation_batch_metrics_expose_amortization_and_wait() {
     let observation = metrics.start_mutation_batch(8, 4096);
     metrics.record_mutation_queue_wait(0.01);
     metrics.record_mutation_commits(7);
+    metrics.record_mutation_fence_burst(3);
+    metrics.record_generated_pack(65_536, 60_000, 4_096, 58_000, 3);
     drop(observation);
 
     let body = metrics.render(&admission);
     assert!(body.contains("crab_s3_gateway_mutation_batches_total 1"));
+    assert!(body.contains("crab_s3_gateway_mutation_fence_bursts_total 1"));
+    assert!(body.contains("crab_s3_gateway_mutation_fence_burst_batches_total 3"));
     assert!(body.contains("crab_s3_gateway_mutation_batch_requests_total 8"));
     assert!(body.contains("crab_s3_gateway_mutation_batch_commits_total 7"));
     assert!(body.contains("crab_s3_gateway_mutation_batch_input_bytes_total 4096"));
+    assert!(body.contains("crab_s3_gateway_mutation_generated_object_bytes_total 65536"));
+    assert!(body.contains("crab_s3_gateway_mutation_generated_tree_bytes_total 60000"));
+    assert!(body.contains("crab_s3_gateway_mutation_generated_pack_bytes_total 4096"));
+    assert!(body.contains("crab_s3_gateway_mutation_external_tree_base_bytes_total 58000"));
+    assert!(body.contains("crab_s3_gateway_mutation_cross_pack_tree_deltas_total 3"));
     assert!(body.contains("crab_s3_gateway_mutation_batch_duration_seconds_count 1"));
     assert!(body.contains("crab_s3_gateway_mutation_queue_wait_seconds_count 1"));
+}
+
+#[tokio::test]
+async fn checkpoint_metrics_expose_background_progress_and_failures() {
+    let (admission, metrics) = setup();
+    metrics.record_checkpoint_scheduled(false);
+    metrics.record_checkpoint_scheduled(true);
+    metrics.record_checkpoint_superseded();
+    metrics.record_checkpoint_published();
+    metrics.record_checkpoint_failure();
+    metrics.observe_checkpoint_prepare(async {}).await;
+    metrics.observe_checkpoint_publish(async {}).await;
+
+    let body = metrics.render(&admission);
+    assert!(body.contains("crab_s3_gateway_attribute_checkpoints_scheduled_total 2"));
+    assert!(body.contains("crab_s3_gateway_attribute_checkpoints_coalesced_total 1"));
+    assert!(body.contains("crab_s3_gateway_attribute_checkpoints_superseded_total 1"));
+    assert!(body.contains("crab_s3_gateway_attribute_checkpoints_published_total 1"));
+    assert!(body.contains("crab_s3_gateway_attribute_checkpoint_failures_total 1"));
+    assert!(body.contains("crab_s3_gateway_attribute_checkpoint_prepare_duration_seconds_count 1"));
+    assert!(body.contains("crab_s3_gateway_attribute_checkpoint_publish_duration_seconds_count 1"));
 }
 
 #[test]

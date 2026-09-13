@@ -34,6 +34,13 @@ pub struct PackObjectLocation {
     pub crc32: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PackIndexEntry {
+    pub(crate) oid: gix_hash::ObjectId,
+    pub(crate) crc32: u32,
+    pub(crate) offset: u64,
+}
+
 /// Errors returned while deriving or validating pack object locations.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -98,6 +105,18 @@ pub enum PackLocatorError {
         source: std::io::Error,
     },
 
+    /// Pack-index filesystem I/O failed.
+    #[error("git pack-index I/O failed for {path}: {source}")]
+    IndexIo {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Pack-index bytes could not represent the requested object inventory.
+    #[error("invalid git pack index {path}: {reason}")]
+    InvalidIndex { path: PathBuf, reason: String },
+
     /// Reverse-index bytes were structurally invalid or disagreed with the index.
     #[error("invalid git reverse index {path}: {reason}")]
     InvalidReverseIndex { path: PathBuf, reason: String },
@@ -109,6 +128,84 @@ pub enum PackLocatorError {
     /// A kind sidecar did not match its immutable pack index.
     #[error("invalid git pack kind metadata: {reason}")]
     InvalidKindMetadata { reason: String },
+}
+
+pub(crate) fn write_pack_index_v2(
+    entries: &mut [PackIndexEntry],
+    index_path: &Path,
+    pack_checksum: gix_hash::ObjectId,
+) -> Result<(), PackLocatorError> {
+    entries.sort_unstable_by_key(|entry| entry.oid);
+    if entries.windows(2).any(|pair| pair[0].oid == pair[1].oid) {
+        return Err(PackLocatorError::InvalidIndex {
+            path: index_path.to_owned(),
+            reason: "pack index contains duplicate object IDs".to_owned(),
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(
+        8_usize
+            .saturating_add(256 * 4)
+            .saturating_add(entries.len().saturating_mul(36))
+            .saturating_add(40),
+    );
+    bytes.extend_from_slice(b"\xfftOc");
+    bytes.extend_from_slice(&2_u32.to_be_bytes());
+    let mut fanout = [0_u32; 256];
+    for entry in entries.iter() {
+        let bucket = usize::from(entry.oid.as_bytes()[0]);
+        fanout[bucket] = fanout[bucket]
+            .checked_add(1)
+            .ok_or(PackLocatorError::Overflow {
+                path: index_path.to_owned(),
+            })?;
+    }
+    let mut cumulative = 0_u32;
+    for count in fanout {
+        cumulative = cumulative
+            .checked_add(count)
+            .ok_or(PackLocatorError::Overflow {
+                path: index_path.to_owned(),
+            })?;
+        bytes.extend_from_slice(&cumulative.to_be_bytes());
+    }
+    for entry in entries.iter() {
+        bytes.extend_from_slice(entry.oid.as_bytes());
+    }
+    for entry in entries.iter() {
+        bytes.extend_from_slice(&entry.crc32.to_be_bytes());
+    }
+    let mut large_offsets = Vec::new();
+    for entry in entries.iter() {
+        let encoded = if entry.offset > 0x7fff_ffff {
+            let position =
+                u32::try_from(large_offsets.len()).map_err(|_| PackLocatorError::Overflow {
+                    path: index_path.to_owned(),
+                })?;
+            if position > 0x7fff_ffff {
+                return Err(PackLocatorError::Overflow {
+                    path: index_path.to_owned(),
+                });
+            }
+            large_offsets.push(entry.offset);
+            position | 0x8000_0000
+        } else {
+            u32::try_from(entry.offset).map_err(|_| PackLocatorError::Overflow {
+                path: index_path.to_owned(),
+            })?
+        };
+        bytes.extend_from_slice(&encoded.to_be_bytes());
+    }
+    for offset in large_offsets {
+        bytes.extend_from_slice(&offset.to_be_bytes());
+    }
+    bytes.extend_from_slice(pack_checksum.as_bytes());
+    let index_checksum: [u8; 20] = Sha1::digest(&bytes).into();
+    bytes.extend_from_slice(&index_checksum);
+    std::fs::write(index_path, bytes).map_err(|source| PackLocatorError::IndexIo {
+        path: index_path.to_owned(),
+        source,
+    })
 }
 
 /// Iterator over verified locations in increasing pack-offset order.

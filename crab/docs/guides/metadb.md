@@ -99,12 +99,34 @@ command.
 
 ### `crab metadb owner`
 
-Run one durable derived-state owner for a repository. Each cycle pins one
-manifest snapshot and performs at most one bounded action: advance the object
-catalog, repair visibility, rebuild or compact the split commit graph, rebuild
-the shallow-closure index, or roll up the smallest non-geometric pack suffix.
-Graph maintenance never shares a cycle with shallow-closure rebuilding, so a
-large repository cannot let one poll monopolize the owner lease. The locator
+Run one durable derived-state owner for a repository. The continuous owner
+fingerprints the manifest and active ref transactions, then waits until that
+activity is unchanged for one configured interval before it begins maintenance.
+Each eligible cycle pins one manifest snapshot and performs bounded maintenance:
+advance the object catalog, repair visibility, rebuild or compact the split
+commit graph, rebuild the shallow-closure index, or roll up the smallest
+non-geometric pack suffix.
+An eligible pack suffix is repacked before commit-graph or shallow-closure
+rebuilding when the object catalog covers the pinned generation. Stale catalog
+coverage is advanced first because bounded repack uses it to materialize any
+REF_DELTA bases discovered in the selected packs. Folding an active ref journal completes that cycle
+and restarts the quiet window before repack or derived work. Repeated bounded
+cycles observe the configured poll interval, so pack convergence cannot
+monopolize the owner or continuously contend with foreground writes. Any
+manifest or active-transaction change restarts the quiet window; `--once`
+remains eager for an operator-approved maintenance window. Derived indexes are
+rebuilt once the pack inventory converges instead of
+being invalidated and rebuilt between successive rollups. A budget-deferred
+rollup does not block catalog, visibility, or graph repair. Canonical disjoint
+packs retain their already-validated entry bodies: the owner rechecks immutable
+pack identity and committed sidecars, then rebuilds the aggregate index while
+copying bodies once instead of inflating every historical tree again. Graph
+When overlapping selected packs require a native rewrite, the owner scans their
+entry headers, reads only the referenced delta-base objects, repairs each thin
+source pack, and verifies that the self-contained replacement preserves exactly
+the selected object set. Graph maintenance
+never shares a cycle with shallow-closure rebuilding, so a large repository
+cannot let one poll monopolize the owner lease. The locator
 writer and its lease are opened only for catalog work and are closed before
 repository-sized graph or pack work begins. Push and upload-pack clients detect
 the repository owner and leave repair to it; complete-pack fetch remains the
@@ -123,9 +145,11 @@ owner lease. SIGINT/SIGTERM closes SlateDB and releases both leases before exit;
 expired leases remain reclaimable after a process or host failure.
 
 The default 30-second poll bounds normal derived-state lag to roughly one
-interval per pending action. An unchanged repository reads the manifest and
-its small inventory/descriptor metadata, but does not download stable pack
-bodies. The repository-owner lease is renewed every one-third of the configured
+interval per pending action after foreground activity becomes quiet. An active
+repository reads only the manifest and bounded active-transaction inventory on
+each poll; it does not enter journal compaction, catalog, graph, or repack work.
+An unchanged repository does not download stable pack bodies. The
+repository-owner lease is renewed every one-third of the configured
 push-lock TTL; the shorter locator lease is acquired only while advancing its
 SlateDB catalog. Choose a longer interval for low-traffic repositories; choose
 a shorter interval only when lower repair or maintenance lag justifies the

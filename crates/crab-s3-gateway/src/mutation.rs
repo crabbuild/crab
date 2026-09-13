@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -16,7 +16,7 @@ use crab_remote_git::{EntryMode, OperationKind};
 use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
 use md5::Digest as _;
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{Notify, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -28,6 +28,7 @@ use crate::{
 const LOCK_TTL: Duration = Duration::from_secs(300);
 const REF_LOCK_TTL: Duration = Duration::from_secs(30);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
+const GENERATED_PACK_SINGLE_PUT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const PACK_SCRATCH_BASE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_QUEUED_WRITES_PER_REF: usize = 64;
 const MAX_TRACKED_REFS: usize = 256;
@@ -37,9 +38,13 @@ const ATTRIBUTE_CHECKPOINT_BATCHES: usize = 64;
 const WRITE_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
 const BATCH_COLLECTION_DELAY: Duration = Duration::from_millis(10);
 const MAX_MUTATIONS_PER_BATCH: usize = 32;
+const MAX_BATCHES_PER_FENCE_BURST: usize = 8;
 const MAX_MUTATION_BATCH_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REPREPARE_ATTEMPTS: usize = 8;
 const TREE_PAGE_SIZE: usize = 4_096;
+const CHECKPOINT_PUBLICATION_CONCURRENCY: usize = 4;
+const GENERATED_TREE_DELTA_DEPTH: u32 = 8;
+const MAX_GENERATED_TREE_DELTA_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
@@ -171,6 +176,14 @@ pub(crate) struct Coordinator {
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
     admission: WriteAdmission,
+    checkpoints: Arc<CheckpointScheduler>,
+    metrics: Metrics,
+}
+
+struct BatchContext {
+    runtime: Arc<crab_remote_git::RemoteGitRuntime>,
+    options: crab_remote_git::RepositoryOptions,
+    checkpoints: Arc<CheckpointScheduler>,
     metrics: Metrics,
 }
 
@@ -178,14 +191,20 @@ impl Coordinator {
     pub(crate) fn new(
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
         options: crab_remote_git::RepositoryOptions,
+        cancellation: CancellationToken,
         metrics: Metrics,
     ) -> Self {
         Self {
             runtime,
             options,
             admission: WriteAdmission::default(),
+            checkpoints: Arc::new(CheckpointScheduler::new(cancellation, metrics.clone())),
             metrics,
         }
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.checkpoints.shutdown().await;
     }
 
     pub(crate) async fn apply(
@@ -237,26 +256,20 @@ impl Coordinator {
                 }
                 let repository = Repository::clone(repository);
                 repository.maintenance.begin();
-                let runtime = Arc::clone(&self.runtime);
-                let options = self.options;
-                let metrics = self.metrics.clone();
+                let context = BatchContext {
+                    runtime: Arc::clone(&self.runtime),
+                    options: self.options,
+                    metrics: self.metrics.clone(),
+                    checkpoints: Arc::clone(&self.checkpoints),
+                };
                 let branch = branch.to_owned();
                 let queue = Arc::clone(&queued.queue);
                 let worker_cancel = cancel.clone();
                 // A drained batch owns every accepted mutation. Detaching it
                 // prevents one disconnected HTTP caller from cancelling peers.
                 tokio::spawn(async move {
-                    Self::apply_batch(
-                        &repository,
-                        runtime,
-                        options,
-                        &metrics,
-                        &branch,
-                        &queue,
-                        batch,
-                        &worker_cancel,
-                    )
-                    .await;
+                    Self::apply_batch(&repository, context, &branch, &queue, batch, &worker_cancel)
+                        .await;
                     drop(permit);
                 });
             }
@@ -306,21 +319,121 @@ impl Coordinator {
 
     async fn apply_batch(
         repository: &Repository,
-        runtime: Arc<crab_remote_git::RemoteGitRuntime>,
-        options: crab_remote_git::RepositoryOptions,
-        metrics: &Metrics,
+        context: BatchContext,
+        branch: &str,
+        queue: &RefQueue,
+        mut batch: Vec<PendingMutation>,
+        cancel: &CancellationToken,
+    ) {
+        let mut deferred_planned = None;
+        if batch
+            .first()
+            .is_some_and(|pending| pending.mutation.is_planned())
+        {
+            Self::apply_one_batch(
+                repository,
+                &context,
+                branch,
+                queue,
+                batch,
+                FenceUse::Acquire,
+                cancel,
+            )
+            .await;
+        } else {
+            match GcWriterFences::acquire(repository, cancel).await {
+                Ok(fences) => {
+                    let mut burst_batches = 0usize;
+                    for index in 0..MAX_BATCHES_PER_FENCE_BURST {
+                        Self::apply_one_batch(
+                            repository,
+                            &context,
+                            branch,
+                            queue,
+                            batch,
+                            FenceUse::Held,
+                            cancel,
+                        )
+                        .await;
+                        burst_batches += 1;
+                        if index + 1 == MAX_BATCHES_PER_FENCE_BURST {
+                            break;
+                        }
+                        tokio::select! {
+                            () = cancel.cancelled() => break,
+                            () = tokio::time::sleep(BATCH_COLLECTION_DELAY) => {}
+                        }
+                        batch = match queue.take_batch() {
+                            Ok(batch) if batch.is_empty() => break,
+                            Ok(batch) => batch,
+                            Err(error) => {
+                                tracing::warn!(%error, "S3 write queue could not continue its fence burst");
+                                break;
+                            }
+                        };
+                        if batch
+                            .first()
+                            .is_some_and(|pending| pending.mutation.is_planned())
+                        {
+                            deferred_planned = Some(batch);
+                            break;
+                        }
+                    }
+                    fences.release().await;
+                    context.metrics.record_mutation_fence_burst(burst_batches);
+                    if let Some(batch) = deferred_planned {
+                        Self::apply_one_batch(
+                            repository,
+                            &context,
+                            branch,
+                            queue,
+                            batch,
+                            FenceUse::Acquire,
+                            cancel,
+                        )
+                        .await;
+                    }
+                }
+                Err(error) => reject_batch(batch, error),
+            }
+        }
+        let idle_maintenance = repository.maintenance.finish(cancel);
+        crate::repository::schedule_catalog_maintenance(
+            repository,
+            cancel,
+            repository.maintenance.current_epoch(),
+        );
+        if let Some((epoch, maintenance_cancel)) = idle_maintenance {
+            crate::repository::schedule_readability(
+                repository,
+                context.runtime,
+                context.options,
+                maintenance_cancel,
+                epoch,
+            );
+        }
+    }
+
+    async fn apply_one_batch(
+        repository: &Repository,
+        context: &BatchContext,
         branch: &str,
         queue: &RefQueue,
         batch: Vec<PendingMutation>,
+        fences: FenceUse,
         cancel: &CancellationToken,
     ) {
         let input_bytes = batch.iter().fold(0usize, |total, pending| {
             total.saturating_add(pending.mutation.estimated_bytes())
         });
         for pending in &batch {
-            metrics.record_mutation_queue_wait(pending.queued_at.elapsed().as_secs_f64());
+            context
+                .metrics
+                .record_mutation_queue_wait(pending.queued_at.elapsed().as_secs_f64());
         }
-        let _observation = metrics.start_mutation_batch(batch.len(), input_bytes);
+        let _observation = context
+            .metrics
+            .start_mutation_batch(batch.len(), input_bytes);
         let mutations = batch
             .iter()
             .map(|pending| pending.mutation.clone())
@@ -331,14 +444,15 @@ impl Coordinator {
                 Some(mutation) => Ok(vec![
                     apply_admitted(
                         repository,
-                        Arc::clone(&runtime),
-                        options,
+                        Arc::clone(&context.runtime),
+                        context.options,
                         mutation,
                         ApplyRequest {
                             branch,
                             plan_id: None,
-                            metrics,
+                            metrics: &context.metrics,
                             state: Some(&queue.state),
+                            checkpoints: Some(&context.checkpoints),
                         },
                         cancel,
                     )
@@ -347,20 +461,41 @@ impl Coordinator {
                 None => Err(std::io::Error::other("planned mutation batch is empty").into()),
             }
         } else {
-            apply_batch_admitted(
-                repository,
-                Arc::clone(&runtime),
-                options,
-                mutations,
-                ApplyRequest {
-                    branch,
-                    plan_id: None,
-                    metrics,
-                    state: Some(&queue.state),
-                },
-                cancel,
-            )
-            .await
+            let request = ApplyRequest {
+                branch,
+                plan_id: None,
+                metrics: &context.metrics,
+                state: Some(&queue.state),
+                checkpoints: Some(&context.checkpoints),
+            };
+            match fences {
+                FenceUse::Acquire => {
+                    apply_batch_admitted(
+                        repository,
+                        Arc::clone(&context.runtime),
+                        context.options,
+                        mutations,
+                        request,
+                        cancel,
+                    )
+                    .await
+                }
+                FenceUse::Held => {
+                    let result = apply_with_fences(
+                        repository,
+                        Arc::clone(&context.runtime),
+                        context.options,
+                        mutations,
+                        request,
+                        cancel,
+                    )
+                    .await;
+                    if result.is_ok() {
+                        repository.read_views.invalidate().await;
+                    }
+                    result
+                }
+            }
         };
         match results {
             Ok(results) => {
@@ -375,21 +510,19 @@ impl Coordinator {
                 }
             }
         }
-        let idle_maintenance = repository.maintenance.finish(cancel);
-        crate::repository::schedule_catalog_maintenance(
-            repository,
-            cancel,
-            repository.maintenance.current_epoch(),
-        );
-        if let Some((epoch, maintenance_cancel)) = idle_maintenance {
-            crate::repository::schedule_readability(
-                repository,
-                runtime,
-                options,
-                maintenance_cancel,
-                epoch,
-            );
-        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FenceUse {
+    Acquire,
+    Held,
+}
+
+fn reject_batch(batch: Vec<PendingMutation>, error: Error) {
+    let error = Arc::new(error);
+    for pending in batch {
+        let _ = pending.result.send(Err(Error::Batch(Arc::clone(&error))));
     }
 }
 
@@ -404,7 +537,7 @@ async fn apply(
     principal: &str,
     cancel: &CancellationToken,
 ) -> Result<Outcome> {
-    Coordinator::new(runtime, options, Metrics::new().unwrap())
+    Coordinator::new(runtime, options, cancel.clone(), Metrics::new().unwrap())
         .apply(repository, branch, path, change, principal, cancel)
         .await
 }
@@ -441,6 +574,181 @@ struct CachedBranchState {
 struct BranchState {
     cached: std::sync::Mutex<Option<CachedBranchState>>,
     warm_bytes: Arc<AtomicUsize>,
+}
+
+struct CheckpointJob {
+    repository: Repository,
+    branch: String,
+    commit: ObjectId,
+    manifest: attributes::Manifest,
+}
+
+struct CheckpointRefState {
+    running: bool,
+    pending: Option<CheckpointJob>,
+}
+
+struct CheckpointScheduler {
+    refs: std::sync::Mutex<HashMap<String, CheckpointRefState>>,
+    permits: Arc<Semaphore>,
+    cancellation: CancellationToken,
+    active: AtomicUsize,
+    idle: Notify,
+    metrics: Metrics,
+}
+
+impl CheckpointScheduler {
+    fn new(cancellation: CancellationToken, metrics: Metrics) -> Self {
+        Self {
+            refs: std::sync::Mutex::new(HashMap::new()),
+            permits: Arc::new(Semaphore::new(CHECKPOINT_PUBLICATION_CONCURRENCY)),
+            cancellation,
+            active: AtomicUsize::new(0),
+            idle: Notify::new(),
+            metrics,
+        }
+    }
+
+    fn schedule(
+        self: &Arc<Self>,
+        repository: &Repository,
+        branch: &str,
+        commit: ObjectId,
+        manifest: &attributes::Manifest,
+    ) {
+        if self.cancellation.is_cancelled() {
+            return;
+        }
+        let key = format!("{}\0{branch}", repository.config.name);
+        let start = {
+            let mut refs = self
+                .refs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = refs.entry(key.clone()).or_insert(CheckpointRefState {
+                running: false,
+                pending: None,
+            });
+            let replaced = state.pending.replace(CheckpointJob {
+                repository: repository.clone(),
+                branch: branch.to_owned(),
+                commit,
+                manifest: manifest.clone(),
+            });
+            self.metrics.record_checkpoint_scheduled(replaced.is_some());
+            if state.running {
+                false
+            } else {
+                state.running = true;
+                self.active.fetch_add(1, Ordering::AcqRel);
+                true
+            }
+        };
+        if start {
+            let scheduler = Arc::clone(self);
+            tokio::spawn(async move { scheduler.run_ref(key).await });
+        }
+    }
+
+    async fn run_ref(self: Arc<Self>, key: String) {
+        loop {
+            let job = {
+                let mut refs = self
+                    .refs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match refs.get_mut(&key).and_then(|state| state.pending.take()) {
+                    Some(job) => Some(job),
+                    None => {
+                        refs.remove(&key);
+                        self.active.fetch_sub(1, Ordering::AcqRel);
+                        self.idle.notify_waiters();
+                        None
+                    }
+                }
+            };
+            let Some(job) = job else {
+                return;
+            };
+            if self.cancellation.is_cancelled() {
+                continue;
+            }
+            let permit = tokio::select! {
+                permit = Arc::clone(&self.permits).acquire_owned() => permit,
+                () = self.cancellation.cancelled() => continue,
+            };
+            let Ok(_permit) = permit else {
+                continue;
+            };
+            let commit = job.commit;
+            let repository = job.repository;
+            let branch = job.branch;
+            let manifest = job.manifest;
+            let preparation = self.metrics.observe_checkpoint_prepare(async {
+                tokio::task::spawn_blocking(move || {
+                    attributes::prepare_checkpoint(&branch, commit, &manifest)
+                })
+                .await
+                .map_err(Error::Worker)?
+                .map_err(Error::from)
+            });
+            // A blocking serializer cannot be cancelled by dropping its join
+            // handle. Await it so shutdown does not leave detached work behind.
+            let prepared = preparation.await;
+            let prepared = match prepared {
+                Ok(Some(prepared)) => prepared,
+                Ok(None) => continue,
+                Err(error) => {
+                    self.metrics.record_checkpoint_failure();
+                    tracing::warn!(%error, "S3 attribute checkpoint preparation failed");
+                    continue;
+                }
+            };
+            if self.cancellation.is_cancelled() {
+                continue;
+            }
+            let newer_pending = self
+                .refs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
+                .is_some_and(|state| state.pending.is_some());
+            if newer_pending {
+                self.metrics.record_checkpoint_superseded();
+                continue;
+            }
+            let publication = self
+                .metrics
+                .observe_checkpoint_publish(attributes::publish_checkpoint(&repository, &prepared));
+            let result = tokio::select! {
+                result = publication => result,
+                () = self.cancellation.cancelled() => continue,
+            };
+            match result {
+                Ok(true) => self.metrics.record_checkpoint_published(),
+                Ok(false) => self.metrics.record_checkpoint_superseded(),
+                Err(error) => {
+                    self.metrics.record_checkpoint_failure();
+                    tracing::warn!(%error, "S3 attribute checkpoint publication failed");
+                }
+            }
+        }
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            if self.active.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn shutdown(&self) {
+        self.cancellation.cancel();
+        self.wait_idle().await;
+    }
 }
 
 impl BranchState {
@@ -812,6 +1120,47 @@ struct RefLease {
     worker: tokio::task::JoinHandle<std::result::Result<(), crab_coordination::CoordinationError>>,
 }
 
+struct GcWriterFences {
+    fences: Vec<(GcFenceLease, GcFenceHeartbeat)>,
+}
+
+impl GcWriterFences {
+    async fn acquire(repository: &Repository, cancel: &CancellationToken) -> Result<Self> {
+        let mut fences = Vec::new();
+        for domain in [
+            repository.layout.global_prefix(),
+            repository.layout.repo_prefix(),
+        ] {
+            let fence = match async {
+                check_cancelled(cancel)?;
+                GcFenceLease::acquire_writer(repository.store.inner(), domain, LOCK_TTL)
+                    .await
+                    .map_err(Error::from)
+            }
+            .await
+            {
+                Ok(fence) => fence,
+                Err(error) => {
+                    Self { fences }.release().await;
+                    return Err(error);
+                }
+            };
+            let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), LOCK_TTL / 3);
+            fences.push((fence, heartbeat));
+        }
+        Ok(Self { fences })
+    }
+
+    async fn release(self) {
+        for (fence, heartbeat) in self.fences.into_iter().rev() {
+            heartbeat.stop().await;
+            if let Err(error) = fence.release().await {
+                tracing::warn!(%error, "S3 GC fence cleanup failed");
+            }
+        }
+    }
+}
+
 impl RefLease {
     async fn acquire(
         repository: &Repository,
@@ -882,6 +1231,7 @@ struct ApplyRequest<'a> {
     plan_id: Option<&'a str>,
     metrics: &'a Metrics,
     state: Option<&'a BranchState>,
+    checkpoints: Option<&'a Arc<CheckpointScheduler>>,
 }
 
 async fn apply_admitted(
@@ -1000,35 +1350,17 @@ async fn apply_with_gc_fences(
     request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<Vec<Result<Outcome>>> {
-    let mut fences = Vec::new();
-    let result = async {
-        for domain in [
-            repository.layout.global_prefix(),
-            repository.layout.repo_prefix(),
-        ] {
-            check_cancelled(cancel)?;
-            let fence =
-                GcFenceLease::acquire_writer(repository.store.inner(), domain, LOCK_TTL).await?;
-            let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), LOCK_TTL / 3);
-            fences.push((fence, heartbeat));
-        }
-        Box::pin(apply_with_fences(
-            repository,
-            Arc::clone(&runtime),
-            options,
-            mutations,
-            request,
-            cancel,
-        ))
-        .await
-    }
+    let fences = GcWriterFences::acquire(repository, cancel).await?;
+    let result = apply_with_fences(
+        repository,
+        Arc::clone(&runtime),
+        options,
+        mutations,
+        request,
+        cancel,
+    )
     .await;
-    for (fence, heartbeat) in fences.into_iter().rev() {
-        heartbeat.stop().await;
-        if let Err(error) = fence.release().await {
-            tracing::warn!(%error, "S3 GC fence cleanup failed");
-        }
-    }
+    fences.release().await;
     if result.is_ok() {
         repository.read_views.invalidate().await;
     }
@@ -1097,9 +1429,15 @@ async fn apply_with_fences(
         lease.release().await;
         match published? {
             Publish::Committed(transaction) => {
+                let checkpoint = prepared.checkpoint;
+                let tip = prepared.tip;
+                if checkpoint && let (Some(checkpoints), Some(commit)) = (request.checkpoints, tip)
+                {
+                    checkpoints.schedule(repository, request.branch, commit, &prepared.attributes);
+                }
                 if let Some(state) = request.state {
                     state.store(
-                        prepared.tip,
+                        tip,
                         Some(transaction),
                         prepared.attributes,
                         prepared.tree,
@@ -1127,7 +1465,6 @@ struct UploadedMutation {
     commit: ObjectId,
     pack: PackManifestEntry,
     evidence_hash: String,
-    checkpoint: Option<attributes::PreparedCheckpoint>,
 }
 
 struct PreparedBatch {
@@ -1139,6 +1476,7 @@ struct PreparedBatch {
     attributes: attributes::Manifest,
     tree: WarmTree,
     batches_since_checkpoint: usize,
+    checkpoint: bool,
     requires_revalidation: bool,
 }
 
@@ -1315,7 +1653,14 @@ async fn build_batch(
     }
     let next_checkpoint = batches_since_checkpoint.saturating_add(1);
     let has_commits = !commits.is_empty();
-    let checkpoint = has_commits && next_checkpoint >= ATTRIBUTE_CHECKPOINT_BATCHES;
+    let checkpoint = has_commits
+        && next_checkpoint >= ATTRIBUTE_CHECKPOINT_BATCHES
+        && attributes::checkpoint_eligible(&manifest);
+    if checkpoint {
+        let commit =
+            parent.ok_or_else(|| std::io::Error::other("checkpoint batch has no final commit"))?;
+        manifest.mark_checkpoint(commit);
+    }
     let batches_since_checkpoint = if !has_commits {
         batches_since_checkpoint
     } else if checkpoint {
@@ -1348,7 +1693,7 @@ async fn upload_batch(
         commits,
         tip,
         attributes,
-        tree,
+        mut tree,
         batches_since_checkpoint,
         checkpoint,
     } = batch;
@@ -1362,25 +1707,16 @@ async fn upload_batch(
             attributes,
             tree,
             batches_since_checkpoint,
+            checkpoint: false,
             requires_revalidation,
         });
     };
     let commit_count = commits.len();
-    let parent = commits.first().and_then(|commit| commit.parent);
-    let final_commit = commits
-        .last()
-        .map(|commit| commit.commit)
-        .ok_or_else(|| std::io::Error::other("mutation batch has no commit"))?;
-    let checkpoint = if checkpoint {
-        check_cancelled(cancel)?;
-        attributes::prepare_checkpoint(branch, final_commit, &attributes)?
-    } else {
-        None
-    };
     let publication = upload_built_batch(
         repository,
-        parent,
+        branch,
         commits,
+        &mut tree,
         expected_transaction.clone(),
         checkpoint,
         cancel,
@@ -1396,6 +1732,7 @@ async fn upload_batch(
         attributes,
         tree,
         batches_since_checkpoint,
+        checkpoint,
         requires_revalidation,
     })
 }
@@ -1432,22 +1769,23 @@ async fn prepared_parent_is_current(
 
 async fn upload_built_batch(
     repository: &Repository,
-    parent: Option<ObjectId>,
+    branch: &str,
     commits: Vec<BuiltCommit>,
+    tree: &mut WarmTree,
     expected_transaction: Option<String>,
-    checkpoint: Option<attributes::PreparedCheckpoint>,
+    checkpoint: bool,
     cancel: &CancellationToken,
     metrics: &Metrics,
 ) -> Result<UploadedMutation> {
     let mut objects = Vec::new();
     let mut seen = HashMap::new();
+    let mut delta_candidates = BTreeMap::<ObjectId, Vec<TreeDeltaBase>>::new();
     let final_commit = commits
         .last()
         .map(|built| built.commit)
         .ok_or_else(|| std::io::Error::other("mutation batch has no commit"))?;
-    let checkpoint_slot = checkpoint
-        .as_ref()
-        .map(|checkpoint| checkpoint.slot().to_owned());
+    let parent = commits.first().and_then(|built| built.parent);
+    let checkpoint_slot = checkpoint.then(|| attributes::checkpoint_slot(branch));
     let attribute_deltas = commits
         .iter()
         .map(|built| {
@@ -1455,7 +1793,7 @@ async fn upload_built_batch(
                 built.commit,
                 built.parent,
                 built.attribute_changes.clone(),
-                built.commit == final_commit && checkpoint_slot.is_some(),
+                built.commit == final_commit && checkpoint,
                 (built.commit == final_commit)
                     .then(|| checkpoint_slot.clone())
                     .flatten(),
@@ -1463,12 +1801,53 @@ async fn upload_built_batch(
         })
         .collect::<Vec<_>>();
     for built in commits {
+        for candidate in built.tree_delta_bases {
+            delta_candidates
+                .entry(candidate.object)
+                .or_default()
+                .push(candidate);
+        }
         for (kind, bytes) in built.objects {
             let oid = object_id(kind, &bytes)?;
             if seen.insert(oid, ()).is_none() {
                 objects.push((kind, bytes));
             }
         }
+    }
+    let mut delta_bases = BTreeMap::new();
+    let mut external_delta_bases = BTreeMap::new();
+    let mut external_delta_bytes = 0usize;
+    for (object, candidates) in delta_candidates {
+        let candidate = candidates
+            .into_iter()
+            .filter(|candidate| seen.contains_key(&candidate.base) || candidate.external.is_some())
+            .min_by_key(|candidate| (!seen.contains_key(&candidate.base), candidate.base));
+        let Some(candidate) = candidate else {
+            continue;
+        };
+        if !seen.contains_key(&candidate.base) {
+            let external = candidate.external.ok_or_else(|| {
+                std::io::Error::other("external tree delta base bytes disappeared")
+            })?;
+            let Some(next_external_bytes) = external_delta_bytes.checked_add(external.bytes.len())
+            else {
+                continue;
+            };
+            if next_external_bytes > MAX_GENERATED_PACK_BYTES as usize {
+                continue;
+            }
+            external_delta_bytes = next_external_bytes;
+            external_delta_bases.insert(
+                object,
+                crab_git::incoming_pack::ExternalDeltaBase::new(
+                    candidate.base,
+                    Kind::Tree,
+                    external.bytes,
+                    external.depth,
+                ),
+            );
+        }
+        delta_bases.insert(object, candidate.base);
     }
     let scratch_bytes = pack_scratch_reservation(&objects);
     let capacity = metrics.reserve_scratch(scratch_bytes)?;
@@ -1478,7 +1857,16 @@ async fn upload_built_batch(
         .iter()
         .map(|(kind, bytes)| object_id(*kind, bytes).map(|oid| oid.to_string()))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let prepared = prepare_pack(objects, cancel).await;
+    let generated_object_bytes = objects.iter().fold(0_usize, |total, (_, bytes)| {
+        total.saturating_add(bytes.len())
+    });
+    let generated_tree_bytes = objects
+        .iter()
+        .filter(|(kind, _)| *kind == Kind::Tree)
+        .fold(0_usize, |total, (_, bytes)| {
+            total.saturating_add(bytes.len())
+        });
+    let prepared = prepare_pack(objects, delta_bases, external_delta_bases, cancel).await;
     if matches!(
         &prepared,
         Err(Error::Io(_)
@@ -1488,6 +1876,14 @@ async fn upload_built_batch(
         scratch.record_failure(ScratchFailure::Write);
     }
     let (pack_owner, pack) = prepared?;
+    metrics.record_generated_pack(
+        generated_object_bytes,
+        generated_tree_bytes,
+        pack.size(),
+        external_delta_bytes,
+        pack.external_delta_count(),
+    );
+    tree.bind_prepared_pack(&pack)?;
     // The prepared files are now reflected by statvfs. Release their
     // conservative pre-write claim while ownership metrics remain live.
     drop(capacity);
@@ -1507,18 +1903,27 @@ async fn upload_built_batch(
         ),
     };
     let pack_upload = async {
-        repository
-            .store
-            .put_multipart_file_retry(
-                &repository.layout.pack_path(&pack_id),
-                pack.pack_path(),
-                pack.size(),
-                *pack.content_hash().as_bytes(),
-                8 * 1024 * 1024,
-                cancel,
-                None,
-            )
-            .await?;
+        let path = repository.layout.pack_path(&pack_id);
+        if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
+            check_cancelled(cancel)?;
+            repository
+                .store
+                .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
+                .await?;
+        } else {
+            repository
+                .store
+                .put_multipart_file_retry(
+                    &path,
+                    pack.pack_path(),
+                    pack.size(),
+                    *pack.content_hash().as_bytes(),
+                    GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
+                    cancel,
+                    None,
+                )
+                .await?;
+        }
         Ok::<(), Error>(())
     };
     let sidecar_upload = |source: &std::path::Path, target| {
@@ -1584,7 +1989,6 @@ async fn upload_built_batch(
             ref_tips: vec![final_commit.to_string()],
         },
         evidence_hash,
-        checkpoint,
     };
     drop(pack);
     drop(pack_owner);
@@ -1597,8 +2001,8 @@ fn pack_scratch_reservation(objects: &[(Kind, Vec<u8>)]) -> u64 {
         total.saturating_add(object.len() as u64)
     });
     let sidecars = (objects.len() as u64).saturating_mul(64);
-    // Direct generated-pack preparation retains one decoded spool and two
-    // normalized packs at peak. The fourth copy, extra quarter, and fixed
+    // Direct generated-pack preparation retains one decoded spool and one
+    // normalized pack. The remaining copies, extra quarter, and fixed
     // allowance conservatively cover indexing and sidecar overhead.
     bytes
         .saturating_mul(4)
@@ -1674,13 +2078,6 @@ async fn publish_prepared(
         Err(crab_write::WriteError::RefChanged { .. }) => return Ok(Publish::Reprepare),
         Err(error) => return Err(error.into()),
     };
-    if let Some(checkpoint) = &prepared.checkpoint
-        && let Err(error) = attributes::publish_checkpoint(repository, checkpoint).await
-    {
-        // The journal is already authoritative. A missing checkpoint falls
-        // back to immutable deltas, so retrying this mutation would duplicate it.
-        tracing::warn!(%error, "S3 attribute checkpoint publication failed");
-    }
     Ok(Publish::Committed(committed.transaction_id))
 }
 
@@ -1689,7 +2086,19 @@ struct BuiltCommit {
     commit: ObjectId,
     etag: Option<String>,
     objects: Vec<(Kind, Vec<u8>)>,
+    tree_delta_bases: Vec<TreeDeltaBase>,
     attribute_changes: std::collections::BTreeMap<String, Option<attributes::ObjectAttributes>>,
+}
+
+struct TreeDeltaBase {
+    object: ObjectId,
+    base: ObjectId,
+    external: Option<ExternalTreeDeltaBase>,
+}
+
+struct ExternalTreeDeltaBase {
+    bytes: Vec<u8>,
+    depth: u32,
 }
 
 enum Build {
@@ -1697,17 +2106,24 @@ enum Build {
     Commit(Box<BuiltCommit>),
 }
 
-struct TreeFrame {
+struct TreeEntryEdit {
+    name: Vec<u8>,
+    replacement: Option<tree::Entry>,
+}
+
+struct DirectoryEdit {
     path: Vec<u8>,
-    old_oid: Option<ObjectId>,
-    new_oid: Option<ObjectId>,
-    entries: Vec<tree::Entry>,
+    oid: Option<ObjectId>,
+    entries: Vec<TreeEntryEdit>,
+    generated: bool,
 }
 
 #[derive(Clone)]
 struct DirectoryState {
     oid: Option<ObjectId>,
     entries: Vec<tree::Entry>,
+    delta_depth: Option<u32>,
+    generated_in_batch: bool,
 }
 
 struct GeneratedAttributeBlob {
@@ -1726,6 +2142,23 @@ struct WarmTree {
 impl WarmTree {
     fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
+    }
+
+    fn bind_prepared_pack(&mut self, pack: &crab_git::incoming_pack::PreparedPack) -> Result<()> {
+        for directory in self
+            .directories
+            .values_mut()
+            .filter(|directory| directory.generated_in_batch)
+        {
+            let oid = directory.oid.ok_or_else(|| {
+                std::io::Error::other("generated directory has no object identity")
+            })?;
+            directory.delta_depth = Some(pack.delta_depth(&oid).ok_or_else(|| {
+                std::io::Error::other("generated directory is absent from prepared pack")
+            })?);
+            directory.generated_in_batch = false;
+        }
+        Ok(())
     }
 }
 
@@ -1768,12 +2201,12 @@ impl MutableTree {
         }
     }
 
-    async fn frames(
+    async fn paths(
         &mut self,
         directories: &[Vec<u8>],
         operation: Option<&crab_remote_git::OperationContext>,
-    ) -> Result<Vec<TreeFrame>> {
-        let mut frames = Vec::with_capacity(directories.len() + 1);
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut paths = Vec::with_capacity(directories.len() + 1);
         let mut directory_path = crab_remote_git::GitPath::root();
         let mut directory_oid = self.root_oid;
         for depth in 0..=directories.len() {
@@ -1794,6 +2227,8 @@ impl MutableTree {
                 let state = DirectoryState {
                     oid: directory_oid,
                     entries,
+                    delta_depth: None,
+                    generated_in_batch: false,
                 };
                 self.estimated_bytes = self
                     .estimated_bytes
@@ -1807,12 +2242,7 @@ impl MutableTree {
             if state.oid != directory_oid {
                 return Err(std::io::Error::other("mutation directory state diverged").into());
             }
-            frames.push(TreeFrame {
-                path: key,
-                old_oid: state.oid,
-                new_oid: state.oid,
-                entries: state.entries.clone(),
-            });
+            paths.push(key);
             if depth == directories.len() {
                 break;
             }
@@ -1824,55 +2254,56 @@ impl MutableTree {
             };
             directory_path = push_component(&directory_path, component)?;
         }
-        Ok(frames)
+        Ok(paths)
     }
 
-    fn commit(&mut self, frames: Vec<TreeFrame>, objects: &[(Kind, Vec<u8>)]) -> Result<()> {
-        for frame in &frames {
-            let attributes = find_entry(&frame.entries, b".gitattributes");
-            match attributes {
-                Some(attributes) => {
-                    let mut generated = None;
-                    for (kind, bytes) in objects {
-                        if *kind == Kind::Blob && object_id(*kind, bytes)? == attributes.oid {
-                            generated = Some(bytes);
-                            break;
-                        }
-                    }
-                    if let Some(bytes) = generated {
-                        self.replace_generated_attributes(
-                            frame.path.clone(),
-                            Some(GeneratedAttributeBlob {
-                                oid: attributes.oid,
-                                bytes: bytes.clone(),
-                            }),
-                        );
-                    } else if self
-                        .generated_attribute_blobs
-                        .get(&frame.path)
-                        .is_some_and(|blob| blob.oid != attributes.oid)
-                    {
-                        self.replace_generated_attributes(frame.path.clone(), None);
-                    }
+    fn commit(
+        &mut self,
+        edits: Vec<DirectoryEdit>,
+        generated_attributes: Option<(Vec<u8>, Option<GeneratedAttributeBlob>)>,
+    ) -> Result<()> {
+        if edits
+            .iter()
+            .any(|edit| !self.directories.contains_key(&edit.path))
+        {
+            return Err(std::io::Error::other("mutation directory state disappeared").into());
+        }
+        for edit in edits {
+            let Some(state) = self.directories.get_mut(&edit.path) else {
+                return Err(std::io::Error::other("mutation directory state disappeared").into());
+            };
+            for entry in edit.entries {
+                if let Some(index) = entry_index(&state.entries, &entry.name) {
+                    let previous = state.entries.remove(index);
+                    self.estimated_bytes = self
+                        .estimated_bytes
+                        .saturating_sub(estimated_tree_entry_bytes(&previous));
                 }
-                None => self.replace_generated_attributes(frame.path.clone(), None),
+                if let Some(replacement) = entry.replacement {
+                    self.estimated_bytes = self
+                        .estimated_bytes
+                        .saturating_add(estimated_tree_entry_bytes(&replacement));
+                    let index = state
+                        .entries
+                        .binary_search(&replacement)
+                        .unwrap_or_else(|index| index);
+                    state.entries.insert(index, replacement);
+                }
+            }
+            state.oid = edit.oid;
+            if edit.oid.is_none() {
+                state.delta_depth = None;
+                state.generated_in_batch = false;
+            } else if edit.generated {
+                state.delta_depth = None;
+                state.generated_in_batch = true;
+            }
+            if edit.path.is_empty() {
+                self.root_oid = edit.oid;
             }
         }
-        for frame in frames {
-            if frame.path.is_empty() {
-                self.root_oid = frame.new_oid;
-            }
-            let state = DirectoryState {
-                oid: frame.new_oid,
-                entries: frame.entries,
-            };
-            let next_bytes = estimated_directory_bytes(&frame.path, &state);
-            if let Some(previous) = self.directories.insert(frame.path.clone(), state) {
-                self.estimated_bytes = self
-                    .estimated_bytes
-                    .saturating_sub(estimated_directory_bytes(&frame.path, &previous));
-            }
-            self.estimated_bytes = self.estimated_bytes.saturating_add(next_bytes);
+        if let Some((path, replacement)) = generated_attributes {
+            self.replace_generated_attributes(path, replacement);
         }
         Ok(())
     }
@@ -1924,10 +2355,12 @@ impl MutableTree {
 
 fn estimated_directory_bytes(path: &[u8], directory: &DirectoryState) -> usize {
     directory.entries.iter().fold(path.len(), |total, entry| {
-        total
-            .saturating_add(std::mem::size_of::<tree::Entry>())
-            .saturating_add(entry.filename.len())
+        total.saturating_add(estimated_tree_entry_bytes(entry))
     })
+}
+
+fn estimated_tree_entry_bytes(entry: &tree::Entry) -> usize {
+    std::mem::size_of::<tree::Entry>().saturating_add(entry.filename.len())
 }
 
 fn estimated_attribute_blob_bytes(path: &[u8], blob: &GeneratedAttributeBlob) -> usize {
@@ -1947,14 +2380,18 @@ async fn build_commit(
 ) -> Result<Build> {
     let components = path.components().map(<[u8]>::to_vec).collect::<Vec<_>>();
     let (name, directories) = components.split_last().ok_or(Error::IsDirectory)?;
-    let mut frames = tree_state.frames(directories, operation).await?;
+    let paths = tree_state.paths(directories, operation).await?;
     let mut directory_path = crab_remote_git::GitPath::root();
     for component in directories {
         directory_path = push_component(&directory_path, component)?;
     }
-    let leaf_entries = &mut frames
-        .last_mut()
-        .ok_or_else(|| std::io::Error::other("object path has no parent tree"))?
+    let leaf_path = paths
+        .last()
+        .ok_or_else(|| std::io::Error::other("object path has no parent tree"))?;
+    let leaf_entries = &tree_state
+        .directories
+        .get(leaf_path)
+        .ok_or_else(|| std::io::Error::other("object path parent tree disappeared"))?
         .entries;
     let old = match find_entry(leaf_entries, name) {
         Some(entry) if entry.mode == tree::EntryKind::Tree.into() => {
@@ -1991,6 +2428,7 @@ async fn build_commit(
         }
         Change::Put { .. } | Change::Attributes { .. } | Change::Delete { .. } => None,
     };
+    let mut leaf_edits = Vec::with_capacity(2);
     let (etag, changed, pending_attributes) = match change {
         Change::Put {
             bytes,
@@ -2013,15 +2451,14 @@ async fn build_commit(
             {
                 return Ok(Build::Noop(Outcome { etag: Some(etag) }));
             }
-            replace_entry(
-                leaf_entries,
-                name,
-                Some(tree::Entry {
+            leaf_edits.push(TreeEntryEdit {
+                name: name.clone(),
+                replacement: Some(tree::Entry {
                     mode: tree::EntryKind::Blob.into(),
                     filename: BString::from(name.clone()),
                     oid,
                 }),
-            );
+            });
             let changed = old
                 .filter(|(old_oid, _)| *old_oid == oid)
                 .map(|_| None)
@@ -2054,12 +2491,16 @@ async fn build_commit(
             if old.is_none() {
                 return Ok(Build::Noop(Outcome { etag: None }));
             }
-            replace_entry(leaf_entries, name, None);
+            leaf_edits.push(TreeEntryEdit {
+                name: name.clone(),
+                replacement: None,
+            });
             (None, None, None)
         }
     };
     let seconds = now_seconds()?;
     let mut objects = Vec::new();
+    let mut tree_delta_bases = Vec::new();
     let mut attribute_changes = std::collections::BTreeMap::new();
     if let Some(bytes) = changed {
         objects.push((Kind::Blob, bytes));
@@ -2076,42 +2517,17 @@ async fn build_commit(
             seconds,
             attributes::PutAttributes::default(),
         );
-        replace_entry(
-            leaf_entries,
-            b".gitattributes",
-            Some(tree::Entry {
+        leaf_edits.push(TreeEntryEdit {
+            name: b".gitattributes".to_vec(),
+            replacement: Some(tree::Entry {
                 mode: attributes.mode,
                 filename: BString::from(b".gitattributes".to_vec()),
                 oid: attributes.oid,
             }),
-        );
+        });
         attribute_changes.insert(attributes_path, Some(generated_attributes));
         objects.push((Kind::Blob, attributes.bytes));
     }
-    let mut tree_oid = None;
-    for depth in (0..frames.len()).rev() {
-        let frame = &mut frames[depth];
-        let empty = frame.entries.is_empty();
-        let oid = if depth > 0 && empty {
-            None
-        } else {
-            let oid = encode_tree(frame.old_oid, &frame.entries, &mut objects)?;
-            Some(oid)
-        };
-        frame.new_oid = oid;
-        if depth == 0 {
-            tree_oid = oid;
-            break;
-        }
-        let directory_name = &directories[depth - 1];
-        let entry = oid.map(|oid| tree::Entry {
-            mode: tree::EntryKind::Tree.into(),
-            filename: BString::from(directory_name.clone()),
-            oid,
-        });
-        replace_entry(&mut frames[depth - 1].entries, directory_name, entry);
-    }
-    let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
     let object_attributes = pending_attributes.map(|(oid, pending, size)| {
         attributes::ObjectAttributes::new(
             oid,
@@ -2125,10 +2541,58 @@ async fn build_commit(
     let attribute_identity = serde_json::to_vec(&attribute_changes)
         .map_err(|source| Error::Attributes(Box::new(crate::Error::Attributes { source })))?;
     let attribute_digest = blake3::hash(&attribute_identity).to_hex();
+
+    let generated_attributes =
+        generated_attribute_update(tree_state, leaf_path, leaf_entries, &leaf_edits, &objects)?;
+    let mut directory_edits = Vec::with_capacity(paths.len());
+    let mut tree_oid = None;
+    let mut entries = leaf_edits;
+    for depth in (0..paths.len()).rev() {
+        let state = tree_state
+            .directories
+            .get(&paths[depth])
+            .ok_or_else(|| std::io::Error::other("mutation directory state disappeared"))?;
+        let changed = tree_entries_changed(&state.entries, &entries);
+        let empty = tree_entry_count_after_edits(&state.entries, &entries) == 0;
+        let oid = if !changed {
+            state.oid
+        } else if depth > 0 && empty {
+            None
+        } else {
+            let oid = encode_tree_with_edits(
+                state,
+                &state.entries,
+                &entries,
+                &mut objects,
+                &mut tree_delta_bases,
+            )?;
+            Some(oid)
+        };
+        directory_edits.push(DirectoryEdit {
+            path: paths[depth].clone(),
+            oid,
+            entries,
+            generated: changed && !(depth > 0 && empty),
+        });
+        if depth == 0 {
+            tree_oid = oid;
+            break;
+        }
+        let directory_name = &directories[depth - 1];
+        entries = vec![TreeEntryEdit {
+            name: directory_name.clone(),
+            replacement: oid.map(|oid| tree::Entry {
+                mode: tree::EntryKind::Tree.into(),
+                filename: BString::from(directory_name.clone()),
+                oid,
+            }),
+        }];
+    }
+    let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
     let commit_bytes = commit_bytes(tree, parent, principal, seconds, attribute_digest.as_str());
     let commit = object_id(Kind::Commit, &commit_bytes)?;
     objects.push((Kind::Commit, commit_bytes));
-    tree_state.commit(frames, &objects)?;
+    tree_state.commit(directory_edits, generated_attributes)?;
     for (path, attributes) in &attribute_changes {
         manifest.update(path.clone(), attributes.clone());
     }
@@ -2137,6 +2601,7 @@ async fn build_commit(
         commit,
         etag,
         objects,
+        tree_delta_bases,
         attribute_changes,
     })))
 }
@@ -2363,18 +2828,6 @@ fn find_entry<'a>(entries: &'a [tree::Entry], name: &[u8]) -> Option<&'a tree::E
     entry_index(entries, name).map(|index| &entries[index])
 }
 
-fn replace_entry(entries: &mut Vec<tree::Entry>, name: &[u8], replacement: Option<tree::Entry>) {
-    if let Some(index) = entry_index(entries, name) {
-        entries.remove(index);
-    }
-    if let Some(replacement) = replacement {
-        let index = entries
-            .binary_search(&replacement)
-            .unwrap_or_else(|index| index);
-        entries.insert(index, replacement);
-    }
-}
-
 fn entry_index(entries: &[tree::Entry], name: &[u8]) -> Option<usize> {
     [tree::EntryKind::Blob, tree::EntryKind::Tree]
         .into_iter()
@@ -2401,25 +2854,139 @@ fn push_component(
     crab_remote_git::GitPath::new(path).map_err(Error::Remote)
 }
 
-fn encode_tree(
-    old_oid: Option<ObjectId>,
+fn tree_entries_changed(entries: &[tree::Entry], edits: &[TreeEntryEdit]) -> bool {
+    edits
+        .iter()
+        .any(|edit| find_entry(entries, &edit.name) != edit.replacement.as_ref())
+}
+
+fn tree_entry_count_after_edits(entries: &[tree::Entry], edits: &[TreeEntryEdit]) -> usize {
+    edits.iter().fold(entries.len(), |count, edit| {
+        match (
+            find_entry(entries, &edit.name).is_some(),
+            edit.replacement.is_some(),
+        ) {
+            (true, false) => count.saturating_sub(1),
+            (false, true) => count.saturating_add(1),
+            (true, true) | (false, false) => count,
+        }
+    })
+}
+
+fn tree_entry_after_edits<'a>(
+    entries: &'a [tree::Entry],
+    edits: &'a [TreeEntryEdit],
+    name: &[u8],
+) -> Option<&'a tree::Entry> {
+    edits
+        .iter()
+        .rev()
+        .find(|edit| edit.name == name)
+        .map_or_else(
+            || find_entry(entries, name),
+            |edit| edit.replacement.as_ref(),
+        )
+}
+
+fn generated_attribute_update(
+    tree_state: &MutableTree,
+    path: &[u8],
     entries: &[tree::Entry],
+    edits: &[TreeEntryEdit],
+    objects: &[(Kind, Vec<u8>)],
+) -> Result<Option<(Vec<u8>, Option<GeneratedAttributeBlob>)>> {
+    let current = tree_state.generated_attribute_blobs.get(path);
+    let Some(attributes) = tree_entry_after_edits(entries, edits, b".gitattributes") else {
+        return Ok(current.is_some().then(|| (path.to_vec(), None)));
+    };
+    for (kind, bytes) in objects {
+        if *kind == Kind::Blob && object_id(*kind, bytes)? == attributes.oid {
+            return Ok(Some((
+                path.to_vec(),
+                Some(GeneratedAttributeBlob {
+                    oid: attributes.oid,
+                    bytes: bytes.clone(),
+                }),
+            )));
+        }
+    }
+    Ok(match current {
+        Some(current) if current.oid == attributes.oid => None,
+        Some(_) => Some((path.to_vec(), None)),
+        None => None,
+    })
+}
+
+fn encode_tree_with_edits(
+    old: &DirectoryState,
+    entries: &[tree::Entry],
+    edits: &[TreeEntryEdit],
     objects: &mut Vec<(Kind, Vec<u8>)>,
+    delta_bases: &mut Vec<TreeDeltaBase>,
 ) -> Result<ObjectId> {
+    let mut replacements = edits
+        .iter()
+        .filter_map(|edit| edit.replacement.as_ref())
+        .collect::<Vec<_>>();
+    replacements.sort_unstable();
+    let mut existing = entries
+        .iter()
+        .filter(|entry| {
+            let filename: &[u8] = entry.filename.as_ref();
+            !edits.iter().any(|edit| edit.name == filename)
+        })
+        .peekable();
+    let mut replacements = replacements.into_iter().peekable();
     let mut bytes = Vec::new();
-    let mut mode = [0; 6];
-    for entry in entries {
-        bytes.extend_from_slice(entry.mode.as_bytes(&mut mode));
-        bytes.push(b' ');
-        bytes.extend_from_slice(&entry.filename);
-        bytes.push(0);
-        bytes.extend_from_slice(entry.oid.as_bytes());
+    loop {
+        let entry = match (existing.peek(), replacements.peek()) {
+            (Some(existing), Some(replacement)) if replacement < existing => replacements.next(),
+            (Some(_), Some(_)) | (Some(_), None) => existing.next(),
+            (None, Some(_)) => replacements.next(),
+            (None, None) => break,
+        };
+        let entry = entry.ok_or_else(|| std::io::Error::other("tree merge lost an entry"))?;
+        append_tree_entry(&mut bytes, entry);
     }
     let oid = object_id(Kind::Tree, &bytes)?;
-    if old_oid != Some(oid) {
-        objects.push((Kind::Tree, bytes));
+    objects.push((Kind::Tree, bytes));
+    if let Some(base) = old.oid {
+        let external = if old.generated_in_batch {
+            None
+        } else {
+            old.delta_depth
+                .filter(|depth| *depth < GENERATED_TREE_DELTA_DEPTH)
+                .map(|depth| ExternalTreeDeltaBase {
+                    bytes: encode_tree(entries),
+                    depth,
+                })
+        };
+        if old.generated_in_batch || external.is_some() {
+            delta_bases.push(TreeDeltaBase {
+                object: oid,
+                base,
+                external,
+            });
+        }
     }
     Ok(oid)
+}
+
+fn encode_tree(entries: &[tree::Entry]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for entry in entries {
+        append_tree_entry(&mut bytes, entry);
+    }
+    bytes
+}
+
+fn append_tree_entry(bytes: &mut Vec<u8>, entry: &tree::Entry) {
+    let mut mode = [0; 6];
+    bytes.extend_from_slice(entry.mode.as_bytes(&mut mode));
+    bytes.push(b' ');
+    bytes.extend_from_slice(&entry.filename);
+    bytes.push(0);
+    bytes.extend_from_slice(entry.oid.as_bytes());
 }
 
 fn commit_bytes(
@@ -2455,6 +3022,8 @@ fn object_id(kind: Kind, bytes: &[u8]) -> std::result::Result<ObjectId, gix_hash
 
 async fn prepare_pack(
     objects: Vec<(Kind, Vec<u8>)>,
+    delta_bases: BTreeMap<ObjectId, ObjectId>,
+    external_delta_bases: BTreeMap<ObjectId, crab_git::incoming_pack::ExternalDeltaBase>,
     cancel: &CancellationToken,
 ) -> Result<(tempfile::TempDir, crab_git::incoming_pack::PreparedPack)> {
     let cancelled = Arc::new(AtomicBool::new(cancel.is_cancelled()));
@@ -2480,7 +3049,15 @@ async fn prepare_pack(
             || worker_flag.load(Ordering::Acquire),
         )?;
         let prepared = incoming
-            .prepare(owner.path(), MAX_GENERATED_PACK_BYTES, &worker_flag)?
+            .prepare_with_external_delta_bases(
+                owner.path(),
+                MAX_GENERATED_PACK_BYTES,
+                &worker_flag,
+                &delta_bases,
+                &external_delta_bases,
+                GENERATED_TREE_DELTA_DEPTH,
+                MAX_GENERATED_TREE_DELTA_BYTES,
+            )?
             .ok_or_else(|| std::io::Error::other("generated pack contains no objects"))?;
         Ok::<_, Error>((owner, prepared))
     })
@@ -2561,11 +3138,176 @@ mod tests {
         .write_to(&mut expected)
         .unwrap();
         let mut objects = Vec::new();
+        let mut delta_bases = Vec::new();
 
-        let oid = encode_tree(None, &entries, &mut objects).unwrap();
+        let oid = encode_tree_with_edits(
+            &DirectoryState {
+                oid: None,
+                entries: entries.clone(),
+                delta_depth: None,
+                generated_in_batch: false,
+            },
+            &entries,
+            &[],
+            &mut objects,
+            &mut delta_bases,
+        )
+        .unwrap();
 
         assert_eq!(oid, object_id(Kind::Tree, &expected).unwrap());
         assert_eq!(objects, vec![(Kind::Tree, expected)]);
+        assert!(delta_bases.is_empty());
+    }
+
+    #[test]
+    fn virtual_tree_edits_match_canonical_insert_replace_and_delete() {
+        let original = vec![
+            tree::Entry {
+                mode: tree::EntryKind::Blob.into(),
+                filename: BString::from("a.txt"),
+                oid: ObjectId::from([1; 20]),
+            },
+            tree::Entry {
+                mode: tree::EntryKind::Tree.into(),
+                filename: BString::from("folder"),
+                oid: ObjectId::from([2; 20]),
+            },
+            tree::Entry {
+                mode: tree::EntryKind::Blob.into(),
+                filename: BString::from("z.txt"),
+                oid: ObjectId::from([3; 20]),
+            },
+        ];
+        let edits = vec![
+            TreeEntryEdit {
+                name: b"a.txt".to_vec(),
+                replacement: None,
+            },
+            TreeEntryEdit {
+                name: b"middle.txt".to_vec(),
+                replacement: Some(tree::Entry {
+                    mode: tree::EntryKind::Blob.into(),
+                    filename: BString::from("middle.txt"),
+                    oid: ObjectId::from([4; 20]),
+                }),
+            },
+            TreeEntryEdit {
+                name: b"z.txt".to_vec(),
+                replacement: Some(tree::Entry {
+                    mode: tree::EntryKind::BlobExecutable.into(),
+                    filename: BString::from("z.txt"),
+                    oid: ObjectId::from([5; 20]),
+                }),
+            },
+        ];
+        let mut expected_entries = vec![
+            original[1].clone(),
+            edits[1].replacement.clone().unwrap(),
+            edits[2].replacement.clone().unwrap(),
+        ];
+        expected_entries.sort();
+        let mut expected = Vec::new();
+        gix_object::Tree {
+            entries: expected_entries,
+        }
+        .write_to(&mut expected)
+        .unwrap();
+        let mut objects = Vec::new();
+        let mut delta_bases = Vec::new();
+
+        let oid = encode_tree_with_edits(
+            &DirectoryState {
+                oid: Some(ObjectId::from([9; 20])),
+                entries: original.clone(),
+                delta_depth: Some(0),
+                generated_in_batch: true,
+            },
+            &original,
+            &edits,
+            &mut objects,
+            &mut delta_bases,
+        )
+        .unwrap();
+
+        assert_eq!(tree_entry_count_after_edits(&original, &edits), 3);
+        assert!(tree_entries_changed(&original, &edits));
+        assert_eq!(oid, object_id(Kind::Tree, &expected).unwrap());
+        assert_eq!(objects, vec![(Kind::Tree, expected)]);
+        assert_eq!(delta_bases.len(), 1);
+        assert_eq!(delta_bases[0].object, oid);
+        assert_eq!(delta_bases[0].base, ObjectId::from([9; 20]));
+        assert!(delta_bases[0].external.is_none());
+        assert_eq!(original[0].oid, ObjectId::from([1; 20]));
+    }
+
+    #[test]
+    fn warm_tree_delta_base_is_external_and_resets_at_the_depth_limit() {
+        let original = vec![tree::Entry {
+            mode: tree::EntryKind::Blob.into(),
+            filename: BString::from("existing"),
+            oid: ObjectId::from([1; 20]),
+        }];
+        let edit = TreeEntryEdit {
+            name: b"added".to_vec(),
+            replacement: Some(tree::Entry {
+                mode: tree::EntryKind::Blob.into(),
+                filename: BString::from("added"),
+                oid: ObjectId::from([2; 20]),
+            }),
+        };
+        let old_oid = object_id(Kind::Tree, &encode_tree(&original)).unwrap();
+        let mut objects = Vec::new();
+        let mut bases = Vec::new();
+        let state = DirectoryState {
+            oid: Some(old_oid),
+            entries: original.clone(),
+            delta_depth: Some(0),
+            generated_in_batch: false,
+        };
+
+        let target = encode_tree_with_edits(
+            &state,
+            &original,
+            std::slice::from_ref(&edit),
+            &mut objects,
+            &mut bases,
+        )
+        .unwrap();
+
+        assert_eq!(bases.len(), 1);
+        assert_eq!(bases[0].object, target);
+        assert_eq!(bases[0].base, old_oid);
+        let external = bases[0].external.as_ref().unwrap();
+        assert_eq!(external.bytes, encode_tree(&original));
+        assert_eq!(external.depth, 0);
+
+        let mut objects = Vec::new();
+        let mut bases = Vec::new();
+        encode_tree_with_edits(
+            &DirectoryState {
+                delta_depth: Some(GENERATED_TREE_DELTA_DEPTH),
+                ..state.clone()
+            },
+            &original,
+            std::slice::from_ref(&edit),
+            &mut objects,
+            &mut bases,
+        )
+        .unwrap();
+        assert!(bases.is_empty());
+
+        encode_tree_with_edits(
+            &DirectoryState {
+                delta_depth: None,
+                ..state
+            },
+            &original,
+            &[edit],
+            &mut objects,
+            &mut bases,
+        )
+        .unwrap();
+        assert!(bases.is_empty());
     }
 
     #[test]
@@ -2808,6 +3550,7 @@ mod tests {
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         );
         coordinated_put(&coordinator, &repository, &cancel, "object", b"value").await;
@@ -2868,6 +3611,7 @@ mod tests {
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         );
         let manifest_lock = PushLock::acquire_internal(
@@ -2928,6 +3672,122 @@ mod tests {
             .await
             .unwrap();
         manifest_lock.release().await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sustained_warm_directory_writes_publish_readable_bounded_cross_pack_deltas() {
+        let (repository, runtime, cancel) = fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..16 {
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:02}"),
+                b"value",
+            )
+            .await;
+        }
+        assert_eq!(
+            read(
+                &repository,
+                Arc::clone(&runtime),
+                &cancel,
+                "objects/item-15"
+            )
+            .await,
+            "value"
+        );
+
+        let view = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let operation = view
+            .remote()
+            .operation(OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        let snapshot = view.snapshot("refs/heads/main", &operation).await.unwrap();
+        let directory = snapshot
+            .entry(
+                &crab_remote_git::GitPath::new(b"objects".to_vec()).unwrap(),
+                &operation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let head = crab_metadata::ref_journal::read_ref_head(
+            &repository.store,
+            &repository.layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        let transaction = crab_metadata::ref_journal::read_transaction(
+            &repository.store,
+            &repository.layout,
+            head.visible_transaction.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let pack = transaction.packs.first().unwrap();
+        let (pack_bytes, _) = repository
+            .store
+            .get_with_etag(&repository.layout.pack_path(&pack.pack_id))
+            .await
+            .unwrap();
+        let (index_bytes, _) = repository
+            .store
+            .get_with_etag(&repository.layout.pack_index_path(&pack.pack_id))
+            .await
+            .unwrap();
+        let (reverse_bytes, _) = repository
+            .store
+            .get_with_etag(&repository.layout.pack_reverse_index_path(&pack.pack_id))
+            .await
+            .unwrap();
+        let files = tempfile::tempdir().unwrap();
+        let index_path = files.path().join("pack.idx");
+        let reverse_path = files.path().join("pack.rev");
+        std::fs::write(&index_path, index_bytes).unwrap();
+        std::fs::write(&reverse_path, reverse_bytes).unwrap();
+        let mut locations =
+            crab_git::PackLocationIter::open(&index_path, &reverse_path, pack_bytes.len() as u64)
+                .unwrap();
+        let location = locations
+            .find_map(|location| {
+                let location = location.unwrap();
+                (location.oid == directory.oid).then_some(location)
+            })
+            .unwrap();
+        let start = usize::try_from(location.pack_offset).unwrap();
+        let end = usize::try_from(location.pack_offset + location.entry_len).unwrap();
+        let entry =
+            gix_pack::data::Entry::from_bytes(&pack_bytes[start..end], location.pack_offset, 20)
+                .unwrap();
+        let gix_pack::data::entry::Header::RefDelta { base_id } = entry.header else {
+            panic!("warm broad-directory tree must use a cross-pack REF_DELTA")
+        };
+        let base = operation.read_object(base_id).await.unwrap();
+        assert_eq!(base.kind, Kind::Tree);
+        let target = operation.read_object(directory.oid).await.unwrap();
+        assert_eq!(target.kind, Kind::Tree);
+        assert_eq!(object_id(Kind::Tree, &target.data).unwrap(), directory.oid);
+        operation.finish(Ok(())).await.unwrap();
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 
@@ -3164,6 +4024,7 @@ mod tests {
                 plan_id: None,
                 metrics: &metrics,
                 state: None,
+                checkpoints: None,
             },
             &cancel,
         )
@@ -3530,6 +4391,7 @@ mod tests {
                 plan_id: None,
                 metrics: &metrics,
                 state: None,
+                checkpoints: None,
             },
             &cancel,
         )
@@ -3706,6 +4568,7 @@ mod tests {
         let coordinator = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         ));
         let start = Arc::new(tokio::sync::Barrier::new(9));
@@ -3834,6 +4697,113 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fence_burst_preserves_batch_transactions_and_commit_history() {
+        let (repository, runtime, cancel) = fixture().await;
+        let blocker = PushLock::acquire_internal(
+            repository.store.inner(),
+            repository.layout.repo_prefix(),
+            GIT_OBJECT_LOCATOR_RESOURCE,
+            LOCK_TTL,
+        )
+        .await
+        .unwrap();
+        let metrics = Metrics::new().unwrap();
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            metrics.clone(),
+        );
+        let mut queued = Vec::new();
+        for index in 0..40 {
+            let path = format!("burst/{index}.txt");
+            queued.push(
+                coordinator
+                    .admission
+                    .enqueue(
+                        &repository.config.name,
+                        "refs/heads/main",
+                        mutation(path.as_bytes(), None),
+                    )
+                    .unwrap(),
+            );
+        }
+        let queue = Arc::clone(&queued[0].queue);
+        let first = queue.take_batch().unwrap();
+        assert_eq!(first.len(), MAX_MUTATIONS_PER_BATCH);
+
+        repository.maintenance.begin();
+        Coordinator::apply_batch(
+            &repository,
+            BatchContext {
+                runtime: Arc::clone(&runtime),
+                options: crab_remote_git::RepositoryOptions::default(),
+                checkpoints: Arc::clone(&coordinator.checkpoints),
+                metrics: metrics.clone(),
+            },
+            "refs/heads/main",
+            &queue,
+            first,
+            &cancel,
+        )
+        .await;
+        for mut queued in queued {
+            (&mut queued.result).await.unwrap().unwrap();
+        }
+
+        let journal = crab_metadata::manifest_store::read_repository_snapshot(
+            &repository.store,
+            &repository.layout,
+        )
+        .await
+        .unwrap()
+        .journal;
+        assert_eq!(journal.transactions.len(), 2);
+        assert_eq!(journal.packs.len(), 2);
+
+        let view = repository
+            .read_views
+            .current(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let tip = view.remote().refs().find("refs/heads/main").unwrap().target;
+        let operation = view
+            .remote()
+            .operation(OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        let snapshot = view
+            .remote()
+            .snapshot(&crab_remote_git::Revision::Commit(tip), &operation)
+            .await
+            .unwrap();
+        let history = snapshot
+            .history(
+                crab_remote_git::HistoryTraversal::FirstParent,
+                &crab_remote_git::PageRequest::new(64, None).unwrap(),
+                &operation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.items.len(), 40);
+        operation.finish(Ok(())).await.unwrap();
+
+        let admission = crate::admission::Admission::new(8, cancel.clone(), metrics.clone());
+        let body = metrics.render(&admission);
+        assert!(body.contains("crab_s3_gateway_mutation_fence_bursts_total 1"));
+        assert!(body.contains("crab_s3_gateway_mutation_fence_burst_batches_total 2"));
+
+        blocker.release().await.unwrap();
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn admitted_batch_survives_all_callers_being_dropped() {
         let (repository, runtime, cancel) = fixture().await;
         let repository = Arc::new(repository);
@@ -3848,6 +4818,7 @@ mod tests {
         let coordinator = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         ));
         let mut callers = Vec::new();
@@ -3906,11 +4877,13 @@ mod tests {
         let first = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         ));
         let second = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         ));
         let start = Arc::new(tokio::sync::Barrier::new(3));
@@ -3963,11 +4936,13 @@ mod tests {
         let local = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         );
         let competing = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         );
         coordinated_put(&local, &repository, &cancel, "seed.txt", b"seed").await;
@@ -4016,6 +4991,7 @@ mod tests {
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
             Metrics::new().unwrap(),
         );
         coordinated_put(
@@ -4096,15 +5072,19 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn each_commit_persists_only_its_path_attribute_delta() {
         let (repository, runtime, cancel) = fixture().await;
-        for path in ["first.txt", "second.txt"] {
-            apply(
+        let first = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        first
+            .apply(
                 &repository,
-                Arc::clone(&runtime),
-                crab_remote_git::RepositoryOptions::default(),
                 "refs/heads/main",
-                &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+                &crab_remote_git::GitPath::new(b"first.txt".to_vec()).unwrap(),
                 Change::Put {
-                    bytes: Bytes::from(path.to_owned()),
+                    bytes: Bytes::from_static(b"first.txt"),
                     track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition: PutCondition::None,
@@ -4114,7 +5094,37 @@ mod tests {
             )
             .await
             .unwrap();
-        }
+        first.checkpoints.wait_idle().await;
+        let first_commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        let first_manifest = attributes::load(&repository, first_commit).await.unwrap();
+        let stale =
+            attributes::prepare_checkpoint("refs/heads/main", first_commit, &first_manifest)
+                .unwrap()
+                .unwrap();
+
+        let second = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        second
+            .apply(
+                &repository,
+                "refs/heads/main",
+                &crab_remote_git::GitPath::new(b"second.txt".to_vec()).unwrap(),
+                Change::Put {
+                    bytes: Bytes::from_static(b"second.txt"),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
+                },
+                "user",
+                &cancel,
+            )
+            .await
+            .unwrap();
+        second.checkpoints.wait_idle().await;
         let commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
         let path = repository
             .layout
@@ -4123,6 +5133,7 @@ mod tests {
         let stored: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(stored["version"], 2);
         assert_eq!(stored["checkpoint"], true);
+        assert!(stored.get("checkpoint_parent").is_none());
         assert!(stored.get("objects").is_none());
         assert_eq!(stored["changes"].as_object().unwrap().len(), 1);
         assert!(stored["changes"].get("second.txt").is_some());
@@ -4133,14 +5144,12 @@ mod tests {
         repository.store.head(&checkpoint).await.unwrap();
 
         let manifest = attributes::load(&repository, commit).await.unwrap();
-        let stale = attributes::prepare_checkpoint(
-            "refs/heads/main",
-            ObjectId::empty_tree(gix_hash::Kind::Sha1),
-            &manifest,
-        )
-        .unwrap()
-        .unwrap();
-        attributes::publish_checkpoint(&repository, &stale)
+        let current = attributes::prepare_checkpoint("refs/heads/main", commit, &manifest)
+            .unwrap()
+            .unwrap();
+        repository
+            .store
+            .put_overwrite(&checkpoint, stale.bytes())
             .await
             .unwrap();
         let fallback = attributes::load(&repository, commit).await.unwrap();
@@ -4148,12 +5157,16 @@ mod tests {
             let oid = object_id(Kind::Blob, path.as_bytes()).unwrap();
             assert!(fallback.object(path, oid).is_some());
         }
-        let current = attributes::prepare_checkpoint("refs/heads/main", commit, &manifest)
-            .unwrap()
-            .unwrap();
-        attributes::publish_checkpoint(&repository, &current)
-            .await
-            .unwrap();
+        assert!(
+            attributes::publish_checkpoint(&repository, &current)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !attributes::publish_checkpoint(&repository, &stale)
+                .await
+                .unwrap()
+        );
 
         let parent = stored["parent"].as_str().unwrap();
         let parent_delta = repository

@@ -1,10 +1,12 @@
 use std::{
     collections::BTreeMap,
+    io::{Read as _, Write as _},
     ops::Bound::{Excluded, Included, Unbounded},
     str::FromStr as _,
 };
 
 use bytes::Bytes;
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +15,10 @@ use crate::gateway::Repository;
 const VERSION: u32 = 2;
 const LEGACY_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_CHECKPOINT_DECODED_BYTES: u64 = 128 * 1024 * 1024;
+const GZIP_MAGIC: &[u8] = b"\x1f\x8b";
 const MAX_DELTA_DEPTH: usize = 1_000_000;
+const MAX_CHECKPOINT_PUBLISH_ATTEMPTS: usize = 8;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,6 +177,8 @@ pub(crate) struct Manifest {
     objects: BTreeMap<String, ObjectAttributes>,
     estimated_bytes: usize,
     complete: bool,
+    checkpoint: Option<ObjectId>,
+    previous_checkpoint: Option<ObjectId>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -215,13 +222,17 @@ pub(crate) struct ManifestListingPage {
 }
 
 pub(crate) struct PreparedCheckpoint {
+    branch: String,
+    commit: ObjectId,
     slot: String,
+    expected_existing: Option<ObjectId>,
     bytes: Bytes,
 }
 
+#[cfg(test)]
 impl PreparedCheckpoint {
-    pub(crate) fn slot(&self) -> &str {
-        &self.slot
+    pub(crate) fn bytes(&self) -> Bytes {
+        self.bytes.clone()
     }
 }
 
@@ -247,6 +258,8 @@ impl Manifest {
             objects,
             estimated_bytes,
             complete,
+            checkpoint: None,
+            previous_checkpoint: None,
         }
     }
 
@@ -286,6 +299,11 @@ impl Manifest {
 
     pub(crate) fn is_complete(&self) -> bool {
         self.complete
+    }
+
+    pub(crate) fn mark_checkpoint(&mut self, commit: ObjectId) {
+        self.previous_checkpoint = self.checkpoint;
+        self.checkpoint = Some(commit);
     }
 
     /// Page the durable S3 namespace only when it covers the complete Git tree.
@@ -388,12 +406,16 @@ pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Re
                 break;
             }
             Some(Stored::Delta(delta)) => {
+                if delta.checkpoint && manifest.checkpoint.is_none() {
+                    manifest.checkpoint = Some(commit);
+                }
                 if delta.checkpoint
                     && let Some(checkpoint) =
                         load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
                             .await?
                 {
                     manifest = checkpoint;
+                    manifest.checkpoint = Some(commit);
                     break;
                 }
                 current = parse_parent(delta.parent.as_deref())?;
@@ -551,37 +573,175 @@ pub(crate) fn prepare_checkpoint(
     commit: ObjectId,
     manifest: &Manifest,
 ) -> crate::Result<Option<PreparedCheckpoint>> {
-    if u64::try_from(manifest.estimated_bytes()).unwrap_or(u64::MAX) > MAX_MANIFEST_BYTES {
+    if !checkpoint_eligible(manifest) {
         return Ok(None);
     }
-    let bytes = serde_json::to_vec(&CheckpointPayload {
-        version: VERSION,
-        commit: commit.to_string(),
-        complete: manifest.complete,
-        objects: &manifest.objects,
-    })
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+    serde_json::to_writer(
+        &mut encoder,
+        &CheckpointPayload {
+            version: VERSION,
+            commit: commit.to_string(),
+            complete: manifest.complete,
+            objects: &manifest.objects,
+        },
+    )
     .map_err(|source| crate::Error::Attributes { source })?;
+    encoder.flush()?;
+    let bytes = encoder.finish()?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Ok(None);
     }
     Ok(Some(PreparedCheckpoint {
-        slot: blake3::hash(branch.as_bytes()).to_hex().to_string(),
+        branch: branch.to_owned(),
+        commit,
+        slot: checkpoint_slot(branch),
+        expected_existing: manifest.previous_checkpoint,
         bytes: Bytes::from(bytes),
     }))
+}
+
+pub(crate) fn checkpoint_eligible(manifest: &Manifest) -> bool {
+    u64::try_from(manifest.estimated_bytes()).unwrap_or(u64::MAX) <= MAX_CHECKPOINT_DECODED_BYTES
+}
+
+pub(crate) fn checkpoint_slot(branch: &str) -> String {
+    blake3::hash(branch.as_bytes()).to_hex().to_string()
 }
 
 pub(crate) async fn publish_checkpoint(
     repository: &Repository,
     checkpoint: &PreparedCheckpoint,
-) -> crate::Result<()> {
-    repository
-        .store
-        .put_overwrite(
-            &checkpoint_slot_path(repository, &checkpoint.slot)?,
-            checkpoint.bytes.clone(),
-        )
-        .await?;
-    Ok(())
+) -> crate::Result<bool> {
+    let path = checkpoint_slot_path(repository, &checkpoint.slot)?;
+    for _ in 0..MAX_CHECKPOINT_PUBLISH_ATTEMPTS {
+        let existing = repository
+            .store
+            .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
+            .await;
+        let etag = match existing {
+            Ok((bytes, etag)) => {
+                let stored = parse_checkpoint(&bytes)?;
+                let commit = stored
+                    .commit
+                    .parse::<ObjectId>()
+                    .map_err(|_| crate::Error::Config("invalid S3 attribute checkpoint commit"))?;
+                if commit == checkpoint.commit {
+                    return Ok(true);
+                }
+                // The prepared checkpoint carries its manifest's process-local
+                // predecessor. Equality proves that lineage; ETag CAS below still
+                // rejects a concurrent slot replacement.
+                if checkpoint.expected_existing != Some(commit)
+                    && !checkpoint_is_newer(repository, checkpoint, commit).await?
+                {
+                    return Ok(false);
+                }
+                Some(etag)
+            }
+            Err(crab_storage::StorageError::NotFound { .. }) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let result = match etag {
+            Some(etag) => repository
+                .store
+                .update(&path, checkpoint.bytes.clone(), etag)
+                .await
+                .map(|_| ()),
+            None => {
+                repository
+                    .store
+                    .create_strict(&path, checkpoint.bytes.clone())
+                    .await
+            }
+        };
+        match result {
+            Ok(()) => return Ok(true),
+            Err(crab_storage::StorageError::StateConflict { .. }) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(crab_storage::StorageError::StateConflict {
+        path: path.to_string(),
+    }
+    .into())
+}
+
+fn parse_checkpoint(bytes: &[u8]) -> crate::Result<StoredCheckpoint> {
+    let decoded;
+    let bytes = if bytes.starts_with(GZIP_MAGIC) {
+        let mut decoder = GzDecoder::new(bytes).take(MAX_CHECKPOINT_DECODED_BYTES + 1);
+        decoded = {
+            let mut decoded = Vec::new();
+            decoder.read_to_end(&mut decoded)?;
+            decoded
+        };
+        if decoded.len() as u64 > MAX_CHECKPOINT_DECODED_BYTES {
+            return Err(crate::Error::Config(
+                "S3 attribute checkpoint exceeds its decoded limit",
+            ));
+        }
+        decoded.as_slice()
+    } else {
+        bytes
+    };
+    let stored = serde_json::from_slice::<StoredCheckpoint>(bytes)
+        .map_err(|source| crate::Error::Attributes { source })?;
+    if !matches!(stored.version, LEGACY_VERSION | VERSION) {
+        return Err(crate::Error::Config(
+            "unsupported S3 attribute checkpoint version",
+        ));
+    }
+    Ok(stored)
+}
+
+async fn checkpoint_is_newer(
+    repository: &Repository,
+    checkpoint: &PreparedCheckpoint,
+    existing: ObjectId,
+) -> crate::Result<bool> {
+    if delta_chain_reaches(repository, checkpoint.commit, existing).await? {
+        return Ok(true);
+    }
+    if delta_chain_reaches(repository, existing, checkpoint.commit).await? {
+        return Ok(false);
+    }
+    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
+        &repository.store,
+        &repository.layout,
+    )
+    .await?;
+    let Some(current) = snapshot.journal.refs.get(&checkpoint.branch) else {
+        return Ok(false);
+    };
+    let current = current
+        .parse::<ObjectId>()
+        .map_err(|_| crate::Error::Config("repository ref contains an invalid object ID"))?;
+    Ok(
+        delta_chain_reaches(repository, current, checkpoint.commit).await?
+            && !delta_chain_reaches(repository, current, existing).await?,
+    )
+}
+
+async fn delta_chain_reaches(
+    repository: &Repository,
+    start: ObjectId,
+    target: ObjectId,
+) -> crate::Result<bool> {
+    let mut current = Some(start);
+    for _ in 0..MAX_DELTA_DEPTH {
+        let Some(commit) = current else {
+            return Ok(false);
+        };
+        if commit == target {
+            return Ok(true);
+        }
+        current = match load_stored(repository, commit).await? {
+            Some(Stored::Delta(delta)) => parse_parent(delta.parent.as_deref())?,
+            Some(Stored::Legacy(_)) | None => None,
+        };
+    }
+    Err(crate::Error::Config("S3 attribute delta chain is too deep"))
 }
 
 async fn load_checkpoint(
@@ -604,13 +764,7 @@ async fn load_checkpoint(
     };
     let objects = match slot {
         Some(_) => {
-            let stored = serde_json::from_slice::<StoredCheckpoint>(&bytes)
-                .map_err(|source| crate::Error::Attributes { source })?;
-            if !matches!(stored.version, LEGACY_VERSION | VERSION) {
-                return Err(crate::Error::Config(
-                    "unsupported S3 attribute checkpoint version",
-                ));
-            }
+            let stored = parse_checkpoint(&bytes)?;
             if stored.commit != commit.to_string() {
                 return Ok(None);
             }
@@ -777,8 +931,9 @@ mod tests {
     fn oversized_manifest_skips_checkpoint_before_serialization() {
         let manifest = Manifest {
             objects: BTreeMap::new(),
-            estimated_bytes: MAX_MANIFEST_BYTES as usize + 1,
+            estimated_bytes: MAX_CHECKPOINT_DECODED_BYTES as usize + 1,
             complete: false,
+            ..Manifest::default()
         };
 
         assert!(
@@ -860,15 +1015,16 @@ mod tests {
         let complete = prepare_checkpoint("refs/heads/main", commit, &Manifest::empty_complete())
             .unwrap()
             .unwrap();
-        let stored: StoredCheckpoint = serde_json::from_slice(&complete.bytes).unwrap();
+        assert!(complete.bytes.starts_with(GZIP_MAGIC));
+        let stored = parse_checkpoint(&complete.bytes).unwrap();
 
         assert_eq!(stored.version, VERSION);
         assert_eq!(stored.commit, commit.to_string());
         assert!(stored.complete);
 
-        let legacy: StoredCheckpoint = serde_json::from_str(&format!(
-            r#"{{"version":1,"commit":"{commit}","objects":{{}}}}"#
-        ))
+        let legacy = parse_checkpoint(
+            format!(r#"{{"version":1,"commit":"{commit}","objects":{{}}}}"#).as_bytes(),
+        )
         .unwrap();
         assert!(!legacy.complete);
     }
