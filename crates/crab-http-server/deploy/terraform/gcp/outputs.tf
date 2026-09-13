@@ -22,3 +22,18 @@ output "recovery_version_retention_days" {
   description = "Configured noncurrent object-version recovery window."
   value       = var.recovery_version_retention_days
 }
+
+output "helm_values" {
+  description = "Non-secret GKE Helm values generated from this infrastructure."
+  value = yamlencode({
+    config = {
+      storageUrl = "gs://${var.bucket_name}/${var.root_prefix}"
+    }
+    serviceAccount = {
+      name = var.service_account_name
+      annotations = {
+        "iam.gke.io/gcp-service-account" = google_service_account.server.email
+      }
+    }
+  })
+}

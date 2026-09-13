@@ -22,3 +22,21 @@ output "service_account_name" {
   description = "Helm serviceAccount.name value."
   value       = var.service_account_name
 }
+
+output "helm_values" {
+  description = "Non-secret AKS Helm values generated from this infrastructure."
+  value = yamlencode({
+    config = {
+      storageUrl = "az://${var.storage_account_name}/${var.container_name}/${var.root_prefix}"
+    }
+    serviceAccount = {
+      name = var.service_account_name
+      annotations = {
+        "azure.workload.identity/client-id" = azurerm_user_assigned_identity.server.client_id
+      }
+    }
+    podLabels = {
+      "azure.workload.identity/use" = "true"
+    }
+  })
+}

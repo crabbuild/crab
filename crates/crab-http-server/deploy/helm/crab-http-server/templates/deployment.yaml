@@ -37,7 +37,7 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        checksum/managed-config: {{ .Values.config.content | sha256sum | quote }}
+        checksum/managed-config: {{ if .Values.config.existingConfigMap }}""{{ else }}{{ include "crab-http-server.managedConfig" . | sha256sum | quote }}{{ end }}
         {{- with .Values.rolloutToken }}
         crab.build/rollout-token: {{ . | quote }}
         {{- end }}

@@ -60,12 +60,13 @@ jobs:
 
           for values in eks-values.example.yaml gke-values.example.yaml aks-values.example.yaml; do
             values_path="${chart}/${values}"
+            profile_values=(--values "${chart}/team-values.example.yaml" --values "${values_path}")
             rendered="${RUNNER_TEMP}/crab-http-server-${values}"
             docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-              "${helm_image}" lint --strict "${chart}" --values "${values_path}"
+              "${helm_image}" lint --strict "${chart}" "${profile_values[@]}"
             docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
               "${helm_image}" template qualification "${chart}" \
-                --namespace crab --values "${values_path}" \
+                --namespace crab "${profile_values[@]}" \
                 --set autoscaling.enabled=true \
                 --set ingress.enabled=true \
                 --set ingress.className=nginx \
@@ -83,11 +84,37 @@ jobs:
                 /manifests/server.yaml
           done
 
-          values="${chart}/eks-values.example.yaml"
+          profile_values=(
+            --values "${chart}/team-values.example.yaml"
+            --values "${chart}/eks-values.example.yaml"
+          )
+          config_resource="${RUNNER_TEMP}/crab-http-server-config-map.yaml"
+          config_file="${RUNNER_TEMP}/crab-http-server-server.toml"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab "${profile_values[@]}" \
+              --show-only templates/configmap.yaml \
+              > "${config_resource}"
+          awk '
+            $0 == "  server.toml: |" { found=1; next }
+            found && /^    / { sub(/^    /, ""); print; next }
+            found { exit }
+          ' "${config_resource}" > "${config_file}"
+          python3 -c '
+          import sys, tomllib
+          with open(sys.argv[1], "rb") as config_file:
+              config = tomllib.load(config_file)
+          assert config["listen"] == "0.0.0.0:8788"
+          assert config["management_listen"] == "0.0.0.0:8789"
+          assert config["storage"]["url"] == "s3://team-crab-repositories/repositories"
+          assert config["auth"]["issuer"] == "https://identity.example.com/realms/team"
+          assert config["auth"]["public_url"] == "https://git.example.com"
+          ' "${config_file}"
+
           monitor_resource="${RUNNER_TEMP}/crab-http-server-pod-monitor.yaml"
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" \
-              --namespace crab --values "${values}" \
+              --namespace crab "${profile_values[@]}" \
               --show-only templates/podmonitor.yaml \
               --set metrics.podMonitor.enabled=true \
               --set-json 'metrics.podMonitor.labels={"prometheus":"platform"}' \
@@ -102,7 +129,7 @@ jobs:
           rules_file="${RUNNER_TEMP}/crab-http-server-rules.yaml"
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" \
-              --namespace crab --values "${values}" \
+              --namespace crab "${profile_values[@]}" \
               --show-only templates/prometheusrule.yaml \
               --set metrics.podMonitor.enabled=true \
               --set metrics.prometheusRule.enabled=true \
@@ -116,65 +143,98 @@ jobs:
 
           default_rendered="${RUNNER_TEMP}/crab-http-server-default.yaml"
           docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set ingress.enabled=false \
+              --set-json 'networkPolicy.publicIngressFrom=[]' \
               > "${default_rendered}"
           grep -F 'ingress: []' "${default_rendered}"
+
+          external_rendered="${RUNNER_TEMP}/crab-http-server-external-config.yaml"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --set image.repository=registry.example.com/crab-http-server \
+              --set-string image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+              --set config.existingConfigMap=platform-owned-config \
+              --set secrets.existingSecret=platform-owned-secret \
+              --set serviceAccount.name=crab-http-server \
+              > "${external_rendered}"
+          grep -F 'name: platform-owned-config' "${external_rendered}"
+          if grep -F 'kind: ConfigMap' "${external_rendered}"; then
+            echo "chart rendered a managed ConfigMap for an external configuration" >&2
+            exit 1
+          fi
+
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set serviceAccount.automountServiceAccountToken=true \
               >/dev/null 2>&1; then
             echo "chart accepted automatic Kubernetes API credentials" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set image.repository=registry.example.com/crab-http-server:latest \
               >/dev/null 2>&1; then
             echo "chart accepted a mutable image tag" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set image.repository=registry.example.com/crab-http-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
               >/dev/null 2>&1; then
             echo "chart accepted a digest in image.repository" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set config.existingConfigMap=another-config \
               >/dev/null 2>&1; then
             echo "chart accepted two configuration sources" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set config.storageUrl=https://storage.example.com/repositories \
+              >/dev/null 2>&1; then
+            echo "chart accepted a non-cloud storage URL" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set ingress.enabled=true --set ingress.host=git.example.com \
+              --set-string ingress.tlsSecretName= \
               >/dev/null 2>&1; then
             echo "chart accepted ingress without a TLS Secret" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set ingress.enabled=true --set ingress.host=git.example.com \
-              --set ingress.tlsSecretName=crab-http-server-tls >/dev/null 2>&1; then
+              --set ingress.tlsSecretName=crab-http-server-tls \
+              --set-json 'networkPolicy.publicIngressFrom=[]' >/dev/null 2>&1; then
             echo "chart accepted ingress from every network source" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set ingress.host=other.example.com >/dev/null 2>&1; then
+            echo "chart accepted an ingress host that differs from the OIDC public URL" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true >/dev/null 2>&1; then
             echo "chart accepted a metrics scraper without an allowed source" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.prometheusRule.enabled=true >/dev/null 2>&1; then
             echo "chart accepted alert rules without metrics discovery" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
               --set metrics.prometheusRule.enabled=true \
               --set-json 'metrics.prometheusRule.labels={"app.kubernetes.io/name":"other"}' \
@@ -184,7 +244,7 @@ jobs:
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true \
               --set-json 'metrics.podMonitor.labels={"app.kubernetes.io/name":"other"}' \
               --set-json 'networkPolicy.metricsIngressFrom=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
@@ -193,38 +253,38 @@ jobs:
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set networkPolicy.enabled=false >/dev/null 2>&1; then
             echo "chart accepted disabled network isolation" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set-json 'podLabels={"app.kubernetes.io/name":"other"}' >/dev/null 2>&1; then
             echo "chart accepted an overridden selector label" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set-json 'podAnnotations={"prometheus.io/scrape":"true"}' >/dev/null 2>&1; then
             echo "chart accepted an overridden management annotation" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set service.type=LoadBalancer >/dev/null 2>&1; then
             echo "chart accepted a direct load balancer that bypasses TLS ingress" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set autoscaling.enabled=true --set autoscaling.minReplicas=5 \
               --set autoscaling.maxReplicas=2 >/dev/null 2>&1; then
             echo "chart accepted an invalid autoscaling range" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
-            "${helm_image}" template qualification "${chart}" --values "${values}" \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set terminationGracePeriodSeconds=629 >/dev/null 2>&1; then
             echo "chart accepted a shutdown budget shorter than pre-stop plus drain" >&2
             exit 1

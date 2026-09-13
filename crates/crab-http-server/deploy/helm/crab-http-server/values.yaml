@@ -18,8 +18,12 @@ serviceAccount:
 
 config:
   existingConfigMap: ""
-  content: ""
   key: server.toml
+  storageUrl: ""
+  auth:
+    issuer: ""
+    clientId: ""
+    publicUrl: ""
 
 secrets:
   existingSecret: ""

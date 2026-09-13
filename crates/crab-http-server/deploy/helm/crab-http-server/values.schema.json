@@ -55,11 +55,24 @@
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["existingConfigMap", "content", "key"],
+      "required": ["existingConfigMap", "key", "storageUrl", "auth"],
       "properties": {
         "existingConfigMap": { "type": "string" },
-        "content": { "type": "string" },
-        "key": { "type": "string", "minLength": 1 }
+        "key": { "type": "string", "minLength": 1 },
+        "storageUrl": {
+          "type": "string",
+          "pattern": "^$|^((s3|gs)://[^/]+/.+|az://[^/]+/[^/]+/.+)$"
+        },
+        "auth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["issuer", "clientId", "publicUrl"],
+          "properties": {
+            "issuer": { "type": "string", "pattern": "^$|^https://[^/]+.*$" },
+            "clientId": { "type": "string" },
+            "publicUrl": { "type": "string", "pattern": "^$|^https://[^/?#]+/?$" }
+          }
+        }
       }
     },
     "secrets": {

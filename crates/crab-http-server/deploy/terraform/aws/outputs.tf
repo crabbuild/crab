@@ -22,3 +22,25 @@ output "recovery_version_retention_days" {
   description = "Configured noncurrent object-version recovery window."
   value       = var.recovery_version_retention_days
 }
+
+output "helm_values" {
+  description = "Non-secret EKS Helm values generated from this infrastructure."
+  value = yamlencode({
+    config = {
+      storageUrl = "s3://${var.bucket_name}/${var.root_prefix}"
+    }
+    serviceAccount = {
+      name = var.service_account_name
+    }
+    extraEnv = [
+      {
+        name  = "AWS_REGION"
+        value = var.region
+      },
+      {
+        name  = "AWS_DEFAULT_REGION"
+        value = var.region
+      }
+    ]
+  })
+}

@@ -1,24 +1,5 @@
-image:
-  repository: example.azurecr.io/crab-http-server
-  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-
 config:
-  content: |
-    listen = "0.0.0.0:8788"
-    management_listen = "0.0.0.0:8789"
-
-    [storage]
-    url = "az://teamstorage/crab-repositories/repositories"
-
-    [auth]
-    issuer = "https://identity.example.com/realms/team"
-    client_id = "crab-browser"
-    public_url = "https://git.example.com"
-    client_secret_file = "/run/secrets/crab/oidc-client-secret"
-    state_key_file = "/run/secrets/crab/state-key"
-
-secrets:
-  existingSecret: crab-http-server
+  storageUrl: az://teamstorage/crab-repositories/repositories
 
 serviceAccount:
   name: crab-http-server

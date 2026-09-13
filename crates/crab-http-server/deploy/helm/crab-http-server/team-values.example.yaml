@@ -1,0 +1,24 @@
+image:
+  repository: ghcr.io/crabbuild/crab-http-server
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+config:
+  auth:
+    issuer: https://identity.example.com/realms/team
+    clientId: crab-browser
+    publicUrl: https://git.example.com
+
+secrets:
+  existingSecret: crab-http-server
+
+ingress:
+  enabled: true
+  className: nginx
+  host: git.example.com
+  tlsSecretName: crab-http-server-tls
+
+networkPolicy:
+  publicIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx

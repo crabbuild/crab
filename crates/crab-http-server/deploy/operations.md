@@ -46,10 +46,14 @@ Render and validate the release before applying it:
 
 ```sh
 helm lint crates/crab-http-server/deploy/helm/crab-http-server \
-  --strict --values /secure/crab-http-server-values.yaml
+  --strict \
+  --values /secure/crab-provider-values.yaml \
+  --values /secure/crab-team-values.yaml
 helm template crab-http-server \
   crates/crab-http-server/deploy/helm/crab-http-server \
-  --namespace crab --values /secure/crab-http-server-values.yaml \
+  --namespace crab \
+  --values /secure/crab-provider-values.yaml \
+  --values /secure/crab-team-values.yaml \
   > /secure/crab-http-server-rendered.yaml
 ```
 
@@ -84,7 +88,8 @@ Use a rolling upgrade with the chart’s zero-unavailable strategy:
 helm upgrade --install crab-http-server \
   crates/crab-http-server/deploy/helm/crab-http-server \
   --namespace crab --create-namespace \
-  --values /secure/crab-http-server-values.yaml \
+  --values /secure/crab-provider-values.yaml \
+  --values /secure/crab-team-values.yaml \
   --wait --timeout 15m
 kubectl --namespace crab rollout status deployment/crab-http-server \
   --timeout=15m
@@ -129,8 +134,8 @@ Monitor these platform and application signals:
 | Publication or LFS transfer failures | A write may need client retry or operator outcome inspection |
 
 Scrape `GET /metrics` on each pod's private management port. The chart can add
-Prometheus pod annotations and a management-port NetworkPolicy rule for an
-explicit monitoring source. Keep port 8789 absent from public Services and
+a Prometheus Operator `PodMonitor` and a management-port NetworkPolicy rule for
+an explicit monitoring source. Keep port 8789 absent from public Services and
 ingress. Alert thresholds need a workload baseline; start with catalog health,
 new catalog-refresh failures, sustained zero admission permits, response-body
 errors, and unexpected drain state.
@@ -161,7 +166,9 @@ kubectl --namespace crab create secret generic crab-http-server \
   --dry-run=client -o yaml | kubectl apply -f -
 helm upgrade crab-http-server \
   crates/crab-http-server/deploy/helm/crab-http-server \
-  --namespace crab --values /secure/crab-http-server-values.yaml \
+  --namespace crab \
+  --values /secure/crab-provider-values.yaml \
+  --values /secure/crab-team-values.yaml \
   --set-string rolloutToken="$(date -u +%Y%m%dT%H%M%SZ)" \
   --wait --timeout 15m
 ```
@@ -187,7 +194,7 @@ Use this triage map:
 | Symptom | Likely boundary | First action |
 | --- | --- | --- |
 | Readiness returns 503 | Catalog access, provider credentials, invalid catalog, or repository read-index maintenance | Inspect readiness warnings, workload identity events, and maintenance logs |
-| Public requests return 403 | Canonical host mismatch | Compare ingress host with `auth.public_url` and preserved `Host` |
+| Public requests return 403 | Canonical host mismatch | Compare the ingress host with `config.auth.publicUrl` and the preserved `Host` header |
 | Browser requests return 401 | OIDC session or membership | Verify issuer, clock, shared state key, and stable provider subject |
 | Git push disconnects | Ingress timeout, pod termination, or publication failure | Find the request ID, inspect logs, then compare the remote ref before retrying |
 | Pod is evicted | Scratch or node pressure | Preserve object storage, increase scratch or node capacity, and requalify concurrency |

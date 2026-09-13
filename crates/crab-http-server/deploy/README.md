@@ -20,7 +20,7 @@ flowchart LR
 | AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
 | ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
-The Kubernetes chart manages inline configuration, two or more replicas,
+The Kubernetes chart generates configuration from typed values, runs two or more replicas,
 private probes and Prometheus metrics, an optional Prometheus Operator
 `PodMonitor` and alert rules, a disruption budget, ingress isolation, optional
 Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is
@@ -123,7 +123,8 @@ Use the Helm chart on Amazon Elastic Kubernetes Service (EKS), Google Kubernetes
 
 ```mermaid
 flowchart LR
-    Values[One provider values file] --> Helm[Helm release]
+    Provider[Generated provider values] --> Helm[Helm release]
+    Team[Team image, OIDC, and ingress values] --> Helm
     Secret[OIDC secret and stable state key] --> Helm
     Identity[Cloud workload identity] --> Pods[Two or more Crab pods]
     Helm --> Pods
@@ -135,7 +136,7 @@ Complete the setup in this order:
 1. Create versioned storage and provider workload identity with `terraform/aws`, `terraform/gcp`, or `terraform/azure`.
 2. Grant the workload identity access only to the dedicated storage boundary.
 3. Register the OpenID Connect (OIDC) callback `https://git.example.com/auth/callback`.
-4. Copy and edit the matching `eks`, `gke`, or `aks` example values file.
+4. Export Terraform's generated provider values and edit the provider-neutral team values file.
 5. Create the Kubernetes Secret and install the chart.
 6. Create the first repository through a running pod.
 7. Run the live qualification gates before admitting critical repositories.

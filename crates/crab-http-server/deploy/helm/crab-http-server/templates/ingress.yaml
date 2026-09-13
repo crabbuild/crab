@@ -4,6 +4,12 @@
 {{- end }}
 {{- $host := required "ingress.host is required when ingress is enabled" .Values.ingress.host }}
 {{- $tlsSecret := required "ingress.tlsSecretName is required when ingress is enabled" .Values.ingress.tlsSecretName }}
+{{- if not .Values.config.existingConfigMap }}
+{{- $publicUrl := trimSuffix "/" .Values.config.auth.publicUrl }}
+{{- if ne $publicUrl (printf "https://%s" $host) }}
+{{- fail "config.auth.publicUrl must be the HTTPS ingress host" }}
+{{- end }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

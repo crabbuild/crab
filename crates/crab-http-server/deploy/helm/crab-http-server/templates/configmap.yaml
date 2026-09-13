@@ -1,4 +1,4 @@
-{{- if .Values.config.content }}
+{{- if not .Values.config.existingConfigMap }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -7,5 +7,5 @@ metadata:
     {{- include "crab-http-server.labels" . | nindent 4 }}
 data:
   {{ .Values.config.key }}: |
-    {{- .Values.config.content | nindent 4 }}
+    {{- include "crab-http-server.managedConfig" . | nindent 4 }}
 {{- end }}

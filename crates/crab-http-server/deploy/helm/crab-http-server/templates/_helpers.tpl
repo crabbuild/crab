@@ -48,12 +48,30 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{- define "crab-http-server.configMapName" -}}
-{{- if and .Values.config.existingConfigMap .Values.config.content -}}
-{{- fail "config.existingConfigMap and config.content are mutually exclusive" -}}
+{{- $managed := or .Values.config.storageUrl .Values.config.auth.issuer .Values.config.auth.clientId .Values.config.auth.publicUrl -}}
+{{- if and .Values.config.existingConfigMap $managed -}}
+{{- fail "config.existingConfigMap and managed config values are mutually exclusive" -}}
 {{- else if .Values.config.existingConfigMap -}}
 {{- .Values.config.existingConfigMap -}}
 {{- else -}}
-{{- $_ := required "config.content is required when config.existingConfigMap is empty" .Values.config.content -}}
+{{- $_ := include "crab-http-server.managedConfig" . -}}
 {{- include "crab-http-server.fullname" . -}}
 {{- end -}}
+{{- end }}
+
+{{- define "crab-http-server.managedConfig" -}}
+listen = "0.0.0.0:8788"
+management_listen = "0.0.0.0:8789"
+
+[storage]
+url = {{ required "config.storageUrl is required when config.existingConfigMap is empty" .Values.config.storageUrl | toJson }}
+
+[auth]
+issuer = {{ required "config.auth.issuer is required when config.existingConfigMap is empty" .Values.config.auth.issuer | toJson }}
+client_id = {{ required "config.auth.clientId is required when config.existingConfigMap is empty" .Values.config.auth.clientId | toJson }}
+public_url = {{ required "config.auth.publicUrl is required when config.existingConfigMap is empty" .Values.config.auth.publicUrl | toJson }}
+{{- if .Values.secrets.oidcClientSecretKey }}
+client_secret_file = "/run/secrets/crab/oidc-client-secret"
+{{- end }}
+state_key_file = "/run/secrets/crab/state-key"
 {{- end }}

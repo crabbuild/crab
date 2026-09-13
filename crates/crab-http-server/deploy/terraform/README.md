@@ -53,16 +53,24 @@ incomplete-multipart lifecycle values without contacting a cloud account.
 
 ## Transfer outputs to Helm
 
-Read the provider outputs after apply:
+Write the generated, non-secret provider overlay after apply:
 
 ```sh
-terraform -chdir=crates/crab-http-server/deploy/terraform/aws output
+terraform -chdir=crates/crab-http-server/deploy/terraform/aws \
+  output -raw helm_values > /secure/crab-provider-values.yaml
 ```
 
-Copy `storage_url` into `config.content.storage.url` in the matching Helm values file. Copy the identity outputs into these chart values:
+Replace `aws` with `gcp` or `azure`. The overlay already contains
+`config.storageUrl`, the Kubernetes ServiceAccount name, and the provider's
+required identity annotation, label, or region environment. It contains no
+credential or application secret. Combine it with the provider-neutral team
+overlay from the Kubernetes guide.
+
+Individual outputs remain available for existing infrastructure pipelines:
 
 | Platform | Terraform output | Helm value |
 | --- | --- | --- |
+| EKS, GKE, AKS | `storage_url` | `config.storageUrl` |
 | EKS | `service_account_name` | `serviceAccount.name` |
 | GKE | `gcp_service_account_email` | `serviceAccount.annotations.iam.gke.io/gcp-service-account` |
 | AKS | `managed_identity_client_id` | `serviceAccount.annotations.azure.workload.identity/client-id` |
