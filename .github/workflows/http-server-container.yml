@@ -448,6 +448,13 @@ jobs:
           docker compose --file crates/crab-http-server/deploy/compose.yaml \
             run --rm --no-deps repository-init \
               --config /etc/crab/server.toml storage-probe
+          docker compose --file crates/crab-http-server/deploy/compose.yaml \
+            run --rm --no-deps --entrypoint aws bucket-init \
+              --endpoint-url http://rustfs:9000 s3api list-objects-v2 \
+              --bucket crab-http-server \
+              --prefix repositories/.crab/http-server/v1/auth/preflight/ \
+              --output json \
+            | jq --exit-status '(.Contents // []) | length == 0'
           printf '%s\n' \
             'members = [{ subject = "ci-admin", name = "CI Admin", access = "admin" }]' \
             | docker compose --file crates/crab-http-server/deploy/compose.yaml \
