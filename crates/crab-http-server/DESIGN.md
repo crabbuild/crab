@@ -19,6 +19,10 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
+The [next-generation architecture proposal](NEXT_ARCHITECTURE.md) designs
+per-repository SQLite/LTX application storage, owner routing and Kubernetes
+failover. Its proposed contracts do not describe the current runtime.
+
 ## Read the design by responsibility
 
 Use this map to jump from a write concern to its owning contract.
