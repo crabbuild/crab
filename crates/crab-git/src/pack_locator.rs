@@ -690,7 +690,9 @@ fn decode_pack_kind_metadata_payload(
             reason: "external delta payload length does not match its count".to_owned(),
         });
     }
-    for record in bytes[records_start..digest_start].chunks_exact(KIND_METADATA_EXTERNAL_ENTRY_LEN)
+    for record in bytes[records_start..digest_start]
+        .as_chunks::<KIND_METADATA_EXTERNAL_ENTRY_LEN>()
+        .0
     {
         let index =
             read_u64_le(record, 0).ok_or_else(|| PackLocatorError::InvalidKindMetadata {
