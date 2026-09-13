@@ -38,6 +38,7 @@ import {
   useSubmission,
 } from "./discussion";
 import { Link, Result, short } from "./ui";
+import type { CodeThemes } from "./code-theme";
 
 interface PullComment {
   number: number;
@@ -171,12 +172,14 @@ export function PullRequests({
   url,
   csrf,
   theme,
+  codeThemes,
 }: {
   repo: Repository;
   refs: Refs;
   url: URL;
   csrf: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
 }) {
   const pull = url.searchParams.get("pull");
   if (pull === "new")
@@ -187,7 +190,14 @@ export function PullRequests({
         <Link href={repoHref(repo, { view: "pulls" })}>Back to pulls</Link>
       </div>
     ) : (
-      <NewPull repo={repo} refs={refs} url={url} csrf={csrf} theme={theme} />
+      <NewPull
+        repo={repo}
+        refs={refs}
+        url={url}
+        csrf={csrf}
+        theme={theme}
+        codeThemes={codeThemes}
+      />
     );
   if (pull) {
     const number = Number(pull);
@@ -206,6 +216,7 @@ export function PullRequests({
         url={url}
         csrf={csrf}
         theme={theme}
+        codeThemes={codeThemes}
       />
     );
   }
@@ -375,12 +386,14 @@ function NewPull({
   url,
   csrf,
   theme,
+  codeThemes,
 }: {
   repo: Repository;
   refs: Refs;
   url: URL;
   csrf: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
 }) {
   const branches = refs.refs.filter((ref) =>
     ref.name.startsWith("refs/heads/"),
@@ -511,6 +524,7 @@ function NewPull({
             base={baseOid ?? ""}
             head={headOid ?? ""}
             theme={theme}
+            codeThemes={codeThemes}
           />
         </>
       )}
@@ -524,12 +538,14 @@ function PullDetail({
   url,
   csrf,
   theme,
+  codeThemes,
 }: {
   repo: Repository;
   number: number;
   url: URL;
   csrf: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
 }) {
   const path = endpoint(repo, `pulls/${number}`);
   const pull = useRequest<PullRequest>(path);
@@ -652,6 +668,7 @@ function PullDetail({
                     base={data.base_oid}
                     head={data.head_oid}
                     theme={theme}
+                    codeThemes={codeThemes}
                   />
                   {data.state === "open" && !repo.archived && (
                     <ReviewForm

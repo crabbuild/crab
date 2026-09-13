@@ -4177,6 +4177,26 @@ async fn semantic_changes_cover_modes_types_rename_like_paths_binary_and_pointer
         assert_eq!(second.items[0].kind, ChangeKind::Added);
         assert!(second.next.is_none());
 
+        let directory = head
+            .list_directory(&GitPath::root(), &PageRequest::new(100, None)?, &operation)
+            .await?;
+        let latest = head
+            .latest_directory_entry_commits(&GitPath::root(), &directory.items, &operation)
+            .await?;
+        assert_eq!(latest.len(), directory.items.len());
+        for (entry, commit) in directory.items.iter().zip(latest) {
+            let expected = if entry.path.as_bytes() == b"same" {
+                fixture.semantic_base_commit
+            } else {
+                fixture.semantic_head_commit
+            };
+            assert_eq!(
+                commit.oid, expected,
+                "wrong latest commit for {}",
+                entry.path
+            );
+        }
+
         let binary = head
             .diff(
                 &base,
