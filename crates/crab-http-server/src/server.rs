@@ -845,7 +845,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         [
             ("x-content-type-options", "nosniff"),
             ("referrer-policy", "same-origin"),
-            ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
+            ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://extensions.duckdb.org; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
         ], response,
     ).into_response()
 }
@@ -1057,6 +1057,17 @@ mod tests {
                     .and_then(|value| value.to_str().ok()),
                 cache
             );
+            if expected.is_success() {
+                let policy = response
+                    .headers()
+                    .get("content-security-policy")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap();
+                assert!(
+                    policy.contains("connect-src 'self' https://extensions.duckdb.org"),
+                    "{path}, {host}"
+                );
+            }
             if expected == StatusCode::NOT_FOUND {
                 let body = response.into_body().collect().await.unwrap().to_bytes();
                 let value: serde_json::Value = serde_json::from_slice(&body).unwrap();

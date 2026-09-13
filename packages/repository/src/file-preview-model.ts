@@ -97,65 +97,6 @@ export function previewDescriptor(name: string) {
 
 const MAX_TABLE_ROWS = 5_000;
 
-export function parseDelimited(text: string, delimiter: string): TableData {
-  const records: string[][] = [];
-  let record: string[] = [];
-  let field = "";
-  let quoted = false;
-  for (let index = 0; index <= text.length; index += 1) {
-    const character = text[index];
-    if (quoted) {
-      if (character === '"' && text[index + 1] === '"') {
-        field += '"';
-        index += 1;
-      } else if (character === '"') {
-        quoted = false;
-      } else if (character !== undefined) {
-        field += character;
-      }
-      continue;
-    }
-    if (character === '"' && field === "") {
-      quoted = true;
-    } else if (character === delimiter) {
-      record.push(field);
-      field = "";
-    } else if (character === "\n" || character === undefined) {
-      if (field.endsWith("\r")) field = field.slice(0, -1);
-      record.push(field);
-      if (record.some((value) => value !== "")) records.push(record);
-      record = [];
-      field = "";
-      if (records.length > MAX_TABLE_ROWS) break;
-    } else {
-      field += character;
-    }
-  }
-  if (!records.length) return { columns: [], rows: [], totalRows: 0 };
-  const width = Math.max(...records.map((row) => row.length));
-  const seen = new Map<string, number>();
-  const columns = Array.from({ length: width }, (_, index) => {
-    const base = records[0]?.[index]?.trim() || `Column ${index + 1}`;
-    const occurrence = (seen.get(base) ?? 0) + 1;
-    seen.set(base, occurrence);
-    return occurrence === 1 ? base : `${base} (${occurrence})`;
-  });
-  const rows = records
-    .slice(1, MAX_TABLE_ROWS + 1)
-    .map((row) =>
-      Array.from({ length: width }, (_, index) => row[index] ?? ""),
-    );
-  return {
-    columns,
-    rows,
-    totalRows: Math.max(0, records.length - 1),
-    note:
-      records.length > MAX_TABLE_ROWS
-        ? `Showing the first ${MAX_TABLE_ROWS.toLocaleString()} rows.`
-        : undefined,
-  };
-}
-
 export function tableFromValues(values: unknown[]): TableData {
   if (!values.length) return { columns: [], rows: [], totalRows: 0 };
   const objects = values.every(
@@ -188,26 +129,6 @@ export function tableFromValues(values: unknown[]): TableData {
         ? `Showing the first ${MAX_TABLE_ROWS.toLocaleString()} rows.`
         : undefined,
   };
-}
-
-export function parseJsonTable(text: string, lines: boolean): TableData {
-  if (lines) {
-    const values = text
-      .split(/\r?\n/)
-      .filter((line) => line.trim())
-      .slice(0, MAX_TABLE_ROWS + 1)
-      .map((line) => JSON.parse(line) as unknown);
-    return tableFromValues(values);
-  }
-  const value: unknown = JSON.parse(text);
-  if (Array.isArray(value)) return tableFromValues(value);
-  if (value !== null && typeof value === "object")
-    return {
-      columns: ["Key", "Value"],
-      rows: Object.entries(value),
-      totalRows: Object.keys(value).length,
-    };
-  return { columns: ["Value"], rows: [[value]], totalRows: 1 };
 }
 
 export function parseSafetensors(bytes: Uint8Array): TableData {

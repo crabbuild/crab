@@ -26,6 +26,7 @@ import {
   HistoryIcon,
   IssueOpenedIcon,
   MoonIcon,
+  PaintbrushIcon,
   RepoIcon,
   SidebarCollapseIcon,
   SunIcon,
@@ -50,6 +51,13 @@ import { Link, Result, date, short } from "./ui";
 import { GitAccess } from "./git-access";
 import { FileBreadcrumb, FileNavigation } from "./file-navigation";
 import { PaneResizer } from "./pane-resizer";
+import {
+  codeThemeChoices,
+  codeThemeFrom,
+  codeThemeNames,
+  type CodeTheme,
+  type CodeThemes,
+} from "./code-theme";
 import {
   CreateFile,
   DeleteFile,
@@ -117,6 +125,9 @@ export function App() {
     const saved = localStorage.getItem("crab-theme");
     return saved === "light" || saved === "dark" ? saved : "auto";
   });
+  const [codeTheme, setCodeTheme] = useState<CodeTheme>(() =>
+    codeThemeFrom(localStorage.getItem("crab-code-theme")),
+  );
   const [systemDark, setSystemDark] = useState(
     () => matchMedia("(prefers-color-scheme: dark)").matches,
   );
@@ -129,6 +140,14 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("crab-theme", theme);
   }, [theme]);
+  useEffect(() => {
+    localStorage.setItem("crab-code-theme", codeTheme);
+  }, [codeTheme]);
+  useEffect(() => {
+    void import("@pierre/diffs").then(({ preloadHighlighter }) =>
+      preloadHighlighter({ themes: codeThemeNames, langs: ["text"] }),
+    );
+  }, []);
   const resolved = theme === "auto" ? (systemDark ? "dark" : "light") : theme;
   useLayoutEffect(() => {
     const root = document.documentElement;
@@ -136,6 +155,7 @@ export function App() {
     root.dataset.colorMode = resolved;
     root.dataset.darkTheme = "dark";
     root.dataset.lightTheme = "light";
+    root.dataset.codeTheme = codeTheme;
     root.dataset.themeChanging = "";
     let settledFrame: number | undefined;
     const paintedFrame = requestAnimationFrame(() => {
@@ -148,7 +168,7 @@ export function App() {
       if (settledFrame !== undefined) cancelAnimationFrame(settledFrame);
       delete root.dataset.themeChanging;
     };
-  }, [resolved]);
+  }, [codeTheme, resolved]);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -228,7 +248,12 @@ export function App() {
               </Button>
             </div>
           )}
-          <ThemeControl theme={theme} setTheme={setTheme} />
+          <ThemeControl
+            theme={theme}
+            setTheme={setTheme}
+            codeTheme={codeTheme}
+            setCodeTheme={setCodeTheme}
+          />
         </header>
         <main id="main" tabIndex={-1}>
           {sessionError && (
@@ -323,6 +348,7 @@ export function App() {
                     repo={repo}
                     url={url}
                     theme={resolved}
+                    codeThemes={codeThemeChoices[codeTheme].themes}
                     csrf={session.data?.csrf ?? ""}
                     onRepositoryChanged={catalog.retry}
                   />
@@ -358,9 +384,13 @@ export function App() {
 function ThemeControl({
   theme,
   setTheme,
+  codeTheme,
+  setCodeTheme,
 }: {
   theme: Theme;
   setTheme: (theme: Theme) => void;
+  codeTheme: CodeTheme;
+  setCodeTheme: (theme: CodeTheme) => void;
 }) {
   const choices = [
     { value: "auto", label: "System", icon: DeviceDesktopIcon },
@@ -369,6 +399,21 @@ function ThemeControl({
   ] as const;
   return (
     <div className="theme-control">
+      <label className="code-theme-control">
+        <PaintbrushIcon aria-hidden="true" />
+        <span>Code theme</span>
+        <select
+          aria-label="Code theme"
+          value={codeTheme}
+          onChange={(event) => setCodeTheme(codeThemeFrom(event.target.value))}
+        >
+          {Object.entries(codeThemeChoices).map(([value, choice]) => (
+            <option key={value} value={value}>
+              {choice.label}
+            </option>
+          ))}
+        </select>
+      </label>
       <SegmentedControl
         aria-label="Appearance"
         size="small"
@@ -395,12 +440,14 @@ function RepositoryPage({
   repo,
   url,
   theme,
+  codeThemes,
   csrf,
   onRepositoryChanged,
 }: {
   repo: Repository;
   url: URL;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
   csrf: string;
   onRepositoryChanged: () => void;
 }) {
@@ -731,6 +778,7 @@ function RepositoryPage({
                   url={url}
                   csrf={csrf}
                   theme={theme}
+                  codeThemes={codeThemes}
                 />
               </Suspense>
             )}
@@ -874,6 +922,7 @@ function RepositoryPage({
                           repo={repo}
                           rev={rev}
                           theme={theme}
+                          codeThemes={codeThemes}
                         />
                       </>
                     ) : (
@@ -1046,6 +1095,8 @@ function RepositoryPage({
                                   repo={repo}
                                   rev={rev}
                                   path={path}
+                                  theme={theme}
+                                  codeThemes={codeThemes}
                                   onEntry={selectEntry}
                                   header={
                                     <LatestCommit
@@ -1068,6 +1119,7 @@ function RepositoryPage({
                                   path={path}
                                   name={displayHex(path)}
                                   theme={theme}
+                                  codeThemes={codeThemes}
                                   write={
                                     canChangeFile
                                       ? {

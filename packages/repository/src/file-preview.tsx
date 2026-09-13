@@ -1,12 +1,17 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Spinner } from "@primer/react";
 import type { Repository } from "./api";
 import { DataTable } from "./data-explorer";
 import { RepositoryMarkdown } from "./repository-markdown";
 import {
   extension,
-  parseDelimited,
-  parseJsonTable,
   parseSafetensors,
   type PreviewDescriptor,
 } from "./file-preview-model";
@@ -15,18 +20,17 @@ import {
   parseOffice,
   type OfficePreview,
 } from "./file-preview-office";
-import {
-  loadArrow,
-  loadGguf,
-  loadNumpy,
-  loadParquet,
-  loadSqlite,
-  type DatabasePreview,
-} from "./file-preview-loaders";
+import { loadGguf, loadNumpy } from "./file-preview-loaders";
 import { PdfPreview } from "./pdf-preview";
 import { GenericFilePreview } from "./generic-file-preview";
+import type { CodeThemes } from "./code-theme";
 
 const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
+const DataWorkbench = lazy(() =>
+  import("./data-workbench").then((module) => ({
+    default: module.DataWorkbench,
+  })),
+);
 
 type Props = {
   descriptor: PreviewDescriptor;
@@ -37,6 +41,8 @@ type Props = {
   text: string | null;
   size: number;
   blobUrl: string;
+  theme: "light" | "dark";
+  codeThemes: CodeThemes;
 };
 
 type BinaryState = {
@@ -108,30 +114,6 @@ function PreviewNotice({
   );
 }
 
-function TextDataPreview({
-  descriptor,
-  name,
-  text,
-}: Pick<Props, "descriptor" | "name" | "text">) {
-  try {
-    const data =
-      descriptor.kind === "delimited"
-        ? parseDelimited(text ?? "", extension(name) === "tsv" ? "\t" : ",")
-        : parseJsonTable(
-            text ?? "",
-            ["jsonl", "ndjson"].includes(extension(name)),
-          );
-    return <DataTable data={data} name={descriptor.label} />;
-  } catch (error) {
-    return (
-      <PreviewNotice error>
-        <strong>This file could not be parsed as {descriptor.label}.</strong>
-        <p>{error instanceof Error ? error.message : "The data is invalid."}</p>
-      </PreviewNotice>
-    );
-  }
-}
-
 type Notebook = {
   cells?: Array<{
     cell_type?: string;
@@ -154,7 +136,12 @@ function NotebookPreview({
   rev,
   directory,
   text,
-}: Pick<Props, "repo" | "rev" | "directory" | "text">) {
+  theme,
+  codeThemes,
+}: Pick<
+  Props,
+  "repo" | "rev" | "directory" | "text" | "theme" | "codeThemes"
+>) {
   let notebook: Notebook;
   try {
     notebook = JSON.parse(text ?? "") as Notebook;
@@ -179,7 +166,13 @@ function NotebookPreview({
           </div>
           <div className="notebook-content">
             {cell.cell_type === "markdown" ? (
-              <RepositoryMarkdown repo={repo} rev={rev} directory={directory}>
+              <RepositoryMarkdown
+                repo={repo}
+                rev={rev}
+                directory={directory}
+                theme={theme}
+                codeThemes={codeThemes}
+              >
                 {sourceText(cell.source)}
               </RepositoryMarkdown>
             ) : (
@@ -414,54 +407,6 @@ function OfficeFilePreview({
   );
 }
 
-function DatabaseFilePreview({
-  bytes,
-  name,
-}: {
-  bytes: Uint8Array;
-  name: string;
-}) {
-  const [selected, setSelected] = useState(0);
-  return (
-    <AsyncValue cacheKey={name} load={() => loadSqlite(bytes)}>
-      {(value: DatabasePreview) => {
-        const table = value.tables[Math.min(selected, value.tables.length - 1)];
-        if (!table)
-          return (
-            <PreviewNotice>
-              This database has no user tables or views.
-            </PreviewNotice>
-          );
-        return (
-          <div className="database-preview">
-            <aside aria-label="Database objects">
-              <strong>Database objects</strong>
-              {value.tables.map((item, index) => (
-                <button
-                  key={item.name}
-                  className={index === selected ? "active" : ""}
-                  aria-current={index === selected ? "page" : undefined}
-                  onClick={() => setSelected(index)}
-                >
-                  <span>{item.name}</span>
-                  <small>{item.type}</small>
-                </button>
-              ))}
-            </aside>
-            <div className="database-table">
-              <details>
-                <summary>Schema for {table.name}</summary>
-                <pre>{table.definition || "No stored schema statement"}</pre>
-              </details>
-              <DataTable data={table.data} name={table.name} />
-            </div>
-          </div>
-        );
-      }}
-    </AsyncValue>
-  );
-}
-
 function StructuredBinaryPreview({
   descriptor,
   bytes,
@@ -475,8 +420,6 @@ function StructuredBinaryPreview({
     return <GenericFilePreview bytes={bytes} name={name} />;
   if (descriptor.kind === "office")
     return <OfficeFilePreview bytes={bytes} name={name} />;
-  if (descriptor.kind === "sqlite")
-    return <DatabaseFilePreview bytes={bytes} name={name} />;
   if (descriptor.kind === "safetensors")
     try {
       return <DataTable data={parseSafetensors(bytes)} name="Model tensors" />;
@@ -499,13 +442,9 @@ function StructuredBinaryPreview({
       </AsyncValue>
     );
   const loader =
-    descriptor.kind === "parquet"
-      ? () => loadParquet(bytes)
-      : descriptor.kind === "arrow"
-        ? () => loadArrow(bytes)
-        : descriptor.kind === "numpy"
-          ? () => loadNumpy(bytes, name)
-          : () => archiveInventory(bytes, extension(name));
+    descriptor.kind === "numpy"
+      ? () => loadNumpy(bytes, name)
+      : () => archiveInventory(bytes, extension(name));
   return (
     <AsyncValue cacheKey={`${descriptor.kind}:${name}`} load={loader}>
       {(value) => <DataTable data={value} name={descriptor.label} />}
@@ -557,6 +496,17 @@ function BinaryPreview({ descriptor, blobUrl, name, size, ...props }: Props) {
     return (
       <MediaPreview descriptor={descriptor} bytes={state.bytes} name={name} />
     );
+  if (descriptor.kind === "sqlite" || descriptor.kind === "arrow")
+    return (
+      <DataWorkbench
+        key={blobUrl}
+        bytes={state.bytes}
+        format={descriptor.kind}
+        name={name}
+        size={size}
+        url={blobUrl}
+      />
+    );
   return (
     <StructuredBinaryPreview
       descriptor={descriptor}
@@ -574,6 +524,8 @@ export function FilePreview(props: Props) {
         rev={props.rev}
         directory={props.directory}
         className="file-markdown-preview"
+        theme={props.theme}
+        codeThemes={props.codeThemes}
       >
         {props.text ?? ""}
       </RepositoryMarkdown>
@@ -585,18 +537,31 @@ export function FilePreview(props: Props) {
         rev={props.rev}
         directory={props.directory}
         text={props.text}
+        theme={props.theme}
+        codeThemes={props.codeThemes}
       />
     );
-  if (
-    ["delimited", "json"].includes(props.descriptor.kind) &&
-    props.text !== null
-  )
+  if (["delimited", "json", "parquet"].includes(props.descriptor.kind)) {
+    const fileExtension = extension(props.name);
+    const format =
+      props.descriptor.kind === "parquet"
+        ? "parquet"
+        : props.descriptor.kind === "delimited"
+          ? fileExtension === "tsv"
+            ? "tsv"
+            : "csv"
+          : ["jsonl", "ndjson"].includes(fileExtension)
+            ? "jsonl"
+            : "json";
     return (
-      <TextDataPreview
-        descriptor={props.descriptor}
+      <DataWorkbench
+        key={props.blobUrl}
+        format={format}
         name={props.name}
-        text={props.text}
+        size={props.size}
+        url={props.blobUrl}
       />
     );
+  }
   return <BinaryPreview {...props} />;
 }
