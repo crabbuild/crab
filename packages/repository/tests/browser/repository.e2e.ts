@@ -3,7 +3,10 @@ import { tableFromArrays, tableToIPC } from "apache-arrow";
 import { strToU8, zipSync } from "fflate";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import initSqlJs from "sql.js";
-import { expectNoAccessibilityViolations } from "./accessibility";
+import {
+  expectNoAccessibilityViolations,
+  selectDarkTheme,
+} from "./accessibility";
 
 const oid = "a".repeat(40);
 const pathOid = "b".repeat(40);
@@ -12,7 +15,8 @@ const addedPathOid = "d".repeat(40);
 const readme =
   "# Team project\n\nBrowse the [source entry](src/index.ts) without cloning.\n\n" +
   "![Architecture](docs/architecture.png) ![Vector](docs/vector.svg) " +
-  "![Build status](https://status.example/build.svg)\n";
+  "![Build status](https://status.example/build.svg)\n\n" +
+  '```typescript\nconst project: string = "Crab";\n```\n';
 const pathHex = (path: string) =>
   Array.from(new TextEncoder().encode(path), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -47,7 +51,12 @@ async function routePreviewFiles(
   page: Page,
   files: Record<
     string,
-    { text: string | null; bytes: Uint8Array; textTruncated?: boolean }
+    {
+      text: string | null;
+      bytes: Uint8Array;
+      size?: number;
+      textTruncated?: boolean;
+    }
   >,
 ) {
   await page.route("**/api/repos/team/project/file?*", async (route) => {
@@ -59,7 +68,7 @@ async function routePreviewFiles(
     return route.fulfill({
       json: {
         oid,
-        size: file.bytes.byteLength,
+        size: file.size ?? file.bytes.byteLength,
         mode: "100644",
         classification: "OrdinaryGit",
         text: file.text,
@@ -73,9 +82,35 @@ async function routePreviewFiles(
       ([name]) => pathHex(name) === path,
     )?.[1];
     if (!file) return route.fallback();
+    const range = route.request().headers()["range"];
+    if (range) {
+      const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+      if (!match) return route.fulfill({ status: 416 });
+      const start = Number(match[1]);
+      const end = Math.min(
+        match[2] ? Number(match[2]) + 1 : file.bytes.byteLength,
+        file.bytes.byteLength,
+      );
+      return route.fulfill({
+        status: 206,
+        body: Buffer.from(file.bytes.slice(start, end)),
+        contentType: "application/octet-stream",
+        headers: {
+          "accept-ranges": "bytes",
+          "content-range": `bytes ${start}-${end - 1}/${file.bytes.byteLength}`,
+        },
+      });
+    }
     return route.fulfill({
-      body: Buffer.from(file.bytes),
+      body:
+        route.request().method() === "HEAD"
+          ? undefined
+          : Buffer.from(file.bytes),
       contentType: "application/octet-stream",
+      headers: {
+        "accept-ranges": "bytes",
+        "content-length": String(file.bytes.byteLength),
+      },
     });
   });
 }
@@ -427,6 +462,16 @@ test.beforeEach(async ({ page }) => {
             kind,
             oid,
             mode: kind === "Tree" ? "040000" : "100644",
+            ...(url.searchParams.get("last_commit") === "true"
+              ? {
+                  last_commit: {
+                    oid,
+                    author: "Alice",
+                    author_seconds: 1_700_000_000,
+                    message: `Update ${path}`,
+                  },
+                }
+              : {}),
           })),
           next: null,
           commit: oid,
@@ -862,6 +907,18 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(
     panel.getByText("Make the repository easier to browse"),
   ).toBeVisible();
+  await expect(
+    panel.getByRole("columnheader", { name: "Last commit" }),
+  ).toBeVisible();
+  const readmeRow = panel.getByRole("row").filter({ hasText: "README.md" });
+  await expect(readmeRow.getByText("Update README.md")).toHaveAttribute(
+    "href",
+    `/team/project?view=commit&rev=${oid}`,
+  );
+  await expect(readmeRow.getByRole("time")).toHaveAttribute(
+    "datetime",
+    "2023-11-14T22:13:20.000Z",
+  );
   await expect
     .poll(() =>
       panel
@@ -994,13 +1051,65 @@ test("Markdown files switch between source and a repository-aware preview", asyn
     "src",
     `/api/repos/team/project/asset?rev=${oid}&path_hex=${pathHex("docs/architecture.png")}`,
   );
+  await expect(preview.locator(".markdown-code-block")).toContainText(
+    'const project: string = "Crab";',
+  );
   await page.getByRole("button", { name: "Code", exact: true }).click();
   await expect(preview).toHaveCount(0);
+});
+
+test("code palette persists and follows light and dark appearance", async ({
+  page,
+}) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  const highlighted = page.locator(".markdown-code-block");
+  await expect(highlighted).toContainText('const project: string = "Crab";');
+
+  await page
+    .getByRole("combobox", { name: "Code theme" })
+    .selectOption("vscode");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-code-theme",
+    "vscode",
+  );
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("crab-code-theme")))
+    .toBe("vscode");
+
+  const codeColors = () =>
+    highlighted.evaluate((container) => {
+      const tokens = container.shadowRoot?.querySelectorAll("[data-line] span");
+      return [...(tokens ?? [])].map((token) => getComputedStyle(token).color);
+    });
+  await expect
+    .poll(async () => new Set(await codeColors()).size)
+    .toBeGreaterThan(1);
+  const lightColors = await codeColors();
+  await selectTheme(page, "dark");
+  await expect(highlighted).toBeVisible();
+  await expect.poll(codeColors).not.toEqual(lightColors);
+
+  await page.reload();
+  await expect(page.getByRole("combobox", { name: "Code theme" })).toHaveValue(
+    "vscode",
+  );
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-code-theme",
+    "vscode",
+  );
 });
 
 test("format-aware previews explore data, office files, media, and databases locally", async ({
   page,
 }) => {
+  const duckdbWorkerRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("duckdb-browser-mvp.worker"))
+      duckdbWorkerRequests.push(request.url());
+  });
   const csv = "run,model,score\n1,small,0.91\n2,large,0.98\n";
   const svg =
     '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#0969da"/></svg>';
@@ -1015,7 +1124,9 @@ test("format-aware previews explore data, office files, media, and databases loc
   const SQL = await initSqlJs();
   const database = new SQL.Database();
   database.run(
-    "CREATE TABLE runs (id INTEGER, model TEXT, score REAL); INSERT INTO runs VALUES (1, 'large', 0.98);",
+    "CREATE TABLE runs (id INTEGER, model TEXT, score REAL); " +
+      "INSERT INTO runs VALUES (1, 'large', 0.98); " +
+      "CREATE VIEW top_runs AS SELECT * FROM runs WHERE score > 0.95;",
   );
   const sqlite = database.export();
   database.close();
@@ -1040,7 +1151,11 @@ test("format-aware previews explore data, office files, media, and databases loc
     "diagram.svg": { text: svg, bytes: strToU8(svg) },
     "report.xlsx": { text: null, bytes: workbook },
     "runs.sqlite": { text: null, bytes: sqlite },
-    "features.parquet": { text: null, bytes: parquet },
+    "features.parquet": {
+      text: null,
+      bytes: parquet,
+      size: 5 * 1024 * 1024 * 1024,
+    },
     "batch.arrow": { text: null, bytes: arrow },
     "handbook.pdf": {
       text: null,
@@ -1055,14 +1170,61 @@ test("format-aware previews explore data, office files, media, and databases loc
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("metrics.csv")}&kind=Blob`,
   );
-  await page.getByRole("button", { name: "Preview", exact: true }).click();
-  const csvExplorer = page.getByRole("region", {
-    name: "CSV dataset data explorer",
+  const csvWorkbench = page.getByRole("region", {
+    name: "metrics.csv query workbench",
   });
-  await expect(csvExplorer).toContainText("large");
-  await csvExplorer.getByPlaceholder("Search loaded rows").fill("small");
-  await expect(csvExplorer.getByRole("row")).toHaveCount(2);
+  await expect(csvWorkbench.getByRole("cell", { name: "large" })).toBeVisible();
+  const csvEditor = csvWorkbench.getByRole("textbox", { name: "SQL query" });
+  await expect(csvWorkbench.locator(".cm-editor")).toBeVisible();
+  await expect(
+    csvWorkbench.locator(".cm-line span").filter({ hasText: "SELECT" }).first(),
+  ).toHaveCSS("font-weight", "600");
+  await csvEditor.fill("SELECT sc");
+  await csvEditor.press("Control+Space");
+  await expect(page.getByRole("option", { name: /score/ })).toBeVisible();
+  await csvEditor.press("Enter");
+  await expect(csvEditor).toHaveText("SELECT score");
+  await csvEditor.fill("SELECT model, score FROM data WHERE score > 0.95");
+  await csvWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(csvWorkbench.getByRole("cell", { name: "0.98" })).toBeVisible();
+  await csvWorkbench.getByRole("button", { name: "Chart" }).click();
+  await expect(
+    csvWorkbench.getByRole("region", { name: "Query result chart" }),
+  ).toBeVisible();
+  await csvWorkbench.getByText("Recent runs", { exact: false }).click();
+  await expect(csvWorkbench.getByText(/Query · success · 1 row/)).toBeVisible();
+
+  await csvWorkbench
+    .getByRole("textbox", { name: "SQL query" })
+    .fill("SELECT model, score FROM data");
+  await csvWorkbench.getByRole("button", { name: "Explain" }).click();
+  await expect(
+    csvWorkbench.getByRole("cell", { name: "physical_plan" }),
+  ).toBeVisible();
+  const resultDownload = page.waitForEvent("download");
+  await csvWorkbench
+    .getByRole("button", { name: "Download query result as CSV" })
+    .click();
+  expect((await resultDownload).suggestedFilename()).toBe("metrics-query.csv");
+
+  await csvWorkbench
+    .getByRole("textbox", { name: "SQL query" })
+    .fill("SELECT sum(i) AS total FROM range(10000000000) values(i)");
+  await csvWorkbench.getByRole("button", { name: "Run query" }).click();
+  await csvWorkbench.getByRole("button", { name: "Stop query" }).click();
+  await expect(csvWorkbench.getByText(/Query stopped/)).toBeVisible();
+  await csvWorkbench.getByRole("button", { name: "Count rows" }).click();
+  await csvWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(csvWorkbench.getByRole("cell", { name: "2" })).toBeVisible();
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect(
+    csvWorkbench.getByRole("textbox", { name: "SQL query" }),
+  ).toBeVisible();
+  await expect(
+    csvWorkbench.getByRole("table", { name: "Query results" }),
+  ).toBeVisible();
   await expectNoAccessibilityViolations(page);
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("diagram.svg")}&kind=Blob`,
@@ -1086,25 +1248,109 @@ test("format-aware previews explore data, office files, media, and databases loc
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("runs.sqlite")}&kind=Blob`,
   );
+  const sqliteWorkbench = page.getByRole("region", {
+    name: "runs.sqlite query workbench",
+  });
   await expect(
-    page.getByRole("complementary", { name: "Database objects" }),
-  ).toContainText("runs");
-  await expect(page.getByRole("cell", { name: "large" })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "0.98" })).toBeVisible();
+    sqliteWorkbench.getByRole("complementary", { name: "Dataset schema" }),
+  ).toContainText("top_runs");
+  await expect(
+    sqliteWorkbench.getByRole("cell", { name: "large" }),
+  ).toBeVisible();
+  const sqliteEditor = sqliteWorkbench.getByRole("textbox", {
+    name: "SQL query",
+  });
+  await sqliteEditor.fill("SELECT sc");
+  await sqliteEditor.press("Control+Space");
+  const sqliteCompletion = page.getByRole("option", { name: /score/ });
+  await expect(sqliteCompletion).toBeVisible();
+  await sqliteCompletion.click();
+  await expect(sqliteEditor).toHaveText("SELECT score");
+  await sqliteWorkbench.getByRole("button", { name: "top_runs" }).click();
+  await sqliteWorkbench.getByRole("button", { name: "Sample rows" }).click();
+  await expect(sqliteEditor).toContainText('FROM "top_runs"');
+  await sqliteWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(
+    sqliteWorkbench.getByRole("cell", { name: "large" }),
+  ).toBeVisible();
+  await sqliteEditor.fill("SELECT avg(score) AS average FROM runs");
+  await sqliteWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(
+    sqliteWorkbench.getByRole("columnheader", { name: "average" }),
+  ).toBeVisible();
+  await expect(
+    sqliteWorkbench.getByRole("cell", { name: "0.98" }),
+  ).toBeVisible();
+  await sqliteEditor.fill(
+    "WITH RECURSIVE count_up(value) AS (VALUES(0) UNION ALL SELECT value + 1 FROM count_up WHERE value < 100000000) SELECT sum(value) FROM count_up",
+  );
+  await sqliteWorkbench.getByRole("button", { name: "Run query" }).click();
+  await sqliteWorkbench.getByRole("button", { name: "Stop query" }).click();
+  await expect(sqliteWorkbench.getByText(/Query stopped/)).toBeVisible();
+  await expect(
+    sqliteWorkbench.getByRole("button", { name: "Run query" }),
+  ).toBeEnabled();
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("features.parquet")}&kind=Blob`,
   );
-  await expect(
-    page.getByRole("region", { name: "Parquet dataset data explorer" }),
-  ).toContainText("0.91");
+  const parquetWorkbench = page.getByRole("region", {
+    name: "features.parquet query workbench",
+  });
+  await expect
+    .poll(() =>
+      duckdbWorkerRequests.some(
+        (url) =>
+          new URL(url).searchParams.get("worker-policy") ===
+          "duckdb-extensions-v1",
+      ),
+    )
+    .toBe(true);
+  await expect(parquetWorkbench).toContainText("5.00 GB");
+  await expect(parquetWorkbench).toContainText("2 source rows");
+  const parquetQuery = parquetWorkbench.getByRole("textbox", {
+    name: "SQL query",
+  });
+  await parquetQuery.fill("SELECT  FROM data");
+  await parquetQuery.press("Home");
+  for (let index = 0; index < 7; index += 1)
+    await parquetQuery.press("ArrowRight");
+  await parquetWorkbench.getByTitle("Insert score into the query").click();
+  await expect(parquetQuery).toHaveText('SELECT "score" FROM data');
+  await parquetWorkbench
+    .getByRole("button", { name: "Profile columns" })
+    .click();
+  await expect(parquetQuery).toContainText("approx_count_distinct");
+  await parquetWorkbench.getByRole("button", { name: "Run query" }).click();
+  const profileColumn = parquetWorkbench.getByRole("columnheader", {
+    name: "column_name",
+  });
+  await profileColumn.getByRole("button").click();
+  await expect(profileColumn).toHaveAttribute("aria-sort", "ascending");
+  await parquetWorkbench.getByRole("button", { name: "Count rows" }).click();
+  await parquetWorkbench.getByRole("button", { name: "Run query" }).click();
+  const countResult = parquetWorkbench.getByRole("table", {
+    name: "Query results",
+  });
+  await expect(countResult.getByRole("row")).toHaveCount(2);
+  await expect(countResult.getByRole("cell", { name: "2" })).toBeVisible();
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("batch.arrow")}&kind=Blob`,
   );
+  const arrowWorkbench = page.getByRole("region", {
+    name: "batch.arrow query workbench",
+  });
+  await expect(arrowWorkbench).toContainText("2 source rows");
+  await arrowWorkbench
+    .getByRole("textbox", { name: "SQL query" })
+    .fill("SELECT model FROM data WHERE run = 2");
+  await arrowWorkbench.getByRole("button", { name: "Run query" }).click();
   await expect(
-    page.getByRole("region", { name: "Arrow dataset data explorer" }),
-  ).toContainText("large");
+    arrowWorkbench.getByRole("cell", { name: "large" }),
+  ).toBeVisible();
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("handbook.pdf")}&kind=Blob`,

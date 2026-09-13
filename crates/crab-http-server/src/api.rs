@@ -4,7 +4,7 @@ use std::time::Instant;
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use crab_remote_git::{
@@ -45,6 +45,7 @@ pub(crate) struct Parameters {
     limit: Option<usize>,
     cursor: Option<String>,
     q: Option<String>,
+    last_commit: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -159,6 +160,7 @@ pub(crate) async fn read(
     Extension(principal): Extension<Principal>,
     Path((owner, name, action)): Path<(String, String, Action)>,
     Query(params): Query<Parameters>,
+    headers: HeaderMap,
 ) -> Response {
     let started = Instant::now();
     let Some(entry) = server
@@ -250,15 +252,7 @@ pub(crate) async fn read(
                 }
                 Ok(([("content-type", "application/json")], bytes).into_response())
             }
-            Payload::Blob(blob) => Ok((
-                [
-                    ("content-type", "application/octet-stream".to_owned()),
-                    ("content-disposition", "attachment".to_owned()),
-                    ("x-crab-blob-oid", blob.metadata.oid.to_string()),
-                ],
-                blob.bytes,
-            )
-                .into_response()),
+            Payload::Blob(blob) => Ok(blob_response(blob, headers.get(header::RANGE))),
             Payload::Asset(blob) => Ok(asset_response(blob)),
         }
     }
@@ -287,6 +281,90 @@ pub(crate) async fn read(
         response,
     )
         .into_response()
+}
+
+fn blob_response(blob: Blob, range: Option<&HeaderValue>) -> Response {
+    let total = blob.bytes.len();
+    let requested = range.map(|value| {
+        value
+            .to_str()
+            .map_err(|_| ())
+            .and_then(|value| parse_byte_range(value, total))
+    });
+    let (status, body, content_range) = match requested {
+        None => (StatusCode::OK, blob.bytes, None),
+        Some(Ok((start, end))) => {
+            let body = blob.bytes.slice(start..end);
+            (
+                StatusCode::PARTIAL_CONTENT,
+                body,
+                Some(format!("bytes {start}-{}/{total}", end - 1)),
+            )
+        }
+        Some(Err(())) => {
+            let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{total}")) {
+                response.headers_mut().insert(header::CONTENT_RANGE, value);
+            }
+            response
+                .headers_mut()
+                .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+            return response;
+        }
+    };
+    let oid = blob.metadata.oid.to_string();
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment"),
+    );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(value) = HeaderValue::from_str(&oid) {
+        response.headers_mut().insert("x-crab-blob-oid", value);
+    }
+    if let Some(content_range) = content_range
+        && let Ok(value) = HeaderValue::from_str(&content_range)
+    {
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
+    }
+    response
+}
+
+fn parse_byte_range(value: &str, total: usize) -> Result<(usize, usize), ()> {
+    let range = value.strip_prefix("bytes=").ok_or(())?;
+    if total == 0 || range.contains(',') {
+        return Err(());
+    }
+    let (start, end) = range.split_once('-').ok_or(())?;
+    if start.is_empty() {
+        let suffix = end.parse::<usize>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        return Ok((total.saturating_sub(suffix), total));
+    }
+    let start = start.parse::<usize>().map_err(|_| ())?;
+    if start >= total {
+        return Err(());
+    }
+    let end = if end.is_empty() {
+        total
+    } else {
+        end.parse::<usize>()
+            .map_err(|_| ())?
+            .saturating_add(1)
+            .min(total)
+    };
+    if start >= end {
+        return Err(());
+    }
+    Ok((start, end))
 }
 
 async fn execute(
@@ -391,7 +469,24 @@ async fn execute(
             }
             Action::Tree => {
                 let result = snapshot.list_directory(&path, &page, &operation).await?;
-                json!({"items":result.items.iter().map(entry_json).collect::<Vec<_>>(), "next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
+                let items = if params.last_commit {
+                    let commits = snapshot
+                        .latest_directory_entry_commits(&path, &result.items, &operation)
+                        .await?;
+                    result
+                        .items
+                        .iter()
+                        .zip(commits.iter())
+                        .map(|(entry, commit)| {
+                            let mut value = entry_json(entry);
+                            value["last_commit"] = commit_summary_json(commit);
+                            value
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    result.items.iter().map(entry_json).collect::<Vec<_>>()
+                };
+                json!({"items":items, "next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
             }
             Action::Search => {
                 let query = search_query.ok_or(Error::InternalInvariant {
@@ -535,6 +630,15 @@ fn entry_json(entry: &TreeEntry) -> Value {
 
 fn commit_json(commit: &Commit) -> Value {
     json!({"oid":commit.oid.to_string(),"tree":commit.tree.to_string(),"parents":commit.parents.iter().map(ToString::to_string).collect::<Vec<_>>(),"author":String::from_utf8_lossy(&commit.author.name),"author_seconds":commit.author.seconds,"message":String::from_utf8_lossy(&commit.message),"message_hex":encode_hex(&commit.message)})
+}
+
+fn commit_summary_json(commit: &Commit) -> Value {
+    let message = commit
+        .message
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    json!({"oid":commit.oid.to_string(),"author":String::from_utf8_lossy(&commit.author.name),"author_seconds":commit.author.seconds,"message":String::from_utf8_lossy(message)})
 }
 
 fn path_history_json(entry: &crab_remote_git::PathHistoryEntry) -> Value {
@@ -725,5 +829,39 @@ mod tests {
 
         let response = asset_response(blob(b"<svg><script/></svg>"));
         assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[tokio::test]
+    async fn blob_ranges_return_only_the_requested_bytes() {
+        let response = blob_response(
+            blob(b"0123456789"),
+            Some(&HeaderValue::from_static("bytes=2-5")),
+        );
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-5/10");
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            b"2345".as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn blob_ranges_support_suffixes_and_reject_multiple_ranges() {
+        let response = blob_response(
+            blob(b"0123456789"),
+            Some(&HeaderValue::from_static("bytes=-3")),
+        );
+        assert_eq!(
+            response.into_body().collect().await.unwrap().to_bytes(),
+            b"789".as_slice()
+        );
+
+        let response = blob_response(
+            blob(b"0123456789"),
+            Some(&HeaderValue::from_static("bytes=0-1,4-5")),
+        );
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */10");
     }
 }

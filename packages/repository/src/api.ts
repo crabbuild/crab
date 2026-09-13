@@ -46,12 +46,19 @@ export interface Refs {
   refs: Ref[];
   generation: number;
 }
+export interface CommitSummary {
+  oid: string;
+  author: string;
+  author_seconds: number;
+  message: string;
+}
 export interface Entry {
   path: string;
   path_hex: string;
   kind: string;
   oid: string;
   mode: string;
+  last_commit?: CommitSummary;
 }
 export interface Commit {
   oid: string;
