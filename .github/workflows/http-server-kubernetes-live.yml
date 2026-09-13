@@ -196,7 +196,9 @@ jobs:
              .image.platforms == ["linux/amd64", "linux/arm64"] and
              .chart.repository == $chart and
              (.chart.digest | test("^sha256:[0-9a-f]{64}$")) and
-             .chart.reference == ($chart + "@" + .chart.digest)' \
+             .chart.reference == ($chart + "@" + .chart.digest) and
+             .chart.package == ("crab-http-server-" + $version + ".tgz") and
+             (.chart.package_digest | test("^sha256:[0-9a-f]{64}$"))' \
             "$manifest" >/dev/null
           {
             echo "expected_image=$(jq --raw-output .image.reference "$manifest")"

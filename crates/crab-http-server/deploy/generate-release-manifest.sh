@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 8 ]; then
-  echo "usage: $0 TAG VERSION SOURCE_SHA IMAGE_REPOSITORY IMAGE_DIGEST CHART_REPOSITORY CHART_DIGEST OUTPUT" >&2
+if [ "$#" -ne 9 ]; then
+  echo "usage: $0 TAG VERSION SOURCE_SHA IMAGE_REPOSITORY IMAGE_DIGEST CHART_REPOSITORY CHART_DIGEST CHART_PACKAGE_DIGEST OUTPUT" >&2
   exit 2
 fi
 
@@ -13,7 +13,8 @@ image_repository="$4"
 image_digest="$5"
 chart_repository="$6"
 chart_digest="$7"
-output="$8"
+chart_package_digest="$8"
+output="$9"
 
 if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] ||
   [ "$tag" != "crab-http-server-v${version}" ]; then
@@ -32,7 +33,7 @@ if [[ ! "$chart_repository" =~ ^oci://ghcr\.io/[a-z0-9._-]+/charts/crab-http-ser
   echo "chart repository must be the unversioned GHCR Crab chart repository" >&2
   exit 1
 fi
-for digest in "$image_digest" "$chart_digest"; do
+for digest in "$image_digest" "$chart_digest" "$chart_package_digest"; do
   if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "release artifact digests must be lowercase SHA-256 values" >&2
     exit 1
@@ -52,6 +53,8 @@ jq --null-input \
   --arg chart_repository "$chart_repository" \
   --arg chart_digest "$chart_digest" \
   --arg chart_reference "${chart_repository}@${chart_digest}" \
+  --arg chart_package "crab-http-server-${version}.tgz" \
+  --arg chart_package_digest "$chart_package_digest" \
   '{
     schema: 1,
     tag: $tag,
@@ -66,7 +69,9 @@ jq --null-input \
     chart: {
       repository: $chart_repository,
       digest: $chart_digest,
-      reference: $chart_reference
+      reference: $chart_reference,
+      package: $chart_package,
+      package_digest: $chart_package_digest
     }
   }' > "$temporary"
 mv "$temporary" "$output"

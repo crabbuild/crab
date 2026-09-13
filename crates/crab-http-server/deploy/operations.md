@@ -4,6 +4,9 @@ This runbook covers preflight checks, rollouts, rollback, secret rotation, incid
 
 > The deployment assets don’t complete production qualification. Record live evidence for every gate in [Qualify a release](#qualify-a-release).
 
+Operator workstations need `kubectl`, Helm 3, GitHub CLI with
+artifact-attestation support, `jq`, OpenSSL, Git, and Git LFS.
+
 ## Know the state boundaries
 
 Object storage is authoritative. Pods and their scratch volumes are disposable.
@@ -53,7 +56,7 @@ coordinates used below:
 ```sh
 gh release download crab-http-server-v0.1.0 \
   --repo crabbuild/crab \
-  --pattern 'crab-http-server-release*'
+  --pattern 'crab-http-server-*'
 source_commit=$(jq --raw-output .source_commit crab-http-server-release.json)
 gh attestation verify crab-http-server-release.json \
   --bundle crab-http-server-release.attestation.json \
@@ -62,6 +65,10 @@ gh attestation verify crab-http-server-release.json \
   --source-ref refs/tags/crab-http-server-v0.1.0 \
   --source-digest "$source_commit" \
   --deny-self-hosted-runners
+chart_package=$(jq --raw-output .chart.package crab-http-server-release.json)
+expected_package_digest=$(jq --raw-output .chart.package_digest crab-http-server-release.json)
+actual_package_digest="sha256:$(openssl dgst -sha256 "$chart_package" | awk '{print $NF}')"
+test "$actual_package_digest" = "$expected_package_digest"
 image_reference=$(jq --raw-output .image.reference crab-http-server-release.json)
 chart_reference=$(jq --raw-output .chart.reference crab-http-server-release.json)
 ```

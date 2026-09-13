@@ -55,8 +55,9 @@ tags, an OCI Helm chart, an SBOM, and provenance attestations. Exact-source
 qualification rejects fixable HIGH or CRITICAL image vulnerabilities before
 publication. Kubernetes deployments still pin the resulting image manifest
 digest. A GitHub Release retains the packaged chart and a signed JSON deployment
-record that binds the tag and source commit to both registry digests. The
-publisher never overwrites an existing image tag or chart version.
+record that binds the tag and source commit to both registry digests and the
+chart package checksum. The publisher never overwrites an existing image tag
+or chart version.
 
 ## Start locally with Docker Compose
 

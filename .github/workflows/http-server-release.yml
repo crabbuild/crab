@@ -295,10 +295,13 @@ jobs:
           release_dir="${RUNNER_TEMP}/crab-http-server-release"
           image_repository="${REGISTRY}/${IMAGE_NAME}"
           chart_repository="oci://${CHART_REGISTRY}/crab-http-server"
+          chart_package="${RUNNER_TEMP}/chart/crab-http-server-${VERSION}.tgz"
+          chart_package_digest="sha256:$(sha256sum "$chart_package" | awk '{print $1}')"
           crates/crab-http-server/deploy/generate-release-manifest.sh \
             "$TAG" "$VERSION" "$SOURCE_SHA" \
             "$image_repository" "$IMAGE_DIGEST" \
             "$chart_repository" "$CHART_DIGEST" \
+            "$chart_package_digest" \
             "$release_dir/crab-http-server-release.json"
 
       - name: Attest the release manifest
@@ -343,18 +346,21 @@ jobs:
 
           release_dir="${RUNNER_TEMP}/crab-http-server-release"
           notes="$release_dir/release-notes.md"
+          chart_package_digest="$(jq --raw-output .chart.package_digest \
+            "$release_dir/crab-http-server-release.json")"
           cat > "$notes" <<EOF
           Qualified Crab HTTP Server ${VERSION} deployment artifacts.
 
           - Source commit: \`${SOURCE_SHA}\`
           - Image: \`${REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}\`
           - Helm chart: \`oci://${CHART_REGISTRY}/crab-http-server@${CHART_DIGEST}\`
+          - Chart package: \`crab-http-server-${VERSION}.tgz\` (\`${chart_package_digest}\`)
           - Platforms: \`linux/amd64\`, \`linux/arm64\`
 
           Download and verify the signed deployment record:
 
           \`\`\`sh
-          gh release download ${TAG} --repo ${GITHUB_REPOSITORY} --pattern 'crab-http-server-release*'
+          gh release download ${TAG} --repo ${GITHUB_REPOSITORY} --pattern 'crab-http-server-*'
           gh attestation verify crab-http-server-release.json \\
             --bundle crab-http-server-release.attestation.json \\
             --repo ${GITHUB_REPOSITORY} \\

@@ -1337,8 +1337,8 @@ The remaining production gaps include:
 
 The first tagged publication will also exercise the permanent operator
 handoff: a non-latest GitHub Release containing the packaged chart, a JSON
-record binding the source commit to the image and chart digests, and an offline
-GitHub attestation bundle for that record.
+record binding the source commit to the image/chart digests and package
+checksum, and an offline GitHub attestation bundle for that record.
 
 ## Ownership
 

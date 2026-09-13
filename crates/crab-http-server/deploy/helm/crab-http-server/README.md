@@ -32,6 +32,8 @@ Create these resources before installing Crab:
 - A Kubernetes 1.29 or newer cluster with at least two schedulable nodes across
   at least two zones, plus capacity for one rollout surge pod
 - Helm 3
+- GitHub CLI with artifact-attestation support, `jq`, and OpenSSL for release
+  verification
 - A NetworkPolicy-capable Container Network Interface (CNI)
 - Pod Security Admission enabled for the dedicated Crab namespace
 - A versioned S3 bucket, Google Cloud Storage (GCS) bucket, or Azure Blob container
@@ -99,7 +101,7 @@ values:
 ```sh
 gh release download crab-http-server-v0.1.0 \
   --repo crabbuild/crab \
-  --pattern 'crab-http-server-release*'
+  --pattern 'crab-http-server-*'
 source_commit=$(jq --raw-output .source_commit crab-http-server-release.json)
 gh attestation verify \
   crab-http-server-release.json \
@@ -109,6 +111,10 @@ gh attestation verify \
   --source-ref refs/tags/crab-http-server-v0.1.0 \
   --source-digest "$source_commit" \
   --deny-self-hosted-runners
+chart_package=$(jq --raw-output .chart.package crab-http-server-release.json)
+expected_package_digest=$(jq --raw-output .chart.package_digest crab-http-server-release.json)
+actual_package_digest="sha256:$(openssl dgst -sha256 "$chart_package" | awk '{print $NF}')"
+test "$actual_package_digest" = "$expected_package_digest"
 jq . crab-http-server-release.json
 ```
 
@@ -150,21 +156,20 @@ identity outside these Terraform roots, copy the matching `eks`, `gke`, or
 `aks` provider example to `/secure/crab-provider-values.yaml` and replace its
 values.
 
-Without a source checkout, pull and unpack the released OCI chart first, then
-copy the team and provider examples from that directory:
+Without a source checkout, unpack the verified chart downloaded with the
+release record, then copy the team and provider examples from that directory:
 
 ```sh
-helm pull oci://ghcr.io/crabbuild/charts/crab-http-server \
-  --version 0.1.0 --untar --untardir /secure
+chart_package=$(jq --raw-output .chart.package crab-http-server-release.json)
+tar -xzf "$chart_package" --directory /secure
 cp /secure/crab-http-server/eks-values.example.yaml \
   /secure/crab-provider-values.yaml
 cp /secure/crab-http-server/team-values.example.yaml \
   /secure/crab-team-values.yaml
 ```
 
-Authenticate with `helm registry login ghcr.io` first when the package is
-private. Choose `gke-values.example.yaml` or `aks-values.example.yaml` for
-those platforms.
+Choose `gke-values.example.yaml` or `aks-values.example.yaml` for those
+platforms.
 
 The GKE example targets Standard clusters and selects metadata-server-enabled
 nodes. Remove its `nodeSelector` on Autopilot. Terraform's required
@@ -259,7 +264,10 @@ helm upgrade --install crab-http-server \
 ```
 
 When installing without a source checkout, replace the local chart path with
-`oci://ghcr.io/crabbuild/charts/crab-http-server` and add `--version 0.1.0`.
+the verified package returned by
+`jq --raw-output .chart.package crab-http-server-release.json`. Installing the
+downloaded file avoids resolving a mutable registry version between
+verification and rollout.
 
 The Deployment becomes ready only after a pod can read and validate the durable
 catalog and open the current Git view of every discovered repository. Confirm

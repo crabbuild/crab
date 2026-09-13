@@ -59,15 +59,18 @@ jobs:
           source_sha=0123456789abcdef0123456789abcdef01234567
           image_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           chart_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          chart_package_digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
           "$release_manifest_generator" \
             crab-http-server-v0.1.0 0.1.0 "$source_sha" \
             ghcr.io/crabbuild/crab-http-server "$image_digest" \
             oci://ghcr.io/crabbuild/charts/crab-http-server "$chart_digest" \
+            "$chart_package_digest" \
             "$release_manifest"
           jq --exit-status \
             --arg source_sha "$source_sha" \
             --arg image_digest "$image_digest" \
             --arg chart_digest "$chart_digest" \
+            --arg chart_package_digest "$chart_package_digest" \
             '.schema == 1 and .tag == "crab-http-server-v0.1.0" and
              .version == "0.1.0" and .source_commit == $source_sha and
              .image.repository == "ghcr.io/crabbuild/crab-http-server" and
@@ -76,24 +79,29 @@ jobs:
              .image.platforms == ["linux/amd64", "linux/arm64"] and
              .chart.repository == "oci://ghcr.io/crabbuild/charts/crab-http-server" and
              .chart.digest == $chart_digest and
-             .chart.reference == "oci://ghcr.io/crabbuild/charts/crab-http-server@" + $chart_digest' \
+             .chart.reference == "oci://ghcr.io/crabbuild/charts/crab-http-server@" + $chart_digest and
+             .chart.package == "crab-http-server-0.1.0.tgz" and
+             .chart.package_digest == $chart_package_digest' \
             "$release_manifest" >/dev/null
-          for invalid_case in version source image chart digest; do
+          for invalid_case in version source image chart digest package_digest; do
             invalid_version=0.1.0
             invalid_source="$source_sha"
             invalid_image=ghcr.io/crabbuild/crab-http-server
             invalid_chart=oci://ghcr.io/crabbuild/charts/crab-http-server
             invalid_digest="$image_digest"
+            invalid_package_digest="$chart_package_digest"
             case "$invalid_case" in
               version) invalid_version=0.1.1 ;;
               source) invalid_source=not-a-commit ;;
               image) invalid_image=ghcr.io/crabbuild/crab-http-server:latest ;;
               chart) invalid_chart=oci://example.com/crab-http-server ;;
               digest) invalid_digest=sha256:bad ;;
+              package_digest) invalid_package_digest=sha256:bad ;;
             esac
             if "$release_manifest_generator" \
               crab-http-server-v0.1.0 "$invalid_version" "$invalid_source" \
               "$invalid_image" "$invalid_digest" "$invalid_chart" "$chart_digest" \
+              "$invalid_package_digest" \
               "${RUNNER_TEMP}/invalid-release-manifest.json" >/dev/null 2>&1; then
               echo "release manifest generator accepted invalid ${invalid_case}" >&2
               exit 1
