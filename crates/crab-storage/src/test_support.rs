@@ -63,6 +63,8 @@ pub struct CountingObjectStore {
     heads: AtomicUsize,
     ranges: AtomicUsize,
     full: AtomicUsize,
+    puts: AtomicUsize,
+    multipart_starts: AtomicUsize,
     body_reads_enabled: AtomicBool,
     blocked_body_paths: std::sync::Mutex<HashSet<String>>,
     requests: std::sync::Mutex<Vec<ObjectReadRequest>>,
@@ -77,6 +79,8 @@ impl CountingObjectStore {
             heads: AtomicUsize::new(0),
             ranges: AtomicUsize::new(0),
             full: AtomicUsize::new(0),
+            puts: AtomicUsize::new(0),
+            multipart_starts: AtomicUsize::new(0),
             body_reads_enabled: AtomicBool::new(true),
             blocked_body_paths: std::sync::Mutex::new(HashSet::new()),
             requests: std::sync::Mutex::new(Vec::new()),
@@ -132,11 +136,25 @@ impl CountingObjectStore {
             .map_or_else(|poisoned| poisoned.into_inner().clone(), |log| log.clone())
     }
 
+    /// Return the number of single-object PUT requests.
+    #[must_use]
+    pub fn put_requests(&self) -> usize {
+        self.puts.load(Ordering::Acquire)
+    }
+
+    /// Return the number of multipart sessions started through this store.
+    #[must_use]
+    pub fn multipart_starts(&self) -> usize {
+        self.multipart_starts.load(Ordering::Acquire)
+    }
+
     /// Clear counters and the request log.
     pub fn reset(&self) {
         self.heads.store(0, Ordering::Release);
         self.ranges.store(0, Ordering::Release);
         self.full.store(0, Ordering::Release);
+        self.puts.store(0, Ordering::Release);
+        self.multipart_starts.store(0, Ordering::Release);
         self.requests.lock().map_or_else(
             |poisoned| poisoned.into_inner().clear(),
             |mut log| log.clear(),
@@ -188,6 +206,7 @@ impl ObjectStore for CountingObjectStore {
         payload: PutPayload,
         options: PutOptions,
     ) -> object_store::Result<PutResult> {
+        self.puts.fetch_add(1, Ordering::AcqRel);
         self.inner.put_opts(location, payload, options).await
     }
 
@@ -196,6 +215,7 @@ impl ObjectStore for CountingObjectStore {
         location: &Path,
         options: PutMultipartOptions,
     ) -> object_store::Result<Box<dyn MultipartUpload>> {
+        self.multipart_starts.fetch_add(1, Ordering::AcqRel);
         self.inner.put_multipart_opts(location, options).await
     }
 

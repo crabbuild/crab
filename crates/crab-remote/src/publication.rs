@@ -11,6 +11,7 @@ use crab_coordination::{
     PushLockAcquireContext, RenewingPushLock,
 };
 use crab_storage::{Store, StoreLayout};
+use futures_util::future::join_all;
 use rand::Rng;
 use tokio_util::sync::CancellationToken;
 
@@ -117,11 +118,21 @@ impl PublicationLeases {
             .count()
     }
 
-    /// Stop renewal workers and release every fence and ref lease in reverse order.
+    /// Stop renewal workers, release all fences, then release ref leases.
     pub async fn release(mut self) {
-        while let Some((lease, heartbeat)) = self.fences.pop() {
-            heartbeat.stop().await;
-            if let Err(error) = lease.release().await {
+        let fences = std::mem::take(&mut self.fences);
+        let fences = join_all(
+            fences
+                .into_iter()
+                .rev()
+                .map(|(lease, heartbeat)| async move {
+                    heartbeat.stop().await;
+                    lease
+                }),
+        )
+        .await;
+        for result in join_all(fences.iter().map(GcFenceLease::release)).await {
+            if let Err(error) = result {
                 tracing::warn!(%error, "publication GC fence release failed");
             }
         }
@@ -328,21 +339,48 @@ pub async fn acquire_leases(
     cancel: &CancellationToken,
 ) -> Result<PublicationLeases, Error> {
     let mut leases = acquire_ref_leases(store, layout, names, options, cancel).await?;
-    for domain in [layout.global_prefix(), layout.repo_prefix()] {
-        if cancel.is_cancelled() {
-            leases.release().await;
-            return Err(Error::Cancelled);
-        }
-        let lease = match GcFenceLease::acquire_writer(store.inner(), domain, options.ttl).await {
-            Ok(lease) => lease,
-            Err(error) => {
-                leases.release().await;
-                return Err(error.into());
+    if cancel.is_cancelled() {
+        leases.release().await;
+        return Err(Error::Cancelled);
+    }
+    let (global, repo) = tokio::join!(
+        GcFenceLease::acquire_writer(store.inner(), layout.global_prefix(), options.ttl),
+        GcFenceLease::acquire_writer(store.inner(), layout.repo_prefix(), options.ttl),
+    );
+    let fences = match (global, repo) {
+        (Ok(global), Ok(repo)) => [global, repo],
+        (Ok(global), Err(error)) => {
+            if let Err(release_error) = global.release().await {
+                tracing::warn!(%release_error, "partial global GC fence release failed");
             }
-        };
-        let interval = options
-            .renewal_interval
-            .unwrap_or((options.ttl / 3).max(Duration::from_secs(1)));
+            leases.release().await;
+            return Err(error.into());
+        }
+        (Err(error), Ok(repo)) => {
+            if let Err(release_error) = repo.release().await {
+                tracing::warn!(%release_error, "partial repository GC fence release failed");
+            }
+            leases.release().await;
+            return Err(error.into());
+        }
+        (Err(error), Err(_)) => {
+            leases.release().await;
+            return Err(error.into());
+        }
+    };
+    if cancel.is_cancelled() {
+        for result in join_all(fences.iter().map(GcFenceLease::release)).await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "cancelled publication GC fence release failed");
+            }
+        }
+        leases.release().await;
+        return Err(Error::Cancelled);
+    }
+    let interval = options
+        .renewal_interval
+        .unwrap_or((options.ttl / 3).max(Duration::from_secs(1)));
+    for lease in fences {
         let heartbeat = GcFenceHeartbeat::spawn(&lease, cancel.clone(), interval);
         leases.fences.push((lease, heartbeat));
     }

@@ -27,6 +27,7 @@ pub struct PushAdmissionTicket {
     occupied_slots: usize,
     backend_clock: BackendClock,
     leases: Vec<(String, Option<UpdateVersion>)>,
+    acquire_gc_fences: bool,
     global_domain: Option<String>,
     global_fence: Option<GcFenceLease>,
     repo_fence: Option<GcFenceLease>,
@@ -71,6 +72,49 @@ impl PushAdmissionTicket {
         required_slots: usize,
         lease_ttl: Duration,
     ) -> Result<Self> {
+        Self::new_weighted_inner(
+            store,
+            prefix,
+            global_domain,
+            capacity,
+            required_slots,
+            lease_ttl,
+            true,
+        )
+    }
+
+    /// Creates a weighted capacity contender beneath caller-owned GC fences.
+    ///
+    /// The caller must retain both repository and global writer fences until
+    /// this ticket is released. This avoids duplicating those claims when
+    /// publication admission already owns them.
+    pub fn new_weighted_with_existing_fences(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        capacity: usize,
+        required_slots: usize,
+        lease_ttl: Duration,
+    ) -> Result<Self> {
+        Self::new_weighted_inner(
+            store,
+            prefix,
+            None,
+            capacity,
+            required_slots,
+            lease_ttl,
+            false,
+        )
+    }
+
+    fn new_weighted_inner(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        global_domain: Option<&str>,
+        capacity: usize,
+        required_slots: usize,
+        lease_ttl: Duration,
+        acquire_gc_fences: bool,
+    ) -> Result<Self> {
         if capacity == 0 {
             return Err(CoordinationError::Configuration {
                 key: capacity.to_string(),
@@ -96,6 +140,7 @@ impl PushAdmissionTicket {
             occupied_slots: 0,
             backend_clock: BackendClock::default(),
             leases: Vec::with_capacity(required_slots),
+            acquire_gc_fences,
             global_domain: global_domain.map(str::to_owned),
             global_fence: None,
             repo_fence: None,
@@ -303,6 +348,9 @@ impl PushAdmissionTicket {
     }
 
     async fn finish_admission(&mut self) -> Result<bool> {
+        if !self.acquire_gc_fences {
+            return Ok(true);
+        }
         match self.acquire_fences().await {
             Ok(()) => Ok(true),
             Err(CoordinationError::GcFenceHeld { .. }) => {
@@ -608,6 +656,23 @@ mod tests {
             .release()
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn capacity_only_ticket_leaves_gc_authority_to_caller() {
+        let store = memory_store();
+        let ttl = Duration::from_secs(60);
+        let mut ticket =
+            PushAdmissionTicket::new_weighted_with_existing_fences(&store, "org/repo", 1, 1, ttl)
+                .unwrap();
+
+        assert!(ticket.try_admit().await.unwrap());
+        let sweep = GcFenceLease::acquire_sweep(&store, "org/repo", ttl)
+            .await
+            .unwrap();
+
+        sweep.release().await.unwrap();
+        ticket.release().await.unwrap();
     }
 
     #[tokio::test]

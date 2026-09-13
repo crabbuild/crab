@@ -35,6 +35,23 @@ fn same_object_version(left: &ObjectMeta, right: &ObjectMeta) -> bool {
     }
 }
 
+fn expected_pack_hash(router: &StoreLayout<Store>, pack: &PackManifestEntry) -> Result<[u8; 32]> {
+    if pack.pack_id != pack.content_hash {
+        return Err(corrupt(
+            router.pack_path(&pack.pack_id).as_ref(),
+            "pack manifest identity differs from its content hash",
+        ));
+    }
+    blake3::Hash::from_hex(&pack.content_hash)
+        .map(|hash| *hash.as_bytes())
+        .map_err(|error| {
+            corrupt(
+                router.pack_path(&pack.pack_id).as_ref(),
+                format!("invalid pack content hash: {error}"),
+            )
+        })
+}
+
 async fn read_matching_receipt(
     store: &Store,
     receipt_path: &object_store::path::Path,
@@ -92,20 +109,34 @@ pub async fn record_verified_pack_origin(
     if store.staging_write_prefix().is_some() {
         return Ok(());
     }
-    if pack.pack_id != pack.content_hash {
-        return Err(corrupt(
-            router.pack_path(&pack.pack_id).as_ref(),
-            "pack manifest identity differs from its content hash",
-        ));
-    }
-    let expected = blake3::Hash::from_hex(&pack.content_hash).map_err(|error| {
-        corrupt(
-            router.pack_path(&pack.pack_id).as_ref(),
-            format!("invalid pack content hash: {error}"),
-        )
-    })?;
+    expected_pack_hash(&router, pack)?;
     let pack_path = router.pack_path(&pack.pack_id);
     let meta = store.head(&pack_path).await?;
+    record_verified_pack_origin_with_meta(store, repo_prefix, pack, &meta).await
+}
+
+/// Persist a pack-origin receipt using metadata bound to the verified body GET.
+///
+/// The metadata must come from a successful size-and-hash verification of the
+/// same pack body; this function validates its object identity and size.
+pub async fn record_verified_pack_origin_with_meta(
+    store: &Store,
+    repo_prefix: &str,
+    pack: &PackManifestEntry,
+    meta: &ObjectMeta,
+) -> Result<()> {
+    let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
+    if store.staging_write_prefix().is_some() {
+        return Ok(());
+    }
+    let expected_hash = expected_pack_hash(&router, pack)?;
+    let pack_path = router.pack_path(&pack.pack_id);
+    if meta.location != pack_path {
+        return Err(corrupt(
+            pack_path.as_ref(),
+            format!("verified metadata belongs to {}", meta.location),
+        ));
+    }
     if meta.size != pack.size {
         return Err(corrupt(
             pack_path.as_ref(),
@@ -115,17 +146,17 @@ pub async fn record_verified_pack_origin(
             ),
         ));
     }
-    if !has_version_token(&meta) {
+    if !has_version_token(meta) {
         return Ok(());
     }
     let receipt = OriginReceipt::new(
         PACK_ORIGIN_NAMESPACE.to_owned(),
         pack_path.as_ref().to_owned(),
-        *expected.as_bytes(),
-        *expected.as_bytes(),
+        expected_hash,
+        expected_hash,
         pack.size,
-        meta.e_tag,
-        meta.version,
+        meta.e_tag.clone(),
+        meta.version.clone(),
     );
     let bytes = serde_json::to_vec(&receipt).map_err(|error| {
         MetadataError::Internal(format!("pack-origin receipt serialize failed: {error}"))
@@ -150,19 +181,7 @@ pub async fn verify_pack_origin(
     pack: &PackManifestEntry,
 ) -> Result<bool> {
     let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
-    if pack.pack_id != pack.content_hash {
-        return Err(corrupt(
-            router.pack_path(&pack.pack_id).as_ref(),
-            "pack manifest identity differs from its content hash",
-        ));
-    }
-    let expected = blake3::Hash::from_hex(&pack.content_hash).map_err(|error| {
-        corrupt(
-            router.pack_path(&pack.pack_id).as_ref(),
-            format!("invalid pack content hash: {error}"),
-        )
-    })?;
-    let expected_hash = *expected.as_bytes();
+    let expected_hash = expected_pack_hash(&router, pack)?;
     let pack_path = router.pack_path(&pack.pack_id);
     let receipt_path = router.pack_origin_receipt_path(&pack.pack_id);
 
@@ -279,6 +298,31 @@ mod tests {
             verify_pack_origin(&store, router.repo_prefix(), &pack)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_get_metadata_records_version_bound_receipt() {
+        let inner: Arc<dyn object_store::ObjectStore> =
+            Arc::new(object_store::memory::InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "repo".to_owned());
+        let pack = entry(b"verified-pack-body");
+        let path = router.pack_path(&pack.pack_id);
+        store
+            .put(&path, Bytes::from_static(b"verified-pack-body"))
+            .await
+            .expect("seed pack");
+        let meta = store.head(&path).await.expect("pack metadata");
+
+        record_verified_pack_origin_with_meta(&store, router.repo_prefix(), &pack, &meta)
+            .await
+            .expect("record origin receipt");
+
+        assert!(
+            !verify_pack_origin(&store, router.repo_prefix(), &pack)
+                .await
+                .expect("receipt should avoid body verification")
         );
     }
 }
