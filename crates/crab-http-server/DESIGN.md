@@ -362,7 +362,9 @@ third of its lifetime. Response-body or worker completion releases it;
 renewal failure cancels the owned transfer; an abrupt process loss makes the
 slot reusable after its lease expires. This covers Git fetch and push, LFS
 upload and download, archives, and release assets without repository-specific
-configuration.
+configuration. Before opening either listener, startup acquires and releases
+one of 16 separate probe slots, so a missing conditional-write permission
+fails before the pod can become ready without competing with live transfers.
 
 The implementation spreads this sequence across four owners:
 

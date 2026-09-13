@@ -6,6 +6,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const RESOURCE_PREFIX: &str = "http-transfer-admission";
+const PROBE_RESOURCE_PREFIX: &str = "http-transfer-admission-probe";
+const PROBE_CAPACITY: usize = 16;
 const LEASE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +43,25 @@ impl TransferAdmission {
             local: Arc::new(Semaphore::new(capacity)),
             workers: TaskTracker::new(),
         }
+    }
+
+    pub(crate) async fn probe(&self) -> Result<(), CoordinationError> {
+        let mut ticket = FixedSlotAdmissionTicket::new(
+            self.store.inner(),
+            &self.prefix,
+            PROBE_RESOURCE_PREFIX,
+            PROBE_CAPACITY,
+            self.lease_ttl,
+        )?;
+        for _ in 0..PROBE_CAPACITY {
+            if ticket.try_admit().await? {
+                return ticket.release().await;
+            }
+        }
+        Err(CoordinationError::Configuration {
+            key: self.prefix.clone(),
+            origin: "all startup transfer-admission probes are busy".to_owned(),
+        })
     }
 
     pub(crate) async fn try_acquire(
@@ -190,6 +211,19 @@ mod tests {
         second.close();
         first.wait().await;
         second.wait().await;
+    }
+
+    #[tokio::test]
+    async fn startup_probe_is_separate_from_live_capacity_and_releases_its_slot() {
+        let admission = fixture(1);
+        let cancellation = CancellationToken::new();
+        let permit = admission.try_acquire(&cancellation).await.unwrap();
+
+        admission.probe().await.unwrap();
+
+        permit.release().await;
+        admission.close();
+        admission.wait().await;
     }
 
     #[tokio::test]

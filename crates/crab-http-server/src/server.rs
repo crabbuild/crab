@@ -317,6 +317,7 @@ pub async fn serve(config: Config) -> Result<()> {
             .to_string(),
         GIT_ADMISSION_CAPACITY,
     );
+    transfer_admission.probe().await?;
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),

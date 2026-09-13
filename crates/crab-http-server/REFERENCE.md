@@ -320,6 +320,12 @@ The two probe routes answer different operator questions:
 Only the management listener serves probes. Every public request retains strict
 canonical `Host` validation.
 
+Before starting either listener, the process also claims and releases one of
+16 dedicated startup-probe slots in the shared transfer-admission namespace.
+Invalid conditional-write permissions therefore fail startup instead of
+leaving a read-ready server that rejects its first transfer. Probe slots are
+separate from the four live-transfer slots.
+
 Every public response includes a server-generated `x-request-id`. The completion log records the same identifier with the method, path, status, and elapsed milliseconds. Set the standard `RUST_LOG` environment variable to adjust tracing filters; the default level is `info`.
 
 Metrics use bounded `method`, `outcome`, and `class` labels. They never include

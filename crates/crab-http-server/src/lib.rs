@@ -51,6 +51,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("object storage configuration failed")]
     Storage(#[from] crab_storage::StorageError),
+    #[error("object storage coordination failed")]
+    Coordination(#[from] crab_coordination::CoordinationError),
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
     #[error("repository maintenance failed")]
