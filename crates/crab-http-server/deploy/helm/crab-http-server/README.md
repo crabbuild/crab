@@ -413,6 +413,7 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-next-upstream: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "630"
     nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "630"
@@ -430,9 +431,12 @@ networkPolicy:
 The checked-in team overlay applies these ingress-nginx settings. They stream
 request and response bodies, preserve HTTP/1.1 to the server, delegate request
 size enforcement to Crab, require HTTPS redirection, and keep an idle upstream
-connection open beyond the ten-minute archive budget. For another ingress
-controller, replace the annotations with equivalent request-body, streaming,
-upstream timeout, idle timeout, HTTPS redirect, and connection-drain settings.
+connection open beyond the ten-minute archive budget. Upstream retries are
+disabled because `GET /auth/callback` consumes one-time OIDC state; the server
+or client, not the proxy, owns recovery from an indeterminate request. For
+another ingress controller, replace the annotations with equivalent
+request-body, streaming, upstream timeout, idle timeout, HTTPS redirect,
+single-attempt, and connection-drain settings.
 
 ## Enable autoscaling
 

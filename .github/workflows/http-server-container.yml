@@ -141,6 +141,7 @@ jobs:
           grep -F 'nginx.ingress.kubernetes.io/proxy-body-size: "0"' "$nginx_rendered"
           grep -F 'nginx.ingress.kubernetes.io/proxy-buffering: "off"' "$nginx_rendered"
           grep -F 'nginx.ingress.kubernetes.io/proxy-http-version: "1.1"' "$nginx_rendered"
+          grep -F 'nginx.ingress.kubernetes.io/proxy-next-upstream: "off"' "$nginx_rendered"
           grep -F 'nginx.ingress.kubernetes.io/proxy-read-timeout: "630"' "$nginx_rendered"
           grep -F 'nginx.ingress.kubernetes.io/proxy-request-buffering: "off"' "$nginx_rendered"
           grep -F 'nginx.ingress.kubernetes.io/proxy-send-timeout: "630"' "$nginx_rendered"
