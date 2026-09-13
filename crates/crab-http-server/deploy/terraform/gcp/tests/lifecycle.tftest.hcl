@@ -8,6 +8,32 @@ variables {
   gke_cluster_mode = "standard"
 }
 
+run "hardens_the_storage_boundary" {
+  command = plan
+
+  assert {
+    condition = (
+      google_storage_bucket.repositories.force_destroy == false &&
+      google_storage_bucket.repositories.public_access_prevention == "enforced" &&
+      google_storage_bucket.repositories.uniform_bucket_level_access == true &&
+      one(google_storage_bucket.repositories.versioning).enabled == true
+    )
+    error_message = "GCS must prevent public or ACL-based access, force deletion, and unversioned writes."
+  }
+}
+
+run "binds_workload_identity_to_the_server" {
+  command = plan
+
+  assert {
+    condition = (
+      google_service_account_iam_member.workload_identity.role == "roles/iam.workloadIdentityUser" &&
+      google_service_account_iam_member.workload_identity.member == "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${var.service_account_name}]"
+    )
+    error_message = "GKE Workload Identity must bind the expected project, namespace, and ServiceAccount."
+  }
+}
+
 run "renders_standard_metadata_server_placement" {
   command = plan
 

@@ -18,7 +18,7 @@ resource "azurerm_storage_account" "repositories" {
   https_traffic_only_enabled        = true
   infrastructure_encryption_enabled = true
   min_tls_version                   = "TLS1_2"
-  public_network_access_enabled     = var.public_network_access_enabled
+  public_network_access             = var.public_network_access_enabled ? "Enabled" : "Disabled"
   shared_access_key_enabled         = false
   tags                              = var.tags
 

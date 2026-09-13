@@ -20,6 +20,48 @@ variables {
   bucket_name  = "test-crab-http-server"
 }
 
+run "hardens_the_storage_boundary" {
+  command = plan
+
+  assert {
+    condition = (
+      aws_s3_bucket_public_access_block.repositories.block_public_acls == true &&
+      aws_s3_bucket_public_access_block.repositories.block_public_policy == true &&
+      aws_s3_bucket_public_access_block.repositories.ignore_public_acls == true &&
+      aws_s3_bucket_public_access_block.repositories.restrict_public_buckets == true
+    )
+    error_message = "S3 public-access protections must all remain enabled."
+  }
+
+  assert {
+    condition     = one(aws_s3_bucket_ownership_controls.repositories.rule).object_ownership == "BucketOwnerEnforced"
+    error_message = "S3 object ownership must remain enforced by the bucket owner."
+  }
+
+  assert {
+    condition     = one(one(aws_s3_bucket_server_side_encryption_configuration.repositories.rule).apply_server_side_encryption_by_default).sse_algorithm == "AES256"
+    error_message = "S3 objects must retain default server-side encryption."
+  }
+
+  assert {
+    condition     = one(aws_s3_bucket_versioning.repositories.versioning_configuration).status == "Enabled"
+    error_message = "S3 object versioning must remain enabled."
+  }
+}
+
+run "binds_pod_identity_to_the_server" {
+  command = plan
+
+  assert {
+    condition = (
+      aws_eks_pod_identity_association.server.cluster_name == var.cluster_name &&
+      aws_eks_pod_identity_association.server.namespace == var.namespace &&
+      aws_eks_pod_identity_association.server.service_account == var.service_account_name
+    )
+    error_message = "EKS Pod Identity must bind the expected cluster, namespace, and ServiceAccount."
+  }
+}
+
 run "bounds_recovery_versions_and_multipart_uploads" {
   command = plan
 
