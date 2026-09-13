@@ -447,6 +447,17 @@ jobs:
           docker compose --file crates/crab-http-server/deploy/compose.yaml \
             run --rm --no-deps repository-init \
               --config /etc/crab/server.toml storage-probe
+          printf '%s\n' \
+            'members = [{ subject = "ci-admin", name = "CI Admin", access = "admin" }]' \
+            | docker compose --file crates/crab-http-server/deploy/compose.yaml \
+                run --rm --no-deps --no-TTY repository-init \
+                  --config /etc/crab/server.toml repository create \
+                  --owner demo --name stdin-members --prefix demo/stdin-members \
+                  --members-file - \
+            > "${RUNNER_TEMP}/crab-http-server-stdin-repository.json"
+          jq --exit-status \
+            '.owner == "demo" and .name == "stdin-members" and (.members | any(.subject == "ci-admin" and .access == "admin"))' \
+            "${RUNNER_TEMP}/crab-http-server-stdin-repository.json"
           curl --fail --silent --show-error \
             --dump-header "${RUNNER_TEMP}/crab-http-server-headers" \
             --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \

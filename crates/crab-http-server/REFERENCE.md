@@ -601,7 +601,8 @@ HTTP identity endpoints are allowed only when the issuer, public URL, and listen
 
 Each catalog member record binds the provider's stable `sub` claim to a display
 name and explicit grant. Supply records through `--members-file` when creating
-or adopting a repository:
+or adopting a repository. Use `--members-file -` to read the document from
+standard input, including through `kubectl exec --stdin`:
 
 | Access | Capabilities |
 | --- | --- |
@@ -610,6 +611,12 @@ or adopting a repository:
 | `admin` | All write actions plus repository settings and branch protections |
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
+
+When OIDC is configured, the repository administration CLI requires at least
+one `admin` member. It rejects an empty or read/write-only membership before
+touching repository storage, preventing creation of a repository that no
+authenticated operator can administer. Unauthenticated loopback deployments
+may omit membership.
 
 An authenticated account without membership sees an empty catalog. Unauthorized
 and absent repositories both return HTTP 404 after authentication. Catalog

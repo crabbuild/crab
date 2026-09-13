@@ -140,6 +140,11 @@ this is safe and recoverable with `repository adopt`. It never leaves a catalog
 record pointing at an unvalidated repository. Adopt performs only the two
 canonical metadata reads before the same CAS insertion.
 
+For an authenticated deployment, the administration CLI requires an initial
+administrator before either operation reaches storage. Membership can stream
+from standard input so Kubernetes operators do not need to persist repository
+identities in a ConfigMap or copy a file into a pod.
+
 The server does not infer public names from object paths. That would make
 listing permissions, rename behavior, partial uploads, and unrelated bucket
 contents ambiguous.

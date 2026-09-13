@@ -1,9 +1,10 @@
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use crab_http_server::RepositoryMember;
 use crab_http_server::catalog::CatalogStore;
+use crab_http_server::{RepositoryAccess, RepositoryMember};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
@@ -51,7 +52,7 @@ struct RepositoryIdentity {
     prefix: String,
     #[arg(long, default_value = "")]
     description: String,
-    #[arg(long, help = "TOML file containing a members array")]
+    #[arg(long, help = "TOML file containing a members array, or - for stdin")]
     members_file: Option<PathBuf>,
 }
 
@@ -76,13 +77,29 @@ struct MembersFile {
 }
 
 impl RepositoryIdentity {
-    fn members(&self) -> crab_http_server::Result<Vec<RepositoryMember>> {
-        let Some(path) = &self.members_file else {
-            return Ok(Vec::new());
+    fn members(&self, authenticated: bool) -> crab_http_server::Result<Vec<RepositoryMember>> {
+        let members = match &self.members_file {
+            None => Vec::new(),
+            Some(path) if path == Path::new("-") => read_members(std::io::stdin().lock())?,
+            Some(path) => read_members(std::fs::File::open(path)?)?,
         };
-        let source = std::fs::read_to_string(path)?;
-        Ok(toml::from_str::<MembersFile>(&source)?.members)
+        if authenticated
+            && !members
+                .iter()
+                .any(|member| member.access == RepositoryAccess::Admin)
+        {
+            return Err(crab_http_server::Error::Config(
+                "authenticated repositories require at least one admin member",
+            ));
+        }
+        Ok(members)
     }
+}
+
+fn read_members(mut reader: impl Read) -> crab_http_server::Result<Vec<RepositoryMember>> {
+    let mut source = String::new();
+    reader.read_to_string(&mut source)?;
+    Ok(toml::from_str::<MembersFile>(&source)?.members)
 }
 
 #[tokio::main]
@@ -131,11 +148,11 @@ async fn repository(
     config: &crab_http_server::Config,
     command: RepositoryCommand,
 ) -> crab_http_server::Result<()> {
-    let catalog = CatalogStore::from_config(config)?;
     match command {
         RepositoryCommand::Create(arguments) => {
             let identity = arguments.identity;
-            let members = identity.members()?;
+            let members = identity.members(config.auth.is_some())?;
+            let catalog = CatalogStore::from_config(config)?;
             let record = catalog
                 .create_repository(
                     identity.owner,
@@ -150,7 +167,8 @@ async fn repository(
         }
         RepositoryCommand::Adopt(arguments) => {
             let identity = arguments.identity;
-            let members = identity.members()?;
+            let members = identity.members(config.auth.is_some())?;
+            let catalog = CatalogStore::from_config(config)?;
             let record = catalog
                 .adopt_repository(
                     identity.owner,
@@ -163,6 +181,7 @@ async fn repository(
             println!("{}", serde_json::to_string_pretty(&record)?);
         }
         RepositoryCommand::List => {
+            let catalog = CatalogStore::from_config(config)?;
             let (document, _) = catalog.load().await?;
             println!("{}", serde_json::to_string_pretty(&document)?);
         }
@@ -179,5 +198,62 @@ mod tests {
     #[test]
     fn command_line_contract_is_valid() {
         Arguments::command().debug_assert();
+    }
+
+    #[test]
+    fn members_file_accepts_stdin_and_preserves_admin_identity() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "repository",
+            "create",
+            "--owner",
+            "team",
+            "--name",
+            "project",
+            "--prefix",
+            "team/project",
+            "--members-file",
+            "-",
+        ])
+        .unwrap();
+        let Command::Repository {
+            command: RepositoryCommand::Create(create),
+        } = arguments.command.unwrap()
+        else {
+            panic!("repository create command was not parsed");
+        };
+        assert_eq!(
+            create.identity.members_file.as_deref(),
+            Some(Path::new("-"))
+        );
+
+        let members = read_members(
+            b"members = [{ subject = 'alice-sub', name = 'Alice', access = 'admin' }]".as_slice(),
+        )
+        .unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].subject, "alice-sub");
+        assert_eq!(members[0].access, RepositoryAccess::Admin);
+    }
+
+    #[test]
+    fn authenticated_repository_requires_an_admin_member() {
+        let identity = RepositoryIdentity {
+            owner: "team".into(),
+            name: "project".into(),
+            prefix: "team/project".into(),
+            description: String::new(),
+            members_file: None,
+        };
+
+        assert!(matches!(
+            identity.members(true),
+            Err(crab_http_server::Error::Config(
+                "authenticated repositories require at least one admin member"
+            ))
+        ));
+        assert!(identity.members(false).unwrap().is_empty());
     }
 }

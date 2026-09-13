@@ -244,16 +244,32 @@ qualification below for that boundary.
 
 ## Create the first repository
 
-Run repository administration through a pod that already has configuration and workload identity. The command initializes the canonical storage layout before publishing the catalog record.
+Run repository administration through a pod that already has configuration
+and workload identity. First create a private local membership file using the
+OIDC provider's stable `sub` claim for the initial administrator:
 
-```sh
-kubectl --namespace crab exec deployment/crab-http-server -- \
-  crab-http-server --config /etc/crab/http-server/server.toml repository create \
-  --owner your_team --name your_project \
-  --prefix your_team/your_project --default-branch main
+```toml
+members = [
+  { subject = "provider-subject-for-alice", name = "Alice", access = "admin" },
+]
 ```
 
-Every healthy replica discovers the new record within five seconds. Use `repository adopt` instead when the target prefix already contains a canonical Crab repository.
+Pipe that file over standard input so it is neither baked into the image nor
+persisted in a Kubernetes object:
+
+```sh
+kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml repository create \
+  --owner your_team --name your_project \
+  --prefix your_team/your_project --default-branch main \
+  --members-file - < /secure/crab-members.toml
+```
+
+Authenticated repository creation and adoption fail unless the supplied
+membership contains at least one administrator; this prevents creating a
+repository that nobody can manage or open. Every healthy replica discovers the
+new record within five seconds. Use `repository adopt` instead when the target
+prefix already contains a canonical Crab repository.
 
 ## Qualify the live deployment
 

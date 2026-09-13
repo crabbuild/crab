@@ -174,6 +174,11 @@ crab-http-server --config server.toml repository adopt \
 crab-http-server --config server.toml repository list
 ```
 
+Pass `--members-file -` to read the TOML membership document from standard
+input, which is useful with `kubectl exec --stdin`. Authenticated deployments
+require at least one `admin` member when creating or adopting a repository;
+unauthenticated loopback deployments may omit membership.
+
 `create` initializes canonical Crab layout and manifest objects before its CAS
 catalog publish. `adopt` requires those objects to exist already. Every running
 replica refreshes the catalog and begins routing a successful change within
