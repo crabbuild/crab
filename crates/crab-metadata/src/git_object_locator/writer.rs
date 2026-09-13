@@ -537,6 +537,30 @@ impl GitObjectLocatorWriter {
         binding: GitPackLocatorBinding,
         entries: &[GitObjectLocatorEntry],
     ) -> Result<()> {
+        self.write_locations_inner(binding, entries, None).await
+    }
+
+    /// Write object rows without rebinding OIDs whose current pack remains canonical.
+    ///
+    /// `retained_slots` must be the complete pack-slot set for the target inventory.
+    /// Every submitted entry still counts toward rebuild coverage, including a
+    /// duplicate whose previously selected retained location wins.
+    pub async fn write_locations_preserving_retained(
+        &mut self,
+        binding: GitPackLocatorBinding,
+        entries: &[GitObjectLocatorEntry],
+        retained_slots: &HashSet<u64>,
+    ) -> Result<()> {
+        self.write_locations_inner(binding, entries, Some(retained_slots))
+            .await
+    }
+
+    async fn write_locations_inner(
+        &mut self,
+        binding: GitPackLocatorBinding,
+        entries: &[GitObjectLocatorEntry],
+        retained_slots: Option<&HashSet<u64>>,
+    ) -> Result<()> {
         if self.bindings.get(&binding.pack_slot) != Some(&binding.record) {
             return Err(MetadataError::Internal(
                 "Git locator object rows reference an unbound pack slot".to_owned(),
@@ -601,6 +625,12 @@ impl GitObjectLocatorWriter {
                     .and_then(|ordinals| ordinals.get(&entry.oid))
             });
             let existing_object = existing_object.or(existing_objects[entry_index]);
+            if existing_object.is_some_and(|existing| {
+                existing.pack_slot != binding.pack_slot
+                    && retained_slots.is_some_and(|slots| slots.contains(&existing.pack_slot))
+            }) {
+                continue;
+            }
             let (ordinal, previous_object) = match existing_object {
                 Some(existing) => (existing.ordinal, Some(existing)),
                 None => (self.allocate_ordinal()?, None),
@@ -609,10 +639,15 @@ impl GitObjectLocatorWriter {
             // logical facts. Preserve facts already proven by the covered
             // catalog so owner maintenance need not download the whole new
             // pack merely to recover object kinds.
-            let metadata = Self::merge_object_metadata(
+            let mut metadata = Self::merge_object_metadata(
                 previous_object.map(|object| object.metadata),
                 entry.metadata,
             );
+            if retained_slots.is_some() {
+                // Delta identity describes this physical pack entry. Catalog
+                // evidence must clear it when a self-contained alias wins.
+                metadata.delta_base_oid = entry.metadata.delta_base_oid;
+            }
             let object = ExistingObject {
                 ordinal,
                 pack_slot: binding.pack_slot,
@@ -2546,6 +2581,76 @@ mod tests {
             1
         );
         writer.close().await.expect("close writer");
+    }
+
+    #[tokio::test]
+    async fn retained_pack_location_wins_over_a_duplicate_oid() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut writer = GitObjectLocatorWriter::open(Arc::clone(&store), "org/repo")
+            .await
+            .expect("open writer");
+        let original = writer.bind_packs(&[pack(1)]).await.expect("bind original")[0];
+        let duplicate = writer.bind_packs(&[pack(2)]).await.expect("bind duplicate")[0];
+        let object = entry(1);
+        writer
+            .write_locations(original, &[object])
+            .await
+            .expect("write original location");
+        let mut moved = object;
+        moved.location.pack_offset = 24;
+        moved.location.entry_len = 80;
+        let retained = HashSet::from([original.pack_slot, duplicate.pack_slot]);
+        writer
+            .write_locations_preserving_retained(duplicate, &[moved], &retained)
+            .await
+            .expect("preserve original location");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: 2,
+                pack_index_hash: hash(101),
+            })
+            .await
+            .expect("cover both packs");
+        writer
+            .publish_checkpoint()
+            .await
+            .expect("publish checkpoint");
+        let identity = writer.catalog_identity().expect("catalog identity");
+        writer.close().await.expect("close writer");
+
+        let reader = super::super::GitObjectLocatorSession::open_for_catalog(
+            store,
+            "org/repo",
+            identity,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("open catalog");
+        let inventory = [original, duplicate]
+            .into_iter()
+            .map(|binding| {
+                (
+                    binding.record.pack_id,
+                    GitPackInventoryEntry {
+                        pack_id: binding.record.pack_id,
+                        object_count: binding.record.object_count,
+                        pack_size: binding.record.pack_size,
+                    },
+                )
+            })
+            .collect();
+        let lookups = reader
+            .lookup_batch(&[object.oid], &inventory)
+            .await
+            .expect("lookup retained object");
+        match lookups.as_slice() {
+            [GitObjectLookup::Hit(locator)] => assert_eq!(
+                (locator.pack_id, locator.location),
+                (original.record.pack_id, object.location)
+            ),
+            other => panic!("expected one retained locator hit, got {other:?}"),
+        }
+        reader.close().await.expect("close reader");
     }
 
     #[tokio::test]

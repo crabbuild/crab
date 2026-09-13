@@ -5,7 +5,7 @@ use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
 use futures_util::{StreamExt, TryStreamExt};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -22,13 +22,16 @@ pub struct LocatorPackEvidence {
     idx_path: PathBuf,
     rev_path: PathBuf,
     git_sha1: String,
-    kind_by_oid: Option<GitObjectKindMap>,
+    metadata_by_oid: Option<GitObjectMetadataMap>,
     _temp: Option<tempfile::TempDir>,
 }
 
 /// Verified logical kinds indexed by SHA-1 object identity.
 pub type GitObjectKindMap =
     Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectKind>>;
+
+type GitObjectMetadataMap =
+    Arc<HashMap<[u8; 20], crab_metadata::git_object_locator::GitObjectMetadata>>;
 
 impl LocatorPackEvidence {
     /// Validate local immutable index sidecars before catalog publication.
@@ -55,7 +58,22 @@ impl LocatorPackEvidence {
             idx_path: idx_path.to_owned(),
             rev_path: rev_path.to_owned(),
             git_sha1: git_sha1.to_owned(),
-            kind_by_oid,
+            metadata_by_oid: kind_by_oid.map(|kinds| {
+                Arc::new(
+                    kinds
+                        .iter()
+                        .map(|(oid, kind)| {
+                            (
+                                *oid,
+                                crab_metadata::git_object_locator::GitObjectMetadata {
+                                    kind: Some(*kind),
+                                    ..Default::default()
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+            }),
             _temp: None,
         })
     }
@@ -170,7 +188,8 @@ async fn download_locator_pack_evidence(
         &expected_git_sha1,
         router.pack_index_path(&pack.pack_id).as_ref(),
     )?;
-    let kind_by_oid = load_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?;
+    let metadata_by_oid =
+        load_pack_kind_metadata(store, router, pack, &idx_path, &rev_path).await?;
     check_cancelled(cancel)?;
     let pack_id =
         MerkleHash::from_hex(&pack.pack_id).map_err(|source| WriteError::PackIdentity {
@@ -181,7 +200,7 @@ async fn download_locator_pack_evidence(
         idx_path,
         rev_path,
         git_sha1: expected_git_sha1,
-        kind_by_oid,
+        metadata_by_oid,
         _temp: Some(temp),
     })
 }
@@ -192,14 +211,12 @@ async fn load_pack_kind_metadata(
     pack: &PackManifestEntry,
     idx_path: &Path,
     rev_path: &Path,
-) -> Result<Option<GitObjectKindMap>> {
+) -> Result<Option<GitObjectMetadataMap>> {
     let path = router.pack_kind_metadata_path(&pack.pack_id);
-    let maximum =
-        crab_git::pack_locator::pack_kind_metadata_size(pack.object_count).ok_or_else(|| {
-            WriteError::CorruptObject {
-                path: path.as_ref().to_owned(),
-                reason: "Git kind metadata size overflows its bound".to_owned(),
-            }
+    let maximum = crab_git::pack_locator::max_pack_kind_metadata_size(pack.object_count)
+        .ok_or_else(|| WriteError::CorruptObject {
+            path: path.as_ref().to_owned(),
+            reason: "Git kind metadata size overflows its bound".to_owned(),
         })?;
     let bytes = match store.get_with_etag_bounded(&path, maximum).await {
         Ok((bytes, _)) => bytes,
@@ -214,36 +231,56 @@ async fn load_pack_kind_metadata(
             path: "pack kind metadata".to_owned(),
             reason: "kind metadata object count does not fit in memory".to_owned(),
         })?;
-    let map = tokio::task::spawn_blocking(move || -> Result<GitObjectKindMap> {
+    let map = tokio::task::spawn_blocking(move || -> Result<GitObjectMetadataMap> {
         let locations =
             crab_git::pack_locator::PackLocationIter::open(&idx_path, &rev_path, pack_size)
                 .map_err(crab_git::pack::PackError::from)?;
-        let entries = crab_git::pack_locator::decode_pack_kind_metadata_iter(&bytes, locations)
-            .map_err(crab_git::pack::PackError::from)?;
-        let mut kinds = HashMap::with_capacity(entries.len());
-        for entry in entries {
-            let (oid, kind) = entry.map_err(crab_git::pack::PackError::from)?;
+        let entries = crab_git::pack_locator::decode_pack_kind_metadata_with_external_deltas(
+            &bytes, locations,
+        )
+        .map_err(crab_git::pack::PackError::from)?;
+        let mut metadata = HashMap::with_capacity(entries.len());
+        for (oid, kind, external_delta_base) in entries {
             let oid: [u8; 20] = oid.as_bytes().try_into().map_err(|_| {
                 WriteError::Internal("Git kind metadata contains a non-SHA1 object".to_owned())
             })?;
-            if kinds.insert(oid, metadata_kind(kind)).is_some() {
+            let delta_base_oid = external_delta_base
+                .map(|base| {
+                    base.as_bytes().try_into().map_err(|_| {
+                        WriteError::Internal(
+                            "Git kind metadata contains a non-SHA1 delta base".to_owned(),
+                        )
+                    })
+                })
+                .transpose()?;
+            if metadata
+                .insert(
+                    oid,
+                    crab_metadata::git_object_locator::GitObjectMetadata {
+                        kind: Some(metadata_kind(kind)),
+                        delta_base_oid,
+                        ..Default::default()
+                    },
+                )
+                .is_some()
+            {
                 return Err(WriteError::CorruptObject {
                     path: "pack kind metadata".to_owned(),
                     reason: "kind metadata contains a duplicate object".to_owned(),
                 });
             }
         }
-        if kinds.len() != object_count {
+        if metadata.len() != object_count {
             return Err(WriteError::CorruptObject {
                 path: "pack kind metadata".to_owned(),
                 reason: format!(
                     "kind metadata contains {} objects, expected {}",
-                    kinds.len(),
+                    metadata.len(),
                     object_count
                 ),
             });
         }
-        Ok(Arc::new(kinds))
+        Ok(Arc::new(metadata))
     })
     .await
     .map_err(WriteError::Worker)??;
@@ -311,54 +348,183 @@ async fn write_locator_pack_evidence(
     writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
     bindings: &HashMap<MerkleHash, crab_metadata::git_object_locator::GitPackLocatorBinding>,
     evidence: &[LocatorPackEvidence],
+    retained_slots: &HashSet<u64>,
 ) -> Result<()> {
+    type LocatorEntry = crab_metadata::git_object_locator::GitObjectLocatorEntry;
+    type LocatorBinding = crab_metadata::git_object_locator::GitPackLocatorBinding;
+
+    let mut external = HashMap::<[u8; 20], Vec<(LocatorBinding, LocatorEntry)>>::new();
     for pack_evidence in evidence {
-        let binding = *bindings.get(&pack_evidence.pack_id).ok_or_else(|| {
-            WriteError::Internal("locator evidence has no current manifest pack binding".to_owned())
-        })?;
-        let mut locations = crab_git::pack_locator::PackLocationIter::open(
-            &pack_evidence.idx_path,
-            &pack_evidence.rev_path,
-            binding.record.pack_size,
-        )
-        .map_err(crab_git::pack::PackError::from)?;
-        if locations.pack_checksum().to_string() != pack_evidence.git_sha1 {
-            return Err(WriteError::CorruptObject {
-                path: pack_evidence.idx_path.display().to_string(),
-                reason: "pack index checksum changed during locator publication".to_owned(),
-            });
-        }
-        let mut entries = Vec::with_capacity(25_000);
-        for location in &mut locations {
+        let binding = locator_binding(bindings, pack_evidence)?;
+        for location in verified_pack_locations(pack_evidence, binding)? {
             let location = location.map_err(crab_git::pack::PackError::from)?;
-            let oid = location.oid.as_bytes().try_into().map_err(|_| {
-                WriteError::Internal("generated pack index contained non-SHA1 object".to_owned())
-            })?;
-            entries.push(crab_metadata::git_object_locator::GitObjectLocatorEntry {
-                oid,
-                location: crab_metadata::git_object_locator::GitObjectLocation {
-                    pack_offset: location.pack_offset,
-                    entry_len: location.entry_len,
-                    crc32: location.crc32,
-                },
-                metadata: crab_metadata::git_object_locator::GitObjectMetadata {
-                    kind: pack_evidence
-                        .kind_by_oid
-                        .as_ref()
-                        .and_then(|kinds| kinds.get(&oid).copied()),
-                    ..Default::default()
-                },
-            });
+            let entry = locator_entry(pack_evidence, location)?;
+            if entry.metadata.delta_base_oid.is_some() {
+                external
+                    .entry(entry.oid)
+                    .or_default()
+                    .push((binding, entry));
+            }
+        }
+    }
+
+    let mut unselected = Vec::new();
+    // A self-contained representation is always a safe canonical root. Write
+    // those first and discard every external alias for the same object.
+    for pack_evidence in evidence {
+        let binding = locator_binding(bindings, pack_evidence)?;
+        let mut entries = Vec::with_capacity(25_000);
+        for location in verified_pack_locations(pack_evidence, binding)? {
+            let location = location.map_err(crab_git::pack::PackError::from)?;
+            let entry = locator_entry(pack_evidence, location)?;
+            if entry.metadata.delta_base_oid.is_some() {
+                continue;
+            }
+            if let Some(candidates) = external.remove(&entry.oid) {
+                unselected.extend(candidates);
+            }
+            entries.push(entry);
             if entries.len() == 25_000 {
-                writer.write_locations(binding, &entries).await?;
+                write_locator_entries(writer, binding, &entries, retained_slots).await?;
                 entries.clear();
             }
         }
         if !entries.is_empty() {
-            writer.write_locations(binding, &entries).await?;
+            write_locator_entries(writer, binding, &entries, retained_slots).await?;
+        }
+    }
+
+    while !external.is_empty() {
+        let mut ready = external
+            .iter()
+            .filter_map(|(oid, candidates)| {
+                candidates
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, entry))| {
+                        entry
+                            .metadata
+                            .delta_base_oid
+                            .is_some_and(|base| !external.contains_key(&base))
+                    })
+                    .min_by_key(|(_, (binding, _))| binding.pack_slot)
+                    .map(|(candidate, _)| (*oid, candidate))
+            })
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            return Err(WriteError::CorruptObject {
+                path: "Git object locator evidence".to_owned(),
+                reason: "cross-pack delta dependencies contain a cycle".to_owned(),
+            });
+        }
+        ready.sort_unstable_by_key(|(oid, _)| *oid);
+        let mut selected = BTreeMap::<u64, (LocatorBinding, Vec<LocatorEntry>)>::new();
+        for (oid, candidate) in ready {
+            let mut candidates = external.remove(&oid).ok_or_else(|| {
+                WriteError::Internal("ready locator dependency disappeared".to_owned())
+            })?;
+            let (binding, entry) = candidates.swap_remove(candidate);
+            selected
+                .entry(binding.pack_slot)
+                .or_insert_with(|| (binding, Vec::new()))
+                .1
+                .push(entry);
+            unselected.extend(candidates);
+        }
+        write_locator_entry_groups(writer, selected, retained_slots).await?;
+    }
+
+    let mut remaining = BTreeMap::<u64, (LocatorBinding, Vec<LocatorEntry>)>::new();
+    for (binding, entry) in unselected {
+        remaining
+            .entry(binding.pack_slot)
+            .or_insert_with(|| (binding, Vec::new()))
+            .1
+            .push(entry);
+    }
+    write_locator_entry_groups(writer, remaining, retained_slots).await?;
+    Ok(())
+}
+
+fn locator_binding(
+    bindings: &HashMap<MerkleHash, crab_metadata::git_object_locator::GitPackLocatorBinding>,
+    evidence: &LocatorPackEvidence,
+) -> Result<crab_metadata::git_object_locator::GitPackLocatorBinding> {
+    bindings.get(&evidence.pack_id).copied().ok_or_else(|| {
+        WriteError::Internal("locator evidence has no current manifest pack binding".to_owned())
+    })
+}
+
+fn verified_pack_locations(
+    evidence: &LocatorPackEvidence,
+    binding: crab_metadata::git_object_locator::GitPackLocatorBinding,
+) -> Result<crab_git::pack_locator::PackLocationIter> {
+    let locations = crab_git::pack_locator::PackLocationIter::open(
+        &evidence.idx_path,
+        &evidence.rev_path,
+        binding.record.pack_size,
+    )
+    .map_err(crab_git::pack::PackError::from)?;
+    if locations.pack_checksum().to_string() != evidence.git_sha1 {
+        return Err(WriteError::CorruptObject {
+            path: evidence.idx_path.display().to_string(),
+            reason: "pack index checksum changed during locator publication".to_owned(),
+        });
+    }
+    Ok(locations)
+}
+
+fn locator_entry(
+    evidence: &LocatorPackEvidence,
+    location: crab_git::pack_locator::PackObjectLocation,
+) -> Result<crab_metadata::git_object_locator::GitObjectLocatorEntry> {
+    let oid = location.oid.as_bytes().try_into().map_err(|_| {
+        WriteError::Internal("generated pack index contained non-SHA1 object".to_owned())
+    })?;
+    Ok(crab_metadata::git_object_locator::GitObjectLocatorEntry {
+        oid,
+        location: crab_metadata::git_object_locator::GitObjectLocation {
+            pack_offset: location.pack_offset,
+            entry_len: location.entry_len,
+            crc32: location.crc32,
+        },
+        metadata: evidence
+            .metadata_by_oid
+            .as_ref()
+            .and_then(|metadata| metadata.get(&oid).copied())
+            .unwrap_or_default(),
+    })
+}
+
+async fn write_locator_entry_groups(
+    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
+    groups: BTreeMap<
+        u64,
+        (
+            crab_metadata::git_object_locator::GitPackLocatorBinding,
+            Vec<crab_metadata::git_object_locator::GitObjectLocatorEntry>,
+        ),
+    >,
+    retained_slots: &HashSet<u64>,
+) -> Result<()> {
+    for (_, (binding, entries)) in groups {
+        for chunk in entries.chunks(25_000) {
+            write_locator_entries(writer, binding, chunk, retained_slots).await?;
         }
     }
     Ok(())
+}
+
+async fn write_locator_entries(
+    writer: &mut crab_metadata::git_object_locator::GitObjectLocatorWriter,
+    binding: crab_metadata::git_object_locator::GitPackLocatorBinding,
+    entries: &[crab_metadata::git_object_locator::GitObjectLocatorEntry],
+    retained_slots: &HashSet<u64>,
+) -> Result<()> {
+    writer
+        .write_locations_preserving_retained(binding, entries, retained_slots)
+        .await
+        .map_err(Into::into)
 }
 
 /// Publish exact inventory coverage into an exclusively owned locator writer.
@@ -427,7 +593,7 @@ pub async fn publish_inventory(
         .into_iter()
         .map(|binding| (binding.record.pack_id, binding))
         .collect::<HashMap<_, _>>();
-    write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
+    write_locator_pack_evidence(&mut *writer, &bindings, &evidence, &retained_slots).await?;
 
     let sweep = writer.sweep_unreferenced(&retained_slots).await?;
     if sweep.object_rows_deleted != 0 {
@@ -458,7 +624,7 @@ pub async fn publish_inventory(
         )
         .await?;
         evidence.append(&mut replay);
-        write_locator_pack_evidence(&mut *writer, &bindings, &evidence).await?;
+        write_locator_pack_evidence(&mut *writer, &bindings, &evidence, &retained_slots).await?;
         writer.complete_object_catalog_rebuild().await?;
     }
     debug!(

@@ -170,7 +170,10 @@ canonical pack and sidecar preparation; they are not compressed and reinflated
 as synthetic wire input. Caller-proven predecessor relationships delta-compress
 successive generated tree versions inside a batch and, while warm state retains
 a verified prior depth, across packs by immutable Git object ID. A cold process,
-an unknown base depth, or depth eight emits a new full base. Pack offsets and
+an unknown base depth, depth eight, or a target that is already an ancestor of
+the proposed base emits a new full base. The checksummed kind sidecar records
+each external base so catalog and fallback readers select an acyclic physical
+representation when the same Git object exists in more than one pack. Pack offsets and
 entry CRCs are collected during that write, so preparation can emit standard
 Git indexes without decoding every growing tree a second time; checksum,
 inventory, locator, repack, GC-retention, fetch-materialization, and native-Git

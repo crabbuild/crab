@@ -15,7 +15,7 @@ use sha1::{Digest, Sha1};
 
 use super::{IncomingPack, object_id};
 use crate::{
-    PackLocationIter, PackLocatorError, encode_pack_kind_metadata,
+    PackLocationIter, PackLocatorError, encode_pack_kind_metadata_with_external_deltas,
     pack_locator::{PackIndexEntry, write_pack_index_v2},
     write_pack_reverse_index,
 };
@@ -90,6 +90,7 @@ struct WrittenPack {
     index_entries: Vec<PackIndexEntry>,
     delta_depths: BTreeMap<ObjectId, u32>,
     external_delta_count: u32,
+    external_delta_bases: HashMap<ObjectId, ObjectId>,
 }
 
 impl PreparedPack {
@@ -259,6 +260,7 @@ impl IncomingPack {
             mut index_entries,
             delta_depths,
             external_delta_count,
+            external_delta_bases,
         } = self.write_normalized(
             &staging_pack,
             max_pack_bytes,
@@ -285,19 +287,22 @@ impl IncomingPack {
         {
             return Err(PreparePackError::Mismatch("indexed object identities"));
         }
-        let mut kinds = Vec::with_capacity(self.objects.len());
+        let mut metadata = Vec::with_capacity(self.objects.len());
         for location in locations {
             check(cancelled)?;
             let location = location?;
-            kinds.push(
-                self.objects
-                    .get(&location.oid)
-                    .ok_or(PreparePackError::Mismatch("unknown indexed object"))?
-                    .kind,
-            );
+            let kind = self
+                .objects
+                .get(&location.oid)
+                .ok_or(PreparePackError::Mismatch("unknown indexed object"))?
+                .kind;
+            metadata.push((kind, external_delta_bases.get(&location.oid).copied()));
         }
         let kinds_path = pack.with_extension("kinds");
-        std::fs::write(&kinds_path, encode_pack_kind_metadata(git_sha1, &kinds)?)?;
+        std::fs::write(
+            &kinds_path,
+            encode_pack_kind_metadata_with_external_deltas(git_sha1, &metadata)?,
+        )?;
         let mut content_hash = blake3::Hasher::new();
         let mut file = File::open(&pack)?;
         let mut buffer = [0; 64 * 1024];
@@ -350,6 +355,7 @@ impl IncomingPack {
         let mut written = HashMap::<ObjectId, (u64, u32)>::with_capacity(self.objects.len());
         let mut index_entries = Vec::with_capacity(self.objects.len());
         let mut external_delta_count = 0_u32;
+        let mut written_external_delta_bases = HashMap::new();
         for oid in ordered_objects(&self.objects, delta_bases) {
             check(cancelled)?;
             let object = self
@@ -382,6 +388,7 @@ impl IncomingPack {
                         gix_pack::data::entry::Header::RefDelta { base_id }
                             .write_to(delta.bytes.len() as u64, &mut header)?;
                         external_delta_count = external_delta_count.saturating_add(1);
+                        written_external_delta_bases.insert(oid, base_id);
                     }
                 }
                 delta.depth
@@ -455,6 +462,7 @@ impl IncomingPack {
                 .map(|(oid, (_, depth))| (oid, depth))
                 .collect(),
             external_delta_count,
+            external_delta_bases: written_external_delta_bases,
         })
     }
 }

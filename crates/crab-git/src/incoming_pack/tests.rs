@@ -669,6 +669,15 @@ fn generated_external_tree_base_produces_bounded_cross_pack_ref_delta() {
     assert_eq!(delta.delta_depth(&target_oid), Some(1));
     assert_eq!(full.external_delta_count(), 0);
     assert_eq!(delta.external_delta_count(), 1);
+    let locations =
+        crate::PackLocationIter::open(delta.index_path(), delta.reverse_path(), delta.size())
+            .unwrap();
+    let metadata = crate::decode_pack_kind_metadata_with_external_deltas(
+        &std::fs::read(delta.kinds_path()).unwrap(),
+        locations,
+    )
+    .unwrap();
+    assert_eq!(metadata, vec![(target_oid, Kind::Tree, Some(base_oid))]);
     let client = tempfile::tempdir_in(temp.path()).unwrap();
     git(client.path(), &["init", "--bare", "-q"], b"");
     let written = git(
