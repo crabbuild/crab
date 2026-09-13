@@ -107,7 +107,43 @@ jobs:
       - name: Check out qualification source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Require an annotated server release tag
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != tag ] ||
+            [[ ! "$REF_NAME" =~ ^crab-http-server-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Dispatch this workflow from an annotated crab-http-server-vX.Y.Z tag."
+            exit 1
+          fi
+          version="${REF_NAME#crab-http-server-v}"
+          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/crab-http-server/Cargo.toml | head -1)"
+          chart_version="$(sed -n 's/^version: *//p' crates/crab-http-server/deploy/helm/crab-http-server/Chart.yaml | head -1)"
+          app_version="$(sed -n 's/^appVersion: *"\(.*\)"/\1/p' crates/crab-http-server/deploy/helm/crab-http-server/Chart.yaml | head -1)"
+          if [ "$manifest_version" != "$version" ] ||
+            [ "$chart_version" != "$version" ] ||
+            [ "$app_version" != "$version" ]; then
+            echo "::error::$REF_NAME does not match the server and chart versions."
+            exit 1
+          fi
+          if [ "$(git cat-file -t "refs/tags/$REF_NAME" 2>/dev/null || true)" != tag ]; then
+            echo "::error::$REF_NAME must be an annotated tag."
+            exit 1
+          fi
+          if [ "$(git rev-list -n 1 "$REF_NAME")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::The checkout does not match $REF_NAME."
+            exit 1
+          fi
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::$REF_NAME is not reachable from origin/main."
+            exit 1
+          }
 
       - name: Validate selected provider inputs
         shell: bash
