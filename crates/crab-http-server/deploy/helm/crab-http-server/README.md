@@ -87,24 +87,36 @@ workflow qualifies that exact source, generates SBOM and
 provenance attestations, and publishes both the version and source-commit tags.
 The same release publishes this chart to
 `oci://ghcr.io/crabbuild/charts/crab-http-server` with the matching version and
-a registry-backed provenance attestation.
+a registry-backed provenance attestation. Its GitHub Release retains the
+packaged chart, `crab-http-server-release.json`, and the manifest's offline
+attestation bundle. The JSON record is the canonical handoff from release
+maintainer to operator: it binds the tag and source commit to the exact image
+and chart digests.
 
-Inspect a published version and record its manifest digest:
+Download and verify that handoff before copying its image digest into team
+values:
 
 ```sh
-docker buildx imagetools inspect ghcr.io/crabbuild/crab-http-server:0.1.0
+gh release download crab-http-server-v0.1.0 \
+  --repo crabbuild/crab \
+  --pattern 'crab-http-server-release*'
+source_commit=$(jq --raw-output .source_commit crab-http-server-release.json)
 gh attestation verify \
-  oci://ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
+  crab-http-server-release.json \
+  --bundle crab-http-server-release.attestation.json \
   --repo crabbuild/crab \
   --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
   --source-ref refs/tags/crab-http-server-v0.1.0 \
-  --source-digest release_commit_here \
+  --source-digest "$source_commit" \
   --deny-self-hosted-runners
+jq . crab-http-server-release.json
 ```
 
 Authenticate to GHCR first when the package is private. Put
-`ghcr.io/crabbuild/crab-http-server` in `image.repository` and the recorded
-`sha256:` value in `image.digest`; the chart never deploys a mutable tag.
+`.image.repository` in `image.repository` and `.image.digest` in
+`image.digest`; the chart never deploys a mutable tag. Verify the image and
+chart registry attestations from their `.reference` fields as described in the
+[operations preflight](../../operations.md#run-the-preflight-checks).
 
 Until a server release is published, or when maintaining a custom downstream
 image, build from the repository root and push the architectures used by your

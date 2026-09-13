@@ -54,7 +54,9 @@ qualified AMD64/ARM64 image to GHCR with immutable version and source-commit
 tags, an OCI Helm chart, an SBOM, and provenance attestations. Exact-source
 qualification rejects fixable HIGH or CRITICAL image vulnerabilities before
 publication. Kubernetes deployments still pin the resulting image manifest
-digest. The publisher never overwrites an existing image tag or chart version.
+digest. A GitHub Release retains the packaged chart and a signed JSON deployment
+record that binds the tag and source commit to both registry digests. The
+publisher never overwrites an existing image tag or chart version.
 
 ## Start locally with Docker Compose
 
@@ -132,6 +134,18 @@ CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_diges
 ## Deploy for a team
 
 Use the Helm chart on Amazon Elastic Kubernetes Service (EKS), Google Kubernetes Engine (GKE), or Azure Kubernetes Service (AKS). One chart preserves the server runtime contract across providers.
+
+The shortest supported team path is:
+
+| Owner | One-time setup | Per release |
+| --- | --- | --- |
+| Platform team | Apply one provider Terraform root; configure DNS, TLS, ingress, and workload identity | Review infrastructure drift |
+| Identity team | Register the OIDC callback and store the client secret | Rotate under the runbook |
+| Crab service owner | Create the namespace, stable state-key Secret, and team values | Verify the signed release record, change one image digest, and run `helm upgrade` plus `helm test` |
+
+No repository list belongs in the server configuration. Create or adopt a
+repository once through the management CLI; every replica discovers the shared
+catalog update from object storage.
 
 ```mermaid
 flowchart LR

@@ -45,6 +45,26 @@ Complete these checks before the first install and every infrastructure change:
 12. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
 13. For automated live qualification, confirm the protected GitHub environment uses OIDC, required reviewers, release-tag restrictions, and cluster-scoped credentials without storage access.
 
+For an official release, download its deployment record first. This is the
+single signed source for the release commit and the immutable image and chart
+coordinates used below:
+
+```sh
+gh release download crab-http-server-v0.1.0 \
+  --repo crabbuild/crab \
+  --pattern 'crab-http-server-release*'
+source_commit=$(jq --raw-output .source_commit crab-http-server-release.json)
+gh attestation verify crab-http-server-release.json \
+  --bundle crab-http-server-release.attestation.json \
+  --repo crabbuild/crab \
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
+  --source-ref refs/tags/crab-http-server-v0.1.0 \
+  --source-digest "$source_commit" \
+  --deny-self-hosted-runners
+image_reference=$(jq --raw-output .image.reference crab-http-server-release.json)
+chart_reference=$(jq --raw-output .chart.reference crab-http-server-release.json)
+```
+
 Render and validate the release before applying it:
 
 ```sh
@@ -67,11 +87,11 @@ the dedicated server release workflow:
 
 ```sh
 gh attestation verify \
-  oci://ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
+  "oci://${image_reference}" \
   --repo crabbuild/crab \
   --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
   --source-ref refs/tags/crab-http-server-v0.1.0 \
-  --source-digest release_commit_here \
+  --source-digest "$source_commit" \
   --deny-self-hosted-runners
 ```
 
@@ -81,11 +101,11 @@ Verify the OCI chart by its separately reported digest before installation:
 
 ```sh
 gh attestation verify \
-  oci://ghcr.io/crabbuild/charts/crab-http-server@sha256:qualified_chart_digest_here \
+  "$chart_reference" \
   --repo crabbuild/crab \
   --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
   --source-ref refs/tags/crab-http-server-v0.1.0 \
-  --source-digest release_commit_here \
+  --source-digest "$source_commit" \
   --deny-self-hosted-runners
 ```
 

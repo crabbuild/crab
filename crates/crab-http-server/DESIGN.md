@@ -288,8 +288,11 @@ not inherit the CLI's version tag. The tag must match the server crate, resolve
 to `main`, and pass the exact-source container and Compose qualification before
 publishing. The registry receives one AMD64/ARM64 image index under immutable
 version and source-commit tags, the same-version OCI Helm chart, BuildKit SBOM
-and provenance attestations, and GitHub-signed registry attestations.
-Deployment profiles consume the image manifest and chart digests. The
+and provenance attestations, and GitHub-signed registry attestations. A
+non-latest GitHub Release retains the packaged chart plus a signed JSON record
+that binds the release tag and source commit to both registry digests and the
+supported image platforms. Deployment profiles consume the image manifest and
+chart digests from that operator handoff. The
 exact-source qualification also scans the final runtime image and rejects
 fixable HIGH or CRITICAL vulnerabilities before publication. Existing image
 tags and chart versions fail closed instead of being replaced.

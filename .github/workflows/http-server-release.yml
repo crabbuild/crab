@@ -96,7 +96,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       attestations: write
-      contents: read
+      contents: write
       id-token: write
       packages: write
     steps:
@@ -280,3 +280,144 @@ jobs:
           subject-name: ${{ env.CHART_REGISTRY }}/crab-http-server
           subject-digest: ${{ steps.chart.outputs.digest }}
           push-to-registry: true
+
+      - name: Create the release manifest
+        shell: bash
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_dir="${RUNNER_TEMP}/crab-http-server-release"
+          image_repository="${REGISTRY}/${IMAGE_NAME}"
+          chart_repository="oci://${CHART_REGISTRY}/crab-http-server"
+          mkdir -p "$release_dir"
+
+          jq --null-input \
+            --arg tag "$TAG" \
+            --arg version "$VERSION" \
+            --arg source_commit "$SOURCE_SHA" \
+            --arg image_repository "$image_repository" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg image_reference "${image_repository}@${IMAGE_DIGEST}" \
+            --arg chart_repository "$chart_repository" \
+            --arg chart_digest "$CHART_DIGEST" \
+            --arg chart_reference "${chart_repository}@${CHART_DIGEST}" \
+            '{
+              schema: 1,
+              tag: $tag,
+              version: $version,
+              source_commit: $source_commit,
+              image: {
+                repository: $image_repository,
+                digest: $image_digest,
+                reference: $image_reference,
+                platforms: ["linux/amd64", "linux/arm64"]
+              },
+              chart: {
+                repository: $chart_repository,
+                digest: $chart_digest,
+                reference: $chart_reference
+              }
+            }' > "$release_dir/crab-http-server-release.json"
+
+          jq --exit-status \
+            --arg tag "$TAG" \
+            --arg version "$VERSION" \
+            --arg source_commit "$SOURCE_SHA" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg chart_digest "$CHART_DIGEST" \
+            '.schema == 1 and
+             .tag == $tag and .version == $version and
+             .source_commit == $source_commit and
+             .image.digest == $image_digest and
+             .chart.digest == $chart_digest and
+             (.source_commit | test("^[0-9a-f]{40}$")) and
+             (.image.digest | test("^sha256:[0-9a-f]{64}$")) and
+             (.chart.digest | test("^sha256:[0-9a-f]{64}$")) and
+             .image.platforms == ["linux/amd64", "linux/arm64"] and
+             (.image.reference | endswith("@" + $image_digest)) and
+             (.chart.reference | endswith("@" + $chart_digest))' \
+            "$release_dir/crab-http-server-release.json" >/dev/null
+
+      - name: Attest the release manifest
+        id: release-manifest-attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/crab-http-server-release/crab-http-server-release.json
+
+      - name: Verify and preserve the release-manifest attestation
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.release-manifest-attestation.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          release_dir="${RUNNER_TEMP}/crab-http-server-release"
+          bundle="$release_dir/crab-http-server-release.attestation.json"
+          cp "$BUNDLE_PATH" "$bundle"
+          gh attestation verify \
+            "$release_dir/crab-http-server-release.json" \
+            --bundle "$bundle" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/http-server-release.yml" \
+            --source-ref "refs/tags/${TAG}" \
+            --source-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners
+
+      - name: Publish the GitHub release
+        shell: bash
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_dir="${RUNNER_TEMP}/crab-http-server-release"
+          notes="$release_dir/release-notes.md"
+          cat > "$notes" <<EOF
+          Qualified Crab HTTP Server ${VERSION} deployment artifacts.
+
+          - Source commit: \`${SOURCE_SHA}\`
+          - Image: \`${REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}\`
+          - Helm chart: \`oci://${CHART_REGISTRY}/crab-http-server@${CHART_DIGEST}\`
+          - Platforms: \`linux/amd64\`, \`linux/arm64\`
+
+          Download and verify the signed deployment record:
+
+          \`\`\`sh
+          gh release download ${TAG} --repo ${GITHUB_REPOSITORY} --pattern 'crab-http-server-release*'
+          gh attestation verify crab-http-server-release.json \\
+            --bundle crab-http-server-release.attestation.json \\
+            --repo ${GITHUB_REPOSITORY} \\
+            --signer-workflow ${GITHUB_REPOSITORY}/.github/workflows/http-server-release.yml \\
+            --source-ref refs/tags/${TAG} \\
+            --source-digest ${SOURCE_SHA} \\
+            --deny-self-hosted-runners
+          \`\`\`
+          EOF
+
+          gh release create "$TAG" \
+            "$release_dir/crab-http-server-release.json" \
+            "$release_dir/crab-http-server-release.attestation.json" \
+            "${RUNNER_TEMP}/chart/crab-http-server-${VERSION}.tgz" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --latest=false \
+            --title "Crab HTTP Server ${VERSION}" \
+            --notes-file "$notes"
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false

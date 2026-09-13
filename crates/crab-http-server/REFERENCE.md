@@ -1332,6 +1332,11 @@ The remaining production gaps include:
 - Successful EKS, GKE, and AKS live-workflow receipts; rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification
 
+The first tagged publication will also exercise the permanent operator
+handoff: a non-latest GitHub Release containing the packaged chart, a JSON
+record binding the source commit to the image and chart digests, and an offline
+GitHub attestation bundle for that record.
+
 ## Ownership
 
 Object storage is the repository authority. Runtime caches and temporary files are disposable.
