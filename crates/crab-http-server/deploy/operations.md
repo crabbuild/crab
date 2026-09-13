@@ -95,12 +95,13 @@ kubectl --namespace crab rollout status deployment/crab-http-server \
   --timeout=15m
 ```
 
-Server startup validates a holder-checked coordination write. The startup and
-readiness probes then read the durable catalog and open the current Git view of
-every cataloged repository. A replacement pod stays out of endpoint routing
-while shared read-index maintenance is pending. The liveness probe checks only
-whether the management process answers HTTP. `helm test` repeats the catalog
-read and coordination-write contract from a fresh workload-identity pod.
+Before binding either listener, server startup validates a holder-checked
+coordination write. The startup and readiness probes then read the durable
+catalog and open the current Git view of every cataloged repository. A
+replacement pod stays out of endpoint routing while shared read-index
+maintenance is pending. The liveness probe checks only whether the management
+process answers HTTP. `helm test` repeats the catalog read and
+coordination-write contract from a fresh workload-identity pod.
 
 Verify each pod rather than relying on Deployment availability alone:
 

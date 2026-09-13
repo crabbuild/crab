@@ -299,8 +299,6 @@ pub async fn serve(config: Config) -> Result<()> {
         ),
         None => None,
     };
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let catalog_version = document.version;
     let repositories = materialize_catalog(&catalog, document).await?;
     let runtime = Arc::new(RemoteGitRuntime::default());
@@ -322,6 +320,10 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     let transfer_admission = transfer_admission(&catalog);
     transfer_admission.probe().await?;
+    // A pod must prove its shared coordination write path before it owns any
+    // socket; otherwise invalid cloud permissions can look partially started.
+    let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
