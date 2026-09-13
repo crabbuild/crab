@@ -1258,6 +1258,10 @@ workflow-attested JSON receipt establish that release's cross-replica rollout
 result. The protected workflow first verifies the deployed image provenance
 against the exact server release tag and source commit.
 
+The chart's disruption budget protects healthy capacity with `minAvailable`
+and marks unhealthy pods `AlwaysAllow` for eviction. This preserves voluntary
+availability without letting a permanently unready pod block a node drain.
+
 ### Keep qualification evidence honest
 
 Use the following interpretation:

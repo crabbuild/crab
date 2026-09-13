@@ -264,6 +264,7 @@ jq --exit-status --argjson selector "$selector_json" \
   ((.spec.minAvailable | type) == "number") and
   (.spec.minAvailable >= 1) and
   (.spec.minAvailable < $minimum) and
+  (.spec.unhealthyPodEvictionPolicy == "AlwaysAllow") and
   (.spec.selector.matchLabels == $selector)
 ' "$pdb_json" >/dev/null
 kubectl --namespace "$namespace" get ingress "$deployment" -o json > "$ingress_json"

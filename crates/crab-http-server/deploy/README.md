@@ -26,6 +26,10 @@ private probes and Prometheus metrics, an optional Prometheus Operator
 Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is
 release-qualified only after its live test matrix passes.
 
+The disruption budget protects ready replicas while allowing an unhealthy pod
+to be evicted during a node drain, so a broken process cannot indefinitely
+block cluster maintenance.
+
 S3 and GCS Terraform roots bound noncurrent repository versions to a configurable
 90-day recovery window and remove abandoned multipart uploads after one day.
 Azure versions remain unexpired because its available lifecycle condition cannot

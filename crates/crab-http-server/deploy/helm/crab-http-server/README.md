@@ -180,6 +180,11 @@ ingress, direct load balancers, overrides of chart-owned pod metadata, fewer
 than two replicas, an impossible disruption budget, soft or single-domain
 placement, and a shutdown budget shorter than 630 seconds.
 
+The PodDisruptionBudget keeps the configured minimum of ready replicas during
+voluntary disruption and uses `AlwaysAllow` for unhealthy pods. A running but
+permanently unready process therefore cannot block a node drain; healthy pods
+remain protected by `minAvailable`.
+
 `config.existingConfigMap` is an advanced escape hatch for teams that own the
 complete `server.toml`. Do not combine it with the generated provider overlay,
 because that overlay intentionally sets `config.storageUrl`; instead, carry

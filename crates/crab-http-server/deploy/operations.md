@@ -279,7 +279,8 @@ repository runtime shutdown.
 Before planned cluster or node maintenance:
 
 1. Confirm at least two ready replicas.
-2. Confirm the PodDisruptionBudget reports one allowed disruption.
+2. Confirm the PodDisruptionBudget reports one allowed disruption and retains
+   `unhealthyPodEvictionPolicy: AlwaysAllow`.
 3. Confirm endpoint and ingress deregistration complete during the pre-stop delay and connection-drain timeouts preserve active streams.
 4. Replace one pod and complete a test fetch and push.
 5. Continue one pod at a time.

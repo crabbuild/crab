@@ -132,6 +132,7 @@ jobs:
                 > "${rendered}"
             grep -F 'port: management' "${rendered}"
             grep -F 'terminationGracePeriodSeconds: 630' "${rendered}"
+            grep -F 'unhealthyPodEvictionPolicy: AlwaysAllow' "${rendered}"
             grep -F -- '- /usr/bin/sleep' "${rendered}"
             grep -F -- '- "15"' "${rendered}"
             grep -F '"helm.sh/hook": test' "${rendered}"
