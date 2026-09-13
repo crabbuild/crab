@@ -15,7 +15,8 @@ const addedPathOid = "d".repeat(40);
 const readme =
   "# Team project\n\nBrowse the [source entry](src/index.ts) without cloning.\n\n" +
   "![Architecture](docs/architecture.png) ![Vector](docs/vector.svg) " +
-  "![Build status](https://status.example/build.svg)\n";
+  "![Build status](https://status.example/build.svg)\n\n" +
+  '```typescript\nconst project: string = "Crab";\n```\n';
 const pathHex = (path: string) =>
   Array.from(new TextEncoder().encode(path), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -1028,8 +1029,55 @@ test("Markdown files switch between source and a repository-aware preview", asyn
     "src",
     `/api/repos/team/project/asset?rev=${oid}&path_hex=${pathHex("docs/architecture.png")}`,
   );
+  await expect(preview.locator(".markdown-code-block")).toContainText(
+    'const project: string = "Crab";',
+  );
   await page.getByRole("button", { name: "Code", exact: true }).click();
   await expect(preview).toHaveCount(0);
+});
+
+test("code palette persists and follows light and dark appearance", async ({
+  page,
+}) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("README.md")}&kind=Blob`,
+  );
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  const highlighted = page.locator(".markdown-code-block");
+  await expect(highlighted).toContainText('const project: string = "Crab";');
+
+  await page
+    .getByRole("combobox", { name: "Code theme" })
+    .selectOption("vscode");
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-code-theme",
+    "vscode",
+  );
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("crab-code-theme")))
+    .toBe("vscode");
+
+  const codeColors = () =>
+    highlighted.evaluate((container) => {
+      const tokens = container.shadowRoot?.querySelectorAll("[data-line] span");
+      return [...(tokens ?? [])].map((token) => getComputedStyle(token).color);
+    });
+  await expect
+    .poll(async () => new Set(await codeColors()).size)
+    .toBeGreaterThan(1);
+  const lightColors = await codeColors();
+  await selectTheme(page, "dark");
+  await expect(highlighted).toBeVisible();
+  await expect.poll(codeColors).not.toEqual(lightColors);
+
+  await page.reload();
+  await expect(page.getByRole("combobox", { name: "Code theme" })).toHaveValue(
+    "vscode",
+  );
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-code-theme",
+    "vscode",
+  );
 });
 
 test("format-aware previews explore data, office files, media, and databases locally", async ({

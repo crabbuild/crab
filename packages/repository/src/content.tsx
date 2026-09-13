@@ -34,6 +34,7 @@ import {
 import { Link, Result, date, short } from "./ui";
 import { compareFileItems } from "./entry-sort";
 import { PaneResizer } from "./pane-resizer";
+import { enableCodeKeyboardScroll, type CodeThemes } from "./code-theme";
 import {
   previewDescriptor,
   type PreviewDescriptor,
@@ -49,9 +50,9 @@ type Props = {
   path: string;
   name: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
   write?: { branch: string };
 };
-const themes = { light: "github-light", dark: "github-dark" } as const;
 const diffColors = {
   "--diffs-addition-color-override": "var(--fgColor-success)",
   "--diffs-deletion-color-override": "var(--button-danger-fgColor-rest)",
@@ -82,7 +83,15 @@ function changePanelId(pathHex: string) {
   return `changed-file-${pathHex}`;
 }
 
-export function FileView({ repo, rev, path, name, theme, write }: Props) {
+export function FileView({
+  repo,
+  rev,
+  path,
+  name,
+  theme,
+  codeThemes,
+  write,
+}: Props) {
   const preview = previewDescriptor(name);
   const previewFirst = preview !== null && preview.kind !== "markdown";
   const state = useRequest<Content>(
@@ -113,8 +122,14 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
     [name, state.data],
   );
   const options = useMemo(
-    () => ({ theme: themes, themeType: theme, disableFileHeader: true }),
-    [theme],
+    () => ({
+      theme: codeThemes,
+      themeType: theme,
+      disableFileHeader: true,
+      preferredHighlighter: "shiki-js" as const,
+      onPostRender: enableCodeKeyboardScroll,
+    }),
+    [codeThemes, theme],
   );
   const activePreview: PreviewDescriptor | null =
     preview ??
@@ -258,6 +273,8 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
                 text={content.text}
                 size={content.size}
                 blobUrl={endpoint(repo, "blob", { rev, path_hex: path })}
+                theme={theme}
+                codeThemes={codeThemes}
               />
             </Suspense>
           ) : content.text === null ? (
@@ -359,6 +376,7 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
                     tabIndex={0}
                   >
                     <File
+                      key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
                       file={file}
                       options={options}
                       style={
@@ -373,7 +391,11 @@ export function FileView({ repo, rev, path, name, theme, write }: Props) {
               </div>
             ) : null
           ) : (
-            <File file={file} options={options} />
+            <File
+              key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
+              file={file}
+              options={options}
+            />
           )}
         </section>
       )}
@@ -385,10 +407,12 @@ export function CommitView({
   repo,
   rev,
   theme,
+  codeThemes,
 }: {
   repo: Repository;
   rev: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
 }) {
   const commit = useRequest<Commit>(endpoint(repo, "commit", { rev }));
   const changes = useRequest<Changes>(endpoint(repo, "changes", { rev }));
@@ -429,6 +453,7 @@ export function CommitView({
         repo={repo}
         rev={rev}
         theme={theme}
+        codeThemes={codeThemes}
         sticky
       />
     </>
@@ -440,11 +465,13 @@ export function ComparisonView({
   base,
   head,
   theme,
+  codeThemes,
 }: {
   repo: Repository;
   base: string;
   head: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
 }) {
   const changes = useRequest<Changes>(
     endpoint(repo, "changes", { rev: head, base }),
@@ -457,6 +484,7 @@ export function ComparisonView({
       rev={head}
       base={base}
       theme={theme}
+      codeThemes={codeThemes}
     />
   );
 }
@@ -467,6 +495,7 @@ function ChangeComparison({
   rev,
   base,
   theme,
+  codeThemes,
   sticky = false,
 }: {
   state: ReturnType<typeof useRequest<Changes>>;
@@ -474,6 +503,7 @@ function ChangeComparison({
   rev: string;
   base?: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
   sticky?: boolean;
 }) {
   return (
@@ -486,6 +516,7 @@ function ChangeComparison({
           rev={rev}
           base={base}
           theme={theme}
+          codeThemes={codeThemes}
           sticky={sticky}
         />
       )}
@@ -499,6 +530,7 @@ function ChangeWorkspace({
   rev,
   base,
   theme,
+  codeThemes,
   sticky,
 }: {
   changes: Change[];
@@ -506,6 +538,7 @@ function ChangeWorkspace({
   rev: string;
   base?: string;
   theme: "light" | "dark";
+  codeThemes: CodeThemes;
   sticky: boolean;
 }) {
   const diffPane = useRef<HTMLDivElement>(null);
@@ -552,6 +585,7 @@ function ChangeWorkspace({
                   base={base}
                   change={change}
                   theme={theme}
+                  codeThemes={codeThemes}
                   eager={index === 0}
                 />
               ))}
@@ -621,6 +655,7 @@ function DiffView({
   base,
   change,
   theme,
+  codeThemes,
   eager,
 }: Omit<Props, "name" | "path"> & {
   base?: string;
@@ -655,8 +690,14 @@ function DiffView({
   );
   const [style, setStyle] = useState<"unified" | "split">("split");
   const options = useMemo(
-    () => ({ theme: themes, themeType: theme, diffStyle: style }),
-    [theme, style],
+    () => ({
+      theme: codeThemes,
+      themeType: theme,
+      diffStyle: style,
+      preferredHighlighter: "shiki-js" as const,
+      onPostRender: enableCodeKeyboardScroll,
+    }),
+    [codeThemes, theme, style],
   );
   const files = useMemo(() => {
     const data = state.data;
@@ -721,7 +762,12 @@ function DiffView({
         <Result state={state} showTiming={false}>
           {() =>
             files ? (
-              <MultiFileDiff {...files} options={options} style={diffColors} />
+              <MultiFileDiff
+                key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
+                {...files}
+                options={options}
+                style={diffColors}
+              />
             ) : (
               <div className="notice">
                 Binary content changed. Browse the corresponding revision to

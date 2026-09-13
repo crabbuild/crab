@@ -23,6 +23,7 @@ import {
 import { loadGguf, loadNumpy } from "./file-preview-loaders";
 import { PdfPreview } from "./pdf-preview";
 import { GenericFilePreview } from "./generic-file-preview";
+import type { CodeThemes } from "./code-theme";
 
 const MAX_PREVIEW_BYTES = 50 * 1024 * 1024;
 const DataWorkbench = lazy(() =>
@@ -40,6 +41,8 @@ type Props = {
   text: string | null;
   size: number;
   blobUrl: string;
+  theme: "light" | "dark";
+  codeThemes: CodeThemes;
 };
 
 type BinaryState = {
@@ -133,7 +136,12 @@ function NotebookPreview({
   rev,
   directory,
   text,
-}: Pick<Props, "repo" | "rev" | "directory" | "text">) {
+  theme,
+  codeThemes,
+}: Pick<
+  Props,
+  "repo" | "rev" | "directory" | "text" | "theme" | "codeThemes"
+>) {
   let notebook: Notebook;
   try {
     notebook = JSON.parse(text ?? "") as Notebook;
@@ -158,7 +166,13 @@ function NotebookPreview({
           </div>
           <div className="notebook-content">
             {cell.cell_type === "markdown" ? (
-              <RepositoryMarkdown repo={repo} rev={rev} directory={directory}>
+              <RepositoryMarkdown
+                repo={repo}
+                rev={rev}
+                directory={directory}
+                theme={theme}
+                codeThemes={codeThemes}
+              >
                 {sourceText(cell.source)}
               </RepositoryMarkdown>
             ) : (
@@ -510,6 +524,8 @@ export function FilePreview(props: Props) {
         rev={props.rev}
         directory={props.directory}
         className="file-markdown-preview"
+        theme={props.theme}
+        codeThemes={props.codeThemes}
       >
         {props.text ?? ""}
       </RepositoryMarkdown>
@@ -521,6 +537,8 @@ export function FilePreview(props: Props) {
         rev={props.rev}
         directory={props.directory}
         text={props.text}
+        theme={props.theme}
+        codeThemes={props.codeThemes}
       />
     );
   if (["delimited", "json", "parquet"].includes(props.descriptor.kind)) {

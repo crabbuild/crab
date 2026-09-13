@@ -20,6 +20,7 @@ import {
 import { Link, Result, date, short } from "./ui";
 import { compareFileItems } from "./entry-sort";
 import { RepositoryMarkdown } from "./repository-markdown";
+import type { CodeThemes } from "./code-theme";
 
 const readmeNames = ["readme.md", "readme.markdown", "readme"];
 
@@ -40,12 +41,16 @@ function ReadmePreview({
   directory,
   entry,
   onEntry,
+  theme,
+  codeThemes,
 }: {
   repo: Repository;
   rev: string;
   directory: string;
   entry: Entry;
   onEntry: (entry: Entry) => void;
+  theme: "light" | "dark";
+  codeThemes: CodeThemes;
 }) {
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev, path_hex: entry.path_hex }),
@@ -79,6 +84,8 @@ function ReadmePreview({
               rev={rev}
               directory={directory}
               className="repository-readme-body"
+              theme={theme}
+              codeThemes={codeThemes}
             >
               {content.text}
             </RepositoryMarkdown>
@@ -95,12 +102,16 @@ export function Directory({
   path,
   onEntry,
   header,
+  theme,
+  codeThemes,
 }: {
   repo: Repository;
   rev: string;
   path: string;
   onEntry: (entry: Entry) => void;
   header: ReactNode;
+  theme: "light" | "dark";
+  codeThemes: CodeThemes;
 }) {
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const cursor = cursors[cursors.length - 1];
@@ -202,6 +213,8 @@ export function Directory({
                 directory={path}
                 entry={readme}
                 onEntry={onEntry}
+                theme={theme}
+                codeThemes={codeThemes}
               />
             )}
           </>
