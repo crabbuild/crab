@@ -234,7 +234,6 @@ impl Harness {
             maintenance_admission: Arc::new(Semaphore::new(2)),
             cancellation: CancellationToken::new(),
             receives: tokio_util::task::TaskTracker::new(),
-            port: address.port(),
             auth: Some(auth),
             catalog: None,
             catalog_healthy: AtomicBool::new(false),

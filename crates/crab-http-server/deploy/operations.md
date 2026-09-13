@@ -132,6 +132,7 @@ Monitor these platform and application signals:
 | `crab_http_server_draining` | A pod reports `1` outside a planned rollout |
 | `repository catalog refresh failed` | Running pods stop discovering catalog changes |
 | Publication or LFS transfer failures | A write may need client retry or operator outcome inspection |
+| LFS lock conflicts | Inspect the lock owner and ID; use force unlock only after confirming the holder no longer owns the edit |
 
 Scrape `GET /metrics` on each pod's private management port. The chart can add
 a Prometheus Operator `PodMonitor` and a management-port NetworkPolicy rule for
@@ -292,6 +293,7 @@ Record these gates against a dedicated storage root:
 - Create a repository and observe it from every replica within five seconds
 - Push and fetch branches and tags with an independent Git client
 - Upload an LFS object larger than ingress buffering thresholds, interrupt its download, and resume it with a byte range
+- Lock an LFS-tracked path, confirm another writer sees it in `theirs`, verify that writer's standard pre-push hook stops, then unlock it
 - Replace one pod during fetch, push, and archive scenarios
 - Upgrade and roll back one release without losing committed state
 - Restore the complete root to an isolated prefix and repeat read verification

@@ -125,10 +125,9 @@ async fn native_http_push_rustfs() {
     exercise(server, "trunk").await;
 }
 
-async fn exercise(mut server: Arc<Server>, branch: &str) {
+async fn exercise(server: Arc<Server>, branch: &str) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    Arc::get_mut(&mut server).unwrap().port = port;
     let stop = CancellationToken::new();
     let stopped = stop.clone();
     let app = router(Arc::clone(&server));

@@ -518,6 +518,42 @@ Publication proof bypasses receipts and replica fallback. Existing ordinary LFS 
 
 The primary LFS OID and size identify stored bytes after extension processing. Extension hashes describe client transform inputs, not extra server objects. See the [Git LFS extension specification](https://github.com/git-lfs/git-lfs/blob/main/docs/extensions.md).
 
+### Coordinate lock-aware clients
+
+LFS file locks are repository-path coordination records, not publication
+authority. The HTTP adapter authenticates the repository request, stores the
+stable provider subject through `crab-lfs::LfsLockManager`, and resolves display
+names only while forming a response.
+
+```mermaid
+flowchart LR
+    Client[git-lfs lock / verify / unlock]
+    HTTP[HTTP auth and limits]
+    Manager[CAS lock manager]
+    Record[(lfs/locks/blake3(path))]
+    Push[receive-pack]
+
+    Client --> HTTP --> Manager --> Record
+    Client -. standard pre-push verification .-> Push
+    Record -. not yet authoritative .-> Push
+```
+
+A conditional create makes one path exclusive across replicas. Release writes
+an owner- and ID-checked CAS tombstone, so a stale request cannot release a
+newer holder. Same-owner create and exact unlock retry recover lost HTTP
+responses without creating a second state transition. Bounded list scans return
+ID-sorted pages; verification divides that page using the authenticated
+subject.
+
+The standard Git LFS pre-push hook stops a cooperative client when an updated
+path belongs to another subject. Native receive currently validates Git and
+pointer closure without retaining a changed-path-to-lock proof, so the server
+cannot make the lock an authorization condition yet. Doing that correctly
+requires the validated receive plan to carry exact changed paths into the
+publication boundary and recheck lock ownership against the admitted ref
+snapshot. An HTTP-only or browser-only check would leave sibling writers able
+to violate the invariant.
+
 ### Retain CPU admission after caller cancellation
 
 Shard scans, hashing, recipe extraction, and pointer reconstruction use blocking workers. A timed-out caller can return while its bounded worker continues cleanup, but the worker retains its semaphore permit until exit.
@@ -831,7 +867,9 @@ The current implementation does not satisfy these production claims:
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
 - **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
 - **Production scale:** Static EKS/GKE/AKS profiles and the local cold-restore drill do not establish Kubernetes-size push throughput, temporary-disk sizing, provider latency, cross-replica failover, version-selected provider restore, or regional failure behavior. The ECS stop limit is shorter than the maximum operation budget.
-- **LFS locking:** The server transfers and verifies LFS objects but does not implement lock creation or push enforcement.
+- **Server-authoritative LFS locking:** Lock creation, listing, client-side
+  pre-push verification, and release are implemented. Native receive does not
+  yet reject a client that bypasses Git LFS verification.
 
 Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabricated protected plan, fallback reader, or OID rewrite. Each shortcut violates an ownership or outcome invariant above.
 

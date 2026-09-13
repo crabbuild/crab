@@ -372,6 +372,9 @@ jobs:
           crates/crab-http-server/tests/qualify_lfs_range_resume.sh \
             http://127.0.0.1:8788
 
+          crates/crab-http-server/tests/qualify_lfs_locking.sh \
+            http://127.0.0.1:8788
+
           crates/crab-http-server/tests/qualify_backup_restore.sh \
             crates/crab-http-server/deploy/compose.yaml
 

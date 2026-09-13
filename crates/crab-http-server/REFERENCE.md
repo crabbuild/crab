@@ -773,8 +773,67 @@ for methods whose range semantics are undefined.
 
 The container gate uploads a 1 MiB LFS object, downloads an initial range through
 Caddy, resumes into the same file, and compares the completed bytes with the
-source. The optional LFS locking API still returns HTTP 501. Browser blob
-downloads continue to return exact pointer bytes.
+source. Browser blob downloads continue to return exact pointer bytes.
+
+### Coordinate edits with LFS file locks
+
+The server implements the Git LFS File Locking API below the repository's
+automatically discovered LFS URL:
+
+| Method and route suffix | Permission | Result |
+| --- | --- | --- |
+| `POST /locks` | Write | Create one exclusive repository-path lock |
+| `GET /locks` | Read | List active locks, optionally filtered and paginated |
+| `POST /locks/verify` | Write | Partition active locks into `ours` and `theirs` |
+| `POST /locks/{id}/unlock` | Write | Release the caller's lock, or another lock with `force: true` |
+
+```mermaid
+sequenceDiagram
+    participant A as Alice / git-lfs
+    participant H as crab-http-server
+    participant S as Object storage
+    participant B as Bob / git-lfs
+
+    A->>H: POST /locks {path}
+    H->>S: Conditional create by path hash
+    S-->>H: Stable lock ID
+    H-->>A: 201 lock
+    B->>H: POST /locks/verify
+    H->>S: List active records
+    H-->>B: theirs: Alice's lock
+    Note over B: Standard pre-push hook stops the conflicting push
+    A->>H: POST /locks/{id}/unlock
+    H->>S: Owner + ID checked CAS tombstone
+    H-->>A: 200 released lock
+```
+
+Lock ownership stores the authenticated provider subject, not a mutable display
+name. Responses resolve the current repository-member name and fall back to the
+subject for an old or local record. A same-owner create is idempotent. An exact
+unlock retry returns the existing tombstone, while a stale ID cannot release a
+replacement lock. `force: true` follows the Git LFS contract and requires write
+access, not repository-administrator access.
+
+The lock JSON body is limited to 16 KiB. Paths contain 1–4,096 UTF-8 bytes and
+must be valid repository-relative Git paths. Page limits range from 1 through
+100; IDs and cursors contain at most 128 bytes. One request has a 30-second
+budget and shares bounded server admission. `ref` and `refspec` remain
+authorization hints as defined by version 1 of the protocol; locks are not
+branch-scoped.
+
+When `locksverify` is unset, Git LFS probes the endpoint and may print the exact
+configuration command needed to enable enforcement. Teams should set the
+URL-scoped value to `true`; the pre-push hook then reports the caller's locks,
+fails closed on verification errors, and halts a push that changes a path in
+`theirs`:
+
+```sh
+git config lfs.https://git.example.com/git/team/project.git/info/lfs.locksverify true
+```
+
+This is client-side cooperation, not an authoritative receive rule: a modified
+client or a push that bypasses Git LFS hooks can still avoid verification.
+Server-side changed-path lock enforcement remains a production gap.
 
 ## Native Git push
 
@@ -1094,7 +1153,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
 | Native receive and recovery | `src/receive.rs` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
-| LFS upload, download, and range-resume integrity | `src/lfs.rs` | `src/lfs_tests.rs` and `tests/qualify_lfs_range_resume.sh` |
+| LFS transfer, range-resume, and file-lock contracts | `src/lfs.rs` | `src/lfs_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
 | Browser Git writes and settings | `src/contents.rs`, `src/branches.rs` | `src/auth_tests/branches.rs` |
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
@@ -1113,6 +1172,7 @@ Current local and CI evidence includes:
 - Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, Prometheus-validated baseline alerts, runtime inspection, strict Helm lint, and Kubernetes schema validation
 - Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
 - LFS partial download and byte-identical range resume through the Compose Caddy/server/RustFS stack, including safe full-response fallback for multiple ranges
+- Stock Git LFS lock, list, verify-on-push, and unlock against the Compose Caddy/server/RustFS stack
 
 These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. Neither test establishes every crash phase, multi-instance global admission, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
 
@@ -1153,7 +1213,7 @@ The remaining production gaps include:
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
 - Multi-instance global admission and production throughput qualification
-- LFS locking and push-time lock enforcement
+- Server-authoritative LFS lock enforcement for clients that bypass the standard Git LFS pre-push hook
 - Membership administration, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
@@ -1173,7 +1233,7 @@ The service account needs object reads plus conditional writes and deletes for:
 - Ref-journal transactions, prepared heads, and cleanup
 - Per-ref, namespace, generation-owner, and GC coordination keys
 - The complete `app/v1` application namespace
-- LFS objects and multipart lifecycle
+- LFS objects, lock records, and multipart lifecycle
 - The server catalog and shared OIDC/session/Git-token namespace
 
 Preserve source errors across crate boundaries. Map them at the HTTP boundary only when the status code or client action changes.
@@ -1184,6 +1244,7 @@ The interface follows these upstream contracts:
 
 - [Git pack protocol](https://git-scm.com/docs/pack-protocol)
 - [Git credential contexts](https://git-scm.com/docs/gitcredentials#_configuration_options)
+- [Git LFS File Locking API](https://github.com/git-lfs/git-lfs/blob/main/docs/api/locking.md)
 - [Git LFS extensions](https://github.com/git-lfs/git-lfs/blob/main/docs/extensions.md)
 - [RFC 9110 HTTP range semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-14)
 - [Pierre Diffs documentation](https://diffs.com/docs)

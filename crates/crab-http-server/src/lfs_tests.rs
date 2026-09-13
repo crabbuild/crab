@@ -94,16 +94,199 @@ async fn lfs_batch_upload_download_is_verified_and_idempotent() {
         "hello"
     );
     assert_eq!(server.git_admission.available_permits(), 4);
+    server.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn lfs_action_urls_preserve_the_validated_loopback_authority() {
+    let server = maintenance_tests::fixture().await;
+    let response = router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(BATCH)
+                .header("host", "127.0.0.1:18791")
+                .header("content-type", "application/vnd.git-lfs+json")
+                .body(Body::from(
+                    json!({"operation":"upload","objects":[{"oid":HELLO,"size":5}]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let response = value(response).await;
     assert_eq!(
+        response["objects"][0]["actions"]["upload"]["href"],
+        format!("http://127.0.0.1:18791/git/team/repo.git/info/lfs/objects/{HELLO}?size=5")
+    );
+    server.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn lfs_lock_lifecycle_is_paginated_partitioned_and_retry_safe() {
+    let server = maintenance_tests::fixture().await;
+    let locks = "/git/team/repo.git/info/lfs/locks";
+    let created = request(
+        &server,
+        "POST",
+        locks,
+        Body::from(json!({"path":"models/mine.bin"}).to_string()),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(
+        created.headers()["content-type"],
+        "application/vnd.git-lfs+json"
+    );
+    let created = value(created).await;
+    let id = created["lock"]["id"].as_str().unwrap();
+    time::OffsetDateTime::parse(
+        created["lock"]["locked_at"].as_str().unwrap(),
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert_eq!(
+        (&created["lock"]["path"], &created["lock"]["owner"]["name"]),
+        (&json!("models/mine.bin"), &json!("operator"))
+    );
+
+    let duplicate = value(
         request(
             &server,
             "POST",
-            "/git/team/repo.git/info/lfs/locks/verify",
-            Body::empty()
+            locks,
+            Body::from(json!({"path":"models/mine.bin"}).to_string()),
         )
+        .await,
+    )
+    .await;
+    assert_eq!(duplicate["lock"]["id"], id);
+
+    let repo = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    let manager = crab_lfs::LfsLockManager::lfs(repo.store.clone(), &repo.config.prefix);
+    let other = manager
+        .lock("models/theirs.bin", "another-subject")
         .await
-        .status(),
-        StatusCode::NOT_IMPLEMENTED
+        .unwrap();
+    let conflict = request(
+        &server,
+        "POST",
+        locks,
+        Body::from(json!({"path":"models/theirs.bin"}).to_string()),
+    )
+    .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(value(conflict).await["lock"]["id"], other.id);
+
+    let first =
+        value(request(&server, "GET", &format!("{locks}?limit=1"), Body::empty()).await).await;
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let second = value(
+        request(
+            &server,
+            "GET",
+            &format!("{locks}?limit=1&cursor={cursor}"),
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        (
+            first["locks"].as_array().unwrap().len(),
+            second["locks"].as_array().unwrap().len(),
+            first["locks"][0]["id"] != second["locks"][0]["id"],
+            second.get("next_cursor").is_none(),
+        ),
+        (1, 1, true, true)
+    );
+
+    let verified = value(
+        request(
+            &server,
+            "POST",
+            &format!("{locks}/verify"),
+            Body::from("{}"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        (&verified["ours"][0]["id"], &verified["theirs"][0]["id"],),
+        (&json!(id), &json!(other.id))
+    );
+
+    let denied = request(
+        &server,
+        "POST",
+        &format!("{locks}/{}/unlock", other.id),
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let forced = request(
+        &server,
+        "POST",
+        &format!("{locks}/{}/unlock", other.id),
+        Body::from(json!({"force":true}).to_string()),
+    )
+    .await;
+    assert_eq!(forced.status(), StatusCode::OK);
+
+    let unlock_path = format!("{locks}/{id}/unlock");
+    let first_unlock = request(&server, "POST", &unlock_path, Body::from("{}")).await;
+    let retry_unlock = request(&server, "POST", &unlock_path, Body::from("{}")).await;
+    assert_eq!(
+        (
+            first_unlock.status(),
+            value(first_unlock).await["lock"]["id"].clone(),
+            retry_unlock.status(),
+            value(retry_unlock).await["lock"]["id"].clone(),
+        ),
+        (StatusCode::OK, json!(id), StatusCode::OK, json!(id),)
+    );
+    assert!(
+        value(request(&server, "GET", locks, Body::empty()).await).await["locks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    server.runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn lfs_lock_inputs_are_bounded() {
+    let server = maintenance_tests::fixture().await;
+    let locks = "/git/team/repo.git/info/lfs/locks";
+    let invalid_path = request(
+        &server,
+        "POST",
+        locks,
+        Body::from(json!({"path":"/absolute"}).to_string()),
+    )
+    .await;
+    let invalid_limit = request(&server, "GET", &format!("{locks}?limit=0"), Body::empty()).await;
+    let missing = request(
+        &server,
+        "POST",
+        &format!("{locks}/missing/unlock"),
+        Body::from("{}"),
+    )
+    .await;
+    assert_eq!(
+        (
+            invalid_path.status(),
+            invalid_limit.status(),
+            missing.status(),
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::NOT_FOUND,
+        )
     );
     server.runtime.shutdown().await;
 }
@@ -471,10 +654,9 @@ async fn lfs_rejects_invalid_batches_and_releases_disconnected_uploads() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_git_lfs_push_and_clone_transfer_exact_large_file() {
     use receive_tests::success;
-    let mut server = maintenance_tests::fixture().await;
+    let server = maintenance_tests::fixture().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    Arc::get_mut(&mut server).unwrap().port = port;
     let stop = CancellationToken::new();
     let stopped = stop.clone();
     let app = router(Arc::clone(&server));
@@ -536,10 +718,9 @@ async fn cancelled_lfs_response_fails_http_body_and_releases_capacity() {
     for cancel in [false, true] {
         use futures_util::StreamExt;
 
-        let mut server = maintenance_tests::fixture().await;
+        let server = maintenance_tests::fixture().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        Arc::get_mut(&mut server).unwrap().port = port;
         let repo = server
             .repositories
             .get(&("team".into(), "repo".into()))

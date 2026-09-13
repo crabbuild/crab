@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::{Duration, Instant};
@@ -228,7 +229,6 @@ pub(crate) struct Server {
     maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
     pub receives: tokio_util::task::TaskTracker,
-    port: u16,
     pub auth: Option<Authentication>,
     catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
@@ -269,7 +269,6 @@ pub async fn serve(config: Config) -> Result<()> {
     };
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
-    let port = listener.local_addr()?.port();
     let catalog_version = document.version;
     let repositories = materialize_catalog(&catalog, document).await?;
     let runtime = Arc::new(RemoteGitRuntime::default());
@@ -303,7 +302,6 @@ pub async fn serve(config: Config) -> Result<()> {
         git_admission: Arc::new(Semaphore::new(GIT_ADMISSION_CAPACITY)),
         app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
         maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
-        port,
         auth,
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
@@ -502,8 +500,18 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
             get(lfs::download).put(lfs::upload),
         )
         .route(
+            "/git/{owner}/{name}/info/lfs/locks",
+            get(lfs::list_locks)
+                .post(lfs::create_lock)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
             "/git/{owner}/{name}/info/lfs/locks/verify",
-            post(lfs::locks_unavailable),
+            post(lfs::verify_locks).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/git/{owner}/{name}/info/lfs/locks/{id}/unlock",
+            post(lfs::unlock_lock).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
         .route(
@@ -685,12 +693,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         .headers()
         .get("host")
         .and_then(|value| value.to_str().ok());
-    let allowed = [
-        format!("127.0.0.1:{}", server.port),
-        format!("localhost:{}", server.port),
-        format!("[::1]:{}", server.port),
-    ];
-    let local_host = allowed.iter().any(|value| Some(value.as_str()) == host);
+    let local_host = is_local_host(host);
     let health_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
     let valid_host = (health_probe && local_host)
         || server
@@ -759,6 +762,24 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
         ], response,
     ).into_response()
+}
+
+fn is_local_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let hostname = authority.host();
+    let ip_literal = hostname
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(hostname);
+    hostname.eq_ignore_ascii_case("localhost")
+        || ip_literal
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 async fn archived_mutation_response(
@@ -867,7 +888,6 @@ mod tests {
             maintenance_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),
             receives: tokio_util::task::TaskTracker::new(),
-            port: 8788,
             auth: None,
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
@@ -883,7 +903,7 @@ mod tests {
             ),
             (
                 "/api/repos",
-                "127.0.0.1:8788",
+                "127.0.0.1:18791",
                 StatusCode::OK,
                 Some("no-store"),
             ),
@@ -898,6 +918,12 @@ mod tests {
                 "[::1]:8788",
                 StatusCode::NOT_FOUND,
                 Some("no-store"),
+            ),
+            (
+                "/api/repos",
+                "127.0.0.1.evil.invalid:8788",
+                StatusCode::FORBIDDEN,
+                None,
             ),
         ] {
             let request = Request::builder()

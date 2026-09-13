@@ -18,6 +18,26 @@ async fn principal(h: &Harness, token: &str) -> auth::Principal {
         .await
 }
 
+async fn issue_token(h: &Harness, identity: &str, access: &str) -> String {
+    *h.provider.mode.lock().await = identity.into();
+    let cookie = h.login().await;
+    let session = h.json("/api/session", &cookie).await;
+    let response = h
+        .http
+        .post(format!("{}/api/git-token", h.origin))
+        .header(header::COOKIE, &cookie)
+        .header(header::ORIGIN, &h.origin)
+        .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(json!({"owner":"team","repository":"private","access":access}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let issued: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    issued["token"].as_str().unwrap().to_owned()
+}
+
 #[tokio::test]
 async fn token_permissions_intersect_repository_membership_and_requested_scope() {
     let h = Harness::new(false).await;
@@ -118,6 +138,78 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
         config.members.clear();
         assert!(!principal.can_read(&config));
     }
+    h.close().await;
+}
+
+#[tokio::test]
+async fn lfs_locking_uses_team_identity_and_write_scope() {
+    let h = Harness::new(false).await;
+    let alice = issue_token(&h, "valid", "write").await;
+    let bob = issue_token(&h, "member", "read").await;
+    let locks = format!("{}/git/team/private.git/info/lfs/locks", h.origin);
+    let content_type = "application/vnd.git-lfs+json";
+
+    let created = h
+        .http
+        .post(&locks)
+        .basic_auth("crab", Some(&alice))
+        .header(header::CONTENT_TYPE, content_type)
+        .body(json!({"path":"models/team.bin"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = serde_json::from_slice(&created.bytes().await.unwrap()).unwrap();
+    let id = created["lock"]["id"].as_str().unwrap();
+    assert_eq!(created["lock"]["owner"]["name"], "Alice");
+
+    let listed = h
+        .http
+        .get(&locks)
+        .basic_auth("crab", Some(&bob))
+        .header(header::ACCEPT, content_type)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed: Value = serde_json::from_slice(&listed.bytes().await.unwrap()).unwrap();
+    assert_eq!(listed["locks"][0]["id"], id);
+
+    for (path, body) in [
+        (locks.clone(), json!({"path":"models/bob.bin"})),
+        (format!("{locks}/verify"), json!({})),
+        (format!("{locks}/{id}/unlock"), json!({})),
+    ] {
+        let response = h
+            .http
+            .post(path)
+            .basic_auth("crab", Some(&bob))
+            .header(header::CONTENT_TYPE, content_type)
+            .body(body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    let verified = h
+        .http
+        .post(format!("{locks}/verify"))
+        .basic_auth("crab", Some(&alice))
+        .header(header::CONTENT_TYPE, content_type)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(verified.status(), StatusCode::OK);
+    let verified: Value = serde_json::from_slice(&verified.bytes().await.unwrap()).unwrap();
+    assert_eq!(
+        (
+            &verified["ours"][0]["id"],
+            verified["theirs"].as_array().unwrap().len()
+        ),
+        (&json!(id), 0)
+    );
     h.close().await;
 }
 

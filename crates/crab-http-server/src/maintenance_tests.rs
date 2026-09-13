@@ -50,7 +50,6 @@ pub(super) async fn fixture() -> Arc<Server> {
         maintenance_admission: Arc::new(Semaphore::new(2)),
         cancellation: CancellationToken::new(),
         receives: tokio_util::task::TaskTracker::new(),
-        port: 8788,
         auth: None,
         catalog: None,
         catalog_healthy: AtomicBool::new(false),

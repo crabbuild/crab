@@ -24,10 +24,9 @@ async fn json_request(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
-    let mut server = maintenance_tests::fixture().await;
+    let server = maintenance_tests::fixture().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    Arc::get_mut(&mut server).unwrap().port = port;
     let stop = CancellationToken::new();
     let stopped = stop.clone();
     let app = router(Arc::clone(&server));
@@ -309,7 +308,6 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let mutable = Arc::get_mut(&mut server).unwrap();
-    mutable.port = port;
     let repository = mutable
         .repositories
         .get_mut(&("team".into(), "repo".into()))

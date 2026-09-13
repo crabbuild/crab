@@ -1,14 +1,19 @@
+mod locking;
+
 use std::{ops::Range, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json,
     body::Body,
-    extract::{FromRequest, Path, Query, Request, State, rejection::JsonRejection},
+    extract::{
+        FromRequest, Path, Query, Request, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use crab_git::lfs_pointer::{LFS_VERSION_URL, LfsPointer};
-use crab_lfs::{LfsError, LfsObjectStore};
+use crab_lfs::{LfsError, LfsLockError, LfsObjectStore};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -24,6 +29,8 @@ const CONTENT_TYPE: &str = "application/vnd.git-lfs+json";
 const BUDGET: Duration = Duration::from_secs(5 * 60);
 type Result<T> = std::result::Result<T, Error>;
 
+pub(crate) use locking::{create_lock, list_locks, unlock_lock, verify_locks};
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     #[error("{0}")]
@@ -36,18 +43,28 @@ pub(crate) enum Error {
     Archived,
     #[error("LFS transfer exceeds server limits")]
     TooLarge,
-    #[error("Git transfers are busy")]
+    #[error("LFS requests are busy")]
     Busy,
-    #[error("LFS transfer cancelled or timed out")]
+    #[error("LFS lock is owned by another user")]
+    LockOwner,
+    #[error("LFS lock changed concurrently")]
+    LockConflict,
+    #[error("LFS operation cancelled or timed out")]
     Cancelled,
     #[error("LFS byte range is not satisfiable")]
     RangeNotSatisfiable { size: u64 },
     #[error("invalid LFS request body")]
     Json(#[from] JsonRejection),
+    #[error("invalid LFS lock query")]
+    Query(#[from] QueryRejection),
     #[error("invalid LFS object identity")]
     Identity(#[from] crab_git::lfs_pointer::LfsPointerError),
     #[error("LFS object operation failed")]
     Object(#[from] LfsError),
+    #[error("LFS lock operation failed")]
+    Lock(#[from] LfsLockError),
+    #[error("invalid stored LFS lock timestamp")]
+    LockTimestamp,
     #[error("LFS request stream failed")]
     Body(#[from] axum::Error),
     #[error("LFS temporary file operation failed")]
@@ -80,6 +97,15 @@ impl IntoResponse for Error {
                 (StatusCode::NOT_FOUND, "Repository or LFS object not found")
             }
             Self::Forbidden => (StatusCode::FORBIDDEN, "Write access required"),
+            Self::LockOwner => (
+                StatusCode::FORBIDDEN,
+                "Lock is owned by another user; use force to unlock it",
+            ),
+            Self::LockConflict
+            | Self::Lock(LfsLockError::Conflict { .. } | LfsLockError::IdMismatch { .. }) => (
+                StatusCode::CONFLICT,
+                "LFS lock changed; refresh the lock list and retry",
+            ),
             Self::Archived => (
                 StatusCode::FORBIDDEN,
                 "Repository is archived and read-only",
@@ -90,18 +116,22 @@ impl IntoResponse for Error {
             ),
             Self::Busy => (
                 StatusCode::TOO_MANY_REQUESTS,
-                "Git transfers are busy; retry shortly",
+                "LFS requests are busy; retry shortly",
             ),
             Self::Cancelled => (
                 StatusCode::REQUEST_TIMEOUT,
-                "LFS transfer cancelled or timed out",
+                "LFS operation cancelled or timed out",
             ),
             Self::RangeNotSatisfiable { .. } => (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "LFS byte range is not satisfiable",
             ),
             Self::Json(error) => (error.status(), "Invalid LFS request"),
+            Self::Query(error) => (error.status(), "Invalid LFS lock query"),
             Self::Body(_) | Self::Identity(_) => (StatusCode::BAD_REQUEST, "Invalid LFS request"),
+            Self::Lock(LfsLockError::NotFound { .. }) => {
+                (StatusCode::NOT_FOUND, "LFS lock not found")
+            }
             Self::Object(LfsError::ObjectCorrupt { .. }) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "LFS object size or SHA-256 does not match",
@@ -504,20 +534,4 @@ pub(crate) async fn upload(
     });
     result.await.map_err(|_| Error::Cancelled)??;
     Ok(StatusCode::OK.into_response())
-}
-
-pub(crate) async fn locks_unavailable(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name)): Path<(String, String)>,
-) -> Result<Response> {
-    repository(&server, &principal, &owner, &name, false)?;
-    // Git LFS recognizes 501 as an unsupported optional locking API. A generic
-    // 405 would abort its pre-push hook instead of allowing object transfers.
-    Ok((
-        StatusCode::NOT_IMPLEMENTED,
-        [(header::CONTENT_TYPE, CONTENT_TYPE)],
-        Json(json!({"message":"LFS HTTP locking is not implemented"})),
-    )
-        .into_response())
 }

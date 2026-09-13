@@ -41,6 +41,8 @@ still require a live drill.
 The same container path uploads a 1 MiB LFS object, interrupts its logical
 download after an initial byte range, resumes the remaining range through
 Caddy, and requires the reconstructed file to match byte-for-byte.
+It also drives the stock Git LFS client through lock creation, listing,
+verify-on-push, and unlock against durable RustFS lock records.
 
 Server release tags have their own contract, independent of the Crab CLI. An
 annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
@@ -78,7 +80,9 @@ to Docker's published port; Crab still binds to loopback and keeps its
 unauthenticated local-trust invariant. The management listener and RustFS are
 not published to the host. Compose waits until the catalog is valid and every
 repository can open its current Git view. This profile is for local development
-and evaluation, not remote or multi-user service.
+and evaluation, not remote or multi-user service. Caddy preserves the validated
+external loopback authority, so Git LFS action URLs also follow a custom
+`CRAB_HTTP_SERVER_PORT`.
 
 ### Operate the local stack
 
