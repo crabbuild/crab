@@ -60,7 +60,10 @@ fixed number of reusable CAS lease slots. Waiting writers own no object and
 probe slots in rotating order, so admission work and stored coordination state
 remain bounded independently of queue depth. Slot expiry uses backend-authored
 object time from one reusable clock key; admission is best-effort fair rather
-than FIFO.
+than FIFO. A direct CLI publication already owns the repository and global GC
+writer fences, so its capacity ticket reuses those claims instead of acquiring
+a duplicate fence pair. Standalone admission tickets continue to acquire and
+release their own GC fences.
 
 `WriteCoordinator` exposes health, begin/upload/commit/materialize/abort,
 ref lookup, GC safety snapshots, repair snapshots, and write fencing. The

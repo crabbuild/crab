@@ -468,6 +468,13 @@ impl Store {
         self.inner.put(path, bytes).await.map_err(CrabError::from)
     }
 
+    pub async fn put_if_absent(&self, path: &Path, bytes: Bytes) -> Result<bool> {
+        self.inner
+            .put_if_absent(path, bytes)
+            .await
+            .map_err(CrabError::from)
+    }
+
     pub async fn create_strict(&self, path: &Path, bytes: Bytes) -> Result<()> {
         self.inner
             .create_strict(path, bytes)
@@ -577,6 +584,18 @@ impl Store {
     ) -> Result<()> {
         self.inner
             .verify_written_size_and_hash(path, expected_size, expected_hash)
+            .await
+            .map_err(CrabError::from)
+    }
+
+    pub async fn verify_written_size_and_hash_with_meta(
+        &self,
+        path: &Path,
+        expected_size: u64,
+        expected_hash: &[u8; 32],
+    ) -> Result<ObjectMeta> {
+        self.inner
+            .verify_written_size_and_hash_with_meta(path, expected_size, expected_hash)
             .await
             .map_err(CrabError::from)
     }

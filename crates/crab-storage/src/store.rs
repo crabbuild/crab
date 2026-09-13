@@ -507,6 +507,15 @@ impl Store {
     /// create-only writes fail closed; Crab never retries them as an
     /// unconditional overwrite.
     pub async fn put(&self, path: &Path, bytes: Bytes) -> Result<()> {
+        self.put_if_absent(path, bytes).await.map(|_| ())
+    }
+
+    /// Writes exact bytes only when absent and reports whether this call created them.
+    ///
+    /// Identical existing content returns `false`. Different existing content
+    /// remains a state conflict, preserving the same immutable-object contract
+    /// as [`Self::put`].
+    pub async fn put_if_absent(&self, path: &Path, bytes: Bytes) -> Result<bool> {
         let expected_hash = *blake3::hash(&bytes).as_bytes();
 
         retry(&self.retry, || {
@@ -588,7 +597,7 @@ impl Store {
         .await
     }
 
-    async fn put_once(&self, path: &Path, bytes: Bytes, expected_hash: &[u8; 32]) -> Result<()> {
+    async fn put_once(&self, path: &Path, bytes: Bytes, expected_hash: &[u8; 32]) -> Result<bool> {
         let write_path = self.write_path(path);
         let write_inner = self.write_inner();
         let size = bytes.len() as u64;
@@ -599,7 +608,7 @@ impl Store {
         {
             Ok(_) => {
                 self.record_staged_write(path, &write_path, expected_hash, size);
-                Ok(())
+                Ok(true)
             }
             Err(err) => {
                 let mapped = map_object_store_error(err, write_path.as_ref());
@@ -611,7 +620,7 @@ impl Store {
                     // Someone (possibly us on a previous retry) wrote the
                     // same content; treat as success.
                     self.record_staged_write(path, &write_path, expected_hash, size);
-                    return Ok(());
+                    return Ok(false);
                 }
                 Err(mapped)
             }
@@ -634,24 +643,25 @@ impl Store {
         Ok(blake3::hash(&body).as_bytes() == expected)
     }
 
-    async fn matches_in_streaming(
+    async fn streaming_meta_matches(
         inner: &Arc<dyn ObjectStore>,
         path: &Path,
         expected: &[u8; 32],
-    ) -> Result<bool> {
+    ) -> Result<(ObjectMeta, bool)> {
         use futures_util::StreamExt;
 
         let get_result = inner
             .get(path)
             .await
             .map_err(|e| map_object_store_error(e, path.as_ref()))?;
+        let meta = get_result.meta.clone();
         let mut stream = get_result.into_stream();
         let mut hasher = blake3::Hasher::new();
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| map_object_store_error(e, path.as_ref()))?;
             hasher.update(&bytes);
         }
-        Ok(hasher.finalize().as_bytes() == expected)
+        Ok((meta, hasher.finalize().as_bytes() == expected))
     }
 
     async fn matches_write_target(
@@ -1258,14 +1268,16 @@ impl Store {
         expected_hash: &[u8; 32],
     ) -> Result<()> {
         retry(&self.retry, || async {
-            let meta = self.head(path).await?;
+            let (meta, matches) =
+                Self::streaming_meta_matches(&self.read_inner_for(path), path, expected_hash)
+                    .await?;
             if meta.size != expected_size {
                 return Err(StorageError::CorruptObject {
                     path: path.to_string(),
                     reason: format!("expected {expected_size} bytes, found {}", meta.size),
                 });
             }
-            if Self::matches_in_streaming(&self.read_inner_for(path), path, expected_hash).await? {
+            if matches {
                 Ok(())
             } else {
                 Err(StorageError::CorruptObject {
@@ -1290,20 +1302,30 @@ impl Store {
         expected_size: u64,
         expected_hash: &[u8; 32],
     ) -> Result<()> {
+        self.verify_written_size_and_hash_with_meta(path, expected_size, expected_hash)
+            .await
+            .map(|_| ())
+    }
+
+    /// Verifies the physical write destination and returns its bound metadata.
+    pub async fn verify_written_size_and_hash_with_meta(
+        &self,
+        path: &Path,
+        expected_size: u64,
+        expected_hash: &[u8; 32],
+    ) -> Result<ObjectMeta> {
         let (write_path, write_inner, _) = self.exact_write_target(path);
         retry(&self.retry, || async {
-            let meta = write_inner
-                .head(&write_path)
-                .await
-                .map_err(|error| map_object_store_error(error, write_path.as_ref()))?;
+            let (meta, matches) =
+                Self::streaming_meta_matches(&write_inner, &write_path, expected_hash).await?;
             if meta.size != expected_size {
                 return Err(StorageError::CorruptObject {
                     path: write_path.to_string(),
                     reason: format!("expected {expected_size} bytes, found {}", meta.size),
                 });
             }
-            if Self::matches_in_streaming(&write_inner, &write_path, expected_hash).await? {
-                Ok(())
+            if matches {
+                Ok(meta)
             } else {
                 Err(StorageError::CorruptObject {
                     path: write_path.to_string(),
@@ -1466,16 +1488,14 @@ impl Store {
         expected_size: u64,
     ) -> Result<bool> {
         retry(&self.retry, || async {
-            match self.head(canonical).await {
-                Ok(meta) if meta.size == expected_size => {
-                    Self::matches_in_streaming(
-                        &self.read_inner_for(canonical),
-                        canonical,
-                        expected_hash,
-                    )
-                    .await
-                }
-                Ok(_) => Ok(false),
+            match Self::streaming_meta_matches(
+                &self.read_inner_for(canonical),
+                canonical,
+                expected_hash,
+            )
+            .await
+            {
+                Ok((meta, matches)) => Ok(meta.size == expected_size && matches),
                 Err(StorageError::NotFound { .. }) => Ok(false),
                 Err(e) => Err(e),
             }
@@ -1697,6 +1717,9 @@ impl Store {
             ));
         }
         Self::verify_local_file(file_path, size, &expected_hash, cancel).await?;
+        if self.canonical_matches(path, &expected_hash, size).await? {
+            return Ok(crate::multipart::ResumableUploadOutcome::AlreadyPresent);
+        }
 
         let (Some(multipart), Some(journal), Some(target)) = (
             self.multipart.as_ref(),
@@ -1717,9 +1740,6 @@ impl Store {
                 .await?;
             return Ok(crate::multipart::ResumableUploadOutcome::Uploaded);
         };
-        if self.canonical_matches(path, &expected_hash, size).await? {
-            return Ok(crate::multipart::ResumableUploadOutcome::AlreadyPresent);
-        }
 
         let owner_token = random_owner_token();
         let mut repair_attempt = 0_u8;
@@ -3371,6 +3391,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_if_absent_reports_created_then_reused() {
+        let store = memory_store();
+        let path = Path::from("blobs/create-outcome");
+        let body = Bytes::from_static(b"same content");
+
+        assert!(store.put_if_absent(&path, body.clone()).await.unwrap());
+        assert!(!store.put_if_absent(&path, body).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn create_strict_conflicts_even_for_identical_content() {
         let store = memory_store();
         let path = Path::from("locks/refs/heads/main/lock");
@@ -4422,6 +4452,32 @@ mod tests {
         assert!(
             matches!(err, StorageError::CorruptObject { .. }),
             "expected CorruptObject, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn size_and_hash_verification_uses_one_body_request() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let counting = Arc::new(crate::test_support::CountingObjectStore::new(inner));
+        let store = Store::new(counting.clone());
+        let path = Path::from("blobs/stream-verified");
+        let body = Bytes::from_static(b"one response carries metadata and bytes");
+        let hash = *blake3::hash(&body).as_bytes();
+        store.put(&path, body.clone()).await.unwrap();
+        counting.reset();
+
+        store
+            .verify_size_and_hash(&path, body.len() as u64, &hash)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            counting.counts(),
+            crate::test_support::ObjectReadCounts {
+                heads: 0,
+                ranges: 0,
+                full: 1,
+            }
         );
     }
 
