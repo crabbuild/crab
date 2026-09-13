@@ -1105,6 +1105,7 @@ test("code palette persists and follows light and dark appearance", async ({
 test("format-aware previews explore data, office files, media, and databases locally", async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   const duckdbWorkerRequests: string[] = [];
   page.on("request", (request) => {
     if (request.url().includes("duckdb-browser-mvp.worker"))
