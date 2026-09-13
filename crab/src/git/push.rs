@@ -5511,10 +5511,9 @@ pub(crate) async fn acquire_push_lock_leases(
     .map_err(CrabError::from)
 }
 
-async fn acquire_push_admission_lock(
+async fn acquire_push_capacity_lock(
     store: &Store,
     prefix: &str,
-    global_prefix: &str,
     required_slots: usize,
     ttl: Duration,
     cancel: &CancellationToken,
@@ -5522,10 +5521,9 @@ async fn acquire_push_admission_lock(
     // Admission bounds expensive repository-wide work, while per-ref locks
     // provide correctness. Waiting contenders own no object-store state.
     let deadline = Instant::now() + ttl.saturating_mul(PUSH_ADMISSION_WAIT_TTL_MULTIPLIER);
-    let mut ticket = crab_coordination::PushAdmissionTicket::new_weighted_with_global(
+    let mut ticket = crab_coordination::PushAdmissionTicket::new_weighted_with_existing_fences(
         store.inner(),
         prefix,
-        Some(global_prefix),
         PUSH_ADMISSION_SLOTS,
         required_slots,
         ttl,
@@ -12995,7 +12993,7 @@ impl PushPipeline {
                 if let Some(progress) = &self.progress {
                     progress.begin_git_upload();
                 }
-                let uploaded = upload_push_pack_file_body(
+                let (uploaded, verified_meta) = upload_push_pack_file_body(
                     store,
                     &pack_path,
                     packed.pack_path.as_ref(),
@@ -13084,23 +13082,21 @@ impl PushPipeline {
                     let remote_idx_path = self.router.pack_index_path(&pack_sha);
                     let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
                     tokio::try_join!(
-                        store.put_multipart_file_retry(
+                        upload_pack_sidecar_file(
+                            store,
                             &remote_idx_path,
                             &installed.idx_path,
                             idx_size,
                             idx_hash,
-                            8 * 1024 * 1024,
                             &self.cancel,
-                            None,
                         ),
-                        store.put_multipart_file_retry(
+                        upload_pack_sidecar_file(
+                            store,
                             &remote_rev_path,
                             &installed.rev_path,
                             rev_size,
                             rev_hash,
-                            8 * 1024 * 1024,
                             &self.cancel,
-                            None,
                         ),
                     )?;
                 }
@@ -13125,12 +13121,23 @@ impl PushPipeline {
                         self.config.max_cas_retries,
                     ),
                     async {
-                        crab_metadata::pack_origin::record_verified_pack_origin(
-                            store.as_storage(),
-                            self.router.repo_prefix(),
-                            &origin_entry,
-                        )
-                        .await
+                        match verified_meta.as_ref() {
+                            Some(meta) => {
+                                crab_metadata::pack_origin::record_verified_pack_origin_with_meta(
+                                    store.as_storage(),
+                                    self.router.repo_prefix(),
+                                    &origin_entry,
+                                    meta,
+                                )
+                                .await
+                            }
+                            None => crab_metadata::pack_origin::record_verified_pack_origin(
+                                store.as_storage(),
+                                self.router.repo_prefix(),
+                                &origin_entry,
+                            )
+                            .await,
+                        }
                         .map_err(CrabError::from)
                     },
                 )?;
@@ -16175,10 +16182,9 @@ impl PushPipeline {
                 Some(store) => self
                     .at_stage(
                         PushFailureStage::Admission,
-                        acquire_push_admission_lock(
+                        acquire_push_capacity_lock(
                             store,
                             self.router.repo_prefix(),
-                            self.router.global_prefix(),
                             required_admission_slots,
                             self.config.lock_ttl,
                             &self.cancel,
@@ -18261,7 +18267,7 @@ async fn upload_push_pack_file_body(
     journal: Option<&dyn crab_storage::multipart::MultipartJournal>,
     metrics: Option<&Metrics>,
     on_part_done: Option<&(dyn Fn(u64) + Send + Sync)>,
-) -> Result<bool> {
+) -> Result<(bool, Option<ObjectMeta>)> {
     if store.staging_write_prefix().is_some() {
         let pack_bytes = tokio::fs::read(pack_file).await?;
         verify_pack_body(pack_file, &pack_bytes, pack_size, &pack_blake3)?;
@@ -18272,27 +18278,7 @@ async fn upload_push_pack_file_body(
         if let Some(on_part_done) = on_part_done {
             on_part_done(pack_size);
         }
-        return Ok(true);
-    }
-
-    match store.head(pack_path).await {
-        Ok(_) => {
-            match store
-                .verify_size_and_hash(pack_path, pack_size, &pack_blake3)
-                .await
-            {
-                Ok(()) => return Ok(false),
-                Err(CrabError::CorruptObject { .. }) => {
-                    warn!(
-                        path = %pack_path,
-                        "existing content-addressed pack is corrupt; repairing from verified local body"
-                    );
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Err(CrabError::NotFound { .. }) => {}
-        Err(e) => return Err(e),
+        return Ok((true, None));
     }
 
     if pack_size > PACK_MULTIPART_THRESHOLD_BYTES {
@@ -18313,6 +18299,12 @@ async fn upload_push_pack_file_body(
             .await?;
         if matches!(
             outcome,
+            crab_storage::multipart::ResumableUploadOutcome::AlreadyPresent
+        ) {
+            return Ok((false, None));
+        }
+        if matches!(
+            outcome,
             crab_storage::multipart::ResumableUploadOutcome::Resumed
         ) && let Some(metrics) = metrics
         {
@@ -18322,21 +18314,56 @@ async fn upload_push_pack_file_body(
         let pack_bytes = tokio::fs::read(pack_file).await?;
         verify_pack_body(pack_file, &pack_bytes, pack_size, &pack_blake3)?;
         let pack_bytes = Bytes::from(pack_bytes);
-        match store.put(pack_path, pack_bytes.clone()).await {
-            Ok(()) => {}
+        match store.put_if_absent(pack_path, pack_bytes.clone()).await {
+            Ok(true) => {}
+            Ok(false) => return Ok((false, None)),
             Err(CrabError::CasConflict { .. }) => {
+                warn!(
+                    path = %pack_path,
+                    "existing content-addressed pack is corrupt; repairing from verified local body"
+                );
                 store.put_overwrite(pack_path, pack_bytes).await?;
             }
             Err(error) => return Err(error),
         }
-        store
-            .verify_written_size_and_hash(pack_path, pack_size, &pack_blake3)
+        let meta = store
+            .verify_written_size_and_hash_with_meta(pack_path, pack_size, &pack_blake3)
             .await?;
         if let Some(on_part_done) = on_part_done {
             on_part_done(pack_size);
         }
+        return Ok((true, Some(meta)));
     }
-    Ok(true)
+    Ok((true, None))
+}
+
+async fn upload_pack_sidecar_file(
+    store: &Store,
+    remote_path: &ObjectPath,
+    local_path: &Path,
+    size: u64,
+    hash: [u8; 32],
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if size > PACK_MULTIPART_THRESHOLD_BYTES {
+        return store
+            .put_multipart_file_retry(
+                remote_path,
+                local_path,
+                size,
+                hash,
+                PACK_MULTIPART_THRESHOLD_BYTES as usize,
+                cancel,
+                None,
+            )
+            .await;
+    }
+
+    check_cancelled(cancel)?;
+    let bytes = tokio::fs::read(local_path).await?;
+    check_cancelled(cancel)?;
+    verify_pack_body(local_path, &bytes, size, &hash)?;
+    store.put(remote_path, Bytes::from(bytes)).await
 }
 
 fn verify_pack_body(
@@ -21099,7 +21126,7 @@ mod tests {
         pack_file.flush().unwrap();
         let pack_hash = blake3::hash(&body);
 
-        let uploaded = upload_push_pack_file_body(
+        let (uploaded, verified_meta) = upload_push_pack_file_body(
             &store,
             &pack_path,
             pack_file.path(),
@@ -21114,6 +21141,7 @@ mod tests {
         .unwrap();
 
         assert!(uploaded);
+        assert!(verified_meta.is_none());
         let staged = write_inner
             .get(&staged_path)
             .await
@@ -21129,9 +21157,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn small_pack_sidecar_uses_exact_single_put_path() {
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let counting = Arc::new(crab_storage::test_support::CountingObjectStore::new(
+            inner.clone(),
+        ));
+        let store_inner: Arc<dyn object_store::ObjectStore> = counting.clone();
+        let store = crate::storage::store::Store::new(store_inner);
+        let remote_path = ObjectPath::from("repo/packs/pack-a.idx");
+        let body = Bytes::from_static(b"small verified sidecar");
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&body).unwrap();
+        file.flush().unwrap();
+
+        upload_pack_sidecar_file(
+            &store,
+            &remote_path,
+            file.path(),
+            body.len() as u64,
+            *blake3::hash(&body).as_bytes(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(counting.put_requests(), 1);
+        assert_eq!(counting.multipart_starts(), 0);
+        let stored = inner
+            .get(&remote_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(stored, body);
+    }
+
+    #[tokio::test]
+    async fn small_pack_creation_uses_one_put_and_one_verification_get() {
+        let inner = Arc::new(object_store::memory::InMemory::new());
+        let counting = Arc::new(crab_storage::test_support::CountingObjectStore::new(inner));
+        let store_inner: Arc<dyn object_store::ObjectStore> = counting.clone();
+        let store = crate::storage::store::Store::new(store_inner);
+        let pack_path = ObjectPath::from("repo/packs/pack-small.pack");
+        let body = Bytes::from_static(b"small pack body");
+        let mut pack_file = tempfile::NamedTempFile::new().unwrap();
+        pack_file.write_all(&body).unwrap();
+        pack_file.flush().unwrap();
+
+        let (uploaded, verified_meta) = upload_push_pack_file_body(
+            &store,
+            &pack_path,
+            pack_file.path(),
+            body.len() as u64,
+            *blake3::hash(&body).as_bytes(),
+            &CancellationToken::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(uploaded);
+        assert_eq!(verified_meta.unwrap().location, pack_path);
+        assert_eq!(counting.put_requests(), 1);
+        assert_eq!(counting.multipart_starts(), 0);
+        assert_eq!(
+            counting.counts(),
+            crab_storage::test_support::ObjectReadCounts {
+                heads: 0,
+                ranges: 0,
+                full: 1,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn upload_push_pack_file_body_uploads_large_file_once() {
         let inner = Arc::new(object_store::memory::InMemory::new());
-        let store_inner: Arc<dyn object_store::ObjectStore> = inner.clone();
+        let counting = Arc::new(crab_storage::test_support::CountingObjectStore::new(
+            inner.clone(),
+        ));
+        let store_inner: Arc<dyn object_store::ObjectStore> = counting.clone();
         let store = crate::storage::store::Store::new(store_inner);
         let pack_path = ObjectPath::from("repo/packs/pack-large.pack");
         let body = vec![0xab; PACK_MULTIPART_THRESHOLD_BYTES as usize + 1];
@@ -21140,7 +21248,7 @@ mod tests {
         pack_file.flush().unwrap();
         let pack_hash = blake3::hash(&body);
 
-        let uploaded = upload_push_pack_file_body(
+        let (uploaded, _) = upload_push_pack_file_body(
             &store,
             &pack_path,
             pack_file.path(),
@@ -21153,7 +21261,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let uploaded_again = upload_push_pack_file_body(
+        counting.reset();
+        let (uploaded_again, _) = upload_push_pack_file_body(
             &store,
             &pack_path,
             pack_file.path(),
@@ -21169,6 +21278,14 @@ mod tests {
 
         assert!(uploaded);
         assert!(!uploaded_again);
+        assert_eq!(
+            counting.counts(),
+            crab_storage::test_support::ObjectReadCounts {
+                heads: 0,
+                ranges: 0,
+                full: 1,
+            }
+        );
         let stored = inner.get(&pack_path).await.unwrap().bytes().await.unwrap();
         assert_eq!(stored.len(), body.len());
         assert_eq!(blake3::hash(&stored), pack_hash);
@@ -21190,7 +21307,7 @@ mod tests {
         pack_file.flush().unwrap();
         let pack_hash = blake3::hash(&body);
 
-        let uploaded = upload_push_pack_file_body(
+        let (uploaded, verified_meta) = upload_push_pack_file_body(
             &store,
             &pack_path,
             pack_file.path(),
@@ -21205,6 +21322,7 @@ mod tests {
         .unwrap();
 
         assert!(uploaded);
+        assert_eq!(verified_meta.unwrap().location, pack_path);
         let stored = inner.get(&pack_path).await.unwrap().bytes().await.unwrap();
         assert_eq!(stored, body);
     }
@@ -24976,10 +25094,9 @@ mod tests {
         });
 
         let started = Instant::now();
-        let lock = acquire_push_admission_lock(
+        let lock = acquire_push_capacity_lock(
             &store,
             "repo",
-            ".crab",
             1,
             Duration::from_secs(3),
             &CancellationToken::new(),
@@ -24990,6 +25107,52 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(50));
         lock.release().await.unwrap();
         release.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_capacity_reuses_publication_gc_fences() {
+        let (store, router) = test_store_router("capacity-under-publication-fences");
+        let ttl = Duration::from_secs(60);
+        let specs = vec![make_spec("refs/heads/main")];
+        let config = PushConfig {
+            lock_ttl: ttl,
+            heartbeat_interval: None,
+            ..PushConfig::default()
+        };
+        let publication = acquire_push_lock_leases(
+            &store,
+            router.repo_prefix(),
+            &specs,
+            &config,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let capacity = acquire_push_capacity_lock(
+            &store,
+            router.repo_prefix(),
+            1,
+            ttl,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        for domain in [router.global_prefix(), router.repo_prefix()] {
+            assert!(matches!(
+                crab_coordination::GcFenceLease::acquire_sweep(store.inner(), domain, ttl).await,
+                Err(crab_coordination::CoordinationError::GcFenceHeld { .. })
+            ));
+        }
+        capacity.release().await.unwrap();
+        for domain in [router.global_prefix(), router.repo_prefix()] {
+            assert!(matches!(
+                crab_coordination::GcFenceLease::acquire_sweep(store.inner(), domain, ttl).await,
+                Err(crab_coordination::CoordinationError::GcFenceHeld { .. })
+            ));
+        }
+
+        release_push_lock_leases(publication).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -42,7 +42,9 @@ provider credentials / URL
 global `.crab/` prefix while keeping manifests, refs, packs, and locks under a
 repository prefix. `Store` adds conditional create/update, optional staged
 writes, bounded reads, byte/request observers, and provider-neutral
-`StorageError` values.
+`StorageError` values. `put_if_absent` distinguishes a new immutable object
+from an identical retry without a preceding HEAD, and streamed size/hash
+verification uses the GET response metadata instead of a separate HEAD.
 
 The admission token cancels pending admission, response headers, streamed
 body reads and pending listings without retrying the cancellation.

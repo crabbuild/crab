@@ -764,6 +764,9 @@ remote.
    PUT {prefix}/packs/pack-{blake3_hash}.idx
        body = verified canonical Git index
 
+   PUT {prefix}/packs/pack-{blake3_hash}.rev
+       body = verified canonical reverse index
+
    PUT {prefix}/packs/pack-{blake3_hash}.meta
        body = PackMetadata JSON { pack_id, ref_tips, object_count }
 
@@ -797,6 +800,14 @@ remote.
    full history. If no visible base can be proven, Crab retains the
    conservative bounded deferral and the owner must complete the normal
    repair path.
+
+   Pack bodies larger than 8 MiB use resumable multipart upload. Smaller pack
+   bodies use conditional create directly, and one streamed readback replaces
+   a separate existence HEAD. The same readback metadata is reused for the
+   version-bound origin receipt. Small `.idx` and
+   `.rev` evidence objects use one conditional PUT each; multipart is reserved
+   for sidecars larger than 8 MiB. Existing large packs are checked once inside
+   the resumable uploader rather than once in each layer.
 ```
 
 The locator also stores a derived pack-slot membership index keyed by
@@ -1188,6 +1199,12 @@ A same-ref waiter therefore polls only the ref handoff and never scans or
 reserves admission slots. Owners
 of distinct refs may wait for admission while retaining their renewable ref
 leases; once admitted, the existing bounded pack/upload lifecycle applies.
+The publication lease already owns the global and repository GC writer fences;
+the capacity reservation reuses those exact claims, so direct push has one GC
+fence pair for its whole publication lifetime rather than a second pair around
+upload admission. The two independent fence domains are acquired and released
+concurrently to avoid serial remote-latency waves while preserving the rule
+that both fences drain before ref locks are released.
 Admission uses five reusable slot objects to cap every probe and avoid one
 coordination object per contender. A push with xorb work reserves one slot per
 eight configured upload workers, rounded up, and at least one slot per 64 MiB
