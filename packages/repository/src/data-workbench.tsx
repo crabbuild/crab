@@ -10,18 +10,21 @@ import { Button, Label, SegmentedControl, Spinner } from "@primer/react";
 import { DataTable } from "./data-explorer";
 import { displayCell, type TableData } from "./file-preview-model";
 import {
-  createQuerySession,
   defaultDataQuery,
   MAX_QUERY_ROWS,
-  profileDataQuery,
   serializeQueryResult,
+  sqlIdentifier,
   type QueryFormat,
   type QueryResult,
-  type QuerySchemaField,
+  type QueryRelation,
   type QuerySession,
-} from "./duckdb-query";
+} from "./data-query";
+import { createDuckDbQuerySession } from "./duckdb-query";
+import { createSqliteQuerySession } from "./sqlite-query";
+import { SqlEditor, type SqlEditorHandle } from "./sql-editor";
 
 type Props = {
+  bytes?: Uint8Array;
   format: QueryFormat;
   name: string;
   size: number;
@@ -197,24 +200,41 @@ function ResultChart({ data }: { data: TableData }) {
 }
 
 function Schema({
-  fields,
+  relations,
   onInsert,
+  onSelect,
+  selected,
 }: {
-  fields: QuerySchemaField[];
+  relations: QueryRelation[];
   onInsert: (name: string) => void;
+  onSelect: (name: string) => void;
+  selected?: string;
 }) {
   const [query, setQuery] = useState("");
-  const visible = fields.filter((field) =>
-    field.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  const term = query.trim().toLocaleLowerCase();
+  const visible = relations.flatMap((relation) => {
+    const fields = relation.name.toLocaleLowerCase().includes(term)
+      ? relation.fields
+      : relation.fields.filter((field) =>
+          field.name.toLocaleLowerCase().includes(term),
+        );
+    return fields.length || !term ? [{ ...relation, fields }] : [];
+  });
+  const fieldCount = relations.reduce(
+    (total, relation) => total + relation.fields.length,
+    0,
   );
   return (
     <aside className="data-schema" aria-label="Dataset schema">
       <header>
         <div>
-          <strong>data</strong>
-          <span>{fields.length.toLocaleString()} columns</span>
+          <strong>Schema</strong>
+          <span>
+            {relations.length.toLocaleString()} relations ·{" "}
+            {fieldCount.toLocaleString()} columns
+          </span>
         </div>
-        {fields.length > 8 && (
+        {(fieldCount > 8 || relations.length > 1) && (
           <label className="data-schema-search">
             <span className="sr-only">Filter columns</span>
             <ColumnsIcon aria-hidden="true" />
@@ -227,18 +247,37 @@ function Schema({
           </label>
         )}
       </header>
-      <ol>
-        {visible.map((field) => (
-          <li key={field.name}>
-            <button
-              type="button"
-              title={`Insert ${field.name} into the query`}
-              onClick={() => onInsert(field.name)}
-            >
-              <span>{field.name}</span>
-              <code>{field.type.toLowerCase()}</code>
-              <small>{field.nullable ? "nullable" : "required"}</small>
-            </button>
+      <ol className="data-schema-relations">
+        {visible.map((relation) => (
+          <li className="data-schema-relation" key={relation.name}>
+            <div>
+              <button
+                type="button"
+                aria-current={relation.name === selected ? "true" : undefined}
+                title={`Use ${relation.name} for query presets`}
+                onClick={() => onSelect(relation.name)}
+              >
+                {relation.name}
+              </button>
+              <small>
+                {relation.type} · {relation.fields.length.toLocaleString()}
+              </small>
+            </div>
+            <ol>
+              {relation.fields.map((field) => (
+                <li key={field.name}>
+                  <button
+                    type="button"
+                    title={`Insert ${field.name} into the query`}
+                    onClick={() => onInsert(field.name)}
+                  >
+                    <span>{field.name}</span>
+                    <code>{field.type.toLowerCase()}</code>
+                    <small>{field.nullable ? "nullable" : "required"}</small>
+                  </button>
+                </li>
+              ))}
+            </ol>
           </li>
         ))}
       </ol>
@@ -259,7 +298,7 @@ function queryError(reason: unknown, summary: string): WorkbenchError {
   };
 }
 
-export function DataWorkbench({ format, name, size, url }: Props) {
+export function DataWorkbench({ bytes, format, name, size, url }: Props) {
   const historyKey = `crab:data-workbench:${url}`;
   const [generation, setGeneration] = useState(0);
   const [session, setSession] = useState<QuerySession>();
@@ -271,14 +310,16 @@ export function DataWorkbench({ format, name, size, url }: Props) {
   const [operation, setOperation] = useState<RunMode>("query");
   const [engineProgress, setEngineProgress] = useState<number>();
   const [view, setView] = useState<"table" | "chart">("table");
+  const [relationName, setRelationName] = useState<string>();
   const [history, setHistory] = useState<RunRecord[]>(() =>
     readHistory(historyKey),
   );
   const request = useRef(0);
+  const restarting = useRef(false);
   const activeRun = useRef<
     { mode: RunMode; query: string; at: number } | undefined
   >(undefined);
-  const editor = useRef<HTMLTextAreaElement>(null);
+  const editor = useRef<SqlEditorHandle>(null);
   const helpId = useId();
 
   useEffect(() => {
@@ -296,26 +337,38 @@ export function DataWorkbench({ format, name, size, url }: Props) {
     setSession(undefined);
     setResult(undefined);
     setError(undefined);
-    setNotice(undefined);
+    if (!restarting.current) setNotice(undefined);
+    setRelationName(undefined);
     setEngineProgress(undefined);
     setPhase("starting");
-    createQuerySession({ format, name, size, url }, (loaded, total) => {
+    const openSession =
+      format === "sqlite" ? createSqliteQuerySession : createDuckDbQuerySession;
+    openSession({ bytes, format, name, size, url }, (loaded, total) => {
       if (active && id === request.current && total > 0)
         setEngineProgress(Math.min(100, Math.round((loaded / total) * 100)));
     })
       .then(async (value) => {
         opened = value;
         if (!active) return value.close();
-        const initial = await value.query(defaultDataQuery());
+        const initial = await value.query(value.defaultQuery);
         if (active && id === request.current) {
           setSession(value);
+          setQuery(value.defaultQuery);
+          setRelationName(value.relations[0]?.name);
           setResult(initial);
           setPhase("ready");
+          if (restarting.current) {
+            restarting.current = false;
+            setNotice(
+              "Query stopped. The local engine restarted and is ready.",
+            );
+          }
         }
       })
       .catch(async (reason: unknown) => {
         await opened?.close();
         if (active && id === request.current) {
+          restarting.current = false;
           setSession(undefined);
           setError(queryError(reason, "Workbench could not start"));
           setPhase("failed");
@@ -326,7 +379,7 @@ export function DataWorkbench({ format, name, size, url }: Props) {
       request.current += 1;
       void opened?.close();
     };
-  }, [format, generation, name, size, url]);
+  }, [bytes, format, generation, name, size, url]);
 
   const recordRun = (record: Omit<RunRecord, "id">) => {
     setHistory((current) =>
@@ -391,12 +444,14 @@ export function DataWorkbench({ format, name, size, url }: Props) {
         await session.close();
         setSession(undefined);
         setNotice("Query stopped. Restarting the local engine…");
+        restarting.current = true;
         setGeneration((value) => value + 1);
       }
     } catch (reason) {
       await session.close();
       setSession(undefined);
       setError(queryError(reason, "Query stopped; engine restart required"));
+      restarting.current = true;
       setGeneration((value) => value + 1);
     }
     if (run)
@@ -410,23 +465,22 @@ export function DataWorkbench({ format, name, size, url }: Props) {
   };
 
   const insertColumn = (field: string) => {
-    const input = editor.current;
-    const column = `"${field.replaceAll('"', '""')}"`;
-    const start = input?.selectionStart ?? query.length;
-    const end = input?.selectionEnd ?? start;
-    const next = `${query.slice(0, start)}${column}${query.slice(end)}`;
-    setQuery(next);
-    requestAnimationFrame(() => {
-      input?.focus();
-      input?.setSelectionRange(start + column.length, start + column.length);
-    });
+    editor.current?.insertIdentifier(field);
   };
 
   const sourceMode =
     format === "parquet"
       ? "Column-pruned range reads"
-      : "Streaming source scan";
+      : format === "sqlite"
+        ? "Isolated in-browser copy"
+        : format === "arrow"
+          ? "In-memory columnar scan"
+          : "Streaming source scan";
+  const engine = format === "sqlite" ? "SQLite" : "DuckDB";
   const busy = phase === "running" || phase === "cancelling";
+  const selectedRelation =
+    session?.relations.find((relation) => relation.name === relationName) ??
+    session?.relations[0];
   const shortName = name.split("/").pop() ?? name;
   return (
     <section className="data-workbench" aria-label={`${name} query workbench`}>
@@ -436,7 +490,7 @@ export function DataWorkbench({ format, name, size, url }: Props) {
           <strong title={shortName}>{shortName}</strong>
         </div>
         <div className="data-workbench-badges">
-          <Label variant="accent">DuckDB</Label>
+          <Label variant="accent">{engine}</Label>
           <span>{format.toUpperCase()}</span>
           <span>{formatBytes(size)}</span>
           <span>{sourceMode}</span>
@@ -447,42 +501,55 @@ export function DataWorkbench({ format, name, size, url }: Props) {
         <div className="data-query-heading">
           <strong>SQL query</strong>
           <span className="muted" id={helpId}>
-            Read-only · ⌘/Ctrl + Enter to run
+            Read-only · Ctrl+Space completes · ⌘/Ctrl+Enter runs
           </span>
         </div>
-        <textarea
+        <SqlEditor
           ref={editor}
-          aria-describedby={helpId}
-          aria-label="SQL query"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
+          defaultRelation={selectedRelation?.name}
+          describedBy={helpId}
+          format={format}
+          relations={session?.relations ?? []}
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-              event.preventDefault();
-              void execute(event.shiftKey ? "explain" : "query");
-            }
-          }}
+          onChange={setQuery}
+          onRun={(explain) => void execute(explain ? "explain" : "query")}
         />
         <div className="data-query-actions">
           <div className="data-query-presets" aria-label="Query examples">
-            <button type="button" onClick={() => setQuery(defaultDataQuery())}>
+            <button
+              type="button"
+              onClick={() =>
+                setQuery(
+                  selectedRelation
+                    ? defaultDataQuery(selectedRelation.name)
+                    : defaultDataQuery(),
+                )
+              }
+            >
               Sample rows
             </button>
             <button
               type="button"
-              onClick={() => setQuery("SELECT count(*) AS rows\nFROM data")}
+              onClick={() =>
+                setQuery(
+                  `SELECT count(*) AS rows\nFROM ${sqlIdentifier(selectedRelation?.name ?? "data")}`,
+                )
+              }
             >
               Count rows
             </button>
             <button
               type="button"
-              disabled={!session?.schema.length}
-              onClick={() =>
-                session && setQuery(profileDataQuery(session.schema))
-              }
+              disabled={!selectedRelation?.fields.length}
+              onClick={() => {
+                if (session && selectedRelation)
+                  setQuery(
+                    session.profileQuery(
+                      selectedRelation.fields,
+                      selectedRelation.name,
+                    ),
+                  );
+              }}
             >
               Profile columns
             </button>
@@ -575,7 +642,12 @@ export function DataWorkbench({ format, name, size, url }: Props) {
         </div>
       )}
       <div className="data-workbench-body">
-        <Schema fields={session?.schema ?? []} onInsert={insertColumn} />
+        <Schema
+          relations={session?.relations ?? []}
+          selected={selectedRelation?.name}
+          onInsert={insertColumn}
+          onSelect={setRelationName}
+        />
         <div className="data-results">
           <div className="data-results-toolbar">
             <SegmentedControl
@@ -656,7 +728,9 @@ export function DataWorkbench({ format, name, size, url }: Props) {
         {MAX_QUERY_ROWS.toLocaleString()} rows.{" "}
         {format === "parquet"
           ? "Large Parquet files can skip untouched columns and row groups."
-          : "CSV and JSON scan source bytes; project only needed columns and use Parquet for repeated large-data analysis."}
+          : format === "sqlite" || format === "arrow"
+            ? `${format === "sqlite" ? "SQLite" : "Arrow"} files load into isolated browser memory and are limited to the interactive preview budget.`
+            : "CSV and JSON scan source bytes; project only needed columns and use Parquet for repeated large-data analysis."}
       </footer>
     </section>
   );

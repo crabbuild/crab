@@ -3,7 +3,10 @@ import { tableFromArrays, tableToIPC } from "apache-arrow";
 import { strToU8, zipSync } from "fflate";
 import { parquetWriteBuffer } from "hyparquet-writer";
 import initSqlJs from "sql.js";
-import { expectNoAccessibilityViolations } from "./accessibility";
+import {
+  expectNoAccessibilityViolations,
+  selectDarkTheme,
+} from "./accessibility";
 
 const oid = "a".repeat(40);
 const pathOid = "b".repeat(40);
@@ -1051,7 +1054,9 @@ test("format-aware previews explore data, office files, media, and databases loc
   const SQL = await initSqlJs();
   const database = new SQL.Database();
   database.run(
-    "CREATE TABLE runs (id INTEGER, model TEXT, score REAL); INSERT INTO runs VALUES (1, 'large', 0.98);",
+    "CREATE TABLE runs (id INTEGER, model TEXT, score REAL); " +
+      "INSERT INTO runs VALUES (1, 'large', 0.98); " +
+      "CREATE VIEW top_runs AS SELECT * FROM runs WHERE score > 0.95;",
   );
   const sqlite = database.export();
   database.close();
@@ -1099,9 +1104,17 @@ test("format-aware previews explore data, office files, media, and databases loc
     name: "metrics.csv query workbench",
   });
   await expect(csvWorkbench.getByRole("cell", { name: "large" })).toBeVisible();
-  await csvWorkbench
-    .getByRole("textbox", { name: "SQL query" })
-    .fill("SELECT model, score FROM data WHERE score > 0.95");
+  const csvEditor = csvWorkbench.getByRole("textbox", { name: "SQL query" });
+  await expect(csvWorkbench.locator(".cm-editor")).toBeVisible();
+  await expect(
+    csvWorkbench.locator(".cm-line span").filter({ hasText: "SELECT" }).first(),
+  ).toHaveCSS("font-weight", "600");
+  await csvEditor.fill("SELECT sc");
+  await csvEditor.press("Control+Space");
+  await expect(page.getByRole("option", { name: /score/ })).toBeVisible();
+  await csvEditor.press("Enter");
+  await expect(csvEditor).toHaveText("SELECT score");
+  await csvEditor.fill("SELECT model, score FROM data WHERE score > 0.95");
   await csvWorkbench.getByRole("button", { name: "Run query" }).click();
   await expect(csvWorkbench.getByRole("cell", { name: "0.98" })).toBeVisible();
   await csvWorkbench.getByRole("button", { name: "Chart" }).click();
@@ -1165,11 +1178,48 @@ test("format-aware previews explore data, office files, media, and databases loc
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("runs.sqlite")}&kind=Blob`,
   );
+  const sqliteWorkbench = page.getByRole("region", {
+    name: "runs.sqlite query workbench",
+  });
   await expect(
-    page.getByRole("complementary", { name: "Database objects" }),
-  ).toContainText("runs");
-  await expect(page.getByRole("cell", { name: "large" })).toBeVisible();
-  await expect(page.getByRole("cell", { name: "0.98" })).toBeVisible();
+    sqliteWorkbench.getByRole("complementary", { name: "Dataset schema" }),
+  ).toContainText("top_runs");
+  await expect(
+    sqliteWorkbench.getByRole("cell", { name: "large" }),
+  ).toBeVisible();
+  const sqliteEditor = sqliteWorkbench.getByRole("textbox", {
+    name: "SQL query",
+  });
+  await sqliteEditor.fill("SELECT sc");
+  await sqliteEditor.press("Control+Space");
+  const sqliteCompletion = page.getByRole("option", { name: /score/ });
+  await expect(sqliteCompletion).toBeVisible();
+  await sqliteCompletion.click();
+  await expect(sqliteEditor).toHaveText("SELECT score");
+  await sqliteWorkbench.getByRole("button", { name: "top_runs" }).click();
+  await sqliteWorkbench.getByRole("button", { name: "Sample rows" }).click();
+  await expect(sqliteEditor).toContainText('FROM "top_runs"');
+  await sqliteWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(
+    sqliteWorkbench.getByRole("cell", { name: "large" }),
+  ).toBeVisible();
+  await sqliteEditor.fill("SELECT avg(score) AS average FROM runs");
+  await sqliteWorkbench.getByRole("button", { name: "Run query" }).click();
+  await expect(
+    sqliteWorkbench.getByRole("columnheader", { name: "average" }),
+  ).toBeVisible();
+  await expect(
+    sqliteWorkbench.getByRole("cell", { name: "0.98" }),
+  ).toBeVisible();
+  await sqliteEditor.fill(
+    "WITH RECURSIVE count_up(value) AS (VALUES(0) UNION ALL SELECT value + 1 FROM count_up WHERE value < 100000000) SELECT sum(value) FROM count_up",
+  );
+  await sqliteWorkbench.getByRole("button", { name: "Run query" }).click();
+  await sqliteWorkbench.getByRole("button", { name: "Stop query" }).click();
+  await expect(sqliteWorkbench.getByText(/Query stopped/)).toBeVisible();
+  await expect(
+    sqliteWorkbench.getByRole("button", { name: "Run query" }),
+  ).toBeEnabled();
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("features.parquet")}&kind=Blob`,
@@ -1192,15 +1242,15 @@ test("format-aware previews explore data, office files, media, and databases loc
     name: "SQL query",
   });
   await parquetQuery.fill("SELECT  FROM data");
-  await parquetQuery.evaluate((element) =>
-    (element as HTMLTextAreaElement).setSelectionRange(7, 7),
-  );
+  await parquetQuery.press("Home");
+  for (let index = 0; index < 7; index += 1)
+    await parquetQuery.press("ArrowRight");
   await parquetWorkbench.getByTitle("Insert score into the query").click();
-  await expect(parquetQuery).toHaveValue('SELECT "score" FROM data');
+  await expect(parquetQuery).toHaveText('SELECT "score" FROM data');
   await parquetWorkbench
     .getByRole("button", { name: "Profile columns" })
     .click();
-  await expect(parquetQuery).toHaveValue(/approx_count_distinct/);
+  await expect(parquetQuery).toContainText("approx_count_distinct");
   await parquetWorkbench.getByRole("button", { name: "Run query" }).click();
   const profileColumn = parquetWorkbench.getByRole("columnheader", {
     name: "column_name",
@@ -1218,9 +1268,19 @@ test("format-aware previews explore data, office files, media, and databases loc
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("batch.arrow")}&kind=Blob`,
   );
+  const arrowWorkbench = page.getByRole("region", {
+    name: "batch.arrow query workbench",
+  });
+  await expect(arrowWorkbench).toContainText("2 source rows");
+  await arrowWorkbench
+    .getByRole("textbox", { name: "SQL query" })
+    .fill("SELECT model FROM data WHERE run = 2");
+  await arrowWorkbench.getByRole("button", { name: "Run query" }).click();
   await expect(
-    page.getByRole("region", { name: "Arrow dataset data explorer" }),
-  ).toContainText("large");
+    arrowWorkbench.getByRole("cell", { name: "large" }),
+  ).toBeVisible();
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
 
   await page.goto(
     `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("handbook.pdf")}&kind=Blob`,

@@ -10,8 +10,9 @@ import {
   explainReadQuery,
   MAX_QUERY_ROWS,
   profileDataQuery,
+  profileSqliteDataQuery,
   serializeQueryResult,
-} from "./duckdb-query";
+} from "./data-query";
 
 describe("file preview classification", () => {
   it.each([
@@ -42,7 +43,10 @@ describe("interactive data queries", () => {
     ).toBe(
       `SELECT * FROM (WITH sample AS (SELECT 1 AS id) SELECT * FROM sample) AS crab_query_result LIMIT ${MAX_QUERY_ROWS + 1}`,
     );
-    expect(defaultDataQuery()).toContain("FROM data");
+    expect(defaultDataQuery()).toContain('FROM "data"');
+    expect(defaultDataQuery('experiment "runs"')).toContain(
+      'FROM "experiment ""runs"""',
+    );
   });
 
   it("accepts semicolons in values and discards a terminal separator", () => {
@@ -62,6 +66,14 @@ describe("interactive data queries", () => {
         { name: 'run "id"', type: "INTEGER", nullable: false },
       ]),
     ).toContain('count("run ""id""") AS populated');
+    expect(
+      profileSqliteDataQuery(
+        [{ name: "run", type: "INTEGER", nullable: false }],
+        "experiment runs",
+      ),
+    ).toContain(
+      'count(DISTINCT "run") AS distinct_values FROM "experiment runs"',
+    );
   });
 
   it.each([

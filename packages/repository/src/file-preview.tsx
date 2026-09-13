@@ -20,13 +20,7 @@ import {
   parseOffice,
   type OfficePreview,
 } from "./file-preview-office";
-import {
-  loadArrow,
-  loadGguf,
-  loadNumpy,
-  loadSqlite,
-  type DatabasePreview,
-} from "./file-preview-loaders";
+import { loadGguf, loadNumpy } from "./file-preview-loaders";
 import { PdfPreview } from "./pdf-preview";
 import { GenericFilePreview } from "./generic-file-preview";
 
@@ -399,54 +393,6 @@ function OfficeFilePreview({
   );
 }
 
-function DatabaseFilePreview({
-  bytes,
-  name,
-}: {
-  bytes: Uint8Array;
-  name: string;
-}) {
-  const [selected, setSelected] = useState(0);
-  return (
-    <AsyncValue cacheKey={name} load={() => loadSqlite(bytes)}>
-      {(value: DatabasePreview) => {
-        const table = value.tables[Math.min(selected, value.tables.length - 1)];
-        if (!table)
-          return (
-            <PreviewNotice>
-              This database has no user tables or views.
-            </PreviewNotice>
-          );
-        return (
-          <div className="database-preview">
-            <aside aria-label="Database objects">
-              <strong>Database objects</strong>
-              {value.tables.map((item, index) => (
-                <button
-                  key={item.name}
-                  className={index === selected ? "active" : ""}
-                  aria-current={index === selected ? "page" : undefined}
-                  onClick={() => setSelected(index)}
-                >
-                  <span>{item.name}</span>
-                  <small>{item.type}</small>
-                </button>
-              ))}
-            </aside>
-            <div className="database-table">
-              <details>
-                <summary>Schema for {table.name}</summary>
-                <pre>{table.definition || "No stored schema statement"}</pre>
-              </details>
-              <DataTable data={table.data} name={table.name} />
-            </div>
-          </div>
-        );
-      }}
-    </AsyncValue>
-  );
-}
-
 function StructuredBinaryPreview({
   descriptor,
   bytes,
@@ -460,8 +406,6 @@ function StructuredBinaryPreview({
     return <GenericFilePreview bytes={bytes} name={name} />;
   if (descriptor.kind === "office")
     return <OfficeFilePreview bytes={bytes} name={name} />;
-  if (descriptor.kind === "sqlite")
-    return <DatabaseFilePreview bytes={bytes} name={name} />;
   if (descriptor.kind === "safetensors")
     try {
       return <DataTable data={parseSafetensors(bytes)} name="Model tensors" />;
@@ -484,11 +428,9 @@ function StructuredBinaryPreview({
       </AsyncValue>
     );
   const loader =
-    descriptor.kind === "arrow"
-      ? () => loadArrow(bytes)
-      : descriptor.kind === "numpy"
-        ? () => loadNumpy(bytes, name)
-        : () => archiveInventory(bytes, extension(name));
+    descriptor.kind === "numpy"
+      ? () => loadNumpy(bytes, name)
+      : () => archiveInventory(bytes, extension(name));
   return (
     <AsyncValue cacheKey={`${descriptor.kind}:${name}`} load={loader}>
       {(value) => <DataTable data={value} name={descriptor.label} />}
@@ -539,6 +481,17 @@ function BinaryPreview({ descriptor, blobUrl, name, size, ...props }: Props) {
   if (["image", "pdf", "audio", "video"].includes(descriptor.kind))
     return (
       <MediaPreview descriptor={descriptor} bytes={state.bytes} name={name} />
+    );
+  if (descriptor.kind === "sqlite" || descriptor.kind === "arrow")
+    return (
+      <DataWorkbench
+        key={blobUrl}
+        bytes={state.bytes}
+        format={descriptor.kind}
+        name={name}
+        size={size}
+        url={blobUrl}
+      />
     );
   return (
     <StructuredBinaryPreview
