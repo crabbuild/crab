@@ -469,10 +469,18 @@ jobs:
           jq --exit-status \
             '.members | length == 2 and any(.subject == "ci-owner" and .access == "admin") and any(.subject == "ci-reader" and .access == "read")' \
             "${RUNNER_TEMP}/crab-http-server-updated-members.json"
-          curl --fail --silent --show-error \
-            --dump-header "${RUNNER_TEMP}/crab-http-server-headers" \
-            --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \
-            http://127.0.0.1:8788/api/repos
+          for _ in {1..15}; do
+            curl --fail --silent --show-error \
+              --dump-header "${RUNNER_TEMP}/crab-http-server-headers" \
+              --output "${RUNNER_TEMP}/crab-http-server-repositories.json" \
+              http://127.0.0.1:8788/api/repos
+            if jq --exit-status \
+              '.repositories | any(.owner == "demo" and .name == "stdin-members")' \
+              "${RUNNER_TEMP}/crab-http-server-repositories.json" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
           grep --extended-regexp --ignore-case \
             '^x-request-id: [0-9a-f-]{36}[[:space:]]*$' \
             "${RUNNER_TEMP}/crab-http-server-headers"
@@ -481,7 +489,7 @@ jobs:
               http://127.0.0.1:8789/metrics \
             | grep -F 'crab_http_server_requests_total{method="get",outcome="2xx"}'
           jq --exit-status \
-            '.repositories | map(select(.owner == "demo" and .name == "hello")) | length == 1' \
+            '.repositories | map(select(.owner == "demo" and (.name == "hello" or .name == "stdin-members"))) | length == 2' \
             "${RUNNER_TEMP}/crab-http-server-repositories.json"
 
           crates/crab-http-server/tests/qualify_lfs_range_resume.sh \
