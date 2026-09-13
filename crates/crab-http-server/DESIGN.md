@@ -8,7 +8,9 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 > **Current status:** The runtime has a provider-neutral storage root, durable
 > CAS repository catalog, shared identity state, dynamic replica refresh,
 > private probes and bounded Prometheus metrics, a local Compose profile, and
-> hardened Helm profiles for EKS/GKE/AKS. Container CI also exercises one
+> hardened Helm profiles for EKS/GKE/AKS. The chart includes a fresh-workload
+> catalog test, and one portable live gate can exercise two replicas and a rolling
+> replacement. Container CI also exercises one
 > abrupt native receive and an isolated complete-root cold restore. The ECS
 > Fargate profile cannot preserve the full shutdown budget. Static artifacts
 > and local RustFS do not constitute live cloud qualification. Additional
@@ -208,7 +210,52 @@ cache and coordination identities from colliding across clouds.
 | AKS | Microsoft Entra Workload ID | `az://account/container/root` |
 | ECS/Fargate | ECS task role | `s3://bucket/root` |
 
-Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. S3 and GCS retain noncurrent root versions for a configurable 90-day recovery window and abort multipart uploads left incomplete for one day. Azure repository versions remain unexpired because its available lifecycle condition measures version creation rather than the transition to noncurrent state; using it as the same recovery window could discard the previous value immediately after a late first update. One Helm chart generates server TOML from typed storage and identity values, or mounts one explicitly selected external ConfigMap. It owns the Deployment, Service, ServiceAccount, disruption budget, probes, security context, topology spread, scratch volume, ingress NetworkPolicy, optional TLS ingress, optional autoscaling, optional Prometheus Operator `PodMonitor` and alerts, and digest-pinned image. Terraform emits a non-secret provider overlay containing the storage URL, workload-identity annotations or labels, and required environment; a provider-neutral team overlay supplies the image, OIDC, ingress, and monitoring policy. The chart owns ingress isolation but intentionally leaves provider-specific egress to the cluster: every replica must reach DNS, its workload-identity endpoint, object storage, and the configured OIDC issuer. The chart requires network isolation and rejects public ingress or metrics discovery without an explicit allowed source. The private ClusterIP Service exposes port 8788 only inside the cluster, and TLS ingress is the only supported public path; port 8789 remains private for liveness, storage-aware readiness, and Prometheus metrics. The `PodMonitor` selects pods directly without creating a management Service. Metrics retain request observations through response-body completion and use only bounded method, outcome, and admission-class labels. Baseline rules isolate the release by namespace and pod labels and cover missing telemetry, catalog health, refresh failure, Git admission, and HTTP error rate. On termination, Kubernetes marks the endpoint non-ready while a 15-second pre-stop delay keeps the process serving; the remaining pod grace period covers Crab's complete ten-minute drain.
+Provider Terraform roots create dedicated versioned storage and workload
+identity for an existing cluster. They emit a non-secret overlay containing the
+storage URL, identity wiring, and required environment. A provider-neutral team
+overlay supplies the image, OIDC, ingress, and monitoring policy.
+
+One Helm chart owns the runtime contract:
+
+- Deployment, ServiceAccount, private ClusterIP Service, and disruption budget
+- Security context, topology spread, bounded scratch, and graceful termination
+- Storage-aware probes and a fresh-workload catalog test
+- TLS ingress plus mandatory source-restricted NetworkPolicy
+- Optional autoscaling, private `PodMonitor`, and bounded baseline alerts
+- An immutable image digest and typed generated configuration
+
+The chart owns ingress isolation but leaves provider-specific egress to the
+cluster. Every replica must reach DNS, its workload-identity endpoint, object
+storage, and the configured OIDC issuer. Port 8789 remains private for probes
+and metrics; the public route reaches only port 8788 through TLS ingress.
+GKE Standard overlays also select metadata-server-enabled nodes; Autopilot
+overlays omit the Standard-only selector.
+Empty or match-all ingress peers and unrestricted IPv4 or IPv6 CIDRs fail
+rendering, so an enabled public or metrics path always names a bounded source.
+
+```mermaid
+flowchart LR
+    Terraform[Provider Terraform] --> Provider[Non-secret provider values]
+    Team[Team values + Secret] --> Helm[Portable Helm release]
+    Provider --> Helm
+    Helm --> Fresh[Fresh-pod catalog test]
+    Helm --> Replicas[Two-zone replicas]
+    Replicas --> Live[Cross-replica live gate]
+    Live --> Receipt[Secret-free JSON receipt]
+```
+
+S3 and GCS retain noncurrent root versions for a configurable 90-day recovery
+window and abort multipart uploads left incomplete for one day. Azure versions
+remain unexpired because Azure's available lifecycle condition measures age
+from version creation, not from the transition to noncurrent state.
+
+On termination, Kubernetes removes the endpoint, waits 15 seconds for routing
+to converge, then gives Crab its complete ten-minute drain budget. The live
+gate checks provider identity and placement, every pod's readiness, public OIDC
+initiation, direct token use against two replicas, cross-replica Git and LFS,
+lock-owner publication, uninterrupted reads during rollout, and byte-identical
+state after replacement. Its JSON receipt binds the evidence to the provider,
+immutable image, repository, commit, payload digest, and completion time.
 
 Server releases use their own annotated `crab-http-server-vX.Y.Z` tag and do
 not inherit the CLI's version tag. The tag must match the server crate, resolve
@@ -847,6 +894,7 @@ The design is backed by component, composition, provider, and independent-client
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
 | HTTP composition | `crab-http-server::receive` | `receive_tests.rs`, `receive_fault_tests.rs`, authentication tests, and RustFS ignored tests |
+| Multi-cloud runtime | Helm chart and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod catalog read plus recorded EKS, GKE, or AKS cross-replica rollout receipt |
 
 ### Interpret the live fixtures
 
@@ -889,7 +937,11 @@ The current implementation does not satisfy these production claims:
 - **Active-active coexistence:** Versioned coordinator writers do not share the native journal namespace gate or commitment authority.
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
 - **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
-- **Production scale:** Static EKS/GKE/AKS profiles and the local cold-restore drill do not establish Kubernetes-size push throughput, temporary-disk sizing, provider latency, cross-replica failover, version-selected provider restore, or regional failure behavior. The ECS stop limit is shorter than the maximum operation budget.
+- **Production scale:** The portable live gate qualifies one cross-replica
+  rollout when an operator runs it, but no EKS/GKE/AKS receipt is checked in.
+  It does not establish Kubernetes-size push throughput, temporary-disk sizing,
+  provider latency, version-selected provider restore, or regional failure
+  behavior. The ECS stop limit is shorter than the maximum operation budget.
 
 Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabricated protected plan, fallback reader, or OID rewrite. Each shortcut violates an ownership or outcome invariant above.
 

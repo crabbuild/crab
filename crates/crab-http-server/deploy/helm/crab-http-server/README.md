@@ -43,7 +43,7 @@ Use one workload identity mechanism:
 | Platform | Identity mechanism | Storage URL |
 | --- | --- | --- |
 | EKS | [EKS Pod Identity](https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html) | `s3://bucket/root` |
-| GKE | [Workload Identity Federation for GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) | `gs://bucket/root` |
+| GKE | [Workload Identity Federation for GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/workload-identity); metadata-server node selector on Standard only | `gs://bucket/root` |
 | AKS | [Microsoft Entra Workload ID](https://learn.microsoft.com/en-us/azure/aks/workload-identity-deploy-cluster) | `az://account/container/root` |
 
 Grant access only below the configured root. Don’t put static cloud keys in the Kubernetes Secret.
@@ -148,6 +148,10 @@ Authenticate with `helm registry login ghcr.io` first when the package is
 private. Choose `gke-values.example.yaml` or `aks-values.example.yaml` for
 those platforms.
 
+The GKE example targets Standard clusters and selects metadata-server-enabled
+nodes. Remove its `nodeSelector` on Autopilot. Terraform's required
+`gke_cluster_mode` input generates the correct form automatically.
+
 | Overlay | Usually owned by | Contains |
 | --- | --- | --- |
 | Provider | Platform team / Terraform | Storage root and workload-identity wiring |
@@ -226,7 +230,14 @@ kubectl --namespace crab exec deployment/crab-http-server -- \
   crab-http-server --config /etc/crab/http-server/server.toml healthcheck
 kubectl --namespace crab exec deployment/crab-http-server -- \
   crab-http-server --config /etc/crab/http-server/server.toml repository list
+helm test crab-http-server --namespace crab --logs --timeout 3m
 ```
+
+The Helm test starts a fresh hardened pod with the release ServiceAccount,
+configuration, Secret, cloud environment, and immutable image. It succeeds
+only when that new workload can authenticate to object storage and read the
+durable catalog. It does not send traffic through ingress; use the live
+qualification below for that boundary.
 
 ## Create the first repository
 
@@ -240,6 +251,56 @@ kubectl --namespace crab exec deployment/crab-http-server -- \
 ```
 
 Every healthy replica discovers the new record within five seconds. Use `repository adopt` instead when the target prefix already contains a canonical Crab repository.
+
+## Qualify the live deployment
+
+Create a dedicated qualification repository, sign in through OIDC, and issue a
+write-scoped Git token for it. Then run the provider-neutral qualification
+script from a trusted operator workstation with `kubectl`, Git LFS, `curl`, and
+`jq` installed:
+
+```sh
+export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
+export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
+
+bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+  eks crab crab-http-server https://git.example.com \
+  your_team qualification /secure/crab-eks-qualification.json
+```
+
+Replace `eks` with `gke` or `aks`. The explicit rollout approval is required
+because this test creates and retains a uniquely named branch in the dedicated
+repository and performs a rolling restart of the Deployment. Never run it
+against a repository where qualification branches are forbidden by policy.
+
+The test fails unless it can prove all of these boundaries:
+
+- At least two ready replicas run on separate nodes and zones whose provider
+  identities match the declared EKS, GKE, or AKS target
+- The Deployment uses an immutable digest, a private ClusterIP Service, the
+  chart NetworkPolicy, TLS ingress, hardened containers, and no automatic
+  Kubernetes API token
+- Every existing and replacement pod passes storage-backed readiness
+- OIDC login begins through the public HTTPS ingress with a secure flow cookie
+  and request ID
+- A write-scoped Git token works directly against two different replicas
+- A Git LFS object written through one replica is byte-identical through
+  another replica
+- An owner-held LFS lock permits its write and survives shared storage access
+- Public Git reads remain continuously available during a zero-unavailable
+  rolling replacement
+- Every pod is replaced and the committed branch remains byte-identical
+
+The script writes a secret-free JSON evidence receipt containing the provider,
+image digest, repository, qualification branch and commit, payload digest,
+rollout probes, and completion time. Retain it with the release record. The
+Git token remains only in process memory and must still be rotated or revoked
+after qualification according to team policy.
+
+An unpacked OCI chart contains the same script at
+`crab-http-server/qualification/qualify-kubernetes.sh`, so this gate does not
+require a source checkout. Invoke it with `bash`; Helm packages regular files
+without preserving their executable mode.
 
 During termination, Kubernetes marks the pod endpoint non-ready before running
 the chart's 15-second pre-stop delay. Crab keeps serving during that interval so
@@ -368,6 +429,12 @@ ingress. This chart-owned policy intentionally has no `Egress` policy type; any
 cluster-owned egress policy must preserve the destinations above. The Service
 is always private `ClusterIP`; public traffic has one supported path through
 the TLS ingress.
+
+Every public or metrics peer must contain a nonempty label or expression
+selector, or a bounded CIDR. Empty peers, selectors that match everything by
+themselves, and the unrestricted `0.0.0.0/0` and `::/0` CIDRs fail rendering.
+A namespace selector may remain empty only when a pod selector narrows the
+source across namespaces.
 
 ## Roll out configuration and secret changes
 

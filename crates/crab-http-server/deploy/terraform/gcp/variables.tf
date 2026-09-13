@@ -18,6 +18,16 @@ variable "bucket_location" {
   type        = string
 }
 
+variable "gke_cluster_mode" {
+  description = "GKE scheduling mode: standard requires the metadata-server node selector; autopilot rejects it."
+  type        = string
+
+  validation {
+    condition     = contains(["standard", "autopilot"], var.gke_cluster_mode)
+    error_message = "gke_cluster_mode must be standard or autopilot."
+  }
+}
+
 variable "root_prefix" {
   description = "Nonempty application root inside the bucket."
   type        = string

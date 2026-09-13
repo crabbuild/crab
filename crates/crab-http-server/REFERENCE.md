@@ -1178,7 +1178,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
 | Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
-| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml` and `.github/workflows/http-server-release.yml` |
+| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml`, `.github/workflows/http-server-release.yml`, the Helm catalog test, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` |
 
 ### Understand what has been qualified
 
@@ -1196,6 +1196,10 @@ Current local and CI evidence includes:
 - Native Git rejection when another subject owns a changed path, including a change-and-revert history whose final tree matches the original
 
 These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. Neither test establishes every crash phase, multi-instance global admission, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
+
+The packaged Kubernetes gate makes live evidence repeatable, but its existence
+is not provider qualification. Only a successful EKS, GKE, or AKS run and its
+unaltered JSON receipt establish that release's cross-replica rollout result.
 
 ### Keep qualification evidence honest
 
@@ -1215,7 +1219,7 @@ The server is complete only when a real account can perform the workflow and obs
 
 | Surface | Required evidence | Status |
 | --- | --- | --- |
-| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, and reproducible container | Implemented; live rollout qualification remains |
+| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, reproducible container, and portable cross-replica gate | Implemented; each provider release still requires a recorded live run |
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
@@ -1238,7 +1242,7 @@ The remaining production gaps include:
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
-- Live upgrade, rollback, alert-tuning, and disaster-recovery qualification
+- Recorded EKS, GKE, and AKS live runs; rollback, alert-tuning, and disaster-recovery qualification
 - First tagged server image/chart publication and registry-attestation verification
 
 ## Ownership

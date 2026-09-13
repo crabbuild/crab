@@ -1,10 +1,43 @@
 mock_provider "google" {}
 
 variables {
-  project_id      = "test-project"
-  region          = "us-west1"
-  bucket_name     = "test-crab-http-server"
-  bucket_location = "us-west1"
+  project_id       = "test-project"
+  region           = "us-west1"
+  bucket_name      = "test-crab-http-server"
+  bucket_location  = "us-west1"
+  gke_cluster_mode = "standard"
+}
+
+run "renders_standard_metadata_server_placement" {
+  command = plan
+
+  assert {
+    condition     = output.gke_node_selector["iam.gke.io/gke-metadata-server-enabled"] == "true"
+    error_message = "GKE Standard Helm values must select metadata-server-enabled nodes."
+  }
+}
+
+run "omits_the_standard_selector_for_autopilot" {
+  command = plan
+
+  variables {
+    gke_cluster_mode = "autopilot"
+  }
+
+  assert {
+    condition     = length(output.gke_node_selector) == 0
+    error_message = "GKE Autopilot Helm values must omit the rejected Standard node selector."
+  }
+}
+
+run "rejects_an_unknown_cluster_mode" {
+  command = plan
+
+  variables {
+    gke_cluster_mode = "unknown"
+  }
+
+  expect_failures = [var.gke_cluster_mode]
 }
 
 run "bounds_recovery_versions_and_multipart_uploads" {

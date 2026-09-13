@@ -1,4 +1,6 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- include "crab-http-server.validateNetworkPeers" (dict "name" "networkPolicy.publicIngressFrom" "peers" .Values.networkPolicy.publicIngressFrom) }}
+{{- include "crab-http-server.validateNetworkPeers" (dict "name" "networkPolicy.metricsIngressFrom" "peers" .Values.networkPolicy.metricsIngressFrom) }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

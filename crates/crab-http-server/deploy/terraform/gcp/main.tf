@@ -1,6 +1,9 @@
 locals {
   auth_prefix = "${var.root_prefix}/.crab/http-server/v1/auth/"
   ksa_member  = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${var.service_account_name}]"
+  gke_node_selector = var.gke_cluster_mode == "standard" ? {
+    "iam.gke.io/gke-metadata-server-enabled" = "true"
+  } : {}
 }
 
 resource "google_storage_bucket" "repositories" {

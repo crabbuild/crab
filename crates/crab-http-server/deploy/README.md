@@ -146,8 +146,9 @@ Complete the setup in this order:
 3. Register the OpenID Connect (OIDC) callback `https://git.example.com/auth/callback`.
 4. Export Terraform's generated provider values and edit the provider-neutral team values file.
 5. Create the Kubernetes Secret and install the chart.
-6. Create the first repository through a running pod.
-7. Run the live qualification gates before admitting critical repositories.
+6. Run `helm test` to prove a fresh workload can read the catalog through its cloud workload identity.
+7. Create the first repository through a running pod.
+8. Run the portable multi-replica qualification before admitting critical repositories.
 
 Do not grant team members direct write credentials for the storage root. Git,
 LFS, browser, and administration traffic must pass through the server so its

@@ -109,7 +109,13 @@ kubectl --namespace crab logs deployment/crab-http-server \
   --all-pods=true --since=10m
 kubectl --namespace crab exec deployment/crab-http-server -- \
   crab-http-server --config /etc/crab/http-server/server.toml repository list
+helm test crab-http-server --namespace crab --logs --timeout 3m
 ```
+
+The Helm test uses a fresh pod and the release workload identity to read the
+catalog. A passing test proves that a newly scheduled workload can load the
+configuration, Secret, cloud identity, and durable root; it does not prove the
+public ingress or cross-replica data plane.
 
 ## Observe requests and capacity
 
@@ -240,6 +246,34 @@ Before planned cluster or node maintenance:
 5. Continue one pod at a time.
 
 AWS Fargate limits a container stop timeout to 120 seconds. The checked-in ECS profile cannot preserve Crab’s full ten-minute operation budget during task replacement. Treat Fargate as an evaluation profile until abrupt-crash and replacement qualification closes that gap.
+
+## Run the portable live qualification
+
+After preflight and before admitting critical repositories, create a dedicated
+qualification repository and issue a short-lived write token through **Git
+access**. Run the same provider-neutral test on EKS, GKE, and AKS:
+
+```sh
+export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
+export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
+
+bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+  gke crab crab-http-server https://git.example.com \
+  your_team qualification /secure/crab-gke-qualification.json
+```
+
+The rollout approval is deliberately explicit. The script checks the rendered
+runtime controls, provider-matching placement across nodes and zones, readiness
+on every pod, public OIDC initiation, direct authenticated Git traffic through
+two distinct replicas, byte-identical LFS transfer, lock-owner publication, and
+uninterrupted Git discovery while Kubernetes replaces every pod. It leaves a
+unique branch as durable evidence and writes a secret-free JSON receipt. Review
+and retain that receipt with the image and chart attestations; revoke the
+qualification token afterward.
+
+A failed run is a failed release gate. Preserve pod events, ingress logs,
+application request IDs, the evidence path, and the unique branch before
+rollback. Do not edit the JSON receipt to turn a partial run into a pass.
 
 ## Qualify backup and restore
 

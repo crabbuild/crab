@@ -18,6 +18,11 @@ output "service_account_name" {
   value       = var.service_account_name
 }
 
+output "gke_node_selector" {
+  description = "Mode-correct Helm nodeSelector for GKE Workload Identity Federation."
+  value       = local.gke_node_selector
+}
+
 output "recovery_version_retention_days" {
   description = "Configured noncurrent object-version recovery window."
   value       = var.recovery_version_retention_days
@@ -35,5 +40,6 @@ output "helm_values" {
         "iam.gke.io/gcp-service-account" = google_service_account.server.email
       }
     }
+    nodeSelector = local.gke_node_selector
   })
 }

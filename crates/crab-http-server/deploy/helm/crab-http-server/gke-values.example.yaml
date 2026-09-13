@@ -5,3 +5,8 @@ serviceAccount:
   name: crab-http-server
   annotations:
     iam.gke.io/gcp-service-account: crab-http-server@example.iam.gserviceaccount.com
+
+# Required on GKE Standard node pools that use Workload Identity Federation.
+# Remove this selector for Autopilot, which enables the metadata server itself.
+nodeSelector:
+  iam.gke.io/gke-metadata-server-enabled: "true"

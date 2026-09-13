@@ -75,3 +75,23 @@ client_secret_file = "/run/secrets/crab/oidc-client-secret"
 {{- end }}
 state_key_file = "/run/secrets/crab/state-key"
 {{- end }}
+
+{{- define "crab-http-server.validateNetworkPeers" -}}
+{{- $name := .name -}}
+{{- range $index, $peer := .peers -}}
+{{- $cidr := "" -}}
+{{- if hasKey $peer "ipBlock" -}}
+{{- $cidr = default "" (get (get $peer "ipBlock") "cidr") -}}
+{{- if hasSuffix "/0" $cidr -}}
+{{- fail (printf "%s[%d] must not admit an unrestricted CIDR" $name $index) -}}
+{{- end -}}
+{{- end -}}
+{{- $namespace := default dict (get $peer "namespaceSelector") -}}
+{{- $pod := default dict (get $peer "podSelector") -}}
+{{- $namespaceRestricted := or (not (empty (get $namespace "matchLabels"))) (not (empty (get $namespace "matchExpressions"))) -}}
+{{- $podRestricted := or (not (empty (get $pod "matchLabels"))) (not (empty (get $pod "matchExpressions"))) -}}
+{{- if not (or (not (empty $cidr)) $namespaceRestricted $podRestricted) -}}
+{{- fail (printf "%s[%d] must contain a restrictive CIDR, namespace selector, or pod selector" $name $index) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}

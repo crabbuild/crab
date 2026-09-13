@@ -42,10 +42,18 @@ jobs:
           helm_image=alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9
           kubeconform_image=ghcr.io/yannh/kubeconform:v0.7.0@sha256:85dbef6b4b312b99133decc9c6fc9495e9fc5f92293d4ff3b7e1b30f5611823c
           prometheus_image=prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996
+          shellcheck_image=koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb
           terraform_image=hashicorp/terraform:1.13.3@sha256:dfb1889a8ee74ada3ddacc48f89b8a0d69f3e114de3d8a2ce15f6a8d3dbfdbe2
 
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
+          bash -n crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh
+          docker run --rm --volume "$PWD:/src:ro" "$shellcheck_image" \
+            /src/crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
+            /src/crates/crab-http-server/tests/qualify_backup_restore.sh \
+            /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
+            /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh
           docker run --rm \
             --volume "$PWD/crates/crab-http-server/deploy/compose.Caddyfile:/etc/caddy/Caddyfile:ro" \
             caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
@@ -78,11 +86,48 @@ jobs:
             grep -F 'terminationGracePeriodSeconds: 630' "${rendered}"
             grep -F -- '- /usr/bin/sleep' "${rendered}"
             grep -F -- '- "15"' "${rendered}"
+            grep -F '"helm.sh/hook": test' "${rendered}"
+            grep -F 'kind: Pod' "${rendered}"
+            grep -F -- '- repository' "${rendered}"
+            grep -F -- '- list' "${rendered}"
             docker run --rm \
               --volume "${rendered}:/manifests/server.yaml:ro" \
               "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
                 /manifests/server.yaml
           done
+
+          gke_autopilot_rendered="${RUNNER_TEMP}/crab-http-server-gke-autopilot.yaml"
+          docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" \
+              --namespace crab \
+              --values "${chart}/team-values.example.yaml" \
+              --values "${chart}/gke-values.example.yaml" \
+              --set-json 'nodeSelector={}' > "${gke_autopilot_rendered}"
+          if grep -F 'iam.gke.io/gke-metadata-server-enabled' \
+            "${gke_autopilot_rendered}"; then
+            echo "GKE Autopilot render retained the Standard-only node selector" >&2
+            exit 1
+          fi
+          docker run --rm \
+            --volume "${gke_autopilot_rendered}:/manifests/server.yaml:ro" \
+            "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
+              /manifests/server.yaml
+
+          grep -F 'azure.workload.identity/use: "true"' \
+            "${RUNNER_TEMP}/crab-http-server-aks-values.example.yaml"
+
+          chart_package_dir="${RUNNER_TEMP}/crab-http-server-chart"
+          mkdir -p "$chart_package_dir"
+          docker run --rm --volume "${PWD}:/src:ro" \
+            --volume "${chart_package_dir}:/out" --workdir /src \
+            "${helm_image}" package "${chart}" --destination /out
+          chart_version="$(sed -n 's/^version: *//p' "${chart}/Chart.yaml")"
+          chart_archive="${chart_package_dir}/crab-http-server-${chart_version}.tgz"
+          test -f "$chart_archive"
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/templates/tests/catalog.yaml'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/qualify-kubernetes.sh'
 
           profile_values=(
             --values "${chart}/team-values.example.yaml"
@@ -217,6 +262,24 @@ jobs:
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set ingress.enabled=true --set ingress.host=git.example.com \
+              --set ingress.tlsSecretName=crab-http-server-tls \
+              --set-json 'networkPolicy.publicIngressFrom=[{"ipBlock":{"cidr":"0.0.0.0/0"}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted unrestricted IPv4 ingress" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set ingress.enabled=true --set ingress.host=git.example.com \
+              --set ingress.tlsSecretName=crab-http-server-tls \
+              --set-json 'networkPolicy.publicIngressFrom=[{"namespaceSelector":{}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted an unrestricted namespace selector" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set ingress.host=other.example.com >/dev/null 2>&1; then
             echo "chart accepted an ingress host that differs from the OIDC public URL" >&2
             exit 1
@@ -225,6 +288,14 @@ jobs:
             "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
               --set metrics.podMonitor.enabled=true >/dev/null 2>&1; then
             echo "chart accepted a metrics scraper without an allowed source" >&2
+            exit 1
+          fi
+          if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \
+            "${helm_image}" template qualification "${chart}" "${profile_values[@]}" \
+              --set metrics.podMonitor.enabled=true \
+              --set-json 'networkPolicy.metricsIngressFrom=[{"ipBlock":{"cidr":"::/0"}}]' \
+              >/dev/null 2>&1; then
+            echo "chart accepted unrestricted IPv6 metrics ingress" >&2
             exit 1
           fi
           if docker run --rm --volume "${PWD}:/src:ro" --workdir /src \

@@ -30,7 +30,7 @@ Authenticate Terraform with an administrator identity that can create storage an
 | Platform | Existing cluster requirement | Terraform input |
 | --- | --- | --- |
 | EKS | Install the EKS Pod Identity Agent | `cluster_name` |
-| GKE | Enable Workload Identity Federation for GKE | `project_id` |
+| GKE | Enable Workload Identity Federation for GKE; enable the metadata server on Standard node pools | `project_id`, `gke_cluster_mode` |
 | AKS | Enable the OIDC issuer and workload identity | `aks_oidc_issuer_url` |
 
 The Azure provider uses Microsoft Entra authentication for Storage operations and disables shared storage-account keys. The provisioning identity therefore needs both resource-management and Blob data-plane permissions.
@@ -47,6 +47,12 @@ terraform -chdir=crates/crab-http-server/deploy/terraform/aws apply
 ```
 
 Replace `aws` with `gcp` or `azure`. Store Terraform state in your organization’s encrypted remote backend with state locking and restricted access. The checked-in roots intentionally omit a backend block so each team can use its existing state platform.
+
+Set `gke_cluster_mode` to `standard` or `autopilot`. The generated Standard
+overlay selects nodes labeled `iam.gke.io/gke-metadata-server-enabled=true`, as
+required for GKE Standard workloads using the metadata server. The Autopilot
+overlay omits that selector because Autopilot enables the metadata server on
+every node and rejects the Standard-only selector.
 
 The AWS and GCP tests use mocked providers to prove the recovery-version and
 incomplete-multipart lifecycle values without contacting a cloud account.
@@ -73,9 +79,13 @@ Individual outputs remain available for existing infrastructure pipelines:
 | EKS, GKE, AKS | `storage_url` | `config.storageUrl` |
 | EKS | `service_account_name` | `serviceAccount.name` |
 | GKE | `gcp_service_account_email` | `serviceAccount.annotations.iam.gke.io/gcp-service-account` |
+| GKE | `gke_node_selector` | `nodeSelector` |
 | AKS | `managed_identity_client_id` | `serviceAccount.annotations.azure.workload.identity/client-id` |
 
 The EKS association uses the namespace and ServiceAccount name directly, so EKS needs no annotation. AKS also requires the provider example’s `azure.workload.identity/use: "true"` pod label.
+The GKE output also includes the mode-correct `nodeSelector`; keep it with the
+provider overlay so the Deployment and Helm catalog test use the same identity
+path.
 
 ## Preserve the storage boundary
 
