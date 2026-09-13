@@ -452,11 +452,13 @@ runner object-storage credentials or cluster-admin. Protect the environment
 with required reviewers and restrict which release tags may deploy to it.
 
 Start from `qualification/rbac.example.yaml`. Replace its provider-mapped
-group, namespace, and Deployment resource name before applying it. Keep Crab in
-a dedicated namespace: pod exec and port-forward permissions cannot be limited
-to a label selector by Kubernetes RBAC, and Kubernetes cannot restrict pod
-creation by resource name. The example grants no access to Secrets and permits
-only `get`—not `list`—for the dynamically discovered hosting nodes and the named
+group, namespace, Deployment resource name, and workload ServiceAccount name
+before applying it. Keep Crab in a dedicated namespace: pod exec and
+port-forward permissions cannot be limited to a label selector by Kubernetes
+RBAC, and Kubernetes cannot restrict pod creation by resource name. Singleton
+Service, ServiceAccount, ingress, NetworkPolicy, disruption-budget, and HPA
+reads are name-scoped. The example grants no access to Secrets and permits only
+`get`—not `list`—for the dynamically discovered hosting nodes and the named
 namespace.
 
 Use the provider's GitHub federation guidance for the runner identity:
