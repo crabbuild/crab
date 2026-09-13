@@ -1,0 +1,11 @@
+{{- if not .Values.config.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "crab-http-server.fullname" . }}
+  labels:
+    {{- include "crab-http-server.labels" . | nindent 4 }}
+data:
+  {{ .Values.config.key }}: |
+    {{- include "crab-http-server.managedConfig" . | nindent 4 }}
+{{- end }}

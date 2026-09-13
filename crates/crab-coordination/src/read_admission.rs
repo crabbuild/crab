@@ -7,7 +7,7 @@ use std::time::Duration;
 use object_store::ObjectStore;
 
 use crate::error::{CoordinationError, Result};
-use crate::push_lock::{PushLock, PushLockAcquireContext};
+use crate::push_lock::{PushLock, PushLockAcquireContext, internal_lock_path};
 
 /// Default number of concurrent upload-pack sessions admitted per repository.
 pub const DEFAULT_READ_ADMISSION_CAPACITY: usize = 16;
@@ -17,10 +17,10 @@ pub const DEFAULT_READ_ADMISSION_TTL: Duration = Duration::from_secs(300);
 
 const READ_ADMISSION_RESOURCE_PREFIX: &str = "git-read-admission";
 
-/// A crash-reclaimable slot that bounds concurrent repository readers across
-/// independent Crab processes and hosts.
-pub struct ReadAdmissionTicket {
+/// One crash-reclaimable slot from a named, fixed-capacity admission class.
+pub struct FixedSlotAdmissionTicket {
     prefix: String,
+    resource_prefix: String,
     capacity: usize,
     lease_ttl: Duration,
     holder: String,
@@ -29,40 +29,50 @@ pub struct ReadAdmissionTicket {
     lock: Option<PushLock>,
 }
 
-impl ReadAdmissionTicket {
-    /// Creates a reader for one repository's fixed admission slots.
+impl FixedSlotAdmissionTicket {
+    /// Creates a contender for one named set of fixed admission slots.
+    ///
+    /// The storage prefix and resource prefix together define the shared
+    /// admission domain. Every participant must use the same capacity and TTL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoordinationError::Configuration`] when the capacity, lease
+    /// lifetime, storage prefix, or resource prefix cannot define a valid slot.
     pub fn new(
         store: &Arc<dyn ObjectStore>,
         prefix: &str,
+        resource_prefix: &str,
         capacity: usize,
         lease_ttl: Duration,
     ) -> Result<Self> {
         if capacity == 0 {
             return Err(CoordinationError::Configuration {
                 key: capacity.to_string(),
-                origin: "read admission capacity must be positive".to_owned(),
+                origin: "fixed-slot admission capacity must be positive".to_owned(),
             });
         }
         if lease_ttl.as_secs() == 0 {
             return Err(CoordinationError::Configuration {
                 key: lease_ttl.as_secs().to_string(),
-                origin: "read admission TTL must be at least one second".to_owned(),
+                origin: "fixed-slot admission TTL must be at least one second".to_owned(),
             });
         }
-        crate::push_lock::push_locks_prefix(prefix)?;
+        internal_lock_path(prefix, &format!("{resource_prefix}-0"))?;
 
         Ok(Self {
             prefix: prefix.to_owned(),
+            resource_prefix: resource_prefix.to_owned(),
             capacity,
             lease_ttl,
-            holder: admission_holder(),
+            holder: admission_holder(resource_prefix),
             attempt: 0,
             acquire_context: PushLockAcquireContext::new(Arc::clone(store)),
             lock: None,
         })
     }
 
-    /// Tries one rotated slot without waiting behind an active reader.
+    /// Tries one rotated slot without waiting behind an active holder.
     pub async fn try_admit(&mut self) -> Result<bool> {
         if self.lock.is_some() {
             return Ok(true);
@@ -70,7 +80,7 @@ impl ReadAdmissionTicket {
 
         let slot = slot_offset(&self.holder, self.attempt, self.capacity);
         self.attempt = self.attempt.saturating_add(1);
-        let resource = format!("{READ_ADMISSION_RESOURCE_PREFIX}-{slot}");
+        let resource = format!("{}-{slot}", self.resource_prefix);
         match self
             .acquire_context
             .try_acquire_internal(&self.prefix, &resource, self.lease_ttl)
@@ -91,7 +101,7 @@ impl ReadAdmissionTicket {
             .as_mut()
             .ok_or_else(|| CoordinationError::Configuration {
                 key: self.prefix.clone(),
-                origin: "cannot renew an unadmitted repository reader".to_owned(),
+                origin: "cannot renew an unadmitted fixed-slot contender".to_owned(),
             })?
             .renew()
             .await
@@ -112,10 +122,54 @@ impl ReadAdmissionTicket {
     }
 }
 
-fn admission_holder() -> String {
+/// A crash-reclaimable slot that bounds concurrent repository readers across
+/// independent Crab processes and hosts.
+pub struct ReadAdmissionTicket(FixedSlotAdmissionTicket);
+
+impl ReadAdmissionTicket {
+    /// Creates a reader for one repository's fixed admission slots.
+    pub fn new(
+        store: &Arc<dyn ObjectStore>,
+        prefix: &str,
+        capacity: usize,
+        lease_ttl: Duration,
+    ) -> Result<Self> {
+        FixedSlotAdmissionTicket::new(
+            store,
+            prefix,
+            READ_ADMISSION_RESOURCE_PREFIX,
+            capacity,
+            lease_ttl,
+        )
+        .map(Self)
+    }
+
+    /// Tries one rotated slot without waiting behind an active reader.
+    pub async fn try_admit(&mut self) -> Result<bool> {
+        self.0.try_admit().await
+    }
+
+    /// Extends the active slot lease.
+    pub async fn renew(&mut self) -> Result<()> {
+        self.0.renew().await
+    }
+
+    /// Releases the active slot with a holder-checked CAS tombstone.
+    pub async fn release(self) -> Result<()> {
+        self.0.release().await
+    }
+
+    /// Returns the active lease lifetime used by the renewal loop.
+    #[must_use]
+    pub const fn ttl(&self) -> Duration {
+        self.0.ttl()
+    }
+}
+
+fn admission_holder(resource_prefix: &str) -> String {
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
     format!(
-        "read-admission-{}-{}",
+        "{resource_prefix}-{}-{}",
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
@@ -151,6 +205,15 @@ mod tests {
         false
     }
 
+    async fn admit_fixed(ticket: &mut FixedSlotAdmissionTicket, capacity: usize) -> bool {
+        for _ in 0..capacity {
+            if ticket.try_admit().await.unwrap() {
+                return true;
+            }
+        }
+        false
+    }
+
     #[tokio::test]
     async fn capacity_is_bounded_and_reusable() {
         let store = memory_store();
@@ -167,6 +230,21 @@ mod tests {
         assert!(admit(&mut blocked, 2).await);
         second.release().await.unwrap();
         blocked.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn named_admission_classes_do_not_share_slots() {
+        let store = memory_store();
+        let ttl = Duration::from_secs(60);
+        let mut reads = FixedSlotAdmissionTicket::new(&store, "root", "reads", 1, ttl).unwrap();
+        let mut transfers =
+            FixedSlotAdmissionTicket::new(&store, "root", "transfers", 1, ttl).unwrap();
+
+        assert!(admit_fixed(&mut reads, 1).await);
+        assert!(admit_fixed(&mut transfers, 1).await);
+
+        reads.release().await.unwrap();
+        transfers.release().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -28,6 +28,7 @@ shared publication owner `crates/crab-write/src/journal.rs`.
 | Content reads | `crates/crab-http-server/src/contents.rs` | `crates/crab-remote-git/src/snapshot.rs` |
 | Auth or routing | `crates/crab-http-server/src/server.rs` | `crates/crab-http-server/src/auth.rs` |
 | Read readiness | `crates/crab-http-server/src/maintenance.rs` | `crates/crab-write/src/generation.rs` |
+| Metrics or management listener | `crates/crab-http-server/src/metrics.rs` | `crates/crab-http-server/src/server.rs` |
 
 ## Invariants
 

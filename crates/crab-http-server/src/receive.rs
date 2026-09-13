@@ -34,6 +34,8 @@ pub(crate) enum ReceiveError {
     Forbidden,
     #[error("protected branch requires a pull request")]
     Protected,
+    #[error("changed path is locked by another user")]
+    Locked,
     #[error("repository is archived and read-only")]
     Archived,
     #[error("Git transfers are busy")]
@@ -74,6 +76,10 @@ pub(crate) enum ReceiveError {
     Settings(#[source] Box<crate::app::Error>),
     #[error("receive coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("LFS lock lookup failed")]
+    LfsLock(#[from] crab_lfs::LfsLockError),
+    #[error("active LFS lock set exceeds the receive safety limit")]
+    LfsLockLimit,
     #[error("receive publication failed")]
     Write(#[from] crab_write::WriteError),
     #[error("pointer content rejected")]
@@ -84,6 +90,16 @@ pub(crate) enum ReceiveError {
         operation: Box<ReceiveError>,
         close: crab_remote_git::Error,
     },
+}
+
+impl From<crate::transfer_admission::Error> for ReceiveError {
+    fn from(error: crate::transfer_admission::Error) -> Self {
+        match error {
+            crate::transfer_admission::Error::Busy => Self::Busy,
+            crate::transfer_admission::Error::Cancelled => Self::Cancelled,
+            crate::transfer_admission::Error::Coordination(error) => Self::Coordination(error),
+        }
+    }
 }
 
 impl From<crab_remote::publication::Error> for ReceiveError {
@@ -143,10 +159,8 @@ async fn publish_generated_objects(
     visibility_base: Option<(String, gix_hash::ObjectId)>,
     publication: publish::Publication,
 ) -> Result<()> {
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| ReceiveError::Busy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancel).await?;
     let worker_cancel = cancel.clone();
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();
@@ -209,6 +223,10 @@ impl IntoResponse for ReceiveError {
             Self::Protected => (
                 StatusCode::FORBIDDEN,
                 "Protected branch requires a pull request",
+            ),
+            Self::Locked => (
+                StatusCode::CONFLICT,
+                "A changed path is locked by another user",
             ),
             Self::Archived => (
                 StatusCode::FORBIDDEN,
@@ -324,10 +342,8 @@ pub(crate) async fn receive(
         ));
     }
     check_cancelled(&server.cancellation)?;
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| ReceiveError::Busy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancel).await?;
     let _guard = cancel.clone().drop_guard();
     let worker_cancel = cancel.clone();
     let worker_server = Arc::clone(&server);
@@ -522,10 +538,8 @@ async fn publish_ref(
     key: (String, String),
     publication: RefPublication,
 ) -> Result<()> {
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| ReceiveError::Busy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancel).await?;
     let worker_cancel = cancel.clone();
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();

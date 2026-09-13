@@ -26,22 +26,26 @@ crab-remote = { workspace = true, features = ["publication"] }
 base64 = "0.22"
 futures-util = { workspace = true }
 flate2 = { workspace = true }
+http-body = "1"
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 rand = "0.9"
 openidconnect = { version = "4.0.1", default-features = false, features = ["reqwest", "rustls-tls"] }
 object_store = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 url = { version = "2", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 thiserror = { workspace = true }
+time = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["io", "rt"] }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { workspace = true }
 zip = { version = "6.0", default-features = false, features = ["deflate"] }
 
