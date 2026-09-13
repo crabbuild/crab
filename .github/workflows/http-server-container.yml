@@ -123,6 +123,10 @@ jobs:
             --volume "${gke_autopilot_rendered}:/manifests/server.yaml:ro" \
             "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
               /manifests/server.yaml
+          docker run --rm \
+            --volume "${PWD}/${chart}/qualification/rbac.example.yaml:/manifests/qualification-rbac.yaml:ro" \
+            "${kubeconform_image}" -strict -summary -kubernetes-version 1.29.0 \
+              /manifests/qualification-rbac.yaml
 
           grep -F 'azure.workload.identity/use: "true"' \
             "${RUNNER_TEMP}/crab-http-server-aks-values.example.yaml"
@@ -139,6 +143,8 @@ jobs:
             | grep -F 'crab-http-server/templates/tests/catalog.yaml'
           tar -tzf "$chart_archive" \
             | grep -F 'crab-http-server/qualification/qualify-kubernetes.sh'
+          tar -tzf "$chart_archive" \
+            | grep -F 'crab-http-server/qualification/rbac.example.yaml'
 
           profile_values=(
             --values "${chart}/team-values.example.yaml"

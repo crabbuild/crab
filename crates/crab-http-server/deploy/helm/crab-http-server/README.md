@@ -376,6 +376,13 @@ approved restart. Do not grant the runner object-storage credentials or
 cluster-admin. Protect the environment with required reviewers and restrict
 which release tags may deploy to it.
 
+Start from `qualification/rbac.example.yaml`. Replace its provider-mapped
+group, namespace, and Deployment resource name before applying it. Keep Crab in
+a dedicated namespace: pod exec and port-forward permissions cannot be limited
+to a label selector by Kubernetes RBAC. The example grants no access to
+Secrets and permits only `get`—not `list`—for the dynamically discovered
+hosting nodes.
+
 Use the provider's GitHub federation guidance for the runner identity:
 [AWS IAM OIDC](https://github.com/aws-actions/configure-aws-credentials#oidc),
 [Google Cloud Workload Identity Federation](https://github.com/google-github-actions/auth#workload-identity-federation),
