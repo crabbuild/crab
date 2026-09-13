@@ -47,8 +47,12 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: crab-http-server-live-qualification-nodes
+  name: crab-http-server-live-qualification-cluster-read
 rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["crab"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get"]
@@ -56,11 +60,11 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: crab-http-server-live-qualification-nodes
+  name: crab-http-server-live-qualification-cluster-read
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: crab-http-server-live-qualification-nodes
+  name: crab-http-server-live-qualification-cluster-read
 subjects:
   - apiGroup: rbac.authorization.k8s.io
     kind: Group

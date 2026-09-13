@@ -149,7 +149,8 @@ Complete the setup in this order:
 2. Grant the workload identity access only to the dedicated storage boundary.
 3. Register the OpenID Connect (OIDC) callback `https://git.example.com/auth/callback`.
 4. Export Terraform's generated provider values and edit the provider-neutral team values file.
-5. Create the Kubernetes Secret and install the chart.
+5. Create a dedicated namespace with the Restricted Pod Security policy, create
+   the Kubernetes Secret, and install the chart.
 6. Run `helm test` to prove a fresh workload can read, list, write, conditionally update, and delete through its cloud workload identity.
 7. Create the first repository through a running pod.
 8. Run the portable multi-replica qualification locally or through the protected GitHub Actions workflow before admitting critical repositories.

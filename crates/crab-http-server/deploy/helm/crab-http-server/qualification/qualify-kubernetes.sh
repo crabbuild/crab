@@ -172,6 +172,7 @@ printf 'header = "Authorization: Basic %s"\nheader = "Host: %s"\n' \
 chmod 0600 "$curl_config"
 
 deployment_json="${work_dir}/deployment.json"
+namespace_json="${work_dir}/namespace.json"
 service_json="${work_dir}/service.json"
 policy_json="${work_dir}/network-policy.json"
 ingress_json="${work_dir}/ingress.json"
@@ -180,6 +181,28 @@ hpa_json="${work_dir}/hpa.json"
 pods_json="${work_dir}/pods.json"
 
 kubectl config current-context >/dev/null
+kubectl get namespace "$namespace" -o json > "$namespace_json"
+for mode in enforce audit warn; do
+  policy="$(jq --raw-output --arg mode "$mode" \
+    '.metadata.labels["pod-security.kubernetes.io/\($mode)"] // ""' \
+    "$namespace_json")"
+  test "$policy" = restricted || {
+    echo "Namespace ${namespace} must set Pod Security ${mode}=restricted." >&2
+    exit 1
+  }
+  policy_version="$(jq --raw-output --arg mode "$mode" \
+    '.metadata.labels["pod-security.kubernetes.io/\($mode)-version"] // ""' \
+    "$namespace_json")"
+  if [[ ! "$policy_version" =~ ^v1\.([1-9][0-9]*)$ ]]; then
+    echo "Namespace ${namespace} must pin Pod Security ${mode} to v1.29 or newer." >&2
+    exit 1
+  fi
+  policy_minor="${BASH_REMATCH[1]}"
+  if [ "$policy_minor" -lt 29 ]; then
+    echo "Namespace ${namespace} must pin Pod Security ${mode} to v1.29 or newer." >&2
+    exit 1
+  fi
+done
 kubectl --namespace "$namespace" rollout status "deployment/${deployment}" --timeout=15m
 kubectl --namespace "$namespace" get deployment "$deployment" -o json > "$deployment_json"
 jq --exit-status '
@@ -518,6 +541,7 @@ jq --null-input \
     checks: {
       oidc_login_redirect: true,
       oidc_secure_flow_cookie: true,
+      restricted_namespace: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,

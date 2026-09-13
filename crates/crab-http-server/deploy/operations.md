@@ -38,10 +38,12 @@ Complete these checks before the first install and every infrastructure change:
 6. Confirm the ingress preserves the canonical `Host` header and streams bodies without buffering.
 7. Confirm port 8789 has no Service, ingress, or public load-balancer listener.
 8. Confirm the NetworkPolicy-capable CNI enforces the explicit public and monitoring source selectors.
-9. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
-10. Confirm the cluster can schedule two replicas in separate zones.
-11. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
-12. For automated live qualification, confirm the protected GitHub environment uses OIDC, required reviewers, release-tag restrictions, and cluster-scoped credentials without storage access.
+9. Confirm the dedicated namespace pins Pod Security `enforce`, `audit`, and
+   `warn` to `restricted:v1.29` or a reviewed newer policy version.
+10. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
+11. Confirm the cluster can schedule two replicas in separate zones.
+12. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
+13. For automated live qualification, confirm the protected GitHub environment uses OIDC, required reviewers, release-tag restrictions, and cluster-scoped credentials without storage access.
 
 Render and validate the release before applying it:
 

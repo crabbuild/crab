@@ -33,6 +33,7 @@ Create these resources before installing Crab:
   at least two zones, plus capacity for one rollout surge pod
 - Helm 3
 - A NetworkPolicy-capable Container Network Interface (CNI)
+- Pod Security Admission enabled for the dedicated Crab namespace
 - A versioned S3 bucket, Google Cloud Storage (GCS) bucket, or Azure Blob container
 - A workload identity with list, read, create, conditional-update, and delete access below one storage prefix
 - An OpenID Connect (OIDC) client with `https://git.example.com/auth/callback` as its redirect URI
@@ -203,10 +204,18 @@ chmod 0600 /secure/crab-http-server/state-key \
   /secure/crab-http-server/oidc-client-secret
 ```
 
-Create the namespace and Secret from those files:
+Create the namespace, pin all three Pod Security Admission modes to the
+supported Restricted policy floor, and create the Secret from those files:
 
 ```sh
 kubectl create namespace crab --dry-run=client -o yaml | kubectl apply -f -
+kubectl label namespace crab --overwrite \
+  pod-security.kubernetes.io/enforce=restricted \
+  pod-security.kubernetes.io/enforce-version=v1.29 \
+  pod-security.kubernetes.io/audit=restricted \
+  pod-security.kubernetes.io/audit-version=v1.29 \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/warn-version=v1.29
 kubectl --namespace crab create secret generic crab-http-server \
   --from-file=oidc-client-secret=/secure/crab-http-server/oidc-client-secret \
   --from-file=state-key=/secure/crab-http-server/state-key \
@@ -403,10 +412,10 @@ Configure only the variables for the selected platform:
 These identify a GitHub OIDC federation dedicated to qualification; they are
 not the pod's storage workload identity. Give the runner identity only enough
 cloud permission to obtain user credentials for the named cluster. Bind it in
-Kubernetes to read the Deployment, Service, Ingress, NetworkPolicy,
-PodDisruptionBudget, HorizontalPodAutoscaler, pods, and hosting nodes; execute
-and port-forward to Crab pods; and patch only the Crab Deployment for the
-approved restart. Do not grant the runner object-storage credentials or
+Kubernetes to read the named Namespace, Deployment, Service, Ingress,
+NetworkPolicy, PodDisruptionBudget, HorizontalPodAutoscaler, pods, and hosting
+nodes; execute and port-forward to Crab pods; and patch only the Crab Deployment
+for the approved restart. Do not grant the runner object-storage credentials or
 cluster-admin. Protect the environment with required reviewers and restrict
 which release tags may deploy to it.
 
@@ -415,7 +424,7 @@ group, namespace, and Deployment resource name before applying it. Keep Crab in
 a dedicated namespace: pod exec and port-forward permissions cannot be limited
 to a label selector by Kubernetes RBAC. The example grants no access to
 Secrets and permits only `get`—not `list`—for the dynamically discovered
-hosting nodes.
+hosting nodes and the named namespace.
 
 Use the provider's GitHub federation guidance for the runner identity:
 [AWS IAM OIDC](https://github.com/aws-actions/configure-aws-credentials#oidc),

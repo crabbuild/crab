@@ -337,6 +337,7 @@ jobs:
              .rollout_probes >= 1 and .rollout_probe_failures == 0 and
              .checks.oidc_login_redirect == true and
              .checks.oidc_secure_flow_cookie == true and
+             .checks.restricted_namespace == true and
              .checks.cross_replica_git == true and
              .checks.cross_replica_lfs == true and
              .checks.durable_lfs_lock == true and
