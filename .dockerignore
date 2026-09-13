@@ -45,4 +45,14 @@ node_modules/
 **/.terraform/
 **/*.tfstate
 **/*.tfstate.*
+**/.env
+**/.env.*
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/id_dsa
+**/id_ed25519
+**/id_ecdsa
+**/id_rsa
 *.DS_Store

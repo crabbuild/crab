@@ -232,7 +232,12 @@ The private management listener owns `GET /healthz`, `GET /readyz`, and
 
 ## Run the container
 
-The checked-in image builds the locked React application and Rust server from digest-pinned bases. The runtime installs no packages, runs as UID/GID 10001, embeds the frontend, and uses a dedicated temporary directory.
+The checked-in image builds the locked React application and Rust server from
+digest-pinned bases. Its build context excludes environment files, private-key
+formats, repository metadata, Terraform state, dependency trees, and local
+build output so those inputs cannot enter a remote BuildKit cache. The runtime
+installs no packages, runs as UID/GID 10001, embeds the frontend, and uses a
+dedicated temporary directory.
 
 ### Start the complete local stack
 

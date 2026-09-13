@@ -46,6 +46,12 @@ jobs:
           shellcheck_image=koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb
           terraform_image=hashicorp/terraform:1.13.3@sha256:dfb1889a8ee74ada3ddacc48f89b8a0d69f3e114de3d8a2ce15f6a8d3dbfdbe2
 
+          for secret_pattern in \
+            '**/.env' '**/.env.*' '**/*.key' '**/*.pem' '**/*.p12' \
+            '**/*.pfx' '**/id_dsa' '**/id_ed25519' '**/id_ecdsa' '**/id_rsa'; do
+            grep --fixed-strings --line-regexp --quiet -- "$secret_pattern" .dockerignore
+          done
+
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
           bash -n crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh
