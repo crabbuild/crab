@@ -137,6 +137,14 @@ jobs:
 
           grep -F 'azure.workload.identity/use: "true"' \
             "${RUNNER_TEMP}/crab-http-server-aks-values.example.yaml"
+          nginx_rendered="${RUNNER_TEMP}/crab-http-server-eks-values.example.yaml"
+          grep -F 'nginx.ingress.kubernetes.io/proxy-body-size: "0"' "$nginx_rendered"
+          grep -F 'nginx.ingress.kubernetes.io/proxy-buffering: "off"' "$nginx_rendered"
+          grep -F 'nginx.ingress.kubernetes.io/proxy-http-version: "1.1"' "$nginx_rendered"
+          grep -F 'nginx.ingress.kubernetes.io/proxy-read-timeout: "630"' "$nginx_rendered"
+          grep -F 'nginx.ingress.kubernetes.io/proxy-request-buffering: "off"' "$nginx_rendered"
+          grep -F 'nginx.ingress.kubernetes.io/proxy-send-timeout: "630"' "$nginx_rendered"
+          grep -F 'nginx.ingress.kubernetes.io/ssl-redirect: "true"' "$nginx_rendered"
 
           chart_package_dir="${RUNNER_TEMP}/crab-http-server-chart"
           mkdir -p "$chart_package_dir"

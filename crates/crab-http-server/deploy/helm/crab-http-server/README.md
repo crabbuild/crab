@@ -409,6 +409,14 @@ Enable ingress only after installing an ingress controller and creating the TLS 
 ingress:
   enabled: true
   className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "630"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "630"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
   host: git.example.com
   tlsSecretName: crab-http-server-tls
 
@@ -419,7 +427,12 @@ networkPolicy:
           kubernetes.io/metadata.name: ingress-nginx
 ```
 
-Configure the ingress controller for streaming request and response bodies. Its request-body limit, upstream timeout, idle timeout, and connection-drain settings must accommodate five-minute Git and Large File Storage (LFS) transfers plus ten-minute archive downloads.
+The checked-in team overlay applies these ingress-nginx settings. They stream
+request and response bodies, preserve HTTP/1.1 to the server, delegate request
+size enforcement to Crab, require HTTPS redirection, and keep an idle upstream
+connection open beyond the ten-minute archive budget. For another ingress
+controller, replace the annotations with equivalent request-body, streaming,
+upstream timeout, idle timeout, HTTPS redirect, and connection-drain settings.
 
 ## Enable autoscaling
 
