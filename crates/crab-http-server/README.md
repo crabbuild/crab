@@ -84,6 +84,10 @@ and a canonical HTTPS origin. For container deployment, use the
 
 ## Find the relevant contract
 
+For the proposed SQLite/LTX storage and multi-node ownership architecture, read
+[the next-generation technical design](NEXT_ARCHITECTURE.md). It separates
+intended behavior and acceptance gates from the current implementation.
+
 | Task | Read |
 | --- | --- |
 | Configure catalog, storage root, temporary space, and credentials | [Development setup](REFERENCE.md#run-the-current-development-build) |
