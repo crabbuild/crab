@@ -295,54 +295,11 @@ jobs:
           release_dir="${RUNNER_TEMP}/crab-http-server-release"
           image_repository="${REGISTRY}/${IMAGE_NAME}"
           chart_repository="oci://${CHART_REGISTRY}/crab-http-server"
-          mkdir -p "$release_dir"
-
-          jq --null-input \
-            --arg tag "$TAG" \
-            --arg version "$VERSION" \
-            --arg source_commit "$SOURCE_SHA" \
-            --arg image_repository "$image_repository" \
-            --arg image_digest "$IMAGE_DIGEST" \
-            --arg image_reference "${image_repository}@${IMAGE_DIGEST}" \
-            --arg chart_repository "$chart_repository" \
-            --arg chart_digest "$CHART_DIGEST" \
-            --arg chart_reference "${chart_repository}@${CHART_DIGEST}" \
-            '{
-              schema: 1,
-              tag: $tag,
-              version: $version,
-              source_commit: $source_commit,
-              image: {
-                repository: $image_repository,
-                digest: $image_digest,
-                reference: $image_reference,
-                platforms: ["linux/amd64", "linux/arm64"]
-              },
-              chart: {
-                repository: $chart_repository,
-                digest: $chart_digest,
-                reference: $chart_reference
-              }
-            }' > "$release_dir/crab-http-server-release.json"
-
-          jq --exit-status \
-            --arg tag "$TAG" \
-            --arg version "$VERSION" \
-            --arg source_commit "$SOURCE_SHA" \
-            --arg image_digest "$IMAGE_DIGEST" \
-            --arg chart_digest "$CHART_DIGEST" \
-            '.schema == 1 and
-             .tag == $tag and .version == $version and
-             .source_commit == $source_commit and
-             .image.digest == $image_digest and
-             .chart.digest == $chart_digest and
-             (.source_commit | test("^[0-9a-f]{40}$")) and
-             (.image.digest | test("^sha256:[0-9a-f]{64}$")) and
-             (.chart.digest | test("^sha256:[0-9a-f]{64}$")) and
-             .image.platforms == ["linux/amd64", "linux/arm64"] and
-             (.image.reference | endswith("@" + $image_digest)) and
-             (.chart.reference | endswith("@" + $chart_digest))' \
-            "$release_dir/crab-http-server-release.json" >/dev/null
+          crates/crab-http-server/deploy/generate-release-manifest.sh \
+            "$TAG" "$VERSION" "$SOURCE_SHA" \
+            "$image_repository" "$IMAGE_DIGEST" \
+            "$chart_repository" "$CHART_DIGEST" \
+            "$release_dir/crab-http-server-release.json"
 
       - name: Attest the release manifest
         id: release-manifest-attestation

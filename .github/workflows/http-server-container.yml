@@ -54,6 +54,51 @@ jobs:
 
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
+          release_manifest="${RUNNER_TEMP}/crab-http-server-release.json"
+          release_manifest_generator=crates/crab-http-server/deploy/generate-release-manifest.sh
+          source_sha=0123456789abcdef0123456789abcdef01234567
+          image_digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          chart_digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          "$release_manifest_generator" \
+            crab-http-server-v0.1.0 0.1.0 "$source_sha" \
+            ghcr.io/crabbuild/crab-http-server "$image_digest" \
+            oci://ghcr.io/crabbuild/charts/crab-http-server "$chart_digest" \
+            "$release_manifest"
+          jq --exit-status \
+            --arg source_sha "$source_sha" \
+            --arg image_digest "$image_digest" \
+            --arg chart_digest "$chart_digest" \
+            '.schema == 1 and .tag == "crab-http-server-v0.1.0" and
+             .version == "0.1.0" and .source_commit == $source_sha and
+             .image.repository == "ghcr.io/crabbuild/crab-http-server" and
+             .image.digest == $image_digest and
+             .image.reference == "ghcr.io/crabbuild/crab-http-server@" + $image_digest and
+             .image.platforms == ["linux/amd64", "linux/arm64"] and
+             .chart.repository == "oci://ghcr.io/crabbuild/charts/crab-http-server" and
+             .chart.digest == $chart_digest and
+             .chart.reference == "oci://ghcr.io/crabbuild/charts/crab-http-server@" + $chart_digest' \
+            "$release_manifest" >/dev/null
+          for invalid_case in version source image chart digest; do
+            invalid_version=0.1.0
+            invalid_source="$source_sha"
+            invalid_image=ghcr.io/crabbuild/crab-http-server
+            invalid_chart=oci://ghcr.io/crabbuild/charts/crab-http-server
+            invalid_digest="$image_digest"
+            case "$invalid_case" in
+              version) invalid_version=0.1.1 ;;
+              source) invalid_source=not-a-commit ;;
+              image) invalid_image=ghcr.io/crabbuild/crab-http-server:latest ;;
+              chart) invalid_chart=oci://example.com/crab-http-server ;;
+              digest) invalid_digest=sha256:bad ;;
+            esac
+            if "$release_manifest_generator" \
+              crab-http-server-v0.1.0 "$invalid_version" "$invalid_source" \
+              "$invalid_image" "$invalid_digest" "$invalid_chart" "$chart_digest" \
+              "${RUNNER_TEMP}/invalid-release-manifest.json" >/dev/null 2>&1; then
+              echo "release manifest generator accepted invalid ${invalid_case}" >&2
+              exit 1
+            fi
+          done
           bash -n crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh
           if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
             CRAB_HTTP_SERVER_EXPECTED_IMAGE=crab-http-server:mutable \
@@ -99,6 +144,7 @@ jobs:
           docker run --rm --volume "$PWD:/src:ro" "$shellcheck_image" \
             /src/crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
             /src/crates/crab-http-server/tests/qualify_backup_restore.sh \
+            /src/crates/crab-http-server/deploy/generate-release-manifest.sh \
             /src/crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_locking.sh \
             /src/crates/crab-http-server/tests/qualify_lfs_range_resume.sh
