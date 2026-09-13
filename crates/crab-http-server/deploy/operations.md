@@ -47,7 +47,9 @@ Complete these checks before the first install and every infrastructure change:
 10. Confirm the monitoring source can scrape port 8789 and ordinary peer pods cannot.
 11. Confirm the cluster can schedule two replicas in separate zones.
 12. Confirm scratch capacity covers the largest qualified pack, LFS object, and concurrent transfers.
-13. For automated live qualification, confirm the protected GitHub environment uses OIDC, required reviewers, release-tag restrictions, and cluster-scoped credentials without storage access.
+13. For automated live qualification, confirm each provider has a separate
+    protected GitHub environment using OIDC, required reviewers, release-tag
+    restrictions, and cluster-scoped credentials without storage access.
 
 For an official release, download its deployment record first. This is the
 single signed source for the release commit and the immutable image and chart

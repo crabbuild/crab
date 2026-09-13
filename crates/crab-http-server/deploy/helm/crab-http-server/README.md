@@ -440,6 +440,13 @@ The environment needs one secret:
 | --- | --- |
 | `CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN` | Write-scoped Crab token for only the dedicated qualification repository |
 
+Use a separate protected environment for each provider, such as
+`crab-http-server-live-eks`, `crab-http-server-live-gke`, and
+`crab-http-server-live-aks`. This keeps cluster identities, release-tag
+policies, reviewers, and evidence ownership independent. Do not place all
+three cloud identities in the default example environment merely to reduce
+setup steps.
+
 Configure only the variables for the selected platform:
 
 | Platform | Protected-environment variables |

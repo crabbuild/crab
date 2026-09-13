@@ -4,9 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: Protected environment containing the provider identity and Git token
+        description: Provider-specific protected environment containing its cluster identity and Git token
         required: true
-        default: crab-http-server-live
         type: environment
       provider:
         description: Existing Kubernetes platform to qualify
