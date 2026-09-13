@@ -58,6 +58,9 @@ fn captured_sql_survives_process_kill_and_source_directory_loss() {
         .spawn()
         .unwrap();
     let mut child = KillOnDrop(child);
+    // Child::wait closes its stored stdin before reaping. Keep the pipe alive
+    // independently so an EOF panic cannot race the intended process kill.
+    let _stdin = child.0.stdin.take().unwrap();
     let stdout = child.0.stdout.take().unwrap();
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -90,6 +93,11 @@ fn captured_sql_survives_process_kill_and_source_directory_loss() {
     child.0.kill().unwrap();
     let exit = child.0.wait().unwrap();
     assert!(!exit.success());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(exit.signal(), Some(9));
+    }
     let path = replica.path().join("captured.ltx");
     std::fs::copy(source.path().join("captured.ltx"), &path).unwrap();
     source.close().unwrap();

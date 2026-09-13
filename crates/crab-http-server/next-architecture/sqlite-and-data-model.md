@@ -5,7 +5,10 @@
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
 The [crab-ltx implementation](crab-ltx.md#implemented-state) supplies local capture,
-snapshot and exact restore. The domain schema, executor and publication wiring
+snapshot and exact restore, plus optional remote transport, immutable views and
+writable sparse SQL with checksum-seeded continuation. Full restoration remains
+the initial server activation policy; sparse support is a library capability,
+not yet a wired AppCell workflow. The domain schema, executor and HTTP publication wiring
 in this document are still proposed.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
 the [offline importer](hard-cutover.md) must preserve domain identities and retry

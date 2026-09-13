@@ -162,6 +162,11 @@ jobs:
       - name: Check HTTP server and local LTX engine
         run: cargo clippy -p crab-http-server -p crab-ltx --all-targets --locked -- -D warnings
 
+      - name: Check LTX replica feature
+        run: |
+          cargo clippy -p crab-ltx --all-targets --features replica --locked -- -D warnings
+          cargo test -p crab-ltx --features replica --locked
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 

@@ -330,9 +330,8 @@ impl Db {
     pub(super) fn read_db_page(&self, pgno: u32) -> Result<Vec<u8>> {
         let offset = u64::from(pgno.checked_sub(1).ok_or(CrabError::LTXCorrupted)?)
             * u64::from(self.page_size);
-        Ok(self
-            .host
-            .open(&self.path)?
-            .read_exact_at(offset, self.page_size as usize)?)
+        // Read through SQLite's file, below its WAL-aware pager. A sparse VFS
+        // must hydrate holes here too, not only on application SQL reads.
+        crate::managed::read_main(&self.conn, offset, self.page_size as usize)
     }
 }

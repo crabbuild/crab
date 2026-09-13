@@ -1,32 +1,37 @@
 //! Bounded synchronous filesystem operations; execution scheduling belongs to the caller.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub(crate) struct LtxHost {
+    pub facilities: crate::Host,
     pub max_database_bytes: u64,
     pub max_file_bytes: u64,
 }
 
 pub(crate) struct HostFile {
-    file: File,
+    file: Box<dyn crate::environment::FileIo>,
     limit: u64,
 }
 
 impl HostFile {
     pub fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        check_size(bytes.len() as u64, self.limit)?;
+        check_size(
+            self.file.file_len()?.saturating_add(bytes.len() as u64),
+            self.limit,
+        )?;
         self.file.write_all(bytes)
     }
 
     pub fn read_exact_at(&mut self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
         check_size(len as u64, self.limit)?;
-        check_size(self.file.metadata()?.len(), self.limit)?;
-        self.file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = vec![0; len];
-        self.file.read_exact(&mut bytes)?;
+        check_size(self.file.file_len()?, self.limit)?;
+        let bytes = self.file.read_exact_at(offset, len)?;
+        if bytes.len() != len {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
         Ok(bytes)
     }
 
@@ -34,7 +39,7 @@ impl HostFile {
         self.file.sync_all()
     }
     pub fn file_len(&mut self) -> io::Result<u64> {
-        let len = self.file.metadata()?.len();
+        let len = self.file.file_len()?;
         check_size(len, self.limit)?;
         Ok(len)
     }
@@ -52,64 +57,44 @@ impl LtxHost {
         Ok(())
     }
     pub fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
-        read_bounded(path, self.max_file_bytes)
+        let mut file = self.open(path)?;
+        let len = file.file_len()?;
+        file.read_exact_at(0, usize::try_from(len).map_err(io::Error::other)?)
     }
     pub fn open(&self, path: &Path) -> io::Result<HostFile> {
         Ok(HostFile {
-            file: File::open(path)?,
+            file: self.facilities.filesystem.open(path)?,
             limit: self.max_file_bytes,
         })
     }
     pub fn create(&self, path: &Path) -> io::Result<HostFile> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
         Ok(HostFile {
-            file: options.open(path)?,
+            file: self.facilities.filesystem.create(path)?,
             limit: self.max_file_bytes,
         })
     }
     pub fn metadata(&self, path: &Path) -> io::Result<HostMetadata> {
         Ok(HostMetadata {
-            len: std::fs::metadata(path)?.len(),
+            len: self.facilities.filesystem.file_len(path)?,
         })
     }
 
     pub fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-        std::fs::create_dir_all(path)
+        self.facilities.filesystem.create_dir_all(path)
     }
     pub fn remove_file(&self, path: &Path) -> io::Result<()> {
-        std::fs::remove_file(path)
+        self.facilities.filesystem.remove_file(path)
     }
     pub fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         // A fresh session owns this directory. Directory fsync seals the new name.
-        std::fs::rename(from, to)?;
-        sync_parent(to)
+        self.facilities.filesystem.rename(from, to)
     }
     pub fn now_unix_millis(&self) -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0)
+        self.facilities.clock.unix_millis()
     }
     pub fn file_age(&self, path: &Path) -> io::Result<Duration> {
-        Ok(SystemTime::now()
-            .duration_since(std::fs::metadata(path)?.modified()?)
-            .unwrap_or_default())
+        self.facilities.clock.file_age(path)
     }
-}
-
-pub(crate) fn read_bounded(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
-    let file = File::open(path)?;
-    check_size(file.metadata()?.len(), limit)?;
-    let mut bytes = Vec::new();
-    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
-    check_size(bytes.len() as u64, limit)?;
-    Ok(bytes)
 }
 
 fn check_size(size: u64, limit: u64) -> io::Result<()> {

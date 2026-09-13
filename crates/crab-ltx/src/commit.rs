@@ -2,7 +2,6 @@
 //! turn a successful application commit into an older successful capture.
 
 use std::ffi::{c_char, c_int, c_void};
-use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -45,15 +44,20 @@ impl CommitObserver {
         self.frames.load(Ordering::Relaxed)
     }
 
-    pub fn cut(&self, path: &Path) -> Result<Option<WalCut>> {
+    pub fn cut(&self, path: &Path, host: &crate::Host) -> Result<Option<WalCut>> {
         let frames = self.frames();
         if frames == 0 {
             return Ok(None);
         }
         let mut wal_path = path.as_os_str().to_owned();
         wal_path.push("-wal");
-        let mut header = [0u8; 32];
-        std::fs::File::open(wal_path)?.read_exact(&mut header)?;
+        let header = host
+            .filesystem
+            .open(Path::new(&wal_path))?
+            .read_exact_at(0, 32)?;
+        if header.len() != 32 {
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+        }
         let salt1 = u32::from_be_bytes([header[16], header[17], header[18], header[19]]);
         let salt2 = u32::from_be_bytes([header[20], header[21], header[22], header[23]]);
         Ok(Some(WalCut {

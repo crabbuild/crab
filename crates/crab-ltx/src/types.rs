@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{CrabError, Result};
 
-/// An LTX position within one caller-owned replication epoch, not a Git revision.
+/// An LTX position in a checksum-linked lineage, not a Git revision or owner epoch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "replica", derive(serde::Serialize, serde::Deserialize))]
 pub struct Position {
     pub txid: u64,
     pub checksum: u64,
@@ -49,6 +50,7 @@ impl Limits {
 
 /// Immutable-file expectations to record in the server's authoritative manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "replica", derive(serde::Serialize, serde::Deserialize))]
 pub struct SegmentInfo {
     pub min_txid: u64,
     pub max_txid: u64,

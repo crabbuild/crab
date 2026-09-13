@@ -20,6 +20,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointMode {
     Passive,
+    Full,
+    Restart,
     Truncate,
 }
 
@@ -33,6 +35,8 @@ impl std::fmt::Display for CheckpointMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             CheckpointMode::Passive => CHECKPOINT_MODE_PASSIVE,
+            CheckpointMode::Full => "FULL",
+            CheckpointMode::Restart => "RESTART",
             CheckpointMode::Truncate => CHECKPOINT_MODE_TRUNCATE,
         };
         f.write_str(s)
@@ -99,11 +103,15 @@ impl Db {
     pub const DEFAULT_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
     pub const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 
-    pub fn open_with_host(path: impl AsRef<Path>, host: crate::LtxHost) -> Result<Db> {
+    pub fn open_with_host(
+        path: impl AsRef<Path>,
+        host: crate::LtxHost,
+        vfs: Option<&str>,
+    ) -> Result<Db> {
         let path = path.as_ref().to_path_buf();
         let meta_path = Self::meta_path_for(&path);
 
-        let open = |path: &Path| Connection::open(path);
+        let open = |path: &Path| crate::managed::open_connection(path, vfs);
         let conn = open(&path).map_err(CrabError::Sqlite)?;
 
         // All managed writers disable autocheckpoint. The separate long-lived
@@ -352,6 +360,39 @@ impl Db {
 
     pub fn pos(&self) -> Pos {
         self.position
+    }
+
+    pub(crate) fn seed_continuation(
+        &mut self,
+        position: crate::Position,
+        checksums: crate::pages::PageChecksums,
+        page_size: u32,
+        count: u32,
+    ) -> Result<()> {
+        if self.position != Pos::ZERO
+            || page_size != self.page_size
+            || checksums.checksum() != position.checksum
+            || position.txid == 0
+        {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let wal = self.wal_header_bytes()?;
+        self.last_l0_header = Some((
+            Txid(position.txid),
+            LastL0Header {
+                wal_offset: WAL_HEADER_SIZE as i64,
+                wal_size: 0,
+                wal_salt1: be_u32(&wal[16..]),
+                wal_salt2: be_u32(&wal[20..]),
+                commit: count,
+                final_pgno: 0,
+                final_page: Vec::new(),
+            },
+        ));
+        self.position = Pos::new(Txid(position.txid), position.checksum);
+        self.checksums = checksums;
+        self.last_db_pages = count;
+        Ok(())
     }
 
     pub fn sync(&mut self, required: Option<crate::commit::WalCut>) -> Result<()> {

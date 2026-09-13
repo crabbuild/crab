@@ -6,7 +6,11 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
-description = "Local SQLite WAL capture and verified LTX recovery for Crab"
+description = "SQLite LTX capture, object-store replication, and verified recovery for Crab"
+
+[features]
+default = []
+replica = ["dep:crab-storage", "dep:object_store", "dep:bytes", "dep:serde", "dep:serde_json", "dep:tokio"]
 
 [dependencies]
 rusqlite.workspace = true
@@ -15,3 +19,13 @@ blake3.workspace = true
 tempfile.workspace = true
 crc-fast = { version = "=1.10.0", default-features = false, features = ["std"] }
 lz4_flex = "=0.11.6"
+crab-storage = { workspace = true, optional = true }
+object_store = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "sync", "time", "net"] }
+
+[dev-dependencies]
+object_store = { workspace = true, features = ["fs"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

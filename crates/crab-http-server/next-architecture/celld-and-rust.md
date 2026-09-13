@@ -53,7 +53,7 @@ gate and recovery protocol establish which results survive. See the
 | Ownership | Conditional owner record and activation epoch | Single `control.json` containing owner, epoch and exact published head |
 | Acknowledgement | Bucket or follower durability proof and response gate | Immutable graph upload followed by head CAS before success |
 | Restore | Epoch-chain recovery, including predecessor node-log recovery where needed | Only the exact graph named by control; full restore and activation snapshot |
-| Advanced I/O | Paging, compaction and node bundles | Full local working database; paging and bundles deferred |
+| Advanced I/O | Paging, compaction and node bundles | Library provides writable sparse hydration, range compaction and per-repository bundles; server integration remains separate |
 | Placement | Owner routing, capacity checks, hibernated-cell balancing | On-demand acquisition first; bounded idle handoff and later rebalance |
 
 Crab's combined owner/head CAS is a new protocol decision. Borrowing Celld's WAL
@@ -108,8 +108,9 @@ Source reuse of the pinned `celld-ltx` subtree is approved. The import must reta
 applicable Apache-2.0 and BSD notices and record local modifications, as detailed
 in [licensing and attribution](crab-ltx.md#licensing-and-attribution). Dependency
 alignment now resolves the existing workspace SQLite with no new dependency
-versions. `Cargo.lock` adds only the `crab-ltx` package. Local capture/restore
-qualification exists; external interoperability and HTTP protocol correctness
+versions. `Cargo.lock` adds the `crab-ltx` package and its existing dependency
+edges; optional `replica` reuses Crab storage and Tokio. Local capture/restore
+and RustFS replica qualification exist; external interoperability and HTTP protocol correctness
 remain gates. Unrelated dependency patches are outside this approval.
 
 The official Litestream Go embedding API is described as unstable and has
@@ -124,7 +125,7 @@ does not supply durable acknowledgement or ownership transfer.
 
 ### Code ownership
 
-`crates/crab-ltx` now owns the reused local replication mechanics with the
+`crates/crab-ltx` now owns local and optional remote replication mechanics with the
 [required adaptations](crab-ltx.md#reuse-map-and-required-adaptations). Keep HTTP
 routing, repository policy, publication orchestration and AppCell placement
 inside `crab-http-server`.
@@ -136,6 +137,9 @@ crates/crab-ltx/
   exact-position restore
   snapshot and compaction mechanics
   explicit local artifact inputs and outputs
+  optional exact remote manifests, epoch inheritance, bundles and head CAS
+  snapshot/range compaction and caller-driven level scheduling
+  authenticated ranges, immutable and writable sparse SQLite VFS, hydration
 
 crates/crab-http-server/src/
   cells.rs             activation and runtime ownership

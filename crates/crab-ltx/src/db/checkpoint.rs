@@ -65,7 +65,7 @@ impl Db {
         Ok(())
     }
 
-    pub(super) fn checkpoint(&mut self, mode: CheckpointMode) -> Result<()> {
+    pub(crate) fn checkpoint(&mut self, mode: CheckpointMode) -> Result<()> {
         // Self-heal, as in `sync`: `checkpoint` writes to both control tables
         // and re-acquires the read lock through `_litestream_seq`, and the
         // invariant is that the tables exist before any control-table

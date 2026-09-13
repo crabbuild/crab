@@ -3,9 +3,10 @@
 
 //! Local SQLite WAL capture and exact, checksum-verified LTX recovery.
 //!
-//! This synchronous crate owns no object-store client, remote manifest, lease,
-//! repository identity, or HTTP acknowledgement policy. Use a dedicated database
-//! thread or a blocking executor, never a Tokio worker. See the crate README.
+//! Local capture is synchronous; use a dedicated database thread or blocking
+//! executor. The optional `replica` feature adds object-store replication and
+//! exact epoch inheritance, bundles, compaction and sparse paged SQL.
+//! Leases and HTTP policy remain caller-owned.
 
 #![doc = include_str!("../README.md")]
 
@@ -13,8 +14,10 @@ mod codec;
 mod commit;
 mod compactor;
 mod db;
+pub mod environment;
 mod error;
 mod host;
+pub use environment::Host;
 mod ltx;
 mod lz4_block;
 mod managed;
@@ -23,9 +26,33 @@ mod recovery;
 mod types;
 mod wal;
 
+#[cfg(feature = "replica")]
+pub mod bundle;
+#[cfg(feature = "replica")]
+mod paged;
+#[cfg(feature = "replica")]
+mod paged_vfs;
+#[cfg(feature = "replica")]
+mod replica;
+#[cfg(feature = "replica")]
+mod writable_vfs;
+#[cfg(feature = "replica")]
+pub use writable_vfs::Hydration;
+#[cfg(feature = "replica")]
+mod schedule;
+#[cfg(feature = "replica")]
+pub use paged::PagedDatabase;
+#[cfg(feature = "replica")]
+pub use paged_vfs::PagedConnection;
+#[cfg(feature = "replica")]
+pub use replica::{Replica, ReplicaHead};
+#[cfg(feature = "replica")]
+pub use schedule::CompactionSchedule;
+
 #[cfg(test)]
 mod format_tests;
 
+pub use db::CheckpointMode;
 pub use error::{CrabError, Result};
 pub use managed::ManagedDb;
 pub use recovery::{VerifiedLocalPlan, compact_exact, restore_exact};

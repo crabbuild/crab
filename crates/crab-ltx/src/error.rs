@@ -6,6 +6,15 @@ pub type Result<T> = std::result::Result<T, CrabError>;
 /// Capture and recovery failures; none imply remote publication succeeded.
 #[derive(Debug, thiserror::Error)]
 pub enum CrabError {
+    #[cfg(feature = "replica")]
+    #[error("object-store replication failure: {0}")]
+    Storage(#[from] crab_storage::StorageError),
+    #[cfg(feature = "replica")]
+    #[error("invalid replica metadata: {0}")]
+    Json(#[from] serde_json::Error),
+    #[cfg(feature = "replica")]
+    #[error("replication task failed: {0}")]
+    Task(#[from] tokio::task::JoinError),
     #[error("LTX checksum mismatch")]
     ChecksumMismatch,
     #[error("LTX file corrupted")]

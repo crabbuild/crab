@@ -47,8 +47,18 @@ Paths in the first column are relative to upstream `crates/ltx/`.
 | `src/codec.rs` | `92e7a8aa643ecf9f325e4ad7dd4ec606ebe204dcb972f8f0755f8ece9733d5ca` | Adapted dual decoder, sized-block encoder |
 | `src/lz4_block.rs` | `c9cd1c028dd9991a779b9b62c15127f9203edebd55553ce2718dc053a63e7872` | Retained compressor with checked read helpers |
 | `src/compactor.rs` | `e2101df9a95012c644e191ecf86b564f7ddf5f172f77d707d5d178df6cd70ce7` | Adapted exact-input page merge |
-| `src/host.rs` | `6b876f9ab1344e5c915ac0d4ef5ecab3ae88e30bd0490f7255dac673ff7781ff` | Reference; replaced by bounded synchronous local filesystem implementation |
+| `src/host.rs` | `6b876f9ab1344e5c915ac0d4ef5ecab3ae88e30bd0490f7255dac673ff7781ff` | Bounded local I/O, filesystem/clock, named SQLite VFS and executor/worker injection in `environment.rs` |
 | `src/error.rs` | `50f0f6a6c7ca6dbd3d5987ddde5c5896877e7031cd3f3190a288e9434e52f21b` | Reference; replaced by Crab source-preserving errors without remote reset hints |
+| `src/replica.rs` | `90f7a22cefb331b08fa84933d5000dd1b9cd690506467762fe4915b278bf1bd3` | Reference for ordered uploads/restore; exact-plan orchestration in `replica.rs` |
+| `src/replica_compactor.rs` | `77415fe347069635b3b8ce5451c8b5cfc45534de1a9889d61cd2142eb7d2fa3d` | Additive remote compaction adapted to exact ranges/full chains and head CAS |
+| `src/paged.rs` | `c40c2c54872bdbd93ff81dda3837799857a22f0f391931633278ac52b1b3f977` | Page-map/ranged-frame design adapted with authenticated sidecars and per-cut checksum verification |
+| `src/paged_vfs.rs` | `9e7a5e5a379277aa2c9b6ef44f618607ccf66dfa4c2c1d9aeee35f74c149ac3c` | Immutable and writable sparse VFS; static registration, per-file Arc lifetime, checked partial writes/truncation |
+| `src/bundle.rs` | `3a8d2399fc4bcfe7de6475d1768aaba88ab7f2cceb45bbd6a62a46e2eebeeedc` | Verbatim-envelope design adapted to checked CRB1 rows, exact ranges and digests |
+| `src/client/bundle.rs` | `46b13a307db780e58a9f2efdb70a7f63b1aebd5c9b897970010c087bb0cba43f` | Manifest-selected bundle extents replace fallback after arbitrary native-read failures |
+| `src/client/epochs.rs` | `a84c20df2e0a43ad98540eeb0fd20f5aefc4aa8555c8ff3e5636391d8dcf4997` | Pinned inheritance with explicit origin descriptors replaces listing-based chain selection |
+| `src/compaction_level.rs` | `02b99b8532cd4da0ab40ad75a9e96ee85f95ceec82afbf3a7efff0b51299e2cc` | Caller-driven bounded monotonic scheduling in `schedule.rs` |
+| `src/client/mod.rs` | `b2f8d0920291fe33e07d5a1812027dc26c9de31d7efeab9efb794f2b97923438` | Transport contract reference, narrowed to exact named operations |
+| `src/client/object_store.rs` | `044692dcdbcf2cb2006e9966fb8831f1e984f7f59713bafb3b44564dbad95663` | Upload/range reference; use `crab-storage` instead of copied provider construction |
 | `README.md` | `ca048adf266be29471c81d34577b88eb7545b44350575f51be69cd136e5be73c` | Attribution/format contract retained above and in Crab README |
 | `LICENSE` | `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30` | Unmodified |
 | `LICENSE.pierrec-lz4` | `81436a8a4ab6927ec69561e406f1f3d15aeff80fcbd0236847fbad725e72c88f` | Unmodified |
@@ -56,7 +66,8 @@ Paths in the first column are relative to upstream `crates/ltx/`.
 ## Deliberate adaptations
 
 1. Rust 2024; workspace `rusqlite` 0.34 / `libsqlite3-sys` 0.32. No second SQLite,
-   Celld runtime, provider SDK, URL parser or async runtime. Keep existing locked
+   Celld runtime or credential/URL parser. Empty default features; optional
+   `replica` uses existing Crab storage and Tokio dependencies. Keep existing locked
    `lz4_flex` 0.11.6 and `crc-fast` 1.10.0; direct CRC features use `std` only.
 2. Private imported modules behind `ManagedDb`, explicit artifact descriptors
    and exact restore/compaction. The managed writer is owned by the crate rather
@@ -67,11 +78,12 @@ Paths in the first column are relative to upstream `crates/ltx/`.
 4. Add SQLite committed-frame observation to reject a valid-prefix-only capture
    after corruption of a later committed frame. The narrow FFI callback keeps a
    stable boxed atomic alive until the writer closes and cannot unwind.
-5. Fresh-session metadata claim; remove local latest-file discovery, reset/seed
-   continuation and recovery fallbacks. Rebuild the checksum index in a new epoch.
-   No partial published/unpublished local restart protocol is claimed.
-6. Direct bounded file reads replace paged-VFS reads; synchronous filesystem
-   admission replaces Celld's injectable async host. Preserve source errors,
+5. Fresh-session metadata claim; remove local latest-file discovery and recovery
+   fallbacks. Exact restore or authenticated sparse maps seed checksum-bearing
+   continuation. No arbitrary published/unpublished local restart is claimed.
+6. Bounded artifact/WAL reads and complete library-owned filesystem/clock injection; main-page
+   reads traverse SQLite's VFS, including snapshot/capture on sparse files.
+   Replica blocking dispatch is injectable. Preserve source errors,
    replace reachable `expect` conversions, and use SQLite transaction state
    instead of message-string matching when rolling back.
 7. Decoder additionally checks page ordering/coverage, actual index offsets and
@@ -79,8 +91,8 @@ Paths in the first column are relative to upstream `crates/ltx/`.
    input digests and every pre/post checksum; owns verified input bytes to avoid
    path replacement races. New atomic destination installation never overwrites.
 8. Local apply/restore is Crab code, not a copy of `replica.rs` discovery or
-   transport. Compaction accepts a verified complete snapshot chain and compares
-   reconstructed output bytes with the exact original image before installation.
+   transport. Compaction accepts verified snapshot chains or exact spans and
+   compares range endpoint and final image bytes before installation/publication.
 9. Keep normal Rust unit/integration/doc-test targets enabled. Upstream declares
    `[lib] test = false`; no fixture/test corpus is present in the pinned tracked
    source tree. Crab adds real-SQLite tests, a process-kill test and independent
@@ -89,10 +101,27 @@ Paths in the first column are relative to upstream `crates/ltx/`.
     forwarding helpers. A checkpoint error fences the managed handle instead of
     swallowing a busy error that could conceal failed read-lock reacquisition.
 
-Omitted entirely: `client/*`, `replica.rs`, `replica_url.rs`, `bundle.rs`,
-`compaction_level.rs`, `replica_compactor.rs`, `paged.rs`, `paged_vfs.rs`, node-log
-and cell-runtime integration. Retention planning, leases, manifests, object-store
-transport, permission checks and durable HTTP responses remain server policy.
+11. Optional replica support adds immutable content-addressed LTX, page-index and
+    manifest objects, conditional epoch-head publication, exact historical roots,
+    inherited exact recovery, bundles and range/full compaction. No listing/latest
+    inference or remote deletion. The epoch head is not HTTP owner authority.
+12. Paged reads authenticate compressed frames using a hash-pinned index and
+    verify decoded page checksums. Apply intermediate truncations before regrowth.
+    Both SQLite VFS modes use dedicated I/O threads rather than signed-URL
+    transport. Writable faults share installation state with checkpoint writes;
+    truncation retires old pages, and partial writes resolve missing bytes first.
+    SQL callbacks retain I/O source failures and zero-fill SQLite short reads.
+13. Injectable exclusive claims, atomic new-file installation, sparse allocation
+    and local pruning; named process-lifetime SQLite base VFS; independently
+    started/joined I/O workers. Exact local resume remains runtime-free unless
+    the optional remote feature is enabled. No local listing-based authority.
+
+Still omitted: duplicate provider/URL construction, epoch election, listing-based
+discovery, complete virtual-filesystem simulation, B-tree prediction heuristics,
+node-wide shared-bundle aggregation, node-log and cell-runtime integration. Retention planning,
+leases, permission checks and durable HTTP responses remain server policy.
+The new remote modules are focused Crab adaptations of the referenced designs,
+not unmodified copies of those entire upstream files.
 
 ## Review checklist for later imports
 

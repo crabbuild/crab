@@ -1,0 +1,302 @@
+//! Celld-inspired pinned page maps; authenticated indexes replace unchecked tails.
+
+use crate::{CrabError, Position, Replica, Result, replica::RemoteSegment};
+use std::{collections::BTreeMap, sync::Arc};
+
+const ENTRY_BYTES: usize = 60;
+const FRAME_PREFIX: usize = crate::ltx::PAGE_HEADER_SIZE + 4;
+
+#[derive(Clone)]
+struct Locator {
+    segment: Arc<RemoteSegment>,
+    offset: u64,
+    size: u64,
+    hash: [u8; 32],
+    checksum: u64,
+}
+
+/// Immutable exact-cut page reads backed by authenticated object-store ranges.
+///
+/// The head and index are trusted publication metadata, not signatures. Access
+/// control and retention of every referenced object remain the caller's job.
+/// No full LTX body is downloaded during construction; each page read verifies
+/// the frame's BLAKE3 and the decoded page checksum before returning bytes.
+#[derive(Clone)]
+pub struct PagedDatabase {
+    replica: Replica,
+    pages: Arc<BTreeMap<u32, Locator>>,
+    page_size: u32,
+    count: u32,
+    position: Position,
+}
+
+impl PagedDatabase {
+    pub(crate) fn host(&self) -> crate::Host {
+        self.replica.host.clone()
+    }
+    pub(crate) fn checksums(&self) -> Result<crate::pages::PageChecksums> {
+        crate::pages::PageChecksums::from_checksums(
+            self.page_size,
+            self.count,
+            self.pages.iter().map(|(p, loc)| (*p, loc.checksum)),
+        )
+    }
+
+    /// Activates a new writable sparse database continuing this exact cut.
+    ///
+    /// The directory is exclusive to the caller. Use only the returned managed
+    /// writer: opening the sparse file through SQLite's default VFS reads holes.
+    pub fn open_writable(self, destination: &std::path::Path) -> Result<crate::ManagedDb> {
+        crate::ManagedDb::open_paged(self, destination)
+    }
+
+    pub(crate) fn limits(&self) -> crate::Limits {
+        self.replica.limits
+    }
+    #[must_use]
+    pub fn position(&self) -> Position {
+        self.position
+    }
+    #[must_use]
+    pub fn page_size(&self) -> u32 {
+        self.page_size
+    }
+    #[must_use]
+    pub fn page_count(&self) -> u32 {
+        self.count
+    }
+
+    /// Reads a one-based page; pages outside the pinned database are rejected.
+    pub async fn read_page(&self, page: u32) -> Result<Vec<u8>> {
+        if page == 0 || page > self.count {
+            return Err(CrabError::TxNotAvailable);
+        }
+        if page == crate::ltx::lock_pgno(self.page_size) {
+            return Ok(vec![0; self.page_size as usize]);
+        }
+        let loc = self.pages.get(&page).ok_or(CrabError::LTXCorrupted)?;
+        let frame = self
+            .replica
+            .frame(&loc.segment, loc.offset, loc.size)
+            .await?;
+        if *blake3::hash(&frame).as_bytes() != loc.hash {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let bytes = decode_frame(&frame, self.page_size, page)?;
+        if crate::ltx::checksum_page(page, &bytes) != loc.checksum {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        Ok(bytes)
+    }
+
+    /// Reads adjacent pages whose compressed frames occupy one object range.
+    ///
+    /// The run is capped at one MiB decoded, and every returned frame is checked.
+    /// Compaction, bundles and inherited epochs share this same locator path.
+    pub async fn read_run(&self, first: u32, max_pages: u32) -> Result<Vec<(u32, Vec<u8>)>> {
+        if max_pages == 0 {
+            return Ok(Vec::new());
+        }
+        if first == crate::ltx::lock_pgno(self.page_size) {
+            return Ok(vec![(first, self.read_page(first).await?)]);
+        }
+        let first_loc = self.pages.get(&first).ok_or(CrabError::TxNotAvailable)?;
+        let count = max_pages
+            .min((1 << 20) / self.page_size)
+            .min(self.count - first + 1);
+        let mut end = first_loc.offset + first_loc.size;
+        let mut last = first;
+        for page in (first..=first + (count - 1)).skip(1) {
+            let Some(loc) = self.pages.get(&page) else {
+                break;
+            };
+            if !Arc::ptr_eq(&loc.segment, &first_loc.segment) || loc.offset != end {
+                break;
+            }
+            end = end.checked_add(loc.size).ok_or(CrabError::LTXCorrupted)?;
+            last = page;
+        }
+        let frames = self
+            .replica
+            .frame(&first_loc.segment, first_loc.offset, end - first_loc.offset)
+            .await?;
+        let mut output = Vec::new();
+        for page in first..=last {
+            let loc = self.pages.get(&page).ok_or(CrabError::LTXCorrupted)?;
+            let start = (loc.offset - first_loc.offset) as usize;
+            let frame = frames
+                .get(start..start + loc.size as usize)
+                .ok_or(CrabError::LTXCorrupted)?;
+            if *blake3::hash(frame).as_bytes() != loc.hash {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            let bytes = decode_frame(frame, self.page_size, page)?;
+            if crate::ltx::checksum_page(page, &bytes) != loc.checksum {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            output.push((page, bytes));
+        }
+        Ok(output)
+    }
+
+    /// Opens a read-only SQLite VFS over this pinned cut, with no local database.
+    ///
+    /// SQLite calls are blocking. Run queries on a dedicated or blocking thread.
+    /// The VFS uses its own I/O thread/runtime, never a caller runtime's block_on.
+    pub fn open_sqlite(self) -> Result<crate::PagedConnection> {
+        crate::paged_vfs::open(self)
+    }
+}
+
+pub(crate) async fn build(
+    replica: Replica,
+    segments: &[RemoteSegment],
+    position: Position,
+) -> Result<PagedDatabase> {
+    let mut indexes = Vec::new();
+    for segment in segments {
+        indexes.push((segment.clone(), replica.index(segment).await?));
+    }
+    replica
+        .host
+        .clone()
+        .run(move || build_map(replica, indexes, position))
+        .await?
+}
+
+fn build_map(
+    replica: Replica,
+    indexes: Vec<(RemoteSegment, Vec<u8>)>,
+    position: Position,
+) -> Result<PagedDatabase> {
+    let mut pages = BTreeMap::new();
+    let mut count = 0;
+    let mut page_size = 0;
+    for (segment, bytes) in indexes {
+        let segment = Arc::new(segment);
+        let info = &segment.info;
+        page_size = info.page_size;
+        count = info.database_pages;
+        let lock = crate::ltx::lock_pgno(page_size);
+        if bytes.len() % ENTRY_BYTES != 0 {
+            return Err(CrabError::LTXCorrupted);
+        }
+        // Apply each truncation before the next delta; a later regrowth must not
+        // revive old pages from a version predating that truncation.
+        pages.retain(|pgno, _| *pgno <= count);
+        let mut previous = 0;
+        let mut end = crate::ltx::HEADER_SIZE as u64;
+        for entry in bytes.chunks_exact(ENTRY_BYTES) {
+            let pgno = u32::from_be_bytes(array(&entry[..4])?);
+            let offset = u64::from_be_bytes(array(&entry[4..12])?);
+            let size = u64::from_be_bytes(array(&entry[12..20])?);
+            let checksum = u64::from_be_bytes(array(&entry[52..60])?);
+            if pgno <= previous
+                || pgno > count
+                || pgno == lock
+                || offset != end
+                || size < FRAME_PREFIX as u64
+                || size
+                    > crate::lz4_block::compress_bound(page_size as usize) as u64
+                        + FRAME_PREFIX as u64
+            {
+                return Err(CrabError::LTXCorrupted);
+            }
+            end = offset.checked_add(size).ok_or(CrabError::LTXCorrupted)?;
+            let footer = crate::ltx::PAGE_HEADER_SIZE + 8 + crate::ltx::TRAILER_SIZE + 1;
+            if end > info.size_bytes.saturating_sub(footer as u64) {
+                return Err(CrabError::LTXCorrupted);
+            }
+            pages.insert(
+                pgno,
+                Locator {
+                    segment: segment.clone(),
+                    offset,
+                    size,
+                    hash: array(&entry[20..52])?,
+                    checksum,
+                },
+            );
+            previous = pgno;
+        }
+        if pages.len() as u64 != u64::from(count) - u64::from(lock <= count) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        let checksum = pages
+            .values()
+            .fold(crate::CHECKSUM_FLAG, |sum, loc| sum ^ loc.checksum)
+            | crate::CHECKSUM_FLAG;
+        if checksum != info.post_checksum {
+            return Err(CrabError::ChecksumMismatch);
+        }
+    }
+    Ok(PagedDatabase {
+        replica,
+        pages: Arc::new(pages),
+        page_size,
+        count,
+        position,
+    })
+}
+
+// The sidecar binds offsets and compressed-frame digests to the CAS head. The
+// LTX whole-file digest alone cannot authenticate an isolated range read.
+pub(crate) fn encode_index(bytes: &[u8]) -> Result<Vec<u8>> {
+    let (_, pages) = crate::ltx::decode_file_with_pages(bytes)?;
+    let field = bytes
+        .len()
+        .checked_sub(crate::ltx::TRAILER_SIZE + 8)
+        .ok_or(CrabError::LTXCorrupted)?;
+    let len = usize::try_from(u64::from_be_bytes(array(&bytes[field..field + 8])?))
+        .map_err(|_| CrabError::LTXCorrupted)?;
+    let start = field.checked_sub(len).ok_or(CrabError::LTXCorrupted)?;
+    let entries = crate::codec::decode_page_index(&bytes[start..field])?;
+    if entries.len() != pages.len() {
+        return Err(CrabError::LTXCorrupted);
+    }
+    let mut index = Vec::new();
+    for ((pgno, offset, size), (page, data)) in entries.into_iter().zip(pages) {
+        if pgno != page {
+            return Err(CrabError::LTXCorrupted);
+        }
+        let end = offset.checked_add(size).ok_or(CrabError::LTXCorrupted)?;
+        let frame = bytes
+            .get(offset as usize..end as usize)
+            .ok_or(CrabError::LTXCorrupted)?;
+        // Replica writers use sized-block LTX; the old frame decoder remains
+        // supported by exact recovery, not by this new paged storage contract.
+        decode_frame(frame, data.len() as u32, pgno)?;
+        index.extend_from_slice(&pgno.to_be_bytes());
+        index.extend_from_slice(&offset.to_be_bytes());
+        index.extend_from_slice(&size.to_be_bytes());
+        index.extend_from_slice(blake3::hash(frame).as_bytes());
+        index.extend_from_slice(&crate::ltx::checksum_page(pgno, &data).to_be_bytes());
+    }
+    Ok(index)
+}
+
+fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
+    bytes.try_into().map_err(|_| CrabError::LTXCorrupted)
+}
+
+fn decode_frame(frame: &[u8], page_size: u32, pgno: u32) -> Result<Vec<u8>> {
+    let prefix = frame.get(..FRAME_PREFIX).ok_or(CrabError::LTXCorrupted)?;
+    let header = crate::ltx::PageHeader::parse(&prefix[..crate::ltx::PAGE_HEADER_SIZE])?;
+    header.validate()?;
+    let size =
+        u32::from_be_bytes(array(&prefix[crate::ltx::PAGE_HEADER_SIZE..FRAME_PREFIX])?) as usize;
+    if header.pgno != pgno
+        || header.flags != crate::ltx::PAGE_HEADER_FLAG_SIZE
+        || size != frame.len() - FRAME_PREFIX
+        || size > crate::lz4_block::compress_bound(page_size as usize)
+    {
+        return Err(CrabError::LTXCorrupted);
+    }
+    let mut data = vec![0; page_size as usize];
+    let n = lz4_flex::block::decompress_into(&frame[FRAME_PREFIX..], &mut data)
+        .map_err(|e| CrabError::Other(Box::new(e)))?;
+    if n != data.len() {
+        return Err(CrabError::LTXCorrupted);
+    }
+    Ok(data)
+}

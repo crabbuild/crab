@@ -7,6 +7,31 @@ pub(crate) struct PageChecksums {
 }
 
 impl PageChecksums {
+    #[cfg(feature = "replica")]
+    pub(crate) fn from_checksums(
+        page_size: u32,
+        count: u32,
+        pages: impl Iterator<Item = (u32, u64)>,
+    ) -> Result<Self> {
+        let mut result = Self {
+            pages: vec![0; count as usize],
+        };
+        for (page, checksum) in pages {
+            if page == 0 || page > count || checksum & CHECKSUM_FLAG == 0 {
+                return Err(CrabError::LTXCorrupted);
+            }
+            result.pages[page as usize - 1] = checksum;
+        }
+        if result
+            .pages
+            .iter()
+            .enumerate()
+            .any(|(i, c)| *c == 0 && i as u32 + 1 != ltx::lock_pgno(page_size))
+        {
+            return Err(CrabError::LTXCorrupted);
+        }
+        Ok(result)
+    }
     pub fn apply(
         &mut self,
         page_size: u32,
