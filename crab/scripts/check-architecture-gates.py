@@ -18,6 +18,11 @@ OBJECT_STORE_IMPLEMENTATION_FEATURES = {
     "crab-storage": {"aws", "gcp", "azure", "fs"},
     "crab-workflow": {"aws", "gcp", "azure", "fs", "http"},
 }
+OBJECT_STORE_DEV_IMPLEMENTATION_FEATURES = {
+    # This exercises the filesystem backend's unsupported conditional update.
+    # Runtime provider construction remains owned by crab-storage.
+    "crab-ltx": {"fs"},
+}
 XET_OWNER_PACKAGE = "crab-xet"
 XET_FORBIDDEN_PATTERNS = ("xet_core_structures", "xet-core-structures")
 XET_MODULE_REQUIRED_NORMAL_PACKAGES = {
@@ -1744,6 +1749,7 @@ DELETED_WORKFLOW_REEXPORT_ADAPTER_FORBIDDEN_PATTERNS = {
 }
 PRIVATE_INTERNAL_PACKAGES = {
     "crab-http-server",
+    "crab-ltx",
     "crab-s3-gateway",
     "crab-vfs",
     "crab-workflow",
@@ -1786,6 +1792,7 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-s3-gateway": set(),
 }
 WORKSPACE_DEPENDENCY_POLICY = {
+    "crab-ltx": {"normal": {"crab-storage"}},
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
     },
@@ -1926,6 +1933,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-xet": {},
 }
 WORKSPACE_DEPENDENCY_PATHS = {
+    "crab-ltx": "crates/crab-ltx",
     "crab-write": "crates/crab-write",
     "crab-http-server": "crates/crab-http-server",
     "crab-auth": "crates/crab-auth",
@@ -2117,7 +2125,12 @@ def check_object_store_features(metadata: dict) -> bool:
             if dependency["uses_default_features"]:
                 violations.append(f"{name}: object_store uses upstream default features")
 
-            allowed = OBJECT_STORE_IMPLEMENTATION_FEATURES.get(name, set())
+            policies = (
+                OBJECT_STORE_DEV_IMPLEMENTATION_FEATURES
+                if dependency_kind(dependency) == "dev"
+                else OBJECT_STORE_IMPLEMENTATION_FEATURES
+            )
+            allowed = policies.get(name, set())
             if features != allowed:
                 expected = ", ".join(sorted(allowed)) or "(none)"
                 actual = ", ".join(sorted(features)) or "(none)"

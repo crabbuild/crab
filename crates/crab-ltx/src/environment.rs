@@ -235,10 +235,13 @@ impl Host {
         self.executor.dispatch(Box::new(move || {
             // Dispatched work can outlive its future. Keep admission with the
             // job, not the waiter, so cancellation cannot oversubscribe the pool.
-            let _permit = permit;
-            let _recovery = recovery;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
                 .map_err(|_| crate::CrabError::InvalidState("host job panicked"));
+            // Result delivery is the operation's completion boundary. Release
+            // admission first so returned long-lived handles cannot appear to
+            // retain capacity while this closure is still being torn down.
+            drop(recovery);
+            drop(permit);
             let _ = send.send(result);
         }))?;
         receive
