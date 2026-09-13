@@ -337,12 +337,13 @@ main {
   background: var(--bgColor-muted);
 }
 .file-table td:first-child {
-  width: 60%;
+  width: 35%;
 }
 .file-table td:nth-child(2) {
-  width: 20%;
+  width: 45%;
 }
 .file-table td:last-child {
+  width: 20%;
   text-align: right;
 }
 .file-table a {
@@ -909,13 +910,13 @@ main {
     max-width: 200px;
   }
   .file-table td:first-child {
-    width: 75%;
+    width: 45%;
   }
   .file-table td:nth-child(2) {
-    display: none;
+    width: 55%;
   }
   .file-table td:last-child {
-    width: 25%;
+    display: none;
   }
   .latest-commit > strong {
     display: none;
@@ -3593,17 +3594,28 @@ main {
   border-bottom: 1px solid var(--borderColor-muted);
 }
 .file-table th:first-child {
-  width: 60%;
+  width: 35%;
 }
 .file-table th:nth-child(2) {
-  width: 20%;
+  width: 45%;
 }
 .file-table th:last-child {
+  width: 20%;
   text-align: right;
 }
 .file-table td a {
   display: flex;
   align-items: center;
+}
+.directory-commit-message {
+  color: var(--fgColor-muted) !important;
+  display: block !important;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.directory-commit-message:hover {
+  color: var(--fgColor-accent) !important;
 }
 .commit-history-link {
   display: inline-flex;
@@ -3642,7 +3654,7 @@ main {
   .repository-actions {
     flex-wrap: wrap;
   }
-  .file-table th:nth-child(2) {
+  .file-table th:last-child {
     display: none;
   }
   .commit-history-link {

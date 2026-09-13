@@ -17,7 +17,7 @@ import {
   type Commit,
   type Repository,
 } from "./api";
-import { Link, Result, date, short } from "./ui";
+import { Link, Result, date, relativeDate, short } from "./ui";
 import { compareFileItems } from "./entry-sort";
 import { RepositoryMarkdown } from "./repository-markdown";
 import type { CodeThemes } from "./code-theme";
@@ -116,7 +116,13 @@ export function Directory({
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const cursor = cursors[cursors.length - 1];
   const state = useRequest<Page<Entry>>(
-    endpoint(repo, "tree", { rev, path_hex: path, cursor, limit: "100" }),
+    endpoint(repo, "tree", {
+      rev,
+      path_hex: path,
+      cursor,
+      limit: "100",
+      last_commit: "true",
+    }),
   );
   return (
     <Result state={state}>
@@ -136,8 +142,8 @@ export function Directory({
                   <thead>
                     <tr>
                       <th>Name</th>
-                      <th>Type</th>
-                      <th>Object</th>
+                      <th>Last commit</th>
+                      <th>Updated</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -172,15 +178,33 @@ export function Directory({
                               {entry.path.split("/").pop()}
                             </Link>
                           </td>
-                          <td className="muted">
-                            {entry.kind === "Tree"
-                              ? "Directory"
-                              : entry.kind === "Blob"
-                                ? "File"
-                                : entry.kind}
+                          <td className="directory-commit-cell">
+                            {entry.last_commit ? (
+                              <Link
+                                className="directory-commit-message"
+                                href={repoHref(repo, {
+                                  view: "commit",
+                                  rev: entry.last_commit.oid,
+                                })}
+                                title={`${entry.last_commit.message || "Untitled commit"} by ${entry.last_commit.author}`}
+                              >
+                                {entry.last_commit.message || "Untitled commit"}
+                              </Link>
+                            ) : (
+                              <span className="muted">Unavailable</span>
+                            )}
                           </td>
-                          <td>
-                            <code className="muted">{short(entry.oid)}</code>
+                          <td className="directory-commit-date muted">
+                            {entry.last_commit && (
+                              <time
+                                dateTime={new Date(
+                                  entry.last_commit.author_seconds * 1000,
+                                ).toISOString()}
+                                title={date(entry.last_commit.author_seconds)}
+                              >
+                                {relativeDate(entry.last_commit.author_seconds)}
+                              </time>
+                            )}
                           </td>
                         </tr>
                       ))}

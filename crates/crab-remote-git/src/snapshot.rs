@@ -1160,6 +1160,120 @@ impl RemoteGitSnapshot {
         Ok(Page { items, next })
     }
 
+    /// Find the newest first-parent commit that changed each listed directory entry.
+    ///
+    /// Entries must be immediate children returned by this snapshot. The result
+    /// preserves their order and shares one bounded history walk across all entries.
+    pub async fn latest_directory_entry_commits(
+        &self,
+        directory: &GitPath,
+        entries: &[TreeEntry],
+        operation: &OperationContext,
+    ) -> Result<Vec<Commit>> {
+        self.ensure_operation(operation)?;
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        for entry in entries {
+            let name = entry.path.file_name().ok_or(Error::InternalInvariant {
+                invariant: "directory listing contained the repository root",
+            })?;
+            if directory.join(name)? != entry.path {
+                return Err(Error::InternalInvariant {
+                    invariant: "directory history entry was not an immediate child",
+                });
+            }
+        }
+
+        let names = entries
+            .iter()
+            .map(|entry| {
+                entry.path.file_name().ok_or(Error::InternalInvariant {
+                    invariant: "validated directory entry lost its name",
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut current_directory = self.entry(directory, operation).await?;
+        let mut current_entries = entries.iter().cloned().map(Some).collect::<Vec<_>>();
+        let mut latest = vec![None; entries.len()];
+        let mut current_commit = path_history_commit(self.commit_oid, operation).await?;
+
+        loop {
+            let Some(parent_oid) = current_commit.parents.first().copied() else {
+                for result in latest.iter_mut().filter(|result| result.is_none()) {
+                    operation
+                        .charge(
+                            BudgetDimension::ResponseBytes,
+                            commit_response_bytes(&current_commit),
+                        )
+                        .await?;
+                    *result = Some(current_commit.clone());
+                }
+                break;
+            };
+            let parents =
+                blame_parent_commits(parent_oid, self.commit_graph.as_deref(), operation).await?;
+            if parents.is_empty() {
+                return Err(Error::InternalInvariant {
+                    invariant: "directory history prefetch produced no commits",
+                });
+            }
+            let parent_directories = entries_at_trees(&parents, directory, operation).await?;
+            for (parent, parent_directory) in parents.into_iter().zip(parent_directories) {
+                if current_directory == parent_directory {
+                    current_commit = parent;
+                    continue;
+                }
+                let parent_entries = match parent_directory.as_ref() {
+                    Some(entry) if entry.kind == EntryKind::Tree => {
+                        operation
+                            .read_tree_entry_names(entry.oid, directory, &names)
+                            .await?
+                    }
+                    _ => vec![None; entries.len()],
+                };
+                for index in 0..entries.len() {
+                    if latest[index].is_some() {
+                        continue;
+                    }
+                    if path_change_kind(
+                        current_entries[index].as_ref(),
+                        std::slice::from_ref(&parent_entries[index]),
+                    )
+                    .is_some()
+                    {
+                        operation
+                            .charge(
+                                BudgetDimension::ResponseBytes,
+                                commit_response_bytes(&current_commit),
+                            )
+                            .await?;
+                        latest[index] = Some(current_commit.clone());
+                    } else {
+                        current_entries[index] = parent_entries[index].clone();
+                    }
+                }
+                current_directory = parent_directory;
+                if latest.iter().all(Option::is_some) {
+                    break;
+                }
+                current_commit = parent;
+            }
+            if latest.iter().all(Option::is_some) {
+                break;
+            }
+        }
+
+        latest
+            .into_iter()
+            .map(|commit| {
+                commit.ok_or(Error::InternalInvariant {
+                    invariant: "directory history did not resolve every entry",
+                })
+            })
+            .collect()
+    }
+
     /// Read and verify blob-backed content at one exact path.
     ///
     /// Ordinary and symlink entries return their Git representation bytes.

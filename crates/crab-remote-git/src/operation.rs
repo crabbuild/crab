@@ -823,6 +823,37 @@ impl OperationContext {
         Ok(entry)
     }
 
+    pub(crate) async fn read_tree_entry_names(
+        &self,
+        oid: gix_hash::ObjectId,
+        parent: &GitPath,
+        names: &[&[u8]],
+    ) -> Result<Vec<Option<TreeEntry>>> {
+        self.budget
+            .charge(BudgetDimension::LogicalObjects, 1)
+            .await?;
+        let tree = self.read_raw_tree(oid).await?;
+        let mut found = Vec::new();
+        found
+            .try_reserve_exact(names.len())
+            .map_err(|source| Error::Allocation {
+                requested: names
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Option<TreeEntry>>()),
+                source,
+            })?;
+        let mut comparisons = 0u64;
+        for name in names {
+            let (entry, entry_comparisons) = find_tree_entry(&tree, parent, name)?;
+            comparisons = comparisons.saturating_add(entry_comparisons);
+            found.push(entry);
+        }
+        self.budget
+            .charge(BudgetDimension::Entries, comparisons)
+            .await?;
+        Ok(found)
+    }
+
     pub(crate) async fn read_tree_entries(
         &self,
         oids: &[gix_hash::ObjectId],

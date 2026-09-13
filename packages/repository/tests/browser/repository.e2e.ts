@@ -462,6 +462,16 @@ test.beforeEach(async ({ page }) => {
             kind,
             oid,
             mode: kind === "Tree" ? "040000" : "100644",
+            ...(url.searchParams.get("last_commit") === "true"
+              ? {
+                  last_commit: {
+                    oid,
+                    author: "Alice",
+                    author_seconds: 1_700_000_000,
+                    message: `Update ${path}`,
+                  },
+                }
+              : {}),
           })),
           next: null,
           commit: oid,
@@ -897,6 +907,18 @@ test("overview groups files with their commit and opens the tree when navigating
   await expect(
     panel.getByText("Make the repository easier to browse"),
   ).toBeVisible();
+  await expect(
+    panel.getByRole("columnheader", { name: "Last commit" }),
+  ).toBeVisible();
+  const readmeRow = panel.getByRole("row").filter({ hasText: "README.md" });
+  await expect(readmeRow.getByText("Update README.md")).toHaveAttribute(
+    "href",
+    `/team/project?view=commit&rev=${oid}`,
+  );
+  await expect(readmeRow.getByRole("time")).toHaveAttribute(
+    "datetime",
+    "2023-11-14T22:13:20.000Z",
+  );
   await expect
     .poll(() =>
       panel

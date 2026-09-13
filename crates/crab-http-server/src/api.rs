@@ -45,6 +45,7 @@ pub(crate) struct Parameters {
     limit: Option<usize>,
     cursor: Option<String>,
     q: Option<String>,
+    last_commit: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -468,7 +469,24 @@ async fn execute(
             }
             Action::Tree => {
                 let result = snapshot.list_directory(&path, &page, &operation).await?;
-                json!({"items":result.items.iter().map(entry_json).collect::<Vec<_>>(), "next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
+                let items = if params.last_commit {
+                    let commits = snapshot
+                        .latest_directory_entry_commits(&path, &result.items, &operation)
+                        .await?;
+                    result
+                        .items
+                        .iter()
+                        .zip(commits.iter())
+                        .map(|(entry, commit)| {
+                            let mut value = entry_json(entry);
+                            value["last_commit"] = commit_summary_json(commit);
+                            value
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    result.items.iter().map(entry_json).collect::<Vec<_>>()
+                };
+                json!({"items":items, "next":result.next.map(|cursor|encode_cursor(&server.cursor_key,cursor))})
             }
             Action::Search => {
                 let query = search_query.ok_or(Error::InternalInvariant {
@@ -612,6 +630,15 @@ fn entry_json(entry: &TreeEntry) -> Value {
 
 fn commit_json(commit: &Commit) -> Value {
     json!({"oid":commit.oid.to_string(),"tree":commit.tree.to_string(),"parents":commit.parents.iter().map(ToString::to_string).collect::<Vec<_>>(),"author":String::from_utf8_lossy(&commit.author.name),"author_seconds":commit.author.seconds,"message":String::from_utf8_lossy(&commit.message),"message_hex":encode_hex(&commit.message)})
+}
+
+fn commit_summary_json(commit: &Commit) -> Value {
+    let message = commit
+        .message
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    json!({"oid":commit.oid.to_string(),"author":String::from_utf8_lossy(&commit.author.name),"author_seconds":commit.author.seconds,"message":String::from_utf8_lossy(message)})
 }
 
 fn path_history_json(entry: &crab_remote_git::PathHistoryEntry) -> Value {
