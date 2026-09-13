@@ -17,6 +17,7 @@ mod issues;
 mod labels;
 mod lfs;
 mod maintenance;
+mod metrics;
 mod pulls;
 mod receive;
 mod releases;
@@ -24,12 +25,13 @@ mod repository_settings;
 mod server;
 mod statuses;
 mod storage_root;
+mod transfer_admission;
 
 pub use config::{
     BranchProtection, Config, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember,
     StorageConfig,
 };
-pub use server::serve;
+pub use server::{probe_storage, serve};
 
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
@@ -49,12 +51,18 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("object storage configuration failed")]
     Storage(#[from] crab_storage::StorageError),
+    #[error("object storage coordination failed")]
+    Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("object storage preflight failed: {0}")]
+    StorageProbe(&'static str),
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
     #[error("repository maintenance failed")]
     Maintenance(#[from] crab_write::WriteError),
     #[error("repository catalog operation failed")]
     Catalog(#[from] catalog::CatalogError),
+    #[error("server metrics setup failed")]
+    Metrics(#[from] metrics_exporter_prometheus::BuildError),
     #[error("repository maintenance task failed")]
     Worker(#[from] tokio::task::JoinError),
     #[error("repository settings could not be loaded")]

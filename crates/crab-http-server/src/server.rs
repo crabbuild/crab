@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock as SyncRwLock};
 use std::time::{Duration, Instant};
@@ -11,14 +12,17 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use bytes::Bytes;
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
-use crab_storage::{Store, StoreLayout};
+use crab_storage::{StorageError, Store, StoreLayout};
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use uuid::Uuid;
 
 use crate::catalog::CatalogStore;
 use crate::{
@@ -27,9 +31,57 @@ use crate::{
     branches, checks, contents, git, issues, labels, lfs, maintenance, pulls, receive, releases,
     repository_settings::{self, BranchProtections, RepositoryLifecycle},
     statuses,
+    transfer_admission::TransferAdmission,
 };
 
 pub(crate) const MAX_DEPENDENCY_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const READ_ADMISSION_CAPACITY: usize = 16;
+const GIT_ADMISSION_CAPACITY: usize = 4;
+const APP_ADMISSION_CAPACITY: usize = 8;
+const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
+
+fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
+    TransferAdmission::new(
+        catalog.root().store.clone(),
+        catalog
+            .root()
+            .path(".crab/http-server/v1/admission")
+            .to_string(),
+        GIT_ADMISSION_CAPACITY,
+    )
+}
+
+async fn probe_storage_contract(
+    catalog: &CatalogStore,
+    transfer_admission: &TransferAdmission,
+) -> Result<()> {
+    let root = catalog.root();
+    root.store
+        .list_prefix_bounded(&root.path(".crab/http-server/v1"), 1)
+        .await?;
+    transfer_admission.probe().await?;
+
+    // A unique object avoids cross-pod interference. Provider lifecycle rules
+    // bound residue if a pod dies between creation and deletion.
+    let path = root.path(&format!(
+        ".crab/http-server/v1/auth/preflight/{}",
+        Uuid::now_v7()
+    ));
+    root.store
+        .put_overwrite(&path, Bytes::from_static(b"crab-storage-probe-v1"))
+        .await?;
+    match root.store.delete(&path).await {
+        Ok(()) | Err(StorageError::NotFound { .. }) => {}
+        Err(error) => return Err(error.into()),
+    }
+    match root.store.head(&path).await {
+        Err(StorageError::NotFound { .. }) => Ok(()),
+        Ok(_) => Err(crate::Error::StorageProbe(
+            "an object remained visible after a successful delete",
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
 
 pub(crate) struct Repository {
     pub config: RepositoryConfig,
@@ -62,6 +114,13 @@ impl RepositorySet {
             .values()
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 
     fn replace(&self, next: BTreeMap<(String, String), Arc<Repository>>) {
@@ -210,18 +269,38 @@ pub(crate) struct Server {
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
-    pub git_admission: Arc<Semaphore>,
+    pub transfer_admission: TransferAdmission,
     pub app_admission: Semaphore,
     maintenance_admission: Arc<Semaphore>,
     pub cancellation: CancellationToken,
     pub receives: tokio_util::task::TaskTracker,
-    port: u16,
     pub auth: Option<Authentication>,
     catalog: Option<CatalogStore>,
     catalog_healthy: AtomicBool,
+    metrics: crate::metrics::Metrics,
 }
 
 impl Server {
+    pub(crate) async fn acquire_transfer(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<
+        crate::transfer_admission::TransferPermit,
+        crate::transfer_admission::Error,
+    > {
+        let result = self.transfer_admission.try_acquire(cancellation).await;
+        match &result {
+            Err(crate::transfer_admission::Error::Busy) => {
+                self.metrics.record_transfer_admission_rejection(false);
+            }
+            Err(crate::transfer_admission::Error::Coordination(_)) => {
+                self.metrics.record_transfer_admission_rejection(true);
+            }
+            Ok(_) | Err(crate::transfer_admission::Error::Cancelled) => {}
+        }
+        result
+    }
+
     async fn finish_maintenance(&self) -> Result<()> {
         let mut result = Ok(());
         for repository in self.repositories.values() {
@@ -253,9 +332,6 @@ pub async fn serve(config: Config) -> Result<()> {
         ),
         None => None,
     };
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
-    let port = listener.local_addr()?.port();
     let catalog_version = document.version;
     let repositories = materialize_catalog(&catalog, document).await?;
     let runtime = Arc::new(RemoteGitRuntime::default());
@@ -275,6 +351,12 @@ pub async fn serve(config: Config) -> Result<()> {
             ..Default::default()
         },
     )?;
+    let transfer_admission = transfer_admission(&catalog);
+    probe_storage_contract(&catalog, &transfer_admission).await?;
+    // A pod must prove the complete storage contract before it owns any socket;
+    // otherwise incomplete cloud permissions can look partially started.
+    let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
@@ -285,22 +367,19 @@ pub async fn serve(config: Config) -> Result<()> {
             .as_ref()
             .map(Authentication::cursor_key)
             .unwrap_or_else(rand::random),
-        admission: Semaphore::new(16),
-        git_admission: Arc::new(Semaphore::new(4)),
-        app_admission: Semaphore::new(8),
-        maintenance_admission: Arc::new(Semaphore::new(2)),
-        port,
+        admission: Semaphore::new(READ_ADMISSION_CAPACITY),
+        transfer_admission,
+        app_admission: Semaphore::new(APP_ADMISSION_CAPACITY),
+        maintenance_admission: Arc::new(Semaphore::new(MAINTENANCE_ADMISSION_CAPACITY)),
         auth,
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
+        metrics: crate::metrics::Metrics::new()?,
     });
     let app = router(Arc::clone(&server));
     let management = management_router(Arc::clone(&server));
-    println!("Crab repositories: http://{}", listener.local_addr()?);
-    println!(
-        "Crab management: http://{}",
-        management_listener.local_addr()?
-    );
+    tracing::info!(address = %listener.local_addr()?, "public listener started");
+    tracing::info!(address = %management_listener.local_addr()?, "management listener started");
     let signal_cancellation = cancellation.clone();
     let signal = tokio::spawn(async move {
         shutdown_signal().await;
@@ -326,12 +405,26 @@ pub async fn serve(config: Config) -> Result<()> {
     server.cancellation.cancel();
     server.receives.close();
     server.receives.wait().await;
+    server.transfer_admission.close();
+    server.transfer_admission.wait().await;
     let maintenance = server.finish_maintenance().await;
     runtime.shutdown().await;
     result
         .map(|_| ())
         .map_err(crate::Error::from)
         .and(maintenance)
+}
+
+/// Validate the durable catalog and the storage coordination write path.
+///
+/// # Errors
+///
+/// Returns the original configuration, storage, catalog, or coordination
+/// error when the configured workload cannot satisfy the server contract.
+pub async fn probe_storage(config: &Config) -> Result<()> {
+    let catalog = CatalogStore::from_config(config)?;
+    catalog.load().await?;
+    probe_storage_contract(&catalog, &transfer_admission(&catalog)).await
 }
 
 async fn materialize_catalog(
@@ -405,12 +498,14 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
             Ok(value) => value,
             Err(error) => {
                 server.catalog_healthy.store(false, Ordering::Release);
+                server.metrics.record_catalog_refresh_failure();
                 tracing::warn!(error = ?error, "repository catalog refresh failed");
                 continue;
             }
         };
         if document.version < version {
             server.catalog_healthy.store(false, Ordering::Release);
+            server.metrics.record_catalog_refresh_failure();
             tracing::warn!(
                 catalog_version = document.version,
                 active_version = version,
@@ -432,6 +527,7 @@ async fn refresh_catalog(server: Arc<Server>, mut version: u64) {
             }
             Err(error) => {
                 server.catalog_healthy.store(false, Ordering::Release);
+                server.metrics.record_catalog_refresh_failure();
                 tracing::warn!(error = ?error, "repository catalog materialization failed");
             }
         }
@@ -487,8 +583,18 @@ pub(crate) fn router(server: Arc<Server>) -> Router {
             get(lfs::download).put(lfs::upload),
         )
         .route(
+            "/git/{owner}/{name}/info/lfs/locks",
+            get(lfs::list_locks)
+                .post(lfs::create_lock)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
             "/git/{owner}/{name}/info/lfs/locks/verify",
-            post(lfs::locks_unavailable),
+            post(lfs::verify_locks).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/git/{owner}/{name}/info/lfs/locks/{id}/unlock",
+            post(lfs::unlock_lock).layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/git/{owner}/{name}/info/refs", get(git::advertise))
         .route(
@@ -524,22 +630,44 @@ fn management_router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
+        .route("/metrics", get(render_metrics))
         .with_state(server)
 }
 
+async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
+    let body = server.metrics.render(crate::metrics::RuntimeSnapshot {
+        repositories: server.repositories.len(),
+        catalog_healthy: server.catalog_healthy.load(Ordering::Acquire),
+        draining: server.cancellation.is_cancelled(),
+        receive_workers: server.receives.len(),
+        admission_available: [
+            server.admission.available_permits(),
+            server.transfer_admission.available_permits(),
+            server.app_admission.available_permits(),
+            server.maintenance_admission.available_permits(),
+        ],
+        admission_capacity: [
+            READ_ADMISSION_CAPACITY,
+            GIT_ADMISSION_CAPACITY,
+            APP_ADMISSION_CAPACITY,
+            MAINTENANCE_ADMISSION_CAPACITY,
+        ],
+    });
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4; charset=utf-8",
+            ),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 async fn readiness(State(server): State<Arc<Server>>) -> Response {
-    let check = async {
-        if !server.catalog_healthy.load(Ordering::Acquire) {
-            return Err(crate::Error::Config("catalog refresh is unhealthy"));
-        }
-        let catalog = server
-            .catalog
-            .as_ref()
-            .ok_or(crate::Error::Config("catalog is unavailable"))?;
-        catalog.load().await?;
-        Ok::<_, crate::Error>(())
-    };
-    match tokio::time::timeout(Duration::from_secs(10), check).await {
+    match tokio::time::timeout(Duration::from_secs(10), check_readiness(&server)).await {
         Ok(Ok(())) => Json(json!({"status":"ready"})).into_response(),
         Ok(Err(error)) => {
             tracing::warn!(error = ?error, "repository readiness check failed");
@@ -550,6 +678,25 @@ async fn readiness(State(server): State<Arc<Server>>) -> Response {
             readiness_unavailable()
         }
     }
+}
+
+async fn check_readiness(server: &Server) -> Result<()> {
+    if !server.catalog_healthy.load(Ordering::Acquire) {
+        return Err(crate::Error::Config("catalog refresh is unhealthy"));
+    }
+    let catalog = server
+        .catalog
+        .as_ref()
+        .ok_or(crate::Error::Config("catalog is unavailable"))?;
+    catalog.load().await?;
+    for repository in server.repositories.values() {
+        // A pod must not enter endpoint routing while a fresh process would
+        // reject Git reads and trigger shared index maintenance on first use.
+        repository
+            .open_current(server, server.options, &server.cancellation)
+            .await?;
+    }
+    Ok(())
 }
 
 fn readiness_unavailable() -> Response {
@@ -588,17 +735,48 @@ async fn catalog(
     Ok(Json(json!({"repositories":repositories})))
 }
 
-async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next: Next) -> Response {
+async fn boundary(State(server): State<Arc<Server>>, request: Request, next: Next) -> Response {
+    let request_id = Uuid::now_v7().to_string();
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let started = Instant::now();
+    let observation = server.metrics.start_request(&method);
+    let span = tracing::info_span!(
+        "http_request",
+        request_id = %request_id,
+        method = %method,
+        path = %path,
+    );
+    async move {
+        let mut response = boundary_request(server, request, next).await;
+        if let Ok(value) = axum::http::HeaderValue::from_str(&request_id) {
+            response.headers_mut().insert("x-request-id", value);
+        }
+        tracing::info!(
+            status = response.status().as_u16(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "request completed"
+        );
+        let status = response.status();
+        let (parts, body) = response.into_parts();
+        Response::from_parts(
+            parts,
+            axum::body::Body::new(crate::metrics::ObservedBody::new(
+                body,
+                observation.response(status),
+            )),
+        )
+    }
+    .instrument(span)
+    .await
+}
+
+async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get("host")
         .and_then(|value| value.to_str().ok());
-    let allowed = [
-        format!("127.0.0.1:{}", server.port),
-        format!("localhost:{}", server.port),
-        format!("[::1]:{}", server.port),
-    ];
-    let local_host = allowed.iter().any(|value| Some(value.as_str()) == host);
+    let local_host = is_local_host(host);
     let health_probe = matches!(request.uri().path(), "/healthz" | "/readyz");
     let valid_host = (health_probe && local_host)
         || server
@@ -669,6 +847,24 @@ async fn boundary(State(server): State<Arc<Server>>, mut request: Request, next:
     ).into_response()
 }
 
+fn is_local_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let Ok(authority) = host.parse::<axum::http::uri::Authority>() else {
+        return false;
+    };
+    let hostname = authority.host();
+    let ip_literal = hostname
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(hostname);
+    hostname.eq_ignore_ascii_case("localhost")
+        || ip_literal
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 async fn archived_mutation_response(
     server: &Server,
     principal: &Principal,
@@ -732,6 +928,25 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    #[tokio::test]
+    async fn storage_preflight_leaves_no_live_probe_object() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let catalog = CatalogStore::new(crate::storage_root::StorageRoot::memory(
+            store.clone(),
+            "repositories",
+        ));
+        let admission = transfer_admission(&catalog);
+
+        probe_storage_contract(&catalog, &admission).await.unwrap();
+        probe_storage_contract(&catalog, &admission).await.unwrap();
+
+        let objects = store
+            .list_prefix(&catalog.root().path(".crab/http-server/v1/auth/preflight"))
+            .await
+            .unwrap();
+        assert!(objects.is_empty());
+    }
+
     #[test]
     fn repository_tokens_are_only_considered_on_exact_integration_routes() {
         assert!(integration_api_path(
@@ -770,15 +985,19 @@ mod tests {
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
-            git_admission: Arc::new(Semaphore::new(1)),
+            transfer_admission: TransferAdmission::new(
+                Store::new(Arc::new(object_store::memory::InMemory::new())),
+                "test/.crab/http-server/v1/admission".into(),
+                1,
+            ),
             app_admission: Semaphore::new(1),
             maintenance_admission: Arc::new(Semaphore::new(1)),
             cancellation: CancellationToken::new(),
             receives: tokio_util::task::TaskTracker::new(),
-            port: 8788,
             auth: None,
             catalog: None,
             catalog_healthy: AtomicBool::new(false),
+            metrics: crate::metrics::Metrics::new().unwrap(),
         });
         let app = router(Arc::clone(&server));
         for (path, host, expected, cache) in [
@@ -790,7 +1009,7 @@ mod tests {
             ),
             (
                 "/api/repos",
-                "127.0.0.1:8788",
+                "127.0.0.1:18791",
                 StatusCode::OK,
                 Some("no-store"),
             ),
@@ -806,6 +1025,12 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 Some("no-store"),
             ),
+            (
+                "/api/repos",
+                "127.0.0.1.evil.invalid:8788",
+                StatusCode::FORBIDDEN,
+                None,
+            ),
         ] {
             let request = Request::builder()
                 .uri(path)
@@ -814,6 +1039,14 @@ mod tests {
                 .unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), expected, "{path}, {host}");
+            let request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok());
+            assert!(
+                request_id.is_some_and(|value| Uuid::parse_str(value).is_ok()),
+                "{path}, {host}"
+            );
             assert_eq!(
                 response
                     .headers()
@@ -853,6 +1086,27 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), expected, "{path}");
         }
+        let response = management
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = std::str::from_utf8(&body).unwrap();
+        assert!(body.contains("crab_http_server_catalog_healthy 0"));
+        assert!(body.contains("crab_http_server_requests_total{method=\"get\",outcome=\"2xx\"} 2"));
         runtime.shutdown().await;
     }
 }

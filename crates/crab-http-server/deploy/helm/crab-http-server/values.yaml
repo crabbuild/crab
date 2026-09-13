@@ -19,6 +19,11 @@ serviceAccount:
 config:
   existingConfigMap: ""
   key: server.toml
+  storageUrl: ""
+  auth:
+    issuer: ""
+    clientId: ""
+    publicUrl: ""
 
 secrets:
   existingSecret: ""
@@ -26,10 +31,46 @@ secrets:
   stateKeyKey: state-key
 
 service:
-  type: ClusterIP
   port: 80
   annotations: {}
-  loadBalancerSourceRanges: []
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: ""
+  tlsSecretName: ""
+
+networkPolicy:
+  enabled: true
+  publicIngressFrom: []
+  metricsIngressFrom: []
+
+metrics:
+  podMonitor:
+    enabled: false
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+  prometheusRule:
+    enabled: false
+    labels: {}
+    runbookUrl: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      percent: 25
+      periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      percent: 100
+      periodSeconds: 60
 
 resources:
   requests:
@@ -46,12 +87,12 @@ scratch:
 
 startupProbe:
   periodSeconds: 5
-  timeoutSeconds: 3
+  timeoutSeconds: 12
   failureThreshold: 60
 
 readinessProbe:
   periodSeconds: 5
-  timeoutSeconds: 3
+  timeoutSeconds: 12
   failureThreshold: 2
 
 livenessProbe:
@@ -59,9 +100,12 @@ livenessProbe:
   timeoutSeconds: 3
   failureThreshold: 3
 
-terminationGracePeriodSeconds: 600
+terminationGracePeriodSeconds: 630
 minReadySeconds: 10
 revisionHistoryLimit: 3
+progressDeadlineSeconds: 900
+priorityClassName: ""
+rolloutToken: ""
 
 podAnnotations: {}
 podLabels: {}
@@ -76,8 +120,9 @@ topologySpreadConstraints:
     topologyKey: topology.kubernetes.io/zone
     whenUnsatisfiable: DoNotSchedule
   - maxSkew: 1
+    minDomains: 2
     topologyKey: kubernetes.io/hostname
-    whenUnsatisfiable: ScheduleAnyway
+    whenUnsatisfiable: DoNotSchedule
 
 nodeSelector: {}
 tolerations: []

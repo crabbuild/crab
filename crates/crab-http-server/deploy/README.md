@@ -1,7 +1,6 @@
 # Deployment profiles
 
-`crab-http-server` has one provider-neutral runtime contract, a one-command
-local stack, and checked-in production deployment profiles:
+`crab-http-server` has one provider-neutral runtime contract, a one-command local stack, and checked-in deployment profiles for three cloud storage providers:
 
 ```mermaid
 flowchart LR
@@ -13,17 +12,45 @@ flowchart LR
     Catalog & State & Repos --> Root[(One object-storage root)]
 ```
 
-| Target | Deployment asset | Workload identity | Storage URLs |
-|---|---|---|---|
-| Local Docker | `compose.yaml` | Synthetic local credentials | Private RustFS volume |
-| EKS | `helm/crab-http-server` | EKS Pod Identity association | `s3://bucket/root` |
-| GKE | `helm/crab-http-server` | GKE Workload Identity Federation | `gs://bucket/root` |
-| AKS | `helm/crab-http-server` | AKS Workload ID | `az://account/container/root` |
-| ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | `s3://bucket/root` |
+| Target | Deployment asset | Workload identity | Status |
+| --- | --- | --- | --- |
+| Local Docker | `compose.yaml` | Synthetic local credentials | Qualified in container CI |
+| EKS | `helm/crab-http-server` | EKS Pod Identity association | Recommended team profile; live qualification required |
+| GKE | `helm/crab-http-server` | GKE Workload Identity Federation | Recommended team profile; live qualification required |
+| AKS | `helm/crab-http-server` | AKS Workload ID | Recommended team profile; live qualification required |
+| ECS/Fargate | `ecs/task-definition.example.json` | ECS task role | Evaluation profile; replacement grace is too short |
 
-These assets are portable implementation evidence. A provider is only
-release-qualified after its live test matrix passes; the chart or task
-definition alone is not that claim.
+The Kubernetes chart generates configuration from typed values, runs two or more replicas,
+private probes and Prometheus metrics, an optional Prometheus Operator
+`PodMonitor` and alert rules, a disruption budget, ingress isolation, optional
+Transport Layer Security (TLS) ingress, and optional autoscaling. A provider is
+release-qualified only after its live test matrix passes.
+
+S3 and GCS Terraform roots bound noncurrent repository versions to a configurable
+90-day recovery window and remove abandoned multipart uploads after one day.
+Azure versions remain unexpired because its available lifecycle condition cannot
+measure age since becoming noncurrent safely. Provider cost alerts and the
+restore runbook remain operator responsibilities.
+
+Container CI stops the local writers, copies the complete storage root to an
+isolated object prefix, compares every key and object body, then verifies the
+restored catalog through native Git, issue, and LFS clients. This proves the
+portable recovery shape, but provider version selection and regional recovery
+still require a live drill.
+
+The same container path uploads a 1 MiB LFS object, interrupts its logical
+download after an initial byte range, resumes the remaining range through
+Caddy, and requires the reconstructed file to match byte-for-byte.
+It also drives the stock Git LFS client through lock creation, listing,
+verify-on-push, and unlock against durable RustFS lock records.
+
+Server release tags have their own contract, independent of the Crab CLI. An
+annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
+qualified AMD64/ARM64 image to GHCR with immutable version and source-commit
+tags, an OCI Helm chart, an SBOM, and provenance attestations. Exact-source
+qualification rejects fixable HIGH or CRITICAL image vulnerabilities before
+publication. Kubernetes deployments still pin the resulting image manifest
+digest. The publisher never overwrites an existing image tag or chart version.
 
 ## Start locally with Docker Compose
 
@@ -51,8 +78,11 @@ flowchart LR
 The proxy shares the server's network namespace. It is the only process bound
 to Docker's published port; Crab still binds to loopback and keeps its
 unauthenticated local-trust invariant. The management listener and RustFS are
-not published to the host. This profile is for local development and
-evaluation, not remote or multi-user service.
+not published to the host. Compose waits until the catalog is valid and every
+repository can open its current Git view. This profile is for local development
+and evaluation, not remote or multi-user service. Caddy preserves the validated
+external loopback authority, so Git LFS action URLs also follow a custom
+`CRAB_HTTP_SERVER_PORT`.
 
 ### Operate the local stack
 
@@ -74,7 +104,7 @@ docker compose --file crates/crab-http-server/deploy/compose.yaml logs --follow 
 docker compose --file crates/crab-http-server/deploy/compose.yaml down
 ```
 
-`docker compose ... down --volumes` permanently removes the local RustFS
+`docker compose down --volumes` permanently removes the local RustFS
 volume, including the catalog and every repository. The defaults need no
 `.env` file. These optional environment variables customize local operation:
 
@@ -87,7 +117,44 @@ volume, including the catalog and every repository. The defaults need no
 The dependency images are version- and digest-pinned. `RUSTFS_IMAGE`,
 `AWS_CLI_IMAGE`, and `CADDY_IMAGE` exist for controlled mirrors; keep them
 pinned when overriding. To use a prebuilt server image, set
-`CRAB_HTTP_SERVER_IMAGE` and add `--no-build` to `up`.
+`CRAB_HTTP_SERVER_IMAGE` to its manifest digest and add `--no-build` to `up`:
+
+```sh
+CRAB_HTTP_SERVER_IMAGE=ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
+  docker compose --file crates/crab-http-server/deploy/compose.yaml \
+    up --detach --no-build --wait
+```
+
+## Deploy for a team
+
+Use the Helm chart on Amazon Elastic Kubernetes Service (EKS), Google Kubernetes Engine (GKE), or Azure Kubernetes Service (AKS). One chart preserves the server runtime contract across providers.
+
+```mermaid
+flowchart LR
+    Provider[Generated provider values] --> Helm[Helm release]
+    Team[Team image, OIDC, and ingress values] --> Helm
+    Secret[OIDC secret and stable state key] --> Helm
+    Identity[Cloud workload identity] --> Pods[Two or more Crab pods]
+    Helm --> Pods
+    Pods --> Root[(One storage root)]
+```
+
+Complete the setup in this order:
+
+1. Create versioned storage and provider workload identity with `terraform/aws`, `terraform/gcp`, or `terraform/azure`.
+2. Grant the workload identity access only to the dedicated storage boundary.
+3. Register the OpenID Connect (OIDC) callback `https://git.example.com/auth/callback`.
+4. Export Terraform's generated provider values and edit the provider-neutral team values file.
+5. Create the Kubernetes Secret and install the chart.
+6. Run `helm test` to prove a fresh workload can read, list, write, conditionally update, and delete through its cloud workload identity.
+7. Create the first repository through a running pod.
+8. Run the portable multi-replica qualification locally or through the protected GitHub Actions workflow before admitting critical repositories.
+
+Do not grant team members direct write credentials for the storage root. Git,
+LFS, browser, and administration traffic must pass through the server so its
+authorization, locking, and atomic publication rules remain authoritative.
+
+[The infrastructure bootstrap guide](terraform/README.md) creates storage and identity. [The Kubernetes deployment guide](helm/crab-http-server/README.md) contains install commands. [The operations runbook](operations.md) covers rollout, rollback, rotation, incidents, and restore qualification.
 
 ## Repository lifecycle
 
@@ -104,13 +171,24 @@ crab-http-server --config server.toml repository adopt \
   --owner my-team --name existing --prefix imports/existing \
   --members-file members.toml
 
+crab-http-server --config server.toml repository set-members \
+  --owner my-team --name my-project --members-file members.toml
+
 crab-http-server --config server.toml repository list
 ```
 
+Pass `--members-file -` to read the TOML membership document from standard
+input, which is useful with `kubectl exec --stdin`. Authenticated deployments
+require at least one `admin` member when creating or adopting a repository;
+unauthenticated loopback deployments may omit membership.
+
 `create` initializes canonical Crab layout and manifest objects before its CAS
-catalog publish. `adopt` requires those objects to exist already. Every running
-replica refreshes the catalog and begins routing a successful change within
-five seconds; in-flight requests retain the previous repository handle.
+catalog publish. `adopt` requires those objects to exist already. `set-members`
+uses one conditional catalog update and reports a conflict instead of replaying
+a stale decision over a concurrent change. Every running replica checks the
+catalog every five seconds and swaps routing after the new document
+materializes successfully; in-flight requests retain the previous repository
+handle.
 
 ## Why Lambda is excluded
 

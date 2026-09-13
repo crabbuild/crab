@@ -1,0 +1,310 @@
+name: HTTP server Kubernetes live qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Protected environment containing the provider identity and Git token
+        required: true
+        default: crab-http-server-live
+        type: environment
+      provider:
+        description: Existing Kubernetes platform to qualify
+        required: true
+        type: choice
+        options:
+          - eks
+          - gke
+          - aks
+      runner:
+        description: Hosted runner name or dedicated self-hosted runner label
+        required: true
+        default: ubuntu-latest
+        type: string
+      gke_endpoint:
+        description: GKE control-plane endpoint mode; ignored for EKS and AKS
+        required: true
+        default: public
+        type: choice
+        options:
+          - public
+          - internal
+          - connect-gateway
+      namespace:
+        description: Namespace containing the Crab release
+        required: true
+        default: crab
+        type: string
+      deployment:
+        description: Crab Deployment and Service name
+        required: true
+        default: crab-http-server
+        type: string
+      origin:
+        description: Public HTTPS origin without a trailing slash
+        required: true
+        type: string
+      owner:
+        description: Dedicated qualification repository owner
+        required: true
+        type: string
+      repository:
+        description: Dedicated qualification repository name
+        required: true
+        type: string
+      expected_image:
+        description: Exact deployed image, including its sha256 manifest digest
+        required: true
+        type: string
+      approve_rollout:
+        description: I approve a write and rolling restart of this deployment
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: http-server-kubernetes-live-${{ inputs.environment }}-${{ inputs.provider }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Qualify ${{ inputs.provider }} deployment
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_ROLE_ARN: ${{ vars.CRAB_HTTP_SERVER_EKS_GITHUB_ROLE_ARN }}
+      AWS_REGION: ${{ vars.CRAB_HTTP_SERVER_EKS_REGION }}
+      EKS_CLUSTER: ${{ vars.CRAB_HTTP_SERVER_EKS_CLUSTER }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.CRAB_HTTP_SERVER_GKE_GITHUB_IDENTITY_PROVIDER }}
+      GCP_SERVICE_ACCOUNT: ${{ vars.CRAB_HTTP_SERVER_GKE_GITHUB_SERVICE_ACCOUNT }}
+      GCP_PROJECT: ${{ vars.CRAB_HTTP_SERVER_GKE_PROJECT }}
+      GKE_CLUSTER: ${{ vars.CRAB_HTTP_SERVER_GKE_CLUSTER }}
+      GKE_LOCATION: ${{ vars.CRAB_HTTP_SERVER_GKE_LOCATION }}
+      AZURE_CLIENT_ID: ${{ vars.CRAB_HTTP_SERVER_AKS_GITHUB_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.CRAB_HTTP_SERVER_AKS_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.CRAB_HTTP_SERVER_AKS_SUBSCRIPTION_ID }}
+      AKS_RESOURCE_GROUP: ${{ vars.CRAB_HTTP_SERVER_AKS_RESOURCE_GROUP }}
+      AKS_CLUSTER: ${{ vars.CRAB_HTTP_SERVER_AKS_CLUSTER }}
+    steps:
+      - name: Require explicit mutation approval
+        shell: bash
+        env:
+          APPROVED: ${{ inputs.approve_rollout }}
+        run: |
+          set -euo pipefail
+          test "$APPROVED" = true || {
+            echo "::error::Approve the qualification write and rolling restart."
+            exit 1
+          }
+
+      - name: Check out qualification source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require an annotated server release tag
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" != tag ] ||
+            [[ ! "$REF_NAME" =~ ^crab-http-server-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Dispatch this workflow from an annotated crab-http-server-vX.Y.Z tag."
+            exit 1
+          fi
+          version="${REF_NAME#crab-http-server-v}"
+          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/crab-http-server/Cargo.toml | head -1)"
+          chart_version="$(sed -n 's/^version: *//p' crates/crab-http-server/deploy/helm/crab-http-server/Chart.yaml | head -1)"
+          app_version="$(sed -n 's/^appVersion: *"\(.*\)"/\1/p' crates/crab-http-server/deploy/helm/crab-http-server/Chart.yaml | head -1)"
+          if [ "$manifest_version" != "$version" ] ||
+            [ "$chart_version" != "$version" ] ||
+            [ "$app_version" != "$version" ]; then
+            echo "::error::$REF_NAME does not match the server and chart versions."
+            exit 1
+          fi
+          if [ "$(git cat-file -t "refs/tags/$REF_NAME" 2>/dev/null || true)" != tag ]; then
+            echo "::error::$REF_NAME must be an annotated tag."
+            exit 1
+          fi
+          if [ "$(git rev-list -n 1 "$REF_NAME")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::The checkout does not match $REF_NAME."
+            exit 1
+          fi
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::$REF_NAME is not reachable from origin/main."
+            exit 1
+          }
+
+      - name: Validate selected provider inputs
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          GIT_TOKEN: ${{ secrets.CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          require_value() {
+            local name="$1"
+            local value="$2"
+            test -n "$value" || {
+              echo "::error::Protected environment value $name is required."
+              exit 1
+            }
+          }
+
+          require_value CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN "$GIT_TOKEN"
+          if [[ ! "$EXPECTED_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::expected_image must be an immutable repository@sha256 reference."
+            exit 1
+          fi
+          case "$PROVIDER" in
+            eks)
+              require_value CRAB_HTTP_SERVER_EKS_GITHUB_ROLE_ARN "$AWS_ROLE_ARN"
+              require_value CRAB_HTTP_SERVER_EKS_REGION "$AWS_REGION"
+              require_value CRAB_HTTP_SERVER_EKS_CLUSTER "$EKS_CLUSTER"
+              ;;
+            gke)
+              require_value CRAB_HTTP_SERVER_GKE_GITHUB_IDENTITY_PROVIDER "$GCP_WORKLOAD_IDENTITY_PROVIDER"
+              require_value CRAB_HTTP_SERVER_GKE_GITHUB_SERVICE_ACCOUNT "$GCP_SERVICE_ACCOUNT"
+              require_value CRAB_HTTP_SERVER_GKE_PROJECT "$GCP_PROJECT"
+              require_value CRAB_HTTP_SERVER_GKE_CLUSTER "$GKE_CLUSTER"
+              require_value CRAB_HTTP_SERVER_GKE_LOCATION "$GKE_LOCATION"
+              ;;
+            aks)
+              require_value CRAB_HTTP_SERVER_AKS_GITHUB_CLIENT_ID "$AZURE_CLIENT_ID"
+              require_value CRAB_HTTP_SERVER_AKS_TENANT_ID "$AZURE_TENANT_ID"
+              require_value CRAB_HTTP_SERVER_AKS_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
+              require_value CRAB_HTTP_SERVER_AKS_RESOURCE_GROUP "$AKS_RESOURCE_GROUP"
+              require_value CRAB_HTTP_SERVER_AKS_CLUSTER "$AKS_CLUSTER"
+              ;;
+            *)
+              echo "::error::Unsupported provider $PROVIDER."
+              exit 1
+              ;;
+          esac
+
+      - name: Authenticate to AWS with GitHub OIDC
+        if: inputs.provider == 'eks'
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: crab-http-${{ github.run_id }}
+          mask-aws-account-id: true
+
+      - name: Select the EKS cluster
+        if: inputs.provider == 'eks'
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig \
+            --name "$EKS_CLUSTER" --region "$AWS_REGION" \
+            --alias crab-http-live
+
+      - name: Authenticate to Google Cloud with GitHub OIDC
+        if: inputs.provider == 'gke'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+
+      - name: Select the GKE cluster
+        if: inputs.provider == 'gke'
+        uses: google-github-actions/get-gke-credentials@3da1e46a907576cefaa90c484278bb5b259dd395 # v3.0.0
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_LOCATION }}
+          project_id: ${{ env.GCP_PROJECT }}
+          use_internal_ip: ${{ inputs.gke_endpoint == 'internal' }}
+          use_connect_gateway: ${{ inputs.gke_endpoint == 'connect-gateway' }}
+
+      - name: Authenticate to Azure with GitHub OIDC
+        if: inputs.provider == 'aks'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install kubelogin for non-admin AKS access
+        if: inputs.provider == 'aks'
+        uses: azure/use-kubelogin@76597ae0fcbaace21b05e13a2cbf8daee2c6e820 # v1.3
+        with:
+          kubelogin-version: v0.2.19
+
+      - name: Select the AKS cluster
+        if: inputs.provider == 'aks'
+        uses: azure/aks-set-context@60623acbdcbbdcf799ad50a1adf8703874339f8b # v5.0.0
+        with:
+          resource-group: ${{ env.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ env.AKS_CLUSTER }}
+          subscription: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          admin: false
+          use-kubelogin: true
+
+      - name: Run cross-replica qualification
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          NAMESPACE: ${{ inputs.namespace }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ORIGIN: ${{ inputs.origin }}
+          OWNER: ${{ inputs.owner }}
+          REPOSITORY: ${{ inputs.repository }}
+          CRAB_HTTP_SERVER_GIT_TOKEN: ${{ secrets.CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN }}
+          CRAB_HTTP_SERVER_EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          CRAB_HTTP_SERVER_APPROVE_ROLLOUT: "true"
+        run: |
+          set -euo pipefail
+          evidence_dir="${RUNNER_TEMP}/crab-http-server-live-evidence"
+          mkdir -p "$evidence_dir"
+          bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+            "$PROVIDER" "$NAMESPACE" "$DEPLOYMENT" "$ORIGIN" \
+            "$OWNER" "$REPOSITORY" "$evidence_dir/receipt.json"
+
+      - name: Verify evidence binds the selected deployment
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          NAMESPACE: ${{ inputs.namespace }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          ORIGIN: ${{ inputs.origin }}
+          OWNER: ${{ inputs.owner }}
+          REPOSITORY: ${{ inputs.repository }}
+          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+        run: |
+          set -euo pipefail
+          receipt="${RUNNER_TEMP}/crab-http-server-live-evidence/receipt.json"
+          jq --exit-status \
+            --arg provider "$PROVIDER" \
+            --arg namespace "$NAMESPACE" \
+            --arg deployment "$DEPLOYMENT" \
+            --arg origin "${ORIGIN%/}" \
+            --arg repository "${OWNER}/${REPOSITORY}" \
+            --arg image "$EXPECTED_IMAGE" \
+            '.schema == 1 and .provider == $provider and
+             .namespace == $namespace and .deployment == $deployment and
+             .origin == $origin and .repository == $repository and
+             .image == $image and .replica_count >= 2 and .zone_count >= 2 and
+             .rollout_probes >= 1 and (.commit | test("^[0-9a-f]{40}$")) and
+             (.payload_sha256 | test("^[0-9a-f]{64}$"))' \
+            "$receipt" >/dev/null
+
+      - name: Retain qualification receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: crab-http-server-${{ inputs.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/crab-http-server-live-evidence/receipt.json
+          if-no-files-found: error
+          retention-days: 90

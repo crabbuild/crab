@@ -149,9 +149,10 @@ fn preserves_exact_fast_forward_and_annotated_tag_ids_using_committed_frontier()
         ])
     );
     assert_eq!(plan.peeled().get("refs/tags/v1"), Some(&new));
-    assert!(
-        source.reads.is_empty(),
-        "proof frontier should avoid reading existing history"
+    assert_eq!(
+        source.reads,
+        vec![old],
+        "changed-path comparison should read only the trusted parent commit"
     );
     assert_eq!(refs["refs/heads/main"], old);
 }
@@ -307,7 +308,7 @@ fn validates_unreachable_objects_and_all_tree_names_without_following_gitlinks()
         (Kind::Tree, valid_tree),
         (Kind::Blob, blob),
     ]);
-    validate(
+    let plan = validate(
         &received,
         &BTreeMap::new(),
         &[update("refs/heads/main", None, Some(new))],
@@ -317,6 +318,13 @@ fn validates_unreachable_objects_and_all_tree_names_without_following_gitlinks()
         || false,
     )
     .unwrap();
+    assert_eq!(
+        plan.changed_path_hashes(),
+        &BTreeSet::from([
+            *blake3::hash(b"raw-\xff").as_bytes(),
+            *blake3::hash(b"submodule").as_bytes(),
+        ])
+    );
     for entries in [
         vec![
             ("100644", b"a".as_slice(), blob_id),
@@ -478,6 +486,222 @@ fn validation_budgets_and_cancellation_fail_before_publication() {
             ..
         })
     ));
+}
+
+#[test]
+fn changed_paths_include_intermediate_commits_even_when_the_tip_reverts() {
+    let original = b"original".to_vec();
+    let changed = b"changed".to_vec();
+    let original_blob = object_id(Kind::Blob, &original);
+    let changed_blob = object_id(Kind::Blob, &changed);
+    let original_tree_body = tree(&[("100644", b"locked.bin", original_blob)]);
+    let changed_tree_body = tree(&[("100644", b"locked.bin", changed_blob)]);
+    let original_tree = object_id(Kind::Tree, &original_tree_body);
+    let changed_tree = object_id(Kind::Tree, &changed_tree_body);
+    let base_body = commit(original_tree, &[], "base");
+    let base = object_id(Kind::Commit, &base_body);
+    let changed_body = commit(changed_tree, &[base], "change locked path");
+    let changed_commit = object_id(Kind::Commit, &changed_body);
+    let reverted_body = commit(original_tree, &[changed_commit], "revert locked path");
+    let reverted = object_id(Kind::Commit, &reverted_body);
+    let mut source = Source {
+        objects: HashMap::from([
+            (original_blob, (Kind::Blob, original)),
+            (original_tree, (Kind::Tree, original_tree_body)),
+            (base, (Kind::Commit, base_body)),
+        ]),
+        trusted: true,
+        reads: Vec::new(),
+    };
+    let received = incoming(&[
+        (Kind::Blob, changed),
+        (Kind::Tree, changed_tree_body),
+        (Kind::Commit, changed_body),
+        (Kind::Commit, reverted_body),
+    ]);
+    let refs = BTreeMap::from([("refs/heads/main".to_owned(), base)]);
+    let plan = validate(
+        &received,
+        &refs,
+        &[update("refs/heads/main", Some(base), Some(reverted))],
+        policy,
+        &mut source,
+        graph_limits(),
+        || false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.changed_path_hashes(),
+        &BTreeSet::from([*blake3::hash(b"locked.bin").as_bytes()])
+    );
+}
+
+#[test]
+fn changed_paths_include_both_sides_of_a_rename() {
+    let blob = b"content".to_vec();
+    let blob_id = object_id(Kind::Blob, &blob);
+    let old_tree_body = tree(&[("100644", b"old.bin", blob_id)]);
+    let new_tree_body = tree(&[("100644", b"new.bin", blob_id)]);
+    let old_tree = object_id(Kind::Tree, &old_tree_body);
+    let new_tree = object_id(Kind::Tree, &new_tree_body);
+    let old_body = commit(old_tree, &[], "base");
+    let old = object_id(Kind::Commit, &old_body);
+    let new_body = commit(new_tree, &[old], "rename");
+    let new = object_id(Kind::Commit, &new_body);
+    let mut source = Source {
+        objects: HashMap::from([
+            (blob_id, (Kind::Blob, blob)),
+            (old_tree, (Kind::Tree, old_tree_body)),
+            (old, (Kind::Commit, old_body)),
+        ]),
+        trusted: true,
+        reads: Vec::new(),
+    };
+    let received = incoming(&[(Kind::Tree, new_tree_body), (Kind::Commit, new_body)]);
+    let refs = BTreeMap::from([("refs/heads/main".to_owned(), old)]);
+    let plan = validate(
+        &received,
+        &refs,
+        &[update("refs/heads/main", Some(old), Some(new))],
+        policy,
+        &mut source,
+        graph_limits(),
+        || false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.changed_path_hashes(),
+        &BTreeSet::from([
+            *blake3::hash(b"new.bin").as_bytes(),
+            *blake3::hash(b"old.bin").as_bytes(),
+        ])
+    );
+}
+
+#[test]
+fn existing_commits_and_ref_deletions_introduce_no_changed_paths() {
+    let (mut source, existing, _) = base();
+    let received = incoming(&[]);
+    let refs = BTreeMap::from([("refs/heads/main".to_owned(), existing)]);
+    let plan = validate(
+        &received,
+        &refs,
+        &[
+            update("refs/heads/feature", None, Some(existing)),
+            update("refs/heads/main", Some(existing), None),
+        ],
+        policy,
+        &mut source,
+        graph_limits(),
+        || false,
+    )
+    .unwrap();
+
+    assert!(plan.changed_path_hashes().is_empty());
+}
+
+#[test]
+fn changed_paths_compare_merge_commits_with_every_parent() {
+    let a = object_id(Kind::Blob, b"a");
+    let b = object_id(Kind::Blob, b"b");
+    let left_tree_body = tree(&[("100644", b"left.bin", a)]);
+    let right_tree_body = tree(&[("100644", b"right.bin", b)]);
+    let merge_tree_body = tree(&[("100644", b"left.bin", a), ("100644", b"right.bin", b)]);
+    let left_tree = object_id(Kind::Tree, &left_tree_body);
+    let right_tree = object_id(Kind::Tree, &right_tree_body);
+    let merge_tree = object_id(Kind::Tree, &merge_tree_body);
+    let left_body = commit(left_tree, &[], "left");
+    let right_body = commit(right_tree, &[], "right");
+    let left = object_id(Kind::Commit, &left_body);
+    let right = object_id(Kind::Commit, &right_body);
+    let merge_body = commit(merge_tree, &[left, right], "merge");
+    let merge = object_id(Kind::Commit, &merge_body);
+    let mut source = Source {
+        objects: HashMap::from([
+            (a, (Kind::Blob, b"a".to_vec())),
+            (b, (Kind::Blob, b"b".to_vec())),
+            (left_tree, (Kind::Tree, left_tree_body)),
+            (right_tree, (Kind::Tree, right_tree_body)),
+            (left, (Kind::Commit, left_body)),
+            (right, (Kind::Commit, right_body)),
+        ]),
+        trusted: true,
+        reads: Vec::new(),
+    };
+    let received = incoming(&[(Kind::Tree, merge_tree_body), (Kind::Commit, merge_body)]);
+    let refs = BTreeMap::from([
+        ("refs/heads/left".to_owned(), left),
+        ("refs/heads/right".to_owned(), right),
+    ]);
+    let plan = validate(
+        &received,
+        &refs,
+        &[update("refs/heads/left", Some(left), Some(merge))],
+        policy,
+        &mut source,
+        graph_limits(),
+        || false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.changed_path_hashes(),
+        &BTreeSet::from([
+            *blake3::hash(b"left.bin").as_bytes(),
+            *blake3::hash(b"right.bin").as_bytes(),
+        ])
+    );
+}
+
+#[test]
+fn changed_paths_cover_modes_and_tree_leaf_replacements() {
+    let blob = object_id(Kind::Blob, b"content");
+    let old_tree_body = tree(&[("100644", b"mode.bin", blob), ("100644", b"node", blob)]);
+    let nested_body = tree(&[("100644", b"child.bin", blob)]);
+    let nested = object_id(Kind::Tree, &nested_body);
+    let new_tree_body = tree(&[("100755", b"mode.bin", blob), ("40000", b"node", nested)]);
+    let old_tree = object_id(Kind::Tree, &old_tree_body);
+    let new_tree = object_id(Kind::Tree, &new_tree_body);
+    let old_body = commit(old_tree, &[], "base");
+    let old = object_id(Kind::Commit, &old_body);
+    let new_body = commit(new_tree, &[old], "replace");
+    let new = object_id(Kind::Commit, &new_body);
+    let mut source = Source {
+        objects: HashMap::from([
+            (blob, (Kind::Blob, b"content".to_vec())),
+            (old_tree, (Kind::Tree, old_tree_body)),
+            (old, (Kind::Commit, old_body)),
+        ]),
+        trusted: true,
+        reads: Vec::new(),
+    };
+    let received = incoming(&[
+        (Kind::Tree, nested_body),
+        (Kind::Tree, new_tree_body),
+        (Kind::Commit, new_body),
+    ]);
+    let refs = BTreeMap::from([("refs/heads/main".to_owned(), old)]);
+    let plan = validate(
+        &received,
+        &refs,
+        &[update("refs/heads/main", Some(old), Some(new))],
+        policy,
+        &mut source,
+        graph_limits(),
+        || false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.changed_path_hashes(),
+        &BTreeSet::from([
+            *blake3::hash(b"mode.bin").as_bytes(),
+            *blake3::hash(b"node").as_bytes(),
+            *blake3::hash(b"node/child.bin").as_bytes(),
+        ])
+    );
 }
 
 mod visibility;

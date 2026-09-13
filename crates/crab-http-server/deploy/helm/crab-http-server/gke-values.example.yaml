@@ -1,14 +1,12 @@
-image:
-  repository: us-west1-docker.pkg.dev/example/crab/crab-http-server
-  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-
 config:
-  existingConfigMap: crab-http-server
-
-secrets:
-  existingSecret: crab-http-server
+  storageUrl: gs://team-crab-repositories/repositories
 
 serviceAccount:
   name: crab-http-server
   annotations:
     iam.gke.io/gcp-service-account: crab-http-server@example.iam.gserviceaccount.com
+
+# Required on GKE Standard node pools that use Workload Identity Federation.
+# Remove this selector for Autopilot, which enables the metadata server itself.
+nodeSelector:
+  iam.gke.io/gke-metadata-server-enabled: "true"

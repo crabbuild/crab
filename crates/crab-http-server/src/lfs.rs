@@ -1,14 +1,19 @@
-use std::{sync::Arc, time::Duration};
+mod locking;
+
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json,
     body::Body,
-    extract::{FromRequest, Path, Query, Request, State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode, header},
+    extract::{
+        FromRequest, Path, Query, Request, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use crab_git::lfs_pointer::{LFS_VERSION_URL, LfsPointer};
-use crab_lfs::{LfsError, LfsObjectStore};
+use crab_lfs::{LfsError, LfsLockError, LfsObjectStore};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -24,6 +29,8 @@ const CONTENT_TYPE: &str = "application/vnd.git-lfs+json";
 const BUDGET: Duration = Duration::from_secs(5 * 60);
 type Result<T> = std::result::Result<T, Error>;
 
+pub(crate) use locking::{create_lock, list_locks, unlock_lock, verify_locks};
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
     #[error("{0}")]
@@ -36,16 +43,30 @@ pub(crate) enum Error {
     Archived,
     #[error("LFS transfer exceeds server limits")]
     TooLarge,
-    #[error("Git transfers are busy")]
+    #[error("LFS requests are busy")]
     Busy,
-    #[error("LFS transfer cancelled or timed out")]
+    #[error("LFS lock is owned by another user")]
+    LockOwner,
+    #[error("LFS lock changed concurrently")]
+    LockConflict,
+    #[error("LFS operation cancelled or timed out")]
     Cancelled,
+    #[error("LFS byte range is not satisfiable")]
+    RangeNotSatisfiable { size: u64 },
     #[error("invalid LFS request body")]
     Json(#[from] JsonRejection),
+    #[error("invalid LFS lock query")]
+    Query(#[from] QueryRejection),
     #[error("invalid LFS object identity")]
     Identity(#[from] crab_git::lfs_pointer::LfsPointerError),
     #[error("LFS object operation failed")]
     Object(#[from] LfsError),
+    #[error("LFS lock operation failed")]
+    Lock(#[from] LfsLockError),
+    #[error("LFS lock coordination failed")]
+    Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("invalid stored LFS lock timestamp")]
+    LockTimestamp,
     #[error("LFS request stream failed")]
     Body(#[from] axum::Error),
     #[error("LFS temporary file operation failed")]
@@ -56,8 +77,40 @@ pub(crate) enum Error {
     Settings(#[source] Box<app::Error>),
 }
 
+impl From<crab_remote::publication::Error> for Error {
+    fn from(error: crab_remote::publication::Error) -> Self {
+        match error {
+            crab_remote::publication::Error::Cancelled => Self::Cancelled,
+            crab_remote::publication::Error::Coordination(error) => Self::Coordination(error),
+        }
+    }
+}
+
+impl From<crate::transfer_admission::Error> for Error {
+    fn from(error: crate::transfer_admission::Error) -> Self {
+        match error {
+            crate::transfer_admission::Error::Busy => Self::Busy,
+            crate::transfer_admission::Error::Cancelled => Self::Cancelled,
+            crate::transfer_admission::Error::Coordination(error) => Self::Coordination(error),
+        }
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        if let Self::RangeNotSatisfiable { size } = &self {
+            tracing::error!(error = ?self, "LFS transfer failed");
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (header::CONTENT_TYPE, CONTENT_TYPE.to_owned()),
+                    (header::ACCEPT_RANGES, "bytes".to_owned()),
+                    (header::CONTENT_RANGE, format!("bytes */{size}")),
+                ],
+                Json(json!({"message":"LFS byte range is not satisfiable"})),
+            )
+                .into_response();
+        }
         tracing::error!(error = ?self, "LFS transfer failed");
         let (status, message) = match self {
             Self::Request(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
@@ -65,6 +118,15 @@ impl IntoResponse for Error {
                 (StatusCode::NOT_FOUND, "Repository or LFS object not found")
             }
             Self::Forbidden => (StatusCode::FORBIDDEN, "Write access required"),
+            Self::LockOwner => (
+                StatusCode::FORBIDDEN,
+                "Lock is owned by another user; use force to unlock it",
+            ),
+            Self::LockConflict
+            | Self::Lock(LfsLockError::Conflict { .. } | LfsLockError::IdMismatch { .. }) => (
+                StatusCode::CONFLICT,
+                "LFS lock changed; refresh the lock list and retry",
+            ),
             Self::Archived => (
                 StatusCode::FORBIDDEN,
                 "Repository is archived and read-only",
@@ -75,14 +137,22 @@ impl IntoResponse for Error {
             ),
             Self::Busy => (
                 StatusCode::TOO_MANY_REQUESTS,
-                "Git transfers are busy; retry shortly",
+                "LFS requests are busy; retry shortly",
             ),
             Self::Cancelled => (
                 StatusCode::REQUEST_TIMEOUT,
-                "LFS transfer cancelled or timed out",
+                "LFS operation cancelled or timed out",
+            ),
+            Self::RangeNotSatisfiable { .. } => (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "LFS byte range is not satisfiable",
             ),
             Self::Json(error) => (error.status(), "Invalid LFS request"),
+            Self::Query(error) => (error.status(), "Invalid LFS lock query"),
             Self::Body(_) | Self::Identity(_) => (StatusCode::BAD_REQUEST, "Invalid LFS request"),
+            Self::Lock(LfsLockError::NotFound { .. }) => {
+                (StatusCode::NOT_FOUND, "LFS lock not found")
+            }
             Self::Object(LfsError::ObjectCorrupt { .. }) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "LFS object size or SHA-256 does not match",
@@ -268,19 +338,25 @@ pub(crate) async fn download(
     Extension(principal): Extension<Principal>,
     Path((owner, name, oid)): Path<(String, String, String)>,
     Query(size): Query<Size>,
+    method: Method,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let entry = repository(&server, &principal, &owner, &name, false)?;
     let pointer = pointer(&oid, size.size)?;
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| Error::Busy)?;
+    let etag = format!("\"{}\"", crab_git::lfs_pointer::hex_encode(&pointer.oid));
+    let range = if method == Method::GET {
+        requested_range(&headers, pointer.size, &etag)?
+    } else {
+        None
+    };
     let cancel = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancel).await?;
     let guard = cancel.clone().drop_guard();
     let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
     let deadline = tokio::time::Instant::now() + BUDGET;
-    let (_, _, stream) = tokio::select! {
+    let (_, delivered_range, stream) = tokio::select! {
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        result = tokio::time::timeout_at(deadline, lfs.get_stream(&pointer.oid, pointer.size, None)) => result.map_err(|_| Error::Cancelled)??,
+        result = tokio::time::timeout_at(deadline, lfs.get_stream(&pointer.oid, pointer.size, range.clone())) => result.map_err(|_| Error::Cancelled)??,
     };
     let stream = stream.take_until(async move {
         tokio::select! { () = cancel.cancelled() => {}, () = tokio::time::sleep_until(deadline) => {} }
@@ -289,14 +365,116 @@ pub(crate) async fn download(
         let _ = (&permit, &guard);
         chunk
     });
+    let body = Body::from_stream(stream);
+    if range.is_some() {
+        return Ok((
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (
+                    header::CONTENT_RANGE,
+                    format!(
+                        "bytes {}-{}/{}",
+                        delivered_range.start,
+                        delivered_range.end - 1,
+                        pointer.size
+                    ),
+                ),
+                (
+                    header::CONTENT_LENGTH,
+                    (delivered_range.end - delivered_range.start).to_string(),
+                ),
+                (header::ETAG, etag),
+            ],
+            body,
+        )
+            .into_response());
+    }
     Ok((
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (header::ACCEPT_RANGES, "bytes".to_owned()),
             (header::CONTENT_LENGTH, pointer.size.to_string()),
+            (header::ETAG, etag),
         ],
-        Body::from_stream(stream),
+        body,
     )
         .into_response())
+}
+
+pub(crate) fn requested_range(
+    headers: &HeaderMap,
+    size: u64,
+    etag: &str,
+) -> Result<Option<Range<u64>>> {
+    let mut values = headers.get_all(header::RANGE).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Ok(None);
+    }
+    if !if_range_matches(headers, etag) {
+        return Ok(None);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| Error::RangeNotSatisfiable { size })?;
+    let Some((unit, ranges)) = value.split_once('=') else {
+        return Err(Error::RangeNotSatisfiable { size });
+    };
+    if !unit.eq_ignore_ascii_case("bytes") || ranges.contains(',') {
+        return Ok(None);
+    }
+    parse_byte_range(value, size).map(Some)
+}
+
+fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
+    let mut values = headers.get_all(header::IF_RANGE).iter();
+    let Some(value) = values.next() else {
+        return true;
+    };
+    values.next().is_none() && value.as_bytes() == etag.as_bytes()
+}
+
+pub(crate) fn parse_byte_range(value: &str, size: u64) -> Result<Range<u64>> {
+    let (unit, range) = value
+        .split_once('=')
+        .ok_or(Error::RangeNotSatisfiable { size })?;
+    if !unit.eq_ignore_ascii_case("bytes") || range.contains(',') {
+        return Err(Error::RangeNotSatisfiable { size });
+    }
+    let (first, last) = range
+        .split_once('-')
+        .ok_or(Error::RangeNotSatisfiable { size })?;
+    if first.is_empty() {
+        let suffix = last
+            .parse::<u64>()
+            .map_err(|_| Error::RangeNotSatisfiable { size })?;
+        if suffix == 0 || size == 0 {
+            return Err(Error::RangeNotSatisfiable { size });
+        }
+        return Ok(size.saturating_sub(suffix)..size);
+    }
+    let first = first
+        .parse::<u64>()
+        .map_err(|_| Error::RangeNotSatisfiable { size })?;
+    if first >= size {
+        return Err(Error::RangeNotSatisfiable { size });
+    }
+    let end = if last.is_empty() {
+        size
+    } else {
+        let last = last
+            .parse::<u64>()
+            .map_err(|_| Error::RangeNotSatisfiable { size })?;
+        if last < first {
+            return Err(Error::RangeNotSatisfiable { size });
+        }
+        last.saturating_add(1).min(size)
+    };
+    Ok(first..end)
 }
 
 pub(crate) async fn upload(
@@ -317,10 +495,8 @@ pub(crate) async fn upload(
             "LFS uploads require identity content encoding",
         ));
     }
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| Error::Busy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancel).await?;
     let _guard = cancel.clone().drop_guard();
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();
@@ -375,20 +551,4 @@ pub(crate) async fn upload(
     });
     result.await.map_err(|_| Error::Cancelled)??;
     Ok(StatusCode::OK.into_response())
-}
-
-pub(crate) async fn locks_unavailable(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name)): Path<(String, String)>,
-) -> Result<Response> {
-    repository(&server, &principal, &owner, &name, false)?;
-    // Git LFS recognizes 501 as an unsupported optional locking API. A generic
-    // 405 would abort its pre-push hook instead of allowing object transfers.
-    Ok((
-        StatusCode::NOT_IMPLEMENTED,
-        [(header::CONTENT_TYPE, CONTENT_TYPE)],
-        Json(json!({"message":"LFS HTTP locking is not implemented"})),
-    )
-        .into_response())
 }

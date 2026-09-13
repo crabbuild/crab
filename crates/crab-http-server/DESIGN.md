@@ -7,10 +7,15 @@ storage, deployment, ownership, cancellation, and recovery boundaries.
 
 > **Current status:** The runtime has a provider-neutral storage root, durable
 > CAS repository catalog, shared identity state, dynamic replica refresh,
-> private management listener, a local Compose profile, Helm profiles for
-> EKS/GKE/AKS, and an ECS Fargate task profile. Static artifacts do not
-> constitute live cloud qualification. Abrupt write-process crash recovery and
-> index-receipt reconstruction remain incomplete.
+> private probes and bounded Prometheus metrics, a local Compose profile, and
+> hardened Helm profiles for EKS/GKE/AKS. The chart includes a fresh-workload
+> catalog test, and one portable live gate can exercise two replicas and a rolling
+> replacement. Container CI also exercises one
+> abrupt native receive and an isolated complete-root cold restore. The ECS
+> Fargate profile cannot preserve the full shutdown budget. Static artifacts
+> and local RustFS do not constitute live cloud qualification. Additional
+> write-process crash boundaries and index-receipt reconstruction remain
+> incomplete.
 
 Use [the HTTP server reference](REFERENCE.md#native-git-push) for operator commands and route limits. Use this document when changing receive, publication, coordination, or recovery code.
 
@@ -135,6 +140,13 @@ this is safe and recoverable with `repository adopt`. It never leaves a catalog
 record pointing at an unvalidated repository. Adopt performs only the two
 canonical metadata reads before the same CAS insertion.
 
+For an authenticated deployment, the administration CLI requires an initial
+administrator before either operation reaches storage. Membership can stream
+from standard input so Kubernetes operators do not need to persist repository
+identities in a ConfigMap or copy a file into a pod. Later `set-members`
+replacements use one catalog CAS attempt: a concurrent catalog writer returns a
+conflict instead of silently rebasing a stale access-control decision.
+
 The server does not infer public names from object paths. That would make
 listing permissions, rename behavior, partial uploads, and unrelated bucket
 contents ambiguous.
@@ -142,9 +154,12 @@ contents ambiguous.
 ### Refresh replicas without invalidating requests
 
 At startup the server reads and validates the catalog, materializes each
-repository, and refuses readiness if the catalog is unavailable. Every replica
-polls the small catalog every five seconds. On a new version it constructs a
-complete next routing map and swaps it under a short synchronous write lock.
+repository, and refuses readiness if the catalog is unavailable or any
+cataloged repository cannot open its current Git view. This keeps a fresh pod
+out of endpoint routing while shared read-index maintenance is still pending.
+Every replica polls the small catalog every five seconds. On a new version it
+constructs a complete next routing map and swaps it under a short synchronous
+write lock.
 
 Handlers clone an `Arc<Repository>` at route admission. A catalog refresh can
 therefore remove or replace a route without invalidating a request already
@@ -202,16 +217,89 @@ cache and coordination identities from colliding across clouds.
 | AKS | Microsoft Entra Workload ID | `az://account/container/root` |
 | ECS/Fargate | ECS task role | `s3://bucket/root` |
 
-One Helm chart owns the common Deployment, Service, ServiceAccount, disruption
-budget, probes, security context, topology spread, scratch volume, and
-digest-pinned image. Provider value files contain only the workload-identity
-annotations/labels and required environment. The public Service exposes port
-8788; port 8789 remains private for liveness and storage-aware readiness.
+Provider Terraform roots create dedicated versioned storage and workload
+identity for an existing cluster. They emit a non-secret overlay containing the
+storage URL, identity wiring, and required environment. A provider-neutral team
+overlay supplies the image, OIDC, ingress, and monitoring policy.
+
+One Helm chart owns the runtime contract:
+
+- Deployment, ServiceAccount, private ClusterIP Service, and disruption budget
+- Security context, hard two-node/two-zone spread, bounded scratch, and graceful
+  termination
+- Storage-aware probes and a fresh-workload full storage-contract test
+- TLS ingress plus mandatory source-restricted NetworkPolicy
+- Optional autoscaling, private `PodMonitor`, and bounded baseline alerts
+- An immutable image digest and typed generated configuration
+
+The chart owns ingress isolation but leaves provider-specific egress to the
+cluster. Every replica must reach DNS, its workload-identity endpoint, object
+storage, and the configured OIDC issuer. Port 8789 remains private for probes
+and metrics; the public route reaches only port 8788 through TLS ingress.
+GKE Standard overlays also select metadata-server-enabled nodes; Autopilot
+overlays omit the Standard-only selector.
+Empty or match-all ingress peers and unrestricted IPv4 or IPv6 CIDRs fail
+rendering, so an enabled public or metrics path always names a bounded source.
+
+Before either listener binds, every process reads the catalog, performs a
+bounded list, exercises the storage-backed transfer-admission CAS, writes and
+deletes a unique probe object, and verifies that the object is no longer
+visible. The standalone `storage-probe` command performs the same sequence in
+a fresh Helm test pod. Probe objects use the short-lived auth namespace so a
+provider lifecycle rule collects residue if the process dies between write and
+delete.
+
+```mermaid
+flowchart LR
+    Terraform[Provider Terraform] --> Provider[Non-secret provider values]
+    Team[Team values + Secret] --> Helm[Portable Helm release]
+    Provider --> Helm
+    Helm --> Fresh[Fresh-pod storage contract test]
+    Helm --> Replicas[Two-zone replicas]
+    Actions[Protected GitHub OIDC workflow] --> Live[Cross-replica live gate]
+    Replicas --> Live
+    Live --> Receipt[Secret-free JSON receipt]
+```
+
+S3 and GCS retain noncurrent root versions for a configurable 90-day recovery
+window and abort multipart uploads left incomplete for one day. Azure versions
+remain unexpired because Azure's available lifecycle condition measures age
+from version creation, not from the transition to noncurrent state.
+
+On termination, Kubernetes removes the endpoint, waits 15 seconds for routing
+to converge, then gives Crab its complete ten-minute drain budget. The live
+gate checks provider identity and placement, every pod's readiness, public OIDC
+initiation, direct token use against two replicas, cross-replica Git and LFS,
+lock-owner publication, uninterrupted reads during rollout, and byte-identical
+state after replacement. Its JSON receipt binds the evidence to the provider,
+immutable image, repository, commit, payload digest, and completion time.
+The optional manual GitHub workflow uses a protected environment and a
+separate short-lived OIDC runner identity to reach an existing cluster. It
+requires the expected image digest, explicit rollout approval, and a dedicated
+repository, then retains the verified receipt. The runner does not need direct
+storage authority.
+
+Helm upgrades are atomic and keep bounded revision history; the chart refuses a
+disruption budget or placement override that would make its availability claim
+impossible.
+
+Server releases use their own annotated `crab-http-server-vX.Y.Z` tag and do
+not inherit the CLI's version tag. The tag must match the server crate, resolve
+to `main`, and pass the exact-source container and Compose qualification before
+publishing. The registry receives one AMD64/ARM64 image index under immutable
+version and source-commit tags, the same-version OCI Helm chart, BuildKit SBOM
+and provenance attestations, and GitHub-signed registry attestations.
+Deployment profiles consume the image manifest and chart digests. The
+exact-source qualification also scans the final runtime image and rejects
+fixable HIGH or CRITICAL vulnerabilities before publication. Existing image
+tags and chart versions fail closed instead of being replaced.
 
 ECS cannot mount Secrets Manager values as files, so its task entrypoint writes
 three protected files to disposable scratch, unsets the injected environment
 variables, and execs the same binary. Repository, catalog, and session state
 never depend on that scratch volume.
+
+Fargate limits container shutdown to 120 seconds. That limit is shorter than Crab's five-minute Git and LFS budgets and ten-minute archive budget. Treat the task definition as evaluation evidence until abrupt-crash qualification proves safe replacement outcomes.
 
 ### Preserve local trust through a container proxy
 
@@ -271,7 +359,8 @@ The HTTP worker owns the request after admission. A disconnected handler cannot 
 ```mermaid
 flowchart TD
     A[Validate Host, repository, token, and content headers]
-    B[Acquire one of four transfer slots]
+    B[Acquire a local fast-path permit]
+    B2[Claim one of four deployment-wide CAS slots]
     C[Spool at most 2 GiB to a private temporary file]
     D[Parse shallow lines, ref commands, and capabilities]
     E[Acquire sorted ref leases and both GC fences]
@@ -286,8 +375,18 @@ flowchart TD
     N[Attempt read readiness]
     O[Return Git report-status]
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N --> O
+    A --> B --> B2 --> C --> D --> E --> F --> G --> H --> I --> J --> K --> L --> M --> N --> O
 ```
+
+All replicas contend for the same fixed slots beneath the deployment root at
+`.crab/http-server/v1/admission`. Each five-minute slot lease renews every
+third of its lifetime. Response-body or worker completion releases it;
+renewal failure cancels the owned transfer; an abrupt process loss makes the
+slot reusable after its lease expires. This covers Git fetch and push, LFS
+upload and download, archives, and release assets without repository-specific
+configuration. Before opening either listener, startup acquires and releases
+one of 16 separate probe slots, so a missing conditional-write permission
+fails before the pod can become ready without competing with live transfers.
 
 The implementation spreads this sequence across four owners:
 
@@ -503,11 +602,69 @@ Publication proof bypasses receipts and replica fallback. Existing ordinary LFS 
 
 The primary LFS OID and size identify stored bytes after extension processing. Extension hashes describe client transform inputs, not extra server objects. See the [Git LFS extension specification](https://github.com/git-lfs/git-lfs/blob/main/docs/extensions.md).
 
+### Make LFS locks authoritative at publication
+
+LFS file locks are repository-path policy inputs at the Git publication
+boundary. The HTTP adapter authenticates the repository request, stores the
+stable provider subject through `crab-lfs::LfsLockManager`, and resolves display
+names only while forming a response.
+
+```mermaid
+flowchart LR
+    Client[git-lfs lock / verify / unlock]
+    HTTP[HTTP auth and limits]
+    Manager[CAS lock manager]
+    Record[(lfs/locks/blake3(path))]
+    Plan[Validated changed-path hashes]
+    Guard[Renewing lfs-locks lease]
+    Push[receive-pack]
+    Journal[Atomic ref journal]
+
+    Client --> HTTP --> Manager --> Record
+    Client -. early pre-push verification .-> Push
+    Push --> Plan --> Guard
+    HTTP --> Guard
+    Guard --> Record
+    Guard --> Journal
+```
+
+A conditional create makes one path exclusive across replicas. Release writes
+an owner- and ID-checked CAS tombstone, so a stale request cannot release a
+newer holder. Same-owner create and exact unlock retry recover lost HTTP
+responses without creating a second state transition. Bounded list scans return
+ID-sorted pages; verification divides that page using the authenticated
+subject.
+
+The receive plan retains fixed-size Blake3 identities of exact raw Git paths
+changed by every newly introduced commit. It walks to the already visible
+repository frontier, compares merge commits with every parent, expands
+tree/leaf replacements, and treats a rename as deletion plus addition. This
+history-wide proof prevents a change-and-revert pair in one push from hiding a
+locked edit. Hashing preserves non-UTF-8 Git path identity without adding
+attacker-controlled strings to the long-lived plan; a collision can only cause
+a conservative rejection because lock paths are compared by the same identity.
+
+Lock creation, unlock, and the final receive check share the renewing
+`lfs-locks` repository lease. Receive already holds ref leases and GC fences,
+then acquires this guard, reads at most 10,001 active records, rejects an
+over-limit set, verifies that no changed hash belongs to another subject, and
+commits the journal before releasing the guard. Therefore either the lock
+mutation linearizes first and the push observes it, or the push commits first
+and the later lock applies to subsequent changes. Storage or coordination
+failure is fail-closed.
+
+The standard Git LFS pre-push hook remains useful for earlier feedback, but it
+is not trusted. Native pushes, browser content publication, and pull merges all
+reach the same receive publication boundary. The supported deployment gives
+object-store write authority only to server workloads; a direct storage writer
+is an operator outside this authorization model and could mutate any Crab
+state, not only locks.
+
 ### Retain CPU admission after caller cancellation
 
 Shard scans, hashing, recipe extraction, and pointer reconstruction use blocking workers. A timed-out caller can return while its bounded worker continues cleanup, but the worker retains its semaphore permit until exit.
 
-Four shard scans, four Crab pointer proofs, and four LFS bodies can overlap per process at their respective stages. These stage limits supplement the four receive and transfer slots; they do not replace the whole-request deadline.
+Four shard scans, four Crab pointer proofs, and four LFS bodies can overlap per process at their respective stages. These stage limits supplement the four deployment-wide receive and transfer slots; they do not replace the whole-request deadline.
 
 ## Hold publication authority
 
@@ -763,16 +920,18 @@ The design is backed by component, composition, provider, and independent-client
 | --- | --- | --- |
 | Receive framing and report status | `crab-git::receive_wire` | Native command, deletion, empty-pack, unpack-failure, and atomic-report tests |
 | Full and thin-pack quarantine | `crab-git::incoming_pack` | Native fixtures and remote-base reconstruction tests |
-| Ref and graph validity | `crab-git::receive_plan` | Graph-kind, namespace, stale-tip, malformed-tree, and policy tests |
+| Ref, graph, and changed-path validity | `crab-git::receive_plan` | Graph-kind, namespace, stale-tip, malformed-tree, rename, intermediate-commit, and policy tests |
 | Self-contained pack and sidecars | `IncomingPack::prepare` | Independent Git index and byte reconstruction tests |
 | Per-ref visibility | `receive_plan::plan_visibility` | Additive, replacement, tag, shared-subtree, malformed, and limit tests |
 | Crab pointer proof | `crab-read::pointer_proof` | Repeated chunk, empty file, corruption, deletion, limit, and cancellation tests |
 | Snapshot-bound lookup | `FileIndexLookupSession::for_snapshot` | Later-generation isolation, scan budget, and retained-admission tests |
 | Combined Crab and LFS proof | `dependency_proof` and `LfsObjectStore` | Mixed pointer, deduplication, corruption, receipt bypass, and origin-only tests |
+| Authoritative LFS path locking | `receive_plan::changed_paths`, `crab-lfs::LfsLockManager`, and `receive::publish` | Raw-path unit cases, shared-guard HTTP test, and native change-and-revert rejection |
 | Leases and uncertain outcome | `crab-remote::publication` | Contention, durable-holder recovery, marker readback, and cancellation tests |
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
 | HTTP composition | `crab-http-server::receive` | `receive_tests.rs`, `receive_fault_tests.rs`, authentication tests, and RustFS ignored tests |
+| Multi-cloud runtime | Helm chart, `.github/workflows/http-server-kubernetes-live.yml`, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus recorded EKS, GKE, or AKS cross-replica rollout receipt bound to the deployed digest |
 
 ### Interpret the live fixtures
 
@@ -814,11 +973,12 @@ The current implementation does not satisfy these production claims:
 - **Index receipt reconstruction:** Missing sidecar or visibility evidence cannot yet be rebuilt from a durable verified receipt after restart.
 - **Active-active coexistence:** Versioned coordinator writers do not share the native journal namespace gate or commitment authority.
 - **Protected-view coexistence:** Protected receive publishes a complete manifest through another finalizer and needs explicit namespace and authority proof.
-- **Multi-instance admission:** Transfer semaphores and maintenance admission are process-local.
-- **Production scale:** Static EKS/GKE/AKS and ECS profiles do not establish
-  Kubernetes-size push throughput, temporary-disk sizing, provider latency,
-  cross-replica failover, or regional failure behavior.
-- **LFS locking:** The server transfers and verifies LFS objects but does not implement lock creation or push enforcement.
+- **Multi-instance non-transfer admission:** Interactive-read, application, and maintenance admission remain process-local. Long-running transfer admission is deployment-wide, but still needs provider-scale load qualification.
+- **Production scale:** The portable live gate qualifies one cross-replica
+  rollout when an operator runs it, but no EKS/GKE/AKS receipt is checked in.
+  It does not establish Kubernetes-size push throughput, temporary-disk sizing,
+  provider latency, version-selected provider restore, or regional failure
+  behavior. The ECS stop limit is shorter than the maximum operation budget.
 
 Do not solve these gaps with a raw manifest upload, journal-only endpoint, fabricated protected plan, fallback reader, or OID rewrite. Each shortcut violates an ownership or outcome invariant above.
 

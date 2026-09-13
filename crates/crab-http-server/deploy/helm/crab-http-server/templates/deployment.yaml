@@ -1,3 +1,14 @@
+{{- range $key := list "app.kubernetes.io/name" "app.kubernetes.io/instance" }}
+{{- if hasKey $.Values.podLabels $key }}
+{{- fail (printf "podLabels.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
+{{- range $key := list "checksum/managed-config" "crab.build/rollout-token" "prometheus.io/scrape" "prometheus.io/path" "prometheus.io/port" }}
+{{- if hasKey $.Values.podAnnotations $key }}
+{{- fail (printf "podAnnotations.%s is owned by the chart" $key) }}
+{{- end }}
+{{- end }}
+{{- include "crab-http-server.validateAvailability" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,9 +16,12 @@ metadata:
   labels:
     {{- include "crab-http-server.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   minReadySeconds: {{ .Values.minReadySeconds }}
+  progressDeadlineSeconds: {{ .Values.progressDeadlineSeconds }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -23,14 +37,21 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-      {{- with .Values.podAnnotations }}
       annotations:
+        checksum/managed-config: {{ if .Values.config.existingConfigMap }}""{{ else }}{{ include "crab-http-server.managedConfig" . | sha256sum | quote }}{{ end }}
+        {{- with .Values.rolloutToken }}
+        crab.build/rollout-token: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "crab-http-server.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       enableServiceLinks: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         runAsNonRoot: true
@@ -48,11 +69,18 @@ spec:
           image: {{ include "crab-http-server.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["--config", "/etc/crab/http-server/server.toml"]
+          terminationMessagePolicy: FallbackToLogsOnError
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/bin/sleep
+                  - "15"
           ports:
             - name: http
               containerPort: 8788
@@ -117,7 +145,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ required "config.existingConfigMap is required" .Values.config.existingConfigMap }}
+            name: {{ include "crab-http-server.configMapName" . }}
             defaultMode: 0440
             items:
               - key: {{ .Values.config.key }}
@@ -129,8 +157,10 @@ spec:
               - secret:
                   name: {{ required "secrets.existingSecret is required" .Values.secrets.existingSecret }}
                   items:
-                    - key: {{ .Values.secrets.oidcClientSecretKey }}
+                    {{- with .Values.secrets.oidcClientSecretKey }}
+                    - key: {{ . }}
                       path: oidc-client-secret
+                    {{- end }}
                     - key: {{ .Values.secrets.stateKeyKey }}
                       path: state-key
         - name: scratch

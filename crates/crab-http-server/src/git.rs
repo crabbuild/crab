@@ -34,6 +34,8 @@ pub(crate) enum GitError {
     NotFound,
     #[error("Git transport is busy")]
     Busy,
+    #[error("Git transport was cancelled")]
+    Cancelled,
     #[error("Git request body exceeded its deadline")]
     BodyTimeout,
     #[error("Git request body could not be read")]
@@ -54,6 +56,18 @@ pub(crate) enum GitError {
     Service(#[from] crate::Error),
     #[error("Git fetch planning failed")]
     Read(#[from] crab_read::ReadError),
+    #[error("Git transfer admission failed")]
+    Coordination(#[from] crab_coordination::CoordinationError),
+}
+
+impl From<crate::transfer_admission::Error> for GitError {
+    fn from(error: crate::transfer_admission::Error) -> Self {
+        match error {
+            crate::transfer_admission::Error::Busy => Self::Busy,
+            crate::transfer_admission::Error::Cancelled => Self::Cancelled,
+            crate::transfer_admission::Error::Coordination(error) => Self::Coordination(error),
+        }
+    }
 }
 
 impl IntoResponse for GitError {
@@ -70,7 +84,10 @@ impl IntoResponse for GitError {
         if let Self::Body(error) = self {
             return error.into_response();
         }
-        if matches!(self, Self::Remote(_) | Self::Read(_)) {
+        if matches!(
+            self,
+            Self::Remote(_) | Self::Read(_) | Self::Coordination(_)
+        ) {
             tracing::error!(error = ?self, "Git repository read failed");
         }
         let (status, message) = match self {
@@ -79,6 +96,10 @@ impl IntoResponse for GitError {
             Self::Busy => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Git transfers are busy; retry shortly",
+            ),
+            Self::Cancelled => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Git transfer was cancelled",
             ),
             Self::BodyTimeout => (StatusCode::REQUEST_TIMEOUT, "Git request body timed out"),
             Self::Encoding => (
@@ -98,6 +119,10 @@ impl IntoResponse for GitError {
             | Self::Remote(crab_remote_git::Error::RepositoryIndexing { .. }) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Repository indexing could not finish; retry or check server logs",
+            ),
+            Self::Coordination(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Git transfer admission is unavailable; retry or check storage coordination",
             ),
             Self::Read(crab_read::ReadError::UnauthorizedObject) => (
                 StatusCode::FORBIDDEN,
@@ -209,11 +234,9 @@ pub(crate) async fn upload_pack(
             "Expected application/x-git-upload-pack-request",
         ));
     }
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| GitError::Busy)?;
     let cancel = server.cancellation.child_token();
     let guard = cancel.clone().drop_guard();
+    let permit = server.acquire_transfer(&cancel).await?;
     let body = tokio::select! {
         () = cancel.cancelled() => return Err(wire::WireError::Cancelled.into()),
         result = tokio::time::timeout(Duration::from_secs(30), Bytes::from_request(request, &server)) => {

@@ -259,6 +259,11 @@ impl IntoResponse for Error {
                 "repository_archived",
                 "This repository is archived and read-only",
             ),
+            Self::Receive(error) if matches!(error.as_ref(), ReceiveError::Locked) => (
+                StatusCode::CONFLICT,
+                "path_locked",
+                "This path is locked by another user",
+            ),
             Self::Conflict => (
                 StatusCode::CONFLICT,
                 "conflict",

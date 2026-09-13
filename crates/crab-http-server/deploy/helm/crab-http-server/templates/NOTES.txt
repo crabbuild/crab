@@ -1,0 +1,22 @@
+1. Wait for the deployment to become available:
+
+   kubectl --namespace {{ .Release.Namespace }} rollout status deployment/{{ include "crab-http-server.fullname" . }} --timeout=15m
+
+2. Verify storage-backed readiness from a pod:
+
+   kubectl --namespace {{ .Release.Namespace }} exec deployment/{{ include "crab-http-server.fullname" . }} -- \
+     crab-http-server --config /etc/crab/http-server/server.toml healthcheck
+
+3. Start a fresh pod with the release workload identity and verify that it can
+   read the durable catalog:
+
+   helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }} --logs --timeout 3m
+
+{{- if .Values.ingress.enabled }}
+4. Open https://{{ .Values.ingress.host }} after DNS and the TLS certificate are ready.
+{{- else }}
+4. Publish Service/{{ include "crab-http-server.fullname" . }} through an HTTPS ingress or load balancer.
+{{- end }}
+
+The management port is intentionally absent from the Service and NetworkPolicy.
+Change rolloutToken on a Helm upgrade after changing an externally managed ConfigMap or Secret.

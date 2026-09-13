@@ -13,6 +13,7 @@ const TTL: Duration = Duration::from_secs(60);
 
 pub(super) async fn fixture() -> Arc<Server> {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+    let admission_store = store.clone();
     let layout = StoreLayout::new(store.clone(), "maintenance".into());
     crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
         .await
@@ -45,15 +46,19 @@ pub(super) async fn fixture() -> Arc<Server> {
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
-        git_admission: Arc::new(Semaphore::new(4)),
+        transfer_admission: crate::transfer_admission::TransferAdmission::new(
+            admission_store,
+            "test/.crab/http-server/v1/admission".into(),
+            4,
+        ),
         app_admission: Semaphore::new(8),
         maintenance_admission: Arc::new(Semaphore::new(2)),
         cancellation: CancellationToken::new(),
         receives: tokio_util::task::TaskTracker::new(),
-        port: 8788,
         auth: None,
         catalog: None,
         catalog_healthy: AtomicBool::new(false),
+        metrics: crate::metrics::Metrics::new().unwrap(),
     })
 }
 
@@ -120,6 +125,64 @@ async fn close(server: &Server) {
     server.cancellation.cancel();
     server.finish_maintenance().await.unwrap();
     server.runtime.shutdown().await;
+}
+
+fn enable_catalog_readiness(server: &mut Arc<Server>) {
+    let store = repository(server).store.clone();
+    let server = Arc::get_mut(server).unwrap();
+    server.catalog = Some(CatalogStore::new(crate::storage_root::StorageRoot::memory(
+        store, "catalog",
+    )));
+    server.catalog_healthy.store(true, Ordering::Release);
+}
+
+#[tokio::test]
+async fn readiness_opens_every_repository_before_admitting_traffic() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    close(&server).await;
+}
+
+#[tokio::test]
+async fn readiness_rejects_a_repository_that_still_needs_indexing() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    let repo = repository(&server);
+    let lease = commit_without_proof(&repo).await;
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("5")
+    );
+    assert_released(&repo).await;
+    lease.release().await.unwrap();
+    close(&server).await;
 }
 
 #[tokio::test]

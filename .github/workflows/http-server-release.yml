@@ -1,0 +1,287 @@
+name: HTTP server release image
+
+on:
+  push:
+    tags: ["crab-http-server-v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Annotated server release tag (for example crab-http-server-v0.1.0)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: http-server-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/crab-http-server
+  CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
+
+jobs:
+  prepare:
+    name: Prepare server release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      source_sha: ${{ steps.release.outputs.source_sha }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the release tag
+        id: release
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          tag="$REQUESTED_TAG"
+          if [[ ! "$tag" =~ ^crab-http-server-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Server release tag must be stable SemVer such as crab-http-server-v0.1.0, got '$tag'."
+            exit 1
+          fi
+
+          version="${tag#crab-http-server-v}"
+          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/crab-http-server/Cargo.toml | head -1)"
+          if [ "$manifest_version" != "$version" ]; then
+            echo "::error::Release tag $tag does not match crab-http-server version $manifest_version."
+            exit 1
+          fi
+
+          chart_version="$(sed -n 's/^version: *//p' crates/crab-http-server/deploy/helm/crab-http-server/Chart.yaml | head -1)"
+          app_version="$(sed -n 's/^appVersion: *"\(.*\)"/\1/p' crates/crab-http-server/deploy/helm/crab-http-server/Chart.yaml | head -1)"
+          if [ "$chart_version" != "$version" ] || [ "$app_version" != "$version" ]; then
+            echo "::error::Helm chart and app versions must both match server version $version."
+            exit 1
+          fi
+
+          if [ "$(git cat-file -t "refs/tags/$tag")" != "tag" ]; then
+            echo "::error::$tag must be an annotated tag."
+            exit 1
+          fi
+
+          source_sha="$(git rev-list -n 1 "$tag")"
+          if [ "$(git rev-parse HEAD)" != "$source_sha" ]; then
+            echo "::error::Checked-out source does not match $tag."
+            exit 1
+          fi
+
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$source_sha" origin/main; then
+            echo "::error::$tag is not reachable from origin/main."
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "source_sha=$source_sha"
+          } >> "$GITHUB_OUTPUT"
+
+  qualification:
+    name: Qualify exact tagged source
+    needs: prepare
+    uses: ./.github/workflows/http-server-container.yml
+    with:
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+
+  image:
+    name: Publish qualified release artifacts
+    needs: [prepare, qualification]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - name: Check out the qualified source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Package the Helm chart
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/chart"
+          docker run --rm \
+            --volume "${PWD}:/src:ro" \
+            --volume "${RUNNER_TEMP}/chart:/dist" \
+            --workdir /src \
+            alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9 \
+            package crates/crab-http-server/deploy/helm/crab-http-server \
+            --destination /dist
+          test -s "${RUNNER_TEMP}/chart/crab-http-server-${VERSION}.tgz"
+
+      - name: Set up emulation
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Sign in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Reject existing immutable artifacts
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          image="${REGISTRY}/${IMAGE_NAME}"
+          for reference in "${image}:${VERSION}" "${image}:sha-${SOURCE_SHA}"; do
+            set +e
+            inspect_output="$(docker buildx imagetools inspect "$reference" 2>&1)"
+            inspect_status=$?
+            set -e
+            if [ "$inspect_status" -eq 0 ]; then
+              echo "::error::Immutable image tag already exists: $reference"
+              exit 1
+            fi
+            if ! grep --extended-regexp --ignore-case --quiet \
+              'manifest unknown|not found' <<< "$inspect_output"; then
+              printf '%s\n' "$inspect_output"
+              echo "::error::Could not prove that image tag is unused: $reference"
+              exit 1
+            fi
+          done
+
+          set +e
+          chart_output="$(docker run --rm \
+            --volume "$HOME/.docker/config.json:/root/.docker/config.json:ro" \
+            --env HELM_REGISTRY_CONFIG=/root/.docker/config.json \
+            alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9 \
+            show chart "oci://${CHART_REGISTRY}/crab-http-server" \
+            --version "$VERSION" 2>&1)"
+          chart_status=$?
+          set -e
+          if [ "$chart_status" -eq 0 ]; then
+            echo "::error::Immutable Helm chart version already exists: $VERSION"
+            exit 1
+          fi
+          if ! grep --extended-regexp --ignore-case --quiet \
+            'manifest unknown|not found' <<< "$chart_output"; then
+            printf '%s\n' "$chart_output"
+            echo "::error::Could not prove that Helm chart version is unused: $VERSION"
+            exit 1
+          fi
+
+      - name: Build and publish the image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: crates/crab-http-server/deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.prepare.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.prepare.outputs.source_sha }}
+          labels: |
+            org.opencontainers.image.title=crab-http-server
+            org.opencontainers.image.description=Self-hosted Crab repository HTTP application
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.source_sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+          cache-from: type=gha,scope=crab-http-server-release
+          cache-to: type=gha,mode=max,scope=crab-http-server-release
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest the registry image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the published manifest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          image="${REGISTRY}/${IMAGE_NAME}"
+          for reference in "${image}:${VERSION}" "${image}:sha-${SOURCE_SHA}"; do
+            actual="$(docker buildx imagetools inspect "$reference" \
+              --format '{{json .Manifest.Digest}}' | jq --raw-output .)"
+            if [ "$actual" != "$DIGEST" ]; then
+              echo "::error::$reference resolves to $actual, expected $DIGEST."
+              exit 1
+            fi
+          done
+
+          docker buildx imagetools inspect "${image}@${DIGEST}" \
+            --format '{{json .Manifest}}' > "${RUNNER_TEMP}/crab-http-server-manifest.json"
+          jq --exit-status '
+            [.manifests[]?.platform
+              | select(.os == "linux")
+              | select(.architecture == "amd64" or .architecture == "arm64")
+              | .architecture]
+            | sort == ["amd64", "arm64"]
+          ' "${RUNNER_TEMP}/crab-http-server-manifest.json"
+
+      - name: Publish and verify the Helm chart
+        id: chart
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          package="crab-http-server-${VERSION}.tgz"
+          push_output="$(docker run --rm \
+            --volume "$HOME/.docker/config.json:/root/.docker/config.json:ro" \
+            --volume "${RUNNER_TEMP}/chart:/dist:ro" \
+            --env HELM_REGISTRY_CONFIG=/root/.docker/config.json \
+            alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9 \
+            push "/dist/${package}" "oci://${CHART_REGISTRY}" 2>&1)"
+          printf '%s\n' "$push_output"
+          digest="$(printf '%s\n' "$push_output" | sed -n 's/^Digest: //p' | tail -1)"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Helm did not report a valid chart digest."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+          mkdir -p "${RUNNER_TEMP}/chart-verify"
+          docker run --rm \
+            --volume "$HOME/.docker/config.json:/root/.docker/config.json:ro" \
+            --volume "${RUNNER_TEMP}/chart-verify:/verify" \
+            --env HELM_REGISTRY_CONFIG=/root/.docker/config.json \
+            alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9 \
+            pull "oci://${CHART_REGISTRY}/crab-http-server" \
+            --version "$VERSION" --destination /verify
+          cmp "${RUNNER_TEMP}/chart/${package}" \
+            "${RUNNER_TEMP}/chart-verify/${package}"
+
+      - name: Attest the registry chart
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.CHART_REGISTRY }}/crab-http-server
+          subject-digest: ${{ steps.chart.outputs.digest }}
+          push-to-registry: true

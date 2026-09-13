@@ -80,6 +80,8 @@ pub(crate) enum Error {
     ReleaseAssetIo(#[source] std::io::Error),
     #[error("Release asset worker failed")]
     ReleaseAssetWorker(#[source] tokio::task::JoinError),
+    #[error("Release asset transfer admission failed")]
+    ReleaseAssetCoordination(#[source] crab_coordination::CoordinationError),
     #[error("Release tag publication failed")]
     Release(#[source] Box<crate::receive::ReceiveError>),
     #[error("Pull request merge failed")]
@@ -105,18 +107,25 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        if matches!(
-            self,
-            Self::Storage(_)
-                | Self::Json(_)
-                | Self::Clock(_)
-                | Self::Repository(_)
-                | Self::Merge(_)
-                | Self::MergeObject(_)
-                | Self::Release(_)
-                | Self::ReleaseAssetIo(_)
-                | Self::ReleaseAssetWorker(_)
-        ) {
+        let expected_lock_conflict = matches!(
+            &self,
+            Self::Merge(error) if matches!(error.as_ref(), crate::receive::ReceiveError::Locked)
+        );
+        if !expected_lock_conflict
+            && matches!(
+                self,
+                Self::Storage(_)
+                    | Self::Json(_)
+                    | Self::Clock(_)
+                    | Self::Repository(_)
+                    | Self::Merge(_)
+                    | Self::MergeObject(_)
+                    | Self::Release(_)
+                    | Self::ReleaseAssetIo(_)
+                    | Self::ReleaseAssetWorker(_)
+                    | Self::ReleaseAssetCoordination(_)
+            )
+        {
             tracing::error!(error = ?self, "collaboration request failed");
         }
         let (status, code, message) = match &self {
@@ -240,6 +249,13 @@ impl IntoResponse for Error {
                 "invalid_request",
                 "Invalid release asset body",
             ),
+            Self::ReleaseAssetIo(_)
+            | Self::ReleaseAssetWorker(_)
+            | Self::ReleaseAssetCoordination(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "asset_storage",
+                "Release asset storage is unavailable. Retry shortly",
+            ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",
@@ -250,6 +266,15 @@ impl IntoResponse for Error {
                 "invalid_request",
                 "Invalid JSON request or request body too large",
             ),
+            Self::Merge(error)
+                if matches!(error.as_ref(), crate::receive::ReceiveError::Locked) =>
+            {
+                (
+                    StatusCode::CONFLICT,
+                    "path_locked",
+                    "A changed path is locked by another user",
+                )
+            }
             Self::Merge(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "merge_failed",

@@ -14,10 +14,11 @@ Owns LFS object layout, SHA-256 byte verification, receipts, and file-lock stora
 3. `crates/crab-lfs/src/object_store/origin.rs` — `inspect`: fresh bounded origin verification.
 4. `crates/crab-lfs/src/lock.rs` — `LfsLockManager::unlock_with_id`: holder identity and CAS tombstones.
 
-Trace one path: `crab/src/lfs/transfer_agent.rs` → `LfsObjectStore::put_stream_with_size`
-in `crates/crab-lfs/src/object_store.rs` → `Store`/multipart transport from
-`crates/crab-storage/src/store.rs`. This transfer chain does not establish
-that the shared lock manager is wired into a product endpoint.
+Trace one transfer path: `crab/src/lfs/transfer_agent.rs` →
+`LfsObjectStore::put_stream_with_size` in
+`crates/crab-lfs/src/object_store.rs` → `Store`/multipart transport from
+`crates/crab-storage/src/store.rs`. Trace lock protocol composition separately
+through `crates/crab-http-server/src/lfs.rs`.
 
 ## Common changes
 
@@ -27,11 +28,9 @@ that the shared lock manager is wired into a product endpoint.
 | Origin proof | `crates/crab-lfs/src/object_store/origin.rs` | `crates/crab-read/src/dependency_proof.rs` |
 | Lock/unlock races | `crates/crab-lfs/src/lock.rs` | `crab/src/lfs/lock.rs` (separate implementation) |
 
-The shared `LfsLockManager` has local tests but no established production caller
-in this checkout. Compare the separate CLI lock implementation in
-`crab/src/lfs/lock.rs`; HTTP `crates/crab-http-server/src/lfs.rs` currently
-reports lock operations unavailable. Do not assume a shared-lock fix reaches
-either product surface.
+The HTTP server uses the shared `LfsLockManager` for the Git LFS File Locking
+API. The CLI retains a separate implementation in `crab/src/lfs/lock.rs`; a
+shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
 
 ## Invariants
 
@@ -52,7 +51,9 @@ either product surface.
   Source: `crates/crab-lfs/src/object_store/origin.rs`.
 - Retain the typed JSON cause and object key when decoding lock records. Do
   not collapse corrupt metadata into absence or a display-only error.
-- Release locks with holder/ID checks and CAS tombstones; a stale unlock must not remove a replacement lock.
+- Release locks with holder/ID checks and CAS tombstones; a stale unlock must
+  not remove a replacement lock. An exact owner/ID retry must return the
+  existing tombstone so a lost HTTP response is recoverable.
   Source: `crates/crab-lfs/src/lock.rs`.
 
 ## Features and platform

@@ -190,8 +190,20 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
   --members-file /secure/members.toml
 
 "$SERVER" --config /secure/server.toml repository list
+"$SERVER" --config /secure/server.toml repository set-members \
+  --owner your-team --name your-project \
+  --members-file /secure/members.toml
+"$SERVER" --config /secure/server.toml storage-probe
 "$SERVER" --config /secure/server.toml serve
 ```
+
+`storage-probe` validates the complete runtime storage contract: catalog read,
+bounded list, holder-checked conditional create/update, ordinary object write,
+delete, and a post-delete not-found read. `serve` runs the same preflight
+before binding either listener. The unique delete-test object is created below
+`.crab/http-server/v1/auth/preflight/`; normal completion removes it, while the
+provider profile's one-day lifecycle bounds residue after an interrupted
+probe.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:
@@ -214,13 +226,18 @@ seconds without a restart.
 Without OIDC, the server accepts loopback listeners only. This mode trusts one
 local operator and exposes every cataloged repository to that principal.
 
-The private management listener owns `GET /healthz` and `GET /readyz`. The
-public listener does not expose probes. Use `healthcheck` to call readiness on
-the configured management address.
+The private management listener owns `GET /healthz`, `GET /readyz`, and
+`GET /metrics`. The public listener does not expose management routes. Use
+`healthcheck` to call readiness on the configured management address.
 
 ## Run the container
 
-The checked-in image builds the locked React application and Rust server from digest-pinned bases. The runtime installs no packages, runs as UID/GID 10001, embeds the frontend, and uses a dedicated temporary directory.
+The checked-in image builds the locked React application and Rust server from
+digest-pinned bases. Its build context excludes environment files, private-key
+formats, repository metadata, Terraform state, dependency trees, and local
+build output so those inputs cannot enter a remote BuildKit cache. The runtime
+installs no packages, runs as UID/GID 10001, embeds the frontend, and uses a
+dedicated temporary directory.
 
 ### Start the complete local stack
 
@@ -307,24 +324,47 @@ The binary's `healthcheck` command calls `/readyz` on the management listener.
 identity, and application state remain in object storage; `/var/lib/crab/tmp`
 contains only bounded transient files.
 
-### Probe liveness and readiness
+### Probe health and scrape metrics
 
 The two probe routes answer different operator questions:
 
 | Route | Success means | Failure contract |
 | --- | --- | --- |
 | `GET /healthz` | The HTTP process can answer | It does not inspect repository storage |
-| `GET /readyz` | The durable catalog can be read and validated within 10 seconds | HTTP 503 with `Retry-After: 5` |
+| `GET /readyz` | The durable catalog is valid and every cataloged repository can open its current Git view within 10 seconds | HTTP 503 with `Retry-After: 5` |
+| `GET /metrics` | Prometheus text exposes request/body lifetime, admission, catalog, repository, receive-worker, and drain signals | It does not perform a storage probe |
 
 Only the management listener serves probes. Every public request retains strict
 canonical `Host` validation.
 
+Before starting either listener, the process also claims and releases one of
+16 dedicated startup-probe slots in the shared transfer-admission namespace.
+Invalid conditional-write permissions therefore fail startup instead of
+leaving a read-ready server that rejects its first transfer. Probe slots are
+separate from the four live-transfer slots.
+
+Every public response includes a server-generated `x-request-id`. The completion log records the same identifier with the method, path, status, and elapsed milliseconds. Set the standard `RUST_LOG` environment variable to adjust tracing filters; the default level is `info`.
+
+Metrics use bounded `method`, `outcome`, and `class` labels. They never include
+repository names, paths, principals, request IDs, or storage keys. Request
+duration and in-flight gauges retain ownership through the response body, so a
+long Git, LFS, archive, or release stream remains visible after its handler has
+returned. Body errors and client aborts have separate counters.
+The `git_transfer` available-permit gauge describes the current process's
+fast-path guard. The `crab_http_server_transfer_admission_rejections_total`
+counter distinguishes deployment-wide `capacity` rejection from
+`coordination` failure.
+
 ### Choose an orchestrator
 
-Use the portable Helm chart for EKS, GKE, or AKS and the Fargate task profile
-for ECS. Both run at least two replicas, expose only the public port, pin an
-image digest, drop Linux capabilities, use a read-only root filesystem, and
-mount bounded disposable scratch space.
+Use the portable Helm chart for an EKS, GKE, or AKS team deployment. Provider Terraform roots create dedicated versioned storage and workload identity for an existing cluster. S3 and GCS retain noncurrent versions for a configurable 90-day recovery window and abort one-day-old incomplete multipart uploads; Azure versions remain unexpired because its lifecycle API cannot express the same safe noncurrent-age boundary. The chart runs at least two replicas, exposes only the public port, pins an image digest, drops Linux capabilities, uses a read-only root filesystem, mounts bounded disposable scratch, applies a disruption budget and ingress NetworkPolicy, and supports optional TLS ingress, autoscaling, and Prometheus Operator pod discovery and alerts. The `PodMonitor` selects the private management port directly without creating a management Service. The chart leaves egress provider-neutral; cluster policy must allow DNS, the workload-identity exchange, object storage, and OIDC endpoints. During pod termination, a 15-second pre-stop delay lets endpoint and ingress routes converge before `SIGTERM`; the 630-second pod grace period then preserves the complete application drain budget.
+
+The chart rejects disruption budgets that leave no minimum replica evictable
+and requires hard placement across at least two nodes and two zones. Use atomic
+Helm upgrades with bounded revision history so a failed readiness rollout
+returns to the previous release state.
+
+The ECS Fargate task definition remains an evaluation profile. Fargate limits a container stop timeout to 120 seconds, which can interrupt Crab operations that run for up to ten minutes. Prefer the Kubernetes chart until abrupt-process-crash qualification closes that gap.
 
 ```mermaid
 flowchart LR
@@ -342,11 +382,7 @@ flowchart LR
     ECS --> S3
 ```
 
-See `deploy/README.md`, `deploy/helm/crab-http-server/README.md`, and
-`deploy/ecs/README.md`. Lambda is intentionally excluded from the full data
-plane because Git and LFS require long streaming requests, large bodies, and
-bounded scratch that do not preserve the same contract through Lambda/API
-Gateway buffering and limits.
+See `deploy/README.md`, `deploy/terraform/README.md`, `deploy/helm/crab-http-server/README.md`, and `deploy/operations.md`. Lambda is intentionally excluded from the full data plane because Git and LFS require long streaming requests, large bodies, and bounded scratch that do not preserve the same contract through Lambda/API Gateway buffering and limits.
 
 ## Repository browser and application APIs
 
@@ -577,7 +613,15 @@ HTTP identity endpoints are allowed only when the issuer, public URL, and listen
 
 Each catalog member record binds the provider's stable `sub` claim to a display
 name and explicit grant. Supply records through `--members-file` when creating
-or adopting a repository:
+or adopting a repository. Use `--members-file -` to read the document from
+standard input, including through `kubectl exec --stdin`:
+
+```sh
+kubectl --namespace crab exec --stdin deployment/crab-http-server -- \
+  crab-http-server --config /etc/crab/http-server/server.toml \
+  repository set-members --owner your-team --name your-project \
+  --members-file - < /secure/crab-members.toml
+```
 
 | Access | Capabilities |
 | --- | --- |
@@ -586,6 +630,20 @@ or adopting a repository:
 | `admin` | All write actions plus repository settings and branch protections |
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
+
+When OIDC is configured, the repository administration CLI requires at least
+one `admin` member. It rejects an empty or read/write-only membership before
+touching repository storage, preventing creation of a repository that no
+authenticated operator can administer. Unauthenticated loopback deployments
+may omit membership.
+
+`repository set-members` replaces the complete membership array with one
+conditional catalog update. A concurrent catalog mutation returns a conflict;
+inspect `repository list`, reconcile the desired membership, and issue the
+command again. Every healthy replica observes the change on its next
+five-second catalog poll and swaps routing only after materialization succeeds.
+Requests already holding the previous repository handle finish against that
+snapshot.
 
 An authenticated account without membership sees an empty catalog. Unauthorized
 and absent repositories both return HTTP 404 after authentication. Catalog
@@ -736,7 +794,7 @@ sequenceDiagram
     H-->>G: Success
 ```
 
-Uploads stream to a private temporary file, then use `crab-lfs` for verified bounded-memory multipart publication. Downloads verify size and SHA-256 before opening a backpressured response.
+Uploads stream to a private temporary file, then use `crab-lfs` for verified bounded-memory multipart publication. Full downloads hash the delivered object through successful end-of-file. Partial-range downloads verify the complete object or a matching durable verification receipt, bind that proof to the provider's strong object validator, and only then open a backpressured response. A range that spans the complete object uses the full-delivery hash contract.
 
 Already verified objects omit upload actions. Missing or corrupt downloads return per-object errors. A successful upload needs no separate verify request. Git receive proves referenced LFS content again before publishing a commit.
 
@@ -754,7 +812,102 @@ Already verified objects omit upload actions. Missing or corrupt downloads retur
 
 A started multipart operation keeps its permit and temporary file while it completes or aborts. This drain can extend beyond the five-minute request budget and server shutdown.
 
-Downloads restart from byte zero; range resume is not implemented. The optional LFS locking API returns HTTP 501. Browser blob downloads continue to return exact pointer bytes.
+LFS object `GET` supports one RFC 9110 byte range in closed (`bytes=0-99`),
+open (`bytes=100-`), or suffix (`bytes=-100`) form. A partial response returns
+HTTP 206 with `Accept-Ranges`, `Content-Range`, `Content-Length`, and a strong
+OID-based `ETag`. A matching `If-Range` resumes the transfer; a stale validator
+returns the complete HTTP 200 representation so the client replaces its partial
+copy. Malformed or unsatisfiable single byte ranges return HTTP 416 with
+`Content-Range: bytes */size`. Unknown units and multi-range field values are
+ignored, returning the complete HTTP 200 representation rather than creating an
+unbounded multipart response.
+
+`HEAD` describes the complete representation and ignores `Range`, as required
+for methods whose range semantics are undefined.
+
+The container gate uploads a 1 MiB LFS object, downloads an initial range through
+Caddy, resumes into the same file, and compares the completed bytes with the
+source. Browser blob downloads continue to return exact pointer bytes.
+
+### Coordinate edits with LFS file locks
+
+The server implements the Git LFS File Locking API below the repository's
+automatically discovered LFS URL:
+
+| Method and route suffix | Permission | Result |
+| --- | --- | --- |
+| `POST /locks` | Write | Create one exclusive repository-path lock |
+| `GET /locks` | Read | List active locks, optionally filtered and paginated |
+| `POST /locks/verify` | Write | Partition active locks into `ours` and `theirs` |
+| `POST /locks/{id}/unlock` | Write | Release the caller's lock, or another lock with `force: true` |
+
+```mermaid
+sequenceDiagram
+    participant A as Alice / git-lfs
+    participant H as crab-http-server
+    participant S as Object storage
+    participant B as Bob / git-lfs
+
+    A->>H: POST /locks {path}
+    H->>S: Conditional create by path hash
+    S-->>H: Stable lock ID
+    H-->>A: 201 lock
+    B->>H: POST /locks/verify
+    H->>S: List active records
+    H-->>B: theirs: Alice's lock
+    Note over B: Standard pre-push hook gives early feedback
+    B->>H: receive-pack changes the locked path
+    H->>S: Acquire repository LFS-lock guard
+    H->>S: Recheck active locks before ref commit
+    H-->>B: Reject every updated ref
+    A->>H: POST /locks/{id}/unlock
+    H->>S: Owner + ID checked CAS tombstone
+    H-->>A: 200 released lock
+```
+
+Lock ownership stores the authenticated provider subject, not a mutable display
+name. Responses resolve the current repository-member name and fall back to the
+subject for an old or local record. A same-owner create is idempotent. An exact
+unlock retry returns the existing tombstone, while a stale ID cannot release a
+replacement lock. `force: true` follows the Git LFS contract and requires write
+access, not repository-administrator access.
+
+The lock JSON body is limited to 16 KiB. Paths contain 1–4,096 UTF-8 bytes and
+must be valid repository-relative Git paths. Page limits range from 1 through
+100; IDs and cursors contain at most 128 bytes. One request has a 30-second
+budget and shares bounded server admission. `ref` and `refspec` remain
+authorization hints as defined by version 1 of the protocol; locks are not
+branch-scoped.
+
+Lock create and unlock operations share one durable repository guard with Git
+publication. Receive validates every newly introduced commit, hashes its exact
+raw Git paths, and rechecks as many as 10,000 active lock records immediately
+before committing the ref transaction. Additions, deletions, content or mode
+changes, tree/leaf replacements, and both sides of a rename count as changes.
+Merge commits are compared with every parent. A change followed by a revert in
+the same push still counts; comparing only the final trees would let an
+intermediate locked edit bypass policy. Storage, coordination, cancellation,
+and lock-limit failures reject the push rather than skipping enforcement.
+
+When `locksverify` is unset, Git LFS probes the endpoint and may print the exact
+configuration command needed to enable enforcement. Teams should set the
+URL-scoped value to `true`; the pre-push hook then reports the caller's locks,
+fails closed on verification errors, and halts a push that changes a path in
+`theirs`:
+
+```sh
+git config lfs.https://git.example.com/git/team/project.git/info/lfs.locksverify true
+```
+
+This client setting provides early feedback, but a modified client can bypass
+it. The server-side receive rule remains authoritative and rejects the same
+conflicting path before ref publication. An owner's own lock does not block
+that owner.
+
+Only the server workload identity should have write access to the storage root.
+A principal with direct object-store write access is an operator outside the
+HTTP authorization boundary and can mutate lock records or any other
+repository state.
 
 ## Native Git push
 
@@ -1020,7 +1173,7 @@ This table collects process and transport limits that otherwise span several rou
 | --- | ---: | --- |
 | Interactive repository reads | 16 concurrent, 2 minutes, 8 MiB response | `server.rs` and `crab-remote-git` |
 | Collaboration handlers | 8 concurrent, 30s | `app.rs` and route middleware |
-| Git fetch, push, and LFS transfers | 4 concurrent | Shared `git_admission` semaphore |
+| Git fetch, push, LFS, archives, and release assets | 4 concurrent across the deployment | Process-local fast-path semaphore plus renewable object-store CAS slots under `.crab/http-server/v1/admission` |
 | Read-readiness publication | 2 repositories concurrently, 3-minute cooperative budget | `maintenance.rs` |
 | OIDC callbacks | 8 concurrent, 10s per provider request | `auth.rs` |
 | Archive transfer | 10 minutes, 3 GiB encoded response | `archive.rs` |
@@ -1036,8 +1189,9 @@ Server shutdown follows this order:
 2. Cancel request-scoped work
 3. Drain Axum connections
 4. Close and drain receive workers
-5. Drain retained maintenance jobs and lease cleanup
-6. Shut down the shared remote-read runtime
+5. Release and drain deployment-wide transfer leases
+6. Drain retained maintenance jobs and lease cleanup
+7. Shut down the shared remote-read runtime
 
 Stateful publication futures are drained instead of aborted. This prevents a dropped handler from abandoning a marker attempt or releasing a GC fence before cleanup finishes.
 
@@ -1069,17 +1223,17 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 
 | Contract | Primary source | Executable evidence |
 | --- | --- | --- |
-| Route composition, Host checks, readiness, and shutdown | `src/server.rs` | Server, authentication, and maintenance tests |
+| Route composition, Host checks, request correlation, readiness, metrics, and shutdown | `src/server.rs`, `src/metrics.rs` | Server, metrics, authentication, and maintenance tests |
 | OIDC, membership, sessions, tokens, and CSRF | `src/auth.rs` | `src/auth_tests.rs` and `src/auth_tests/git_tokens.rs` |
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
-| Native receive and recovery | `src/receive.rs` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
-| LFS upload and download integrity | `src/lfs.rs` | `src/lfs_tests.rs` |
+| Native receive, changed-path validation, and recovery | `src/receive.rs`, `src/receive/publish.rs`, `crab-git::receive_plan` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
+| LFS transfer, range-resume, file-lock, and authoritative receive contracts | `src/lfs.rs`, `src/receive/publish.rs` | `src/lfs_tests.rs`, `src/receive_tests.rs`, `src/auth_tests/git_tokens.rs`, `tests/qualify_lfs_range_resume.sh`, and `tests/qualify_lfs_locking.sh` |
 | Browser Git writes and settings | `src/contents.rs`, `src/branches.rs` | `src/auth_tests/branches.rs` |
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
 | Releases and assets | `src/releases.rs` | `src/auth_tests/releases.rs` |
-| Container identity and health contract | `deploy/Dockerfile` | `.github/workflows/http-server-container.yml` |
+| Container and multi-cloud deployment contracts | `deploy/Dockerfile`, `deploy/helm/crab-http-server`, `deploy/terraform` | `.github/workflows/http-server-container.yml`, `.github/workflows/http-server-release.yml`, `.github/workflows/http-server-kubernetes-live.yml`, the Helm storage test, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` |
 
 ### Understand what has been qualified
 
@@ -1087,12 +1241,20 @@ Current local and CI evidence includes:
 
 - Kubernetes-scale protocol version 2 discovery, partial clone, deepening, large request batches, path search, history, diff, and deep blame
 - Exact commit, tree, blob, archive, LFS, branch, tag, release, pull, merge, status, and check data compared with independent Git clients
-- Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, and cooperative restart recovery
+- Native initial pushes, fast-forward updates, branch and tag lifecycle, atomic rejection, fault injection, response loss, cooperative restart recovery, and container `SIGKILL` during an in-flight push
 - OIDC redirects and signed-token validation, key rotation, membership isolation, token scope, revocation, Origin checks, and CSRF rejection
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
-- Container build, non-root identity, stop signal, health command, and runtime inspection
+- Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, Prometheus-validated baseline alerts, runtime inspection, strict Helm lint, and Kubernetes schema validation
+- Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
+- LFS partial download and byte-identical range resume through the Compose Caddy/server/RustFS stack, including safe full-response fallback for multiple ranges
+- Stock Git LFS lock, list, verify-on-push, and unlock against the Compose Caddy/server/RustFS stack
+- Native Git rejection when another subject owns a changed path, including a change-and-revert history whose final tree matches the original
 
-These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The tests do not establish abrupt process-crash safety, multi-instance global admission, provider-scale performance, backup recovery, or complete manual accessibility.
+These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. In-memory multi-instance tests prove that independent server admission gates share and reuse fixed storage slots. These tests do not establish every crash phase, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
+
+The packaged Kubernetes gate makes live evidence repeatable, but its existence
+is not provider qualification. Only a successful EKS, GKE, or AKS run and its
+unaltered JSON receipt establish that release's cross-replica rollout result.
 
 ### Keep qualification evidence honest
 
@@ -1104,7 +1266,7 @@ Use the following interpretation:
 | In-memory HTTP test | Routing, authorization, and response semantics | Provider behavior or restart durability |
 | RustFS integration | Real object-store persistence and independent-client result | Production load, region failure, or Internet latency |
 | Browser regression | Rendered behavior and automated accessibility rules | Storage durability or manual assistive technology |
-| Container CI | Reproducible image and runtime metadata | Production orchestration or upgrade safety |
+| Container CI | Reproducible image/runtime metadata, one in-flight `SIGKILL` outcome, and one isolated complete-root cold restore | Cloud orchestration, version-selected provider recovery, every crash phase, or upgrade safety |
 
 ## Completion requirements
 
@@ -1112,31 +1274,31 @@ The server is complete only when a real account can perform the workflow and obs
 
 | Surface | Required evidence | Status |
 | --- | --- | --- |
-| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, Helm, ECS profile, and reproducible container | Implemented; live rollout qualification remains |
+| Multi-replica deployment | One Rust binary, durable CAS catalog and identity state, private management probes, graceful drain, hardened Helm profile, reproducible container, and portable cross-replica gate | Implemented with a protected GitHub OIDC evidence workflow; each provider release still requires a successful recorded live run |
 | Repository browsing | Refs, byte-preserving paths, history, files, blame, downloads, freshness, and empty/error states against real repositories | In progress |
 | Diff and tree interface | Pierre Trees and Diffs, correct modes and binary handling, bounded large-repository behavior, and keyboard navigation | In progress |
 | GitHub-quality design | Themes, responsive layouts, accessible controls, navigation, and loading/error behavior across workflows | In progress |
-| Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; membership administration and provider revocation remain |
-| Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; crash and coexistence qualification remain |
+| Team identity and authorization | OIDC, sessions, membership, permissions, isolation, revocation, CSRF, and administration | In progress; operator membership replacement exists, while browser administration and provider revocation remain |
+| Git hosting | Authenticated fetch and push, exact branch/tag lifecycle, protection, publication, and independent-client proof | In progress; additional crash phases and coexistence qualification remain |
 | Collaboration | Durable issues, pulls, comments, reviews, labels, assignees, merge, checks, activity, and notifications | In progress; activity, moderation, history, and notifications remain |
 | Repository management | CLI create/adopt/list, archive, settings, search, import, and audited administration | In progress; browser creation/import and audit history remain |
-| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Static EKS/GKE/AKS/ECS profiles implemented; live qualification pending |
+| Production operation | Durable concurrency, restart and crash recovery, backup restore, observability, upgrades, and operator guidance | Kubernetes controls, one RustFS in-flight `SIGKILL` path, one complete-root cold restore, bounded Prometheus metrics, request correlation, and runbook implemented; live qualification remains |
 | Quality gates | API, UI, accessibility, realistic repositories, security, package smoke, and measured performance | In progress |
 
 ### Track known operational gaps
 
 The remaining production gaps include:
 
-- Durable application-level push receipts and full abrupt-crash recovery
+- Durable application-level push receipts and abrupt-crash coverage beyond the qualified in-flight native-push boundary
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
-- Multi-instance global admission and production throughput qualification
-- LFS locking and resumed range downloads
-- Membership administration, provider back-channel logout, and immediate provider revocation
+- Production throughput and provider-level admission qualification
+- Browser membership administration, membership audit history, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
-- Backup and restore qualification for Git and the complete `app/v1` namespace
+- Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
 - Manual assistive-technology audits and broader workflow coverage
-- Production observability, upgrade, rollback, and disaster-recovery procedures
+- Successful EKS, GKE, and AKS live-workflow receipts; rollback, alert-tuning, and disaster-recovery qualification
+- First tagged server image/chart publication and registry-attestation verification
 
 ## Ownership
 
@@ -1150,7 +1312,7 @@ The service account needs object reads plus conditional writes and deletes for:
 - Ref-journal transactions, prepared heads, and cleanup
 - Per-ref, namespace, generation-owner, and GC coordination keys
 - The complete `app/v1` application namespace
-- LFS objects and multipart lifecycle
+- LFS objects, lock records, and multipart lifecycle
 - The server catalog and shared OIDC/session/Git-token namespace
 
 Preserve source errors across crate boundaries. Map them at the HTTP boundary only when the status code or client action changes.
@@ -1161,7 +1323,9 @@ The interface follows these upstream contracts:
 
 - [Git pack protocol](https://git-scm.com/docs/pack-protocol)
 - [Git credential contexts](https://git-scm.com/docs/gitcredentials#_configuration_options)
+- [Git LFS File Locking API](https://github.com/git-lfs/git-lfs/blob/main/docs/api/locking.md)
 - [Git LFS extensions](https://github.com/git-lfs/git-lfs/blob/main/docs/extensions.md)
+- [RFC 9110 HTTP range semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-14)
 - [Pierre Diffs documentation](https://diffs.com/docs)
 - [Pierre Trees documentation](https://trees.software/docs)
 - [Primer React guidance](https://primer.style/product/getting-started/react/)

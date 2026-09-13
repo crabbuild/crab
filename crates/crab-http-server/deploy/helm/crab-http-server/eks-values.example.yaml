@@ -1,12 +1,5 @@
-image:
-  repository: 123456789012.dkr.ecr.us-west-2.amazonaws.com/crab-http-server
-  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-
 config:
-  existingConfigMap: crab-http-server
-
-secrets:
-  existingSecret: crab-http-server
+  storageUrl: s3://team-crab-repositories/repositories
 
 serviceAccount:
   name: crab-http-server
