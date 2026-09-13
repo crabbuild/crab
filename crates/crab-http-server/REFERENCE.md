@@ -740,7 +740,7 @@ sequenceDiagram
     H-->>G: Success
 ```
 
-Uploads stream to a private temporary file, then use `crab-lfs` for verified bounded-memory multipart publication. Downloads verify size and SHA-256 before opening a backpressured response.
+Uploads stream to a private temporary file, then use `crab-lfs` for verified bounded-memory multipart publication. Full downloads hash the delivered object through successful end-of-file. Partial-range downloads verify the complete object or a matching durable verification receipt, bind that proof to the provider's strong object validator, and only then open a backpressured response. A range that spans the complete object uses the full-delivery hash contract.
 
 Already verified objects omit upload actions. Missing or corrupt downloads return per-object errors. A successful upload needs no separate verify request. Git receive proves referenced LFS content again before publishing a commit.
 
@@ -758,7 +758,23 @@ Already verified objects omit upload actions. Missing or corrupt downloads retur
 
 A started multipart operation keeps its permit and temporary file while it completes or aborts. This drain can extend beyond the five-minute request budget and server shutdown.
 
-Downloads restart from byte zero; range resume is not implemented. The optional LFS locking API returns HTTP 501. Browser blob downloads continue to return exact pointer bytes.
+LFS object `GET` supports one RFC 9110 byte range in closed (`bytes=0-99`),
+open (`bytes=100-`), or suffix (`bytes=-100`) form. A partial response returns
+HTTP 206 with `Accept-Ranges`, `Content-Range`, `Content-Length`, and a strong
+OID-based `ETag`. A matching `If-Range` resumes the transfer; a stale validator
+returns the complete HTTP 200 representation so the client replaces its partial
+copy. Malformed or unsatisfiable single byte ranges return HTTP 416 with
+`Content-Range: bytes */size`. Unknown units and multi-range field values are
+ignored, returning the complete HTTP 200 representation rather than creating an
+unbounded multipart response.
+
+`HEAD` describes the complete representation and ignores `Range`, as required
+for methods whose range semantics are undefined.
+
+The container gate uploads a 1 MiB LFS object, downloads an initial range through
+Caddy, resumes into the same file, and compares the completed bytes with the
+source. The optional LFS locking API still returns HTTP 501. Browser blob
+downloads continue to return exact pointer bytes.
 
 ## Native Git push
 
@@ -1078,7 +1094,7 @@ For an authenticated server, add `--cookies /path/to/private_cookies.txt` with a
 | Repository reads and raw paths | `src/api.rs` | `tests/verify_live.py` and frontend navigation tests |
 | Git protocol version 2 fetch | `src/git.rs` | `tests/verify_git_transport.py` and protocol CI |
 | Native receive and recovery | `src/receive.rs` | `src/receive_tests.rs` and `src/receive_fault_tests.rs` |
-| LFS upload and download integrity | `src/lfs.rs` | `src/lfs_tests.rs` |
+| LFS upload, download, and range-resume integrity | `src/lfs.rs` | `src/lfs_tests.rs` and `tests/qualify_lfs_range_resume.sh` |
 | Browser Git writes and settings | `src/contents.rs`, `src/branches.rs` | `src/auth_tests/branches.rs` |
 | Issues, labels, and assignees | `src/issues.rs`, `src/labels.rs`, `src/assignees.rs` | Scoped authenticated tests |
 | Pulls, reviews, checks, and merge | `src/pulls/`, `src/statuses.rs`, `src/checks.rs` | `src/pulls_tests.rs` and `src/auth_tests/pulls.rs` |
@@ -1096,6 +1112,7 @@ Current local and CI evidence includes:
 - Browser light, dark, desktop, narrow-screen, keyboard, conflict, and automated Web Content Accessibility Guidelines (WCAG) A/AA checks
 - Container build, non-root identity, stop signal, health command, storage-aware repository readiness, private metrics scrape, Prometheus-validated baseline alerts, runtime inspection, strict Helm lint, and Kubernetes schema validation
 - Complete-root RustFS cold copy into an isolated prefix, exact key/size comparison, byte hashing of every object, and independent restored Git, issue, and LFS reads
+- LFS partial download and byte-identical range resume through the Compose Caddy/server/RustFS stack, including safe full-response fallback for multiple ranges
 
 These runs use local RustFS, in-memory stores, shared caches, and controlled fixtures. Recorded timings are diagnostic observations, not throughput or production latency guarantees. The container crash test proves one in-flight native-push boundary and accepts only the exact old or new ref before a byte-identical retry or clone. The cold-restore test proves the complete fixture root can move to an isolated object prefix without flattening its key namespace and remain readable through independent protocols. Neither test establishes every crash phase, multi-instance global admission, provider-scale performance, version-selected cloud recovery, or complete manual accessibility.
 
@@ -1136,7 +1153,7 @@ The remaining production gaps include:
 - Index receipts and restart reconstruction when verified visibility evidence is missing
 - Protected-view writer coexistence with shared namespace guarantees
 - Multi-instance global admission and production throughput qualification
-- LFS locking and resumed range downloads
+- LFS locking and push-time lock enforcement
 - Membership administration, provider back-channel logout, and immediate provider revocation
 - Repository creation and adoption exist in the CLI; browser import remains
 - Version-selected provider backup and restore qualification for Git, shared identity state, and the complete `app/v1` namespace
@@ -1168,6 +1185,7 @@ The interface follows these upstream contracts:
 - [Git pack protocol](https://git-scm.com/docs/pack-protocol)
 - [Git credential contexts](https://git-scm.com/docs/gitcredentials#_configuration_options)
 - [Git LFS extensions](https://github.com/git-lfs/git-lfs/blob/main/docs/extensions.md)
+- [RFC 9110 HTTP range semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-14)
 - [Pierre Diffs documentation](https://diffs.com/docs)
 - [Pierre Trees documentation](https://trees.software/docs)
 - [Primer React guidance](https://primer.style/product/getting-started/react/)

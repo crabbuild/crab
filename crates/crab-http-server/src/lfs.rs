@@ -1,10 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{ops::Range, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Json,
     body::Body,
     extract::{FromRequest, Path, Query, Request, State, rejection::JsonRejection},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use crab_git::lfs_pointer::{LFS_VERSION_URL, LfsPointer};
@@ -40,6 +40,8 @@ pub(crate) enum Error {
     Busy,
     #[error("LFS transfer cancelled or timed out")]
     Cancelled,
+    #[error("LFS byte range is not satisfiable")]
+    RangeNotSatisfiable { size: u64 },
     #[error("invalid LFS request body")]
     Json(#[from] JsonRejection),
     #[error("invalid LFS object identity")]
@@ -58,6 +60,19 @@ pub(crate) enum Error {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        if let Self::RangeNotSatisfiable { size } = &self {
+            tracing::error!(error = ?self, "LFS transfer failed");
+            return (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [
+                    (header::CONTENT_TYPE, CONTENT_TYPE.to_owned()),
+                    (header::ACCEPT_RANGES, "bytes".to_owned()),
+                    (header::CONTENT_RANGE, format!("bytes */{size}")),
+                ],
+                Json(json!({"message":"LFS byte range is not satisfiable"})),
+            )
+                .into_response();
+        }
         tracing::error!(error = ?self, "LFS transfer failed");
         let (status, message) = match self {
             Self::Request(message) => (StatusCode::UNPROCESSABLE_ENTITY, message),
@@ -80,6 +95,10 @@ impl IntoResponse for Error {
             Self::Cancelled => (
                 StatusCode::REQUEST_TIMEOUT,
                 "LFS transfer cancelled or timed out",
+            ),
+            Self::RangeNotSatisfiable { .. } => (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "LFS byte range is not satisfiable",
             ),
             Self::Json(error) => (error.status(), "Invalid LFS request"),
             Self::Body(_) | Self::Identity(_) => (StatusCode::BAD_REQUEST, "Invalid LFS request"),
@@ -268,9 +287,17 @@ pub(crate) async fn download(
     Extension(principal): Extension<Principal>,
     Path((owner, name, oid)): Path<(String, String, String)>,
     Query(size): Query<Size>,
+    method: Method,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let entry = repository(&server, &principal, &owner, &name, false)?;
     let pointer = pointer(&oid, size.size)?;
+    let etag = format!("\"{}\"", crab_git::lfs_pointer::hex_encode(&pointer.oid));
+    let range = if method == Method::GET {
+        requested_range(&headers, pointer.size, &etag)?
+    } else {
+        None
+    };
     let permit = Arc::clone(&server.git_admission)
         .try_acquire_owned()
         .map_err(|_| Error::Busy)?;
@@ -278,9 +305,9 @@ pub(crate) async fn download(
     let guard = cancel.clone().drop_guard();
     let lfs = LfsObjectStore::new(entry.store.clone(), &entry.config.prefix);
     let deadline = tokio::time::Instant::now() + BUDGET;
-    let (_, _, stream) = tokio::select! {
+    let (_, delivered_range, stream) = tokio::select! {
         () = cancel.cancelled() => return Err(Error::Cancelled),
-        result = tokio::time::timeout_at(deadline, lfs.get_stream(&pointer.oid, pointer.size, None)) => result.map_err(|_| Error::Cancelled)??,
+        result = tokio::time::timeout_at(deadline, lfs.get_stream(&pointer.oid, pointer.size, range.clone())) => result.map_err(|_| Error::Cancelled)??,
     };
     let stream = stream.take_until(async move {
         tokio::select! { () = cancel.cancelled() => {}, () = tokio::time::sleep_until(deadline) => {} }
@@ -289,14 +316,116 @@ pub(crate) async fn download(
         let _ = (&permit, &guard);
         chunk
     });
+    let body = Body::from_stream(stream);
+    if range.is_some() {
+        return Ok((
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (
+                    header::CONTENT_RANGE,
+                    format!(
+                        "bytes {}-{}/{}",
+                        delivered_range.start,
+                        delivered_range.end - 1,
+                        pointer.size
+                    ),
+                ),
+                (
+                    header::CONTENT_LENGTH,
+                    (delivered_range.end - delivered_range.start).to_string(),
+                ),
+                (header::ETAG, etag),
+            ],
+            body,
+        )
+            .into_response());
+    }
     Ok((
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (header::ACCEPT_RANGES, "bytes".to_owned()),
             (header::CONTENT_LENGTH, pointer.size.to_string()),
+            (header::ETAG, etag),
         ],
-        Body::from_stream(stream),
+        body,
     )
         .into_response())
+}
+
+pub(crate) fn requested_range(
+    headers: &HeaderMap,
+    size: u64,
+    etag: &str,
+) -> Result<Option<Range<u64>>> {
+    let mut values = headers.get_all(header::RANGE).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Ok(None);
+    }
+    if !if_range_matches(headers, etag) {
+        return Ok(None);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| Error::RangeNotSatisfiable { size })?;
+    let Some((unit, ranges)) = value.split_once('=') else {
+        return Err(Error::RangeNotSatisfiable { size });
+    };
+    if !unit.eq_ignore_ascii_case("bytes") || ranges.contains(',') {
+        return Ok(None);
+    }
+    parse_byte_range(value, size).map(Some)
+}
+
+fn if_range_matches(headers: &HeaderMap, etag: &str) -> bool {
+    let mut values = headers.get_all(header::IF_RANGE).iter();
+    let Some(value) = values.next() else {
+        return true;
+    };
+    values.next().is_none() && value.as_bytes() == etag.as_bytes()
+}
+
+pub(crate) fn parse_byte_range(value: &str, size: u64) -> Result<Range<u64>> {
+    let (unit, range) = value
+        .split_once('=')
+        .ok_or(Error::RangeNotSatisfiable { size })?;
+    if !unit.eq_ignore_ascii_case("bytes") || range.contains(',') {
+        return Err(Error::RangeNotSatisfiable { size });
+    }
+    let (first, last) = range
+        .split_once('-')
+        .ok_or(Error::RangeNotSatisfiable { size })?;
+    if first.is_empty() {
+        let suffix = last
+            .parse::<u64>()
+            .map_err(|_| Error::RangeNotSatisfiable { size })?;
+        if suffix == 0 || size == 0 {
+            return Err(Error::RangeNotSatisfiable { size });
+        }
+        return Ok(size.saturating_sub(suffix)..size);
+    }
+    let first = first
+        .parse::<u64>()
+        .map_err(|_| Error::RangeNotSatisfiable { size })?;
+    if first >= size {
+        return Err(Error::RangeNotSatisfiable { size });
+    }
+    let end = if last.is_empty() {
+        size
+    } else {
+        let last = last
+            .parse::<u64>()
+            .map_err(|_| Error::RangeNotSatisfiable { size })?;
+        if last < first {
+            return Err(Error::RangeNotSatisfiable { size });
+        }
+        last.saturating_add(1).min(size)
+    };
+    Ok(first..end)
 }
 
 pub(crate) async fn upload(

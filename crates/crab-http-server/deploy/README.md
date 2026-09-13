@@ -38,6 +38,10 @@ restored catalog through native Git, issue, and LFS clients. This proves the
 portable recovery shape, but provider version selection and regional recovery
 still require a live drill.
 
+The same container path uploads a 1 MiB LFS object, interrupts its logical
+download after an initial byte range, resumes the remaining range through
+Caddy, and requires the reconstructed file to match byte-for-byte.
+
 Server release tags have their own contract, independent of the Crab CLI. An
 annotated `crab-http-server-vX.Y.Z` tag matching the server crate publishes a
 qualified AMD64/ARM64 image to GHCR with immutable version and source-commit

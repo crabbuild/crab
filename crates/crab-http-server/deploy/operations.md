@@ -291,7 +291,7 @@ Record these gates against a dedicated storage root:
 - Complete OIDC login when callbacks can reach either replica
 - Create a repository and observe it from every replica within five seconds
 - Push and fetch branches and tags with an independent Git client
-- Upload and download an LFS object larger than ingress buffering thresholds
+- Upload an LFS object larger than ingress buffering thresholds, interrupt its download, and resume it with a byte range
 - Replace one pod during fetch, push, and archive scenarios
 - Upgrade and roll back one release without losing committed state
 - Restore the complete root to an isolated prefix and repeat read verification
