@@ -1254,7 +1254,9 @@ These runs use local RustFS, in-memory stores, shared caches, and controlled fix
 
 The packaged Kubernetes gate makes live evidence repeatable, but its existence
 is not provider qualification. Only a successful EKS, GKE, or AKS run and its
-unaltered JSON receipt establish that release's cross-replica rollout result.
+workflow-attested JSON receipt establish that release's cross-replica rollout
+result. The protected workflow first verifies the deployed image provenance
+against the exact server release tag and source commit.
 
 ### Keep qualification evidence honest
 

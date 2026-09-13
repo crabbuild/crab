@@ -81,7 +81,8 @@ and [AKS outbound workload-identity rules](https://learn.microsoft.com/en-us/azu
 Maintainer releases publish `linux/amd64` and `linux/arm64` images to
 `ghcr.io/crabbuild/crab-http-server`. The release workflow accepts only an
 annotated `crab-http-server-vX.Y.Z` tag that matches this crate's version and is
-reachable from `main`. It qualifies that exact source, generates SBOM and
+reachable from `main`. A push of that tag is the only publication trigger. The
+workflow qualifies that exact source, generates SBOM and
 provenance attestations, and publishes both the version and source-commit tags.
 The same release publishes this chart to
 `oci://ghcr.io/crabbuild/charts/crab-http-server` with the matching version and
@@ -94,7 +95,10 @@ docker buildx imagetools inspect ghcr.io/crabbuild/crab-http-server:0.1.0
 gh attestation verify \
   oci://ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
   --repo crabbuild/crab \
-  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
+  --source-ref refs/tags/crab-http-server-v0.1.0 \
+  --source-digest release_commit_here \
+  --deny-self-hosted-runners
 ```
 
 Authenticate to GHCR first when the package is private. Put
@@ -298,6 +302,8 @@ script from a trusted operator workstation with `kubectl`, Git LFS, `curl`, and
 ```sh
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
 export CRAB_HTTP_SERVER_EXPECTED_IMAGE=registry.example.com/crab-http-server@sha256:qualified_digest_here
+export CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0
+export CRAB_HTTP_SERVER_SOURCE_SHA="$(git rev-list -n 1 "$CRAB_HTTP_SERVER_RELEASE_TAG")"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
@@ -309,8 +315,9 @@ Replace `eks` with `gke` or `aks`. The explicit rollout approval is required
 because this test creates and retains a uniquely named branch in the dedicated
 repository and performs a rolling restart of the Deployment. Never run it
 against a repository where qualification branches are forbidden by policy.
-The expected image is required for release evidence; the script rejects a
-deployment whose manifest reference differs.
+The expected image, release tag, and source commit are required for release
+evidence. The script rejects a deployment whose manifest reference differs or
+a source identity that is not a stable server tag and lowercase Git commit.
 
 The test fails unless it can prove all of these boundaries:
 
@@ -331,10 +338,11 @@ The test fails unless it can prove all of these boundaries:
 - Every pod is replaced and the committed branch remains byte-identical
 
 The script writes a secret-free JSON evidence receipt containing the provider,
-image digest, repository, qualification branch and commit, payload digest,
-rollout probes, and completion time. Retain it with the release record. The
-Git token remains only in process memory and must still be rotated or revoked
-after qualification according to team policy.
+image digest, release tag and source commit, repository, qualification branch
+and commit, payload digest, explicit successful checks, rollout probes and
+failures, and completion time. Retain it with the release record. The Git token
+remains only in process memory and must still be rotated or revoked after
+qualification according to team policy.
 
 ### Retain evidence with GitHub Actions
 
@@ -342,17 +350,36 @@ after qualification according to team policy.
 protected GitHub environment. Dispatch it from the release tag, select the
 provider, provide the dedicated repository and HTTPS origin, paste the exact
 deployed `repository@sha256:...` image, and explicitly approve the write and
-rolling restart. The job rejects a different deployed image and retains the
-verified receipt for 90 days.
+rolling restart. The job accepts only the official Crab image, verifies its
+signed provenance against the selected release tag, rejects a different
+deployed image, signs the verified receipt, and retains the receipt plus its
+offline attestation bundle for 90 days.
+
+After downloading the workflow artifact, verify its receipt against the exact
+qualification workflow and release tag:
+
+```sh
+gh attestation verify receipt.json \
+  --repo crabbuild/crab \
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-kubernetes-live.yml \
+  --source-ref refs/tags/crab-http-server-v0.1.0 \
+  --source-digest release_commit_here
+```
+
+Use `--bundle receipt.attestation.json` to verify the retained bundle instead
+of fetching the attestation from GitHub. A valid signature proves the receipt
+bytes and workflow identity; the receipt's checks still prove only the named
+cluster, deployment, repository, release, and completion time.
 
 Use `ubuntu-latest` only when the cluster API and public Crab origin are
 reachable from a hosted runner. Select a dedicated self-hosted runner label for
 private EKS or AKS endpoints. For GKE, also select `internal` when that runner
 reaches the private control-plane address, or `connect-gateway` when the runner
 identity is authorized for the fleet gateway. A self-hosted runner needs Bash,
-`kubectl`, Git LFS, `curl`, `jq`, and the provider CLI used by its selected
-authentication path. The AKS path installs a pinned `kubelogin` release before
-requesting non-admin cluster credentials.
+`kubectl`, Git LFS, `curl`, `jq`, GitHub CLI with artifact-attestation support,
+and the provider CLI used by its selected authentication path. The AKS path
+installs a pinned `kubelogin` release before requesting non-admin cluster
+credentials.
 
 The environment needs one secret:
 

@@ -67,6 +67,35 @@ jobs:
           fi
           grep -F 'CRAB_HTTP_SERVER_EXPECTED_IMAGE must be an immutable image reference.' \
             "${RUNNER_TEMP}/invalid-image-error"
+          immutable_image=registry.example.com/crab-http-server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
+            CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
+            CRAB_HTTP_SERVER_RELEASE_TAG=invalid \
+            CRAB_HTTP_SERVER_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+              eks crab crab-http-server https://git.example.com \
+              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
+              > /dev/null 2> "${RUNNER_TEMP}/invalid-release-tag-error"; then
+            echo "qualification accepted an invalid release tag" >&2
+            exit 1
+          fi
+          grep -F 'CRAB_HTTP_SERVER_RELEASE_TAG must be a stable crab-http-server-vX.Y.Z tag.' \
+            "${RUNNER_TEMP}/invalid-release-tag-error"
+          if CRAB_HTTP_SERVER_GIT_TOKEN=test-only \
+            CRAB_HTTP_SERVER_EXPECTED_IMAGE="$immutable_image" \
+            CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0 \
+            CRAB_HTTP_SERVER_SOURCE_SHA=invalid \
+            CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true \
+            bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
+              eks crab crab-http-server https://git.example.com \
+              qualification repository "${RUNNER_TEMP}/invalid-evidence.json" \
+              > /dev/null 2> "${RUNNER_TEMP}/invalid-source-sha-error"; then
+            echo "qualification accepted an invalid source commit" >&2
+            exit 1
+          fi
+          grep -F 'CRAB_HTTP_SERVER_SOURCE_SHA must be a lowercase 40-character Git commit.' \
+            "${RUNNER_TEMP}/invalid-source-sha-error"
           docker run --rm --volume "$PWD:/src:ro" "$shellcheck_image" \
             /src/crates/crab-http-server/tests/qualify_abrupt_receive_crash.sh \
             /src/crates/crab-http-server/tests/qualify_backup_restore.sh \

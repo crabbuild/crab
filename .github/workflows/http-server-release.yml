@@ -3,17 +3,12 @@ name: HTTP server release image
 on:
   push:
     tags: ["crab-http-server-v*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Annotated server release tag (for example crab-http-server-v0.1.0)"
-        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: http-server-release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  group: http-server-release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -33,7 +28,7 @@ jobs:
       - name: Check out the release tag
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -41,7 +36,7 @@ jobs:
         id: release
         shell: bash
         env:
-          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          REQUESTED_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 

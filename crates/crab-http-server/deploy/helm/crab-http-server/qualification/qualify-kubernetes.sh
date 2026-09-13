@@ -7,7 +7,8 @@ unset GIT_CURL_VERBOSE GIT_TRACE GIT_TRACE_CURL GIT_TRACE_CURL_NO_DATA \
 
 usage() {
   echo "usage: qualify-kubernetes.sh PROVIDER NAMESPACE DEPLOYMENT HTTPS_ORIGIN OWNER REPOSITORY EVIDENCE_FILE" >&2
-  echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, and CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true." >&2
+  echo "Set CRAB_HTTP_SERVER_GIT_TOKEN, CRAB_HTTP_SERVER_EXPECTED_IMAGE, CRAB_HTTP_SERVER_RELEASE_TAG," >&2
+  echo "CRAB_HTTP_SERVER_SOURCE_SHA, and CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true." >&2
   exit 2
 }
 
@@ -27,6 +28,16 @@ test "${CRAB_HTTP_SERVER_APPROVE_ROLLOUT:-}" = true || {
 }
 if [[ ! "$expected_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
   echo "CRAB_HTTP_SERVER_EXPECTED_IMAGE must be an immutable image reference." >&2
+  exit 2
+fi
+release_tag="${CRAB_HTTP_SERVER_RELEASE_TAG:?set CRAB_HTTP_SERVER_RELEASE_TAG to the qualified crab-http-server-vX.Y.Z tag}"
+source_sha="${CRAB_HTTP_SERVER_SOURCE_SHA:?set CRAB_HTTP_SERVER_SOURCE_SHA to the release tag commit}"
+if [[ ! "$release_tag" =~ ^crab-http-server-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "CRAB_HTTP_SERVER_RELEASE_TAG must be a stable crab-http-server-vX.Y.Z tag." >&2
+  exit 2
+fi
+if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "CRAB_HTTP_SERVER_SOURCE_SHA must be a lowercase 40-character Git commit." >&2
   exit 2
 fi
 
@@ -481,22 +492,38 @@ jq --null-input \
   --arg deployment "$deployment" \
   --arg origin "$origin" \
   --arg image "$image" \
+  --arg release_tag "$release_tag" \
+  --arg source_sha "$source_sha" \
   --arg repository "${owner}/${repository}" \
   --arg branch "$branch" \
   --arg commit "$final_oid" \
   --arg payload_sha256 "$payload_sha256" \
   --arg completed_at "$completed_at" \
   --argjson rollout_probes "$probes" \
+  --argjson rollout_probe_failures "$probe_failures" \
   --argjson replica_count "$replica_count" \
   --argjson zone_count "$zone_count" \
   --argjson old_pod_uids "$old_uids" \
   --argjson new_pod_uids "$new_uids" \
-  '{schema: 1, provider: $provider, namespace: $namespace, deployment: $deployment,
-    origin: $origin, image: $image, repository: $repository, branch: $branch,
+  '{schema: 2, provider: $provider, namespace: $namespace, deployment: $deployment,
+    origin: $origin, image: $image,
+    qualification_source: {release_tag: $release_tag, commit: $source_sha},
+    repository: $repository, branch: $branch,
     commit: $commit, payload_sha256: $payload_sha256,
     replica_count: $replica_count, zone_count: $zone_count,
     old_pod_uids: $old_pod_uids, new_pod_uids: $new_pod_uids,
-    rollout_probes: $rollout_probes, completed_at: $completed_at}' \
+    rollout_probes: $rollout_probes,
+    rollout_probe_failures: $rollout_probe_failures,
+    checks: {
+      oidc_login_redirect: true,
+      oidc_secure_flow_cookie: true,
+      cross_replica_git: true,
+      cross_replica_lfs: true,
+      durable_lfs_lock: true,
+      zero_unavailable_rollout: true,
+      post_rollout_clone: true
+    },
+    completed_at: $completed_at}' \
   > "$evidence_temp"
 ln "$evidence_temp" "$evidence_file"
 rm -f -- "$evidence_temp"

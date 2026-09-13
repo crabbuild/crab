@@ -67,7 +67,10 @@ the dedicated server release workflow:
 gh attestation verify \
   oci://ghcr.io/crabbuild/crab-http-server@sha256:qualified_digest_here \
   --repo crabbuild/crab \
-  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
+  --source-ref refs/tags/crab-http-server-v0.1.0 \
+  --source-digest release_commit_here \
+  --deny-self-hosted-runners
 ```
 
 Authenticate to GHCR first when the package is private. Also inspect the image
@@ -78,7 +81,10 @@ Verify the OCI chart by its separately reported digest before installation:
 gh attestation verify \
   oci://ghcr.io/crabbuild/charts/crab-http-server@sha256:qualified_chart_digest_here \
   --repo crabbuild/crab \
-  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml
+  --signer-workflow crabbuild/crab/.github/workflows/http-server-release.yml \
+  --source-ref refs/tags/crab-http-server-v0.1.0 \
+  --source-digest release_commit_here \
+  --deny-self-hosted-runners
 ```
 
 ## Deploy or upgrade
@@ -289,6 +295,8 @@ access**. Run the same provider-neutral test on EKS, GKE, and AKS:
 ```sh
 export CRAB_HTTP_SERVER_GIT_TOKEN=secret_from_git_access
 export CRAB_HTTP_SERVER_EXPECTED_IMAGE=registry.example.com/crab-http-server@sha256:qualified_digest_here
+export CRAB_HTTP_SERVER_RELEASE_TAG=crab-http-server-v0.1.0
+export CRAB_HTTP_SERVER_SOURCE_SHA="$(git rev-list -n 1 "$CRAB_HTTP_SERVER_RELEASE_TAG")"
 export CRAB_HTTP_SERVER_APPROVE_ROLLOUT=true
 
 bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh \
@@ -301,16 +309,18 @@ runtime controls, provider-matching placement across nodes and zones, readiness
 on every pod, public OIDC initiation, direct authenticated Git traffic through
 two distinct replicas, byte-identical LFS transfer, lock-owner publication, and
 uninterrupted Git discovery while Kubernetes replaces every pod. It leaves a
-unique branch as durable evidence and writes a secret-free JSON receipt. Review
-and retain that receipt with the image and chart attestations; revoke the
-qualification token afterward.
+unique branch as durable evidence and writes a secret-free JSON receipt bound
+to the supplied release tag and source commit. Review and retain that receipt
+with the image and chart attestations; revoke the qualification token afterward.
 
 For repeatable retained evidence, dispatch
 `.github/workflows/http-server-kubernetes-live.yml` from the release tag. Its
 protected environment obtains short-lived cluster credentials through GitHub
-OIDC, checks the expected image digest, runs the same gate, verifies the
-receipt, and uploads it. Keep this runner identity separate from Crab's pod
-storage identity and restrict it to the named cluster and Deployment.
+OIDC, verifies that the official image digest was signed by the server release
+workflow from the selected tag, runs the same gate, verifies and signs the
+receipt, and uploads it with an offline attestation bundle. Keep this runner
+identity separate from Crab's pod storage identity and restrict it to the named
+cluster and Deployment.
 
 A failed run is a failed release gate. Preserve pod events, ingress logs,
 application request IDs, the evidence path, and the unique branch before

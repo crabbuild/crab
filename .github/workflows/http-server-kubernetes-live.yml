@@ -76,8 +76,10 @@ jobs:
     timeout-minutes: 45
     environment: ${{ inputs.environment }}
     permissions:
+      attestations: write
       contents: read
       id-token: write
+      packages: read
     env:
       AWS_ROLE_ARN: ${{ vars.CRAB_HTTP_SERVER_EKS_GITHUB_ROLE_ARN }}
       AWS_REGION: ${{ vars.CRAB_HTTP_SERVER_EKS_REGION }}
@@ -111,6 +113,7 @@ jobs:
           persist-credentials: false
 
       - name: Require an annotated server release tag
+        id: release
         shell: bash
         env:
           REF_NAME: ${{ github.ref_name }}
@@ -136,7 +139,8 @@ jobs:
             echo "::error::$REF_NAME must be an annotated tag."
             exit 1
           fi
-          if [ "$(git rev-list -n 1 "$REF_NAME")" != "$(git rev-parse HEAD)" ]; then
+          source_sha="$(git rev-list -n 1 "$REF_NAME")"
+          if [ "$source_sha" != "$(git rev-parse HEAD)" ]; then
             echo "::error::The checkout does not match $REF_NAME."
             exit 1
           fi
@@ -144,12 +148,17 @@ jobs:
             echo "::error::$REF_NAME is not reachable from origin/main."
             exit 1
           }
+          {
+            echo "tag=$REF_NAME"
+            echo "source_sha=$source_sha"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Validate selected provider inputs
         shell: bash
         env:
           PROVIDER: ${{ inputs.provider }}
           EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          OFFICIAL_IMAGE: ghcr.io/${{ github.repository_owner }}/crab-http-server
           GIT_TOKEN: ${{ secrets.CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN }}
         run: |
           set -euo pipefail
@@ -163,8 +172,11 @@ jobs:
           }
 
           require_value CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN "$GIT_TOKEN"
-          if [[ ! "$EXPECTED_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::expected_image must be an immutable repository@sha256 reference."
+          official_image="${OFFICIAL_IMAGE,,}"
+          image_repository="${EXPECTED_IMAGE%@sha256:*}"
+          if [ "$image_repository" != "$official_image" ] ||
+            [[ ! "$EXPECTED_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::expected_image must be the official immutable ${official_image}@sha256 reference."
             exit 1
           fi
           case "$PROVIDER" in
@@ -192,6 +204,22 @@ jobs:
               exit 1
               ;;
           esac
+
+      - name: Verify the release image provenance
+        shell: bash
+        env:
+          EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://${EXPECTED_IMAGE}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/http-server-release.yml" \
+            --source-ref "refs/tags/${RELEASE_TAG}" \
+            --source-digest "$SOURCE_SHA" \
+            --deny-self-hosted-runners
 
       - name: Authenticate to AWS with GitHub OIDC
         if: inputs.provider == 'eks'
@@ -264,6 +292,8 @@ jobs:
           REPOSITORY: ${{ inputs.repository }}
           CRAB_HTTP_SERVER_GIT_TOKEN: ${{ secrets.CRAB_HTTP_SERVER_QUALIFICATION_GIT_TOKEN }}
           CRAB_HTTP_SERVER_EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          CRAB_HTTP_SERVER_RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          CRAB_HTTP_SERVER_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           CRAB_HTTP_SERVER_APPROVE_ROLLOUT: "true"
         run: |
           set -euo pipefail
@@ -283,6 +313,8 @@ jobs:
           OWNER: ${{ inputs.owner }}
           REPOSITORY: ${{ inputs.repository }}
           EXPECTED_IMAGE: ${{ inputs.expected_image }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
           set -euo pipefail
           receipt="${RUNNER_TEMP}/crab-http-server-live-evidence/receipt.json"
@@ -293,18 +325,46 @@ jobs:
             --arg origin "${ORIGIN%/}" \
             --arg repository "${OWNER}/${REPOSITORY}" \
             --arg image "$EXPECTED_IMAGE" \
-            '.schema == 1 and .provider == $provider and
+            --arg release_tag "$RELEASE_TAG" \
+            --arg source_sha "$SOURCE_SHA" \
+            '.schema == 2 and .provider == $provider and
              .namespace == $namespace and .deployment == $deployment and
              .origin == $origin and .repository == $repository and
-             .image == $image and .replica_count >= 2 and .zone_count >= 2 and
-             .rollout_probes >= 1 and (.commit | test("^[0-9a-f]{40}$")) and
+             .image == $image and
+             .qualification_source.release_tag == $release_tag and
+             .qualification_source.commit == $source_sha and
+             .replica_count >= 2 and .zone_count >= 2 and
+             .rollout_probes >= 1 and .rollout_probe_failures == 0 and
+             .checks.oidc_login_redirect == true and
+             .checks.oidc_secure_flow_cookie == true and
+             .checks.cross_replica_git == true and
+             .checks.cross_replica_lfs == true and
+             .checks.durable_lfs_lock == true and
+             .checks.zero_unavailable_rollout == true and
+             .checks.post_rollout_clone == true and
+             (.commit | test("^[0-9a-f]{40}$")) and
              (.payload_sha256 | test("^[0-9a-f]{64}$"))' \
             "$receipt" >/dev/null
+
+      - name: Attest the qualification receipt
+        id: receipt-attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/crab-http-server-live-evidence/receipt.json
+
+      - name: Preserve the offline attestation bundle
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.receipt-attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE_PATH" \
+            "${RUNNER_TEMP}/crab-http-server-live-evidence/receipt.attestation.json"
 
       - name: Retain qualification receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: crab-http-server-${{ inputs.provider }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/crab-http-server-live-evidence/receipt.json
+          path: ${{ runner.temp }}/crab-http-server-live-evidence/
           if-no-files-found: error
           retention-days: 90

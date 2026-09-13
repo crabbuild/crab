@@ -931,7 +931,7 @@ The design is backed by component, composition, provider, and independent-client
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
 | HTTP composition | `crab-http-server::receive` | `receive_tests.rs`, `receive_fault_tests.rs`, authentication tests, and RustFS ignored tests |
-| Multi-cloud runtime | Helm chart, `.github/workflows/http-server-kubernetes-live.yml`, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus recorded EKS, GKE, or AKS cross-replica rollout receipt bound to the deployed digest |
+| Multi-cloud runtime | Helm chart, `.github/workflows/http-server-kubernetes-live.yml`, and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus an attested EKS, GKE, or AKS cross-replica rollout receipt bound to the release source and deployed digest |
 
 ### Interpret the live fixtures
 
