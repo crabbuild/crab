@@ -95,13 +95,14 @@ kubectl --namespace crab rollout status deployment/crab-http-server \
   --timeout=15m
 ```
 
-Before binding either listener, server startup validates a holder-checked
-coordination write. The startup and readiness probes then read the durable
+Before binding either listener, server startup validates bounded listing,
+holder-checked coordination writes, ordinary object writes, deletion, and
+post-delete visibility. The startup and readiness probes then read the durable
 catalog and open the current Git view of every cataloged repository. A
 replacement pod stays out of endpoint routing while shared read-index
 maintenance is pending. The liveness probe checks only whether the management
-process answers HTTP. `helm test` repeats the catalog read and
-coordination-write contract from a fresh workload-identity pod.
+process answers HTTP. `helm test` repeats the complete storage contract from a
+fresh workload-identity pod.
 
 Verify each pod rather than relying on Deployment availability alone:
 
@@ -116,10 +117,12 @@ helm test crab-http-server --namespace crab --logs --timeout 3m
 ```
 
 The Helm test uses a fresh pod and the release workload identity to read the
-catalog and complete a holder-checked CAS acquire/release. A passing test proves
-that a newly scheduled workload can load the configuration, Secret, cloud
-identity, and durable root with the coordination permissions the server needs;
-it does not prove the public ingress or cross-replica data plane.
+catalog, perform a bounded list, complete a holder-checked CAS acquire/release,
+write and delete a unique object, and confirm that object is no longer visible.
+A passing test proves that a newly scheduled workload can load the
+configuration, Secret, cloud identity, and durable root with the storage
+permissions the server needs; it does not prove the public ingress or
+cross-replica data plane.
 
 ## Manage repository membership
 

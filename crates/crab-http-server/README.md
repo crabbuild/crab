@@ -67,6 +67,11 @@ credentials. Then create a cataloged repository and start:
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
+`storage-probe` fails unless the workload can read and list the configured
+root, perform conditional coordination writes, create and delete an object,
+and observe that deletion. `serve` runs the same preflight before binding its
+listeners.
+
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a
 Crab repository. Every replica discovers catalog changes without a restart.

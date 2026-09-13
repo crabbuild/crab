@@ -227,7 +227,7 @@ One Helm chart owns the runtime contract:
 - Deployment, ServiceAccount, private ClusterIP Service, and disruption budget
 - Security context, hard two-node/two-zone spread, bounded scratch, and graceful
   termination
-- Storage-aware probes and a fresh-workload catalog test
+- Storage-aware probes and a fresh-workload full storage-contract test
 - TLS ingress plus mandatory source-restricted NetworkPolicy
 - Optional autoscaling, private `PodMonitor`, and bounded baseline alerts
 - An immutable image digest and typed generated configuration
@@ -241,12 +241,20 @@ overlays omit the Standard-only selector.
 Empty or match-all ingress peers and unrestricted IPv4 or IPv6 CIDRs fail
 rendering, so an enabled public or metrics path always names a bounded source.
 
+Before either listener binds, every process reads the catalog, performs a
+bounded list, exercises the storage-backed transfer-admission CAS, writes and
+deletes a unique probe object, and verifies that the object is no longer
+visible. The standalone `storage-probe` command performs the same sequence in
+a fresh Helm test pod. Probe objects use the short-lived auth namespace so a
+provider lifecycle rule collects residue if the process dies between write and
+delete.
+
 ```mermaid
 flowchart LR
     Terraform[Provider Terraform] --> Provider[Non-secret provider values]
     Team[Team values + Secret] --> Helm[Portable Helm release]
     Provider --> Helm
-    Helm --> Fresh[Fresh-pod catalog test]
+    Helm --> Fresh[Fresh-pod storage contract test]
     Helm --> Replicas[Two-zone replicas]
     Replicas --> Live[Cross-replica live gate]
     Live --> Receipt[Secret-free JSON receipt]
@@ -916,7 +924,7 @@ The design is backed by component, composition, provider, and independent-client
 | Journal and namespace gate | `crab-write::journal` | Conflicting sibling refs, atomic batches, compaction, and holder-safe cleanup tests |
 | Read readiness | `crab-write::generation` | Superseded state, missing proof, cancellation, catalog close, and repeated pass tests |
 | HTTP composition | `crab-http-server::receive` | `receive_tests.rs`, `receive_fault_tests.rs`, authentication tests, and RustFS ignored tests |
-| Multi-cloud runtime | Helm chart and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod catalog read plus recorded EKS, GKE, or AKS cross-replica rollout receipt |
+| Multi-cloud runtime | Helm chart and `deploy/helm/crab-http-server/qualification/qualify-kubernetes.sh` | Fresh-pod read/list/write/CAS/delete preflight plus recorded EKS, GKE, or AKS cross-replica rollout receipt |
 
 ### Interpret the live fixtures
 

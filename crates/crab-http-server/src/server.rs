@@ -12,11 +12,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use bytes::Bytes;
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
 };
-use crab_storage::{Store, StoreLayout};
+use crab_storage::{StorageError, Store, StoreLayout};
 use serde_json::json;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -48,6 +49,38 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
             .to_string(),
         GIT_ADMISSION_CAPACITY,
     )
+}
+
+async fn probe_storage_contract(
+    catalog: &CatalogStore,
+    transfer_admission: &TransferAdmission,
+) -> Result<()> {
+    let root = catalog.root();
+    root.store
+        .list_prefix_bounded(&root.path(".crab/http-server/v1"), 1)
+        .await?;
+    transfer_admission.probe().await?;
+
+    // A unique object avoids cross-pod interference. Provider lifecycle rules
+    // bound residue if a pod dies between creation and deletion.
+    let path = root.path(&format!(
+        ".crab/http-server/v1/auth/preflight/{}",
+        Uuid::now_v7()
+    ));
+    root.store
+        .put_overwrite(&path, Bytes::from_static(b"crab-storage-probe-v1"))
+        .await?;
+    match root.store.delete(&path).await {
+        Ok(()) | Err(StorageError::NotFound { .. }) => {}
+        Err(error) => return Err(error.into()),
+    }
+    match root.store.head(&path).await {
+        Err(StorageError::NotFound { .. }) => Ok(()),
+        Ok(_) => Err(crate::Error::StorageProbe(
+            "an object remained visible after a successful delete",
+        )),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) struct Repository {
@@ -319,9 +352,9 @@ pub async fn serve(config: Config) -> Result<()> {
         },
     )?;
     let transfer_admission = transfer_admission(&catalog);
-    transfer_admission.probe().await?;
-    // A pod must prove its shared coordination write path before it owns any
-    // socket; otherwise invalid cloud permissions can look partially started.
+    probe_storage_contract(&catalog, &transfer_admission).await?;
+    // A pod must prove the complete storage contract before it owns any socket;
+    // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let server = Arc::new(Server {
@@ -391,8 +424,7 @@ pub async fn serve(config: Config) -> Result<()> {
 pub async fn probe_storage(config: &Config) -> Result<()> {
     let catalog = CatalogStore::from_config(config)?;
     catalog.load().await?;
-    transfer_admission(&catalog).probe().await?;
-    Ok(())
+    probe_storage_contract(&catalog, &transfer_admission(&catalog)).await
 }
 
 async fn materialize_catalog(
@@ -895,6 +927,25 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn storage_preflight_leaves_no_live_probe_object() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let catalog = CatalogStore::new(crate::storage_root::StorageRoot::memory(
+            store.clone(),
+            "repositories",
+        ));
+        let admission = transfer_admission(&catalog);
+
+        probe_storage_contract(&catalog, &admission).await.unwrap();
+        probe_storage_contract(&catalog, &admission).await.unwrap();
+
+        let objects = store
+            .list_prefix(&catalog.root().path(".crab/http-server/v1/auth/preflight"))
+            .await
+            .unwrap();
+        assert!(objects.is_empty());
+    }
 
     #[test]
     fn repository_tokens_are_only_considered_on_exact_integration_routes() {

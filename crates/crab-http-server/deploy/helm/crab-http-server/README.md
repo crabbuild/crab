@@ -237,10 +237,11 @@ helm test crab-http-server --namespace crab --logs --timeout 3m
 
 The Helm test starts a fresh hardened pod with the release ServiceAccount,
 configuration, Secret, cloud environment, and immutable image. Its
-`storage-probe` command validates the durable catalog, claims a dedicated
-coordination slot with a conditional write, and releases that slot with a
-holder-checked update. It does not send traffic through ingress; use the live
-qualification below for that boundary.
+`storage-probe` command reads the durable catalog, performs a bounded list,
+claims and releases a dedicated coordination slot with conditional writes,
+writes and deletes a unique probe object, and confirms that deletion is
+visible. It does not send traffic through ingress; use the live qualification
+below for that boundary.
 
 ## Create the first repository
 

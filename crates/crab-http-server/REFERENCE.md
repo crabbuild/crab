@@ -197,9 +197,13 @@ SERVER="$HOME/Workspace/crabbuild-target/crab-http-server-dev/release/crab-http-
 "$SERVER" --config /secure/server.toml serve
 ```
 
-`storage-probe` validates the catalog read path and performs a dedicated
-holder-checked CAS acquire/release. Use it in deployment preflight to catch
-missing conditional-write permissions before serving traffic.
+`storage-probe` validates the complete runtime storage contract: catalog read,
+bounded list, holder-checked conditional create/update, ordinary object write,
+delete, and a post-delete not-found read. `serve` runs the same preflight
+before binding either listener. The unique delete-test object is created below
+`.crab/http-server/v1/auth/preflight/`; normal completion removes it, while the
+provider profile's one-day lifecycle bounds residue after an interrupted
+probe.
 
 Membership is supplied separately so the shared server configuration stays
 small and secret-independent:

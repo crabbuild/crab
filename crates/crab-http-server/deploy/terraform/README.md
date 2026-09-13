@@ -93,8 +93,9 @@ The roots disable force deletion and enable object versioning. Don’t remove ve
 
 The 24-hour lifecycle rule applies only to
 `repositories/.crab/http-server/v1/auth/`. It removes expired login flows,
-sessions, and Git-token records. The maximum active identity lifetime is eight
-hours, so this rule never expires a valid session.
+sessions, Git-token records, and any unique storage-preflight object left when
+a process dies between its write and delete. The maximum active identity
+lifetime is eight hours, so this rule never expires a valid session.
 
 S3 and GCS also retain noncurrent versions below the complete Crab root for 90
 days by default. Set `recovery_version_retention_days` from 30 through 3650 to

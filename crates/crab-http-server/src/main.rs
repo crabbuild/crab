@@ -23,7 +23,7 @@ enum Command {
     Serve,
     /// Check the management listener's readiness endpoint.
     Healthcheck,
-    /// Validate catalog reads and conditional coordination writes.
+    /// Validate required storage reads, lists, writes, coordination, and deletes.
     StorageProbe,
     /// Create, adopt, or list cataloged repositories.
     Repository {

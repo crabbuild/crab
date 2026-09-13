@@ -53,6 +53,8 @@ pub enum Error {
     Storage(#[from] crab_storage::StorageError),
     #[error("object storage coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("object storage preflight failed: {0}")]
+    StorageProbe(&'static str),
     #[error("repository initialization failed")]
     Remote(#[from] crab_remote_git::Error),
     #[error("repository maintenance failed")]
