@@ -2328,6 +2328,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-ltx"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "crc-fast",
+ "lz4_flex 0.11.6",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "crab-metadata"
 version = "0.1.0"
 dependencies = [

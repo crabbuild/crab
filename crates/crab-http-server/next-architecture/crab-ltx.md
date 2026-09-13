@@ -1,12 +1,31 @@
 # crab-ltx: reuse of Celld's SQLite replication engine
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Local crate implemented; HTTP integration remains proposed.
 
-`crab-ltx` will own the embedded SQLite WAL-to-LTX mechanics used by repository
-AppCells. The selected implementation strategy is a pinned source integration
-of `celld-ltx`, adapted into `crates/crab-ltx`. Reuse of that source is approved
-for this design. The current change adds documentation, not a Cargo member or
-vendored implementation.
+[crab-ltx](../../crab-ltx/README.md) now implements the embedded local SQLite
+WAL-to-LTX mechanics. The Cargo member contains a pinned, modified source
+integration of `celld-ltx`, not a Git dependency or separate daemon.
+The HTTP server does **not** yet consume it; repository actors, remote manifests,
+owner/head CAS, UI durability and hard cutover remain future implementation.
+
+## Implemented state
+
+| Boundary | Current state |
+| --- | --- |
+| SQLite lifecycle | `ManagedDb` owns three connections and a serialized transaction callback; WAL read-lock and managed checkpoints retained |
+| Capture | Checksum-bearing sized-block LTX, all cuts returned; SQLite WAL-hook frame boundary checked before checkpointing |
+| Snapshot | Full local snapshot at the captured endpoint |
+| Restore | Explicit snapshot-plus-deltas plan; exact ranges/digests/checksums; owned verified bytes; new-file installation |
+| Compaction | Complete verified chain to one standalone snapshot; exact output image comparison |
+| Failure/retention | Capture failure fences the handle; fresh local directory required for reactivation; artifacts retained until caller-owned session cleanup |
+| Not wired | Object storage, remote publication, leases/routing, domain SQL, async executor and HTTP responses |
+
+Source and usage: [crate README](../../crab-ltx/README.md),
+[public API](../../crab-ltx/src/lib.rs),
+[import inventory/notices](../../crab-ltx/UPSTREAM.md).
+Local proof includes real SQLite, process kill followed by source-directory loss,
+independent CRC/format vectors and exact snapshot/compaction comparison. It does
+not qualify the multi-node server or RustFS publication protocol.
 
 The [Celld comparison](celld-and-rust.md) explains the system-level differences.
 This document owns the reusable crate boundary and the changes needed to meet
@@ -66,7 +85,7 @@ patches or a change to Crab's storage guarantees.
 ```mermaid
 flowchart TB
     Handler[HTTP domain handler] --> Actor[Repository AppCell actor]
-    Actor --> SQL[Application SQLite connection]
+    Actor --> SQL[SQL callback on ManagedDb writer]
     Actor --> LTX[crab-ltx capture and exact restore]
     SQL --> WAL[Local SQLite WAL]
     WAL --> LTX
@@ -100,8 +119,9 @@ separate from the server's control-CAS publication proof.
 
 ## Reuse map and required adaptations
 
-The names in the upstream column are actual inspected symbols. The Crab column
-is proposed work, not a claim that those capabilities exist unchanged upstream.
+The names in the upstream column are inspected symbols. The Crab column describes
+the adaptation boundary; the implemented-state table above separates current
+local mechanics from server work. These capabilities do not exist unchanged upstream.
 All paths are relative to the pinned Celld repository.
 
 | Upstream surface | Reuse and adaptation |
@@ -111,7 +131,7 @@ All paths are relative to the pinned Celld repository.
 | `crates/ltx/src/ltx.rs`, `codec.rs`, `lz4_block.rs` | Reuse format validation, CRC, frame/block codecs and page checksums; qualify checksum-bearing capture |
 | `Db::snapshot_to_writer` | Reuse full-snapshot encoding; enforce frozen input and memory admission |
 | `crates/ltx/src/compactor.rs`: `Compactor` | Reuse page merge and encoding against an explicit validated input set |
-| `replica.rs`: `restore_from_plan_with_download_slots` and local apply helpers | Reuse apply mechanics, extracting a local explicit-plan API without remote discovery |
+| `replica.rs`: `restore_from_plan_with_download_slots` and local apply helpers | Reference only; Crab implements local apply/install in `recovery.rs`, without copying discovery or transport |
 | `host.rs`: `LtxHost`, `FileSystem` | Preserve useful filesystem/fault seams; connect blocking work to Crab's bounded executor |
 | `replica.rs`: `Replica::sync`, `Replica::pos` | Reference upload sequencing only; not the production publication authority |
 | `client/mod.rs`: `ReplicaClient` | Reference upstream transport contract; do not expose listing and deletion through the production recovery API |
@@ -130,7 +150,7 @@ and [compactor](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e31
 | Contract | Integration requirement |
 | --- | --- |
 | SQLite | Use Crab's workspace `rusqlite` 0.34 and one `libsqlite3-sys`; upstream uses 0.31 |
-| SQLite features | Audit `bundled`/`hooks` and every workspace SQLite consumer; hooks are per connection |
+| SQLite features | Existing workspace `bundled` only; no new `hooks` feature. A narrow SQLite FFI WAL callback carries per-writer commit observation |
 | Object store | Existing Crab transport uses 0.14.1; upstream uses 0.12. Do not pass incompatible store trait objects or add a second credential stack |
 | Async runtime | Use the existing Tokio runtime; synchronous SQLite and codec work stays off I/O workers |
 | Codecs | Pin reused LZ4/CRC dependencies and qualify byte compatibility before changing versions |
@@ -146,7 +166,10 @@ discarding the WAL lifecycle invariants that motivated reuse.
 Before the import is accepted, inspect `cargo tree` for SQLite linkage, duplicate
 provider stacks and feature unification. Build affected existing SQLite consumers
 such as staging, metadata local-index, cache, VFS and workflow in dedicated CI.
-This design does not modify the current dependency graph or lockfiles.
+The implementation adds the workspace member/dependency and one `Cargo.lock` package
+entry. Existing dependency versions are unchanged. The crate has no Tokio or
+object-store dependency; `cargo tree` resolves one `rusqlite` 0.34 and one
+`libsqlite3-sys` 0.32. Broader consumers/platforms remain a CI qualification gate.
 
 ## Managed connection and capture lifecycle
 
@@ -160,7 +183,8 @@ resource admission must budget all of them.
 2. Open managed replication connections before admitting application writes.
 3. Apply and verify the connection factory's WAL, synchronous, timeout and
    foreign-key policy on each connection where applicable.
-4. Open the application writer on the same local database and bounded executor.
+4. Execute domain SQL through `ManagedDb::transaction` on the bounded executor;
+   do not open a second independent application-writer connection.
 5. Establish the initial captured full snapshot and publish the activation.
 6. Execute one domain mutation, then capture and publish it before another
    application command can observe tentative state.
@@ -223,7 +247,10 @@ cut, while preserving the upstream file format and page checksum algorithm:
 Checkpoint housekeeping can produce additional cuts. The capture result includes
 every segment needed to reach its endpoint, not merely the first file produced
 by `Db::sync()`. The executor freezes that endpoint before producing the result.
-Expected application revision is associated with the frozen domain state; it is
+The implemented WAL observer checks SQLite\'s committed frame count and WAL salts
+before checkpoint/control writes. A damaged final commit cannot be credited as
+an earlier valid prefix. Expected application revision is associated with the
+frozen domain state; it is
 not inferred from the count of frames or files.
 
 A checksum index is disposable local state. Rebuild it from verified pages after
@@ -238,35 +265,47 @@ bytes and performs a checkpoint; it is not a drop-in replacement for the rolling
 page checksum. Capture cannot be enabled for application writes until this
 adaptation passes. Source reuse does not justify publishing an unknown checksum.
 
-### Proposed library API
+### Implemented library API
 
-Conceptual signatures below define ownership, not currently callable APIs.
-Unspecified types are design types, and the snippet is not a compilable stub.
+The following signatures summarize callable crate APIs. Full types and a
+compilable example live in the [crate README](../../crab-ltx/README.md).
 
 ```rust
 impl ManagedDb {
-    fn open(path: &Path, options: OpenOptions) -> Result<Self>;
+    fn open(path: &Path, limits: Limits) -> Result<Self>;
+    fn transaction<T>(
+        &mut self,
+        operation: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<T>,
+    ) -> Result<T>;
     fn capture(&mut self) -> Result<CaptureBatch>;
     fn snapshot(&mut self, destination: &Path) -> Result<LocalSegment>;
     fn close(self) -> Result<()>;
 }
 
-fn restore_exact(plan: &VerifiedLocalPlan, destination: &Path)
-    -> Result<RestoredState>;
+impl VerifiedLocalPlan {
+    fn new(files: &[LocalSegment], target: Position, limits: Limits) -> Result<Self>;
+}
 
-fn compact_exact(plan: &VerifiedLocalPlan, destination: &Path)
-    -> Result<LocalSegment>;
+fn restore_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<Position>;
+fn compact_exact(plan: &VerifiedLocalPlan, destination: &Path) -> Result<LocalSegment>;
 ```
 
-`CaptureBatch` owns immutable local artifact handles, start/end LTX positions,
-page count/size, and before/after database checksums. Artifacts remain pinned
-while the server resolves upload and publication; dropping a response waiter
-cannot remove them. The crate verifies and privately constructs these descriptors.
+`CaptureBatch` contains ordered segments and the final `Position`.
+Each `SegmentInfo` carries its range, page size/count, before/after checksums,
+encoded length and BLAKE3 digest. Files are caller-retained paths, not RAII pins:
+dropping a descriptor never deletes an artifact. The server must protect the
+session directory until publication and cleanup are resolved.
 
-`VerifiedLocalPlan` is built by validating explicit file inputs plus expected
-lengths, digests, ranges and endpoint supplied from the server's manifest. It
-contains no bucket URL or implicit latest-state option. Its constructors enforce
-bounds and continuity before restore starts.
+`LocalSegment::new` constructs an unverified selection from a local path and
+manifest expectations. `VerifiedLocalPlan::new` verifies those inputs, exact
+endpoint and each intermediate database checksum, then owns the input bytes.
+It has no bucket URL, epoch inference, local-database fallback or latest option.
+Only a full snapshot followed by contiguous, non-overlapping ranges is accepted.
+
+`ManagedDb::open` atomically claims `.<filename>-crab-ltx` and refuses reuse.
+After failure or owner replacement, restore into a fresh directory and start a
+new epoch. SQL callbacks are trusted main-database application code; they cannot
+change transaction control, pager policy, hooks, or the reserved control tables.
 
 The server wraps these local facts with repository UUID, generation, owner
 epoch and application revision. Only its publication coordinator constructs a
@@ -289,7 +328,7 @@ sequenceDiagram
     A->>S: Upload all batch objects and manifest dependencies
     A->>S: CAS expected owner and head to successor head
     S-->>A: Publication proven
-    A->>L: Release publication pins when local retention permits
+    A->>A: Retain session files until caller-owned cleanup is safe
     A-->>A: Resolve response and reopen command admission
 ```
 
@@ -312,9 +351,9 @@ available state through listings. Even a nonzero target does not supply Crab's
 manifest identity, object digests, or epoch binding. Do not call it over an
 unrestricted bucket prefix for production recovery.
 
-The upstream explicit-plan restore is the useful starting point. Extract its
-decode/apply/file-install mechanics into `restore_exact`, with the following
-server/library division:
+The upstream explicit-plan restore informed the local contract. Crab now owns
+its explicit apply/install implementation in `recovery.rs`, using the imported
+codec with the following server/library division:
 
 1. Server acquires a recovering activation and reads the inherited manifest.
 2. Server validates repository/generation scope, pins that root and fetches only
@@ -342,13 +381,21 @@ Upstream snapshots and full restore buffer substantial data; writing to a
 `Write` parameter does not imply streaming memory usage. Its restore collects
 downloaded files and reconstructs a database image in memory. Initially impose
 admission limits for compressed inputs, decoded pages, image buffers and scratch,
-plus a node-wide concurrency budget. Oversized cells receive a clear capacity
+plus a node-wide concurrency budget. The implemented `Limits` defaults are
+256 MiB per database, 512 MiB per local file including WAL, 1 GiB aggregate
+plan/retained artifacts and 1,024 segments. These are not RSS or disk quotas;
+verification and compaction retain multiple buffers, and aggregate capture
+accounting can fail after local files have been installed. Reserve headroom.
+The current checksum index is packed but cloned/scanned per cut, so this is not
+an O(changed-pages)-only implementation. Oversized cells receive a clear capacity
 failure. A bounded streaming implementation is a measured follow-up, not an
 assumed property of the reused APIs.
 
 ## Compaction and cleanup
 
-Use the upstream compactor on an explicit pinned, verified input set. Preserve
+The implemented API uses the upstream compactor on a complete verified snapshot
+chain and compares its restored output bytes with the original target. Partial
+range/delta compaction is not exposed yet. Preserve
 the final database state/checksum and encode one qualified representation.
 The library returns a local immutable candidate. The server uploads it and
 publishes a replacement manifest with the same application revision; a failed
@@ -359,7 +406,9 @@ includes listing, `delete_ltx_files` and `delete_all`; importing that entire
 trait into production would expose capabilities the restore/capture caller does
 not need. Server-side retention owns remote pins and deletion scope.
 
-Local cleanup must retain segments required by the managed capture cursor as
+The first crate has no per-segment prune/pin-release method. It stops when local
+retained-artifact admission is exhausted; the coordinator must rotate a published
+session. Local cleanup must retain segments required by the managed capture cursor as
 well as in-flight publication. Release of one publication pin does not mean
 every segment can be deleted. Close all handles before removing a retired
 activation's scratch, and scope removal to that activation's validated directory.
@@ -376,7 +425,8 @@ Local corruption does not authorize remote rollback. Helpers such as upstream
 a different recovery head. Fence the activation and restore the authoritative
 graph through the normal server protocol. Corrupt published inputs fail closed.
 
-Record capture/checkpoint duration, captured segment bytes, pending local pins,
+Public metrics export is still server-integration work. Record capture/checkpoint
+duration, captured segment bytes, pending local pins,
 checksum-index size, snapshot peak memory, restore download/apply durations and
 compaction input/output bytes. Keep uploaded and published positions in server
 metrics distinct from the library's captured position.
@@ -400,12 +450,16 @@ distribution and establish normal `crab-ltx` unit/integration targets with expli
 executed test counts. Celld's published fleet results are context, not evidence
 that Crab's modified code passes.
 
-The first implementation slice must round-trip real SQLite through the imported
-codec/capture to an isolated local restore. The second connects the origin-store
-publication graph against real RustFS. The third proves owner replacement with
-empty local disks through an actual HTTP mutation and reload. These extend the
-[delivery gates](validation-and-delivery.md); none is claimed complete by this
-documentation change.
+The local real-SQLite round trip is implemented and tested, including kill of a
+live writer process followed by deletion of its source directory and exact restore
+from retained LTX. The next slice connects the origin-store publication graph
+against real RustFS; the following slice proves owner replacement with empty
+local disks through an actual HTTP mutation and reload. These remain
+[delivery gates](validation-and-delivery.md), not outcomes of the local crate tests.
+
+Run `cargo test -p crab-ltx --locked` with the worktree\'s external
+`CARGO_TARGET_DIR`. See the [crate verification scope](../../crab-ltx/README.md#verification)
+for the remaining interoperability, fuzz, fault, memory and platform gates.
 
 Freeze the encoding capability, capture result shape and local retention rules
 before writing production data. Upstream frame and block variants can share the

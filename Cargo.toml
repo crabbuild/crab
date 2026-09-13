@@ -12,6 +12,7 @@ members = [
     "crates/crab-git",
     "crates/crab-http-server",
     "crates/crab-lfs",
+    "crates/crab-ltx",
     "crates/crab-metadata",
     "crates/crab-read",
     "crates/crab-remote",
@@ -45,6 +46,7 @@ crab-diff = { version = "=0.1.0", path = "crates/crab-diff", default-features = 
 crab-git = { version = "=0.1.0", path = "crates/crab-git", default-features = false }
 crab-http-server = { version = "=0.1.0", path = "crates/crab-http-server", default-features = false }
 crab-lfs = { version = "=0.1.0", path = "crates/crab-lfs", default-features = false }
+crab-ltx = { version = "=0.1.0", path = "crates/crab-ltx", default-features = false }
 crab-metadata = { version = "=0.1.0", path = "crates/crab-metadata", default-features = false }
 crab-read = { version = "=0.1.0", path = "crates/crab-read", default-features = false }
 crab-remote = { version = "=0.1.0", path = "crates/crab-remote", default-features = false }

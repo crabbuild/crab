@@ -1,6 +1,6 @@
 # Celld architecture and Rust integration
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Local crate implemented; server architecture remains proposed.
 
 Reuse of Celld's replication source is selected and approved. The dedicated
 [crab-ltx design](crab-ltx.md) specifies the pinned import, attribution,
@@ -86,8 +86,9 @@ Celld's [guarantees](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b5
 that a partial port inherits Celld's guarantees.
 
 The inspected Celld revision is
-`10cb1303dac710dcb3b557e318e08c855261f68b`. Implementation must record the exact
-approved imported revision, licenses, local changes, and enabled format features.
+`10cb1303dac710dcb3b557e318e08c855261f68b`. The implemented
+[import inventory](../../crab-ltx/UPSTREAM.md) records this revision, original
+hashes, licenses, omitted modules and intentional local changes.
 Do not depend on a floating `main` branch.
 
 ### Dependency constraints
@@ -97,7 +98,7 @@ Do not depend on a floating `main` branch.
 | `rusqlite` | 0.34 with bundled SQLite | 0.31 | Align the port with Crab and verify SQLite linkage |
 | `object_store` | 0.14.1 | 0.12 | Integrate through the existing Crab store contract |
 | `celld-ltx` package | Absent | 0.0.0, `publish = false` | Treat as source integration, not a stable published dependency |
-| SQLite hooks | Not enabled for this server | Used by the replication implementation | Review feature impact across the workspace |
+| SQLite hooks | No additional `rusqlite` hooks feature | Upstream enables hooks | Crab uses a narrow per-writer SQLite FFI WAL callback to check the committed capture boundary |
 
 Sources: [Crab workspace manifest](../../../Cargo.toml),
 [pinned Celld manifest](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557e318e08c855261f68b/Cargo.toml),
@@ -106,9 +107,10 @@ and [LTX manifest](https://github.com/denoland/celld/blob/10cb1303dac710dcb3b557
 Source reuse of the pinned `celld-ltx` subtree is approved. The import must retain
 applicable Apache-2.0 and BSD notices and record local modifications, as detailed
 in [licensing and attribution](crab-ltx.md#licensing-and-attribution). Dependency
-alignment and correctness remain implementation gates; this document imports no
-source code and changes no lockfile. Unrelated dependency patches are outside
-this approval.
+alignment now resolves the existing workspace SQLite with no new dependency
+versions. `Cargo.lock` adds only the `crab-ltx` package. Local capture/restore
+qualification exists; external interoperability and HTTP protocol correctness
+remain gates. Unrelated dependency patches are outside this approval.
 
 The official Litestream Go embedding API is described as unstable and has
 SQLite driver integration constraints. It does not supply a Rust-native
@@ -122,7 +124,7 @@ does not supply durable acknowledgement or ownership transfer.
 
 ### Code ownership
 
-Implement `crates/crab-ltx` as the owner of reused replication mechanics with the
+`crates/crab-ltx` now owns the reused local replication mechanics with the
 [required adaptations](crab-ltx.md#reuse-map-and-required-adaptations). Keep HTTP
 routing, repository policy, publication orchestration and AppCell placement
 inside `crab-http-server`.
@@ -159,7 +161,7 @@ Wire types remain crate-private unless another actual consumer needs them.
 Conceptual Rust signatures, not upstream Celld APIs or compiling implementation:
 
 These are server-layer interfaces. `ReplicatedDatabase` owns the domain command
-boundary and calls the lower-level [crab-ltx API](crab-ltx.md#proposed-library-api);
+boundary and calls the lower-level [crab-ltx API](crab-ltx.md#implemented-library-api);
 the reusable crate does not know `AppCommand` or HTTP response types.
 
 ```rust

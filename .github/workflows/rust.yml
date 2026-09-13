@@ -159,8 +159,8 @@ jobs:
           npm test --prefix packages/repository
           npm run build --prefix packages/repository
 
-      - name: Check HTTP server
-        run: cargo clippy -p crab-http-server --all-targets --locked -- -D warnings
+      - name: Check HTTP server and local LTX engine
+        run: cargo clippy -p crab-http-server -p crab-ltx --all-targets --locked -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
