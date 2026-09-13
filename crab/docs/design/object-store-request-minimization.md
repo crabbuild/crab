@@ -82,6 +82,8 @@ The protocol MUST:
 9. Bound cold-clone metadata amplification through immutable checkpoints.
 10. Scale request count by capsules or multipart parts, not commits, files,
     chunks, refs, or metadata record count.
+11. Continue serving standard Git packfile responses for clone, fetch, pull,
+    shallow fetch, partial clone, and lazy object recovery.
 
 ## 4. Non-goals
 
@@ -175,6 +177,7 @@ parent_generation_digest
 refs[]                    // name, object ID, peeled ID when applicable
 capsule_frontier[]        // hash, size, checksum, transaction identity
 checkpoint                // hash, size, covered generation
+checkpoint_pack           // capsule, byte range, Git checksum, object count
 delta_depth
 capabilities
 root_digest
@@ -191,6 +194,12 @@ version metadata.
 
 ### 6.2 Capsule
 
+Protocol v2 removes standalone object-store keys for packs and their sidecars;
+it does not remove the Git pack format. Git clients consume packfiles, and the
+remote helper's protocol-v2 upload-pack boundary must continue producing one
+valid Git packfile response. A capsule is the storage container for those Git
+bytes and their evidence.
+
 A capsule contains every new authoritative artifact for one push:
 
 - Git pack bytes;
@@ -206,6 +215,13 @@ A capsule contains every new authoritative artifact for one push:
 The pack, `.idx`, `.rev`, metadata, receipts, and catalog deltas are sections
 of one object rather than separate object keys. Readers use exact ranges from
 the footer and validate every returned section.
+
+A push capsule's pack section may use `REF_DELTA` bases reachable from its
+declared base root. It is therefore not automatically a valid response for a
+fresh client. `OFS_DELTA` bases remain inside the same pack section because
+their identity is a pack-relative byte distance. The footer records enough
+information to resolve every `REF_DELTA` base through the pinned repository
+view and to reject a missing or unauthorized base.
 
 A capsule MUST be self-contained relative to the root generation on which it
 is based:
@@ -228,11 +244,24 @@ without rewriting either capsule. Reading an unbounded frontier would move
 request amplification from push to clone, so a checkpoint periodically
 materializes a complete repository view:
 
+- one ordinary, non-thin, self-contained Git pack covering the checkpoint's
+  complete Git object catalog;
+- the pack checksum, object count, byte range, `.idx`, and `.rev` evidence;
 - full Git object locator;
 - complete file and chunk reconstruction indexes;
 - current visibility state;
-- references to retained capsule ranges;
 - the generation and root digest it covers.
+
+The checkpoint locator maps each Git object ID to its checkpoint or retained
+capsule, pack-section base, pack-relative offset, encoded length, CRC, kind,
+and delta-base evidence. Physical reads add the pack-section base to the
+pack-relative offset; the latter remains available for `OFS_DELTA` validation.
+
+The checkpoint pack is a storage optimization, not an authorization bypass.
+It may be streamed unchanged only when the requested authorized object closure
+equals its complete catalog. Hidden refs, partial-clone filters, shallow
+boundaries, or any smaller selection require Crab to generate a pack containing
+only the authorized selected objects.
 
 The root points to one checkpoint and a bounded frontier of later capsules.
 Checkpoint construction is background maintenance and is not part of the
@@ -240,7 +269,12 @@ clean push budget. A checkpoint becomes visible through the same root CAS and
 must preserve an equivalent ref state.
 
 The maximum delta depth is a protocol constant chosen from live clone and
-push measurements. It must not become an unbounded configuration surface.
+push measurements. Background construction should normally publish a new
+checkpoint before the bound is reached. If maintenance falls behind, the next
+push MUST wait for or synchronously construct a checkpoint before publishing a
+root that would exceed the bound. That exceptional push has a higher request
+and byte budget; the implementation must report it separately. The bound must
+not become an unbounded configuration surface.
 
 ## 7. Push protocol
 
@@ -396,30 +430,118 @@ capsules.
 
 ## 10. Clone and read protocol
 
-A cold reader:
+Capsules are an object-store layout. The Git-facing protocol remains standard
+upload-pack: advertisement and negotiation select objects, then Crab emits one
+valid packfile stream. Multiple capsule bodies are never concatenated or sent
+as multiple packs. Protocol v2 does not depend on Git `packfile-uris`.
 
-1. GETs and pins the root;
-2. fetches the referenced checkpoint footer/index;
-3. fetches at most the bounded post-checkpoint capsule set;
-4. downloads complete capsules or exact validated ranges required by Git,
-   hydrate, mount, or file inspection.
+### 10.1 Open and advertise
 
-A full clone request budget is therefore:
+Every clone, fetch, pull, shallow fetch, partial clone, and lazy object request
+first opens one immutable repository view:
 
-```text
-1 root GET
-+ 1 checkpoint GET or bounded set of checkpoint ranges
-+ D capsule GETs, where D <= the protocol delta-depth bound
-+ payload range GETs not already covered by full capsule downloads
-```
+1. GET and validate `v2/root` once;
+2. pin its generation, digest, refs, checkpoint, and capsule frontier;
+3. load checkpoint metadata and at most the bounded post-checkpoint metadata;
+4. validate that the combined locator, catalog, and visibility proof cover the
+   exact pinned generation;
+5. advertise refs from the pinned root, applying hidden-ref policy.
 
-Fresh-clone throughput should prefer full parallel capsule downloads. Partial
-clone, mount, and sparse hydration should prefer coalesced ranges based on the
-capsule footer. The range planner MUST merge adjacent sections up to a bounded
-overfetch ratio so request savings do not create uncontrolled byte waste.
+No later root is mixed into the operation. A root CAS after step 1 creates a
+new generation for another operation; it cannot change the pinned view.
+
+### 10.2 Fresh full clone
+
+A fresh clone has wants and no haves. Crab:
+
+1. authorizes the requested advertised refs and computes their complete
+   reachable Git object closure;
+2. compares that closure with the checkpoint pack catalog;
+3. if the root is exactly at the checkpoint and the authorized closure equals
+   the complete catalog, range-GETs and streams the checkpoint pack section;
+4. otherwise reads the checkpoint pack plus at most `D` post-checkpoint pack
+   sections, where `D` is the hard delta-depth bound, and consolidates the
+   selected objects into one self-contained non-thin response pack;
+5. verifies the response pack's object catalog and trailer before writing the
+   upload-pack `packfile` section;
+6. lets Git validate, index, and install the pack normally.
+
+The direct checkpoint path is forbidden when hidden refs, authorization,
+partial-clone filters, or shallow boundaries make the requested closure
+smaller than the checkpoint catalog. Those requests use selected-object pack
+generation so unrequested or unauthorized objects do not cross the wire.
+
+### 10.3 Incremental fetch and pull
+
+For an incremental fetch, Crab validates wants and client haves against the
+pinned visibility proof, computes objects reachable from wants but not from
+common haves, and resolves the selected object IDs through the capsule-aware
+locator. Adjacent encoded entries are combined into bounded range reads.
+
+Every selected object is reconstructed and Git-object-ID verified. Delta bases
+are recursively read from the pinned view unless the response is thin and the
+base is a client-proven common have. Crab then writes one response pack:
+
+- a self-contained pack when thin-pack negotiation is absent;
+- a thin pack only when every omitted base is a proven common have.
+
+`git pull` adds no remote storage protocol. It performs this fetch and then Git
+merges or rebases locally.
+
+### 10.4 Shallow, partial, and lazy fetch
+
+Shallow fetch applies Git's requested history boundaries before pack
+generation. Partial clone applies the negotiated object filter before reading
+payloads. A later lazy fetch of a promised object repeats authorization for the
+exact object ID, locates and verifies its capsule range and required delta
+bases, and returns a small valid Git pack. None of these paths installs raw
+capsule bytes into Git's object database.
+
+### 10.5 Checkout and file hydration
+
+Git pack transfer reconstructs the committed Git objects, including Crab
+pointer objects. Checkout, hydrate, mount, and repository browsing resolve file
+recipes through the pinned checkpoint plus frontier, coalesce the corresponding
+capsule payload ranges, validate chunk and file hashes, and either reproduce
+the exact file bytes or return an error. Native LFS traffic remains outside
+these budgets until section 18's LFS protocol decision is closed.
+
+### 10.6 Read request budgets
+
+Let `D` be the number of post-checkpoint capsules and `R` the number of
+coalesced capsule ranges needed for an incremental selection. Assuming the
+root contains the checkpoint pack descriptor and one GET can return a complete
+capsule or required contiguous pack range, the theoretical minima are:
+
+| Operation | Minimum object-store reads | Qualification |
+| --- | ---: | --- |
+| Ref advertisement | **1** | Root GET |
+| Full authorized clone at checkpoint generation | **2** | Root GET plus checkpoint pack range |
+| Full clone ahead of checkpoint | **2 + D** | Root, checkpoint pack, and each frontier capsule |
+| Incremental fetch or pull | **1 + R** | Root plus selected coalesced ranges |
+| Lazy object fetch | **2** | Root plus one range only when object and bases co-locate |
+
+These are origin-request minima, not universal guarantees. A selected object
+and its delta bases may span multiple capsules; authorization or filtering may
+force selected-object reconstruction; retries count again; hydrate and LFS add
+their own reads. Claiming a constant two-request fetch would therefore be
+incorrect.
+
+A two-request clone for every generation would require publishing a complete
+checkpoint pack with every push. That would replace request latency with
+full-repository upload and repack cost and is rejected. The bounded `2 + D`
+design amortizes checkpoint construction while enforcing a finite worst-case
+source-capsule count.
+
+Fresh-clone throughput should prefer full parallel capsule downloads when
+consolidation is required. Partial clone, mount, and sparse hydration should
+prefer coalesced ranges based on authenticated locators. The range planner
+MUST merge adjacent sections only up to a bounded overfetch ratio so request
+savings do not create uncontrolled byte waste.
 
 Local caches are keyed by immutable capsule hash and section range. They may
-remove repeated remote reads but never replace root or checksum validation.
+remove repeated remote reads but never replace root, authorization, section,
+pack, object, chunk, or file validation.
 
 ## 11. Throughput and contention
 
@@ -492,7 +614,10 @@ prove conditional-write or checksum semantics.
 - `push_capsule_bytes` and `push_redundant_bytes`;
 - `push_root_cas_conflicts` and `push_reconciliation_reads`;
 - `capsule_read_ranges`, requested bytes, and overfetch bytes;
-- checkpoint delta depth and cold-clone request count;
+- checkpoint delta depth, checkpoint construction lag, and forced foreground
+  checkpoint count;
+- clone/fetch source capsules, response-pack strategy, pack-generation time,
+  and cold-clone request count;
 - orphan capsules created and collected.
 
 Metrics count transport attempts, including retries. They must never include
@@ -513,7 +638,15 @@ The release must include deterministic tests proving:
 - uncertain root CAS is classified from exact transaction identity;
 - concurrent normal GC cannot delete base-reachable or recent capsule data;
 - force-push resurrection re-embeds data absent from the base root;
-- fresh clone, strict Git fsck, hydrate, and byte-digest comparison succeed;
+- fresh clone at checkpoint generation directly streams only an exact,
+  fully-authorized checkpoint catalog;
+- fresh clone at maximum delta depth produces one self-contained Git pack;
+- incremental fetch and pull transfer wants minus common haves and update the
+  expected worktree without exposing hidden objects;
+- thin responses omit only client-proven common bases;
+- shallow, partial, and lazy fetch return exact Git-compatible selections;
+- strict Git fsck, hydrate, and byte-digest comparison succeed after every
+  clone/fetch mode;
 - corrupt root, footer, index, range, Git object, and file data fail closed.
 
 ### 14.3 Live qualification
@@ -589,17 +722,22 @@ safe while omitted required bytes violate reconstruction.
 
 ## 17. Implementation sequence
 
-1. Freeze the v2 root, capsule, footer, checksum, and error contracts.
+1. Freeze the v2 root, capsule, embedded Git pack, checkpoint pack, footer,
+   locator, checksum, visibility, and error contracts.
 2. Build a deterministic capsule writer, range reader, and corruption corpus.
 3. Add a transport request observer and executable budgets before wiring push.
 4. Implement verified-put capability negotiation and mandatory readback
    fallback.
 5. Replace direct push publication with capsule upload plus root CAS.
-6. Replace clone, fetch, hydrate, mount, fsck, and repository browsing reads.
-7. Implement checkpoints and bounded delta traversal.
-8. Implement fence-free normal GC and root-exclusive forced GC.
-9. Qualify RustFS and every hosted provider under failure and concurrency.
-10. Perform the explicit hard cutover and delete v1 runtime paths.
+6. Implement checkpoint-pack passthrough and selected-object response-pack
+   generation over capsule-aware locators.
+7. Replace clone, fetch, pull, shallow, partial, lazy-object, hydrate, mount,
+   fsck, and repository-browsing reads.
+8. Implement background checkpoints, bounded delta traversal, and the hard
+   publication backpressure at maximum delta depth.
+9. Implement fence-free normal GC and root-exclusive forced GC.
+10. Qualify RustFS and every hosted provider under failure and concurrency.
+11. Perform the explicit hard cutover and delete v1 runtime paths.
 
 Each step must keep one canonical implementation. Temporary development code
 may exist on a branch, but the released binary must not retain v1 fallback
