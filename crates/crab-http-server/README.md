@@ -62,6 +62,8 @@ credentials. Then create a cataloged repository and start:
 ```sh
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   repository create --owner team --name project --prefix team/project
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  storage-probe
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
@@ -137,8 +139,9 @@ different lifecycle events:
 
 Keep body-stream resources with the stream. The middleware timeout cannot stand
 in for transfer deadlines or worker cleanup after a response has been returned.
-The production server initializes eight application slots and four shared Git
-transfer slots in [server.rs](src/server.rs); test fixtures use smaller limits.
+The production server initializes eight process-local application slots and
+four deployment-wide Git/LFS/archive/release transfer slots in
+[server.rs](src/server.rs); test fixtures use smaller limits.
 
 Archive downloads in [archive.rs](src/archive.rs) use a channel-backed ZIP body.
 Traversal cancellation must fail that body: finalizing ZIP state for cleanup
