@@ -1,5 +1,6 @@
 //! Canonical Git locator publication shared by CLI and server owners.
 use crate::{Result, WriteError};
+use bytes::Bytes;
 use crab_metadata::manifests::PackManifestEntry;
 use crab_storage::{Store, StoreLayout};
 use crab_xet::hash::MerkleHash;
@@ -7,7 +8,10 @@ use futures_util::{StreamExt, TryStreamExt};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
@@ -147,21 +151,29 @@ async fn download_locator_pack_evidence(
                 .to_owned(),
             reason: "Git reverse index size overflows its bound".to_owned(),
         })?;
-    store
-        .download_to_path_bounded(
-            &router.pack_index_path(&pack.pack_id),
-            &idx_path,
-            index_maximum,
-        )
-        .await?;
-    check_cancelled(cancel)?;
-    store
-        .download_to_path_bounded(
-            &router.pack_reverse_index_path(&pack.pack_id),
-            &rev_path,
-            reverse_maximum,
-        )
-        .await?;
+    let index_missing = object_missing(store, &router.pack_index_path(&pack.pack_id)).await?;
+    let reverse_missing =
+        object_missing(store, &router.pack_reverse_index_path(&pack.pack_id)).await?;
+    if index_missing || reverse_missing {
+        rebuild_locator_pack_evidence(store, router, pack, cancel, &temp, &idx_path, &rev_path)
+            .await?;
+    } else {
+        store
+            .download_to_path_bounded(
+                &router.pack_index_path(&pack.pack_id),
+                &idx_path,
+                index_maximum,
+            )
+            .await?;
+        check_cancelled(cancel)?;
+        store
+            .download_to_path_bounded(
+                &router.pack_reverse_index_path(&pack.pack_id),
+                &rev_path,
+                reverse_maximum,
+            )
+            .await?;
+    }
     check_cancelled(cancel)?;
     validate_locator_pack_evidence(
         pack,
@@ -184,6 +196,136 @@ async fn download_locator_pack_evidence(
         kind_by_oid,
         _temp: Some(temp),
     })
+}
+
+async fn object_missing(store: &Store, path: &object_store::path::Path) -> Result<bool> {
+    match store.head(path).await {
+        Ok(_) => Ok(false),
+        Err(crab_storage::StorageError::NotFound { .. }) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn rebuild_locator_pack_evidence(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    pack: &PackManifestEntry,
+    cancel: &CancellationToken,
+    temp: &tempfile::TempDir,
+    idx_path: &Path,
+    rev_path: &Path,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    let pack_path = temp.path().join("pack.pack");
+    let downloaded = store
+        .download_to_path_bounded(&router.pack_path(&pack.pack_id), &pack_path, pack.size)
+        .await?;
+    if downloaded != pack.size {
+        return Err(WriteError::CorruptObject {
+            path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
+            reason: format!(
+                "rebuilt pack download is {downloaded} bytes; manifest records {}",
+                pack.size
+            ),
+        });
+    }
+    check_cancelled(cancel)?;
+    MerkleHash::from_hex(&pack.pack_id).map_err(|source| WriteError::PackIdentity {
+        source: Box::new(source),
+    })?;
+    let output_dir = temp.path().join("indexes");
+    let pack_path_for_worker = pack_path.clone();
+    let expected_size = pack.size;
+    let expected_object_count = pack.object_count;
+    let indexing_cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&indexing_cancelled);
+    let worker = tokio::task::spawn_blocking(move || {
+        crab_git::pack::index_pack_file(
+            &pack_path_for_worker,
+            &output_dir,
+            expected_size,
+            expected_object_count,
+            &worker_cancelled,
+        )
+    });
+    tokio::pin!(worker);
+    let indexed = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            indexing_cancelled.store(true, Ordering::Release);
+            let _ = (&mut worker).await;
+            return Err(WriteError::Cancelled);
+        }
+        result = &mut worker => match result? {
+            Ok(indexed) => indexed,
+            Err(crab_git::pack::PackError::Cancelled) => return Err(WriteError::Cancelled),
+            Err(error) => return Err(error.into()),
+        },
+    };
+    check_cancelled(cancel)?;
+    let computed_content_hash = blake3::Hash::from_bytes(indexed.content_hash)
+        .to_hex()
+        .to_string();
+    if !computed_content_hash.eq_ignore_ascii_case(&pack.pack_id) {
+        return Err(WriteError::CorruptObject {
+            path: router.pack_path(&pack.pack_id).as_ref().to_owned(),
+            reason: format!(
+                "rebuilt pack content hash {} does not match manifest {}",
+                computed_content_hash, pack.pack_id
+            ),
+        });
+    }
+    for (path, maximum) in [
+        (
+            indexed.index_path.as_path(),
+            crab_git::pack_locator::max_pack_index_size(pack.object_count).ok_or_else(|| {
+                WriteError::CorruptObject {
+                    path: router.pack_index_path(&pack.pack_id).as_ref().to_owned(),
+                    reason: "Git pack index size overflows its bound".to_owned(),
+                }
+            })?,
+        ),
+        (
+            indexed.reverse_path.as_path(),
+            crab_git::pack_locator::pack_reverse_index_size(pack.object_count).ok_or_else(
+                || WriteError::CorruptObject {
+                    path: router
+                        .pack_reverse_index_path(&pack.pack_id)
+                        .as_ref()
+                        .to_owned(),
+                    reason: "Git reverse index size overflows its bound".to_owned(),
+                },
+            )?,
+        ),
+    ] {
+        let size = tokio::fs::metadata(path).await?.len();
+        if size > maximum {
+            return Err(WriteError::CorruptObject {
+                path: path.display().to_string(),
+                reason: format!("generated sidecar is {size} bytes; maximum is {maximum}"),
+            });
+        }
+    }
+    check_cancelled(cancel)?;
+    tokio::fs::copy(&indexed.index_path, idx_path).await?;
+    check_cancelled(cancel)?;
+    tokio::fs::copy(&indexed.reverse_path, rev_path).await?;
+    check_cancelled(cancel)?;
+    let index_bytes = tokio::fs::read(idx_path).await?;
+    let reverse_bytes = tokio::fs::read(rev_path).await?;
+    store
+        .put(
+            &router.pack_index_path(&pack.pack_id),
+            Bytes::from(index_bytes),
+        )
+        .await?;
+    store
+        .put(
+            &router.pack_reverse_index_path(&pack.pack_id),
+            Bytes::from(reverse_bytes),
+        )
+        .await?;
+    check_cancelled(cancel)
 }
 
 async fn load_pack_kind_metadata(
