@@ -339,6 +339,7 @@ jobs:
              .checks.oidc_secure_flow_cookie == true and
              .checks.restricted_namespace == true and
              .checks.workload_identity_only == true and
+             .checks.management_network_isolation == true and
              .checks.cross_replica_git == true and
              .checks.cross_replica_lfs == true and
              .checks.durable_lfs_lock == true and

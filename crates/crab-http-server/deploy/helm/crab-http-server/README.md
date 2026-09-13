@@ -349,6 +349,8 @@ The test fails unless it can prove all of these boundaries:
 - The Deployment uses an immutable digest, a private ClusterIP Service, the
   chart NetworkPolicy, TLS ingress, hardened containers, and no automatic
   Kubernetes API token
+- A short-lived Restricted peer pod cannot reach the private management port,
+  proving that the cluster CNI enforces the rendered NetworkPolicy
 - Every existing and replacement pod passes storage-backed readiness
 - OIDC login begins through the public HTTPS ingress with a secure flow cookie
   and request ID
@@ -364,9 +366,10 @@ The script writes a secret-free JSON evidence receipt containing the provider,
 image digest, release tag and source commit, repository, qualification branch
 and commit, payload digest, explicit successful checks including the
 workload-identity-only deployment boundary, rollout probes and failures, and
-completion time. Retain it with the release record. The Git token remains only
-in process memory and must still be rotated or revoked after qualification
-according to team policy.
+the management-network-isolation result. It also records completion time.
+Retain it with the release record. The Git token remains only in process memory
+and must still be rotated or revoked after qualification according to team
+policy.
 
 ### Retain evidence with GitHub Actions
 
@@ -424,17 +427,19 @@ not the pod's storage workload identity. Give the runner identity only enough
 cloud permission to obtain user credentials for the named cluster. Bind it in
 Kubernetes to read the named Namespace, Deployment, Service, Ingress,
 NetworkPolicy, PodDisruptionBudget, HorizontalPodAutoscaler, pods, and hosting
-nodes; execute and port-forward to Crab pods; and patch only the Crab Deployment
-for the approved restart. Do not grant the runner object-storage credentials or
+nodes; execute and port-forward to Crab pods; create and delete the short-lived
+Restricted network-isolation probe pod; and patch only the Crab Deployment for
+the approved restart. Do not grant the runner object-storage credentials or
 cluster-admin. Protect the environment with required reviewers and restrict
 which release tags may deploy to it.
 
 Start from `qualification/rbac.example.yaml`. Replace its provider-mapped
 group, namespace, and Deployment resource name before applying it. Keep Crab in
 a dedicated namespace: pod exec and port-forward permissions cannot be limited
-to a label selector by Kubernetes RBAC. The example grants no access to
-Secrets and permits only `get`—not `list`—for the dynamically discovered
-hosting nodes and the named namespace.
+to a label selector by Kubernetes RBAC, and Kubernetes cannot restrict pod
+creation by resource name. The example grants no access to Secrets and permits
+only `get`—not `list`—for the dynamically discovered hosting nodes and the named
+namespace.
 
 Use the provider's GitHub federation guidance for the runner identity:
 [AWS IAM OIDC](https://github.com/aws-actions/configure-aws-credentials#oidc),

@@ -78,6 +78,7 @@ work_dir="$(mktemp -d "${work_parent%/}/crab-http-server-kubernetes.XXXXXX")"
 forward_pids=()
 rollout_pid=""
 lock_held=false
+network_probe_pod=""
 client="${work_dir}/client"
 payload=""
 evidence_temp=""
@@ -153,6 +154,10 @@ cleanup() {
   if [ -n "$rollout_pid" ]; then
     kill "$rollout_pid" >/dev/null 2>&1 || true
     wait "$rollout_pid" 2>/dev/null || true
+  fi
+  if [ -n "$network_probe_pod" ]; then
+    kubectl --namespace "$namespace" delete pod "$network_probe_pod" \
+      --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
   stop_forwards
   unset git_token basic_token GIT_CONFIG_VALUE_0
@@ -373,8 +378,91 @@ check_pod_health() {
   done < <(jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name' "$pods_json")
 }
 
+check_management_isolation() {
+  local target_host
+  local target_ip
+  local phase=""
+  target_ip="$(jq --raw-output '
+    .items[] | select(.metadata.deletionTimestamp == null) | .status.podIP
+  ' "$pods_json" | head -1)"
+  test -n "$target_ip" && test "$target_ip" != null
+  target_host="$target_ip"
+  if [[ "$target_ip" == *:* ]]; then
+    target_host="[${target_ip}]"
+  fi
+  network_probe_pod="crab-http-network-probe-${RANDOM}-$$"
+
+  kubectl --namespace "$namespace" create -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${network_probe_pod}
+  labels:
+    crab.build/qualification-probe: network-isolation
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          if curl --connect-timeout 5 --max-time 8 --silent --output /dev/null \
+            http://${target_host}:8789/healthz; then
+            echo "management endpoint is reachable from an ordinary peer pod" >&2
+            exit 42
+          fi
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+          ephemeral-storage: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi
+          ephemeral-storage: 64Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+EOF
+
+  for _attempt in $(seq 1 60); do
+    phase="$(kubectl --namespace "$namespace" get pod "$network_probe_pod" \
+      -o jsonpath='{.status.phase}')"
+    case "$phase" in
+      Succeeded)
+        kubectl --namespace "$namespace" delete pod "$network_probe_pod" \
+          --wait --timeout=1m >/dev/null
+        network_probe_pod=""
+        return
+        ;;
+      Failed)
+        kubectl --namespace "$namespace" get pod "$network_probe_pod" -o yaml >&2
+        echo "The management network-isolation probe failed; inspect its exit code above." >&2
+        return 1
+        ;;
+    esac
+    sleep 2
+  done
+
+  kubectl --namespace "$namespace" get pod "$network_probe_pod" -o yaml >&2
+  echo "The management network-isolation probe did not complete." >&2
+  return 1
+}
+
 load_ready_pods
 check_placement
+check_management_isolation
 check_pod_health
 jq --raw-output '.items[] | select(.metadata.deletionTimestamp == null) | .metadata.uid' \
   "$pods_json" | sort > "${work_dir}/old-uids"
@@ -569,6 +657,7 @@ jq --null-input \
       oidc_secure_flow_cookie: true,
       restricted_namespace: true,
       workload_identity_only: true,
+      management_network_isolation: true,
       cross_replica_git: true,
       cross_replica_lfs: true,
       durable_lfs_lock: true,

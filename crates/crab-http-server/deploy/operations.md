@@ -309,8 +309,9 @@ bash crates/crab-http-server/deploy/helm/crab-http-server/qualification/qualify-
 
 The rollout approval is deliberately explicit. The script checks the rendered
 runtime controls, provider-matching placement across nodes and zones, readiness
-on every pod, public OIDC initiation, direct authenticated Git traffic through
-two distinct replicas, byte-identical LFS transfer, lock-owner publication, and
+on every pod, public OIDC initiation, effective management-port NetworkPolicy
+isolation from an ordinary peer, direct authenticated Git traffic through two
+distinct replicas, byte-identical LFS transfer, lock-owner publication, and
 uninterrupted Git discovery while Kubernetes replaces every pod. It leaves a
 unique branch as durable evidence and writes a secret-free JSON receipt bound
 to the supplied release tag and source commit. Review and retain that receipt

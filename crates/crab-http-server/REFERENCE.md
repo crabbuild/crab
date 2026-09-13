@@ -1279,8 +1279,10 @@ These runs use local RustFS, in-memory stores, shared caches, and controlled fix
 The packaged Kubernetes gate makes live evidence repeatable, but its existence
 is not provider qualification. Only a successful EKS, GKE, or AKS run and its
 workflow-attested JSON receipt establish that release's cross-replica rollout
-result. The protected workflow first verifies the deployed image provenance
-against the exact server release tag and source commit.
+result. The gate also launches a short-lived Restricted peer pod and fails if
+the cluster CNI permits it to reach the private management listener. The
+protected workflow first verifies the deployed image provenance against the
+exact server release tag and source commit.
 
 The chart's disruption budget protects healthy capacity with `minAvailable`
 and marks unhealthy pods `AlwaysAllow` for eviction. This preserves voluntary
