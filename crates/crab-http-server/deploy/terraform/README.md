@@ -31,6 +31,10 @@ The runtime identities contain data-plane permissions only:
 | GKE | `roles/storage.objectUser` | Dedicated bucket |
 | AKS | `Storage Blob Data Contributor` | Dedicated container |
 
+The S3 bucket policy rejects non-AWS-service requests made without TLS. Azure
+Storage likewise requires HTTPS. Storage data remains private to authorized
+provider identities even when a public provider endpoint is reachable.
+
 Crab's S3 client keeps multipart part identifiers in memory and sends them when
 completing or aborting an upload. The EKS role therefore does not grant
 bucket-wide multipart-upload listing or part listing. Abandoned uploads are

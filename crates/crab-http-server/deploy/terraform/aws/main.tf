@@ -7,6 +7,10 @@ locals {
     "s3:GetObject",
     "s3:PutObject",
   ]
+  secure_transport_conditions = {
+    "aws:PrincipalIsAWSService" = "false"
+    "aws:SecureTransport"       = "false"
+  }
 }
 
 resource "aws_s3_bucket" "repositories" {
@@ -42,6 +46,38 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "repositories" {
       sse_algorithm = "AES256"
     }
   }
+}
+
+data "aws_iam_policy_document" "secure_transport" {
+  statement {
+    sid     = "DenyInsecureTransport"
+    effect  = "Deny"
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.repositories.arn,
+      "${aws_s3_bucket.repositories.arn}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    dynamic "condition" {
+      for_each = local.secure_transport_conditions
+
+      content {
+        test     = "Bool"
+        variable = condition.key
+        values   = [condition.value]
+      }
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "secure_transport" {
+  bucket = aws_s3_bucket.repositories.id
+  policy = data.aws_iam_policy_document.secure_transport.json
 }
 
 resource "aws_s3_bucket_versioning" "repositories" {

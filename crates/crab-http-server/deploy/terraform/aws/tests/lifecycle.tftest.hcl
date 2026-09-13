@@ -63,6 +63,18 @@ run "grants_only_runtime_storage_actions" {
   }
 }
 
+run "denies_insecure_storage_transport" {
+  command = plan
+
+  assert {
+    condition = local.secure_transport_conditions == {
+      "aws:PrincipalIsAWSService" = "false"
+      "aws:SecureTransport"       = "false"
+    }
+    error_message = "The S3 bucket policy must deny non-service-principal requests made without TLS."
+  }
+}
+
 run "rejects_an_unsafe_recovery_window" {
   command = plan
 
