@@ -1,0 +1,33 @@
+image:
+  repository: ghcr.io/crabbuild/crab-http-server
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+config:
+  auth:
+    issuer: https://identity.example.com/realms/team
+    clientId: crab-browser
+    publicUrl: https://git.example.com
+
+secrets:
+  existingSecret: crab-http-server
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-next-upstream: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "630"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "630"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  host: git.example.com
+  tlsSecretName: crab-http-server-tls
+
+networkPolicy:
+  publicIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx

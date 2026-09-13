@@ -1,0 +1,42 @@
+{{- if .Values.ingress.enabled }}
+{{- if empty .Values.networkPolicy.publicIngressFrom }}
+{{- fail "networkPolicy.publicIngressFrom is required when ingress is enabled" }}
+{{- end }}
+{{- $host := required "ingress.host is required when ingress is enabled" .Values.ingress.host }}
+{{- $tlsSecret := required "ingress.tlsSecretName is required when ingress is enabled" .Values.ingress.tlsSecretName }}
+{{- if not .Values.config.existingConfigMap }}
+{{- $publicUrl := trimSuffix "/" .Values.config.auth.publicUrl }}
+{{- if ne $publicUrl (printf "https://%s" $host) }}
+{{- fail "config.auth.publicUrl must be the HTTPS ingress host" }}
+{{- end }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "crab-http-server.fullname" . }}
+  labels:
+    {{- include "crab-http-server.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  tls:
+    - hosts:
+        - {{ $host | quote }}
+      secretName: {{ $tlsSecret }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "crab-http-server.fullname" . }}
+                port:
+                  name: http
+{{- end }}

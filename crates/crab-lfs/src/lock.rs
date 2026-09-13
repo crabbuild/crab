@@ -166,6 +166,10 @@ impl LfsLockManager {
     }
 
     /// Releases a lock after validating the owner and, when supplied, ID.
+    ///
+    /// A retry for the same owner and ID returns the existing tombstone. This
+    /// lets a protocol adapter recover when publication succeeded but its
+    /// response was lost.
     pub async fn unlock_with_id(
         &self,
         path: &str,
@@ -184,11 +188,6 @@ impl LfsLockManager {
                     other => other.into(),
                 })?;
         let existing = decode_record(&object_path, &body)?;
-        if is_released(&existing) {
-            return Err(LfsLockError::NotFound {
-                path: path.to_owned(),
-            });
-        }
         if existing.owner != owner {
             return Err(LfsLockError::Conflict {
                 path: path.to_owned(),
@@ -199,6 +198,9 @@ impl LfsLockManager {
             return Err(LfsLockError::IdMismatch {
                 path: path.to_owned(),
             });
+        }
+        if is_released(&existing) {
+            return Ok(existing);
         }
 
         let mut released = existing;
@@ -340,6 +342,43 @@ impl LfsLockManager {
             .ok_or_else(|| LfsLockError::NotFound {
                 path: format!("lock id {id}"),
             })
+    }
+
+    /// Finds the current stored record by public ID, including a release
+    /// tombstone. Protocol adapters use this to make an exact unlock retry
+    /// succeed after its original response was lost.
+    pub async fn find_by_id_including_released(&self, id: &str) -> LockResult<LockRecord> {
+        let prefix = Path::from(self.namespace_path());
+        let mut stream =
+            self.store
+                .inner()
+                .list(Some(&prefix))
+                .map(|result| async {
+                    let object = result.map_err(|error| {
+                        LfsLockError::Storage(crab_storage::map_object_store_error(
+                            error,
+                            prefix.as_ref(),
+                        ))
+                    })?;
+                    match self.store.get_with_etag(&object.location).await {
+                        Ok((body, _)) => Ok::<Option<LockRecord>, LfsLockError>(Some(
+                            decode_record(&object.location, &body)?,
+                        )),
+                        Err(StorageError::NotFound { .. }) => Ok(None),
+                        Err(error) => Err(LfsLockError::Storage(error)),
+                    }
+                })
+                .buffered(MAX_LOCK_READ_CONCURRENCY);
+        while let Some(result) = stream.next().await {
+            if let Some(record) = result?
+                && record.id == id
+            {
+                return Ok(record);
+            }
+        }
+        Err(LfsLockError::NotFound {
+            path: format!("lock id {id}"),
+        })
     }
 
     /// Finds an active lock for a repository-relative path.
@@ -614,5 +653,29 @@ mod tests {
             .await
             .unwrap();
         assert!(manager.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn matching_unlock_retry_returns_the_existing_tombstone() {
+        let manager = manager();
+        let record = manager.lock("model.bin", "alice").await.unwrap();
+        let first = manager
+            .unlock_with_id("model.bin", "alice", Some(&record.id))
+            .await
+            .unwrap();
+        let retried = manager
+            .unlock_with_id("model.bin", "alice", Some(&record.id))
+            .await
+            .unwrap();
+
+        assert_eq!(retried, first);
+        assert!(retried.released_at.is_some());
+        assert_eq!(
+            manager
+                .find_by_id_including_released(&record.id)
+                .await
+                .unwrap(),
+            retried
+        );
     }
 }

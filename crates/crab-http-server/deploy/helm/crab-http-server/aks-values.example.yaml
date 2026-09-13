@@ -1,12 +1,5 @@
-image:
-  repository: example.azurecr.io/crab-http-server
-  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
-
 config:
-  existingConfigMap: crab-http-server
-
-secrets:
-  existingSecret: crab-http-server
+  storageUrl: az://teamstorage/crab-repositories/repositories
 
 serviceAccount:
   name: crab-http-server

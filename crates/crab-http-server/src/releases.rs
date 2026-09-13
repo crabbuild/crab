@@ -30,6 +30,16 @@ const MAX_TAG_BYTES: usize = 255;
 const MAX_ASSET_NAME_BYTES: usize = 255;
 const ASSET_BUDGET: Duration = Duration::from_secs(5 * 60);
 
+fn transfer_error(error: crate::transfer_admission::Error) -> Error {
+    match error {
+        crate::transfer_admission::Error::Busy => Error::ReleaseBusy,
+        crate::transfer_admission::Error::Cancelled => Error::ReleaseAssetCancelled,
+        crate::transfer_admission::Error::Coordination(error) => {
+            Error::ReleaseAssetCoordination(error)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct ReleaseClaim {
@@ -623,10 +633,11 @@ async fn download_asset(
         .iter()
         .find(|asset| asset.id == asset_id)
         .ok_or(Error::ReleaseAssetNotFound)?;
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| Error::ReleaseBusy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server
+        .acquire_transfer(&cancel)
+        .await
+        .map_err(transfer_error)?;
     let guard = cancel.clone().drop_guard();
     let deadline = tokio::time::Instant::now() + ASSET_BUDGET;
     let path = repo.layout.repo_path(&asset_path(&asset.digest));
@@ -725,10 +736,11 @@ async fn upload_asset(
         return Err(Error::Conflict);
     }
 
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| Error::ReleaseBusy)?;
     let cancel = server.cancellation.child_token();
+    let permit = server
+        .acquire_transfer(&cancel)
+        .await
+        .map_err(transfer_error)?;
     let _guard = cancel.clone().drop_guard();
     let worker_server = Arc::clone(&server);
     let (send, result) = tokio::sync::oneshot::channel();

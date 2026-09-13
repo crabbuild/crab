@@ -5,8 +5,9 @@ use std::{
     time::Duration,
 };
 
-use crab_coordination::GIT_MANIFEST_RESOURCE;
+use crab_coordination::{GIT_MANIFEST_RESOURCE, LFS_LOCKS_RESOURCE};
 use crab_git::receive_wire;
+use crab_lfs::LfsLockManager;
 use crab_metadata::{git_visibility, manifest_store, ref_journal::RefJournalEdit};
 use crab_read::{dependency_proof::DependencyProofLimits, pointer_proof::PointerProofLimits};
 use crab_remote_git::RepositoryOptions;
@@ -19,6 +20,7 @@ use crate::{
 };
 
 const TTL: Duration = Duration::from_secs(300);
+const MAX_ACTIVE_LFS_LOCKS: usize = 10_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Publication {
@@ -372,22 +374,11 @@ async fn publish(
         }
         Err(error) => return Err(error),
     };
+    let changed_path_hashes = prepared.plan().changed_path_hashes().clone();
     let artifacts = prepared
         .upload(&snapshot, dependency_limits(), holders, cancel)
         .await
         .map_err(validate::map_error)?;
-    check_cancelled(cancel)?;
-    if !principal.can_write(&entry.config) {
-        return Err(ReceiveError::Forbidden);
-    }
-    if entry
-        .lifecycle()
-        .await
-        .map_err(|error| ReceiveError::Settings(Box::new(error)))?
-        .archived
-    {
-        return Err(ReceiveError::Archived);
-    }
     let head = if prepared.plan().refs().is_empty()
         || prepared.plan().refs().contains_key(&snapshot.manifest.head)
     {
@@ -402,10 +393,53 @@ async fn publish(
             .find(|name| name.starts_with("refs/heads/"))
             .cloned()
     };
-    let outcome = artifacts
-        .commit(head, crab_write::journal::CommitOptions::new(TTL, cancel))
+    let outcome = if changed_path_hashes.is_empty() {
+        commit_prepared(principal, entry, artifacts, head, cancel).await
+    } else {
+        let subject = principal.identity().ok_or(ReceiveError::Forbidden)?.subject;
+        // Lock endpoints take this lease for every mutation. Keep the final lock
+        // read and journal commit together so replicas cannot create a lock between them.
+        crab_remote::publication::with_internal_lease(
+            &entry.store,
+            &entry.layout,
+            LFS_LOCKS_RESOURCE,
+            TTL,
+            cancel,
+            move |lease_cancel| async move {
+                check_cancelled(&lease_cancel)?;
+                let manager = LfsLockManager::lfs(entry.store.clone(), &entry.config.prefix);
+                let locks = tokio::select! {
+                    () = lease_cancel.cancelled() => return Err(ReceiveError::Cancelled),
+                    result = manager.list_page(None, None, None, MAX_ACTIVE_LFS_LOCKS + 1) => result?,
+                };
+                if locks.len() > MAX_ACTIVE_LFS_LOCKS {
+                    return Err(ReceiveError::LfsLockLimit);
+                }
+                if locks.iter().any(|lock| {
+                    lock.owner != subject
+                        && changed_path_hashes.contains(blake3::hash(lock.path.as_bytes()).as_bytes())
+                }) {
+                    return Err(ReceiveError::Locked);
+                }
+                commit_prepared(principal, entry, artifacts, head, &lease_cancel).await
+            },
+        )
         .await
-        .map_err(validate::map_error)?;
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(ReceiveError::Locked) if request.report_status => {
+            let mut bytes = Vec::new();
+            receive_wire::report(
+                &mut bytes,
+                &request.updates,
+                None,
+                Some("path is locked by another user"),
+            )?;
+            return Ok(bytes);
+        }
+        Err(error) => return Err(error),
+    };
     if let crab_remote::publication::CommitOutcome::Indeterminate { source, .. } = outcome {
         // Native Git has no durable client recovery token. Fail transport without
         // emitting a per-ref rejection for a potentially committed marker.
@@ -426,6 +460,31 @@ async fn publish(
         receive_wire::report(&mut bytes, &request.updates, None, None)?;
     }
     Ok(bytes)
+}
+
+async fn commit_prepared(
+    principal: &Principal,
+    entry: &Repository,
+    artifacts: crab_remote::prepare::Artifacts<'_>,
+    head: Option<String>,
+    cancel: &CancellationToken,
+) -> Result<crab_remote::publication::CommitOutcome> {
+    check_cancelled(cancel)?;
+    if !principal.can_write(&entry.config) {
+        return Err(ReceiveError::Forbidden);
+    }
+    if entry
+        .lifecycle()
+        .await
+        .map_err(|error| ReceiveError::Settings(Box::new(error)))?
+        .archived
+    {
+        return Err(ReceiveError::Archived);
+    }
+    artifacts
+        .commit(head, crab_write::journal::CommitOptions::new(TTL, cancel))
+        .await
+        .map_err(validate::map_error)
 }
 
 fn dependency_limits() -> DependencyProofLimits {

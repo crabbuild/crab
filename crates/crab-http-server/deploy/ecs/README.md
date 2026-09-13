@@ -1,11 +1,10 @@
 # ECS Fargate deployment
 
-`task-definition.example.json` is a hardened starting point for running two or
-more `crab-http-server` tasks behind an Application Load Balancer. It assumes
-the cluster, VPC, private subnets, security groups, ALB, target group, CloudWatch
-log group, ECR repository, IAM roles, bucket, and Secrets Manager values already
-exist. Those resources have organization-specific ownership and deletion
-policies, so this profile does not create them.
+`task-definition.example.json` is an evaluation profile for running two or more `crab-http-server` tasks behind an Application Load Balancer. Use the Kubernetes chart for a team production candidate.
+
+AWS Fargate limits a container stop timeout to 120 seconds. Crab permits Git and Large File Storage (LFS) transfers lasting five minutes and archive downloads lasting ten minutes. A task replacement can therefore terminate an active operation before Crab finishes its graceful drain. Abrupt-process-crash qualification must close this gap before the Fargate profile can carry a production-ready claim.
+
+The profile assumes the cluster, virtual private cloud (VPC), private subnets, security groups, Application Load Balancer (ALB), target group, CloudWatch log group, Elastic Container Registry (ECR), Identity and Access Management (IAM) roles, bucket, and Secrets Manager values already exist. Those resources have organization-specific ownership and deletion policies, so this profile does not create them.
 
 The configuration secret must use the task-local secret paths and one S3 root:
 
@@ -52,11 +51,7 @@ aws ecs create-service \
   --load-balancers targetGroupArn=arn:aws:elasticloadbalancing:REGION:ACCOUNT:targetgroup/NAME/ID,containerName=crab-http-server,containerPort=8788
 ```
 
-Configure the target group health check to use port `8789` and path `/readyz`;
-never expose that port on the ALB listener. Enable the ECS deployment circuit
-breaker and span tasks across availability zones. ALB idle timeouts, upstream
-request-body limits, and deregistration delay must accommodate the server's
-large Git/LFS streams and graceful shutdown budget.
+Configure the target group health check to use port `8789` and path `/readyz`; never expose that port on the ALB listener. Enable the ECS deployment circuit breaker and span tasks across availability zones. Configure ALB idle timeouts, upstream request-body limits, and deregistration delay for long Git and LFS streams. Those controls don’t extend Fargate’s 120-second container stop limit.
 
 This checked-in task definition is static deployment evidence, not live AWS
 qualification. A release claim still requires a real push/fetch/LFS test,

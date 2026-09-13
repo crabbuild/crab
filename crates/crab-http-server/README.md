@@ -62,8 +62,15 @@ credentials. Then create a cataloged repository and start:
 ```sh
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   repository create --owner team --name project --prefix team/project
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  storage-probe
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
+
+`storage-probe` fails unless the workload can read and list the configured
+root, perform conditional coordination writes, create and delete an object,
+and observe that deletion. `serve` runs the same preflight before binding its
+listeners.
 
 The bucket or container must already exist. `repository adopt` can publish an
 existing canonical repository; it does not convert arbitrary objects into a
@@ -83,6 +90,7 @@ and a canonical HTTPS origin. For container deployment, use the
 | Start locally with Docker Compose | [Local Compose stack](deploy/README.md#start-locally-with-docker-compose) |
 | Deploy on EKS, GKE, AKS, or ECS | [Deployment profiles](deploy/README.md) |
 | Probe readiness and drain the service | [Container operation](REFERENCE.md#run-the-container) |
+| Scrape metrics and define alerts | [Operations runbook](deploy/operations.md#observe-requests-and-capacity) |
 | Understand browser APIs and publication ownership | [Application behavior](REFERENCE.md#repository-browser-and-application-apis) |
 | Configure identity, membership, sessions, and protection | [Team sign-in](REFERENCE.md#team-sign-in) |
 | Clone and fetch with scoped Git tokens | [Git HTTP reads](REFERENCE.md#git-http-reads) |
@@ -136,8 +144,9 @@ different lifecycle events:
 
 Keep body-stream resources with the stream. The middleware timeout cannot stand
 in for transfer deadlines or worker cleanup after a response has been returned.
-The production server initializes eight application slots and four shared Git
-transfer slots in [server.rs](src/server.rs); test fixtures use smaller limits.
+The production server initializes eight process-local application slots and
+four deployment-wide Git/LFS/archive/release transfer slots in
+[server.rs](src/server.rs); test fixtures use smaller limits.
 
 Archive downloads in [archive.rs](src/archive.rs) use a channel-backed ZIP body.
 Traversal cancellation must fail that body: finalizing ZIP state for cleanup

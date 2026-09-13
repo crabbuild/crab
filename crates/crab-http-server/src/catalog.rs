@@ -24,6 +24,8 @@ pub enum CatalogError {
     Invalid(&'static str),
     #[error("repository catalog changed concurrently")]
     Conflict,
+    #[error("repository is not present in the catalog")]
+    NotFound,
     #[error("repository initialization failed")]
     Initialize(#[from] crab_write::WriteError),
     #[error("repository metadata validation failed")]
@@ -226,6 +228,45 @@ impl CatalogStore {
         self.insert(record).await
     }
 
+    /// Atomically replaces one repository's membership.
+    ///
+    /// A concurrent catalog writer causes this operation to fail instead of
+    /// replaying a potentially stale administrative decision over newer state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogError::NotFound`] for an unknown repository,
+    /// [`CatalogError::Conflict`] after a concurrent catalog change, or the
+    /// original validation, encoding, or storage error.
+    pub async fn set_members(
+        &self,
+        owner: &str,
+        name: &str,
+        members: Vec<RepositoryMember>,
+    ) -> Result<CatalogRecord, CatalogError> {
+        let (mut document, etag) = self.load().await?;
+        let Some(record) = document.repositories.iter_mut().find(|record| {
+            record.owner.eq_ignore_ascii_case(owner) && record.name.eq_ignore_ascii_case(name)
+        }) else {
+            return Err(CatalogError::NotFound);
+        };
+        if record.members == members {
+            return Ok(record.clone());
+        }
+        record.members = members;
+        let updated = record.clone();
+        document.version = document
+            .version
+            .checked_add(1)
+            .ok_or(CatalogError::Invalid("catalog version overflowed"))?;
+        document.validate(&self.root)?;
+        if self.write_document(&document, etag).await? {
+            Ok(updated)
+        } else {
+            Err(CatalogError::Conflict)
+        }
+    }
+
     async fn insert(&self, record: CatalogRecord) -> Result<CatalogRecord, CatalogError> {
         for _ in 0..MAX_CAS_ATTEMPTS {
             let (mut document, etag) = self.load().await?;
@@ -253,26 +294,36 @@ impl CatalogStore {
             document.repositories.push(record.clone());
             document.normalize();
             document.validate(&self.root)?;
-            let body = Bytes::from(serde_json::to_vec(&document)?);
-            if body.len() as u64 > MAX_CATALOG_BYTES {
-                return Err(CatalogError::Invalid("catalog exceeds its byte limit"));
-            }
-            let result = match etag {
-                Some(etag) => self.root.store.update(&self.path, body, etag).await,
-                None => {
-                    self.root
-                        .store
-                        .create_strict_with_etag(&self.path, body)
-                        .await
-                }
-            };
-            match result {
-                Ok(_) => return Ok(record),
-                Err(StorageError::StateConflict { .. }) => continue,
-                Err(error) => return Err(error.into()),
+            if self.write_document(&document, etag).await? {
+                return Ok(record);
             }
         }
         Err(CatalogError::Conflict)
+    }
+
+    async fn write_document(
+        &self,
+        document: &CatalogDocument,
+        etag: Option<ETag>,
+    ) -> Result<bool, CatalogError> {
+        let body = Bytes::from(serde_json::to_vec(document)?);
+        if body.len() as u64 > MAX_CATALOG_BYTES {
+            return Err(CatalogError::Invalid("catalog exceeds its byte limit"));
+        }
+        let result = match etag {
+            Some(etag) => self.root.store.update(&self.path, body, etag).await,
+            None => {
+                self.root
+                    .store
+                    .create_strict_with_etag(&self.path, body)
+                    .await
+            }
+        };
+        match result {
+            Ok(_) => Ok(true),
+            Err(StorageError::StateConflict { .. }) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -349,6 +400,89 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn membership_replacement_is_atomic_and_idempotent() {
+        let catalog = catalog();
+        catalog
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let members = vec![RepositoryMember {
+            subject: "alice-sub".into(),
+            name: "Alice".into(),
+            access: crate::RepositoryAccess::Admin,
+        }];
+
+        let updated = catalog
+            .set_members("TEAM", "PROJECT", members.clone())
+            .await
+            .unwrap();
+        let (after_update, _) = catalog.load().await.unwrap();
+        let repeated = catalog
+            .set_members("team", "project", members)
+            .await
+            .unwrap();
+        let (after_repeat, _) = catalog.load().await.unwrap();
+
+        assert_eq!(updated, repeated);
+        assert_eq!(after_update.version, 2);
+        assert_eq!(after_repeat, after_update);
+    }
+
+    #[tokio::test]
+    async fn membership_replacement_requires_a_cataloged_repository() {
+        let result = catalog().set_members("team", "missing", vec![]).await;
+
+        assert!(matches!(result, Err(CatalogError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn invalid_membership_cannot_change_the_catalog() {
+        let catalog = catalog();
+        catalog
+            .create_repository(
+                "team".into(),
+                "project".into(),
+                "team/project".into(),
+                "main".into(),
+                String::new(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        let (before, _) = catalog.load().await.unwrap();
+        let member = RepositoryMember {
+            subject: "duplicate-subject".into(),
+            name: "Alice".into(),
+            access: crate::RepositoryAccess::Admin,
+        };
+
+        let result = catalog
+            .set_members(
+                "team",
+                "project",
+                vec![
+                    member.clone(),
+                    RepositoryMember {
+                        name: "Bob".into(),
+                        ..member
+                    },
+                ],
+            )
+            .await;
+        let (after, _) = catalog.load().await.unwrap();
+
+        assert!(matches!(result, Err(CatalogError::Invalid(_))));
+        assert_eq!(after, before);
     }
 
     #[tokio::test]

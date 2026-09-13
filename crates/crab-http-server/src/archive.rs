@@ -40,6 +40,18 @@ pub(crate) enum Error {
     Service(#[from] crate::Error),
     #[error("remote archive read failed")]
     Remote(#[from] RemoteError),
+    #[error("archive transfer admission failed")]
+    Coordination(#[from] crab_coordination::CoordinationError),
+}
+
+impl From<crate::transfer_admission::Error> for Error {
+    fn from(error: crate::transfer_admission::Error) -> Self {
+        match error {
+            crate::transfer_admission::Error::Busy => Self::Busy,
+            crate::transfer_admission::Error::Cancelled => Self::Remote(RemoteError::Cancelled),
+            crate::transfer_admission::Error::Coordination(error) => Self::Coordination(error),
+        }
+    }
 }
 
 impl IntoResponse for Error {
@@ -103,6 +115,11 @@ impl IntoResponse for Error {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "indexing_failed",
                 "Repository indexing could not finish. Check storage permissions and retry",
+            ),
+            Self::Coordination(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "admission_failed",
+                "Archive admission is unavailable. Check storage permissions and retry",
             ),
             Self::Remote(_) => (
                 StatusCode::BAD_GATEWAY,
@@ -180,10 +197,8 @@ pub(crate) async fn download(
         .get(&(owner, name))
         .filter(|entry| principal.can_read(&entry.config))
         .ok_or(Error::NotFound)?;
-    let permit = Arc::clone(&server.git_admission)
-        .try_acquire_owned()
-        .map_err(|_| Error::Busy)?;
     let cancellation = server.cancellation.child_token();
+    let permit = server.acquire_transfer(&cancellation).await?;
     let guard = cancellation.clone().drop_guard();
     let repository = entry
         .open_current(&server, archive_options(server.options)?, &cancellation)
@@ -298,11 +313,14 @@ fn spawn_zip_writer(
     });
 }
 
-fn response_body(
+fn response_body<P>(
     receiver: mpsc::Receiver<io::Result<Bytes>>,
-    permit: tokio::sync::OwnedSemaphorePermit,
+    permit: P,
     guard: DropGuard,
-) -> Body {
+) -> Body
+where
+    P: Send + 'static,
+{
     let stream = futures_util::stream::unfold(
         (receiver, permit, guard),
         |(mut receiver, permit, guard)| async move {
