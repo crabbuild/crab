@@ -1,7 +1,7 @@
 use crab_cell_runtime::{
-    CellId, IncarnationId, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowStatus,
-    install_kv_schema, install_queue_schema, install_runtime_schema, install_workflow_schema,
-    scheduler_next_due_ms, scheduler_tick,
+    CellId, IncarnationId, SessionId, WorkflowContext, WorkflowDecision, WorkflowDefinition,
+    WorkflowStatus, install_kv_schema, install_queue_schema, install_runtime_schema,
+    install_workflow_schema, preferred_scanner, scheduler_next_due_ms, scheduler_tick,
 };
 
 struct ExpiryDefinition;
@@ -107,6 +107,21 @@ fn tick_terminalizes_expired_ready_work_and_runs_workflow_failure_transition() {
         )
         .unwrap();
     assert_eq!(states, (3, 3, 2));
+}
+
+#[test]
+fn rendezvous_scanner_choice_is_order_independent_and_uses_both_nodes() {
+    let first = SessionId::from_bytes([1; 16]);
+    let second = SessionId::from_bytes([2; 16]);
+    let mut winners = std::collections::HashSet::new();
+    for shard in 0_u8..=u8::MAX {
+        let forward = preferred_scanner(shard, &[first, second]).unwrap().unwrap();
+        let reverse = preferred_scanner(shard, &[second, first]).unwrap().unwrap();
+        assert_eq!(forward, reverse);
+        winners.insert(*forward.as_bytes());
+    }
+    assert_eq!(winners.len(), 2);
+    assert!(preferred_scanner(0, &[first, first]).is_err());
 }
 
 #[test]

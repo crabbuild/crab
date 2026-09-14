@@ -100,8 +100,11 @@ handlers can no longer omit or spoof scheduler state. A typed internal Tick now
 rechecks the scanned root position, advances at most 128 ledger, expiry, lease,
 timer or retention items through the normal actor and republishes the resulting
 summary. It dispatches timer and terminal activity events through the run's
-retained definition. Catalog discovery, due-Cell routing and retry supervision
-remain.
+retained definition. Revision-pinned catalog iteration now verifies one immutable
+256-entry page at a time; due filtering reads at most 32 controls per step, and
+the preferred scanner is selected by order-independent rendezvous hashing.
+Node-progress advertisements, 15-second fallback, due-Cell route/acquire and
+retry supervision remain.
 The startup-only compiled registry now validates module names, exact migration
 bytes/digests and contiguous schema ranges, command/query codec ranges and byte
 limits, namespace topology/effect targets/DLQ cycles, workflow/activity

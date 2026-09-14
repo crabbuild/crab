@@ -106,6 +106,70 @@ pub struct CatalogProof {
     revision: u64,
 }
 
+/// One verified immutable catalog page from a revision-pinned shard scan.
+pub struct CatalogScanPage {
+    revision: u64,
+    entries: Vec<CatalogProof>,
+}
+
+impl CatalogScanPage {
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[must_use]
+    pub fn entries(&self) -> &[CatalogProof] {
+        &self.entries
+    }
+}
+
+/// Stateful bounded scan over one immutable catalog-head snapshot.
+pub struct CatalogShardScan {
+    catalog: CellCatalog,
+    shard: u8,
+    revision: u64,
+    pages: Vec<Digest>,
+    next_page: usize,
+    previous: Option<CellId>,
+}
+
+impl CatalogShardScan {
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Loads and verifies at most one 256-entry immutable page.
+    pub async fn next_page(&mut self) -> Result<Option<CatalogScanPage>> {
+        let Some(digest) = self.pages.get(self.next_page).copied() else {
+            return Ok(None);
+        };
+        let entries = self.catalog.load_page(digest).await?;
+        let mut proofs = Vec::with_capacity(entries.len());
+        for entry in entries {
+            entry.validate(self.catalog.tenant, self.catalog.application)?;
+            if entry.cell.as_bytes()[0] != self.shard
+                || self
+                    .previous
+                    .is_some_and(|previous| previous.as_bytes() >= entry.cell.as_bytes())
+            {
+                return Err(Error::Catalog("invalid scanned catalog ordering or shard"));
+            }
+            self.previous = Some(entry.cell);
+            proofs.push(CatalogProof {
+                entry,
+                revision: self.revision,
+            });
+        }
+        self.next_page += 1;
+        Ok(Some(CatalogScanPage {
+            revision: self.revision,
+            entries: proofs,
+        }))
+    }
+}
+
 impl CatalogProof {
     #[must_use]
     pub const fn entry(&self) -> &CatalogEntry {
@@ -228,6 +292,22 @@ impl CellCatalog {
             }))
     }
 
+    /// Pins one shard head for bounded immutable-page iteration.
+    pub async fn scan_shard(&self, shard: u8) -> Result<CatalogShardScan> {
+        let observed = self.load_head(shard).await?;
+        let (revision, pages) = observed
+            .map(|observed| (observed.head.revision, observed.head.pages))
+            .unwrap_or_default();
+        Ok(CatalogShardScan {
+            catalog: self.clone(),
+            shard,
+            revision,
+            pages,
+            next_page: 0,
+            previous: None,
+        })
+    }
+
     async fn lookup_after_failed_publish(
         &self,
         expected: &CatalogEntry,
@@ -260,20 +340,7 @@ impl CellCatalog {
     async fn load_entries(&self, head: &CatalogHead) -> Result<Vec<CatalogEntry>> {
         let mut entries = Vec::new();
         for digest in &head.pages {
-            let path = self.layout.catalog_object_path(digest.as_bytes());
-            let (body, _) = self
-                .layout
-                .store()
-                .get_with_etag_bounded(&path, MAX_PAGE_BYTES)
-                .await?;
-            if blake3::hash(&body).as_bytes() != digest.as_bytes() {
-                return Err(Error::Catalog("page digest mismatch"));
-            }
-            let page = CatalogPage::decode(&body)?;
-            if page.entries.is_empty() || page.entries.len() > ENTRIES_PER_PAGE {
-                return Err(Error::Catalog("invalid page entry count"));
-            }
-            for entry in page.entries {
+            for entry in self.load_page(*digest).await? {
                 entry.validate(self.tenant, self.application)?;
                 if entries.last().is_some_and(|previous: &CatalogEntry| {
                     previous.cell.as_bytes() >= entry.cell.as_bytes()
@@ -287,6 +354,23 @@ impl CellCatalog {
             return Err(Error::Catalog("head exceeds entry limit"));
         }
         Ok(entries)
+    }
+
+    async fn load_page(&self, digest: Digest) -> Result<Vec<CatalogEntry>> {
+        let path = self.layout.catalog_object_path(digest.as_bytes());
+        let (body, _) = self
+            .layout
+            .store()
+            .get_with_etag_bounded(&path, MAX_PAGE_BYTES)
+            .await?;
+        if blake3::hash(&body).as_bytes() != digest.as_bytes() {
+            return Err(Error::Catalog("page digest mismatch"));
+        }
+        let page = CatalogPage::decode(&body)?;
+        if page.entries.is_empty() || page.entries.len() > ENTRIES_PER_PAGE {
+            return Err(Error::Catalog("invalid page entry count"));
+        }
+        Ok(page.entries)
     }
 
     async fn upload_pages(&self, revision: u64, entries: &[CatalogEntry]) -> Result<CatalogHead> {

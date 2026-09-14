@@ -399,8 +399,11 @@ pending LTX cut into the same control publication. `scheduler_tick` and
 cleanup, effect/queue expiry and lease recovery, KV expiry, Workflow retention,
 terminal activity events and due timers. The command rejects a stale scanned
 root position before doing maintenance, and its resulting summary publishes
-through the ordinary actor/LTX/control path. Catalog scanning, routing and Tick
-retry supervision remain to implement.
+through the ordinary actor/LTX/control path. `CatalogShardScan` pins one head
+revision and verifies one immutable page per call; `DueCellScan` inspects at
+most 32 controls per step, and `preferred_scanner` implements deterministic
+rendezvous assignment. Node advertisements and fallback, due-Cell route/acquire
+and Tick retry supervision remain to implement.
 
 After every commit, compute minimum outstanding due time using indexed minima
 for ready effects, leased-effect deadlines, KV expirations, ready queue rows,

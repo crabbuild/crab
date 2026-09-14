@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, drain, transactional scheduler summaries and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities plus exact native activity execution | Add sparse page-I/O deadlines, automatic fenced recovery, private peer routing, Workflow effects, catalog-driven activity scheduling and scheduler catalog discovery/routing |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, drain, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities plus exact native activity execution | Add sparse page-I/O deadlines, automatic fenced recovery, private peer routing, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
 | [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization, scoped SQLite authorizers, registered codecs and a role-checked SqlCell proven through publish and exact-root restore | Use the completed handle from the repository HTTP adapter |
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup, binary pagination and typed scope-sharded KvNamespace/registry codecs | Add scheduler cleanup invocation |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup plus typed producer-sharded QueueNamespace and registry codecs | Add DLQ effects and native polling scheduler |
@@ -275,7 +275,9 @@ catalog scanner and Tick through the normal actor command loop.
 
 Current implementation includes the bounded Tick transaction and typed actor
 command, including stale-root rejection, timer dispatch and terminal activity
-events. Catalog enumeration, node assignment, route/acquire and retry remain.
+events. It also includes revision-pinned page enumeration, 32-control due
+batches and deterministic rendezvous assignment. Node-progress advertisements,
+fallback, route/acquire and retry remain.
 
 | Test file | Required cases |
 | --- | --- |

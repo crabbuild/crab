@@ -350,7 +350,11 @@ the maintenance Tick owns timer dispatch.
 published root's commit sequence; `MaintenanceTickCommand` no-ops stale scans,
 uses one budget across every installed primitive, and relies on the executor to
 publish the new scheduler summary. Application routes never construct Tick
-requests.
+requests. `CatalogShardScan` keeps a fixed head revision while reading one
+digest-verified page at a time. `DueCellScan` bounds each step to 32 control
+reads; a zero-result batch still advances the scan. Rendezvous selection is pure
+and independent of node-list ordering. Liveness advertisements, fallback and
+route/acquire orchestration remain node-supervisor work.
 
 ```rust,ignore
 pub trait WorkflowModule: Send + Sync + 'static {

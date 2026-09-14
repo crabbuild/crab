@@ -11,15 +11,15 @@ use std::{
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellClient, CellModule, CellRuntime, CellTarget, Digest, Error, IncarnationId, InvocationError,
-    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId,
-    OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId,
-    WorkflowAction, WorkflowActivities, WorkflowActivityClaimCommand,
-    WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand, WorkflowActivityModule,
-    WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext, WorkflowDecision,
-    WorkflowDefinition, WorkflowGetQuery, WorkflowModule, WorkflowNamespace, WorkflowOutcome,
-    WorkflowSignal, WorkflowSignalCommand, WorkflowStartCommand, WorkflowStatus,
+    CellClient, CellModule, CellRuntime, CellTarget, Digest, DueCellScan, Error, IncarnationId,
+    InvocationError, MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome,
+    MaintenanceTickRequest, MigrationDescriptor, ModuleDescriptor, MutationIdentity,
+    NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId,
+    SessionId, SqlWorkerPool, TenantId, WorkflowAction, WorkflowActivities,
+    WorkflowActivityClaimCommand, WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand,
+    WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowGetQuery, WorkflowModule, WorkflowNamespace,
+    WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand, WorkflowStartCommand, WorkflowStatus,
     install_workflow_schema, register_activity, register_maintenance, register_workflow,
     register_workflow_activities,
 };
@@ -444,6 +444,21 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         .start(identity(16), b"timer-build".to_vec(), b"timer".to_vec())
         .await
         .unwrap();
+    let mut due = DueCellScan::new(&catalog, authority.clone(), target.cell_id().as_bytes()[0])
+        .await
+        .unwrap();
+    let due = due.next_batch(i64::MAX).await.unwrap().unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(
+        due[0]
+            .control()
+            .value()
+            .root
+            .as_ref()
+            .unwrap()
+            .commit_sequence,
+        timer.receipt.commit_sequence
+    );
     let tick = client
         .command::<MaintenanceTickCommand<TestWorkflow>>(
             &target,

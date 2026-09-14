@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use crab_ltx::rusqlite::Transaction;
 
 use crate::{
-    Error, Result, WorkflowDefinition,
+    CatalogProof, CatalogShardScan, CellAuthority, CellCatalog, Error, Result, SessionId,
+    VersionedControl, WorkflowDefinition,
     effects::{
         effect_cleanup_terminal_bounded, effect_expire_ready_bounded,
         effect_reclaim_expired_bounded, inbox_cleanup_expired_bounded,
@@ -20,6 +21,111 @@ use crate::{
 
 const WORKFLOW_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_TICK_ITEMS: usize = 128;
+const CONTROL_BATCH: usize = 32;
+
+/// One due catalog entry and its exact observed control token.
+pub struct DueCell {
+    catalog: CatalogProof,
+    control: VersionedControl,
+}
+
+impl DueCell {
+    #[must_use]
+    pub const fn catalog(&self) -> &CatalogProof {
+        &self.catalog
+    }
+
+    #[must_use]
+    pub const fn control(&self) -> &VersionedControl {
+        &self.control
+    }
+}
+
+/// Revision-pinned catalog scan with at most 32 control reads per step.
+pub struct DueCellScan {
+    catalog: CatalogShardScan,
+    authority: CellAuthority,
+    pending: VecDeque<CatalogProof>,
+}
+
+impl DueCellScan {
+    /// Pins one catalog shard head before any control records are inspected.
+    pub async fn new(catalog: &CellCatalog, authority: CellAuthority, shard: u8) -> Result<Self> {
+        Ok(Self {
+            catalog: catalog.scan_shard(shard).await?,
+            authority,
+            pending: VecDeque::new(),
+        })
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.catalog.revision()
+    }
+
+    /// Advances by at most 32 entries; an empty page still represents progress.
+    pub async fn next_batch(&mut self, now_ms: i64) -> Result<Option<Vec<DueCell>>> {
+        if now_ms < 0 {
+            return Err(Error::Command("negative scheduler scan time"));
+        }
+        if self.pending.is_empty() {
+            let Some(page) = self.catalog.next_page().await? else {
+                return Ok(None);
+            };
+            self.pending.extend(page.entries().iter().cloned());
+        }
+        let count = self.pending.len().min(CONTROL_BATCH);
+        let mut due = Vec::new();
+        for _ in 0..count {
+            let proof = self
+                .pending
+                .pop_front()
+                .ok_or(Error::Catalog("scheduler scan queue underflow"))?;
+            let Some(control) = self.authority.load(proof.entry().cell()).await? else {
+                continue;
+            };
+            if control.value().cell != proof.entry().cell() {
+                return Err(Error::Control("catalog control changed Cell"));
+            }
+            if control.value().root.is_some()
+                && control
+                    .value()
+                    .next_due_ms
+                    .is_some_and(|deadline| deadline <= now_ms)
+                && control.value().state != crate::ControlState::Tombstoned
+            {
+                due.push(DueCell {
+                    catalog: proof,
+                    control,
+                });
+            }
+        }
+        Ok(Some(due))
+    }
+}
+
+/// Selects one preferred live scanner for a catalog shard by rendezvous score.
+pub fn preferred_scanner(shard: u8, nodes: &[SessionId]) -> Result<Option<SessionId>> {
+    let mut unique = HashSet::with_capacity(nodes.len());
+    let mut winner = None;
+    for node in nodes {
+        if !unique.insert(*node.as_bytes()) {
+            return Err(Error::Control("duplicate scheduler node session"));
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"crab.scheduler-rendezvous.v1\0");
+        hasher.update(&[shard]);
+        hasher.update(node.as_bytes());
+        let score = *hasher.finalize().as_bytes();
+        if winner
+            .as_ref()
+            .is_none_or(|(best, _): &([u8; 32], SessionId)| score > *best)
+        {
+            winner = Some((score, *node));
+        }
+    }
+    Ok(winner.map(|(_, node)| node))
+}
 
 /// Bounded durable work performed by one serialized scheduler Tick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

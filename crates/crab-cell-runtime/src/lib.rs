@@ -28,7 +28,9 @@ mod workflow;
 
 pub use actor::{CellHandle, CellRuntime};
 pub use authority::{CellAuthority, VersionedControl};
-pub use catalog::{CatalogEntry, CatalogProof, CatalogRole, CellCatalog};
+pub use catalog::{
+    CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
+};
 pub use client::{
     CellClient, CellDescription, Committed, InvocationError, Observed, PendingMutation, Receipt,
     command_operation_digest,
@@ -72,7 +74,10 @@ pub use registry::{
     MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor, Query,
     QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
 };
-pub use scheduler::{SchedulerTickOutcome, scheduler_next_due_ms, scheduler_tick};
+pub use scheduler::{
+    DueCell, DueCellScan, SchedulerTickOutcome, preferred_scanner, scheduler_next_due_ms,
+    scheduler_tick,
+};
 pub use schema::{install_runtime_schema, verify_runtime_schema};
 pub use sql::{
     SqlBatch, SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, SqlResultSet, SqlStatement,
