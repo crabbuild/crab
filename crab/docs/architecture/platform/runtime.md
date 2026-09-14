@@ -13,8 +13,13 @@ bounded shard queues, stable Cell routing, global activation admission, and
 cancellation-safe completion of accepted SQL commands. `CellRuntime` now owns
 the node-wide dispatcher, per-Cell and node byte admission, FIFO single-flight
 execution/publication, pure-renewal retry, unknown-outcome classification and
-drain. Catalog activation, deadline/watchdog enforcement, later-root request
-resolution, read dispatch and the fenced recovery supervisor remain to implement.
+drain. Exact-root catalog-driven activation, deadline/watchdog enforcement,
+later-root request resolution, read dispatch and the fenced recovery supervisor
+remain to implement.
+Catalog proof itself is implemented: activation accepts only a `CatalogProof`
+from the verified catalog reader and rejects a control owned by a different
+node session. Opening/restoring the executor from that proof remains outside the
+current activation API.
 
 ## Rust interfaces and ownership
 

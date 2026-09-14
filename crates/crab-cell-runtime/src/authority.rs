@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use crab_storage::{CellStorageLayout, ETag, StorageError};
 
-use crate::{CellId, Control, Result, Transition};
+use crate::{CatalogProof, CellId, Control, Error, IncarnationId, Owner, Result, Transition};
 
 const MAX_CONTROL_BYTES: u64 = 8 * 1024;
 
@@ -33,6 +33,40 @@ impl CellAuthority {
     #[must_use]
     pub fn new(layout: CellStorageLayout) -> Self {
         Self { layout }
+    }
+
+    /// Strict-creates a bootstrap control only after catalog publication.
+    pub async fn create_initial(
+        &self,
+        catalog: &CatalogProof,
+        incarnation: IncarnationId,
+        owner: Owner,
+    ) -> Result<VersionedControl> {
+        let entry = catalog.entry();
+        let initial = Control::initial(
+            entry.cell(),
+            incarnation,
+            owner,
+            entry.initial_code(),
+            entry.initial_schema(),
+        )?;
+        let path = self.layout.control_path(entry.cell().as_bytes());
+        match self
+            .layout
+            .store()
+            .create_strict_with_etag(&path, Bytes::from(initial.encode()?))
+            .await
+        {
+            Ok(token) => Ok(VersionedControl {
+                value: initial,
+                token,
+            }),
+            Err(create_error) => match self.load(entry.cell()).await? {
+                Some(current) if current.value == initial => Ok(current),
+                Some(_) => Err(Error::CellAlreadyActive),
+                None => Err(create_error.into()),
+            },
+        }
     }
 
     /// Reads one exact control object; absence is not inferred from listing.

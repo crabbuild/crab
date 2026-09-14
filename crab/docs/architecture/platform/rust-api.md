@@ -11,7 +11,9 @@ owners run the same validation, handler and publication path. A local call may
 avoid a network hop, but cannot bypass identity, size or durability checks.
 
 The current lower-level implementation is intentionally narrower than the typed
-registry below. `CellRuntime::activate` moves a restored `CellExecutor` onto its
+registry below. `CellRuntime::new` binds the node session and byte budget.
+`CellRuntime::activate` consumes an unforgeable `CatalogProof`, verifies that the
+control owner is that node session, moves a restored `CellExecutor` onto its
 stable SQL worker and returns a capability-bound `CellHandle`. Its implemented
 command entry point is:
 

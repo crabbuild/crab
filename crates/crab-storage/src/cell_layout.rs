@@ -49,6 +49,11 @@ impl CellStorageLayout {
     }
 
     #[must_use]
+    pub const fn application_id(&self) -> &[u8; 16] {
+        &self.application
+    }
+
+    #[must_use]
     pub fn identity_path(&self) -> Path {
         Path::from(format!("{}/cells/v1/identity.json", self.root))
     }

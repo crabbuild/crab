@@ -8,7 +8,13 @@ pub enum Error {
     Identity(&'static str),
     #[error("invalid Cell control record: {0}")]
     Control(&'static str),
-    #[error("Cell control JSON failed")]
+    #[error("invalid Cell catalog: {0}")]
+    Catalog(&'static str),
+    #[error("Cell ID collides with a different catalog entry")]
+    CatalogCollision,
+    #[error("Cell catalog shard reached its 65,536-entry limit")]
+    CatalogFull,
+    #[error("Cell runtime JSON failed")]
     Json(#[from] serde_json::Error),
     #[error("Cell runtime SQLite schema failed")]
     Sqlite(#[from] rusqlite::Error),

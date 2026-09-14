@@ -11,8 +11,10 @@ that exact root and refreshes through pure lease renewals. The node-wide runtime
 dispatcher now combines the fixed SQL workers with per-Cell request/byte
 mailboxes, node byte admission, FIFO single-flight publication, cancellation-safe
 accepted work, bounded retry backoff, structured unknown outcomes and drain.
-Catalog activation, deadlines/watchdogs, later-root request resolution, fenced
-recovery, reads, directory-backed writable SQLite, streaming directory updates,
+Catalog immutable pages/CAS heads and proof-before-control activation are now
+implemented. Exact-root restore activation, deadlines/watchdogs, later-root
+request resolution, fenced recovery, reads, directory-backed writable SQLite,
+streaming directory updates,
 prepared compaction/bundles, primitives, HTTP cutover and capacity qualification
 remain incomplete.
 
@@ -88,7 +90,7 @@ crates/crab-cell-runtime/src/
   identity.rs, authority.rs    Cell identity and owner/control CAS
   actor.rs, executor.rs        supervised commands and bounded SQL workers
   publication.rs              pending cut ownership and reconciliation
-  catalog.rs, scheduler.rs     provision-before-use and due-summary scanning
+  catalog.rs, scheduler.rs     provision proof (implemented) and due-summary scanning
   registry.rs, api.rs          typed definitions, codecs and capability handles
   peer.rs                     private message codec, no listener/auth policy
   sql.rs, kv.rs, queue.rs,

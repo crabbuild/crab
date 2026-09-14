@@ -12,8 +12,8 @@ use tokio::{
 };
 
 use crate::{
-    CellAuthority, CellExecutor, CellId, CellPublisher, Digest, Error, MutationIdentity,
-    SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
+    CatalogProof, CellAuthority, CellExecutor, CellId, CellPublisher, Digest, Error,
+    MutationIdentity, SessionId, SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
     worker::{Handler, WorkerState},
 };
 
@@ -33,6 +33,7 @@ pub struct CellRuntime {
 #[derive(Clone)]
 pub struct CellHandle {
     cell: CellId,
+    catalog: CatalogProof,
     inner: Arc<RuntimeInner>,
     admission: Arc<CellAdmission>,
 }
@@ -40,6 +41,7 @@ pub struct CellHandle {
 struct RuntimeInner {
     sender: mpsc::Sender<Message>,
     node_bytes: Arc<Semaphore>,
+    session: SessionId,
 }
 
 struct CellAdmission {
@@ -51,7 +53,11 @@ struct CellAdmission {
 
 impl CellRuntime {
     /// Starts one dispatcher on the current Tokio runtime.
-    pub fn new(pool: SqlWorkerPool, node_mailbox_bytes: usize) -> crate::Result<Self> {
+    pub fn new(
+        pool: SqlWorkerPool,
+        node_mailbox_bytes: usize,
+        session: SessionId,
+    ) -> crate::Result<Self> {
         if node_mailbox_bytes == 0 || node_mailbox_bytes > Semaphore::MAX_PERMITS {
             return Err(Error::Capacity("node mailbox bytes"));
         }
@@ -62,6 +68,7 @@ impl CellRuntime {
             inner: Arc::new(RuntimeInner {
                 sender,
                 node_bytes: Arc::new(Semaphore::new(node_mailbox_bytes)),
+                session,
             }),
         })
     }
@@ -69,14 +76,23 @@ impl CellRuntime {
     /// Activates one restored executor and binds its publication authority.
     pub async fn activate(
         &self,
-        cell: CellId,
+        catalog: CatalogProof,
         executor: CellExecutor,
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         observed: VersionedControl,
     ) -> crate::Result<CellHandle> {
+        let cell = catalog.entry().cell();
         if observed.value().cell != cell {
             return Err(Error::Control("activation control changed Cell"));
+        }
+        if observed
+            .value()
+            .owner
+            .as_ref()
+            .is_none_or(|owner| owner.session != self.inner.session)
+        {
+            return Err(Error::Fenced);
         }
         let (reply, response) = oneshot::channel();
         self.inner
@@ -92,6 +108,7 @@ impl CellRuntime {
         let admission = response.await.map_err(|_| Error::RuntimeClosed)??;
         Ok(CellHandle {
             cell,
+            catalog,
             inner: self.inner.clone(),
             admission,
         })
@@ -99,6 +116,11 @@ impl CellRuntime {
 }
 
 impl CellHandle {
+    #[must_use]
+    pub const fn catalog(&self) -> &CatalogProof {
+        &self.catalog
+    }
+
     /// Runs and publishes one command while retaining admission after cancellation.
     pub async fn execute<F>(
         &self,

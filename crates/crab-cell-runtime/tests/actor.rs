@@ -1,10 +1,9 @@
 use std::sync::{Arc, mpsc};
 
-use bytes::Bytes;
 use crab_cell_runtime::{
-    CellAuthority, CellExecutor, CellId, CellRuntime, Control, Digest, HandlerOutcome,
-    IncarnationId, MutationIdentity, Owner, RequestId, SessionId, SqlWorkerPool, StoredOutcome,
-    install_runtime_schema,
+    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellExecutor, CellRuntime, CellTarget,
+    Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId, Owner, RequestId,
+    SessionId, SqlWorkerPool, StoredOutcome, TenantId, install_runtime_schema,
 };
 use crab_ltx::{CellReplica, Limits, ManagedDb};
 use crab_storage::{CellStorageLayout, Store};
@@ -13,14 +12,21 @@ use object_store::{memory::InMemory, path::Path};
 struct Fixture {
     _directory: tempfile::TempDir,
     database: std::path::PathBuf,
-    cell: CellId,
+    target: CellTarget,
     layout: CellStorageLayout,
     replica: CellReplica,
     executor: Option<CellExecutor>,
 }
 
 fn fixture() -> Fixture {
-    let cell = CellId::from_bytes([1; 32]);
+    let target = CellTarget::new(
+        TenantId::from_bytes([1; 16]),
+        ApplicationId::from_bytes([3; 16]),
+        NamespaceId::from_bytes([6; 16]),
+        b"repository-1",
+    )
+    .unwrap();
+    let cell = target.cell_id();
     let incarnation = IncarnationId::from_bytes([2; 16]);
     let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
@@ -45,7 +51,7 @@ fn fixture() -> Fixture {
     Fixture {
         _directory: directory,
         database,
-        cell,
+        target,
         layout,
         replica,
         executor: Some(CellExecutor::new(writer, cell, incarnation, 1)),
@@ -62,32 +68,38 @@ async fn activate_with_replica(
     node_bytes: usize,
     replica: CellReplica,
 ) -> crab_cell_runtime::CellHandle {
-    let control = Control::initial(
-        fixture.cell,
-        IncarnationId::from_bytes([2; 16]),
-        Owner {
-            session: SessionId::from_bytes([4; 16]),
-            endpoint: "https://node.internal:8081".into(),
-        },
-        Digest::from_bytes([5; 32]),
-        1,
-    )
-    .unwrap();
-    fixture
-        .layout
-        .store()
-        .create_strict(
-            &fixture.layout.control_path(fixture.cell.as_bytes()),
-            Bytes::from(control.encode().unwrap()),
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &fixture.target,
+                CatalogRole::Repository,
+                Digest::from_bytes([5; 32]),
+                1,
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
+    let session = SessionId::from_bytes([4; 16]);
     let authority = CellAuthority::new(fixture.layout.clone());
-    let observed = authority.load(fixture.cell).await.unwrap().unwrap();
-    let runtime = CellRuntime::new(SqlWorkerPool::new(2, 10).unwrap(), node_bytes).unwrap();
+    let observed = authority
+        .create_initial(
+            &proof,
+            IncarnationId::from_bytes([2; 16]),
+            Owner {
+                session,
+                endpoint: "https://node.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(2, 10).unwrap(), node_bytes, session).unwrap();
     runtime
         .activate(
-            fixture.cell,
+            proof,
             fixture.executor.take().unwrap(),
             replica,
             authority,
@@ -387,4 +399,53 @@ async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
         assert!(result_rx.recv().await.unwrap().is_ok());
     }
     handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn activation_rejects_control_owned_by_another_node_session() {
+    let mut fixture = fixture();
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &fixture.target,
+                CatalogRole::Repository,
+                Digest::from_bytes([5; 32]),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .create_initial(
+            &proof,
+            IncarnationId::from_bytes([2; 16]),
+            Owner {
+                session: SessionId::from_bytes([4; 16]),
+                endpoint: "https://node.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1).unwrap(),
+        2 * 1024 * 1024,
+        SessionId::from_bytes([9; 16]),
+    )
+    .unwrap();
+    assert!(matches!(
+        runtime
+            .activate(
+                proof,
+                fixture.executor.take().unwrap(),
+                fixture.replica,
+                authority,
+                observed,
+            )
+            .await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
 }

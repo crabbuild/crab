@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, fixed SQL workers, node/per-Cell mailbox admission, FIFO publication, transient retry, unknown outcomes and drain | Add catalog proof, deadline/read/recovery supervision, later-root resolution and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, fixed SQL workers, node/per-Cell mailbox admission, FIFO publication, transient retry, unknown outcomes and drain | Add exact-root activation, deadline/read/recovery supervision, later-root resolution and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -63,7 +63,9 @@ reconciliation and renewal-token refresh are implemented without SQL replay.
 The node dispatcher now adds 64-request/8-MiB Cell admission, node byte admission,
 single-flight FIFO publication, 100/200/400/1,000-ms storage retry, structured
 unknown outcomes and accepted-work drain without a permanent task per Cell.
-Complete catalog proof, deadlines/SQLite interruption, read jobs, later-root
+Immutable catalog pages, CAS heads, concurrent merge, collision rejection,
+proof-before-control creation and local-session activation checks are implemented.
+Complete exact-root restore activation, deadlines/SQLite interruption, read jobs, later-root
 request resolution, fenced takeover recovery, and panic supervision. All
 transitions use the existing Store conditional primitives, preserving sources.
 
@@ -107,6 +109,17 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
 
 `publication_rebases_over_a_pure_lease_renewal_without_sql_replay` covers the
 coordinator's latest-token retry path.
+
+Current catalog coverage is in `crates/crab-cell-runtime/tests/catalog.rs`:
+
+- `catalog_provision_is_idempotent_and_precedes_control` proves immutable catalog
+  reachability exists before strict control creation and exact lost-create adoption.
+- `concurrent_catalog_writers_merge_entries_on_one_shard` races two writers and
+  proves both entries survive the ETag loop.
+- `catalog_rejects_conflicting_bootstrap_contract_for_one_cell` and
+  `catalog_page_digest_is_checked_before_entry_use` prove collision and content
+  integrity boundaries. Actor coverage also rejects a valid control owned by a
+  different node session.
 
 Exit: two local runtime processes against isolated RustFS pass counter increment,
 owner kill, full source-directory removal and query recovery.

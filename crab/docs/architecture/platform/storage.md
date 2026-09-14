@@ -225,6 +225,25 @@ caps at 65,536 entries; return RESOURCE_EXHAUSTED at this v1 bound. Writers CAS
 the head after uploading changed pages, with ID collision checks. Provision
 catalog before control so crashes can leave only harmless empty entries.
 
+This format is implemented by `CellCatalog`. Head bodies are canonical strict
+JSON bounded to 32 KiB: `version` is integer 1, `revision` is a nonzero canonical
+u64 decimal string, and `pages` contains 1–256 lowercase BLAKE3 hex digests.
+Page bodies are canonical strict JSON bounded to 1 MiB with `version=1` and
+1–256 entries. Entry IDs/digests and partition bytes are lowercase hex; roles
+are `repository`, `sql`, `kv`, `queue`, or `workflow`. Readers verify the page
+body against its head digest, recompute every Cell ID from the configured tenant/
+application plus namespace/partition, and enforce global Cell ordering across
+page boundaries before returning `CatalogProof`.
+
+Provisioning reloads the whole bounded shard, rejects a different bootstrap
+contract for an existing Cell ID, uploads every changed immutable page with
+create-if-absent semantics, then strict-creates or ETag-updates the head. On a
+failed head response it reloads and accepts only the exact requested entry;
+state-dependent conflicts merge the winning entries and retry.
+`CellAuthority::create_initial` requires this unforgeable proof and adopts a lost create response
+only when the complete control bytes match. `CellRuntime` binds a local session
+at construction and rejects activation unless the control owner names it.
+
 Startup validates provider strict-create and failed-update behavior in a private
 probe prefix, loads release/catalog roots, opens local capacity budgets, then
 accepts traffic. Cell activation reserves capacity, acquires control, opens its

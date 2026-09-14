@@ -7,6 +7,7 @@
 
 mod actor;
 mod authority;
+mod catalog;
 mod control;
 mod error;
 mod executor;
@@ -17,6 +18,7 @@ mod worker;
 
 pub use actor::{CellHandle, CellRuntime};
 pub use authority::{CellAuthority, VersionedControl};
+pub use catalog::{CatalogEntry, CatalogProof, CatalogRole, CellCatalog};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use error::{Error, Result};
 pub use executor::{
