@@ -200,6 +200,14 @@ identify the stored bytes. Verification writes no durable evidence and is not
 publication authority. A publisher must hold GC fences and recheck the exact
 base before exposing refs. Native HTTP receive/publication remains unfinished.
 
+`request_minimal::open_view` loads the v2 repository root and all of its
+post-checkpoint capsules. The root costs one GET and each capsule costs one
+concurrent GET; exact size, BLAKE3 identity, transaction identity, and base-root
+binding are verified before any capsule is returned. Callers supply individual
+and aggregate capsule-byte admission limits before the concurrent body reads.
+This is the shared verified metadata view, not yet a Git clone/fetch
+response-pack implementation.
+
 - [`crab-metadata`](../crab-metadata/README.md) defines manifests, file
   indexes, and shard metadata; this crate consumes them.
 - [`crab-cache-store`](../crab-cache-store/README.md) supplies cache-aware

@@ -35,6 +35,7 @@ pub mod ref_journal;
 pub mod ref_registry;
 #[cfg(feature = "remote-index")]
 pub mod remote_index;
+pub mod request_minimal;
 pub mod segmented;
 #[cfg(feature = "storage")]
 pub mod segmented_store;

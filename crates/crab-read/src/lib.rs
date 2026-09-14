@@ -8,6 +8,7 @@ mod hydrator;
 mod integrity;
 pub mod pointer_proof;
 mod ref_advertisement;
+pub mod request_minimal;
 mod selection;
 mod store_client;
 mod term_resolver;

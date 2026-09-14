@@ -2390,6 +2390,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "bytes",
+ "crab-git",
  "crab-storage",
  "crab-xet",
  "futures-util",
