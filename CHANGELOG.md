@@ -5,6 +5,36 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 1.2.4 - 2026-09-14
+
+### S3 Gateway
+
+- Completed conditional mutation support and accepted empty list delimiters for
+  broader S3 client compatibility.
+- Added configurable Git blob thresholds, bounded sustained request
+  amplification, and expanded ecosystem and large-repository qualification.
+
+### Git And Durability
+
+- Preserved Git visibility while restoring flat incremental-push latency and
+  reducing object-store requests.
+- Rebuilt missing Git object-locator sidecars and made concurrent prepared-xorb
+  publication converge safely on the winning durable result.
+- Recovered native pushes from durable receipts after interrupted HTTP receive
+  operations.
+
+### Hosting And Repository Experience
+
+- Added durable multi-cloud deployment support, a one-command Compose stack,
+  and readiness protection during server drain.
+- Added richer blame and discussion views, format-aware file previews, and an
+  interactive data workbench for repository content.
+
+### SQLite Replication
+
+- Added the `crab-ltx` crate for checksum-verified SQLite WAL capture,
+  replication, sparse storage, recovery, and compaction.
+
 ## 1.2.3 - 2026-09-11
 
 ### S3 And Reliability
