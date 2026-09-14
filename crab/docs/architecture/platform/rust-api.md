@@ -62,8 +62,9 @@ non-canonical bit pattern. Generic `Command`/`Query` registration uses
 monomorphized decode/execute/encode trampolines, with no raw byte-handler
 registration escape hatch. The implemented local `CellClient` covers canonical
 operation-digest integration and the actor path. Authenticated peer forwarding,
-bounded stale-owner retry, typed primitive adapters and the server composition
-root remain to implement.
+bounded stale-owner retry, Queue/Workflow primitive adapters and the server
+composition root remain to implement. Typed local SQL and KV capabilities are
+implemented.
 
 The trait is a source-level interface, not a stable ABI. Modules use normal
 Cargo dependencies and are monomorphized or privately type-erased inside the
@@ -304,13 +305,19 @@ locally or forward privately. No new public /sql, /kv or /workflow API is added.
 | WorkflowNamespace | start, signal, cancel, state | One workflow-ID shard |
 | Native activity supervisor | claim, complete, fail, extend | Published claim and completion are separate commands |
 
-Implementation status: `KvNamespace<M>` is complete for local routing. A
+Implementation status: `KvNamespace<M>` and `SqlCell<M>` are complete for local
+routing. A
 compile-time `KvModule` supplies atomic/get/list IDs and codec version;
 `register_kv` binds those typed handlers to the static registry. The capability
 hashes scope into its fixed shard, maps failed checks to durable typed rejection,
 and exposes receipted point/list reads whose TTL time is sampled by the owner.
 Its integration test covers publication, rejection rollback, list encoding and
-exact-root restore. SqlCell, QueueNamespace and WorkflowNamespace remain.
+exact-root restore. A compile-time `SqlModule` supplies batch/query IDs and
+`register_sql` binds bounded typed `SqlBatch`/`SqlResultSet` codecs. `SqlCell`
+requires an explicit SQL-role target, publishes write batches and enforces
+read-only minimum-receipt queries. Its integration test proves LTX publication,
+query mutation rejection and exact-root restore. `QueueNamespace` and
+`WorkflowNamespace` remain.
 
 WorkflowDefinition::transition(state, event, TransitionContext) -> Decision is
 synchronous; Decision/Action are native owned Rust values. Activities are

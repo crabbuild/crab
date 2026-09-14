@@ -55,8 +55,12 @@ protected trigger/view accessors, DDL, PRAGMA, transactions/savepoints,
 ATTACH/DETACH, virtual tables, ANALYZE/REINDEX, unknown operations and
 `load_extension`. `tests/sql.rs` covers typed mutation/read order, direct and
 indirect protected access, read-only enforcement, separator/parameter/input/
-row bounds and authorizer cleanup. Registry codecs and `CommandContext::sql()`
-remain to connect this helper to compiled Crab handlers.
+row bounds and authorizer cleanup. `SqlModule` supplies compile-time batch/query
+IDs and `register_sql` binds their canonical bounded codecs. `SqlCell` validates
+the registered SQL namespace and explicit target before routing, publishes
+write batches through the normal actor/LTX path and returns receipted read-only
+results. Integration coverage also proves that a published batch survives
+drain, source-local database loss and exact-root restoration on a new owner.
 
 ## Request dedup and outbox
 

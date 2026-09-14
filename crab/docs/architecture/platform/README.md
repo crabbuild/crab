@@ -51,7 +51,12 @@ lease reclamation, attempt limits and terminal cleanup. Dead-letter delivery
 still depends on the remaining effect subsystem. The application SQL boundary
 now executes typed, bounded batches, classifies statements through SQLite,
 materializes bounded results and installs a scoped native authorizer that denies
-runtime/primitive access and connection, schema or transaction control.
+runtime/primitive access and connection, schema or transaction control. Its
+typed `SqlCell` binds compile-time command/query IDs, accepts only an explicit
+Cell target with the SQL role, publishes mutations through `CellClient`, and
+returns receipted minimum-position reads. Integration coverage publishes a
+batch, rejects a mutation on the query path, removes the first owner's local
+database and verifies the same values after exact-root restoration.
 The Workflow transition core now installs the normative schema and atomically
 implements start, idempotent signal, cancellation and timer firing against a
 pinned compiled definition digest. Deterministic action IDs, bounded decisions,
@@ -85,8 +90,8 @@ validates namespace/module code/schema and incarnation before admission, maps
 typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
 publication path. Private peer routing, server composition and release inspection
-remain; KV is the first completed primitive handle, while SQL, Queue and
-Workflow adapters remain.
+remain; KV and SQL primitive handles are complete for local routing, while Queue
+and Workflow adapters remain.
 
 ## Deliverable and contract precedence
 

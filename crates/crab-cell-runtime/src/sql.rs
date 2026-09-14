@@ -7,8 +7,13 @@ use rusqlite::{
 
 use crate::{Error, Result};
 
+mod api;
+
+pub use api::{SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, register_sql};
+
 const MAX_STATEMENTS: usize = 128;
 const MAX_ROWS: usize = 1_000;
+const MAX_PARAMETERS: usize = 32_766;
 const MAX_OPERATION_BYTES: usize = 1 << 20;
 const MAX_RESULT_BYTES: usize = 1 << 20;
 
@@ -167,6 +172,11 @@ fn validate_batch(batch: &SqlBatch) -> Result<()> {
     for statement in &batch.statements {
         if statement.sql.trim().is_empty() {
             return Err(Error::Command("SQL statement cannot be empty"));
+        }
+        if statement.parameters.len() > MAX_PARAMETERS {
+            return Err(Error::Command(
+                "SQL statement exceeds SQLite variable limit",
+            ));
         }
         if has_unquoted_semicolon(&statement.sql) {
             return Err(Error::Command(

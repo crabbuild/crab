@@ -67,7 +67,10 @@ pub use registry::{
 };
 pub use scheduler::scheduler_next_due_ms;
 pub use schema::{install_runtime_schema, verify_runtime_schema};
-pub use sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue, sql_batch, sql_query_batch};
+pub use sql::{
+    SqlBatch, SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, SqlResultSet, SqlStatement,
+    SqlValue, register_sql, sql_batch, sql_query_batch,
+};
 pub use worker::{SqlWorkerPool, WorkerExecution};
 pub use workflow::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
