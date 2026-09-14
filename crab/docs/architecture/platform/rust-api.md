@@ -73,10 +73,11 @@ avoid a network hop, but cannot bypass identity, size or durability checks.
 
 The current lower-level implementation is intentionally narrower than the typed
 registry below. `CellRuntime::new` binds the node session and byte budget.
-`CellRuntime::activate` consumes an unforgeable `CatalogProof`, verifies that the
-control owner is that node session, moves a restored `CellExecutor` onto its
-stable SQL worker and returns a capability-bound `CellHandle`. Its implemented
-command entry point is:
+`CellRuntime::activate_restored` consumes an unforgeable `CatalogProof`, verifies
+that control belongs to that Cell and node session, reserves node activation,
+opens control's exact immutable root as a fresh sparse writer on its stable SQL
+worker, verifies persisted identity/schema/sequence, then returns a
+capability-bound `CellHandle`. Its implemented command entry point is:
 
 ```rust,ignore
 pub async fn execute<F>(

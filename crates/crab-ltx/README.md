@@ -118,6 +118,8 @@ The next Cell runtime uses `CellReplica`, not the standalone epoch head:
 | `prepare(base, cuts, sequence, schema).await` | Admits the complete chain, verifies native LTX/index bytes, writes content-addressed directory/descriptor/root objects and returns an unforgeable `PreparedRoot`; writes no mutable key |
 | `open_root(root).await` | Reopens the exact digest, validates canonical metadata, scope, chain and the authenticated radix root without downloading LTX bodies or every directory leaf |
 | `VerifiedRoot::paged().read_page(page).await` | Walks only the selected hash-pinned radix path, range-reads its LTX frame and verifies frame BLAKE3, decoded page number and page checksum |
+| `VerifiedRoot::paged().prepare_writable().await` | Loads authenticated directory checksums without LTX bodies and returns an exact-root writable activation value |
+| `CellWritableDatabase::open_writable(path)` | Creates a fresh sparse SQLite file, seeds exact TXID/checksum continuation and faults verified pages through the shared VFS driver |
 | `PreparedRoot::{root,predecessor,verified}` | Supplies the exact publication proposal and predecessor proof without exposing an unchecked constructor |
 
 `crab-cell-runtime::Control::publish_prepared` verifies Cell/incarnation, schema
@@ -132,10 +134,11 @@ compact v1 and references at most 64 pages of 96 segment descriptors. Its binary
 `CRBDIR01` radix tree has 256-entry leaves/branches, hashes every node and binds
 the live-page count and rolling SQLite checksum. Cold open reads bounded root
 metadata and one directory root; page bodies and descendant directory nodes fault
-on demand. Preparation still rebuilds the locator set from every historical
-index, and no shared directory-node cache exists yet, so it is not yet the
-streaming 5 GB write path required by the platform capacity gate. Cell-root
-bundle, compaction, writable VFS and sequential restore APIs also remain.
+on demand. Writable activation currently materializes one eight-byte checksum per
+database page before opening SQLite. Preparation still rebuilds the locator set
+from every historical index, and no shared directory-node cache exists yet, so
+it is not yet the streaming 5 GB write path required by the platform capacity
+gate. Cell-root bundle, compaction and full sequential restore APIs also remain.
 
 The older `Replica` API below remains for standalone repository replication and
 its existing callers. Its mutable epoch head is not Cell ownership authority.

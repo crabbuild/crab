@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -98,13 +99,42 @@ impl SqlWorkerPool {
 
     /// Moves a newly restored/opened Cell executor onto its sole worker.
     pub async fn activate(&self, cell: CellId, executor: CellExecutor) -> Result<()> {
-        let reservation = self.reserve_cell()?;
+        let reservation = self.reserve_activation()?;
         let (reply, response) = oneshot::channel();
         self.send(
             cell,
             WorkerCommand::Activate {
                 cell,
                 executor: Box::new(executor),
+                reservation,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
+    /// Opens and verifies one exact immutable root on its assigned SQL worker.
+    pub(crate) async fn activate_restored(
+        &self,
+        cell: CellId,
+        database: crab_ltx::CellWritableDatabase,
+        destination: PathBuf,
+        incarnation: crate::IncarnationId,
+        schema: u32,
+        root: crab_ltx::RootRef,
+        reservation: CellReservation,
+    ) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::ActivateRestored {
+                cell,
+                database: Box::new(database),
+                destination,
+                incarnation,
+                schema,
+                root,
                 reservation,
                 reply,
             },
@@ -216,7 +246,7 @@ impl SqlWorkerPool {
             .map_err(|_| Error::RuntimeClosed)
     }
 
-    fn reserve_cell(&self) -> Result<CellReservation> {
+    pub(crate) fn reserve_activation(&self) -> Result<CellReservation> {
         self.inner
             .active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -253,6 +283,16 @@ enum WorkerCommand {
     Activate {
         cell: CellId,
         executor: Box<CellExecutor>,
+        reservation: CellReservation,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    ActivateRestored {
+        cell: CellId,
+        database: Box<crab_ltx::CellWritableDatabase>,
+        destination: PathBuf,
+        incarnation: crate::IncarnationId,
+        schema: u32,
+        root: crab_ltx::RootRef,
         reservation: CellReservation,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -298,7 +338,7 @@ struct ActiveCell {
     _reservation: CellReservation,
 }
 
-struct CellReservation {
+pub(crate) struct CellReservation {
     active: Arc<AtomicUsize>,
 }
 
@@ -327,6 +367,33 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                         });
                         Ok(())
                     }
+                };
+                let _ = reply.send(result);
+            }
+            WorkerCommand::ActivateRestored {
+                cell,
+                database,
+                destination,
+                incarnation,
+                schema,
+                root,
+                reservation,
+                reply,
+            } => {
+                let result = match cells.entry(cell) {
+                    std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
+                    std::collections::hash_map::Entry::Vacant(entry) => (*database)
+                        .open_writable(&destination)
+                        .map_err(Error::from)
+                        .and_then(|db| {
+                            CellExecutor::from_restored(db, cell, incarnation, schema, root)
+                        })
+                        .map(|executor| {
+                            entry.insert(ActiveCell {
+                                executor,
+                                _reservation: reservation,
+                            });
+                        }),
                 };
                 let _ = reply.send(result);
             }

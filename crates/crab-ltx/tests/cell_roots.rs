@@ -116,3 +116,89 @@ async fn root_scope_and_commit_sequence_are_fenced() {
     assert!(replica.open_root(&wrong).await.is_err());
     writer.close().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exact_cell_root_opens_sparse_writer_and_publishes_incrementally() {
+    let source = tempfile::TempDir::new().unwrap();
+    let source_path = source.path().join("source.sqlite");
+    let mut writer = ManagedDb::open(&source_path, Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL);\
+                 INSERT INTO messages(body) VALUES ('first'), ('second');\
+                 CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(2000000))",
+            )
+        })
+        .unwrap();
+    let store = Store::new(Arc::new(InMemory::new()));
+    let replica = replica(store, [8; 32], [9; 16]);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 0, 3)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+    source.close().unwrap();
+
+    let active = tempfile::TempDir::new().unwrap();
+    let writable = replica
+        .open_root(&root)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable()
+        .await
+        .unwrap();
+    let active_path = active.path().join("active.sqlite");
+    let mut writer = tokio::task::spawn_blocking(move || writable.open_writable(&active_path))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(writer.position(), root.position);
+    assert!(!writer.hydration().unwrap().unwrap().complete());
+    writer
+        .transaction(|transaction| {
+            assert_eq!(
+                transaction.query_row("SELECT count(*) FROM messages", [], |row| row
+                    .get::<_, u32>(0))?,
+                2
+            );
+            transaction.execute("INSERT INTO messages(body) VALUES ('third')", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let next = replica
+        .prepare(Some(&root), &writer.capture().unwrap(), 1, 3)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+    assert_eq!(next.commit_sequence, 1);
+
+    let replacement = tempfile::TempDir::new().unwrap();
+    let writable = replica
+        .open_root(&next)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable()
+        .await
+        .unwrap();
+    let replacement_path = replacement.path().join("replacement.sqlite");
+    let mut replacement =
+        tokio::task::spawn_blocking(move || writable.open_writable(&replacement_path))
+            .await
+            .unwrap()
+            .unwrap();
+    let count = replacement
+        .transaction(|transaction| {
+            transaction.query_row("SELECT count(*) FROM messages", [], |row| {
+                row.get::<_, u32>(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(count, 3);
+    replacement.close().unwrap();
+}

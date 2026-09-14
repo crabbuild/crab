@@ -147,6 +147,69 @@ impl CellExecutor {
         }
     }
 
+    pub(crate) fn from_restored(
+        mut db: ManagedDb,
+        cell: CellId,
+        incarnation: IncarnationId,
+        schema: u32,
+        root: crab_ltx::RootRef,
+    ) -> Result<Self> {
+        let expected_sequence = match i64::try_from(root.commit_sequence) {
+            Ok(sequence) => sequence,
+            Err(_) => {
+                let _ = db.close();
+                return Err(Error::Control("root commit sequence exceeds SQLite range"));
+            }
+        };
+        if root.cell != *cell.as_bytes()
+            || root.incarnation != *incarnation.as_bytes()
+            || db.position() != root.position
+        {
+            let _ = db.close();
+            return Err(Error::Control(
+                "restored SQLite position does not match root",
+            ));
+        }
+        let verification = db.transaction_with(|transaction| {
+            let metadata = transaction.query_row(
+                "SELECT cell_id, incarnation, commit_sequence, logical_time_ms, schema_version FROM sys_meta WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, u32>(4)?,
+                    ))
+                },
+            )?;
+            let latest_request = transaction.query_row(
+                "SELECT COALESCE(MAX(commit_sequence), 0) FROM sys_requests",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if metadata.0.as_slice() != cell.as_bytes()
+                || metadata.1.as_slice() != incarnation.as_bytes()
+                || metadata.2 != expected_sequence
+                || metadata.3 < 0
+                || metadata.4 != schema
+                || latest_request > metadata.2
+            {
+                return Err(Error::Control(
+                    "restored SQLite metadata does not match authoritative root",
+                ));
+            }
+            Ok(())
+        });
+        if let Err(error) = verification {
+            let error = transaction_error(error);
+            let _ = db.close();
+            return Err(error);
+        }
+        Ok(Self::new(db, cell, incarnation, schema))
+    }
+
     /// Executes one accepted command or returns its already published result.
     pub fn execute(
         &mut self,
@@ -272,13 +335,9 @@ impl CellExecutor {
         let transaction = match transaction {
             Ok(value) => value,
             Err(TransactionError::Operation(error)) => return Err(error),
-            Err(TransactionError::Sqlite(error)) => {
+            Err(error) => {
                 self.fenced = true;
-                return Err(error.into());
-            }
-            Err(TransactionError::Capture(error)) => {
-                self.fenced = true;
-                return Err(error.into());
+                return Err(transaction_error(error));
             }
         };
         match transaction {
@@ -370,6 +429,14 @@ impl CellExecutor {
         } else {
             crate::worker::WorkerState::Ready
         }
+    }
+}
+
+fn transaction_error(error: TransactionError<Error>) -> Error {
+    match error {
+        TransactionError::Operation(error) => error,
+        TransactionError::Sqlite(error) => error.into(),
+        TransactionError::Capture(error) => error.into(),
     }
 }
 

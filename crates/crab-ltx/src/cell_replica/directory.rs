@@ -196,6 +196,7 @@ impl Header {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct Verification<'a> {
     pub layout: &'a CellStorageLayout,
     pub cell: &'a [u8; 32],
@@ -295,6 +296,69 @@ pub(super) async fn lookup(
         expected = Some(child.aggregate);
         height = height.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
     }
+}
+
+pub(super) async fn load_checksums(
+    verification: Verification<'_>,
+    root: [u8; 32],
+    height: u32,
+) -> Result<crate::pages::PageChecksums> {
+    if height > 3 || verification.database_pages == 0 {
+        return Err(CrabError::LTXCorrupted);
+    }
+    let mut pending = vec![(root, height, None)];
+    let mut checksums = vec![0; verification.database_pages as usize];
+    let mut previous_page = 0;
+    let mut seen = 0u64;
+    while let Some((digest, remaining, expected)) = pending.pop() {
+        let bytes = read_node(&verification, digest).await?;
+        let header = Header::parse(&bytes)?;
+        if (remaining == 0) != (header.kind == 0) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        if header.kind == 0 {
+            let (aggregate, entries) = verify_leaf(
+                &bytes,
+                &header,
+                verification.page_size,
+                verification.database_pages,
+                verification.extents,
+            )?;
+            if expected.is_some_and(|value| value != aggregate) {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            for entry in entries {
+                let slot = checksums
+                    .get_mut(entry.page as usize - 1)
+                    .ok_or(CrabError::LTXCorrupted)?;
+                if entry.page <= previous_page || *slot != 0 {
+                    return Err(CrabError::LTXCorrupted);
+                }
+                *slot = entry.checksum;
+                previous_page = entry.page;
+                seen += 1;
+            }
+            continue;
+        }
+        let (aggregate, children) = verify_branch(&bytes, &header)?;
+        if expected.is_some_and(|value| value != aggregate) {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let next = remaining.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
+        pending.extend(
+            children
+                .into_iter()
+                .rev()
+                .map(|child| (child.digest, next, Some(child.aggregate))),
+        );
+    }
+    let lock = crate::ltx::lock_pgno(verification.page_size);
+    let expected =
+        u64::from(verification.database_pages) - u64::from(lock <= verification.database_pages);
+    if seen != expected {
+        return Err(CrabError::LTXCorrupted);
+    }
+    crate::pages::PageChecksums::from_dense(verification.page_size, checksums)
 }
 
 async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<Vec<u8>> {

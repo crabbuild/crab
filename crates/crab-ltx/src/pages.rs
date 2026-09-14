@@ -32,6 +32,21 @@ impl PageChecksums {
         }
         Ok(result)
     }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn from_dense(page_size: u32, pages: Vec<u64>) -> Result<Self> {
+        if !ltx::is_valid_page_size(page_size)
+            || pages.is_empty()
+            || pages.iter().enumerate().any(|(index, checksum)| {
+                let page = index as u32 + 1;
+                (*checksum == 0) != (page == ltx::lock_pgno(page_size))
+                    || (*checksum != 0 && *checksum & CHECKSUM_FLAG == 0)
+            })
+        {
+            return Err(CrabError::LTXCorrupted);
+        }
+        Ok(Self { pages })
+    }
     pub fn apply(
         &mut self,
         page_size: u32,

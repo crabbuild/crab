@@ -85,7 +85,7 @@ pub(crate) fn open(database: PagedDatabase) -> Result<PagedConnection> {
     let app = Arc::new(App {
         page_size: database.page_size(),
         count: database.page_count(),
-        io: Io::new(database)?,
+        io: Io::new(crate::paged_io::Database::Replica(database))?,
         error: std::sync::Mutex::new(None),
     });
     views()

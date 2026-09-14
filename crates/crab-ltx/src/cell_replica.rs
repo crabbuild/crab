@@ -121,6 +121,16 @@ pub struct CellPagedDatabase {
     position: Position,
 }
 
+/// Exact immutable Cell root prepared for writable sparse activation.
+///
+/// Preparation loads authenticated directory checksums, never LTX page bodies.
+/// The resulting value can cross into the Cell's assigned SQLite worker.
+#[derive(Clone)]
+pub struct CellWritableDatabase {
+    database: CellPagedDatabase,
+    checksums: crate::pages::PageChecksums,
+}
+
 impl CellPagedDatabase {
     #[must_use]
     pub fn position(&self) -> Position {
@@ -135,6 +145,28 @@ impl CellPagedDatabase {
     #[must_use]
     pub fn page_count(&self) -> u32 {
         self.database_pages
+    }
+
+    /// Loads the authenticated checksum index needed by incremental WAL capture.
+    pub async fn prepare_writable(self) -> Result<CellWritableDatabase> {
+        let checksums = directory::load_checksums(
+            directory::Verification {
+                layout: &self.replica.layout,
+                cell: &self.replica.cell,
+                incarnation: &self.replica.incarnation,
+                page_size: self.page_size,
+                database_pages: self.database_pages,
+                extents: &self.extents,
+                host: &self.replica.host,
+            },
+            self.directory_digest,
+            self.directory_height,
+        )
+        .await?;
+        Ok(CellWritableDatabase {
+            database: self,
+            checksums,
+        })
     }
 
     /// Reads one page by verifying every radix node and the selected LTX frame.
@@ -188,6 +220,53 @@ impl CellPagedDatabase {
             return Err(CrabError::ChecksumMismatch);
         }
         Ok(bytes)
+    }
+
+    async fn read_run(&self, first: u32, max_pages: u32) -> Result<Vec<(u32, Vec<u8>)>> {
+        if max_pages == 0 || first == 0 || first > self.database_pages {
+            return Ok(Vec::new());
+        }
+        // Cell directory nodes are not resident yet. Avoid multiplying metadata
+        // reads by speculative legacy prefetch until the shared node cache lands.
+        Ok(vec![(first, self.read_page(first).await?)])
+    }
+}
+
+impl CellWritableDatabase {
+    pub(crate) fn host(&self) -> Host {
+        self.database.replica.host.clone()
+    }
+
+    pub(crate) fn limits(&self) -> Limits {
+        self.database.replica.limits
+    }
+
+    pub(crate) fn checksums(&self) -> crate::pages::PageChecksums {
+        self.checksums.clone()
+    }
+
+    #[must_use]
+    pub fn position(&self) -> Position {
+        self.database.position()
+    }
+
+    #[must_use]
+    pub fn page_size(&self) -> u32 {
+        self.database.page_size()
+    }
+
+    #[must_use]
+    pub fn page_count(&self) -> u32 {
+        self.database.page_count()
+    }
+
+    pub(crate) async fn read_run(&self, first: u32, max_pages: u32) -> Result<Vec<(u32, Vec<u8>)>> {
+        self.database.read_run(first, max_pages).await
+    }
+
+    /// Opens a fresh sparse SQLite file pinned to this exact Cell root.
+    pub fn open_writable(self, destination: &std::path::Path) -> Result<crate::ManagedDb> {
+        crate::ManagedDb::open_cell_paged(self, destination)
     }
 }
 

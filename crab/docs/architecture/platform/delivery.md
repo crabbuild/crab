@@ -9,14 +9,14 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Trusted synchronous SQL callback; separate capture; local-only commit | Typed operation errors, restricted application/read callbacks and actor-owned cut transfer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell/incarnation-scoped roots; cold open and page reads traverse exact digest-pinned radix paths without a mutable head | Add prepared compaction/bundles, writable SQLite activation, shared node cache and streaming directory updates |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell roots; cold reads and sparse writable activation use exact digest-pinned radix paths without a mutable head | Add prepared compaction/bundles, shared node cache and streaming directory/checksum updates |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, fixed SQL workers, node/per-Cell mailbox admission, FIFO publication, transient retry, unknown outcomes and drain | Add exact-root activation, deadline/read/recovery supervision, later-root resolution and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, exact-root sparse activation, fixed SQL workers, bounded FIFO publication, retry, unknown outcomes and drain | Add deadline/read/recovery supervision, later-root resolution and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -31,8 +31,9 @@ canonical root/descriptor codecs, immutable dependency upload and the persistent
 radix directory format. `Control::publish_prepared` binds that checked proposal
 to exactly one Cell/incarnation/predecessor before the authority CAS. Complete
 this package by sharing the preparation path with bundles and compaction, making
-directory updates streaming, adding the shared node cache, and wiring exact
-Cell-root sequential restore/writable activation.
+directory/checksum updates streaming and adding the shared node cache. Exact
+Cell roots now load authenticated directory checksums without LTX bodies and
+open a sparse writable continuation through the existing VFS.
 Existing standalone `Replica` callers retain their current API; Cell runtime
 code must not call its mutable epoch head.
 
@@ -46,6 +47,9 @@ Current local coverage is in `crates/crab-ltx/tests/cell_roots.rs` and
 - `root_rejects_other_cell_or_incarnation`: reuse a valid digest in another scope.
 - `snapshot_transfers_all_pending_cuts`: interleave transaction/checkpoint/snapshot;
   verify no local committed cut disappears from the caller-owned batch.
+
+`exact_cell_root_opens_sparse_writer_and_publishes_incrementally` currently
+proves local source deletion, exact sparse activation and successor publication.
 
 Exit: default/replica builds and existing tests pass, plus live source-loss test.
 
@@ -65,9 +69,12 @@ single-flight FIFO publication, 100/200/400/1,000-ms storage retry, structured
 unknown outcomes and accepted-work drain without a permanent task per Cell.
 Immutable catalog pages, CAS heads, concurrent merge, collision rejection,
 proof-before-control creation and local-session activation checks are implemented.
-Complete exact-root restore activation, deadlines/SQLite interruption, read jobs, later-root
-request resolution, fenced takeover recovery, and panic supervision. All
-transitions use the existing Store conditional primitives, preserving sources.
+Exact-root restore now reserves active-Cell admission before I/O, prepares the
+authenticated checksum index, opens SQLite on the assigned worker, verifies
+`sys_meta` against control/root, and reloads authority before serving. Complete
+deadlines/SQLite interruption, read jobs, later-root request resolution, fenced
+takeover recovery, and panic supervision. All transitions use the existing Store
+conditional primitives, preserving sources.
 
 Add `crates/crab-cell-runtime/tests/publication.rs`:
 
@@ -106,6 +113,9 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
   proves the opposite boundary carries the original identity and digest.
 - `proven_handler_rollback_keeps_the_cell_servable` proves application errors do
   not inherit infrastructure fencing.
+- `source_loss_takeover_restores_exact_root_and_continues_publication` deletes
+  bootstrap and first-owner local state, changes owner session, restores from the
+  published root and advances the command sequence again.
 
 `publication_rebases_over_a_pure_lease_renewal_without_sql_replay` covers the
 coordinator's latest-token retry path.

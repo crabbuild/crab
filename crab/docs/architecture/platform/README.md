@@ -12,11 +12,13 @@ dispatcher now combines the fixed SQL workers with per-Cell request/byte
 mailboxes, node byte admission, FIFO single-flight publication, cancellation-safe
 accepted work, bounded retry backoff, structured unknown outcomes and drain.
 Catalog immutable pages/CAS heads and proof-before-control activation are now
-implemented. Exact-root restore activation, deadlines/watchdogs, later-root
-request resolution, fenced recovery, reads, directory-backed writable SQLite,
-streaming directory updates,
-prepared compaction/bundles, primitives, HTTP cutover and capacity qualification
-remain incomplete.
+implemented. Exact authoritative roots now prepare an authenticated checksum
+index, open a fresh sparse writable SQLite file on the assigned SQL worker,
+verify persisted identity/position/schema/sequence, and continue publication
+after complete local source loss and a new owner session. Deadlines/watchdogs,
+later-root request resolution, fenced recovery, reads, streaming directory and
+checksum updates, prepared compaction/bundles, primitives, HTTP cutover and
+capacity qualification remain incomplete.
 
 ## Deliverable and contract precedence
 

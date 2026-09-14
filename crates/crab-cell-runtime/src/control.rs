@@ -150,6 +150,22 @@ impl Control {
             .map(|root| root.to_ltx(self.cell, self.incarnation))
     }
 
+    pub(crate) fn is_same_or_pure_renewal_of(&self, previous: &Self) -> bool {
+        let revisions = self.revision.checked_sub(previous.revision);
+        let progress = self.progress.checked_sub(previous.progress);
+        revisions.is_some()
+            && revisions == progress
+            && previous.cell == self.cell
+            && previous.incarnation == self.incarnation
+            && previous.epoch == self.epoch
+            && previous.state == self.state
+            && previous.owner == self.owner
+            && previous.root == self.root
+            && previous.code == self.code
+            && previous.schema == self.schema
+            && previous.next_due_ms == self.next_due_ms
+    }
+
     /// Builds the sole valid publication successor for an uploaded root proposal.
     pub fn publish_prepared(
         &self,
@@ -505,6 +521,11 @@ mod tests {
         serving
             .validate_transition(&renewed, Transition::Renew)
             .unwrap();
+        assert!(serving.is_same_or_pure_renewal_of(&serving));
+        assert!(renewed.is_same_or_pure_renewal_of(&serving));
+        let mut skipped_progress = renewed.clone();
+        skipped_progress.revision += 1;
+        assert!(!skipped_progress.is_same_or_pure_renewal_of(&serving));
 
         let mut takeover = renewed.clone();
         takeover.state = ControlState::Recovering;

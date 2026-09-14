@@ -31,6 +31,19 @@ pub struct ManagedDb {
 impl ManagedDb {
     #[cfg(feature = "replica")]
     pub(crate) fn open_paged(database: crate::PagedDatabase, destination: &Path) -> Result<Self> {
+        Self::open_sparse(crate::paged_io::Database::Replica(database), destination)
+    }
+
+    #[cfg(feature = "replica")]
+    pub(crate) fn open_cell_paged(
+        database: crate::CellWritableDatabase,
+        destination: &Path,
+    ) -> Result<Self> {
+        Self::open_sparse(crate::paged_io::Database::Cell(database), destination)
+    }
+
+    #[cfg(feature = "replica")]
+    fn open_sparse(database: crate::paged_io::Database, destination: &Path) -> Result<Self> {
         let limits = database.limits();
         let position = database.position();
         let page_size = database.page_size();

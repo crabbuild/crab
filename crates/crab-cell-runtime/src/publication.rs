@@ -95,7 +95,9 @@ impl CellPublisher {
                         self.observed = current;
                         return Ok(prepared.root());
                     }
-                    if retryable_after_renewal(self.observed.value(), current.value())
+                    if current
+                        .value()
+                        .is_same_or_pure_renewal_of(self.observed.value())
                         && retryable_publication_error(&error)
                     {
                         self.observed = current;
@@ -103,7 +105,10 @@ impl CellPublisher {
                         continue;
                     }
                     return Err(
-                        if retryable_after_renewal(self.observed.value(), current.value()) {
+                        if current
+                            .value()
+                            .is_same_or_pure_renewal_of(self.observed.value())
+                        {
                             error
                         } else {
                             Error::Fenced
@@ -197,19 +202,4 @@ impl PublicationBackoff {
         tokio::time::sleep(minimum.map_or(delay, |minimum| minimum.max(delay))).await;
         self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
     }
-}
-
-fn retryable_after_renewal(previous: &crate::Control, current: &crate::Control) -> bool {
-    previous == current
-        || (previous.cell == current.cell
-            && previous.incarnation == current.incarnation
-            && previous.epoch == current.epoch
-            && previous.state == current.state
-            && previous.owner == current.owner
-            && previous.root == current.root
-            && previous.code == current.code
-            && previous.schema == current.schema
-            && previous.next_due_ms == current.next_due_ms
-            && current.revision > previous.revision
-            && current.progress > previous.progress)
 }

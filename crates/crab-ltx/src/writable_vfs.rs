@@ -1,7 +1,7 @@
 //! Writable sparse-file adaptation of Celld paged_vfs.rs; see UPSTREAM.md.
 //! A static VFS and per-open Arc ownership keep SQLite discovery memory-safe.
 
-use crate::{CrabError, PagedDatabase, Result, paged_io::Io};
+use crate::{CrabError, Result, paged_io::Io};
 use rusqlite::{Connection, ffi};
 use std::{
     collections::HashMap,
@@ -53,7 +53,7 @@ pub(crate) struct Registration {
 }
 
 impl Registration {
-    pub(crate) fn new(database: PagedDatabase, path: &Path) -> Result<Self> {
+    pub(crate) fn new(database: crate::paged_io::Database, path: &Path) -> Result<Self> {
         let host = database.host();
         let vfs = register_for(host.sqlite_vfs.as_deref())?;
         let parent = path

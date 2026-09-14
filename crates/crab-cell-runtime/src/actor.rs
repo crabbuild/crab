@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -14,7 +15,7 @@ use tokio::{
 use crate::{
     CatalogProof, CellAuthority, CellExecutor, CellId, CellPublisher, Digest, Error,
     MutationIdentity, SessionId, SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
-    worker::{Handler, WorkerState},
+    worker::{CellReservation, Handler, WorkerState},
 };
 
 const INGRESS_REQUESTS: usize = 1_024;
@@ -42,6 +43,7 @@ struct RuntimeInner {
     sender: mpsc::Sender<Message>,
     node_bytes: Arc<Semaphore>,
     session: SessionId,
+    pool: SqlWorkerPool,
 }
 
 struct CellAdmission {
@@ -63,12 +65,13 @@ impl CellRuntime {
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(Error::RuntimeStart)?;
         let (sender, receiver) = mpsc::channel(INGRESS_REQUESTS);
-        runtime.spawn(run(receiver, pool));
+        runtime.spawn(run(receiver, pool.clone()));
         Ok(Self {
             inner: Arc::new(RuntimeInner {
                 sender,
                 node_bytes: Arc::new(Semaphore::new(node_mailbox_bytes)),
                 session,
+                pool,
             }),
         })
     }
@@ -82,6 +85,66 @@ impl CellRuntime {
         authority: CellAuthority,
         observed: VersionedControl,
     ) -> crate::Result<CellHandle> {
+        self.activate_inner(
+            catalog,
+            Activation::Opened(Box::new(executor)),
+            replica,
+            authority,
+            observed,
+        )
+        .await
+    }
+
+    /// Cold-opens the exact authoritative root on the Cell's SQL worker.
+    pub async fn activate_restored(
+        &self,
+        catalog: CatalogProof,
+        replica: crab_ltx::CellReplica,
+        authority: CellAuthority,
+        observed: VersionedControl,
+        destination: PathBuf,
+    ) -> crate::Result<CellHandle> {
+        let cell = self.activation_cell(&catalog, &observed)?;
+        let reservation = self.inner.pool.reserve_activation()?;
+        let control = observed.value();
+        let root = control
+            .ltx_root()
+            .ok_or(Error::Control("activation requires a published root"))?;
+        let incarnation = control.incarnation;
+        let schema = control.schema;
+        let verified = replica.open_root(&root).await?;
+        if verified.schema() != schema {
+            return Err(Error::Control(
+                "immutable root schema does not match control",
+            ));
+        }
+        let database = verified.paged().prepare_writable().await?;
+        let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
+        if !current.value().is_same_or_pure_renewal_of(observed.value()) {
+            return Err(Error::Fenced);
+        }
+        self.activate_inner(
+            catalog,
+            Activation::Restored(Box::new(RestoredActivation {
+                database,
+                destination,
+                incarnation,
+                schema,
+                root,
+                reservation,
+            })),
+            replica,
+            authority,
+            current,
+        )
+        .await
+    }
+
+    fn activation_cell(
+        &self,
+        catalog: &CatalogProof,
+        observed: &VersionedControl,
+    ) -> crate::Result<CellId> {
         let cell = catalog.entry().cell();
         if observed.value().cell != cell {
             return Err(Error::Control("activation control changed Cell"));
@@ -94,12 +157,24 @@ impl CellRuntime {
         {
             return Err(Error::Fenced);
         }
+        Ok(cell)
+    }
+
+    async fn activate_inner(
+        &self,
+        catalog: CatalogProof,
+        activation: Activation,
+        replica: crab_ltx::CellReplica,
+        authority: CellAuthority,
+        observed: VersionedControl,
+    ) -> crate::Result<CellHandle> {
+        let cell = self.activation_cell(&catalog, &observed)?;
         let (reply, response) = oneshot::channel();
         self.inner
             .sender
             .send(Message::Activate {
                 cell,
-                executor: Box::new(executor),
+                activation,
                 publisher: Box::new(CellPublisher::new(replica, authority, observed)),
                 reply,
             })
@@ -113,6 +188,20 @@ impl CellRuntime {
             admission,
         })
     }
+}
+
+enum Activation {
+    Opened(Box<CellExecutor>),
+    Restored(Box<RestoredActivation>),
+}
+
+struct RestoredActivation {
+    database: crab_ltx::CellWritableDatabase,
+    destination: PathBuf,
+    incarnation: crate::IncarnationId,
+    schema: u32,
+    root: crab_ltx::RootRef,
+    reservation: CellReservation,
 }
 
 impl CellHandle {
@@ -250,7 +339,7 @@ fn admission_error(error: TryAcquireError, resource: &'static str) -> Error {
 enum Message {
     Activate {
         cell: CellId,
-        executor: Box<CellExecutor>,
+        activation: Activation,
         publisher: Box<CellPublisher>,
         reply: oneshot::Sender<crate::Result<Arc<CellAdmission>>>,
     },
@@ -351,7 +440,7 @@ fn handle_message(
     match message {
         Message::Activate {
             cell,
-            executor,
+            activation,
             publisher,
             reply,
         } => {
@@ -367,12 +456,35 @@ fn handle_message(
             });
             let pool = pool.clone();
             tasks.spawn(async move {
+                let result = match activation {
+                    Activation::Opened(executor) => pool.activate(cell, *executor).await,
+                    Activation::Restored(activation) => {
+                        let RestoredActivation {
+                            database,
+                            destination,
+                            incarnation,
+                            schema,
+                            root,
+                            reservation,
+                        } = *activation;
+                        pool.activate_restored(
+                            cell,
+                            database,
+                            destination,
+                            incarnation,
+                            schema,
+                            root,
+                            reservation,
+                        )
+                        .await
+                    }
+                };
                 TaskResult::Activated {
                     cell,
                     publisher,
                     admission,
                     reply,
-                    result: pool.activate(cell, *executor).await,
+                    result,
                 }
             });
         }
