@@ -36,6 +36,15 @@ pub enum WriteError {
         source: Box<crab_storage::StorageError>,
         verification: Option<Box<WriteError>>,
     },
+    #[error(
+        "request-minimal checkpoint {checkpoint_hash} may have committed; reconcile exact root evidence before retrying"
+    )]
+    RequestMinimalCheckpointCommitUncertain {
+        checkpoint_hash: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        verification: Option<Box<WriteError>>,
+    },
     #[error("publication coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("publication storage operation failed")]

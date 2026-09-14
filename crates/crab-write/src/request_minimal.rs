@@ -1,8 +1,8 @@
 //! Request-minimal publication through one immutable capsule and one mutable root.
 
 use crab_metadata::request_minimal::{
-    Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, RepositoryRoot, RootRecord,
-    create_root, load_root,
+    Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, Checkpoint, CheckpointPointer,
+    RepositoryRoot, RootRecord, create_root, load_root,
 };
 use crab_storage::{StorageError, Store, StoreLayout};
 
@@ -121,6 +121,64 @@ pub async fn publish(
     }
 }
 
+/// Publish a complete checkpoint and atomically replace the covered root's frontier.
+pub async fn publish_checkpoint(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    checkpoint: &Checkpoint,
+) -> Result<RootSnapshot> {
+    if checkpoint.covered_generation() != base.record().root().generation()
+        || checkpoint.covered_root_digest() != base.record().digest()
+    {
+        return Err(WriteError::CorruptObject {
+            path: "request-minimal checkpoint".to_owned(),
+            reason: "checkpoint does not cover the exact CAS base".to_owned(),
+        });
+    }
+    let object_count = checkpoint
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| {
+            total.checked_add(pack.object_count()).ok_or_else(|| {
+                WriteError::Internal("checkpoint object count overflowed".to_owned())
+            })
+        })?;
+    let pack_count = u32::try_from(checkpoint.git_packs().len())
+        .map_err(|_| WriteError::Internal("checkpoint pack count overflowed".to_owned()))?;
+    let path = router.request_minimal_checkpoint_path(checkpoint.hash());
+    router
+        .store()
+        .put_if_absent_verified(&path, checkpoint.bytes().clone())
+        .await?;
+    let pointer = CheckpointPointer::new(
+        checkpoint.hash(),
+        checkpoint.bytes().len() as u64,
+        checkpoint.covered_generation(),
+        checkpoint.covered_root_digest(),
+        pack_count,
+        object_count,
+    )?;
+    let next = base
+        .record()
+        .root()
+        .install_checkpoint(base.record().digest(), pointer)?;
+    let candidate = RootRecord::encode(next)?;
+    let root_path = router.request_minimal_root_path();
+    match router
+        .store()
+        .update(&root_path, candidate.bytes().clone(), base.etag().clone())
+        .await
+    {
+        Ok(etag) => Ok(base.committed_checkpoint(candidate, etag)?),
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::RequestMinimalRootChanged {
+            path: root_path.to_string(),
+        }),
+        Err(source) => {
+            reconcile_checkpoint_update(router, base.record(), candidate, checkpoint, source).await
+        }
+    }
+}
+
 async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
     let path = router.request_minimal_capsule_path(pointer.hash());
     let (bytes, _) = router
@@ -226,6 +284,30 @@ async fn reconcile_root_update(
         }),
         Err(verification) => Err(WriteError::RequestMinimalCommitUncertain {
             transaction_id: transaction.id()?,
+            source: Box::new(source),
+            verification: Some(Box::new(verification)),
+        }),
+    }
+}
+
+async fn reconcile_checkpoint_update(
+    router: &StoreLayout<Store>,
+    base: &RootRecord,
+    candidate: RootRecord,
+    checkpoint: &Checkpoint,
+    source: StorageError,
+) -> Result<RootSnapshot> {
+    let verification = open_root(router).await;
+    match verification {
+        Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
+        Ok(snapshot) if snapshot.record().digest() == base.digest() => Err(source.into()),
+        Ok(_) => Err(WriteError::RequestMinimalCheckpointCommitUncertain {
+            checkpoint_hash: checkpoint.hash().to_owned(),
+            source: Box::new(source),
+            verification: None,
+        }),
+        Err(verification) => Err(WriteError::RequestMinimalCheckpointCommitUncertain {
+            checkpoint_hash: checkpoint.hash().to_owned(),
             source: Box::new(source),
             verification: Some(Box::new(verification)),
         }),

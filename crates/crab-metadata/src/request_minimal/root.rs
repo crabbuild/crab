@@ -4,7 +4,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MetadataError, Result};
-use crate::request_minimal::CapsuleSectionLocation;
 use crate::validation::{validate_content_hash, validate_sha1};
 
 const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
@@ -98,8 +97,7 @@ pub struct CheckpointPointer {
     size: u64,
     covered_generation: u64,
     covered_root_digest: String,
-    git_pack: CapsuleSectionLocation,
-    git_checksum: String,
+    pack_count: u32,
     object_count: u64,
 }
 
@@ -110,8 +108,7 @@ impl CheckpointPointer {
         size: u64,
         covered_generation: u64,
         covered_root_digest: impl Into<String>,
-        git_pack: CapsuleSectionLocation,
-        git_checksum: impl Into<String>,
+        pack_count: u32,
         object_count: u64,
     ) -> Result<Self> {
         let pointer = Self {
@@ -119,8 +116,7 @@ impl CheckpointPointer {
             size,
             covered_generation,
             covered_root_digest: covered_root_digest.into(),
-            git_pack,
-            git_checksum: git_checksum.into(),
+            pack_count,
             object_count,
         };
         validate_checkpoint_pointer(&pointer)?;
@@ -151,16 +147,10 @@ impl CheckpointPointer {
         &self.covered_root_digest
     }
 
-    /// Return the range containing the checkpoint's complete Git pack.
+    /// Return the number of independently usable Git packs.
     #[must_use]
-    pub fn git_pack(&self) -> &CapsuleSectionLocation {
-        &self.git_pack
-    }
-
-    /// Return the Git pack trailer checksum.
-    #[must_use]
-    pub fn git_checksum(&self) -> &str {
-        &self.git_checksum
+    pub fn pack_count(&self) -> u32 {
+        self.pack_count
     }
 
     /// Return the number of Git objects in the complete checkpoint pack.
@@ -510,27 +500,7 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
         "root checkpoint covered digest",
         "request-minimal root",
     )?;
-    validate_content_hash(
-        pointer.git_pack.blake3(),
-        "root checkpoint pack hash",
-        "request-minimal root",
-    )?;
-    validate_sha1(
-        &pointer.git_checksum,
-        "root checkpoint Git checksum",
-        "request-minimal root",
-    )?;
-    let pack_end = pointer
-        .git_pack
-        .offset()
-        .checked_add(pointer.git_pack.length())
-        .ok_or_else(|| contract_error("checkpoint Git pack range overflowed"))?;
-    if pointer.size == 0
-        || pointer.object_count == 0
-        || pointer.git_pack.kind() != crate::request_minimal::CapsuleSectionKind::GitPack
-        || pointer.git_pack.length() == 0
-        || pack_end > pointer.size
-    {
+    if pointer.size == 0 || pointer.pack_count == 0 || pointer.object_count == 0 {
         return Err(contract_error("checkpoint descriptor is out of bounds"));
     }
     Ok(())
@@ -666,7 +636,6 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
-    use crate::request_minimal::{Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction};
 
     #[test]
     fn root_round_trip_preserves_digest_and_generation() {
@@ -756,42 +725,12 @@ mod tests {
         for generation in 0..10 {
             record = advance_with_synthetic_run(&record, generation).unwrap();
         }
-        let checkpoint_transaction = CapsuleTransaction::new(
-            record.digest(),
-            vec![CapsuleRefEdit::new(
-                "refs/heads/checkpoint-evidence",
-                None,
-                Some("a".repeat(40)),
-                None,
-            )],
-        )
-        .unwrap();
-        let checkpoint = Capsule::build(
-            &checkpoint_transaction,
-            vec![
-                CapsuleGitPack::new(
-                    Bytes::from_static(b"PACK checkpoint"),
-                    Bytes::from_static(b"index"),
-                    Bytes::from_static(b"reverse"),
-                    Bytes::from_static(b"locator"),
-                    "b".repeat(40),
-                    1,
-                )
-                .unwrap(),
-            ],
-            Vec::new(),
-        )
-        .unwrap();
-        let pack = checkpoint.sections()
-            [usize::try_from(checkpoint.git_packs()[0].pack_section()).unwrap()]
-        .clone();
         let pointer = CheckpointPointer::new(
-            checkpoint.hash(),
-            checkpoint.bytes().len() as u64,
+            "b".repeat(64),
+            100,
             record.root().generation(),
             record.digest(),
-            pack,
-            "b".repeat(40),
+            1,
             1,
         )
         .unwrap();

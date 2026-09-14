@@ -45,12 +45,12 @@ pub struct CapsuleSection {
 /// One locally prepared Git pack and all evidence required to read it safely.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapsuleGitPack {
-    pack: Bytes,
-    index: Bytes,
-    reverse_index: Bytes,
-    locator: Bytes,
-    git_checksum: String,
-    object_count: u64,
+    pub(crate) pack: Bytes,
+    pub(crate) index: Bytes,
+    pub(crate) reverse_index: Bytes,
+    pub(crate) locator: Bytes,
+    pub(crate) git_checksum: String,
+    pub(crate) object_count: u64,
 }
 
 impl CapsuleGitPack {
@@ -74,18 +74,24 @@ impl CapsuleGitPack {
         validate_git_pack_input(&pack)?;
         Ok(pack)
     }
+
+    /// Return the complete Git packfile byte length.
+    #[must_use]
+    pub fn pack_size(&self) -> u64 {
+        self.pack.len() as u64
+    }
 }
 
 /// Authenticated section bindings and Git identity for one capsule pack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapsuleGitPackDescriptor {
-    pack_section: u32,
-    index_section: u32,
-    reverse_index_section: u32,
-    locator_section: u32,
-    git_checksum: String,
-    object_count: u64,
+    pub(crate) pack_section: u32,
+    pub(crate) index_section: u32,
+    pub(crate) reverse_index_section: u32,
+    pub(crate) locator_section: u32,
+    pub(crate) git_checksum: String,
+    pub(crate) object_count: u64,
 }
 
 impl CapsuleGitPackDescriptor {
@@ -138,10 +144,10 @@ impl CapsuleSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapsuleSectionLocation {
-    kind: CapsuleSectionKind,
-    offset: u64,
-    length: u64,
-    blake3: String,
+    pub(crate) kind: CapsuleSectionKind,
+    pub(crate) offset: u64,
+    pub(crate) length: u64,
+    pub(crate) blake3: String,
 }
 
 impl CapsuleSectionLocation {

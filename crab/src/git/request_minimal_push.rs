@@ -301,6 +301,41 @@ async fn prepare_git_packs(
         },
     )
     .await?;
+    prepare_generated_git_packs(git_dir, generated, max_input_size).await
+}
+
+pub(crate) async fn prepare_complete_git_packs(
+    git_dir: &Path,
+    refs: &BTreeMap<String, String>,
+    max_input_size: u64,
+) -> Result<Vec<crab_metadata::request_minimal::CapsuleGitPack>> {
+    let updates = refs
+        .iter()
+        .map(|(name, oid)| RefUpdate {
+            ref_name: name.clone(),
+            old_sha: None,
+            new_sha: oid.clone(),
+            force: false,
+        })
+        .collect::<Vec<_>>();
+    let generated = generate_push_pack_files_with_exclusions(
+        &updates,
+        None,
+        &PushPackConfig {
+            thin_packs: false,
+            max_input_size,
+            git_dir: Some(git_dir.to_owned()),
+        },
+    )
+    .await?;
+    prepare_generated_git_packs(git_dir, generated, max_input_size).await
+}
+
+async fn prepare_generated_git_packs(
+    git_dir: &Path,
+    generated: Vec<crate::git::pack::PackedFileData>,
+    max_input_size: u64,
+) -> Result<Vec<crab_metadata::request_minimal::CapsuleGitPack>> {
     let evidence_dir = tempfile::Builder::new()
         .prefix(".crab-v2-push-evidence-")
         .tempdir_in(git_dir.join("objects"))?;
@@ -604,6 +639,76 @@ mod tests {
         assert_eq!(
             committed.record().root().capsule_frontier()[0].capsule_count(),
             2
+        );
+
+        let repack_workspace = tempfile::tempdir().expect("repack workspace");
+        let before_repack = observer.count();
+        let repack = crate::cmd::repack::run_repack(
+            &store,
+            "repos/test",
+            &crate::cmd::repack::RepackConfig {
+                workspace_root: repack_workspace.path().to_owned(),
+                ..crate::cmd::repack::RepackConfig::default()
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("checkpoint repack");
+        assert_eq!(repack.packs_before, 2);
+        assert_eq!(repack.packs_after, 1);
+        assert_eq!(observer.count() - before_repack, 5);
+        let checkpoint_root = crab_write::request_minimal::open_root(&layout)
+            .await
+            .expect("checkpoint root");
+        assert!(checkpoint_root.record().root().checkpoint().is_some());
+        assert!(
+            checkpoint_root
+                .record()
+                .root()
+                .capsule_frontier()
+                .is_empty()
+        );
+
+        let third = commit(source.path(), "third");
+        config
+            .expected_refs
+            .insert("refs/heads/main".to_owned(), Some(second.clone()));
+        let (result, _) = run(
+            &config,
+            &[PushSpec {
+                force: false,
+                src: "refs/heads/main".to_owned(),
+                dst: "refs/heads/main".to_owned(),
+            }],
+            &store,
+            &router,
+            Some(checkpoint_root),
+            &[],
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("post-checkpoint push");
+        assert!(result.all_ok());
+
+        let fresh = tempfile::tempdir().expect("fresh clone target");
+        git(fresh.path(), &["init", "--bare"]);
+        let view = crab_read::request_minimal::open_view(
+            &layout,
+            crab_read::request_minimal::RequestMinimalReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("open checkpoint and delta");
+        assert!(view.checkpoint().is_some());
+        assert_eq!(view.capsules().len(), 1);
+        crab_read::request_minimal::install_git_packs(&view, fresh.path(), 16 * 1024 * 1024)
+            .await
+            .expect("install checkpoint and delta");
+        git(
+            fresh.path(),
+            &["cat-file", "-e", &format!("{third}^{{commit}}")],
         );
     }
 }
