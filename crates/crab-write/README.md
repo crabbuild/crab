@@ -114,12 +114,20 @@ even before generation compaction. The function preserves exact new OIDs, tag
 peeling, HEAD changes, uploaded pack/shard references and visibility evidence.
 
 `journal::commit_existing_ref_edit` is the bounded fast path for a caller that
-retains one existing ref's exact visible transaction together with its old OID.
-While holding that ref's lease, it verifies the small mutable head and immutable
-parent transaction before publishing the update, so its work is independent of
-repository pack count. A mismatch returns `RefChanged`. Ref creation, deletion,
-multi-ref publication and namespace changes must use `commit_edits` with a full
-coherent snapshot.
+retains one journal-backed existing ref's exact visible transaction together
+with its old OID. While holding that ref's lease, it verifies the small mutable
+head and immutable parent transaction before publishing the update, so its work
+is independent of repository pack count. A mismatch returns `RefChanged`. Ref
+creation, deletion, multi-ref publication and namespace changes must use
+`commit_edits` with a full coherent snapshot.
+
+Latency-sensitive callers can instead retain the opaque state returned by
+`capture_existing_ref_commit_base` and pass it to
+`commit_captured_existing_ref_edit`. The caller-owned ref lease allows the ref
+head and compacted manifest to be captured concurrently, so both manifest-only
+and journal-backed existing refs use the bounded path. The final conditional
+head write validates that capture without rereading it; the same ref lease must
+span both calls.
 
 Creations and deletions additionally hold the renewable `git-ref-namespace`
 internal lease, reread the coherent repository snapshot, and validate the final

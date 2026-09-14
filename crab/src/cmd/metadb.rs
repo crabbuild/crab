@@ -438,8 +438,9 @@ const GENERATION_OWNER_STABLE_REVALIDATION: std::time::Duration =
 fn generation_owner_repack_has_priority(
     geometric_repack_packs: u64,
     catalog_current: bool,
+    visibility_current: bool,
 ) -> bool {
-    geometric_repack_packs > 0 && catalog_current
+    geometric_repack_packs > 0 && catalog_current && visibility_current
 }
 
 fn generation_owner_quiescence(interval_secs: u64) -> std::time::Duration {
@@ -719,24 +720,29 @@ async fn generation_owner_sample(
             .unwrap_or(u64::MAX);
     let anchor = crab_write::generation::committed_manifest_anchor(&manifest)?;
     let catalog_current = object_catalog_covers_anchor(store, router, anchor).await?;
-    let deferred_repack =
-        if generation_owner_repack_has_priority(geometric_repack_packs, catalog_current) {
-            let repack =
-                run_generation_owner_repack(store, router, lock_ttl, config, cancel).await?;
-            if repack.superseded {
-                return Ok(repack_owner_sample(
-                    &manifest,
-                    &packs,
-                    geometric_repack_packs,
-                    repack,
-                    interval_secs,
-                    started,
-                ));
-            }
-            Some(repack)
-        } else {
-            None
-        };
+    let visibility_current = manifest.refs.is_empty()
+        || crate::git::push::git_visibility_index_exists_for_manifest(store, router, &manifest)
+            .await?;
+    let deferred_repack = if generation_owner_repack_has_priority(
+        geometric_repack_packs,
+        catalog_current,
+        visibility_current,
+    ) {
+        let repack = run_generation_owner_repack(store, router, lock_ttl, config, cancel).await?;
+        if repack.superseded {
+            return Ok(repack_owner_sample(
+                &manifest,
+                &packs,
+                geometric_repack_packs,
+                repack,
+                interval_secs,
+                started,
+            ));
+        }
+        Some(repack)
+    } else {
+        None
+    };
     let maintenance = maintain_object_catalog(store, router, &manifest, &packs, lock_ttl, cancel)
         .await
         .map_err(|error| {
@@ -804,9 +810,6 @@ async fn generation_owner_sample(
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         });
     }
-    let visibility_current = manifest.refs.is_empty()
-        || crate::git::push::git_visibility_index_exists_for_manifest(store, router, &manifest)
-            .await?;
     let visibility = Box::pin(
         crate::git::push::repair_git_visibility_after_locator_if_current_with_limit(
             store,
@@ -4110,9 +4113,10 @@ mod tests {
 
     #[test]
     fn generation_owner_prioritizes_repack_only_after_catalog_catch_up() {
-        assert!(generation_owner_repack_has_priority(1, true));
-        assert!(!generation_owner_repack_has_priority(1, false));
-        assert!(!generation_owner_repack_has_priority(0, true));
+        assert!(generation_owner_repack_has_priority(1, true, true));
+        assert!(!generation_owner_repack_has_priority(1, false, true));
+        assert!(!generation_owner_repack_has_priority(0, true, true));
+        assert!(!generation_owner_repack_has_priority(1, true, false));
     }
 
     #[test]

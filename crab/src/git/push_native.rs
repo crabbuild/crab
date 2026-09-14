@@ -19,8 +19,9 @@ use crate::core::perf_phase::PerfPhaseSink;
 use crate::git::discover;
 use crate::git::progress::NativePushProgress;
 use crate::git::push::{
-    LockedPushHandoff, PrePopulatedWalk, PushConfig, PushFailureStage, PushLockLease, PushResult,
-    acquire_push_lock_leases, duplicate_destination_result, release_push_lock_leases,
+    ExistingRefPushBase, LockedPushHandoff, PrePopulatedWalk, PushConfig, PushFailureStage,
+    PushLockLease, PushResult, acquire_push_lock_leases, acquire_push_lock_leases_while,
+    duplicate_destination_result, read_existing_ref_push_base, release_push_lock_leases,
     run_push_batch_with_locks,
 };
 use crate::git::push_staging::PushStaging;
@@ -365,25 +366,109 @@ async fn run_native_push_inner(
     // ── Phase 1: Discover ──────────────────────────────────────────
     release_native_locks_on_error(check_cancelled(&cancel), &mut pre_acquired_locks).await?;
     let phase_start = Instant::now();
+    let speculative_refs = if !config.followtags && config.push.protected_push.is_none() {
+        local_existing_ref_frontier(specs, push_state, remote_url, remote_name, &git_dirs)
+    } else {
+        None
+    };
+    let mut speculative_discovery_task = speculative_refs.as_ref().map(|refs| {
+        let specs = specs.to_vec();
+        let push_state = push_state.clone();
+        let remote_url = remote_url.to_owned();
+        let refs = refs.clone();
+        let incremental = config.incremental;
+        let git_dirs = git_dirs.clone();
+        // Blocking workers do not inherit a thread-local dispatcher. Carry it
+        // across so discovery diagnostics remain visible to callers.
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                phase_discover(
+                    &specs,
+                    &push_state,
+                    &remote_url,
+                    Some(&refs),
+                    incremental,
+                    &git_dirs,
+                )
+            })
+        })
+    });
+    let mut speculative_discovery = None;
+    let mut acquired_existing_ref_base = None;
     if pre_acquired_locks.is_none() && !config.followtags && config.push.protected_push.is_none() {
-        match acquire_push_lock_leases(&store, router.repo_prefix(), specs, &config.push, &cancel)
-            .await
-        {
-            Ok(leases) => {
+        let acquire = acquire_push_lock_leases_while(
+            &store,
+            router.repo_prefix(),
+            specs,
+            &config.push,
+            &cancel,
+            read_existing_ref_push_base(&store, &router, specs, &config.push),
+        );
+        let discovery = async {
+            match speculative_discovery_task.take() {
+                Some(task) => task.await.map(Some).map_err(|error| {
+                    CrabError::Internal(format!("speculative discovery join failed: {error}"))
+                }),
+                None => Ok(None),
+            }
+        };
+        let (acquired, discovered) = tokio::join!(acquire, discovery);
+        match acquired {
+            Ok((leases, existing_ref_base)) => {
                 debug!(
                     lock_count = leases.len(),
                     "native push: acquired push locks before repository snapshot"
                 );
                 pre_acquired_locks = Some(leases);
+                acquired_existing_ref_base = Some(existing_ref_base);
             }
             Err(e) => {
                 warn!(error = %e, "native push: failed to acquire push lock before discovery");
                 return Ok(push_lock_rejection_result(specs, &e));
             }
         }
+        speculative_discovery =
+            release_native_locks_on_error(discovered, &mut pre_acquired_locks).await?;
     }
     let mut locked_base_snapshot = None;
-    let remote_refs_for_discovery = if let Some(session) = config.push.protected_push.as_ref() {
+    let mut existing_ref_base = if let Some(existing_ref_base) = acquired_existing_ref_base {
+        existing_ref_base
+    } else if pre_acquired_locks.is_some() && !config.followtags {
+        let capture = read_existing_ref_push_base(&store, &router, specs, &config.push);
+        let captured = if let Some(task) = speculative_discovery_task.take() {
+            let discover = async {
+                task.await.map_err(|error| {
+                    CrabError::Internal(format!("speculative discovery join failed: {error}"))
+                })?
+            };
+            let (captured, discovered) = tokio::join!(capture, discover);
+            speculative_discovery = Some(discovered);
+            captured
+        } else {
+            capture.await
+        };
+        release_native_locks_on_error(captured, &mut pre_acquired_locks).await?
+    } else {
+        None
+    };
+    if existing_ref_base.as_ref().is_some_and(|base| {
+        use gix_object::Exists;
+
+        let Ok(oid) = gix_hash::ObjectId::from_hex(base.old_oid().as_bytes()) else {
+            return true;
+        };
+        let objects = git_dirs.common.join("objects");
+        gix_odb::at(objects).map_or(true, |odb| !odb.exists(&oid))
+    }) {
+        debug!(
+            "native push: exact ref base is absent from the local ODB; using full snapshot path"
+        );
+        existing_ref_base = None;
+    }
+    let remote_refs_for_discovery = if let Some(base) = existing_ref_base.as_ref() {
+        Some(base.remote_refs())
+    } else if let Some(session) = config.push.protected_push.as_ref() {
         // Prepare returns refs from the caller's filtered view. Those OIDs are
         // the only safe and locally resolvable frontier for a path-scoped
         // client; the protected upload store is not a canonical read handle.
@@ -421,7 +506,17 @@ async fn run_native_push_inner(
     };
     progress.begin_discovery();
     let discovery_ticker = progress.start_ticker();
-    let discovery = if config.mirror_git_only {
+    let speculative_matches = existing_ref_base.as_ref().is_some_and(|base| {
+        speculative_refs
+            .as_ref()
+            .and_then(|refs| refs.get(base.ref_name()))
+            .is_some_and(|oid| oid == base.old_oid())
+    });
+    let discovery = if speculative_matches {
+        speculative_discovery.take().ok_or_else(|| {
+            CrabError::Internal("matching speculative discovery is missing".to_owned())
+        })?
+    } else if config.mirror_git_only {
         phase_discover_git_only(specs, &git_dirs)
     } else {
         phase_discover(
@@ -481,6 +576,23 @@ async fn run_native_push_inner(
             commit_entries = full_entries;
             sha_map = full_sha_map;
         }
+    }
+
+    // Pointer publication needs the complete shard and recipe snapshot. Pure
+    // Git updates retain the exact-ref path and never materialize pack history.
+    if existing_ref_base.is_some() && !pointers.is_empty() {
+        let snapshot = release_native_locks_on_error(
+            crate::metadata::manifest::read_repository_snapshot_with_cache(
+                &store,
+                caching_store.as_ref(),
+                &router,
+            )
+            .await,
+            &mut pre_acquired_locks,
+        )
+        .await?;
+        locked_base_snapshot = Some(Arc::new(snapshot));
+        existing_ref_base = None;
     }
 
     NativePushProgress::finish_ticker(discovery_ticker).await;
@@ -620,6 +732,7 @@ async fn run_native_push_inner(
                     sha_map.clone(),
                     remote_name,
                     locked_base_snapshot.clone(),
+                    existing_ref_base.clone(),
                 )
                 .await
             }
@@ -649,6 +762,7 @@ async fn run_native_push_inner(
                             commit_entries.clone(),
                             sha_map.clone(),
                             remote_name,
+                            None,
                             None,
                         )
                         .await
@@ -736,6 +850,7 @@ async fn run_native_push_with_locks(
     sha_map: HashMap<String, String>,
     remote_name: &str,
     locked_base_snapshot: Option<Arc<crate::metadata::manifest::RepositorySnapshot>>,
+    existing_ref_base: Option<ExistingRefPushBase>,
 ) -> PushResult {
     let prepopulated = PrePopulatedWalk {
         pointers,
@@ -746,6 +861,9 @@ async fn run_native_push_with_locks(
     let mut handoff = LockedPushHandoff::new(leases, Some(prepopulated));
     if let Some(snapshot) = locked_base_snapshot {
         handoff = handoff.with_locked_base_snapshot(snapshot);
+    }
+    if let Some(base) = existing_ref_base {
+        handoff = handoff.with_existing_ref_base(base);
     }
     Box::pin(run_push_batch_with_locks(
         specs,
@@ -1199,6 +1317,32 @@ fn phase_discover(
     }
 
     Ok((all_pointers, all_entries, sha_map))
+}
+
+fn local_existing_ref_frontier(
+    specs: &[PushSpec],
+    push_state: &PushState,
+    remote_url: &str,
+    remote_name: &str,
+    git_dirs: &NativeGitDirs,
+) -> Option<BTreeMap<String, String>> {
+    let [spec] = specs else {
+        return None;
+    };
+    let branch = spec.dst.strip_prefix("refs/heads/")?;
+    if spec.src.is_empty() {
+        return None;
+    }
+    let oid = push_state
+        .last_pushed(remote_url, &spec.dst)
+        .map(str::to_owned)
+        .or_else(|| {
+            let tracking_ref = format!("refs/remotes/{remote_name}/{branch}");
+            resolve_refs(&[&tracking_ref], git_dirs)
+                .ok()
+                .and_then(|refs| refs.get(&tracking_ref).cloned())
+        })?;
+    Some(BTreeMap::from([(spec.dst.clone(), oid)]))
 }
 
 fn phase_discover_git_only(

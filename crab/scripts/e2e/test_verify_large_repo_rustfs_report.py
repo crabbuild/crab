@@ -219,6 +219,29 @@ def stage(duration: int = 100) -> dict[str, Any]:
     return {"duration_ms": duration, "resources": resources(), "telemetry": telemetry()}
 
 
+class ReplayCheckpointTests(unittest.TestCase):
+    def test_interval_adds_periodic_fetches_without_dropping_standard_checkpoints(self) -> None:
+        self.assertEqual(
+            QUALIFICATION.replay_checkpoints(5_000, 500),
+            {1, 10, 100, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_500, 4_000, 4_500, 5_000},
+        )
+
+    def test_zero_interval_preserves_default_checkpoints(self) -> None:
+        self.assertEqual(
+            QUALIFICATION.replay_checkpoints(1_000, 0),
+            {1, 10, 100, 1_000},
+        )
+
+    def test_completed_replay_ordinal_requires_contiguous_pushes(self) -> None:
+        pushes = [{"ordinal": ordinal} for ordinal in range(4)]
+
+        self.assertEqual(3, QUALIFICATION.completed_replay_ordinal(pushes))
+
+    def test_completed_replay_ordinal_rejects_gap(self) -> None:
+        with self.assertRaisesRegex(QUALIFICATION.QualificationError, "not contiguous"):
+            QUALIFICATION.completed_replay_ordinal([{"ordinal": 0}, {"ordinal": 2}])
+
+
 def valid_report() -> dict[str, Any]:
     replay_count = 3
     checks = [
@@ -606,6 +629,70 @@ class ReportVerificationTests(unittest.TestCase):
     def test_valid_smoke_report_is_accepted_explicitly(self) -> None:
         result = VERIFY.verify_report(self.write("report.json", valid_report()), allow_smoke=True)
         self.assertEqual(result.replay_count, 3)
+
+    def test_resume_accepts_only_explicitly_covered_interruptions(self) -> None:
+        report = valid_report()
+        failed_command = copy.deepcopy(report["commands"][0])
+        failed_command.update(
+            {
+                "name": "interrupted inventory",
+                "exit_code": 255,
+                "stderr_log": "/run/logs/interrupted.stderr.log",
+            }
+        )
+        report["commands"].append(failed_command)
+        report["checks"].append({"name": "isolated-remote-prefix", "ok": False})
+        report["checks"].extend(
+            {"name": name, "ok": True}
+            for name in (
+                "resume-source-matches",
+                "resume-binary-matches",
+                "resume-remote-prefix-present",
+                "resume-remote-tip-matches",
+                "resume-incremental-tip-matches",
+            )
+        )
+        report["resumptions"] = [
+            {
+                "resumed_at": "2026-08-23T00:00:30+00:00",
+                "prior_error": (
+                    "interrupted inventory failed; "
+                    "stderr=/run/logs/interrupted.stderr.log"
+                ),
+                "completed_replay_pushes": 1,
+                "harness_sha256": DIGEST,
+            },
+            {
+                "resumed_at": "2026-08-23T00:00:40+00:00",
+                "prior_error": "check failed: isolated-remote-prefix",
+                "completed_replay_pushes": 1,
+                "harness_sha256": DIGEST,
+            },
+        ]
+
+        result = VERIFY.verify_report(
+            self.write("resumed.json", report),
+            allow_smoke=True,
+        )
+
+        self.assertEqual(result.replay_count, 3)
+
+    def test_resume_rejects_uncovered_command_failure(self) -> None:
+        report = valid_report()
+        failed_command = copy.deepcopy(report["commands"][0])
+        failed_command.update(
+            {
+                "exit_code": 255,
+                "stderr_log": "/run/logs/uncovered.stderr.log",
+            }
+        )
+        report["commands"].append(failed_command)
+
+        with self.assertRaisesRegex(VERIFY.VerificationError, "not covered"):
+            VERIFY.verify_report(
+                self.write("uncovered.json", report),
+                allow_smoke=True,
+            )
 
     def test_release_team_load_contract_requires_all_scenarios(self) -> None:
         VERIFY.verify_team_load(valid_team_load(), require_release_counts=True)

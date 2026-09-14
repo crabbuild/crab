@@ -35,6 +35,12 @@ expired-lease reclamation. Enable it with `object-store-lock`.
 Unrepresentable expiry or renewal deadlines return a configuration error;
 deadline arithmetic must not panic or wrap into an expired lease.
 
+GC writer fences have a distinct post-commit release: once the authoritative
+publication record durably roots every uploaded object, the writer can remove
+its holder with a direct CAS and does not need the backend-clock probes that
+protect abandoned uploads with quarantine. Error and cancellation paths must
+continue using ordinary release.
+
 ### Lease lifecycle
 
 `while_renewing` borrows a `PushLock` and polls work alongside lease renewal.

@@ -5270,9 +5270,73 @@ mod tests {
             vec![0, 1]
         );
 
+        let (repacked_pack_index_hash, _, repacked_pack_index) =
+            compact_pack_index(6, &target_packs).expect("repacked pack index");
+        crate::manifest_store::upload_segmented_bulk(
+            &store,
+            &router,
+            &BulkData {
+                shard_index: crate::segmented::SegmentWrite::default(),
+                pack_index: repacked_pack_index,
+            },
+        )
+        .await
+        .expect("upload repacked pack index");
+        let mut repacked = target.clone();
+        repacked.generation = 6;
+        repacked.pack_index_hash = repacked_pack_index_hash.clone();
+        repacked.seal_git_validation();
+        assert!(
+            prepare_catalog_journal_edits(
+                &store,
+                &router,
+                &target,
+                &[],
+                &repacked.refs,
+                repacked.generation,
+                &repacked.pack_index_hash,
+                &repacked.git_validation_digest,
+            )
+            .await
+            .expect("prepare zero-edit catalog handoff")
+        );
+        let mut writer =
+            GitObjectLocatorWriter::open(Arc::clone(store.inner()), router.repo_prefix())
+                .await
+                .expect("open repacked catalog writer");
+        writer
+            .set_coverage(GitLocatorCoverage {
+                generation: repacked.generation,
+                pack_index_hash: MerkleHash::from_hex(&repacked_pack_index_hash)
+                    .expect("repacked pack index hash"),
+            })
+            .await
+            .expect("publish repacked catalog");
+        writer.close().await.expect("close repacked catalog writer");
+        assert!(
+            ensure_catalog_bound(&store, &router, &repacked)
+                .await
+                .expect("apply zero-edit catalog handoff")
+        );
+        let repacked_visibility = read_catalog_with_format(
+            &store,
+            &router,
+            repacked.generation,
+            &repacked.pack_index_hash,
+            &repacked.git_validation_digest,
+        )
+        .await
+        .expect("read repacked catalog proof");
+        assert_eq!(
+            repacked_visibility
+                .index
+                .incremental_ordinals("refs/heads/main", 4, &[0]),
+            Some(vec![2, 3, 4, 5])
+        );
+
         // The removed tip is absent from both the new ref and its replacement
         // evidence. Deletion must explicitly resolve it before checking closure.
-        let mut after_delete = target.clone();
+        let mut after_delete = repacked.clone();
         after_delete.generation += 1;
         after_delete.refs = BTreeMap::from([
             ("refs/heads/feature".into(), "1".repeat(40)),
@@ -5307,7 +5371,7 @@ mod tests {
             prepare_catalog_journal_edits(
                 &store,
                 &router,
-                &target,
+                &repacked,
                 &deletion,
                 &after_delete.refs,
                 after_delete.generation,
@@ -5324,7 +5388,8 @@ mod tests {
         writer
             .set_coverage(GitLocatorCoverage {
                 generation: after_delete.generation,
-                pack_index_hash: target_pack_index_hash,
+                pack_index_hash: MerkleHash::from_hex(&repacked_pack_index_hash)
+                    .expect("repacked pack index hash"),
             })
             .await
             .unwrap();

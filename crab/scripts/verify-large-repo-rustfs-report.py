@@ -504,6 +504,33 @@ def verify_report(
     if profile == "full":
         require(replay_count >= 1_000, "full report must replay at least 1,000 commits")
 
+    resumptions = report.get("resumptions", [])
+    require(isinstance(resumptions, list), "resumptions must be an array")
+    interruption_errors: list[str] = []
+    completed_resumptions: list[int] = []
+    for index, resumption in enumerate(resumptions):
+        field = f"resumptions[{index}]"
+        require(isinstance(resumption, dict), f"{field} must be an object")
+        require(resumption.get("resumed_at"), f"{field}.resumed_at is missing")
+        prior_error = resumption.get("prior_error")
+        require(isinstance(prior_error, str) and prior_error, f"{field}.prior_error is missing")
+        interruption_errors.append(prior_error)
+        completed = require_nonnegative_int(
+            resumption.get("completed_replay_pushes"),
+            f"{field}.completed_replay_pushes",
+        )
+        require(completed <= replay_count, f"{field} exceeds the replay count")
+        completed_resumptions.append(completed)
+        harness_sha256 = resumption.get("harness_sha256")
+        require(
+            isinstance(harness_sha256, str) and DIGEST_RE.fullmatch(harness_sha256),
+            f"invalid {field}.harness_sha256",
+        )
+    require(
+        completed_resumptions == sorted(completed_resumptions),
+        "resumption checkpoints are not monotonic",
+    )
+
     provenance = report.get("provenance")
     require(isinstance(provenance, dict), "provenance must be an object")
     for field in (
@@ -561,7 +588,14 @@ def verify_report(
         require(isinstance(command.get("name"), str) and command["name"], f"{field}.name is missing")
         require(isinstance(command.get("required_success"), bool), f"{field}.required_success is missing")
         if command["required_success"]:
-            require(command.get("exit_code") == 0, f"{field} did not exit successfully")
+            exit_code = command.get("exit_code")
+            if exit_code != 0:
+                stderr_log = command.get("stderr_log")
+                require(
+                    isinstance(stderr_log, str)
+                    and any(stderr_log in error for error in interruption_errors),
+                    f"{field} failure is not covered by a resumption",
+                )
         else:
             require(isinstance(command.get("exit_code"), int), f"{field}.exit_code must be an integer")
         require_nonnegative_int(command.get("duration_ms"), f"{field}.duration_ms")
@@ -575,15 +609,33 @@ def verify_report(
         require(isinstance(check, dict), f"checks[{index}] must be an object")
         name = check.get("name")
         require(isinstance(name, str) and name, f"checks[{index}].name is missing")
-        require(name not in check_names, f"duplicate check: {name}")
+        if check.get("ok") is not True:
+            require(
+                f"check failed: {name}" in interruption_errors,
+                f"check did not pass: {name}; failure is not covered by a resumption",
+            )
+            continue
+        require(
+            name not in check_names or name.startswith("resume-"),
+            f"duplicate check: {name}",
+        )
         check_names.add(name)
-        require(check.get("ok") is True, f"check did not pass: {name}")
     required_checks = set(BASE_REQUIRED_CHECKS)
     required_checks.update(
         f"incremental-fetch-tip-{checkpoint}"
         for checkpoint in {1, 10, 100, replay_count}
         if checkpoint <= replay_count
     )
+    if resumptions:
+        required_checks.update(
+            {
+                "resume-source-matches",
+                "resume-binary-matches",
+                "resume-remote-prefix-present",
+                "resume-remote-tip-matches",
+                "resume-incremental-tip-matches",
+            }
+        )
     required_checks.update(
         f"acceleration-current-{checkpoint}"
         for checkpoint in {"seed", 1, 10, 100, replay_count}
