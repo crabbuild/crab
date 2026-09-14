@@ -25,7 +25,7 @@ use crate::git::push::{
     configure_active_active_push_coordinator, duplicate_destination_result,
     record_push_audit_event,
 };
-use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
+use crate::git::push_native::NativePushConfig;
 use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
@@ -1363,8 +1363,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
     staging: &PushStaging,
     prefix: &str,
     cache: &mut SessionCache,
-    remote_name: &str,
-    push_state: &mut PushState,
+    _remote_name: &str,
+    _push_state: &mut PushState,
     progress_mode: OutputMode,
     jsonl_stderr_stream: Option<&Arc<Mutex<JsonlStream<Stderr>>>>,
     remote_url: Option<&str>,
@@ -1585,17 +1585,6 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     }
                 }
 
-                // Build CachingStore when a cache service is configured and healthy.
-                let caching_store = if let Some(s) = push_store.as_ref() {
-                    crab_cache_store::CachingStore::try_build_healthy(
-                        s.as_storage().clone(),
-                        &config.cache,
-                    )
-                    .await
-                } else {
-                    None
-                };
-
                 let router = if let Some(s) = push_store.as_ref() {
                     StoreLayout::new(s.clone(), prefix.to_owned())
                 } else {
@@ -1633,29 +1622,28 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     tracing::error!(error = %e, "push setup failed");
                     reject_specs_for_error(&specs, &e)
                 } else {
-                    let push_state_remote_url = remote_url.ok_or_else(|| {
-                        CrabError::Protocol(
-                            "push batch is missing its invocation remote URL".to_owned(),
-                        )
-                    })?;
-                    match run_native_push(
-                        &native_config,
+                    let push_store =
+                        push_store
+                            .as_ref()
+                            .ok_or_else(|| CrabError::Configuration {
+                                key: "request-minimal push store".to_owned(),
+                                origin: "push requires a resolved object store".to_owned(),
+                            })?;
+                    match crate::git::request_minimal_push::run(
+                        &native_config.push,
                         &specs,
-                        NativePushInputs::new(
-                            push_store,
-                            caching_store,
-                            staging.clone(),
-                            router,
-                            push_state,
-                            remote_name,
-                            push_state_remote_url,
-                            Some(Arc::clone(&cache.metrics)),
-                            cancel.clone(),
-                        ),
+                        push_store,
+                        &router,
+                        cache.request_minimal_root.take(),
+                        &config.transfer_hide_refs,
+                        cancel,
                     )
                     .await
                     {
-                        Ok(r) => r,
+                        Ok((r, root)) => {
+                            cache.request_minimal_root = root;
+                            r
+                        }
                         // Partial outcomes carry per-ref state the pipeline
                         // already computed — unwrap so siblings keep the
                         // outcomes they earned instead of collapsing to the
