@@ -330,6 +330,8 @@ struct LeaseInner {
     epoch: u64,
     writer_epoch: u64,
     etag: Mutex<Option<UpdateVersion>>,
+    committed_release_state: GcFenceState,
+    committed_release_etag: UpdateVersion,
     released: AtomicBool,
 }
 
@@ -528,7 +530,9 @@ impl GcFenceLease {
                 incarnation: state.incarnation.clone(),
                 epoch: state.epoch,
                 writer_epoch: state.writer_epoch,
-                etag: Mutex::new(Some(etag)),
+                etag: Mutex::new(Some(etag.clone())),
+                committed_release_state: state.clone(),
+                committed_release_etag: etag.clone(),
                 released: AtomicBool::new(false),
             }),
         }
@@ -613,6 +617,36 @@ impl GcFenceLease {
             &self.inner.incarnation,
             self.inner.mode,
             self.inner.epoch,
+        )
+        .await;
+        if result.is_ok() {
+            self.inner.released.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// Releases a writer after its uploaded objects have become durably rooted.
+    ///
+    /// The caller must have crossed its authoritative publication boundary.
+    /// Unlike an aborted writer, an expired committed writer needs no GC
+    /// quarantine, so cleanup can avoid a backend-clock request pair.
+    pub async fn release_committed_writer(&self) -> Result<()> {
+        if self.inner.released.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if self.inner.mode != GcFenceMode::Writer {
+            return Err(CoordinationError::Configuration {
+                key: self.inner.domain.clone(),
+                origin: "committed fence release requires a writer lease".to_owned(),
+            });
+        }
+        let result = release_committed_writer_holder(
+            &self.inner.store,
+            &self.inner.path,
+            &self.inner.holder,
+            &self.inner.incarnation,
+            &self.inner.committed_release_state,
+            &self.inner.committed_release_etag,
         )
         .await;
         if result.is_ok() {
@@ -1002,6 +1036,84 @@ async fn release_holder(
     })
 }
 
+async fn release_committed_writer_holder(
+    store: &Arc<dyn ObjectStore>,
+    path: &str,
+    holder: &str,
+    incarnation: &str,
+    admitted_state: &GcFenceState,
+    admitted_etag: &UpdateVersion,
+) -> Result<()> {
+    let mut state = admitted_state.clone();
+    remove_committed_writer(path, holder, incarnation, &mut state)?;
+    match update(
+        store,
+        &Path::from(path),
+        serialize_state(path, &state)?,
+        admitted_etag.clone(),
+    )
+    .await
+    {
+        Ok(_) => return Ok(()),
+        Err(object_store::Error::AlreadyExists { .. })
+        | Err(object_store::Error::Precondition { .. })
+        | Err(object_store::Error::NotFound { .. }) => {}
+        Err(source) => return Err(store_error(path, source)),
+    }
+
+    for _ in 0..GC_FENCE_MAX_CAS_ATTEMPTS {
+        let (body, etag) = match get_with_version(store, &Path::from(path)).await {
+            Ok(value) => value,
+            Err(object_store::Error::NotFound { .. }) => return Ok(()),
+            Err(source) => return Err(store_error(path, source)),
+        };
+        let mut state = deserialize_state(path, &body)?;
+        state.validate(path)?;
+        if !remove_committed_writer(path, holder, incarnation, &mut state)? {
+            return Ok(());
+        }
+        match update(
+            store,
+            &Path::from(path),
+            serialize_state(path, &state)?,
+            etag,
+        )
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => continue,
+            Err(source) => return Err(store_error(path, source)),
+        }
+    }
+    Err(CoordinationError::CasConflict {
+        path: path.to_owned(),
+        expected_etag: None,
+    })
+}
+
+fn remove_committed_writer(
+    path: &str,
+    holder: &str,
+    incarnation: &str,
+    state: &mut GcFenceState,
+) -> Result<bool> {
+    if state.incarnation != incarnation {
+        return Err(CoordinationError::GcFenceLost {
+            domain: path.to_owned(),
+            holder: holder.to_owned(),
+        });
+    }
+    let old = state.writers.len();
+    state.writers.retain(|record| record.holder != holder);
+    if state.writers.len() == old {
+        return Ok(false);
+    }
+    state.epoch = next_epoch(state.epoch)?;
+    state.writer_epoch = next_epoch(state.writer_epoch)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,6 +1159,47 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn committed_writer_release_removes_expired_rooted_claim() {
+        let store = memory_store();
+        let domain = "committed-writer";
+        let lease = GcFenceLease::acquire_writer(&store, domain, Duration::from_secs(30))
+            .await
+            .unwrap();
+        let path = Path::from(gc_fence_path(domain).unwrap());
+        let (body, _) = get_with_version(&store, &path).await.unwrap();
+        let mut state = deserialize_state(path.as_ref(), &body).unwrap();
+        state.writers[0].expires_at_backend = 1;
+        store
+            .put(
+                &path,
+                serialize_state(path.as_ref(), &state).unwrap().into(),
+            )
+            .await
+            .unwrap();
+
+        lease.release_committed_writer().await.unwrap();
+
+        let body = store.get(&path).await.unwrap().bytes().await.unwrap();
+        let state = deserialize_state(path.as_ref(), &body).unwrap();
+        assert!(state.writers.is_empty());
+        assert!(state.quarantine.is_empty());
+    }
+
+    #[tokio::test]
+    async fn committed_writer_release_rejects_sweep_lease() {
+        let store = memory_store();
+        let lease = GcFenceLease::acquire_sweep(&store, "repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            lease.release_committed_writer().await,
+            Err(CoordinationError::Configuration { .. })
+        ));
+        lease.release().await.unwrap();
     }
 
     #[tokio::test]

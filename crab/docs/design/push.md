@@ -1205,6 +1205,10 @@ fence pair for its whole publication lifetime rather than a second pair around
 upload admission. The two independent fence domains are acquired and released
 concurrently to avoid serial remote-latency waves while preserving the rule
 that both fences drain before ref locks are released.
+For one existing branch, the ref lease is acquired first and its exact journal
+base is then captured while those independent GC fences are being acquired.
+The branch lease still spans capture through commit, so the overlap removes a
+remote read wave without allowing a stale ref base to pass commitment.
 Admission uses five reusable slot objects to cap every probe and avoid one
 coordination object per contender. A push with xorb work reserves one slot per
 eight configured upload workers, rounded up, and at least one slot per 64 MiB
@@ -1251,6 +1255,12 @@ lock holder that crossed the final ref-critical boundary. A contender may
 release that holder immediately with a holder-checked CAS. Prepared
 transactions and mismatched holders cannot take this path, and the final CAS
 cannot clear a lock that has already been acquired by a successor.
+
+The successful existing-branch path also releases its GC writer claims from
+the lease's holder-checked state directly. Because the active marker already
+roots every uploaded object, an expired claim on this path does not need the
+abandoned-upload quarantine or its backend-clock probes. Failure and
+cancellation retain the ordinary clock-checked quarantine path.
 
 The generation-owner compactor also closes the crash window after the marker
 is written: once the compacted manifest is committed, it promotes any

@@ -44,13 +44,15 @@ replacing the segmented pack inventory selected by the unified manifest.
 5. Uploads immutable pack/index/reverse-index files only for newly generated
    packs, repairs missing metadata sidecars, and compacts the pack-index
    segment.
-6. Performs one CAS of a new manifest generation with unchanged refs, HEAD,
-   shard index, commit graph, and ref registry. Existing reachability proofs
-   are rebound to the new generation because repack changes physical layout,
-   not refs or reachable objects.
-7. Publishes exact SlateDB object locators and a generation receipt. Locator
-   or receipt failure is repairable and does not invalidate an already
-   committed manifest.
+6. Stages a zero-edit catalog visibility handoff, then performs one CAS of a
+   new manifest generation with unchanged refs, HEAD, shard index, commit
+   graph, and ref registry. The handoff preserves incremental ref history
+   across the new pack-index identity without serializing the repository's OID
+   dictionary. Repack rebinds a legacy materialized proof when no catalog-bound
+   proof exists.
+7. Publishes exact SlateDB object locators, completes the staged visibility
+   handoff, and writes a generation receipt. Repairable post-CAS failures do
+   not invalidate an already committed manifest.
 
 Apply mode holds the repository-wide maintenance lease. The temporary
 workspace lives under Crab's cache root and is removed automatically. Dry-run

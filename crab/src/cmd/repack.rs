@@ -381,7 +381,6 @@ async fn run_repack_locked(
     if let Some(deferral) = elapsed_budget_deferral(budget, start.elapsed()) {
         return Ok(deferral_result(deferral));
     }
-    let visibility = read_current_visibility(store, router, &manifest).await?;
     let commit_graph = read_current_commit_graph(store, router, &manifest).await?;
     let shallow_closure = read_current_shallow_closure(store, router, &manifest).await?;
 
@@ -532,7 +531,7 @@ async fn run_repack_locked(
         return Ok(result);
     }
 
-    let mut committed = repack_manifest(manifest, new_generation, pack_index_hash);
+    let mut committed = repack_manifest(manifest.clone(), new_generation, pack_index_hash);
     if let Some(graph) = commit_graph {
         let write = crab_metadata::split_commit_graph::rebind_split_commit_graph(
             &graph,
@@ -576,14 +575,31 @@ async fn run_repack_locked(
     if let Some(result) = elapsed_budget_result(budget, start) {
         return Ok(result);
     }
+    let storage_router =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    // Repack changes the catalog identity but not the object universe or refs.
+    // Carry the ordinal proof forward before the manifest CAS so large repositories
+    // never have to materialize and serialize their complete OID dictionary.
+    let catalog_visibility_prepared = crab_metadata::git_visibility::prepare_catalog_journal_edits(
+        store.as_storage(),
+        &storage_router,
+        &manifest,
+        &[],
+        &committed.refs,
+        committed.generation,
+        &committed.pack_index_hash,
+        &committed.git_validation_digest,
+    )
+    .await?;
+    let visibility = if catalog_visibility_prepared {
+        None
+    } else {
+        read_current_visibility(store, router, &manifest).await?
+    };
+    let visibility_expected = catalog_visibility_prepared || visibility.is_some();
     write_manifest_cas(store, router, &committed, &manifest_etag).await?;
-    let visibility_expected = visibility.is_some();
     if let Some(visibility) = visibility {
         let visibility = rebind_visibility(visibility, &committed);
-        let storage_router = crab_storage::StoreLayout::new(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
-        );
         if let Err(error) = crab_metadata::git_visibility::upload_if_absent(
             store.as_storage(),
             &storage_router,
@@ -597,6 +613,11 @@ async fn run_repack_locked(
                 "repack committed; Git visibility proof requires repair"
             );
         }
+    } else if catalog_visibility_prepared {
+        debug!(
+            generation = committed.generation,
+            "repack staged a catalog visibility handoff"
+        );
     } else {
         debug!(
             generation = committed.generation,
@@ -639,10 +660,7 @@ async fn run_repack_locked(
     if visibility_expected && locator_published {
         match crab_metadata::git_visibility::ensure_catalog_bound(
             store.as_storage(),
-            &crab_storage::StoreLayout::new(
-                store.as_storage().clone(),
-                router.repo_prefix().to_owned(),
-            ),
+            &storage_router,
             &committed,
         )
         .await

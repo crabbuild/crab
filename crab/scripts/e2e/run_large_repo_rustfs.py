@@ -44,6 +44,7 @@ DEFAULT_BUCKET = "crab"
 DEFAULT_ENDPOINT = "http://127.0.0.1:9000"
 DEFAULT_REPLAY_COUNT = 1_000
 DEFAULT_SAMPLE_SIZE = 1_000
+DEFAULT_INCREMENTAL_FETCH_INTERVAL = 0
 # A repack can make catalog, visibility, graph, and shallow proofs stale in
 # sequence. Bounded repacks add one maintenance wave per selected pack batch,
 # so four samples per observed pack leave room for each catalog/visibility step
@@ -109,6 +110,29 @@ def percentile(values: list[int], percent: float) -> int:
     return ordered[index]
 
 
+def replay_checkpoints(replay_count: int, incremental_fetch_interval: int) -> set[int]:
+    checkpoints = {
+        checkpoint
+        for checkpoint in (1, 10, 100, replay_count)
+        if checkpoint <= replay_count
+    }
+    if incremental_fetch_interval:
+        checkpoints.update(
+            range(incremental_fetch_interval, replay_count + 1, incremental_fetch_interval)
+        )
+    return checkpoints
+
+
+def completed_replay_ordinal(pushes: list[dict[str, Any]]) -> int:
+    if not pushes:
+        raise QualificationError("resume report has no completed seed push")
+    ordinals = [push.get("ordinal") for push in pushes]
+    expected = list(range(len(pushes)))
+    if ordinals != expected:
+        raise QualificationError("recorded push ordinals are not contiguous from the seed")
+    return ordinals[-1]
+
+
 def redact_text(value: str, secrets: Iterable[str]) -> str:
     result = value
     for secret in sorted({secret for secret in secrets if secret}, key=len, reverse=True):
@@ -143,6 +167,7 @@ def snapshot_executable(source: Path, destination: Path, label: str) -> Path:
 class LargeRepositoryQualification:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        self.resume = getattr(args, "resume", False)
         self.run_id = safe_run_id(args.run_id or default_run_id())
         self.run_root = args.root.resolve() / self.run_id
         self.logs = self.run_root / "logs"
@@ -597,6 +622,9 @@ class LargeRepositoryQualification:
         return value
 
     def setup(self) -> None:
+        if getattr(self, "resume", False):
+            self.setup_resume()
+            return
         if self.run_root.exists():
             raise QualificationError(f"run root already exists: {self.run_root}")
         self.logs.mkdir(parents=True)
@@ -617,6 +645,122 @@ class LargeRepositoryQualification:
         )
         self.install_helper_alias()
         self.write_report()
+
+    def setup_resume(self) -> None:
+        report_path = self.artifacts / "report.json"
+        if not report_path.is_file():
+            raise QualificationError(f"resume report does not exist: {report_path}")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if report.get("schema") != SCHEMA or report.get("run_id") != self.run_id:
+            raise QualificationError("resume report identity does not match this run")
+        if report.get("status") != "failed":
+            raise QualificationError("only a failed qualification can be resumed")
+        remote = report.get("remote", {})
+        source = report.get("source", {})
+        if (
+            remote.get("bucket") != self.args.bucket
+            or remote.get("endpoint_url") != self.args.endpoint_url
+            or remote.get("prefix") != self.remote_prefix
+            or source.get("path") != str(self.source)
+            or source.get("replay_count") != self.args.replay_count
+        ):
+            raise QualificationError("resume arguments do not match the recorded run")
+        self.crab_bin = resolve_executable(str(self.bin_root / "crab"), "run-local Crab binary")
+        log_indexes = [
+            int(path.name.split("-", 1)[0])
+            for path in self.logs.glob("[0-9][0-9][0-9][0-9][0-9]-*.log")
+        ]
+        self.command_index = max(log_indexes, default=len(report.get("commands", [])))
+        self.report = report
+        prior_error = self.report.get("error")
+        self.report["status"] = "running"
+        self.report["error"] = None
+        self.report["finished_at"] = None
+        self.report.setdefault("resumptions", []).append(
+            {
+                "resumed_at": utc_now(),
+                "prior_error": prior_error,
+                "completed_replay_pushes": completed_replay_ordinal(
+                    self.report.get("pushes", [])
+                ),
+                "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            }
+        )
+        self.install_helper_alias()
+        self.write_report()
+
+    def resume_preflight(self) -> tuple[str, str, list[str]]:
+        source_head = self.git_value(self.source, ["rev-parse", "HEAD"], "resume source HEAD")
+        status = self.run_git(
+            self.source,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            "resume source status",
+        )
+        base = self.git_value(
+            self.source,
+            ["rev-parse", f"{source_head}~{self.args.replay_count}"],
+            "resume replay base",
+        )
+        commits_record = self.run_git(
+            self.source,
+            ["rev-list", "--first-parent", "--reverse", f"{base}..{source_head}"],
+            "resume first-parent replay commits",
+        )
+        commits = [line for line in self.stdout(commits_record).splitlines() if line]
+        source_record = self.report["source"]
+        self.check(
+            "resume-source-matches",
+            source_head == source_record["revision"]
+            and base == source_record["base_revision"]
+            and len(commits) == self.args.replay_count
+            and hashlib.sha256(self.stdout(status).encode()).hexdigest()
+            == source_record["status_sha256"],
+            {"revision": source_head, "base_revision": base, "commits": len(commits)},
+        )
+        self.check(
+            "resume-binary-matches",
+            hashlib.sha256(self.crab_bin.read_bytes()).hexdigest()
+            == self.report["provenance"]["crab_binary_sha256"],
+        )
+        return source_head, base, commits
+
+    def validate_resume_remote(self, base: str, commits: list[str]) -> None:
+        completed = completed_replay_ordinal(self.report["pushes"])
+        expected = base if completed == 0 else commits[completed - 1]
+        remote_record = self.run_git(
+            self.replay_repo,
+            ["ls-remote", "origin", "refs/heads/main"],
+            "resume remote main",
+        )
+        remote_fields = self.stdout(remote_record).split()
+        remote_tip = remote_fields[0] if remote_fields else ""
+        self.check(
+            "resume-remote-tip-matches",
+            remote_tip == expected,
+            {"completed": completed, "expected": expected, "actual": remote_tip},
+        )
+        checkpoints = [
+            int(name.removeprefix("incremental_fetch_"))
+            for name in self.report["stages"]
+            if name.startswith("incremental_fetch_")
+        ]
+        if not checkpoints:
+            return
+        checkpoint = max(checkpoints)
+        consumer_tip = self.git_value(
+            self.incremental_clone,
+            ["rev-parse", "refs/remotes/origin/main"],
+            "resume incremental consumer tip",
+        )
+        self.check(
+            "resume-incremental-tip-matches",
+            consumer_tip == commits[checkpoint - 1],
+            {
+                "checkpoint": checkpoint,
+                "expected": commits[checkpoint - 1],
+                "actual": consumer_tip,
+            },
+        )
 
     def preflight(self) -> tuple[str, str, list[str]]:
         self.check(
@@ -788,11 +932,18 @@ class LargeRepositoryQualification:
             raise QualificationError(f"required bucket does not exist: {self.args.bucket}")
         self.probe_cache_service()
         existing = self.list_remote_objects(limit=1)
-        self.check(
-            "isolated-remote-prefix",
-            not existing,
-            {"prefix": self.remote_prefix, "existing_objects": len(existing)},
-        )
+        if self.resume:
+            self.check(
+                "resume-remote-prefix-present",
+                bool(existing),
+                {"prefix": self.remote_prefix, "existing_objects": len(existing)},
+            )
+        else:
+            self.check(
+                "isolated-remote-prefix",
+                not existing,
+                {"prefix": self.remote_prefix, "existing_objects": len(existing)},
+            )
         self.report["provenance"]["object_store"] = {
             "kind": "rustfs",
             "endpoint_url": self.args.endpoint_url,
@@ -1757,28 +1908,48 @@ class LargeRepositoryQualification:
         self.write_report()
 
     def replay(self, base: str, commits: list[str]) -> None:
-        initial = self.push_commit(base, 0, "initial import")
-        self.report["stages"]["initial_import"] = {
-            "duration_ms": initial["duration_ms"],
-            "resources": initial["resources"],
-            "telemetry": initial["telemetry"],
-        }
-        self.acceleration_snapshot("seed")
-        self.active_pack_snapshot("seed")
-        self.store_snapshot("seed")
-        self.clone(
-            "incremental_seed_clone",
-            self.incremental_clone,
-            ["--single-branch", "--branch", "main"],
-            fsck=False,
+        if self.resume:
+            completed = completed_replay_ordinal(self.report["pushes"])
+        else:
+            initial = self.push_commit(base, 0, "initial import")
+            self.report["stages"]["initial_import"] = {
+                "duration_ms": initial["duration_ms"],
+                "resources": initial["resources"],
+                "telemetry": initial["telemetry"],
+            }
+            self.acceleration_snapshot("seed")
+            self.active_pack_snapshot("seed")
+            self.store_snapshot("seed")
+            self.clone(
+                "incremental_seed_clone",
+                self.incremental_clone,
+                ["--single-branch", "--branch", "main"],
+                fsck=False,
+            )
+            completed = 0
+        checkpoints = replay_checkpoints(
+            self.args.replay_count,
+            self.args.incremental_fetch_interval,
         )
-        checkpoints = {
-            checkpoint
-            for checkpoint in (1, 10, 100, self.args.replay_count)
-            if checkpoint <= self.args.replay_count
-        }
         fetch_seed_checkpoint = 100 if self.args.replay_count > 100 else 10
-        for ordinal, commit in enumerate(commits, start=1):
+
+        if self.resume and completed in checkpoints:
+            stage = str(completed)
+            commit = commits[completed - 1]
+            if f"acceleration_{stage}" not in self.report["stages"]:
+                self.acceleration_snapshot(stage)
+            if f"incremental_fetch_{stage}" not in self.report["stages"]:
+                self.incremental_fetch(completed, commit)
+            if f"pack_inventory_{stage}" not in self.report["stages"]:
+                self.active_pack_snapshot(stage)
+            if not any(
+                snapshot.get("stage") == stage
+                for snapshot in self.report["store_snapshots"]
+            ):
+                self.store_snapshot(stage)
+
+        for ordinal in range(completed + 1, len(commits) + 1):
+            commit = commits[ordinal - 1]
             self.push_commit(commit, ordinal, f"replay push {ordinal:04d}")
             if ordinal in checkpoints:
                 self.acceleration_snapshot(str(ordinal))
@@ -2167,9 +2338,15 @@ class LargeRepositoryQualification:
     def run(self) -> int:
         self.setup()
         try:
-            source_head, base, commits = self.preflight()
+            if self.resume:
+                source_head, base, commits = self.resume_preflight()
+            else:
+                source_head, base, commits = self.preflight()
             self.ensure_object_store()
-            self.setup_replay(base)
+            if self.resume:
+                self.validate_resume_remote(base, commits)
+            else:
+                self.setup_replay(base)
             self.replay(base, commits)
             full_clone = self.final_clones()
             self.verify_correctness(source_head, full_clone)
@@ -2228,6 +2405,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--run-id")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume a failed run after validating its source, binary, and remote tips",
+    )
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
     parser.add_argument("--endpoint-url", default=DEFAULT_ENDPOINT)
     parser.add_argument("--region", default="us-east-1")
@@ -2243,6 +2425,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--aws-bin", default="aws")
     parser.add_argument("--replay-count", type=int, default=DEFAULT_REPLAY_COUNT)
     parser.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE)
+    parser.add_argument(
+        "--incremental-fetch-interval",
+        type=int,
+        default=DEFAULT_INCREMENTAL_FETCH_INTERVAL,
+        help="also fetch the incremental consumer after every N replay pushes",
+    )
     parser.add_argument("--cold-clone-fanout", type=int, default=0)
     parser.add_argument("--warm-clone-fanout", type=int, default=0)
     parser.add_argument("--team-load", action="store_true")
@@ -2260,10 +2448,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cleanup-remote", action="store_true")
     parser.add_argument("--retain-worktrees", action="store_true")
     args = parser.parse_args()
+    if args.resume and not args.run_id:
+        parser.error("--resume requires --run-id")
     if args.replay_count < 1:
         parser.error("--replay-count must be at least 1")
     if args.sample_size < 1:
         parser.error("--sample-size must be at least 1")
+    if args.incremental_fetch_interval < 0:
+        parser.error("--incremental-fetch-interval must not be negative")
     if not 0 <= args.cold_clone_fanout <= 50:
         parser.error("--cold-clone-fanout must be between 0 and 50")
     if not 0 <= args.warm_clone_fanout <= 100:

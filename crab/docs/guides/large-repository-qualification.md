@@ -9,6 +9,17 @@ commits individually, exercises full, filtered, shallow, and incremental
 reads, and verifies the resulting Git object database. Run it twice on the
 same idle host before using its latency results as a baseline.
 
+Pass `--incremental-fetch-interval N` to add consumer fetch checkpoints every
+`N` replay pushes. The standard 1, 10, 100, and final checkpoints remain, so
+the interval adds coverage without weakening the normal qualification.
+
+If the object-store process or host interrupts a retained run, restart the same
+store volume and pass `--resume` with the original `--run-id` and arguments. The
+harness resumes only after the source checkout, snapshotted Crab binary, remote
+tip, and latest incremental-consumer tip match the recorded state. Interrupted
+commands and rejected resume checks remain in the report; the verifier accepts
+only failures named by a recorded resumption with all resume proofs passing.
+
 The [Kubernetes 4,500-commit RustFS benchmark](../benchmarks/kubernetes-4500-rustfs.md)
 is a published example of a larger, explicitly scoped run. It reports the
 successful prefix through replay ordinal 4,500 and states which terminal
