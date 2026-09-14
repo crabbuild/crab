@@ -393,8 +393,48 @@ impl CellReplica {
                 .await?;
         }
 
-        let (entries, page_size, database_pages) = self.directory_entries(&descriptors).await?;
-        let directory = DirectoryTree::build(entries, page_size, database_pages)?;
+        let base_pages = base_graph
+            .as_ref()
+            .map_or(0, |graph| graph.document.database_pages);
+        let (changes, retain_through, page_size, database_pages) =
+            directory_changes(&prepared, base_pages)?;
+        let extents = object_extents(&descriptors)?;
+        let directory = if let Some(graph) = &base_graph {
+            let base_extents = object_extents(&graph.descriptors)?;
+            DirectoryTree::update(
+                directory::Verification {
+                    layout: &self.layout,
+                    cell: &self.cell,
+                    incarnation: &self.incarnation,
+                    page_size: graph.document.page_size,
+                    database_pages: graph.document.database_pages,
+                    extents: &base_extents,
+                    host: &self.host,
+                },
+                graph.document.directory_digest,
+                graph.document.directory_height,
+                graph.aggregate,
+                changes,
+                retain_through,
+                directory::Verification {
+                    layout: &self.layout,
+                    cell: &self.cell,
+                    incarnation: &self.incarnation,
+                    page_size,
+                    database_pages,
+                    extents: &extents,
+                    host: &self.host,
+                },
+                cuts.position.checksum,
+            )
+            .await?
+        } else {
+            let directory = DirectoryTree::build(changes, page_size, database_pages)?;
+            if directory.checksum() != cuts.position.checksum {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            directory
+        };
         for node in directory.objects() {
             self.put_object(&node.digest, CellObjectKind::Directory, node.bytes.clone())
                 .await?;
@@ -508,61 +548,10 @@ impl CellReplica {
             return Err(CrabError::ChecksumMismatch);
         }
         Ok(LoadedGraph {
+            aggregate,
             document,
             descriptors,
         })
-    }
-
-    async fn directory_entries(
-        &self,
-        descriptors: &[SegmentDescriptor],
-    ) -> Result<(BTreeMap<u32, DirectoryEntry>, u32, u32)> {
-        let mut entries = BTreeMap::new();
-        let mut page_size = 0;
-        let mut database_pages = 0;
-        for descriptor in descriptors {
-            page_size = descriptor.info.page_size;
-            database_pages = descriptor.info.database_pages;
-            entries.retain(|page, _| *page <= database_pages);
-            let bytes = self
-                .read_object(
-                    &descriptor.index_digest,
-                    CellObjectKind::Index,
-                    descriptor.index_length,
-                )
-                .await?;
-            if bytes.len() as u64 != descriptor.index_length
-                || *blake3::hash(&bytes).as_bytes() != descriptor.index_digest
-            {
-                return Err(CrabError::ChecksumMismatch);
-            }
-            let object = descriptor.object_digest();
-            let base = descriptor.offset();
-            for entry in crate::paged::decode_index(&bytes)? {
-                let offset = base
-                    .checked_add(entry.offset)
-                    .ok_or(CrabError::LTXCorrupted)?;
-                entries.insert(
-                    entry.page,
-                    DirectoryEntry {
-                        page: entry.page,
-                        object,
-                        offset,
-                        length: u32::try_from(entry.size).map_err(|_| CrabError::LTXCorrupted)?,
-                        frame_hash: entry.hash,
-                        checksum: entry.checksum,
-                    },
-                );
-            }
-            let expected = u64::from(database_pages)
-                - u64::from(crate::ltx::lock_pgno(page_size) <= database_pages);
-            let checksum =
-                entries.values().fold(0, |sum, entry| sum ^ entry.checksum) | crate::CHECKSUM_FLAG;
-            if entries.len() as u64 != expected || checksum != descriptor.info.post_checksum {
-                return Err(CrabError::ChecksumMismatch);
-            }
-        }
-        Ok((entries, page_size, database_pages))
     }
 
     fn validate_chain(&self, descriptors: &[SegmentDescriptor], target: Position) -> Result<()> {
@@ -642,6 +631,7 @@ impl CellReplica {
 }
 
 struct LoadedGraph {
+    aggregate: directory::Aggregate,
     document: RootDocument,
     descriptors: Vec<SegmentDescriptor>,
 }
@@ -690,4 +680,36 @@ fn object_extents(descriptors: &[SegmentDescriptor]) -> Result<BTreeMap<[u8; 32]
         }
     }
     Ok(extents)
+}
+
+fn directory_changes(
+    prepared: &[(Vec<u8>, crate::SegmentInfo, Vec<u8>)],
+    base_pages: u32,
+) -> Result<(BTreeMap<u32, DirectoryEntry>, u32, u32, u32)> {
+    let mut changes = BTreeMap::new();
+    let mut retain_through = base_pages;
+    let mut page_size = 0;
+    let mut database_pages = base_pages;
+    for (_, info, index) in prepared {
+        page_size = info.page_size;
+        database_pages = info.database_pages;
+        // Once a cut truncates a page, later growth must provide a new frame;
+        // retaining its old locator would resurrect bytes from before truncation.
+        retain_through = retain_through.min(database_pages);
+        changes.retain(|page, _| *page <= database_pages);
+        for entry in crate::paged::decode_index(index)? {
+            changes.insert(
+                entry.page,
+                DirectoryEntry {
+                    page: entry.page,
+                    object: info.blake3,
+                    offset: entry.offset,
+                    length: u32::try_from(entry.size).map_err(|_| CrabError::LTXCorrupted)?,
+                    frame_hash: entry.hash,
+                    checksum: entry.checksum,
+                },
+            );
+        }
+    }
+    Ok((changes, retain_through, page_size, database_pages))
 }

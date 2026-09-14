@@ -34,7 +34,8 @@ interrupt, new admission is fenced immediately, and a timed-out mutation returns
 unknown while its permits remain held until the callback exits. A native callback
 that exits late cannot publish its tentative commit. Sparse page-I/O deadline
 propagation and automatic fenced recovery,
-streaming directory and checksum updates, prepared compaction/bundles,
+streaming initial directory construction and directory-backed capture checksums,
+shared directory caching, prepared compaction/bundles,
 Workflow/effect/scheduler primitives, typed registry, HTTP cutover and capacity
 qualification remain incomplete. The scoped KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence

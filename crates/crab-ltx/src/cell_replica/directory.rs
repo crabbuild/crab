@@ -4,6 +4,8 @@ use crab_storage::{CellObjectKind, CellStorageLayout};
 
 use crate::{CrabError, Host, Result};
 
+mod update;
+
 const MAGIC: &[u8; 8] = b"CRBDIR01";
 const HEADER_BYTES: usize = 32;
 const LEAF_RECORD_BYTES: usize = 88;
@@ -107,6 +109,33 @@ impl DirectoryTree {
 
     pub(super) fn height(&self) -> u32 {
         self.height
+    }
+
+    pub(super) fn checksum(&self) -> u64 {
+        self.root.aggregate.checksum
+    }
+
+    pub(super) async fn update(
+        base: Verification<'_>,
+        root: [u8; 32],
+        height: u32,
+        aggregate: Aggregate,
+        changes: BTreeMap<u32, DirectoryEntry>,
+        retain_through: u32,
+        final_state: Verification<'_>,
+        expected_checksum: u64,
+    ) -> Result<Self> {
+        update::run(
+            base,
+            root,
+            height,
+            aggregate,
+            changes,
+            retain_through,
+            final_state,
+            expected_checksum,
+        )
+        .await
     }
 }
 

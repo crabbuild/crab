@@ -43,6 +43,7 @@ does not imply that all of those bytes must reside on local disk.
 | Every open paged view started a thread | One shared independent I/O worker for overlapping default views; custom executor hosts share across their clones | `host_hooks::remote::many_views_share_one_host_io_worker`: 16 simultaneous views started 16 workers before, one after; final close joins it |
 | Read-ahead cache multiplied with views | Shared FIFO cache capped at 8 MiB decoded payload, keyed by immutable view/page identity | `paged_io::tests::cache_bounds_payload_and_isolates_pinned_views` checks eviction, byte accounting and view isolation |
 | Small remote appends cloned/scanned all locators | Copy-on-write 256-page metadata blocks, cached block/global XOR checksums | `paged::map` tests copy one changed block out of a 4,096-page map and compare 4,000 updates/shrinks with a full-scan oracle |
+| Cell-root appends reloaded every historical index and rebuilt every locator | Authenticated radix copy-on-write reads changed leaves/ancestors, prunes truncated subtrees and reuses untouched digests | `cell_roots::changed_cut_loads_only_touched_directory_nodes` stays below 100 KiB of origin reads after changing one page in a 20 MB database; `truncate_regrow_cannot_reuse_old_locator` restores newly written bytes after shrink/regrowth |
 | Partial compaction downloaded unrelated bodies | Verify the original indexed plan; fetch only selected bodies; authenticate regenerated indexes; compare independently reduced page bytes; verify replacement indexed state | `publication::range_compaction_does_not_download_unselected_bodies`: before, 2,026,087 downloaded bytes; after, under 100,000; restored bytes identical |
 | Independent replicas multiplied remote/recovery work | Shared I/O, CPU-job and large-recovery admission; ordered concurrent input/index reads | `replica::io` tests overlap two cohorts while enforcing one three-request ceiling and preserving input order |
 | Cancelling a waiter could release capacity before its work stopped | CPU/recovery permits travel with dispatched non-cancellable closures; network child tasks abort on cohort drop | `environment` cancellation regression and `replica::io` cancellation regression |
@@ -88,14 +89,14 @@ admit 5 GB databases. Raising it requires a separately sized recovery budget.
 
 ## Remaining implementation gates
 
-1. **Bounded authenticated metadata residency.** Current sparse activation loads
-   all indexes and keeps a locator per live page. Introduce an authenticated,
-   block-addressable page directory and bounded resident block cache with an
-   explicit local persistence/rebuild contract. Block hashes and aggregate
-   checksums must preserve exact coverage, truncation/regrowth and intermediate
-   state verification. Copy-on-write blocks implemented here are an update-cost
-   optimization, not that disk-backed directory. A format change needs a
-   deliberate hard-cutover design, not an implicit fallback reader.
+1. **Finish bounded authenticated metadata residency.** Cell roots now use an
+   authenticated block-addressable radix directory, and incremental publication
+   reads/copy-on-writes only changed paths while preserving truncation/regrowth
+   coverage. Initial construction still materializes all locators, writable
+   activation loads an eight-byte checksum per database page, the standalone
+   `Replica` page map remains resident, and there is no bounded shared node cache
+   with an explicit local persistence/rebuild contract. Finish those paths before
+   claiming the 5 GB/10K target; do not add an implicit fallback reader.
 2. **Streaming large-database operations.** Capture checksum arrays still
    clone/scan per cut. Snapshot, restore and compaction can hold database-sized
    decoded buffers. Replace these with bounded scratch-backed processing and

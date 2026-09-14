@@ -8,8 +8,9 @@ Enable `replica` for the existing `crab-storage` transport and Tokio integration
 Status: local and standalone remote replication are implemented. Native LTX cuts
 can also be prepared as immutable Cell/incarnation-scoped roots and bound to a
 checked `crab-cell-runtime` control successor. **This is not wired into
-`crab-http-server` yet.** Prepared bundle/compaction roots, lazy directory-backed
-activation, actor reconciliation and the hard cutover still remain. See the
+`crab-http-server` yet.** Prepared bundle/compaction roots, directory-backed
+capture checksums, shared directory caching, streaming initial construction and
+the hard cutover still remain. See the
 [next architecture](../crab-http-server/next-architecture/README.md).
 
 ## Contract
@@ -142,9 +143,12 @@ compact v1 and references at most 64 pages of 96 segment descriptors. Its binary
 the live-page count and rolling SQLite checksum. Cold open reads bounded root
 metadata and one directory root; page bodies and descendant directory nodes fault
 on demand. Writable activation currently materializes one eight-byte checksum per
-database page before opening SQLite. Preparation still rebuilds the locator set
-from every historical index, and no shared directory-node cache exists yet, so
-it is not yet the streaming 5 GB write path required by the platform capacity
+database page before opening SQLite. Incremental preparation copy-on-writes only
+changed leaves and ancestors, prunes truncated subtrees by their authenticated
+ranges and reuses every untouched digest; it does not fetch historical indexes or
+materialize all live locators. Initial root construction still materializes its
+full locator set, and no shared directory-node cache exists yet, so this is not
+yet the complete streaming 5 GB write path required by the platform capacity
 gate. Cell-root bundle, compaction and full sequential restore APIs also remain.
 
 The older `Replica` API below remains for standalone repository replication and

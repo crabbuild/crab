@@ -45,14 +45,6 @@ impl SegmentDescriptor {
         }
     }
 
-    pub(super) fn object_digest(&self) -> [u8; 32] {
-        self.object_digest
-    }
-
-    pub(super) fn offset(&self) -> u64 {
-        self.offset
-    }
-
     pub(super) fn object_extent(&self) -> ([u8; 32], u64, u64, crab_storage::CellObjectKind) {
         (
             self.object_digest,

@@ -142,6 +142,16 @@ nodes are copy-on-write immutable objects; original nodes remain usable by
 historical roots. Initial snapshot construction streams sorted verified pages
 into leaves; it does not allocate one locator per page.
 
+Incremental cut update is now implemented: native indexes are decoded from the
+already verified local cuts, affected radix paths are authenticated and rewritten,
+whole truncated subtrees are dropped from parent aggregates without reading their
+leaves, and untouched child digests remain shared with historical roots. Coverage
+and the root checksum must equal the new LTX endpoint before `PreparedRoot` is
+created. `changed_cut_loads_only_touched_directory_nodes` and
+`truncate_regrow_cannot_reuse_old_locator` cover origin-read bounds and the
+truncate/regrow safety invariant. Initial tree construction is still dense and
+must be replaced by the streaming builder described above.
+
 The local capture checksum tracker must use this same bounded directory through
 an injected page-state interface: lookup/update a changed page CRC, truncate a
 suffix, and read the aggregate checksum. Replace the current Vec/whole-map clone

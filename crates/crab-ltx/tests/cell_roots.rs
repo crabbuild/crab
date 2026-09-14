@@ -202,3 +202,184 @@ async fn exact_cell_root_opens_sparse_writer_and_publishes_incrementally() {
     assert_eq!(count, 3);
     replacement.close().unwrap();
 }
+
+#[tokio::test]
+async fn changed_cut_loads_only_touched_directory_nodes() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE counter(value INTEGER NOT NULL);\
+                 INSERT INTO counter VALUES (0);\
+                 CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(20000000))",
+            )
+        })
+        .unwrap();
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let observed = read_bytes.clone();
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes, Ordering::SeqCst);
+        }));
+    let replica = replica(store, [41; 32], [42; 16]);
+    let first = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+
+    writer
+        .transaction(|transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let next = writer.capture().unwrap();
+    read_bytes.store(0, Ordering::SeqCst);
+    let second = replica.prepare(Some(&first), &next, 2, 1).await.unwrap();
+
+    assert!(
+        read_bytes.load(Ordering::SeqCst) < 100_000,
+        "an incremental root must not reload the full 20 MB snapshot index"
+    );
+    assert_eq!(second.root().position, next.position);
+    writer.close().unwrap();
+}
+
+#[tokio::test]
+async fn directory_growth_adds_authenticated_parent_level() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let mut writer =
+        ManagedDb::open(&directory.path().join("cell.sqlite"), Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(700000))",
+            )
+        })
+        .unwrap();
+    let replica = replica(Store::new(Arc::new(InMemory::new())), [61; 32], [62; 16]);
+    let first = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap();
+    assert_eq!(first.verified().directory_height(), 0);
+
+    writer
+        .transaction(|transaction| {
+            transaction.execute("INSERT INTO payload VALUES(randomblob(700000))", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let second = replica
+        .prepare(Some(&first.root()), &writer.capture().unwrap(), 2, 1)
+        .await
+        .unwrap();
+    assert_eq!(second.verified().directory_height(), 1);
+    let last = second.verified().paged().page_count();
+    assert_eq!(
+        second
+            .verified()
+            .paged()
+            .read_page(last)
+            .await
+            .unwrap()
+            .len(),
+        second.verified().page_size() as usize
+    );
+    writer.close().unwrap();
+}
+
+#[tokio::test]
+async fn truncate_regrow_cannot_reuse_old_locator() {
+    let directory = tempfile::TempDir::new().unwrap();
+    let path = directory.path().join("cell.sqlite");
+    let initial = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+    initial
+        .execute_batch("PRAGMA auto_vacuum = FULL; VACUUM")
+        .unwrap();
+    drop(initial);
+    let mut writer = ManagedDb::open(&path, Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(zeroblob(4000000))",
+            )
+        })
+        .unwrap();
+    let replica = replica(Store::new(Arc::new(InMemory::new())), [51; 32], [52; 16]);
+    let first_batch = writer.capture().unwrap();
+    let first_pages = first_batch.segments.last().unwrap().info().database_pages;
+    let first = replica
+        .prepare(None, &first_batch, 1, 1)
+        .await
+        .unwrap()
+        .root();
+
+    writer
+        .transaction(|transaction| {
+            transaction.execute("DELETE FROM payload", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let truncated_batch = writer.capture().unwrap();
+    let truncated_pages = truncated_batch
+        .segments
+        .last()
+        .unwrap()
+        .info()
+        .database_pages;
+    assert!(truncated_pages < first_pages);
+    let truncated = replica
+        .prepare(Some(&first), &truncated_batch, 2, 1)
+        .await
+        .unwrap()
+        .root();
+
+    writer
+        .transaction(|transaction| {
+            transaction.execute("INSERT INTO payload VALUES(randomblob(4000000))", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let regrown_batch = writer.capture().unwrap();
+    let regrown = replica
+        .prepare(Some(&truncated), &regrown_batch, 3, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+
+    let restored = directory.path().join("restored.sqlite");
+    let writable = replica
+        .open_root(&regrown)
+        .await
+        .unwrap()
+        .paged()
+        .prepare_writable()
+        .await
+        .unwrap();
+    let restored_for_open = restored.clone();
+    let mut replacement =
+        tokio::task::spawn_blocking(move || writable.open_writable(&restored_for_open))
+            .await
+            .unwrap()
+            .unwrap();
+    let (length, is_zero): (u32, bool) = replacement
+        .transaction(|transaction| {
+            transaction.query_row(
+                "SELECT length(value), value = zeroblob(length(value)) FROM payload",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(length, 4_000_000);
+    assert!(!is_zero);
+    replacement.close().unwrap();
+}

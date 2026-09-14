@@ -132,7 +132,10 @@ the bounded plan. Range compaction downloads only selected bodies, authenticates
 their generated indexes, compares independently reduced page bytes, and validates
 the full replacement indexed plan. Sparse takeover is index/metadata-only until SQL
 faults pages. Copy-on-write metadata blocks and rolling checksums remove whole-map
-copying/scanning on each remote append, but all live-page locators remain resident.
+copying/scanning on each standalone remote append, but its live-page locators
+remain resident. Cell roots instead use an authenticated radix directory whose
+incremental publisher reads only changed leaves/ancestors; initial construction,
+writable checksum seeding and shared directory caching remain scalability gates.
 See [SCALABILITY.md](SCALABILITY.md) for the 1K–10K database target and remaining gates.
 The feature set is not yet a production-ready HTTP backend,
 nor a claim of complete Celld performance, simulator or operational parity.

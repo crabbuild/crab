@@ -9,7 +9,7 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell roots; cold reads and sparse writable activation use exact digest-pinned radix paths without a mutable head | Add prepared compaction/bundles, shared node cache and streaming directory/checksum updates |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell roots; cold reads and sparse writable activation use exact digest-pinned radix paths; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add prepared compaction/bundles, shared node cache, streaming initial construction and directory-backed capture checksums |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -32,9 +32,12 @@ mechanics evidence; none already proves multi-owner HTTP output gating.
 `CellReplica::prepare` and `open_root` now implement native-cut scope validation,
 canonical root/descriptor codecs, immutable dependency upload and the persistent
 radix directory format. `Control::publish_prepared` binds that checked proposal
-to exactly one Cell/incarnation/predecessor before the authority CAS. Complete
-this package by sharing the preparation path with bundles and compaction, making
-directory/checksum updates streaming and adding the shared node cache. Exact
+to exactly one Cell/incarnation/predecessor before the authority CAS. Incremental
+native publication now authenticates and copy-on-writes only changed leaves and
+ancestors, reuses untouched subtree digests and prunes truncation without loading
+discarded leaves. Complete this package by sharing preparation with bundles and
+compaction, streaming initial directory construction, replacing the dense
+capture/activation checksum array and adding the shared node cache. Exact
 Cell roots now load authenticated directory checksums without LTX bodies and
 open a sparse writable continuation through the existing VFS.
 Existing standalone `Replica` callers retain their current API; Cell runtime
@@ -53,6 +56,9 @@ Current local coverage is in `crates/crab-ltx/tests/cell_roots.rs` and
 
 `exact_cell_root_opens_sparse_writer_and_publishes_incrementally` currently
 proves local source deletion, exact sparse activation and successor publication.
+`changed_cut_loads_only_touched_directory_nodes` proves a one-page update does
+not reload a 20 MB snapshot index; `truncate_regrow_cannot_reuse_old_locator`
+proves a truncated locator cannot reappear after database growth.
 
 Exit: default/replica builds and existing tests pass, plus live source-loss test.
 
@@ -163,9 +169,11 @@ owner kill, full source-directory removal and query recovery.
 
 ## Work package 3: bounded storage
 
-Implement directory.rs, streaming root construction, external-merge compaction,
-and directory-backed capture checksum updates. Remove whole-DB buffers from
-active paths; do not preserve a second unbounded implementation as fallback.
+The authenticated radix directory and incremental copy-on-write update are now
+implemented. Continue with streaming initial root construction, external-merge
+compaction, shared bounded node caching and directory-backed capture checksum
+updates. Remove whole-DB buffers from active paths; do not preserve a second
+unbounded implementation as fallback.
 
 Add tests `directory_hash_and_coverage_reject_missing_page`,
 `truncate_regrow_cannot_reuse_old_locator`, `changed_cut_loads_only_touched_nodes`,
