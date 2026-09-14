@@ -2878,19 +2878,175 @@ pub async fn run_repo_remote_gc(
     coordinator_protected_keys: &HashSet<String>,
     cancel: &CancellationToken,
     grace_period: Duration,
-    jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
+    _jsonl_stream: Option<&std::sync::Mutex<JsonlStream<Stdout>>>,
 ) -> Result<GcOutcome> {
-    run_repo_remote_gc_under_maintenance(
+    run_request_minimal_gc(
         args,
         store,
         router,
         coordinator_protected_keys,
         cancel,
         grace_period,
-        jsonl_stream,
-        None,
     )
     .await
+}
+
+async fn run_request_minimal_gc(
+    args: &GcArgs,
+    store: &Store,
+    router: &StoreLayout,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    grace_period: Duration,
+) -> Result<GcOutcome> {
+    const FENCE_TTL: Duration = Duration::from_secs(60 * 60);
+
+    if args.resume_run_id.is_some() {
+        return Err(CrabError::Configuration {
+            key: "gc.resume".to_owned(),
+            origin: "protocol-v2 GC completes under one root fence and has no journal resume mode"
+                .to_owned(),
+        });
+    }
+    if args.force && !confirm_force(args)? {
+        return Ok(GcOutcome::default());
+    }
+    check_cancelled(cancel)?;
+    let started = Instant::now();
+    let snapshot_at = SystemTime::now();
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let base = crab_write::request_minimal::open_root(&layout).await?;
+    if base.record().root().generation() == 0 {
+        return Ok(GcOutcome {
+            dry_run: args.dry_run,
+            ..GcOutcome::default()
+        });
+    }
+    let fence_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+        .to_hex()
+        .to_string();
+    let expires_at_unix = snapshot_at
+        .checked_add(FENCE_TTL)
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .ok_or_else(|| CrabError::Internal("GC fence expiry cannot be represented".to_owned()))?;
+    let fenced = if args.dry_run {
+        base
+    } else {
+        crab_write::request_minimal::begin_gc(
+            &layout,
+            base,
+            crab_metadata::request_minimal::GcFence::new(&fence_id, expires_at_unix)?,
+        )
+        .await?
+    };
+    let sweep = sweep_request_minimal_objects(
+        args,
+        store,
+        &layout,
+        fenced.record().root(),
+        coordinator_protected_keys,
+        cancel,
+        snapshot_at,
+        grace_period,
+        started,
+    )
+    .await;
+    if args.dry_run {
+        return sweep;
+    }
+    let release = crab_write::request_minimal::end_gc(&layout, fenced, &fence_id).await;
+    match (sweep, release) {
+        (Ok(outcome), Ok(_)) => Ok(outcome),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GC sweep keeps its safety snapshot and policy explicit"
+)]
+async fn sweep_request_minimal_objects(
+    args: &GcArgs,
+    store: &Store,
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::request_minimal::RepositoryRoot,
+    coordinator_protected_keys: &HashSet<String>,
+    cancel: &CancellationToken,
+    snapshot_at: SystemTime,
+    grace_period: Duration,
+    started: Instant,
+) -> Result<GcOutcome> {
+    let mut reachable = HashSet::new();
+    if let Some(checkpoint) = root.checkpoint() {
+        reachable.insert(
+            layout
+                .request_minimal_checkpoint_path(checkpoint.hash())
+                .to_string(),
+        );
+    }
+    reachable.extend(
+        root.capsule_frontier()
+            .iter()
+            .map(|run| layout.request_minimal_capsule_path(run.hash()).to_string()),
+    );
+    reachable.extend(coordinator_protected_keys.iter().cloned());
+
+    let capsule_prefix = layout.repo_path("v2/capsules/");
+    let checkpoint_prefix = layout.repo_path("v2/checkpoints/");
+    let (capsules, checkpoints) = tokio::try_join!(
+        store.list_prefix(&capsule_prefix),
+        store.list_prefix(&checkpoint_prefix),
+    )?;
+    let cutoff = snapshot_at - grace_period.max(MIN_GRACE_PERIOD);
+    let candidates = capsules
+        .into_iter()
+        .chain(checkpoints)
+        .filter(|object| !reachable.contains(object.location.as_ref()))
+        .filter(|object| args.force || SystemTime::from(object.last_modified) < cutoff)
+        .collect::<Vec<_>>();
+    let bytes = candidates.iter().map(|object| object.size).sum();
+    if !args.dry_run {
+        let deleter = StoreObjectDeleter::new(store.clone());
+        let policy = DeletePolicy {
+            snapshot_at,
+            grace_period,
+            force: args.force,
+        };
+        let concurrency = args.delete_concurrency.max(1);
+        let mut deletes = futures_util::stream::iter(candidates.iter().map(|object| {
+            let meta = ObjectMeta {
+                key: object.location.to_string(),
+                size: object.size,
+                last_modified: SystemTime::from(object.last_modified),
+                e_tag: object.e_tag.clone(),
+                version: object.version.clone(),
+                storage_class: None,
+                transitioned_at: None,
+            };
+            let deleter = &deleter;
+            async move { deleter.delete_candidate(&meta, policy).await }
+        }))
+        .buffer_unordered(concurrency);
+        while let Some(result) = deletes.next().await {
+            check_cancelled(cancel)?;
+            result?;
+        }
+    }
+    Ok(GcOutcome {
+        packs_deleted: candidates.len() as u64,
+        bytes_reclaimed: bytes,
+        list_requests: 2,
+        list_parallelism: 2,
+        list_wall_seconds: started.elapsed().as_secs_f64(),
+        dry_run: args.dry_run,
+        ..GcOutcome::default()
+    })
 }
 
 async fn run_repo_remote_gc_under_maintenance(

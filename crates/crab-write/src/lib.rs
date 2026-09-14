@@ -27,6 +27,11 @@ pub enum WriteError {
     RefChanged { ref_name: String, path: String },
     #[error("request-minimal root changed at {path}")]
     RequestMinimalRootChanged { path: String },
+    #[error("request-minimal root is fenced for GC by {fence_id}")]
+    RequestMinimalGcFenced {
+        fence_id: String,
+        expires_at_unix: u64,
+    },
     #[error(
         "request-minimal transaction {transaction_id} may have committed; reconcile exact root evidence before retrying"
     )]
@@ -41,6 +46,15 @@ pub enum WriteError {
     )]
     RequestMinimalCheckpointCommitUncertain {
         checkpoint_hash: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        verification: Option<Box<WriteError>>,
+    },
+    #[error(
+        "request-minimal maintenance transition {fence_id} may have committed; reconcile exact root evidence before retrying"
+    )]
+    RequestMinimalMaintenanceCommitUncertain {
+        fence_id: String,
         #[source]
         source: Box<crab_storage::StorageError>,
         verification: Option<Box<WriteError>>,

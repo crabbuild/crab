@@ -58,6 +58,24 @@ impl RootSnapshot {
         }
         Ok(Self { record, etag })
     }
+
+    /// Bind a GC fence transition that preserves all logical repository state.
+    pub fn committed_maintenance(&self, record: RootRecord, etag: ETag) -> Result<Self> {
+        if record.root().generation() != self.record.root().generation()
+            || record.root().parent_root_digest() != Some(self.record.digest())
+            || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().refs() != self.record.root().refs()
+            || record.root().peeled_refs() != self.record.root().peeled_refs()
+            || record.root().head() != self.record.root().head()
+            || record.root().checkpoint() != self.record.root().checkpoint()
+            || record.root().capsule_frontier() != self.record.root().capsule_frontier()
+        {
+            return Err(contract_error(
+                "committed maintenance root changed logical repository state",
+            ));
+        }
+        Ok(Self { record, etag })
+    }
 }
 
 /// Create the first root at an empty v2 publication key.

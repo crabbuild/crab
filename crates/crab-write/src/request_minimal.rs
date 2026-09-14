@@ -127,6 +127,12 @@ pub async fn publish_checkpoint(
     base: RootSnapshot,
     checkpoint: &Checkpoint,
 ) -> Result<RootSnapshot> {
+    if let Some(fence) = base.record().root().gc_fence() {
+        return Err(WriteError::RequestMinimalGcFenced {
+            fence_id: fence.id().to_owned(),
+            expires_at_unix: fence.expires_at_unix(),
+        });
+    }
     if checkpoint.covered_generation() != base.record().root().generation()
         || checkpoint.covered_root_digest() != base.record().digest()
     {
@@ -179,6 +185,71 @@ pub async fn publish_checkpoint(
     }
 }
 
+/// Atomically fence a root for one exclusive GC sweep.
+pub async fn begin_gc(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    fence: crab_metadata::request_minimal::GcFence,
+) -> Result<RootSnapshot> {
+    let fence_id = fence.id().to_owned();
+    let next = base
+        .record()
+        .root()
+        .begin_gc(base.record().digest(), fence)?;
+    update_maintenance_root(router, base, RootRecord::encode(next)?, &fence_id).await
+}
+
+/// Atomically clear the exact GC fence after a sweep.
+pub async fn end_gc(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    fence_id: &str,
+) -> Result<RootSnapshot> {
+    let next = base
+        .record()
+        .root()
+        .end_gc(base.record().digest(), fence_id)?;
+    update_maintenance_root(router, base, RootRecord::encode(next)?, fence_id).await
+}
+
+async fn update_maintenance_root(
+    router: &StoreLayout<Store>,
+    base: RootSnapshot,
+    candidate: RootRecord,
+    fence_id: &str,
+) -> Result<RootSnapshot> {
+    let root_path = router.request_minimal_root_path();
+    match router
+        .store()
+        .update(&root_path, candidate.bytes().clone(), base.etag().clone())
+        .await
+    {
+        Ok(etag) => Ok(base.committed_maintenance(candidate, etag)?),
+        Err(StorageError::StateConflict { .. }) => Err(WriteError::RequestMinimalRootChanged {
+            path: root_path.to_string(),
+        }),
+        Err(source) => {
+            let verification = open_root(router).await;
+            match verification {
+                Ok(snapshot) if snapshot.record().digest() == candidate.digest() => Ok(snapshot),
+                Ok(snapshot) if snapshot.record().digest() == base.record().digest() => {
+                    Err(source.into())
+                }
+                Ok(_) => Err(WriteError::RequestMinimalMaintenanceCommitUncertain {
+                    fence_id: fence_id.to_owned(),
+                    source: Box::new(source),
+                    verification: None,
+                }),
+                Err(verification) => Err(WriteError::RequestMinimalMaintenanceCommitUncertain {
+                    fence_id: fence_id.to_owned(),
+                    source: Box::new(source),
+                    verification: Some(Box::new(verification)),
+                }),
+            }
+        }
+    }
+}
+
 async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
     let path = router.request_minimal_capsule_path(pointer.hash());
     let (bytes, _) = router
@@ -207,6 +278,12 @@ fn validate_capsule_binding(
     transaction: &CapsuleTransaction,
     capsule: &Capsule,
 ) -> Result<()> {
+    if let Some(fence) = base.record().root().gc_fence() {
+        return Err(WriteError::RequestMinimalGcFenced {
+            fence_id: fence.id().to_owned(),
+            expires_at_unix: fence.expires_at_unix(),
+        });
+    }
     if transaction.base_root_digest() != base.record().digest()
         || capsule.base_root_digest() != base.record().digest()
         || capsule.transaction_id() != transaction.id()?

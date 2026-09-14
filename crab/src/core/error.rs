@@ -1978,6 +1978,14 @@ impl From<crab_write::WriteError> for CrabError {
                 path,
                 expected_etag: None,
             },
+            crab_write::WriteError::RequestMinimalGcFenced {
+                fence_id,
+                expires_at_unix,
+            } => Self::PushLockHeld {
+                ref_name: "request-minimal-gc".to_owned(),
+                holder: fence_id,
+                expires_at_unix: Some(expires_at_unix),
+            },
             crab_write::WriteError::Timestamp(source) => Self::from(source),
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
@@ -1994,6 +2002,9 @@ impl From<crab_write::WriteError> for CrabError {
             | crab_write::WriteError::InitialHead { .. }
             | crab_write::WriteError::RequestMinimalCommitUncertain { .. }
             | crab_write::WriteError::RequestMinimalCheckpointCommitUncertain { .. }
+            | crab_write::WriteError::RequestMinimalMaintenanceCommitUncertain {
+                ..
+            }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }

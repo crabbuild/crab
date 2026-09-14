@@ -710,5 +710,41 @@ mod tests {
             fresh.path(),
             &["cat-file", "-e", &format!("{third}^{{commit}}")],
         );
+
+        let orphan = layout.request_minimal_capsule_path(&"f".repeat(64));
+        store
+            .put(&orphan, Bytes::from_static(b"unreachable capsule"))
+            .await
+            .expect("write GC orphan");
+        let gc = crate::cmd::gc::run_repo_remote_gc(
+            &crate::cmd::gc::GcArgs {
+                force: true,
+                yes: true,
+                ..crate::cmd::gc::GcArgs::default()
+            },
+            &store,
+            &router,
+            &std::collections::HashSet::new(),
+            &CancellationToken::new(),
+            std::time::Duration::ZERO,
+            None,
+        )
+        .await
+        .expect("request-minimal GC");
+        assert_eq!(gc.packs_deleted, 3);
+        assert!(store.head(&orphan).await.is_err());
+        let root = crab_write::request_minimal::open_root(&layout)
+            .await
+            .expect("root after GC");
+        assert!(root.record().root().gc_fence().is_none());
+        crab_read::request_minimal::open_view(
+            &layout,
+            crab_read::request_minimal::RequestMinimalReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("GC preserves every referenced checkpoint and capsule");
     }
 }
