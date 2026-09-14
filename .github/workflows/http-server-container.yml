@@ -53,6 +53,15 @@ jobs:
           done
 
           jq empty crates/crab-http-server/deploy/ecs/task-definition.example.json
+          jq --exit-status '
+            .containerDefinitions[0].command[0]
+              | contains("cells release bootstrap --image \\\"$CRAB_HTTP_SERVER_RELEASE_IMAGE\\\"")
+          ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
+          jq --exit-status '
+            [.containerDefinitions[0].environment[]
+              | select(.name == "CRAB_HTTP_SERVER_RELEASE_IMAGE")]
+              | length == 1
+          ' crates/crab-http-server/deploy/ecs/task-definition.example.json >/dev/null
           docker compose --file crates/crab-http-server/deploy/compose.yaml config --quiet
           release_manifest="${RUNNER_TEMP}/crab-http-server-release.json"
           release_manifest_generator=crates/crab-http-server/deploy/generate-release-manifest.sh
@@ -254,6 +263,8 @@ jobs:
             grep -F -- '- "15"' "${rendered}"
             grep -F '"helm.sh/hook": test' "${rendered}"
             grep -F 'kind: Pod' "${rendered}"
+            grep -F 'name: cell-release-bootstrap' "${rendered}"
+            grep -F -- '- bootstrap' "${rendered}"
             grep -F -- '- storage-probe' "${rendered}"
             docker run --rm \
               --volume "${rendered}:/manifests/server.yaml:ro" \

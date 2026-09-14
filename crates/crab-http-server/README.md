@@ -61,12 +61,20 @@ credentials. Then create a cataloged repository and start:
 
 ```sh
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
+  cells release bootstrap --image sha256:IMAGE_MANIFEST_DIGEST
+"$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   repository create --owner team --name project --prefix team/project
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml \
   storage-probe
 "$CARGO_TARGET_DIR/release/crab-http-server" --config /path/to/server.toml serve
 ```
 
+`cells release bootstrap` converges concurrent first-install callers on one
+exact descriptor/image and resumes only the activation operation it created.
+For an operator-prepared upgrade it validates and admits the candidate without
+completing activation; it refuses to replace another desired release. `serve`
+rejects startup before binding either listener unless the compiled descriptor is
+the selected ready release or the selected compatible rollout candidate.
 `storage-probe` fails unless the workload can read and list the configured
 root, perform conditional coordination writes, create and delete an object,
 and observe that deletion. `serve` runs the same preflight before binding its

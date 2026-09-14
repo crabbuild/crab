@@ -85,11 +85,15 @@ flowchart LR
 The proxy shares the server's network namespace. It is the only process bound
 to Docker's published port; Crab still binds to loopback and keeps its
 unauthenticated local-trust invariant. The management listener and RustFS are
-not published to the host. Compose waits until the catalog is valid and every
-repository can open its current Git view. This profile is for local development
-and evaluation, not remote or multi-user service. Caddy preserves the validated
-external loopback authority, so Git LFS action URLs also follow a custom
-`CRAB_HTTP_SERVER_PORT`.
+not published to the host. A one-shot `release-init` service converges concurrent
+first-install callers on the exact Cell descriptor and image before repository
+initialization or server startup. It resumes only its own bootstrap operation,
+admits an operator-prepared candidate without activating it, and never replaces
+a different desired release.
+Compose then waits until the catalog is valid and every repository can open its
+current Git view. This profile is for local development and evaluation, not
+remote or multi-user service. Caddy preserves the validated external loopback
+authority, so Git LFS action URLs also follow a custom `CRAB_HTTP_SERVER_PORT`.
 
 ### Operate the local stack
 
@@ -118,6 +122,7 @@ volume, including the catalog and every repository. The defaults need no
 | Variable | Default | Purpose |
 |---|---|---|
 | `CRAB_HTTP_SERVER_PORT` | `8788` | Localhost port published by Docker |
+| `CRAB_HTTP_SERVER_RELEASE_IMAGE` | `sha256:` plus 64 zeroes | Immutable image identity recorded by local release bootstrap |
 | `CRAB_TMP_SIZE` | `2g` | Bounded receive-pack and index scratch space |
 | `CRAB_HTTP_SERVER_IMAGE` | `crab-http-server:local` | Server image name or prebuilt image reference |
 

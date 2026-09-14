@@ -383,6 +383,7 @@ pub async fn serve(config: Config) -> Result<()> {
     )?;
     let transfer_admission = transfer_admission(&catalog);
     probe_storage_contract(&catalog, &transfer_admission).await?;
+    crate::cells::verify_startup_release(&config).await?;
     // A pod must prove the complete storage contract before it owns any socket;
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;

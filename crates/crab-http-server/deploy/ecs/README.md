@@ -34,7 +34,11 @@ Add an S3 lifecycle rule that expires objects below
 `repositories/.crab/http-server/v1/auth/` after 24 hours. Do not apply that
 rule to the catalog or repository prefixes.
 
-After replacing every placeholder and digest-pinning a qualified image:
+Replace both the container image suffix and
+`CRAB_HTTP_SERVER_RELEASE_IMAGE` with the same qualified manifest digest. The
+task bootstraps or admits that exact compiled Cell release before starting the
+listener; concurrent first tasks converge on one operation, and a different
+pending release fails closed. After replacing every placeholder:
 
 ```sh
 aws ecs register-task-definition \

@@ -158,11 +158,20 @@ only the exact compiled descriptor selected by `ready.current` or
 `activating.desired`, publishes the catalog entry, and reloads the same release
 operation before returning its proof. It accepts only the exact activation-to-ready
 successor, so a late catalog publication cannot introduce unsupported initial
-code/schema across the activator's final scan. No product route creates Cells yet.
-Node eligibility, old-code/schema migration, persistent Cell-directory
-configuration, product routing and capacity qualification remain. Existing HTTP
-issue/comment routes still use the old object documents; the native module is not
-yet a user-visible storage path.
+code/schema across the activator's final scan. The first-install
+`cells release bootstrap --image DIGEST` command uses a deterministic operation
+identity, so concurrent pods converge on one exact descriptor and image. It
+resumes activation only for the operation it created; an operator-prepared
+upgrade is admitted without stealing activation ownership. `serve` verifies the
+selected descriptor bytes and complete Cell inventory before binding either
+listener. A candidate binary is eligible while its exact digest is `prepared` or
+`activating`; a steady server requires its exact `ready.current`. Compose, Helm
+and the ECS evaluation task execute bootstrap before first start. No product
+route creates Cells yet.
+Eligible-node quorum, old-code/schema migration,
+persistent Cell-directory configuration, product routing and capacity
+qualification remain. Existing HTTP issue/comment routes still use the old object
+documents; the native module is not yet a user-visible storage path.
 
 ## Deliverable and contract precedence
 

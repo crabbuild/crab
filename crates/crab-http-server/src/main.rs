@@ -60,6 +60,11 @@ enum CellReleaseCommand {
         #[arg(long)]
         image: String,
     },
+    /// Initialize an empty application or admit this binary's selected release.
+    Bootstrap {
+        #[arg(long)]
+        image: String,
+    },
     /// Verify every cataloged Cell and publish the prepared release as current.
     Activate {
         #[arg(long)]
@@ -211,6 +216,9 @@ async fn cells(
                 },
         } => crab_http_server::prepare_cell_release(config, expected_revision, &image).await?,
         CellsCommand::Release {
+            command: CellReleaseCommand::Bootstrap { image },
+        } => crab_http_server::bootstrap_cell_release(config, &image).await?,
+        CellsCommand::Release {
             command:
                 CellReleaseCommand::Activate {
                     expected_revision,
@@ -351,7 +359,27 @@ mod tests {
     }
 
     #[test]
-    fn release_prepare_activate_and_status_match_the_administration_contract() {
+    fn release_bootstrap_prepare_activate_and_status_match_the_administration_contract() {
+        let bootstrap = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "bootstrap",
+            "--image",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .unwrap();
+        assert!(matches!(
+            bootstrap.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Bootstrap { .. }
+                }
+            })
+        ));
+
         let prepare = Arguments::try_parse_from([
             "crab-http-server",
             "--config",

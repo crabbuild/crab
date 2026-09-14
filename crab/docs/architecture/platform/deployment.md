@@ -192,6 +192,7 @@ Implement administrative subcommands in the existing executable:
 
 ```text
 crab-http-server --config CONFIG cells release inspect --json
+crab-http-server --config CONFIG cells release bootstrap --image DIGEST
 crab-http-server --config CONFIG cells release prepare --expected-revision N --image DIGEST
 crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible
 crab-http-server --config CONFIG cells release status
@@ -199,8 +200,13 @@ crab-http-server --config CONFIG cells release status
 
 `cells release inspect --json` is now implemented and read-only; it prints the
 canonical descriptor compiled into the binary without accessing object storage.
-`cells release prepare`, `cells release activate --strategy compatible` and
-`cells release status` are also implemented. The
+`cells release bootstrap`, `cells release prepare`, `cells release activate
+--strategy compatible` and `cells release status` are also implemented.
+Bootstrap is an idempotent first-install operation: concurrent callers derive the
+same operation identity and converge on one descriptor/image. It resumes only
+the initial activation it created, admits an exact operator-prepared rollout
+candidate without completing that operator's activation, returns an already
+ready exact release, and refuses to replace another desired release. The
 first prepare strict-creates or adopts the root identity, uploads only the exact
 compiled descriptor, validates its digest and image digest, then strict-creates
 or ETag-updates canonical release state at the expected revision. Exact retries
@@ -309,7 +315,14 @@ never release its permits and continue running it in the background. Successors
 recover authoritative origin roots. VM supervisors use the same lifecycle.
 
 The current `serve` composition now creates one process-session `CellRuntime`,
-validates its statically linked registry, places it on `Server`, rejects readiness
+validates its statically linked registry, and before binding either listener
+requires that exact descriptor to be selected as `ready.current` or as the
+`prepared`/`activating` rollout candidate. The gate verifies stored descriptor
+bytes plus every catalog/control bootstrap pair. Compose, Helm and the ECS
+evaluation task run the idempotent bootstrap command before server start; on
+upgrades the init process admits a candidate but leaves its operator-owned
+activation state unchanged. The server then places the runtime on `Server`,
+rejects readiness
 once the runtime enters terminal drain, and calls its shutdown after public HTTP,
 Git receives, transfer permits and repository maintenance settle. Shutdown closes
 every active SQLite Cell, conditionally releases its exact control ownership,

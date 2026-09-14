@@ -49,6 +49,12 @@ pub async fn prepare_cell_release(
     cells::prepare_release(config, expected_revision, image).await
 }
 
+/// Initializes an empty application or admits this binary's selected release.
+pub async fn bootstrap_cell_release(config: &Config, image: &str) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::bootstrap_release(config, image).await
+}
+
 /// Returns the canonical release selection stored for this application.
 pub async fn cell_release_status(config: &Config) -> Result<Vec<u8>> {
     config.validate()?;

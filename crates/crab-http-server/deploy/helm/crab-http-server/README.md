@@ -269,6 +269,15 @@ the verified package returned by
 downloaded file avoids resolving a mutable registry version between
 verification and rollout.
 
+Every pod first runs the same immutable image as a `cell-release-bootstrap` init
+container. On a new storage root, concurrent pods converge on one deterministic
+first-install operation and complete it. On an upgrade, prepare the new compiled
+release before changing `image.digest`; the init container validates the exact
+prepared/activating candidate but does not complete the operator-owned
+activation. Activate it with `cells release activate --strategy compatible`
+after the rollout admission checks. A different desired descriptor or image
+keeps the pod unstarted instead of silently replacing release state.
+
 The Deployment becomes ready only after a pod can read and validate the durable
 catalog and open the current Git view of every discovered repository. Confirm
 the rollout and inspect the catalog:

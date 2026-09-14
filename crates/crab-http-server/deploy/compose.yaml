@@ -74,6 +74,21 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65534,gid=65534,mode=0700
     restart: "no"
 
+  release-init:
+    <<: *server-service
+    command:
+      - --config
+      - /etc/crab/server.toml
+      - cells
+      - release
+      - bootstrap
+      - --image
+      - ${CRAB_HTTP_SERVER_RELEASE_IMAGE:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+    restart: "no"
+
   repository-init:
     <<: *server-service
     command:
@@ -90,7 +105,7 @@ services:
       - --description
       - A repository created by Docker Compose
     depends_on:
-      bucket-init:
+      release-init:
         condition: service_completed_successfully
     restart: "no"
 
