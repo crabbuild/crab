@@ -322,10 +322,13 @@ shard count from the registry, publishes claims before returning payloads,
 revalidates exact tokens at a minimum receipt and exposes token-bound ack/retry/
 extend commands. Its integration test proves durable producer conflict,
 publication, validation, exact-root restore and acknowledgement.
-`WorkflowModule` binds one namespace, one statically linked definition and
-fixed start/signal/cancel/state IDs; `register_workflow` installs their typed
-codecs and exact definition-digest binding. Registry freeze rejects descriptor
-and transition-function drift. `WorkflowNamespace` derives its shard solely
+`WorkflowModule` binds one namespace, one current definition for new runs, a
+static retained-definition inventory, and fixed start/signal/cancel/state IDs;
+`register_workflow` installs their typed codecs and every exact definition-digest
+binding. Signal and activity completion load the stored run digest before
+selecting transition code, so a rollout can start new runs without stranding old
+ones. Registry freeze rejects descriptor, transition-function and
+definition/activity-matrix drift. `WorkflowNamespace` derives its shard solely
 from the workflow ID and registry topology, binds the start run identity to the
 runtime mutation identity, returns durable typed rejection for non-applied
 outcomes and supports bounded minimum-receipt state reads. Its integration test
@@ -339,7 +342,24 @@ borrow, heartbeat extensions publish as independent commands, and completion or
 retry feeds the pinned state machine. The activity context exposes stable run,
 activity and external-idempotency identities, the current durable lease deadline
 and cooperative cancellation. Pending mutations retain their exact identity for
-resolution. Catalog-driven shard polling and bounded concurrent cycles remain.
+resolution. Catalog-driven shard polling, timer dispatch and bounded concurrent
+cycles remain.
+
+```rust,ignore
+pub trait WorkflowModule: Send + Sync + 'static {
+    const MODULE: &'static str;
+    const NAMESPACE: NamespaceId;
+    const CURRENT_DEFINITION: &'static dyn WorkflowDefinition;
+    const DEFINITIONS: &'static [&'static dyn WorkflowDefinition];
+    // Fixed codec and operation IDs omitted.
+}
+```
+
+`DEFINITIONS` is executable code, not metadata: keep an older entry until a
+maintenance inventory proves no retained run, activity or timer references its
+digest. `CURRENT_DEFINITION` must be one of those entries. Adding a new current
+definition is an ordinary fleet release; removing old code is a separately
+gated cleanup release.
 
 WorkflowDefinition::transition(state, event, TransitionContext) -> Decision is
 synchronous; Decision/Action are native owned Rust values. Activities are

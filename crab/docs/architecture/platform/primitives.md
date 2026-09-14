@@ -302,13 +302,20 @@ lease tokens; completion identity is deterministic per attempt. Pending command
 outcomes retain their mutation evidence, and cancellation is signalled if the
 cycle is dropped or loses its lease. Integration coverage holds an activity
 past its first heartbeat, completes its state-machine transition, then restores
-and reads that terminal result from the exact LTX root. Effect actions, catalog-
-driven shard polling and bounded concurrent orchestration remain to implement.
+and reads that terminal result from the exact LTX root. Effect actions,
+catalog-driven shard polling, bounded concurrent orchestration and timer
+dispatch across retained definitions remain to implement.
 
-`WorkflowModule` binds one namespace, one statically linked definition and
-fixed start/signal/cancel/state operation IDs. `register_workflow` installs the
-typed codecs and definition function together; registry freeze rejects any
-descriptor whose definition-digest inventory differs from those bindings.
+`WorkflowModule` binds one namespace, one current definition, a bounded static
+inventory of retained definitions, and fixed start/signal/cancel/state operation
+IDs. New runs use `CURRENT_DEFINITION`; signal and activity completion first
+read the run's persisted digest and dispatch the matching entry from
+`DEFINITIONS`. `register_workflow` installs every transition function together
+with the typed codecs; activity registration expands the exact definition/type
+matrix. Registry freeze rejects any descriptor whose digest or activity
+inventory differs from those bindings, and startup rejects a current definition
+absent from the retained inventory.
+
 `WorkflowNamespace` hashes only the workflow ID through the registry-owned
 shard count, binds start identity to `MutationIdentity.request_id`, maps every
 non-applied outcome to a durable typed rejection, and exposes bounded

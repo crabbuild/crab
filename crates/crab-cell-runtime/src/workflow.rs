@@ -457,6 +457,20 @@ fn load_run(transaction: &Transaction<'_>, workflow_id: &[u8]) -> Result<Option<
         .map_err(Into::into)
 }
 
+pub(super) fn workflow_definition_digest(
+    transaction: &Transaction<'_>,
+    workflow_id: &[u8],
+) -> Result<Option<Digest>> {
+    Ok(load_run(transaction, workflow_id)?.map(|run| Digest::from_bytes(run.definition_digest)))
+}
+
+pub(super) fn workflow_definition_digest_by_run(
+    transaction: &Transaction<'_>,
+    run_id: [u8; 16],
+) -> Result<Option<Digest>> {
+    Ok(load_run_by_id(transaction, run_id)?.map(|run| Digest::from_bytes(run.definition_digest)))
+}
+
 pub(super) fn load_run_by_id(
     transaction: &Transaction<'_>,
     run_id: [u8; 16],

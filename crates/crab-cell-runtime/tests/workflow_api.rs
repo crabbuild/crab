@@ -29,6 +29,7 @@ const WORKFLOW_MODULE: &str = "workflow-api-test";
 const WORKFLOW_NAMESPACE: NamespaceId = NamespaceId::from_bytes([8; 16]);
 const WORKFLOW_MIGRATION: &str = include_str!("../src/migrations/workflow.sql");
 const DEFINITION_DIGEST: Digest = Digest::from_bytes([6; 32]);
+const LEGACY_DEFINITION_DIGEST: Digest = Digest::from_bytes([7; 32]);
 const COMMANDS: &[OperationDescriptor] = &[
     operation(1, 1024 * 1024, 64),
     operation(2, 1024 * 1024, 64),
@@ -46,6 +47,8 @@ static HEARTBEAT_OBSERVED: AtomicBool = AtomicBool::new(false);
 struct Definition;
 
 static DEFINITION: Definition = Definition;
+static LEGACY_DEFINITION: LegacyDefinition = LegacyDefinition;
+static DEFINITIONS: [&dyn WorkflowDefinition; 2] = [&LEGACY_DEFINITION, &DEFINITION];
 
 impl WorkflowDefinition for Definition {
     fn digest(&self) -> Digest {
@@ -100,12 +103,37 @@ impl WorkflowDefinition for Definition {
     }
 }
 
+struct LegacyDefinition;
+
+impl WorkflowDefinition for LegacyDefinition {
+    fn digest(&self) -> Digest {
+        LEGACY_DEFINITION_DIGEST
+    }
+
+    fn transition(
+        &self,
+        _state: &[u8],
+        event: &[u8],
+        _context: WorkflowContext,
+    ) -> crab_cell_runtime::Result<WorkflowDecision> {
+        let mut state = b"legacy:".to_vec();
+        state.extend_from_slice(event);
+        Ok(WorkflowDecision {
+            status: WorkflowStatus::Running,
+            state,
+            result: None,
+            actions: Vec::new(),
+        })
+    }
+}
+
 struct TestWorkflow;
 
 impl WorkflowModule for TestWorkflow {
     const MODULE: &'static str = WORKFLOW_MODULE;
     const NAMESPACE: NamespaceId = WORKFLOW_NAMESPACE;
-    const DEFINITION: &'static dyn WorkflowDefinition = &DEFINITION;
+    const CURRENT_DEFINITION: &'static dyn WorkflowDefinition = &DEFINITION;
+    const DEFINITIONS: &'static [&'static dyn WorkflowDefinition] = &DEFINITIONS;
     const START_COMMAND_ID: u32 = 1;
     const SIGNAL_COMMAND_ID: u32 = 2;
     const CANCEL_COMMAND_ID: u32 = 3;
@@ -169,7 +197,7 @@ impl CellModule for TestWorkflow {
             }])),
             commands: COMMANDS,
             queries: QUERIES,
-            workflow_definitions: &[DEFINITION_DIGEST],
+            workflow_definitions: &[LEGACY_DEFINITION_DIGEST, DEFINITION_DIGEST],
             activity_types: &["echo"],
             namespaces: &[NamespaceDescriptor {
                 id: WORKFLOW_NAMESPACE,
@@ -200,7 +228,9 @@ impl CellModule for MissingDefinitionBinding {
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
         registry.bind_workflow_definition(WORKFLOW_MODULE, &DEFINITION)?;
+        registry.bind_workflow_definition(WORKFLOW_MODULE, &LEGACY_DEFINITION)?;
         registry.bind_activity_inventory(WORKFLOW_MODULE, DEFINITION_DIGEST, &["echo"])?;
+        registry.bind_activity_inventory(WORKFLOW_MODULE, LEGACY_DEFINITION_DIGEST, &["echo"])?;
         registry.bind_command::<WorkflowStartCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowSignalCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowCancelCommand<TestWorkflow>>()?;
@@ -208,7 +238,8 @@ impl CellModule for MissingDefinitionBinding {
         registry.bind_command::<WorkflowActivityCompleteCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowActivityExtendCommand<TestWorkflow>>()?;
         registry.bind_query::<WorkflowGetQuery<TestWorkflow>>()?;
-        registry.bind_query::<WorkflowActivityValidateQuery<TestWorkflow>>()
+        registry.bind_query::<WorkflowActivityValidateQuery<TestWorkflow>>()?;
+        registry.bind_activity::<EchoActivity>(WORKFLOW_MODULE, DEFINITION_DIGEST)
     }
 }
 

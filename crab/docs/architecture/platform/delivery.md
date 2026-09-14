@@ -281,6 +281,11 @@ catalog scanner and Tick through the normal actor command loop.
 | tests/scheduler.rs | drop every wake notification, evict all due Cells, restart scanner and observe eventual published progress |
 | tests/effects.rs | target commits/source response lost, source retries same effect; inbox retention exceeds sender horizon |
 
+Current implementation already dispatches signals and activity completions by a
+persisted digest across a module's current-plus-retained definition inventory.
+The remaining rollover gate must inventory timers and other retained work and
+reject takeover when any required digest is absent.
+
 Exit: a compiled Rust workflow schedules a native asynchronous activity; kill
 the executing process after its external idempotent effect. A replacement retries
 safely and records one completion event. Kill every runtime and recover pending

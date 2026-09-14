@@ -21,7 +21,9 @@ use crate::{
 use super::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
     ActivitySupport, SystemActivityTokens, WorkflowModule, WorkflowOutcome,
-    activity::MAX_ACTIVITY_BYTES, workflow_claim_activities, workflow_complete_activity,
+    activity::MAX_ACTIVITY_BYTES,
+    api::{definition, definitions},
+    workflow_claim_activities, workflow_complete_activity, workflow_definition_digest_by_run,
     workflow_extend_activity, workflow_validate_activity_claim,
 };
 
@@ -40,7 +42,9 @@ pub trait WorkflowActivityModule: WorkflowModule {
 pub fn register_workflow_activities<M: WorkflowActivityModule>(
     registry: &mut RegistryBuilder,
 ) -> crate::Result<()> {
-    registry.bind_activity_inventory(M::MODULE, M::DEFINITION.digest(), M::ACTIVITY_TYPES)?;
+    for definition in definitions::<M>()? {
+        registry.bind_activity_inventory(M::MODULE, definition.digest(), M::ACTIVITY_TYPES)?;
+    }
     registry.bind_command::<WorkflowActivityClaimCommand<M>>()?;
     registry.bind_command::<WorkflowActivityCompleteCommand<M>>()?;
     registry.bind_command::<WorkflowActivityExtendCommand<M>>()?;
@@ -51,7 +55,10 @@ pub fn register_workflow_activities<M: WorkflowActivityModule>(
 pub fn register_activity<M: WorkflowModule, A: ActivityHandler>(
     registry: &mut RegistryBuilder,
 ) -> crate::Result<()> {
-    registry.bind_activity::<A>(M::MODULE, M::DEFINITION.digest())
+    for definition in definitions::<M>()? {
+        registry.bind_activity::<A>(M::MODULE, definition.digest())?;
+    }
+    Ok(())
 }
 
 /// Cooperative cancellation and lease state supplied to native activity code.
@@ -182,11 +189,15 @@ impl<M: WorkflowActivityModule> Command for WorkflowActivityClaimCommand<M> {
     ) -> crate::Result<CommandResult<Self::Output>> {
         let limit = usize::try_from(input.limit)
             .map_err(|_| Error::Command("activity claim limit overflow"))?;
-        let supported = M::ACTIVITY_TYPES
+        let supported = definitions::<M>()?
             .iter()
-            .map(|activity_type| ActivitySupport {
-                activity_type: (*activity_type).to_owned(),
-                definition_digest: M::DEFINITION.digest(),
+            .flat_map(|definition| {
+                M::ACTIVITY_TYPES
+                    .iter()
+                    .map(|activity_type| ActivitySupport {
+                        activity_type: (*activity_type).to_owned(),
+                        definition_digest: definition.digest(),
+                    })
             })
             .collect::<Vec<_>>();
         let mut tokens = SystemActivityTokens;
@@ -215,11 +226,18 @@ impl<M: WorkflowActivityModule> Command for WorkflowActivityCompleteCommand<M> {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
+        let Some(digest) =
+            workflow_definition_digest_by_run(context.primitive_transaction(), input.run_id)?
+        else {
+            return Ok(CommandResult::Rejected(
+                ActivityCompletionOutcome::LeaseLost,
+            ));
+        };
         let outcome = workflow_complete_activity(
             context.primitive_transaction(),
             context.now_ms(),
             &input,
-            M::DEFINITION,
+            definition::<M>(digest)?,
         )?;
         Ok(match outcome {
             ActivityCompletionOutcome::Applied(_)
@@ -320,7 +338,9 @@ impl<M: WorkflowActivityModule> WorkflowActivities<M> {
         application: ApplicationId,
     ) -> crate::Result<Self> {
         let shards = client.require_namespace(M::NAMESPACE, M::MODULE, CatalogRole::Workflow)?;
-        client.activity_support(M::MODULE, M::DEFINITION.digest())?;
+        for definition in definitions::<M>()? {
+            client.activity_support(M::MODULE, definition.digest())?;
+        }
         Ok(Self {
             client,
             tenant,

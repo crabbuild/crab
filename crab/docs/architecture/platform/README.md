@@ -64,7 +64,10 @@ batch, rejects a mutation on the query path, removes the first owner's local
 database and verifies the same values after exact-root restoration.
 The Workflow transition core now installs the normative schema and atomically
 implements start, idempotent signal, cancellation and timer firing against a
-pinned compiled definition digest. Deterministic action IDs, bounded decisions,
+pinned compiled definition digest. Each module names one current definition for
+new runs and retains every older executable definition needed by stored runs;
+signals and activity completions select the exact implementation from the
+persisted digest. Deterministic action IDs, bounded decisions,
 outstanding-task limits, terminal cancellation and exact-root restoration are
 implemented. Activity claims, post-publication lease validation, heartbeat extension,
 attempt-bound idempotent completion/failure, retry and terminal retention cleanup
@@ -76,11 +79,13 @@ completion or retry transition. Its mutation evidence survives unknown outcomes,
 and dropping the supervisor cycle signals cooperative cancellation. Catalog-driven
 shard polling, bounded multi-activity orchestration, effect actions and the due-Cell
 scanner remain. A typed `WorkflowNamespace` now
-binds each namespace and definition digest to fixed command/query IDs at
-startup, derives its shard only from the workflow ID and compiled registry,
+binds each namespace and its current-plus-retained definition inventory to fixed
+command/query IDs at startup, derives its shard only from the workflow ID and compiled registry,
 and exposes receipted start, signal, cancel and state operations. Registry
-freeze fails unless every declared definition has an exact statically linked
-transition binding. Its integration path proves start, idempotent signal,
+freeze fails unless every declared definition and activity pair has an exact
+statically linked binding. Unit coverage proves a run pinned by an old binary
+continues through retained old transition code while new starts select the
+current definition. Its integration path proves start, idempotent signal,
 durable identity-conflict rejection, cancellation and minimum-receipt state
 after exact-root restoration. The source effect ledger and target
 inbox mechanics now derive immutable identities/digests, enforce command and

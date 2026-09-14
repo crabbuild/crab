@@ -25,7 +25,8 @@ const NOT_DUE_TAG: u8 = 6;
 pub trait WorkflowModule: Send + Sync + 'static {
     const MODULE: &'static str;
     const NAMESPACE: NamespaceId;
-    const DEFINITION: &'static dyn WorkflowDefinition;
+    const CURRENT_DEFINITION: &'static dyn WorkflowDefinition;
+    const DEFINITIONS: &'static [&'static dyn WorkflowDefinition];
     const CODEC_VERSION: u32 = 1;
     const START_COMMAND_ID: u32;
     const SIGNAL_COMMAND_ID: u32;
@@ -33,9 +34,11 @@ pub trait WorkflowModule: Send + Sync + 'static {
     const GET_QUERY_ID: u32;
 }
 
-/// Registers one definition and its typed Workflow bindings.
+/// Registers every executable definition and the module's typed Workflow bindings.
 pub fn register_workflow<M: WorkflowModule>(registry: &mut RegistryBuilder) -> crate::Result<()> {
-    registry.bind_workflow_definition(M::MODULE, M::DEFINITION)?;
+    for definition in definitions::<M>()? {
+        registry.bind_workflow_definition(M::MODULE, *definition)?;
+    }
     registry.bind_command::<WorkflowStartCommand<M>>()?;
     registry.bind_command::<WorkflowSignalCommand<M>>()?;
     registry.bind_command::<WorkflowCancelCommand<M>>()?;
@@ -61,7 +64,7 @@ impl<M: WorkflowModule> Command for WorkflowStartCommand<M> {
             M::NAMESPACE,
             context.now_ms(),
             &input,
-            M::DEFINITION,
+            M::CURRENT_DEFINITION,
         )?)
     }
 }
@@ -80,13 +83,53 @@ impl<M: WorkflowModule> Command for WorkflowSignalCommand<M> {
         context: &mut CommandContext<'_, '_>,
         input: Self::Input,
     ) -> crate::Result<CommandResult<Self::Output>> {
+        let Some(definition) =
+            definition_for_workflow::<M>(context.primitive_transaction(), &input.workflow_id)?
+        else {
+            return classify(WorkflowOutcome::RunMismatch);
+        };
         classify(workflow_signal(
             context.primitive_transaction(),
             context.now_ms(),
             &input,
-            M::DEFINITION,
+            definition,
         )?)
     }
+}
+
+pub(super) fn definitions<M: WorkflowModule>()
+-> crate::Result<&'static [&'static dyn WorkflowDefinition]> {
+    if M::DEFINITIONS.is_empty()
+        || !M::DEFINITIONS
+            .iter()
+            .any(|definition| definition.digest() == M::CURRENT_DEFINITION.digest())
+    {
+        return Err(crate::Error::Registry(
+            "current workflow definition is absent from inventory",
+        ));
+    }
+    Ok(M::DEFINITIONS)
+}
+
+pub(super) fn definition<M: WorkflowModule>(
+    digest: Digest,
+) -> crate::Result<&'static dyn WorkflowDefinition> {
+    definitions::<M>()?
+        .iter()
+        .copied()
+        .find(|definition| definition.digest() == digest)
+        .ok_or(crate::Error::Command(
+            "workflow definition digest is unavailable",
+        ))
+}
+
+fn definition_for_workflow<M: WorkflowModule>(
+    transaction: &crab_ltx::rusqlite::Transaction<'_>,
+    workflow_id: &[u8],
+) -> crate::Result<Option<&'static dyn WorkflowDefinition>> {
+    super::workflow_definition_digest(transaction, workflow_id)?
+        .map(definition::<M>)
+        .transpose()
 }
 
 /// Typed Workflow cancellation bound to immutable module operation IDs.
@@ -461,6 +504,57 @@ fn read_fixed<const N: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crab_ltx::rusqlite::Connection;
+
+    struct TestDefinition {
+        digest: Digest,
+        prefix: &'static [u8],
+    }
+
+    impl WorkflowDefinition for TestDefinition {
+        fn digest(&self) -> Digest {
+            self.digest
+        }
+
+        fn transition(
+            &self,
+            _state: &[u8],
+            event: &[u8],
+            _context: super::super::WorkflowContext,
+        ) -> crate::Result<super::super::WorkflowDecision> {
+            let mut state = self.prefix.to_vec();
+            state.extend_from_slice(event);
+            Ok(super::super::WorkflowDecision {
+                status: WorkflowStatus::Running,
+                state,
+                result: None,
+                actions: Vec::new(),
+            })
+        }
+    }
+
+    static OLD_DEFINITION: TestDefinition = TestDefinition {
+        digest: Digest::from_bytes([11; 32]),
+        prefix: b"old:",
+    };
+    static NEW_DEFINITION: TestDefinition = TestDefinition {
+        digest: Digest::from_bytes([12; 32]),
+        prefix: b"new:",
+    };
+    static TEST_DEFINITIONS: [&dyn WorkflowDefinition; 2] = [&OLD_DEFINITION, &NEW_DEFINITION];
+
+    struct RolloverWorkflow;
+
+    impl WorkflowModule for RolloverWorkflow {
+        const MODULE: &'static str = "rollover";
+        const NAMESPACE: NamespaceId = NamespaceId::from_bytes([13; 16]);
+        const CURRENT_DEFINITION: &'static dyn WorkflowDefinition = &NEW_DEFINITION;
+        const DEFINITIONS: &'static [&'static dyn WorkflowDefinition] = &TEST_DEFINITIONS;
+        const START_COMMAND_ID: u32 = 1;
+        const SIGNAL_COMMAND_ID: u32 = 2;
+        const CANCEL_COMMAND_ID: u32 = 3;
+        const GET_QUERY_ID: u32 = 1;
+    }
 
     fn roundtrip<T: WireValue + PartialEq + std::fmt::Debug>(value: T) {
         let mut encoder = BoundedEncoder::new(1024 * 1024).unwrap();
@@ -538,5 +632,54 @@ mod tests {
             run.encode(&mut encoder),
             Err(CodecError::Invalid("invalid workflow run"))
         ));
+    }
+
+    #[test]
+    fn persisted_definition_digest_dispatches_to_retained_old_code() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        super::super::install_workflow_schema(&transaction).unwrap();
+        let request = WorkflowStart {
+            workflow_id: b"old-run".to_vec(),
+            request_id: RequestId::from_bytes([14; 16]),
+            event: b"start".to_vec(),
+        };
+        let started = super::super::workflow_start(
+            &transaction,
+            RolloverWorkflow::NAMESPACE,
+            10,
+            &request,
+            &OLD_DEFINITION,
+        )
+        .unwrap();
+        let WorkflowOutcome::Applied { run_id, .. } = started else {
+            panic!("old workflow did not start");
+        };
+
+        let retained =
+            definition_for_workflow::<RolloverWorkflow>(&transaction, &request.workflow_id)
+                .unwrap()
+                .unwrap();
+        assert_eq!(retained.digest(), OLD_DEFINITION.digest());
+        super::super::workflow_signal(
+            &transaction,
+            11,
+            &WorkflowSignal {
+                workflow_id: request.workflow_id.clone(),
+                run_id,
+                signal_id: [15; 16],
+                event: b"continue".to_vec(),
+            },
+            retained,
+        )
+        .unwrap();
+        let run = super::super::workflow_state(&transaction, &request.workflow_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, b"old:continue");
+
+        let current =
+            definition::<RolloverWorkflow>(RolloverWorkflow::CURRENT_DEFINITION.digest()).unwrap();
+        assert_eq!(current.digest(), NEW_DEFINITION.digest());
     }
 }
