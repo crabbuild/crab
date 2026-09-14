@@ -315,6 +315,16 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    pub(crate) async fn interrupt_handle(
+        &self,
+        cell: CellId,
+    ) -> Result<crab_ltx::rusqlite::InterruptHandle> {
+        let (reply, response) = oneshot::channel();
+        self.send(cell, WorkerCommand::InterruptHandle { cell, reply })
+            .await?;
+        receive(response).await
+    }
+
     /// Closes and removes one fully drained Cell from its worker.
     pub async fn deactivate(&self, cell: CellId) -> Result<()> {
         let (reply, response) = oneshot::channel();
@@ -425,6 +435,10 @@ enum WorkerCommand {
     State {
         cell: CellId,
         reply: oneshot::Sender<Result<WorkerState>>,
+    },
+    InterruptHandle {
+        cell: CellId,
+        reply: oneshot::Sender<Result<crab_ltx::rusqlite::InterruptHandle>>,
     },
     Deactivate {
         cell: CellId,
@@ -636,6 +650,13 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .get(&cell)
                     .ok_or(Error::CellNotActive)
                     .map(|cell| cell.executor.worker_state());
+                let _ = reply.send(result);
+            }
+            WorkerCommand::InterruptHandle { cell, reply } => {
+                let result = cells
+                    .get(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .map(|cell| cell.executor.interrupt_handle());
                 let _ = reply.send(result);
             }
             WorkerCommand::Deactivate { cell, reply } => {

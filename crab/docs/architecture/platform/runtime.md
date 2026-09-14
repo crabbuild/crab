@@ -32,16 +32,23 @@ declared output bound, and leaves the Cell usable after a proven query error.
 only for the original digest, `ABSENT` only after earlier accepted work drained,
 `UNKNOWN` when publication fenced, and `EXPIRED` for a structurally valid expired
 identity. A successor that restores a later authoritative root resolves the
-predecessor's ledger without replay. Deadline/watchdog enforcement and the
-automatic fenced recovery supervisor remain to implement. A single
+predecessor's ledger without replay. Sparse page-I/O deadline propagation and
+the automatic fenced recovery supervisor remain to implement. A single
 dispatcher timer currently scans every 100 ms and admits at most 32 concurrent
 owner renewals. Each idle owner renews every 3 s without a permanent per-Cell
 task. Renewal uses the same strict control CAS, reconciles exact lost responses,
 and fences the worker and mailbox if authority names another owner or cannot be
 proven within the 10 s renewal attempt. Immutable-root preparation interleaves
 renewal so retrying object I/O does not silently stop owner progress. SQL work
-still needs the specified 5 s interruption path so a blocking callback cannot
-delay its next renewal indefinitely.
+now uses one `rusqlite::InterruptHandle` captured from the worker-owned connection
+at activation. A 5-second actor watchdog interrupts SQLite, atomically closes
+Cell admission and returns `OUTCOME_UNKNOWN` for mutation or a deadline/unknown
+read result. The accepted work and its byte/request permits remain owned by the
+same task until the synchronous callback actually exits. The worker is then
+fenced before any returned pending cut can prepare or publish. This also handles
+native Rust that ignores the interrupt: the caller and admission stop at five
+seconds, but Rust is never unsafely terminated. Deadline propagation into a
+blocking sparse VFS page fetch remains required.
 
 `CellRuntime::acquire_idle_restored` handles an `Idle` control immediately;
 `CellRuntime::takeover_restored` handles a published `Recovering` or `Serving`

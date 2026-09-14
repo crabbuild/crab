@@ -382,6 +382,94 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_handler_deadline_returns_unknown_and_never_publishes_late_commit() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let before = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap()
+        .value()
+        .root
+        .clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mutation = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    identity(42),
+                    Digest::from_bytes([43; 32]),
+                    20,
+                    1_024,
+                    1_024,
+                    None,
+                    move |transaction| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(Vec::new()))
+                    },
+                )
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(7), mutation)
+        .await
+        .unwrap()
+        .unwrap();
+    match outcome {
+        Err(crab_cell_runtime::Error::OutcomeUnknown { source, .. }) => {
+            assert!(matches!(*source, crab_cell_runtime::Error::Deadline));
+        }
+        other => panic!("expected deadline outcome, got {other:?}"),
+    }
+    assert!(matches!(
+        handle.query(1, 1, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+
+    release_tx.send(()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let after = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.value().root, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sqlite_query_is_interrupted_at_wall_deadline() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        handle.query(64, 64, |connection| {
+            let value = connection.query_row(
+                "WITH RECURSIVE counter(value) AS (VALUES(0) UNION ALL SELECT value + 1 FROM counter WHERE value < 1000000000) SELECT sum(value) FROM counter",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(value.to_be_bytes().to_vec())
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(crab_cell_runtime::Error::Deadline)));
+    assert!(matches!(
+        handle.query(1, 1, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn query_waits_for_preceding_publication_and_cannot_write() {
     let fixture = fixture();
     let handle = activate(&fixture, 16 * 1024 * 1024).await;

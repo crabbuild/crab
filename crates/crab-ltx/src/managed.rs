@@ -29,6 +29,15 @@ pub struct ManagedDb {
 }
 
 impl ManagedDb {
+    /// Returns a thread-safe handle for interrupting the current SQLite operation.
+    ///
+    /// The handle becomes inert after the database closes. Calling it does not
+    /// prove rollback or cancellation; the owner must still await the operation.
+    #[must_use]
+    pub fn interrupt_handle(&self) -> rusqlite::InterruptHandle {
+        self.writer.get_interrupt_handle()
+    }
+
     #[cfg(feature = "replica")]
     pub(crate) fn open_paged(database: crate::PagedDatabase, destination: &Path) -> Result<Self> {
         Self::open_sparse(crate::paged_io::Database::Replica(database), destination)

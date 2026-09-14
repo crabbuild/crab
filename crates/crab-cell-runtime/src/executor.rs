@@ -156,6 +156,10 @@ pub struct CellExecutor {
 }
 
 impl CellExecutor {
+    pub(crate) fn interrupt_handle(&self) -> crab_ltx::rusqlite::InterruptHandle {
+        self.db.interrupt_handle()
+    }
+
     #[must_use]
     pub fn new(db: ManagedDb, cell: CellId, incarnation: IncarnationId, schema: u32) -> Self {
         Self {

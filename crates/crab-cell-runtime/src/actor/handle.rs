@@ -70,7 +70,7 @@ impl CellHandle {
                 max_result_bytes,
                 next_due_ms,
                 handler: Some(Box::new(handler)),
-                reply,
+                reply: Some(reply),
                 _work: admission,
             })))
             .await
@@ -97,7 +97,7 @@ impl CellHandle {
                 admission: self.admission.clone(),
                 max_result_bytes,
                 handler: Some(Box::new(handler)),
-                reply,
+                reply: Some(reply),
                 _work: admission,
             })))
             .await
@@ -134,7 +134,7 @@ impl CellHandle {
                 operation_digest,
                 now_ms,
                 max_result_bytes,
-                reply,
+                reply: Some(reply),
                 _work: admission,
             })))
             .await

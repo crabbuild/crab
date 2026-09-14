@@ -38,6 +38,8 @@ pub enum Error {
     CellAlreadyActive,
     #[error("Cell is draining and no longer accepts commands")]
     CellDraining,
+    #[error("Cell SQLite operation exceeded its wall deadline")]
+    Deadline,
     #[error("accepted Cell command outcome is unknown")]
     OutcomeUnknown {
         request_id: crate::RequestId,

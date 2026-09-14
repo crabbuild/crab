@@ -30,6 +30,7 @@ const CELL_BYTES: usize = 8 * 1024 * 1024;
 const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 const TAKEOVER_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(15);
+const SQL_WALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Node-wide dispatcher for bounded per-Cell command mailboxes.
 #[derive(Clone)]
@@ -410,7 +411,7 @@ struct QueuedCommand {
     max_result_bytes: usize,
     next_due_ms: Option<i64>,
     handler: Option<Handler>,
-    reply: oneshot::Sender<crate::Result<StoredOutcome>>,
+    reply: Option<oneshot::Sender<crate::Result<StoredOutcome>>>,
     _work: WorkAdmission,
 }
 
@@ -419,7 +420,7 @@ struct QueuedQuery {
     admission: Arc<CellAdmission>,
     max_result_bytes: usize,
     handler: Option<QueryHandler>,
-    reply: oneshot::Sender<crate::Result<Vec<u8>>>,
+    reply: Option<oneshot::Sender<crate::Result<Vec<u8>>>>,
     _work: WorkAdmission,
 }
 
@@ -430,7 +431,7 @@ struct QueuedResolve {
     operation_digest: Digest,
     now_ms: i64,
     max_result_bytes: usize,
-    reply: oneshot::Sender<crate::Result<Resolution>>,
+    reply: Option<oneshot::Sender<crate::Result<Resolution>>>,
     _work: WorkAdmission,
 }
 
@@ -442,6 +443,7 @@ enum QueuedWork {
 
 struct ActiveCell {
     admission: Arc<CellAdmission>,
+    interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
     publisher: Option<CellPublisher>,
     queue: VecDeque<QueuedWork>,
     busy: bool,
@@ -456,7 +458,7 @@ enum TaskResult {
         publisher: Box<CellPublisher>,
         admission: Arc<CellAdmission>,
         reply: oneshot::Sender<crate::Result<Arc<CellAdmission>>>,
-        result: crate::Result<()>,
+        result: crate::Result<Arc<crab_ltx::rusqlite::InterruptHandle>>,
     },
     Executed {
         cell: CellId,
@@ -585,6 +587,10 @@ fn handle_message(
                         bootstrap_and_publish(cell, &pool, &mut publisher, *activation).await
                     }
                 };
+                let result = match result {
+                    Ok(()) => pool.interrupt_handle(cell).await.map(Arc::new),
+                    Err(error) => Err(error),
+                };
                 TaskResult::Activated {
                     cell,
                     publisher,
@@ -594,61 +600,63 @@ fn handle_message(
                 }
             });
         }
-        Message::Execute(command) => {
+        Message::Execute(mut command) => {
             let Some(active) = cells.get_mut(&command.cell) else {
-                let _ = command.reply.send(Err(Error::CellNotActive));
+                send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             };
             if !Arc::ptr_eq(&active.admission, &command.admission) {
-                let _ = command.reply.send(Err(Error::CellNotActive));
+                send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             }
             if active.fenced || active.drain.is_some() {
-                let _ = command.reply.send(Err(if active.fenced {
+                let error = if active.fenced {
                     Error::Fenced
                 } else {
                     Error::CellDraining
-                }));
+                };
+                send_command_reply(&mut command, Err(error));
                 return;
             }
             active.queue.push_back(QueuedWork::Command(command));
             start_next(active, pool, tasks);
         }
-        Message::Query(query) => {
+        Message::Query(mut query) => {
             let Some(active) = cells.get_mut(&query.cell) else {
-                let _ = query.reply.send(Err(Error::CellNotActive));
+                send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             };
             if !Arc::ptr_eq(&active.admission, &query.admission) {
-                let _ = query.reply.send(Err(Error::CellNotActive));
+                send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             }
             if active.fenced || active.drain.is_some() {
-                let _ = query.reply.send(Err(if active.fenced {
+                let error = if active.fenced {
                     Error::Fenced
                 } else {
                     Error::CellDraining
-                }));
+                };
+                send_query_reply(&mut query, Err(error));
                 return;
             }
             active.queue.push_back(QueuedWork::Query(query));
             start_next(active, pool, tasks);
         }
-        Message::Resolve(resolve) => {
+        Message::Resolve(mut resolve) => {
             let Some(active) = cells.get_mut(&resolve.cell) else {
-                let _ = resolve.reply.send(Err(Error::CellNotActive));
+                send_resolve_reply(&mut resolve, Err(Error::CellNotActive));
                 return;
             };
             if !Arc::ptr_eq(&active.admission, &resolve.admission) {
-                let _ = resolve.reply.send(Err(Error::CellNotActive));
+                send_resolve_reply(&mut resolve, Err(Error::CellNotActive));
                 return;
             }
             if active.fenced {
-                let _ = resolve.reply.send(Ok(Resolution::Unknown));
+                send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
                 return;
             }
             if active.drain.is_some() {
-                let _ = resolve.reply.send(Err(Error::CellDraining));
+                send_resolve_reply(&mut resolve, Err(Error::CellDraining));
                 return;
             }
             active.queue.push_back(QueuedWork::Resolve(resolve));
@@ -728,23 +736,24 @@ fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet
     };
     active.busy = true;
     let pool = pool.clone();
+    let interrupt = active.interrupt.clone();
     match work {
-        QueuedWork::Command(command) => {
+        QueuedWork::Command(mut command) => {
             let Some(publisher) = active.publisher.take() else {
-                let _ = command.reply.send(Err(Error::Fenced));
+                send_command_reply(&mut command, Err(Error::Fenced));
                 active.fenced = true;
                 active.busy = false;
                 return;
             };
-            tasks.spawn(
-                async move { execute_and_publish(pool, Box::new(publisher), command).await },
-            );
+            tasks.spawn(async move {
+                execute_and_publish(pool, Box::new(publisher), command, interrupt).await
+            });
         }
         QueuedWork::Query(query) => {
-            tasks.spawn(async move { execute_query(pool, query).await });
+            tasks.spawn(async move { execute_query(pool, query, interrupt).await });
         }
         QueuedWork::Resolve(resolve) => {
-            tasks.spawn(async move { execute_resolve(pool, resolve).await });
+            tasks.spawn(async move { execute_resolve(pool, resolve, interrupt).await });
         }
     }
 }
@@ -753,18 +762,45 @@ async fn execute_and_publish(
     pool: SqlWorkerPool,
     mut publisher: Box<CellPublisher>,
     mut command: Box<QueuedCommand>,
+    interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
     let execution = match command.handler.take() {
         Some(handler) => {
-            pool.execute(
+            let operation = pool.execute(
                 command.cell,
                 command.identity,
                 command.operation_digest,
                 command.now_ms,
                 command.max_result_bytes,
                 handler,
-            )
-            .await
+            );
+            tokio::pin!(operation);
+            match tokio::time::timeout(SQL_WALL_DEADLINE, &mut operation).await {
+                Ok(result) => result,
+                Err(_) => {
+                    interrupt.interrupt();
+                    fence_admission(&command.admission);
+                    let request_id = command.identity.request_id;
+                    let operation_digest = command.operation_digest;
+                    send_command_reply(
+                        &mut command,
+                        Err(Error::OutcomeUnknown {
+                            request_id,
+                            operation_digest,
+                            source: Box::new(Error::Deadline),
+                        }),
+                    );
+                    let _ = operation.await;
+                    let _ = pool.fence(command.cell).await;
+                    return TaskResult::Executed {
+                        cell: command.cell,
+                        publisher,
+                        command,
+                        result: Err(Error::Deadline),
+                        fenced: true,
+                    };
+                }
+            }
         }
         None => Err(Error::Fenced),
     };
@@ -809,11 +845,31 @@ async fn execute_and_publish(
     }
 }
 
-async fn execute_query(pool: SqlWorkerPool, mut query: Box<QueuedQuery>) -> TaskResult {
+async fn execute_query(
+    pool: SqlWorkerPool,
+    mut query: Box<QueuedQuery>,
+    interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
+) -> TaskResult {
     let result = match query.handler.take() {
         Some(handler) => {
-            pool.query(query.cell, query.max_result_bytes, handler)
-                .await
+            let operation = pool.query(query.cell, query.max_result_bytes, handler);
+            tokio::pin!(operation);
+            match tokio::time::timeout(SQL_WALL_DEADLINE, &mut operation).await {
+                Ok(result) => result,
+                Err(_) => {
+                    interrupt.interrupt();
+                    fence_admission(&query.admission);
+                    send_query_reply(&mut query, Err(Error::Deadline));
+                    let _ = operation.await;
+                    let _ = pool.fence(query.cell).await;
+                    return TaskResult::Queried {
+                        cell: query.cell,
+                        query,
+                        result: Err(Error::Deadline),
+                        fenced: true,
+                    };
+                }
+            }
         }
         None => Err(Error::Fenced),
     };
@@ -829,16 +885,35 @@ async fn execute_query(pool: SqlWorkerPool, mut query: Box<QueuedQuery>) -> Task
     }
 }
 
-async fn execute_resolve(pool: SqlWorkerPool, resolve: Box<QueuedResolve>) -> TaskResult {
-    let result = pool
-        .resolve(
-            resolve.cell,
-            resolve.identity,
-            resolve.operation_digest,
-            resolve.now_ms,
-            resolve.max_result_bytes,
-        )
-        .await;
+async fn execute_resolve(
+    pool: SqlWorkerPool,
+    mut resolve: Box<QueuedResolve>,
+    interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
+) -> TaskResult {
+    let operation = pool.resolve(
+        resolve.cell,
+        resolve.identity,
+        resolve.operation_digest,
+        resolve.now_ms,
+        resolve.max_result_bytes,
+    );
+    tokio::pin!(operation);
+    let result = match tokio::time::timeout(SQL_WALL_DEADLINE, &mut operation).await {
+        Ok(result) => result,
+        Err(_) => {
+            interrupt.interrupt();
+            fence_admission(&resolve.admission);
+            send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
+            let _ = operation.await;
+            let _ = pool.fence(resolve.cell).await;
+            return TaskResult::Resolved {
+                cell: resolve.cell,
+                resolve,
+                result: Ok(Resolution::Unknown),
+                fenced: true,
+            };
+        }
+    };
     let fenced =
         result.is_err() && !matches!(pool.state(resolve.cell).await, Ok(WorkerState::Ready));
     if fenced {
@@ -867,7 +942,7 @@ fn handle_task(
             reply,
             result,
         } => match result {
-            Ok(()) => {
+            Ok(interrupt) => {
                 if reply.send(Ok(admission.clone())).is_err() {
                     start_orphan_deactivate(cell, pool, *publisher, transitioning, tasks);
                     return;
@@ -877,6 +952,7 @@ fn handle_task(
                     cell,
                     ActiveCell {
                         admission,
+                        interrupt,
                         publisher: Some(*publisher),
                         queue: VecDeque::new(),
                         busy: false,
@@ -894,12 +970,12 @@ fn handle_task(
         TaskResult::Executed {
             cell,
             publisher,
-            command,
+            mut command,
             result,
             fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
-                let _ = command.reply.send(Err(Error::CellNotActive));
+                send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             };
             active.busy = false;
@@ -908,7 +984,7 @@ fn handle_task(
             if active.fenced {
                 fence_active(active);
             }
-            let _ = command.reply.send(result);
+            send_command_reply(&mut command, result);
             if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
@@ -917,12 +993,12 @@ fn handle_task(
         }
         TaskResult::Queried {
             cell,
-            query,
+            mut query,
             result,
             fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
-                let _ = query.reply.send(Err(Error::CellNotActive));
+                send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             };
             active.busy = false;
@@ -930,7 +1006,7 @@ fn handle_task(
             if active.fenced {
                 fence_active(active);
             }
-            let _ = query.reply.send(result);
+            send_query_reply(&mut query, result);
             if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
@@ -939,12 +1015,12 @@ fn handle_task(
         }
         TaskResult::Resolved {
             cell,
-            resolve,
+            mut resolve,
             result,
             fenced,
         } => {
             let Some(active) = cells.get_mut(&cell) else {
-                let _ = resolve.reply.send(Err(Error::CellNotActive));
+                send_resolve_reply(&mut resolve, Err(Error::CellNotActive));
                 return;
             };
             active.busy = false;
@@ -952,7 +1028,7 @@ fn handle_task(
             if active.fenced {
                 fence_active(active);
             }
-            let _ = resolve.reply.send(result);
+            send_resolve_reply(&mut resolve, result);
             if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
@@ -993,22 +1069,44 @@ fn handle_task(
 }
 
 fn fence_active(active: &mut ActiveCell) {
-    active.admission.fenced.store(true, Ordering::Release);
-    active.admission.draining.store(true, Ordering::Release);
-    active.admission.requests.close();
-    active.admission.bytes.close();
+    fence_admission(&active.admission);
     while let Some(queued) = active.queue.pop_front() {
         match queued {
-            QueuedWork::Command(command) => {
-                let _ = command.reply.send(Err(Error::Fenced));
+            QueuedWork::Command(mut command) => {
+                send_command_reply(&mut command, Err(Error::Fenced));
             }
-            QueuedWork::Query(query) => {
-                let _ = query.reply.send(Err(Error::Fenced));
+            QueuedWork::Query(mut query) => {
+                send_query_reply(&mut query, Err(Error::Fenced));
             }
-            QueuedWork::Resolve(resolve) => {
-                let _ = resolve.reply.send(Ok(Resolution::Unknown));
+            QueuedWork::Resolve(mut resolve) => {
+                send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
             }
         }
+    }
+}
+
+fn fence_admission(admission: &CellAdmission) {
+    admission.fenced.store(true, Ordering::Release);
+    admission.draining.store(true, Ordering::Release);
+    admission.requests.close();
+    admission.bytes.close();
+}
+
+fn send_command_reply(command: &mut QueuedCommand, result: crate::Result<StoredOutcome>) {
+    if let Some(reply) = command.reply.take() {
+        let _ = reply.send(result);
+    }
+}
+
+fn send_query_reply(query: &mut QueuedQuery, result: crate::Result<Vec<u8>>) {
+    if let Some(reply) = query.reply.take() {
+        let _ = reply.send(result);
+    }
+}
+
+fn send_resolve_reply(resolve: &mut QueuedResolve, result: crate::Result<Resolution>) {
+    if let Some(reply) = resolve.reply.take() {
+        let _ = reply.send(result);
     }
 }
 
