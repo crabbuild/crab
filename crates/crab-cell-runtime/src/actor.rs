@@ -409,7 +409,6 @@ struct QueuedCommand {
     operation_digest: Digest,
     now_ms: i64,
     max_result_bytes: usize,
-    next_due_ms: Option<i64>,
     handler: Option<Handler>,
     reply: Option<oneshot::Sender<crate::Result<StoredOutcome>>>,
     _work: WorkAdmission,
@@ -701,7 +700,7 @@ async fn bootstrap_and_publish(
         initialize,
         reservation,
     } = activation;
-    let cuts = pool
+    let bootstrap = pool
         .bootstrap(
             cell,
             replica,
@@ -713,8 +712,10 @@ async fn bootstrap_and_publish(
         )
         .await?;
     let publication = async {
-        let prepared = publisher.prepare_initial(&cuts).await?;
-        publisher.publish_prepared(&prepared, None).await?;
+        let prepared = publisher.prepare_initial(&bootstrap.cuts).await?;
+        publisher
+            .publish_prepared(&prepared, bootstrap.next_due_ms)
+            .await?;
         Ok(())
     }
     .await;
@@ -811,7 +812,7 @@ async fn execute_and_publish(
                 let prepared = publisher.prepare(&pending).await?;
                 pool.bind_prepared(command.cell, prepared.clone()).await?;
                 let root = publisher
-                    .publish_prepared(&prepared, command.next_due_ms)
+                    .publish_prepared(&prepared, pending.next_due_ms())
                     .await?;
                 pool.confirm_published(command.cell, root).await
             }

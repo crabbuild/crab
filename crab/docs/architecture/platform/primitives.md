@@ -346,6 +346,15 @@ history. Capacity remediation is an operator action, not arbitrary stack replay.
 
 ## Scheduler commands
 
+Implementation status: `crab-cell-runtime::scheduler_next_due_ms` now computes
+the summary inside bootstrap and every committed command transaction. It covers
+request/inbox retention, source effects, installed KV/Queue/Workflow schemas,
+ready work, live lease deadlines, expirations, pending timers and terminal
+retention. Overdue values clamp to the command's logical time. `CellHandle`
+does not accept a caller-provided summary; the exact computed value follows the
+pending LTX cut into the same control publication. Catalog scanning and bounded
+Tick processing remain to implement.
+
 After every commit, compute minimum outstanding due time using indexed minima
 for ready effects, leased-effect deadlines, KV expirations, ready queue rows,
 queue lease deadlines, ready activities, activity deadlines and pending timers.

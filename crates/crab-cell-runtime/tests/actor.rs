@@ -131,7 +131,6 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
                     20,
                     1_024,
                     1_024,
-                    None,
                     |transaction| {
                         transaction.execute("UPDATE counter SET value = value + 1", [])?;
                         Ok(HandlerOutcome::Success(b"one".to_vec()))
@@ -150,7 +149,6 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
                     21,
                     1_024,
                     1_024,
-                    Some(500),
                     |transaction| {
                         transaction.execute("UPDATE counter SET value = value + 1", [])?;
                         Ok(HandlerOutcome::Success(b"two".to_vec()))
@@ -176,6 +174,10 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
         .unwrap();
     assert_eq!(released.value().state, ControlState::Idle);
     assert!(released.value().owner.is_none());
+    assert_eq!(
+        released.value().next_due_ms,
+        Some(10_000 + 24 * 60 * 60 * 1000)
+    );
 
     let connection = crab_ltx::rusqlite::Connection::open(&fixture.database).unwrap();
     assert_eq!(
@@ -406,7 +408,6 @@ async fn native_handler_deadline_returns_unknown_and_never_publishes_late_commit
                     20,
                     1_024,
                     1_024,
-                    None,
                     move |transaction| {
                         started_tx.send(()).unwrap();
                         release_rx.recv().unwrap();
@@ -485,7 +486,6 @@ async fn query_waits_for_preceding_publication_and_cannot_write() {
                     20,
                     1_024,
                     1_024,
-                    None,
                     move |transaction| {
                         started_tx.send(()).unwrap();
                         release_rx.recv().unwrap();
@@ -556,20 +556,12 @@ async fn cancelled_command_waiter_is_resolved_by_original_identity() {
         let handle = handle.clone();
         tokio::spawn(async move {
             handle
-                .execute(
-                    request,
-                    digest,
-                    20,
-                    1_024,
-                    1_024,
-                    None,
-                    move |transaction| {
-                        started_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
-                        Ok(HandlerOutcome::Success(b"survived".to_vec()))
-                    },
-                )
+                .execute(request, digest, 20, 1_024, 1_024, move |transaction| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(b"survived".to_vec()))
+                })
                 .await
         })
     };
@@ -582,7 +574,7 @@ async fn cancelled_command_waiter_is_resolved_by_original_identity() {
 
     assert!(matches!(
         handle
-            .execute(request, digest, 21, 1_024, 1_024, None, |_| {
+            .execute(request, digest, 21, 1_024, 1_024, |_| {
                 Ok(HandlerOutcome::Success(b"wrong".to_vec()))
             })
             .await
@@ -599,7 +591,7 @@ async fn resolve_distinguishes_committed_absent_conflict_and_expired() {
     let request = identity(54);
     let digest = Digest::from_bytes([55; 32]);
     let outcome = handle
-        .execute(request, digest, 20, 1_024, 1_024, None, |transaction| {
+        .execute(request, digest, 20, 1_024, 1_024, |transaction| {
             transaction.execute("UPDATE counter SET value = value + 1", [])?;
             Ok(HandlerOutcome::Rejected(b"recorded".to_vec()))
         })
@@ -645,20 +637,12 @@ async fn resolve_waits_for_inflight_publication_and_returns_unknown_after_fence(
         let handle = handle.clone();
         tokio::spawn(async move {
             handle
-                .execute(
-                    request,
-                    digest,
-                    20,
-                    1_024,
-                    1_024,
-                    None,
-                    move |transaction| {
-                        started_tx.send(()).unwrap();
-                        release_rx.recv().unwrap();
-                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
-                        Ok(HandlerOutcome::Success(Vec::new()))
-                    },
-                )
+                .execute(request, digest, 20, 1_024, 1_024, move |transaction| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(Vec::new()))
+                })
                 .await
         })
     };
@@ -689,7 +673,6 @@ async fn node_byte_admission_rejects_before_sql_execution() {
                 20,
                 1_025,
                 1024 * 1024,
-                None,
                 |_| Ok(HandlerOutcome::Success(Vec::new())),
             )
             .await,
@@ -707,7 +690,7 @@ async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
     let digest = Digest::from_bytes([15; 32]);
     assert!(matches!(
         handle
-            .execute(request, digest, 20, 1_024, 1_024, None, |transaction| {
+            .execute(request, digest, 20, 1_024, 1_024, |transaction| {
                 transaction.execute("UPDATE counter SET value = value + 1", [])?;
                 Ok(HandlerOutcome::Success(b"not-yet-published".to_vec()))
             })
@@ -720,7 +703,7 @@ async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
     ));
     assert!(matches!(
         handle
-            .execute(request, digest, 21, 1_024, 1_024, None, |_| {
+            .execute(request, digest, 21, 1_024, 1_024, |_| {
                 Ok(HandlerOutcome::Success(Vec::new()))
             })
             .await,
@@ -744,7 +727,6 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
                 20,
                 1_024,
                 1_024,
-                None,
                 |transaction| {
                     transaction.execute("UPDATE counter SET value = value + 10", [])?;
                     Err(crab_cell_runtime::Error::Command("application failure"))
@@ -761,7 +743,6 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
                 20,
                 1_024,
                 1,
-                None,
                 |transaction| {
                     transaction.execute("UPDATE counter SET value = value + 10", [])?;
                     Ok(HandlerOutcome::Success(b"too large".to_vec()))
@@ -780,7 +761,6 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
                 21,
                 1_024,
                 1_024,
-                None,
                 |transaction| {
                     transaction.execute("UPDATE counter SET value = value + 1", [])?;
                     Ok(HandlerOutcome::Success(b"recovered".to_vec()))
@@ -809,7 +789,6 @@ async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
                     20,
                     0,
                     1,
-                    None,
                     move |_| {
                         started_tx.send(()).unwrap();
                         release_rx.recv().unwrap();
@@ -835,7 +814,6 @@ async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
                     21,
                     0,
                     1,
-                    None,
                     |_| Ok(HandlerOutcome::Success(Vec::new())),
                 )
                 .await;
@@ -1060,7 +1038,6 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
             20,
             1_024,
             1_024,
-            None,
             |transaction| {
                 transaction.execute("UPDATE counter SET value = value + 1", [])?;
                 Ok(HandlerOutcome::Success(b"first".to_vec()))
@@ -1127,7 +1104,6 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
                 21,
                 1_024,
                 1_024,
-                None,
                 |transaction| {
                     let value = transaction
                         .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;

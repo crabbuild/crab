@@ -49,6 +49,7 @@ CREATE TABLE sys_effects (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX sys_effects_due ON sys_effects(state, due_at_ms);
 CREATE INDEX sys_effects_leases ON sys_effects(state, lease_until_ms);
+CREATE INDEX sys_effects_expiry ON sys_effects(expires_at_ms);
 
 CREATE TABLE sys_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),

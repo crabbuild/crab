@@ -98,6 +98,7 @@ pub struct PendingCommit {
     operation_digest: Digest,
     outcome: StoredOutcome,
     logical_time_ms: i64,
+    next_due_ms: Option<i64>,
     cuts: CaptureBatch,
     prepared: Option<crab_ltx::RootRef>,
 }
@@ -121,6 +122,11 @@ impl PendingCommit {
     #[must_use]
     pub fn logical_time_ms(&self) -> i64 {
         self.logical_time_ms
+    }
+
+    #[must_use]
+    pub fn next_due_ms(&self) -> Option<i64> {
+        self.next_due_ms
     }
 
     #[must_use]
@@ -178,16 +184,20 @@ impl CellExecutor {
         incarnation: IncarnationId,
         schema: u32,
         initialize: impl FnOnce(&crab_ltx::rusqlite::Transaction<'_>) -> Result<()>,
-    ) -> Result<(Self, CaptureBatch)> {
+    ) -> Result<(Self, CaptureBatch, Option<i64>)> {
         let initialized = db.transaction_with(|transaction| {
             crate::schema::install_runtime_schema_in(transaction, cell, incarnation, schema)?;
-            initialize(transaction)
+            initialize(transaction)?;
+            crate::scheduler_next_due_ms(transaction, 0)
         });
-        if let Err(error) = initialized {
-            let error = transaction_error(error);
-            let _ = db.close();
-            return Err(error);
-        }
+        let next_due_ms = match initialized {
+            Ok(next_due_ms) => next_due_ms,
+            Err(error) => {
+                let error = transaction_error(error);
+                let _ = db.close();
+                return Err(error);
+            }
+        };
         let cuts = match db.capture() {
             Ok(cuts) if !cuts.segments.is_empty() => cuts,
             Ok(_) => {
@@ -199,7 +209,7 @@ impl CellExecutor {
                 return Err(error.into());
             }
         };
-        Ok((Self::new(db, cell, incarnation, schema), cuts))
+        Ok((Self::new(db, cell, incarnation, schema), cuts, next_due_ms))
     }
 
     pub(crate) fn from_restored(
@@ -381,9 +391,11 @@ impl CellExecutor {
             {
                 return Err(Error::Command("runtime metadata row missing"));
             }
+            let next_due_ms = crate::scheduler_next_due_ms(transaction, logical_time_ms)?;
             Ok(TransactionResult::Committed {
                 outcome: stored_outcome(outcome, result, sequence)?,
                 logical_time_ms,
+                next_due_ms,
             })
         });
 
@@ -400,6 +412,7 @@ impl CellExecutor {
             TransactionResult::Committed {
                 outcome,
                 logical_time_ms,
+                next_due_ms,
             } => {
                 let cuts = match self.db.capture() {
                     Ok(cuts) => cuts,
@@ -413,6 +426,7 @@ impl CellExecutor {
                     operation_digest,
                     outcome,
                     logical_time_ms,
+                    next_due_ms,
                     cuts,
                     prepared: None,
                 });
@@ -592,6 +606,7 @@ enum TransactionResult {
     Committed {
         outcome: StoredOutcome,
         logical_time_ms: i64,
+        next_due_ms: Option<i64>,
     },
 }
 

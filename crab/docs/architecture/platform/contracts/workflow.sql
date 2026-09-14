@@ -43,7 +43,10 @@ CREATE TABLE workflow_activities (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX activities_ready
     ON workflow_activities(activity_type, state, due_at_ms, run_id, activity_id);
+CREATE INDEX activities_due
+    ON workflow_activities(state, due_at_ms, run_id, activity_id);
 CREATE INDEX activities_leases ON workflow_activities(state, lease_until_ms);
+CREATE INDEX activities_expiry ON workflow_activities(expires_at_ms);
 
 CREATE TABLE workflow_timers (
     run_id BLOB NOT NULL REFERENCES workflow_runs(run_id),
@@ -53,3 +56,5 @@ CREATE TABLE workflow_timers (
     PRIMARY KEY (run_id, timer_id)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX timers_due ON workflow_timers(state, due_at_ms, run_id, timer_id);
+CREATE INDEX workflow_retention ON workflow_runs(completed_at_ms)
+    WHERE status != 0;

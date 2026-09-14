@@ -333,7 +333,6 @@ async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
             20,
             128,
             128,
-            Some(20),
             move |transaction| {
                 let outcome = queue_send(transaction, namespace, 20, &request)?;
                 match outcome {
@@ -359,7 +358,6 @@ async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
             21,
             64,
             512,
-            Some(5_021),
             |transaction| {
                 let mut tokens = Tokens(10);
                 let claim = queue_claim(transaction, 21, 1, 5_000, &mut tokens)?
@@ -375,6 +373,16 @@ async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
         StoredOutcome::Success { result, .. } => decode_claim(&result),
         StoredOutcome::Rejected { .. } => panic!("queue claim was rejected"),
     };
+    assert_eq!(
+        authority
+            .load(cell)
+            .await
+            .unwrap()
+            .unwrap()
+            .value()
+            .next_due_ms,
+        Some(5_021)
+    );
     assert!(
         handle
             .query(64, 64, {

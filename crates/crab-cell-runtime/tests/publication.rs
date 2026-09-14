@@ -281,12 +281,15 @@ async fn publisher_uploads_cas_and_releases_one_result() {
     let mut publisher = CellPublisher::new(replica, authority, observed);
     assert!(matches!(
         publisher
-            .publish_pending(&mut executor, Some(500))
+            .publish_pending(&mut executor)
             .await
             .unwrap(),
         StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"committed"
     ));
-    assert_eq!(publisher.control().value().next_due_ms, Some(500));
+    assert_eq!(
+        publisher.control().value().next_due_ms,
+        Some(20_000 + 24 * 60 * 60 * 1000)
+    );
     assert!(executor.pending().is_none());
     executor.close().unwrap();
 }
@@ -321,7 +324,9 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
         .prepare(None, pending.cuts(), pending.outcome().commit_sequence(), 1)
         .await
         .unwrap();
-    let winner = initial.publish_prepared(&prepared, None).unwrap();
+    let winner = initial
+        .publish_prepared(&prepared, pending.next_due_ms())
+        .unwrap();
     authority
         .transition(&stale, winner.clone(), Transition::Publish)
         .await
@@ -330,7 +335,7 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
     let mut publisher = CellPublisher::new(replica, authority, stale);
     assert!(matches!(
         publisher
-            .publish_pending(&mut executor, None)
+            .publish_pending(&mut executor)
             .await
             .unwrap(),
         StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"published"
@@ -400,7 +405,7 @@ async fn published_root_observed_after_takeover_fences_the_old_executor() {
 
     let mut publisher = CellPublisher::new(replica, authority, stale);
     assert!(matches!(
-        publisher.publish_pending(&mut executor, None).await,
+        publisher.publish_pending(&mut executor).await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
     assert!(matches!(
@@ -456,7 +461,7 @@ async fn publication_rebases_over_a_pure_lease_renewal_without_sql_replay() {
     let mut publisher = CellPublisher::new(replica, authority, stale);
     assert!(matches!(
         publisher
-            .publish_pending(&mut executor, None)
+            .publish_pending(&mut executor)
             .await
             .unwrap(),
         StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"renewed"

@@ -47,7 +47,6 @@ impl CellHandle {
         now_ms: i64,
         operation_bytes: usize,
         max_result_bytes: usize,
-        next_due_ms: Option<i64>,
         handler: F,
     ) -> crate::Result<StoredOutcome>
     where
@@ -68,7 +67,6 @@ impl CellHandle {
                 operation_digest,
                 now_ms,
                 max_result_bytes,
-                next_due_ms,
                 handler: Some(Box::new(handler)),
                 reply: Some(reply),
                 _work: admission,

@@ -213,12 +213,9 @@ impl CellPublisher {
     }
 
     /// Publishes the executor's retained commit or reconciles an ambiguous CAS.
-    pub async fn publish_pending(
-        &mut self,
-        executor: &mut CellExecutor,
-        next_due_ms: Option<i64>,
-    ) -> Result<StoredOutcome> {
+    pub async fn publish_pending(&mut self, executor: &mut CellExecutor) -> Result<StoredOutcome> {
         let pending = executor.pending().ok_or(Error::PendingPublication)?;
+        let next_due_ms = pending.next_due_ms();
         let prepared = self.prepare(pending).await?;
         executor.bind_prepared(&prepared)?;
         let root = match self.publish_prepared(&prepared, next_due_ms).await {

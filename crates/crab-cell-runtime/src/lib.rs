@@ -16,6 +16,7 @@ mod identity;
 mod kv;
 mod publication;
 mod queue;
+mod scheduler;
 mod schema;
 mod sql;
 mod worker;
@@ -50,6 +51,7 @@ pub use queue::{
     QueueState, QueueTokenSource, SystemQueueTokens, install_queue_schema, queue_apply_lease,
     queue_claim, queue_cleanup_expired, queue_send, queue_validate_claim,
 };
+pub use scheduler::scheduler_next_due_ms;
 pub use schema::{install_runtime_schema, verify_runtime_schema};
 pub use sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue, sql_batch, sql_query_batch};
 pub use worker::{SqlWorkerPool, WorkerExecution};

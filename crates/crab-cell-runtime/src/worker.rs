@@ -36,6 +36,11 @@ pub(crate) type Initializer = Box<
 pub(crate) type QueryHandler =
     Box<dyn FnOnce(&crab_ltx::rusqlite::Connection) -> Result<Vec<u8>> + Send + 'static>;
 
+pub(crate) struct BootstrapExecution {
+    pub(crate) cuts: crab_ltx::CaptureBatch,
+    pub(crate) next_due_ms: Option<i64>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerState {
     Ready,
@@ -133,7 +138,7 @@ impl SqlWorkerPool {
         schema: u32,
         initialize: Initializer,
         reservation: CellReservation,
-    ) -> Result<crab_ltx::CaptureBatch> {
+    ) -> Result<BootstrapExecution> {
         let (reply, response) = oneshot::channel();
         self.send(
             cell,
@@ -454,7 +459,7 @@ struct WorkerBootstrap {
     schema: u32,
     initialize: Initializer,
     reservation: CellReservation,
-    reply: oneshot::Sender<Result<crab_ltx::CaptureBatch>>,
+    reply: oneshot::Sender<Result<BootstrapExecution>>,
 }
 
 struct ActiveCell {
@@ -540,12 +545,12 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                         .and_then(|db| {
                             CellExecutor::bootstrap(db, cell, incarnation, schema, initialize)
                         })
-                        .map(|(executor, cuts)| {
+                        .map(|(executor, cuts, next_due_ms)| {
                             entry.insert(ActiveCell {
                                 executor,
                                 _reservation: reservation,
                             });
-                            cuts
+                            BootstrapExecution { cuts, next_due_ms }
                         }),
                 };
                 let _ = reply.send(result);

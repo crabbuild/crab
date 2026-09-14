@@ -124,7 +124,6 @@ pub async fn execute<F>(
     now_ms: i64,
     operation_bytes: usize,
     max_result_bytes: usize,
-    next_due_ms: Option<i64>,
     handler: F,
 ) -> Result<StoredOutcome>
 where

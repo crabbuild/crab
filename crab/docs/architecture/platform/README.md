@@ -36,7 +36,7 @@ that exits late cannot publish its tentative commit. Sparse page-I/O deadline
 propagation and automatic fenced recovery,
 streaming initial directory construction and directory-backed capture checksums,
 shared directory caching, prepared compaction/bundles,
-Workflow activity supervision/effect/scheduler mechanics, typed registry, HTTP cutover and capacity
+Workflow activity/effect supervision, scheduler scanning/Tick, typed registry, HTTP cutover and capacity
 qualification remain incomplete. The scoped KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -60,6 +60,11 @@ claim bounds, validate only published leases, retry with stable bytes, dedup
 target execution, retain destination receipts beyond the sender horizon and
 clean terminal rows in bounded batches. Private peer delivery and the node
 effect supervisor still remain.
+Bootstrap and every committed command now derive the earliest durable work or
+retention deadline from SQLite inside the same transaction. The runtime binds
+that summary to the pending LTX cut and publishes it in control; application
+handlers can no longer omit or spoof scheduler state. Catalog scanning and
+bounded Tick execution still remain.
 
 ## Deliverable and contract precedence
 
@@ -190,7 +195,7 @@ crates/crab-cell-runtime/src/
   identity.rs, authority.rs    Cell identity and owner/control CAS
   actor.rs, executor.rs        supervised commands and bounded SQL workers
   publication.rs              pending cut ownership and reconciliation
-  catalog.rs, scheduler.rs     provision proof (implemented) and due-summary scanning
+  catalog.rs, scheduler.rs     provision proof and transactional due summary (implemented), scanning/Tick
   registry.rs, api.rs          typed definitions, codecs and capability handles
   peer.rs                     private message codec, no listener/auth policy
   sql.rs, kv.rs, queue.rs,

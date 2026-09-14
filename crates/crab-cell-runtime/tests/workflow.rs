@@ -574,7 +574,6 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
             10,
             128,
             128,
-            Some(10),
             move |transaction| match workflow_start(
                 transaction,
                 namespace,
@@ -593,6 +592,7 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
     handle.drain().await.unwrap();
 
     let idle = authority.load(cell).await.unwrap().unwrap();
+    assert_eq!(idle.value().next_due_ms, Some(10));
     let second_session = SessionId::from_bytes([11; 16]);
     let runtime = CellRuntime::new(
         SqlWorkerPool::new(1, 10).unwrap(),
@@ -641,7 +641,6 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
             11,
             128,
             512,
-            Some(5_011),
             move |transaction| {
                 let mut tokens = Tokens(20);
                 let claim = workflow_claim_activities(
@@ -694,7 +693,6 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
             13,
             128,
             128,
-            Some(20),
             move |transaction| {
                 let completion = ActivityCompletion {
                     run_id: claim.run_id,

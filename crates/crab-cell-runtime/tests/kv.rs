@@ -286,7 +286,6 @@ async fn kv_command_publishes_and_survives_idle_owner_restore() {
             20,
             128,
             128,
-            None,
             move |transaction| match kv_atomic(transaction, 20, &request)? {
                 KvAtomicOutcome::Applied(_) => Ok(HandlerOutcome::Success(b"applied".to_vec())),
                 KvAtomicOutcome::PreconditionFailed { .. } => {
