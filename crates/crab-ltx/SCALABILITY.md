@@ -5,14 +5,24 @@ Reference: Celld `10cb1303dac710dcb3b557e318e08c855261f68b`, `crates/ltx`.
 See [PARITY.md](PARITY.md) for feature and safety differences, and
 [the HTTP design](../crab-http-server/next-architecture/crab-ltx.md) for integration.
 
-## Target and unanswered sizing questions
+## Target and hardware profiles
 
 The requested node target is 1,000–10,000 active databases, each typically
-100–5,000 MB, and 1,000 transactions/second. For this assessment, TPS means
-aggregate per node; per-database TPS remains an unconfirmed alternative.
-CPU count, RAM, SSD capacity/IOPS, network bandwidth, transaction sizes,
-read/write ratio, latency objectives and durability latency are not specified.
-No benchmark here establishes either throughput interpretation.
+100–5,000 MB, and 1,000 transactions/second **aggregate per node**. Target node
+envelopes:
+
+| Profile | vCPU | RAM | SSD |
+| --- | --- | --- | --- |
+| Small | 1–2 | 2–4 GB | 50–100 GB |
+| Medium | 4–8 | 8–16 GB | 100–200 GB |
+| Large | 16 | 32–64 GB | 500–1,000 GB |
+
+SSD IOPS, network bandwidth, transaction sizes, read/write ratio, latency
+objectives and durability latency remain unspecified. No benchmark here
+establishes the target on any profile; the hardware ranges are not a claim that
+a small node can sustain 10K open databases at 1,000 TPS. See the proposed
+[general platform capacity model](../../crab/docs/architecture/platform/deployment.md#resource-profiles-and-capacity-targets)
+and [qualification plan](../../crab/docs/architecture/platform/delivery.md#capacity-qualification).
 
 Treat active as simultaneously open unless the service explicitly defines an
 activation/eviction policy. Do not substitute registered database count for
