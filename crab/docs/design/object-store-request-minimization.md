@@ -256,7 +256,10 @@ magic. The first section is always the canonical ref transaction. Its BLAKE3
 must equal the footer transaction identity, and its base-root digest must equal
 the footer base. Every section has a contiguous offset, length, kind, and
 BLAKE3 entry; gaps, overlaps, duplicate transaction sections, and corrupt
-ranges fail closed.
+ranges fail closed. Each Git pack descriptor binds exactly one pack section,
+standard `.idx`, deterministic `.rev`, and checksummed object kind/delta
+locator, plus the Git trailer checksum and object count. Git evidence cannot
+appear outside a descriptor or be shared across descriptors.
 
 A push capsule's pack section may use `REF_DELTA` bases reachable from its
 declared base root. It is therefore not automatically a valid response for a

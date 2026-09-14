@@ -126,7 +126,7 @@ mod tests {
 
     use bytes::Bytes;
     use crab_metadata::request_minimal::{
-        CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction, RepositoryRoot,
+        CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction, RepositoryRoot,
     };
     use crab_storage::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
     use object_store::memory::InMemory;
@@ -170,10 +170,18 @@ mod tests {
         .unwrap();
         let capsule = Capsule::build(
             &transaction,
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::GitPack,
-                Bytes::from_static(b"PACK request-minimal read test"),
-            )],
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK request-minimal read test"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
         )
         .unwrap();
         store

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{MetadataError, Result};
 use crate::request_minimal::CapsuleTransaction;
-use crate::validation::validate_content_hash;
+use crate::validation::{validate_content_hash, validate_sha1};
 
 const CAPSULE_MAGIC: &[u8; 8] = b"CRBCAPS2";
 const CAPSULE_VERSION: u32 = 2;
@@ -40,6 +40,90 @@ pub enum CapsuleSectionKind {
 pub struct CapsuleSection {
     kind: CapsuleSectionKind,
     bytes: Bytes,
+}
+
+/// One locally prepared Git pack and all evidence required to read it safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapsuleGitPack {
+    pack: Bytes,
+    index: Bytes,
+    reverse_index: Bytes,
+    locator: Bytes,
+    git_checksum: String,
+    object_count: u64,
+}
+
+impl CapsuleGitPack {
+    /// Bind one non-empty pack to its index, reverse index, and object locator.
+    pub fn new(
+        pack: Bytes,
+        index: Bytes,
+        reverse_index: Bytes,
+        locator: Bytes,
+        git_checksum: impl Into<String>,
+        object_count: u64,
+    ) -> Result<Self> {
+        let pack = Self {
+            pack,
+            index,
+            reverse_index,
+            locator,
+            git_checksum: git_checksum.into(),
+            object_count,
+        };
+        validate_git_pack_input(&pack)?;
+        Ok(pack)
+    }
+}
+
+/// Authenticated section bindings and Git identity for one capsule pack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapsuleGitPackDescriptor {
+    pack_section: u32,
+    index_section: u32,
+    reverse_index_section: u32,
+    locator_section: u32,
+    git_checksum: String,
+    object_count: u64,
+}
+
+impl CapsuleGitPackDescriptor {
+    /// Return the section containing ordinary Git packfile bytes.
+    #[must_use]
+    pub fn pack_section(&self) -> u32 {
+        self.pack_section
+    }
+
+    /// Return the section containing the matching Git pack index.
+    #[must_use]
+    pub fn index_section(&self) -> u32 {
+        self.index_section
+    }
+
+    /// Return the section containing the matching Git reverse index.
+    #[must_use]
+    pub fn reverse_index_section(&self) -> u32 {
+        self.reverse_index_section
+    }
+
+    /// Return the section containing checksummed object locator metadata.
+    #[must_use]
+    pub fn locator_section(&self) -> u32 {
+        self.locator_section
+    }
+
+    /// Return the SHA-1 checksum in the Git pack trailer.
+    #[must_use]
+    pub fn git_checksum(&self) -> &str {
+        &self.git_checksum
+    }
+
+    /// Return the number of objects proven by the pack index.
+    #[must_use]
+    pub fn object_count(&self) -> u64 {
+        self.object_count
+    }
 }
 
 impl CapsuleSection {
@@ -93,6 +177,7 @@ struct CapsuleFooter {
     base_root_digest: String,
     transaction_id: String,
     sections: Vec<CapsuleSectionLocation>,
+    git_packs: Vec<CapsuleGitPackDescriptor>,
 }
 
 /// An immutable, locally verified request-minimal publication capsule.
@@ -105,8 +190,19 @@ pub struct Capsule {
 
 impl Capsule {
     /// Build and verify a capsule containing one canonical ref transaction and payload sections.
-    pub fn build(transaction: &CapsuleTransaction, sections: Vec<CapsuleSection>) -> Result<Self> {
-        if sections.len() >= MAX_CAPSULE_SECTIONS {
+    pub fn build(
+        transaction: &CapsuleTransaction,
+        git_packs: Vec<CapsuleGitPack>,
+        sections: Vec<CapsuleSection>,
+    ) -> Result<Self> {
+        let git_section_count = git_packs
+            .len()
+            .checked_mul(4)
+            .ok_or_else(|| contract_error("capsule Git pack section count overflowed"))?;
+        let payload_section_count = git_section_count
+            .checked_add(sections.len())
+            .ok_or_else(|| contract_error("capsule payload section count overflowed"))?;
+        if payload_section_count >= MAX_CAPSULE_SECTIONS {
             return Err(contract_error(format!(
                 "capsule has too many payload sections (maximum {})",
                 MAX_CAPSULE_SECTIONS - 1
@@ -114,15 +210,33 @@ impl Capsule {
         }
         if sections
             .iter()
-            .any(|section| section.kind == CapsuleSectionKind::RefTransaction)
+            .any(|section| is_reserved_git_section(section.kind))
         {
             return Err(contract_error(
-                "caller payload cannot contain a ref transaction section",
+                "caller payload cannot contain transaction or unbound Git sections",
             ));
         }
         let transaction_bytes = transaction.encode()?;
-        let mut encoded_sections = Vec::with_capacity(sections.len() + 1);
+        let mut encoded_sections = Vec::with_capacity(payload_section_count + 1);
         encoded_sections.push((CapsuleSectionKind::RefTransaction, transaction_bytes));
+        let mut descriptors = Vec::with_capacity(git_packs.len());
+        for pack in git_packs {
+            validate_git_pack_input(&pack)?;
+            let first = u32::try_from(encoded_sections.len())
+                .map_err(|_| contract_error("capsule section index cannot be represented"))?;
+            encoded_sections.push((CapsuleSectionKind::GitPack, pack.pack));
+            encoded_sections.push((CapsuleSectionKind::GitIndex, pack.index));
+            encoded_sections.push((CapsuleSectionKind::GitReverseIndex, pack.reverse_index));
+            encoded_sections.push((CapsuleSectionKind::GitObjectLocator, pack.locator));
+            descriptors.push(CapsuleGitPackDescriptor {
+                pack_section: first,
+                index_section: first + 1,
+                reverse_index_section: first + 2,
+                locator_section: first + 3,
+                git_checksum: pack.git_checksum,
+                object_count: pack.object_count,
+            });
+        }
         encoded_sections.extend(
             sections
                 .into_iter()
@@ -155,6 +269,7 @@ impl Capsule {
             base_root_digest: transaction.base_root_digest().to_owned(),
             transaction_id: transaction.id()?,
             sections: locations,
+            git_packs: descriptors,
         };
         let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
             MetadataError::Internal(format!("capsule footer serialization failed: {source}"))
@@ -238,6 +353,29 @@ impl Capsule {
     pub fn sections(&self) -> &[CapsuleSectionLocation] {
         &self.footer.sections
     }
+
+    /// Return every authenticated Git pack descriptor in publication order.
+    #[must_use]
+    pub fn git_packs(&self) -> &[CapsuleGitPackDescriptor] {
+        &self.footer.git_packs
+    }
+
+    /// Return the authenticated bytes for one section owned by this capsule.
+    pub fn section_bytes(&self, section: u32) -> Result<Bytes> {
+        let location = self
+            .footer
+            .sections
+            .get(usize::try_from(section).map_err(|_| corrupt("section index overflowed"))?)
+            .ok_or_else(|| corrupt("section index is out of bounds"))?;
+        let start = usize::try_from(location.offset)
+            .map_err(|_| corrupt("section offset cannot be represented"))?;
+        let end = location
+            .offset
+            .checked_add(location.length)
+            .and_then(|end| usize::try_from(end).ok())
+            .ok_or_else(|| corrupt("section range cannot be represented"))?;
+        Ok(self.bytes.slice(start..end))
+    }
 }
 
 fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
@@ -268,6 +406,7 @@ fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
             "capsule must contain exactly one leading ref transaction section",
         ));
     }
+    validate_git_pack_descriptors(footer)?;
     let mut expected_offset = 0u64;
     for location in &footer.sections {
         validate_content_hash(
@@ -319,6 +458,93 @@ fn validate_footer(footer: &CapsuleFooter, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn validate_git_pack_input(pack: &CapsuleGitPack) -> Result<()> {
+    if pack.pack.is_empty()
+        || pack.index.is_empty()
+        || pack.reverse_index.is_empty()
+        || pack.locator.is_empty()
+    {
+        return Err(contract_error(
+            "Git pack, index, reverse index, and locator must all be non-empty",
+        ));
+    }
+    validate_sha1(
+        &pack.git_checksum,
+        "capsule Git checksum",
+        "request-minimal capsule",
+    )?;
+    if pack.object_count == 0 {
+        return Err(contract_error("capsule Git pack must contain an object"));
+    }
+    Ok(())
+}
+
+fn validate_git_pack_descriptors(footer: &CapsuleFooter) -> Result<()> {
+    let mut claimed = vec![false; footer.sections.len()];
+    claimed[0] = true;
+    for descriptor in &footer.git_packs {
+        validate_sha1(
+            &descriptor.git_checksum,
+            "capsule Git checksum",
+            "request-minimal capsule",
+        )?;
+        if descriptor.object_count == 0 {
+            return Err(corrupt("capsule Git pack has zero objects"));
+        }
+        let bindings = [
+            (descriptor.pack_section, CapsuleSectionKind::GitPack),
+            (descriptor.index_section, CapsuleSectionKind::GitIndex),
+            (
+                descriptor.reverse_index_section,
+                CapsuleSectionKind::GitReverseIndex,
+            ),
+            (
+                descriptor.locator_section,
+                CapsuleSectionKind::GitObjectLocator,
+            ),
+        ];
+        for (index, expected_kind) in bindings {
+            let index = usize::try_from(index)
+                .map_err(|_| corrupt("capsule Git section index cannot be represented"))?;
+            let location = footer
+                .sections
+                .get(index)
+                .ok_or_else(|| corrupt("capsule Git section index is out of bounds"))?;
+            if location.kind != expected_kind {
+                return Err(corrupt(
+                    "capsule Git descriptor section kind does not match",
+                ));
+            }
+            if claimed[index] {
+                return Err(corrupt("capsule Git section is claimed more than once"));
+            }
+            claimed[index] = true;
+        }
+    }
+    for (index, location) in footer.sections.iter().enumerate().skip(1) {
+        if is_git_section(location.kind) != claimed[index] {
+            return Err(corrupt(
+                "capsule Git sections must belong to exactly one pack descriptor",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_reserved_git_section(kind: CapsuleSectionKind) -> bool {
+    kind == CapsuleSectionKind::RefTransaction || is_git_section(kind)
+}
+
+fn is_git_section(kind: CapsuleSectionKind) -> bool {
+    matches!(
+        kind,
+        CapsuleSectionKind::GitPack
+            | CapsuleSectionKind::GitIndex
+            | CapsuleSectionKind::GitReverseIndex
+            | CapsuleSectionKind::GitObjectLocator
+    )
+}
+
 fn contract_error(reason: impl Into<String>) -> MetadataError {
     MetadataError::RequestMinimalContract {
         record: "capsule",
@@ -354,38 +580,74 @@ mod tests {
         .unwrap()
     }
 
+    fn git_pack() -> CapsuleGitPack {
+        CapsuleGitPack::new(
+            Bytes::from_static(b"PACK payload"),
+            Bytes::from_static(b"index payload"),
+            Bytes::from_static(b"reverse index payload"),
+            Bytes::from_static(b"locator payload"),
+            "4".repeat(40),
+            1,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn capsule_round_trip_authenticates_every_section() {
-        let capsule = Capsule::build(
-            &transaction(),
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::GitPack,
-                Bytes::from_static(b"PACK payload"),
-            )],
-        )
-        .unwrap();
+        let capsule = Capsule::build(&transaction(), vec![git_pack()], Vec::new()).unwrap();
 
         let decoded = Capsule::decode(capsule.bytes().clone()).unwrap();
 
         assert_eq!(decoded.hash(), capsule.hash());
         assert_eq!(decoded.transaction_id(), transaction().id().unwrap());
-        assert_eq!(decoded.sections().len(), 2);
+        assert_eq!(decoded.sections().len(), 5);
+        assert_eq!(decoded.git_packs().len(), 1);
+        assert_eq!(
+            decoded
+                .section_bytes(decoded.git_packs()[0].pack_section())
+                .unwrap(),
+            Bytes::from_static(b"PACK payload")
+        );
     }
 
     #[test]
     fn capsule_rejects_corrupt_payload() {
-        let capsule = Capsule::build(
-            &transaction(),
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::GitPack,
-                Bytes::from_static(b"PACK payload"),
-            )],
-        )
-        .unwrap();
+        let capsule = Capsule::build(&transaction(), vec![git_pack()], Vec::new()).unwrap();
         let mut bytes = capsule.bytes().to_vec();
         bytes[0] ^= 1;
 
         let error = Capsule::decode(Bytes::from(bytes)).expect_err("corruption must fail");
+
+        assert!(matches!(error, MetadataError::CorruptObject { .. }));
+    }
+
+    #[test]
+    fn capsule_rejects_unbound_git_sections() {
+        let error = Capsule::build(
+            &transaction(),
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::GitIndex,
+                Bytes::from_static(b"orphan index"),
+            )],
+        )
+        .expect_err("Git evidence must be bound to one descriptor");
+
+        assert!(matches!(
+            error,
+            MetadataError::RequestMinimalContract { .. }
+        ));
+    }
+
+    #[test]
+    fn capsule_rejects_cross_pack_section_binding() {
+        let capsule =
+            Capsule::build(&transaction(), vec![git_pack(), git_pack()], Vec::new()).unwrap();
+        let mut footer = capsule.footer.clone();
+        footer.git_packs[1].index_section = footer.git_packs[0].index_section;
+
+        let error = validate_git_pack_descriptors(&footer)
+            .expect_err("one section cannot authenticate evidence for two packs");
 
         assert!(matches!(error, MetadataError::CorruptObject { .. }));
     }

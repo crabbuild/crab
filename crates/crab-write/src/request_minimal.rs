@@ -171,7 +171,7 @@ mod tests {
     };
 
     use bytes::Bytes;
-    use crab_metadata::request_minimal::{CapsuleRefEdit, CapsuleSection, CapsuleSectionKind};
+    use crab_metadata::request_minimal::{CapsuleGitPack, CapsuleRefEdit};
     use crab_storage::{
         ImmutableWriteVerification, StorageObservation, StorageObserver, StorageOperation,
         StorageOutcome,
@@ -298,10 +298,18 @@ mod tests {
     fn capsule(transaction: &CapsuleTransaction) -> Capsule {
         Capsule::build(
             transaction,
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::GitPack,
-                Bytes::from_static(b"PACK request-minimal test"),
-            )],
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK request-minimal test"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
         )
         .unwrap()
     }
