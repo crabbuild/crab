@@ -176,6 +176,26 @@ impl<S> StoreLayout<S> {
         self.repo_path("layout")
     }
 
+    /// Path to the request-minimal repository root.
+    #[must_use]
+    pub fn request_minimal_root_path(&self) -> ObjectPath {
+        self.repo_path("v2/root")
+    }
+
+    /// Path to one immutable request-minimal capsule.
+    #[must_use]
+    pub fn request_minimal_capsule_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/capsules/{partition}/{hash}"))
+    }
+
+    /// Path to one immutable request-minimal checkpoint.
+    #[must_use]
+    pub fn request_minimal_checkpoint_path(&self, hash: &str) -> ObjectPath {
+        let partition = hash.get(..GLOBAL_CONTENT_FANOUT_WIDTH).unwrap_or(hash);
+        self.repo_path(&format!("v2/checkpoints/{partition}/{hash}"))
+    }
+
     /// Path to the fresh-clone replica discovery document.
     #[must_use]
     pub fn replica_discovery_path(&self) -> ObjectPath {
@@ -518,6 +538,25 @@ mod tests {
         let layout = test_layout();
         let path = layout.repo_path("refs/heads/main");
         assert_eq!(path.as_ref(), "org/models/refs/heads/main");
+    }
+
+    #[test]
+    fn request_minimal_paths_stay_inside_repository_prefix() {
+        let layout = test_layout();
+        let hash = format!("ab{}", "1".repeat(62));
+
+        assert_eq!(
+            layout.request_minimal_root_path().as_ref(),
+            "org/models/v2/root"
+        );
+        assert_eq!(
+            layout.request_minimal_capsule_path(&hash).as_ref(),
+            format!("org/models/v2/capsules/ab/{hash}")
+        );
+        assert_eq!(
+            layout.request_minimal_checkpoint_path(&hash).as_ref(),
+            format!("org/models/v2/checkpoints/ab/{hash}")
+        );
     }
 
     #[test]

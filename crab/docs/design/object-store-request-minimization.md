@@ -6,10 +6,34 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Push, clone/read, recovery, and garbage collection |
-| Status | Proposed hard-cutover design |
+| Status | Implementation in progress; not wired to user-facing commands |
 | Priority | Correctness, then request latency, throughput, and transferred bytes |
 | Replaces | The v1 multi-object publication layout after an explicit cutover |
 | Companion | [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
+
+### Implementation status
+
+The first implementation slice is present but intentionally unreachable from
+the released push and read paths:
+
+- `crab-metadata::request_minimal` owns bounded, versioned, checksum-bearing
+  repository-root, capsule, ref-transaction, and checkpoint-pointer contracts;
+- `crab-write::request_minimal` initializes and opens a repository root,
+  uploads and independently verifies a capsule, and publishes through one root
+  CAS;
+- `crab-read::request_minimal` loads the root and its bounded capsule frontier
+  concurrently, verifying every size, content, transaction, and base binding;
+- the executable clean-path test proves exactly four object-store operations,
+  including advertisement: root GET, capsule PUT, capsule GET, and root PUT;
+- the executable one-capsule read test proves exactly two object-store
+  operations: root GET and capsule GET;
+- CAS-loser, expected-old mismatch, payload corruption, and lost-root-response
+  tests fail closed or reconcile through exact transaction identity.
+
+The current CLI remains on v1. Git pack/sidecar ingestion into capsules,
+capsule-aware clone/fetch, checkpoint construction, v2 GC, provider checksum
+qualification, migration, and live qualification remain required before the
+hard cutover.
 
 ## 1. Decision summary
 
@@ -47,10 +71,12 @@ state, ref-journal records, locks, admission slots, GC fences, and manifest
 history. Each object has a valid local responsibility, but a high-latency
 remote store charges at least one network round trip for every responsibility.
 
-The current request-minimization work reduces the modeled clean tiny-push
-budget from roughly 60 logical object-store operations to roughly 37 without
-changing the v1 format. The remaining amplification is structural: v1 cannot
-coalesce those objects without changing read, recovery, and GC contracts.
+A current optimized-v1 single-writer RustFS measurement of one small
+same-branch push recorded 69 transport attempts: 37 GETs, 2 LIST pages, 5
+HEADs, and 25 PUTs.
+There were no 5xx responses or SDK retries, so the remaining amplification is
+structural rather than provider instability. V1 cannot coalesce those objects
+without changing read, recovery, and GC contracts.
 
 For remote stores, elapsed time is approximately:
 
@@ -192,6 +218,12 @@ The root's object-store ETag and version are CAS tokens, not content hashes.
 The encoded `root_digest` detects body corruption independently of provider
 version metadata.
 
+The development codec uses an eight-byte `CRBROOT2` magic, a big-endian format
+version and payload length, a deterministic JSON payload containing only
+ordered maps and integer/string fields, and a trailing BLAKE3 digest over the
+envelope and payload. Readers reject oversized, non-canonical, truncated,
+extended, or digest-mismatched records before trusting any referenced object.
+
 ### 6.2 Capsule
 
 Protocol v2 removes standalone object-store keys for packs and their sidecars;
@@ -215,6 +247,14 @@ A capsule contains every new authoritative artifact for one push:
 The pack, `.idx`, `.rev`, metadata, receipts, and catalog deltas are sections
 of one object rather than separate object keys. Readers use exact ranges from
 the footer and validate every returned section.
+
+The development capsule codec concatenates non-empty sections, followed by a
+bounded deterministic footer, footer length, footer BLAKE3, and `CRBCAPS2`
+magic. The first section is always the canonical ref transaction. Its BLAKE3
+must equal the footer transaction identity, and its base-root digest must equal
+the footer base. Every section has a contiguous offset, length, kind, and
+BLAKE3 entry; gaps, overlaps, duplicate transaction sections, and corrupt
+ranges fail closed.
 
 A push capsule's pack section may use `REF_DELTA` bases reachable from its
 declared base root. It is therefore not automatically a valid response for a
@@ -722,10 +762,16 @@ safe while omitted required bytes violate reconstruction.
 
 ## 17. Implementation sequence
 
-1. Freeze the v2 root, capsule, embedded Git pack, checkpoint pack, footer,
-   locator, checksum, visibility, and error contracts.
-2. Build a deterministic capsule writer, range reader, and corruption corpus.
-3. Add a transport request observer and executable budgets before wiring push.
+1. **In progress:** freeze the v2 root, capsule, embedded Git pack, checkpoint
+   pack, footer, locator, checksum, visibility, and error contracts. Root,
+   capsule, ref-transaction, and checkpoint-pointer contracts exist; pack,
+   locator, and visibility semantics remain incomplete.
+2. **In progress:** build a deterministic capsule writer, range reader, and
+   corruption corpus. Whole-capsule encode/decode and section authentication
+   exist; range reading remains.
+3. **Started:** add a transport request observer and executable budgets before
+   wiring push. The readback path has an exact four-request unit gate; live
+   provider gates remain.
 4. Implement verified-put capability negotiation and mandatory readback
    fallback.
 5. Replace direct push publication with capsule upload plus root CAS.
@@ -745,13 +791,18 @@ paths after the cutover.
 
 ## 18. Acceptance decision
 
-The protocol is ready to implement only after these decisions are closed:
+The implementation may proceed behind an unreachable development module, but
+production wiring and format freeze require these decisions to be closed:
 
-- whether cryptographic verified PUT is mandatory or readback remains a
-  supported provider tier;
-- the maximum root size and behavior for repositories with extreme ref count;
+- **Decided:** independent readback is the safe baseline; the three-request
+  path is enabled only for a provider/endpoint that passes cryptographic
+  verified-PUT qualification;
+- **Partly decided:** roots are capped at 8 MiB. Repositories whose complete
+  ref map cannot fit require a separately designed protocol and cannot use v2;
 - the maximum capsule size before multipart and the multipart part policy;
-- the checkpoint delta-depth bound derived from large-repository evidence;
+- **Provisional:** the implementation blocks an eighth post-checkpoint capsule,
+  keeping `2 + D` clone reads below ten. Large-repository evidence must confirm
+  or revise the seven-capsule limit before format freeze;
 - whether native LFS bodies are capsule sections or retain a separately
   counted protocol;
 - the exact active-active boundary, which cannot use one object-store root as

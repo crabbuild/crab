@@ -4,6 +4,7 @@ pub mod generation;
 pub mod initialize;
 pub mod journal;
 mod namespace;
+pub mod request_minimal;
 pub use namespace::with_ref_namespace;
 
 /// Failure while preparing or publishing canonical Git metadata.
@@ -24,6 +25,17 @@ pub enum WriteError {
     VisibilityUnavailable { generation: u64 },
     #[error("ref {ref_name} no longer matches its expected old value at {path}")]
     RefChanged { ref_name: String, path: String },
+    #[error("request-minimal root changed at {path}")]
+    RequestMinimalRootChanged { path: String },
+    #[error(
+        "request-minimal transaction {transaction_id} may have committed; reconcile exact root evidence before retrying"
+    )]
+    RequestMinimalCommitUncertain {
+        transaction_id: String,
+        #[source]
+        source: Box<crab_storage::StorageError>,
+        verification: Option<Box<WriteError>>,
+    },
     #[error("publication coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("publication storage operation failed")]

@@ -71,3 +71,18 @@ _Avoid_: Shared state
 **Repository read view**:
 An immutable repository generation plus its validated committed-journal overlay, used to resolve refs, trees, objects, and version-bound attributes consistently for one request.
 _Avoid_: Mutable repository handle, when referring to a pinned view
+
+**Capsule**:
+A content-addressed immutable object that co-locates one ref transaction with
+the Git and large-file bytes and authenticated indexes needed to reconstruct it.
+_Avoid_: Pack, because a capsule contains a Git pack plus non-pack evidence
+
+**Repository root**:
+The single bounded mutable record that atomically publishes refs, a checkpoint,
+and the capsule frontier for one repository generation.
+_Avoid_: Manifest, when referring to the request-minimal storage protocol
+
+**Checkpoint**:
+An immutable complete repository view that resets the capsule frontier and
+bounds the number of objects needed for clone, fetch, and reconstruction.
+_Avoid_: Snapshot, when referring to the stored request-minimal artifact
