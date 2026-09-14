@@ -53,6 +53,14 @@ application extension boundary is reviewed Rust source compiled with
 compiled-registry descriptor; operators do not upload functions, modules or
 language bundles at runtime.
 
+The extension author is therefore a Crab contributor, not an independent
+platform tenant. Adding a service operation changes the server source, its SQL
+migration and codec fixtures in the same pull request. The operation becomes
+available only after the resulting whole-server image passes qualification and
+is rolled out. Repository owners can use the resulting product capability but
+cannot choose code, dependencies, migrations or primitive permissions at
+runtime.
+
 This fixes the dependency and request path:
 
 ```mermaid
@@ -116,6 +124,12 @@ listener, dynamic code loading, or service-bundle deployment system. The existin
 React browser application remains a client of Crab's product HTTP API.
 Cross-Cell transactions, online GC and peer-disk durability acknowledgements
 are also outside v1. Native code is trusted, not a tenant sandbox.
+
+The public compatibility contract remains Crab's product HTTP and Git surfaces.
+`CellClient`, primitive handles, command codecs and the peer protocol are private
+implementation contracts between code built into compatible Crab images. They
+must not be exported as an application SDK or advertised as user-selectable
+infrastructure.
 
 This is a hard architecture boundary, not deferred optional work. Supporting
 untrusted or independently deployed application code later would require a new

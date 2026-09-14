@@ -1,8 +1,9 @@
 # Native Rust programming model and private peer protocol
 
-[Index](README.md). These are proposed interfaces. Application developers add
-ordinary Rust modules to Crab and rebuild its image; there is no language host,
-runtime plugin loader or public primitive SDK.
+[Index](README.md). These are proposed interfaces. Crab contributors add ordinary
+Rust modules to the server source and rebuild the complete image; repository
+owners do not provide executable code. There is no language host, runtime plugin
+loader or public primitive SDK.
 
 ## Compile-time application composition
 
@@ -64,6 +65,38 @@ crab-storage <- crab-ltx <- crab-cell-runtime <- crab-http-server
 Repository handlers may call narrow public contracts from existing Git crates,
 but those calls occur in asynchronous activities after a durable SQL intention;
 they do not add server or Git dependencies to `crab-cell-runtime`.
+
+## Contributor change and release procedure
+
+One product capability is delivered as one reviewed vertical slice. Its pull
+request must make these changes together; none is a separately deployable unit:
+
+1. Add or extend an application migration under
+   `crab-http-server/src/cells/migrations/`. Use a monotonic schema version and
+   pin the exact migration digest in the module descriptor.
+2. Define stable command/query IDs, codec versions and independent byte fixtures
+   under `crab-http-server/src/cells/`. IDs and published codec meanings are never
+   reused. The codec owns bounded decode before runtime admission.
+3. Implement a synchronous transaction-scoped Rust handler. External Git,
+   object-store or network work is represented by an outbox intention and runs
+   in a registered asynchronous activity after SQL publication.
+4. Register every descriptor and function binding in `cells.rs`. Startup fails
+   if migration, descriptor, fixture and binding inventories disagree.
+5. Adapt an existing authenticated Crab HTTP route to a typed `CellClient` call.
+   The route resolves repository capability and Cell target; it cannot accept a
+   primitive name, command ID, handler name, digest or byte budget from the user.
+6. Add transaction, publication, retry/Resolve, private-forwarding and product
+   HTTP tests. The browser-visible test must enter through the real route and
+   verify a result after restoring the owner from the object-store root.
+7. Build one `crab-http-server` image, run `cells release inspect --json` against
+   that binary, prepare the descriptor, and use the normal compatible or
+   maintenance fleet rollout. There is no module-only deployment or rollback.
+
+This procedure deliberately couples application and runtime compatibility to
+the server release. A Cargo feature, repository setting or environment variable
+must not select between old and new persistence implementations. During the hard
+cutover, old application storage exists only as importer input; all serving uses
+the registered Cell path.
 
 ## Typed commands, not remotely shipped closures
 

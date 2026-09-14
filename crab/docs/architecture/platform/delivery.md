@@ -181,6 +181,12 @@ Generate private message types from peer.proto inside crab-cell-runtime; no
 protocol facade crate or public gRPC service. Implement canonical digest codec,
 bounded decoding and outcome-aware retry/Resolve once in CellClient.
 
+Treat the module author as a Crab contributor. A capability is not delivered
+unless one pull request contains its migration and digest, stable codecs and
+fixtures, native bindings, authorized product-route adapter and end-to-end test.
+Do not add a module package format, scaffold command, external application SDK or
+per-repository module selector. The complete server image is the sole artifact.
+
 Make `crab-http-server/src/cells.rs` the only composition root. Its static module
 descriptors and bindings must produce one canonical registry or fail startup.
 Add the read-only `cells release inspect --json` command and run it in the image

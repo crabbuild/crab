@@ -145,6 +145,12 @@ codec/schema/definition versions during a rolling release, but every retained
 implementation is still part of the same signed image. Removing an old binding
 requires the inventory and maintenance rules below.
 
+Rollback also operates at whole-image granularity. A previous image may be
+rolled back only while its compiled registry still supports every authoritative
+code/schema pair and retained command, queue and workflow codec. Otherwise enter
+maintenance and complete an explicit forward migration; never download an old
+module or switch one repository to a second runtime path.
+
 The build produces a bounded canonical release descriptor embedded in the binary.
 The same bytes may be copied to the object store as metadata. Fields:
 
