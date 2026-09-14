@@ -3,6 +3,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use crate::{Digest, Error, NamespaceId, RequestId, Result};
 
 mod activity;
+mod activity_api;
+mod activity_codec;
 mod api;
 
 pub use activity::{
@@ -10,6 +12,13 @@ pub use activity::{
     ActivitySupport, ActivityTokenSource, SystemActivityTokens, workflow_claim_activities,
     workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
     workflow_validate_activity_claim,
+};
+pub use activity_api::{
+    ActivityCancellation, ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome,
+    ActivitySupervisor, ActivitySupervisorError, WorkflowActivities, WorkflowActivityClaimCommand,
+    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand,
+    WorkflowActivityExtendRequest, WorkflowActivityModule, WorkflowActivityValidateQuery,
+    WorkflowActivityValidateRequest, register_activity, register_workflow_activities,
 };
 pub use api::{
     WorkflowCancelCommand, WorkflowGetQuery, WorkflowGetRequest, WorkflowModule, WorkflowNamespace,

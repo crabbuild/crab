@@ -293,8 +293,17 @@ it, republishes and observes the resulting event. Activity claim scans filter
 the worker's exact type/definition pairs in SQL, lease tokens and attempts bind
 all extension/completion predicates, retry completions are idempotent, and old
 attempts lose authority after a new claim. Terminal cleanup deletes children
-before at most 128 retained parents. Effect actions, the native activity
-supervisor and scheduler scanning remain to implement.
+before at most 128 retained parents. `ActivitySupervisor::run_once` now claims
+through the typed actor command, validates the published lease at its receipt,
+dispatches the exact compiled `(module, definition, activity type)` Rust future
+outside SQLite, durably extends the lease every third of its interval, and
+publishes completion or retry. Stable external idempotency ignores attempt and
+lease tokens; completion identity is deterministic per attempt. Pending command
+outcomes retain their mutation evidence, and cancellation is signalled if the
+cycle is dropped or loses its lease. Integration coverage holds an activity
+past its first heartbeat, completes its state-machine transition, then restores
+and reads that terminal result from the exact LTX root. Effect actions, catalog-
+driven shard polling and bounded concurrent orchestration remain to implement.
 
 `WorkflowModule` binds one namespace, one statically linked definition and
 fixed start/signal/cancel/state operation IDs. `register_workflow` installs the
@@ -305,9 +314,9 @@ shard count, binds start identity to `MutationIdentity.request_id`, maps every
 non-applied outcome to a durable typed rejection, and exposes bounded
 minimum-receipt `WorkflowRun` reads. Integration coverage proves start, signal,
 duplicate replay, identity-conflict rejection, exact-root restore, state and
-cancellation. Activity supervision remains a separate node-owned capability;
-application code never receives a lease or raw SQLite connection through this
-handle.
+cancellation. Activity execution remains a separate node-owned capability;
+application code never receives a lease or raw SQLite connection through the
+Workflow handle.
 
 Timer events passed to the definition are `timer\0 || timer_id`. Activity
 completion events are `activity\0 || failed:u8 || activity_id ||

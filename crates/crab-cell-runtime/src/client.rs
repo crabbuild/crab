@@ -12,9 +12,9 @@ use std::{
 use crab_ltx::rusqlite::OptionalExtension;
 
 use crate::{
-    CatalogRole, CellHandle, CellId, CellTarget, Command, CommandInvocation, Digest, Error,
-    IncarnationId, MutationIdentity, OperationDescriptor, Query, QueryInvocation, Registry,
-    Resolution, Result, StoredOutcome,
+    ActivityContext, ActivityExecution, ActivitySupport, CatalogRole, CellHandle, CellId,
+    CellTarget, Command, CommandInvocation, Digest, Error, IncarnationId, MutationIdentity,
+    OperationDescriptor, Query, QueryInvocation, Registry, Resolution, Result, StoredOutcome,
     codec::{decode_wire, encode_wire},
 };
 
@@ -250,6 +250,27 @@ impl CellClient {
             ));
         }
         Ok(descriptor.shards)
+    }
+
+    pub(crate) fn activity_support(
+        &self,
+        module: &'static str,
+        definition: Digest,
+    ) -> Result<Vec<ActivitySupport>> {
+        self.registry.activity_support(module, definition)
+    }
+
+    pub(crate) async fn execute_activity(
+        &self,
+        module: &'static str,
+        definition: Digest,
+        activity: &str,
+        context: ActivityContext,
+        input: Vec<u8>,
+    ) -> Result<ActivityExecution> {
+        self.registry
+            .execute_activity(module, definition, activity, context, input)
+            .await
     }
 
     /// Executes one typed command with a digest derived from validated values.

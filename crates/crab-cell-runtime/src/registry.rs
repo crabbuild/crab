@@ -1,4 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    future::Future,
+    pin::Pin,
+};
 
 use crab_ltx::rusqlite::{Connection, Transaction};
 
@@ -7,8 +11,9 @@ mod descriptor;
 use descriptor::encode_release;
 
 use crate::{
-    CatalogRole, CellId, Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch,
-    SqlResultSet, WireValue, WorkflowDefinition,
+    ActivityContext, ActivityExecution, ActivityHandler, ActivitySupport, CatalogRole, CellId,
+    Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch, SqlResultSet, WireValue,
+    WorkflowDefinition,
     codec::{decode_wire, encode_wire},
     sql_batch, sql_query_batch,
 };
@@ -151,6 +156,8 @@ type CommandHandler = for<'borrow, 'connection> fn(
 ) -> Result<HandlerOutcome>;
 
 type QueryHandler = for<'borrow> fn(&mut QueryContext<'borrow>, &[u8]) -> Result<Vec<u8>>;
+type ActivityFuture = Pin<Box<dyn Future<Output = Result<ActivityExecution>> + Send + 'static>>;
+type ActivityFunction = fn(ActivityContext, Vec<u8>) -> ActivityFuture;
 
 /// Stored command decision encoded with the command's declared output codec.
 pub enum CommandResult<T> {
@@ -222,6 +229,8 @@ pub struct RegistryBuilder {
     commands: BTreeMap<BindingKey, CommandHandler>,
     queries: BTreeMap<BindingKey, QueryHandler>,
     workflow_definitions: HashSet<(String, [u8; 32])>,
+    activities: BTreeMap<ActivityKey, ActivityFunction>,
+    activity_claims: BTreeSet<ActivityKey>,
 }
 
 impl RegistryBuilder {
@@ -233,6 +242,8 @@ impl RegistryBuilder {
             commands: BTreeMap::new(),
             queries: BTreeMap::new(),
             workflow_definitions: HashSet::new(),
+            activities: BTreeMap::new(),
+            activity_claims: BTreeSet::new(),
         }
     }
 
@@ -285,6 +296,40 @@ impl RegistryBuilder {
         Ok(())
     }
 
+    /// Binds one declared activity type to its statically linked Rust future.
+    pub fn bind_activity<A: ActivityHandler>(
+        &mut self,
+        module: &'static str,
+        definition: Digest,
+    ) -> std::result::Result<(), RegistryError> {
+        let key = ActivityKey::new(module, definition, A::TYPE)?;
+        if self.activities.insert(key, typed_activity::<A>).is_some() {
+            return Err(Error::Registry("duplicate activity binding"));
+        }
+        Ok(())
+    }
+
+    /// Binds the claim-time activity inventory to the same compiled definitions.
+    pub fn bind_activity_inventory(
+        &mut self,
+        module: &'static str,
+        definition: Digest,
+        activity_types: &'static [&'static str],
+    ) -> std::result::Result<(), RegistryError> {
+        if activity_types.is_empty() {
+            return Err(Error::Registry("activity claim inventory is empty"));
+        }
+        for activity in activity_types {
+            if !self
+                .activity_claims
+                .insert(ActivityKey::new(module, definition, activity)?)
+            {
+                return Err(Error::Registry("duplicate activity claim binding"));
+            }
+        }
+        Ok(())
+    }
+
     /// Freezes registration after validating inventory and canonical bytes.
     pub fn finish(mut self) -> std::result::Result<Registry, RegistryError> {
         validate_build(&self.build)?;
@@ -327,6 +372,24 @@ impl RegistryBuilder {
                 "descriptor and workflow definition bindings differ",
             ));
         }
+        let expected_activities = self
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module.workflow_definitions.iter().flat_map(|definition| {
+                    module.activity_types.iter().map(|activity| ActivityKey {
+                        module: module.name.to_owned(),
+                        definition: *definition.as_bytes(),
+                        activity: (*activity).to_owned(),
+                    })
+                })
+            })
+            .collect::<BTreeSet<_>>();
+        if expected_activities != self.activities.keys().cloned().collect()
+            || expected_activities != self.activity_claims
+        {
+            return Err(Error::Registry("descriptor and activity bindings differ"));
+        }
         validate_namespaces(&namespace_owners)?;
 
         let command_descriptors = operation_descriptors(&self.modules, |module| module.commands);
@@ -346,6 +409,7 @@ impl RegistryBuilder {
             queries: self.queries,
             query_descriptors,
             namespace_modules: namespace_owners,
+            activities: self.activities,
         })
     }
 }
@@ -360,6 +424,7 @@ pub struct Registry {
     queries: BTreeMap<BindingKey, QueryHandler>,
     query_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     namespace_modules: HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
+    activities: BTreeMap<ActivityKey, ActivityFunction>,
 }
 
 impl Registry {
@@ -376,6 +441,44 @@ impl Registry {
     #[must_use]
     pub fn module_code(&self, module: &str) -> Option<Digest> {
         self.module_codes.get(module).copied()
+    }
+
+    pub(crate) fn activity_support(
+        &self,
+        module: &'static str,
+        definition: Digest,
+    ) -> Result<Vec<ActivitySupport>> {
+        let supported = self
+            .activities
+            .keys()
+            .filter(|key| key.module == module && key.definition == *definition.as_bytes())
+            .map(|key| ActivitySupport {
+                activity_type: key.activity.clone(),
+                definition_digest: Digest::from_bytes(key.definition),
+            })
+            .collect::<Vec<_>>();
+        if supported.is_empty() {
+            return Err(Error::Registry("activity support is unavailable"));
+        }
+        Ok(supported)
+    }
+
+    pub(crate) fn execute_activity(
+        &self,
+        module: &'static str,
+        definition: Digest,
+        activity: &str,
+        context: ActivityContext,
+        input: Vec<u8>,
+    ) -> ActivityFuture {
+        let key = match ActivityKey::new(module, definition, activity) {
+            Ok(key) => key,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        let Some(handler) = self.activities.get(&key).copied() else {
+            return Box::pin(async { Err(Error::Registry("activity binding is unavailable")) });
+        };
+        handler(context, input)
     }
 
     pub(crate) fn namespace_contract(
@@ -542,11 +645,48 @@ fn typed_query<Q: Query>(context: &mut QueryContext<'_>, input: &[u8]) -> Result
     Ok(encode_wire(&output, context.output_limit)?)
 }
 
+fn typed_activity<A: ActivityHandler>(context: ActivityContext, input: Vec<u8>) -> ActivityFuture {
+    Box::pin(async move {
+        let outcome = A::execute(context, input).await;
+        let payload = match &outcome {
+            ActivityExecution::Completed(result) => result,
+            ActivityExecution::Failed { details, .. } => details,
+        };
+        if payload.len() > 256 * 1024 {
+            return Err(Error::Command("activity handler result exceeds 256 KiB"));
+        }
+        Ok(outcome)
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct BindingKey {
     module: String,
     id: u32,
     codec_version: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ActivityKey {
+    module: String,
+    definition: [u8; 32],
+    activity: String,
+}
+
+impl ActivityKey {
+    fn new(module: &str, definition: Digest, activity: &str) -> Result<Self> {
+        if !valid_name(module)
+            || !valid_name(activity)
+            || definition.as_bytes().iter().all(|byte| *byte == 0)
+        {
+            return Err(Error::Registry("invalid activity binding key"));
+        }
+        Ok(Self {
+            module: module.to_owned(),
+            definition: *definition.as_bytes(),
+            activity: activity.to_owned(),
+        })
+    }
 }
 
 impl BindingKey {
@@ -627,6 +767,11 @@ fn validate_module(
         if !valid_name(activity) || !activities.insert(*activity) {
             return Err(Error::Registry("invalid activity inventory"));
         }
+    }
+    if !activities.is_empty() && workflows.is_empty() {
+        return Err(Error::Registry(
+            "activity inventory requires a workflow definition",
+        ));
     }
     for namespace in module.namespaces {
         if namespaces

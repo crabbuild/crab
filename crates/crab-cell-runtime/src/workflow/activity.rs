@@ -7,10 +7,10 @@ use super::{
 };
 use crate::{Digest, Error, Result};
 
-const MAX_CLAIM_ITEMS: usize = 32;
+pub(super) const MAX_CLAIM_ITEMS: usize = 32;
 const MAX_CLAIM_BYTES: usize = 512 << 10;
 const MAX_SCAN_ITEMS: usize = 128;
-const MAX_ACTIVITY_BYTES: usize = 256 << 10;
+pub(super) const MAX_ACTIVITY_BYTES: usize = 256 << 10;
 const MAX_ACTIVITY_TYPE_BYTES: usize = 256;
 const MAX_ATTEMPTS: u32 = 20;
 const MIN_LEASE_MS: u32 = 5_000;

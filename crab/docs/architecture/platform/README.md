@@ -36,7 +36,8 @@ that exits late cannot publish its tentative commit. Sparse page-I/O deadline
 propagation and automatic fenced recovery,
 streaming initial directory construction and directory-backed capture checksums,
 shared directory caching, prepared compaction/bundles,
-Workflow activity/effect supervision, scheduler scanning/Tick, private peer
+Workflow effect supervision, catalog-driven activity scheduling, scheduler
+scanning/Tick, private peer
 routing, HTTP cutover and capacity qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
@@ -67,8 +68,14 @@ pinned compiled definition digest. Deterministic action IDs, bounded decisions,
 outstanding-task limits, terminal cancellation and exact-root restoration are
 implemented. Activity claims, post-publication lease validation, heartbeat extension,
 attempt-bound idempotent completion/failure, retry and terminal retention cleanup
-are now implemented through the same publication path. The node supervisor,
-effect actions and due-Cell scanner remain. A typed `WorkflowNamespace` now
+are now implemented through the same publication path. The native
+`ActivitySupervisor` claims one item through the actor, waits for that claim's
+root to publish, validates its exact lease, runs only the statically bound Rust
+future outside SQLite, heartbeats through durable commands and publishes its
+completion or retry transition. Its mutation evidence survives unknown outcomes,
+and dropping the supervisor cycle signals cooperative cancellation. Catalog-driven
+shard polling, bounded multi-activity orchestration, effect actions and the due-Cell
+scanner remain. A typed `WorkflowNamespace` now
 binds each namespace and definition digest to fixed command/query IDs at
 startup, derives its shard only from the workflow ID and compiled registry,
 and exposes receipted start, signal, cancel and state operations. Registry
@@ -89,7 +96,8 @@ bounded Tick execution still remain.
 The startup-only compiled registry now validates module names, exact migration
 bytes/digests and contiguous schema ranges, command/query codec ranges and byte
 limits, namespace topology/effect targets/DLQ cycles, workflow/activity
-inventories, and exact descriptor-to-function binding equality. It produces
+inventories, and exact descriptor-to-command/query/definition/activity binding
+equality. It produces
 order-independent canonical release bytes, module code digests and one release
 digest, then exposes only immutable command/query dispatch through transaction-
 scoped contexts. The canonical bounded `WireValue` codec and generic typed

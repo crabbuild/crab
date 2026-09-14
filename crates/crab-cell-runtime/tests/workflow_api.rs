@@ -1,13 +1,25 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, UNIX_EPOCH},
+};
 
 use crab_cell_runtime::{
+    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
     CellClient, CellModule, CellRuntime, CellTarget, Digest, Error, IncarnationId, InvocationError,
     MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId,
     OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId,
-    WorkflowCancelCommand, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
-    WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand,
-    WorkflowStartCommand, WorkflowStatus, install_workflow_schema, register_workflow,
+    WorkflowAction, WorkflowActivities, WorkflowActivityClaimCommand,
+    WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand, WorkflowActivityModule,
+    WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext, WorkflowDecision,
+    WorkflowDefinition, WorkflowGetQuery, WorkflowModule, WorkflowNamespace, WorkflowOutcome,
+    WorkflowSignal, WorkflowSignalCommand, WorkflowStartCommand, WorkflowStatus,
+    install_workflow_schema, register_activity, register_workflow, register_workflow_activities,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -21,8 +33,15 @@ const COMMANDS: &[OperationDescriptor] = &[
     operation(1, 1024 * 1024, 64),
     operation(2, 1024 * 1024, 64),
     operation(3, 1024 * 1024, 64),
+    operation(4, 1024 * 1024, 1024 * 1024),
+    operation(5, 1024 * 1024, 1024 * 1024),
+    operation(6, 1024 * 1024, 64),
 ];
-const QUERIES: &[OperationDescriptor] = &[operation(1, 2048, 1024 * 1024)];
+const QUERIES: &[OperationDescriptor] = &[
+    operation(1, 2048, 1024 * 1024),
+    operation(2, 1024 * 1024, 1),
+];
+static HEARTBEAT_OBSERVED: AtomicBool = AtomicBool::new(false);
 
 struct Definition;
 
@@ -37,8 +56,33 @@ impl WorkflowDefinition for Definition {
         &self,
         _state: &[u8],
         event: &[u8],
-        _context: WorkflowContext,
+        context: WorkflowContext,
     ) -> crab_cell_runtime::Result<WorkflowDecision> {
+        if matches!(event, b"activity" | b"activity-retry") {
+            return Ok(WorkflowDecision {
+                status: WorkflowStatus::Running,
+                state: b"waiting".to_vec(),
+                result: None,
+                actions: vec![WorkflowAction::Activity {
+                    activity_type: "echo".into(),
+                    input: if event == b"activity-retry" {
+                        b"retry".to_vec()
+                    } else {
+                        b"payload".to_vec()
+                    },
+                    due_at_ms: context.now_ms(),
+                    expires_at_ms: context.now_ms() + 60_000,
+                }],
+            });
+        }
+        if event.starts_with(b"activity\0") {
+            return Ok(WorkflowDecision {
+                status: WorkflowStatus::Completed,
+                state: b"activity-complete".to_vec(),
+                result: Some(event.to_vec()),
+                actions: Vec::new(),
+            });
+        }
         if event == b"finish" {
             return Ok(WorkflowDecision {
                 status: WorkflowStatus::Completed,
@@ -68,6 +112,46 @@ impl WorkflowModule for TestWorkflow {
     const GET_QUERY_ID: u32 = 1;
 }
 
+impl WorkflowActivityModule for TestWorkflow {
+    const ACTIVITY_TYPES: &'static [&'static str] = &["echo"];
+    const ACTIVITY_CLAIM_COMMAND_ID: u32 = 4;
+    const ACTIVITY_COMPLETE_COMMAND_ID: u32 = 5;
+    const ACTIVITY_EXTEND_COMMAND_ID: u32 = 6;
+    const ACTIVITY_VALIDATE_QUERY_ID: u32 = 2;
+}
+
+struct EchoActivity;
+
+impl ActivityHandler for EchoActivity {
+    const TYPE: &'static str = "echo";
+
+    fn execute(
+        context: ActivityContext,
+        input: Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = ActivityExecution> + Send + 'static>> {
+        Box::pin(async move {
+            if input == b"retry" {
+                return ActivityExecution::Failed {
+                    details: b"temporary".to_vec(),
+                    retryable: true,
+                };
+            }
+            let initial_deadline = context.lease_until_ms();
+            assert_ne!(context.idempotency_key(), [0; 32]);
+            assert_ne!(context.lease_token(), [0; 16]);
+            tokio::time::sleep(Duration::from_millis(1_800)).await;
+            HEARTBEAT_OBSERVED.store(
+                context.lease_until_ms() > initial_deadline
+                    && !context.cancellation().is_cancelled(),
+                Ordering::Release,
+            );
+            let mut result = input;
+            result.extend_from_slice(b"-complete");
+            ActivityExecution::Completed(result)
+        })
+    }
+}
+
 impl CellModule for TestWorkflow {
     const NAME: &'static str = WORKFLOW_MODULE;
 
@@ -86,7 +170,7 @@ impl CellModule for TestWorkflow {
             commands: COMMANDS,
             queries: QUERIES,
             workflow_definitions: &[DEFINITION_DIGEST],
-            activity_types: &[],
+            activity_types: &["echo"],
             namespaces: &[NamespaceDescriptor {
                 id: WORKFLOW_NAMESPACE,
                 name: WORKFLOW_MODULE,
@@ -99,7 +183,9 @@ impl CellModule for TestWorkflow {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        register_workflow::<Self>(registry)
+        register_workflow::<Self>(registry)?;
+        register_workflow_activities::<Self>(registry)?;
+        register_activity::<Self, EchoActivity>(registry)
     }
 }
 
@@ -113,10 +199,16 @@ impl CellModule for MissingDefinitionBinding {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+        registry.bind_workflow_definition(WORKFLOW_MODULE, &DEFINITION)?;
+        registry.bind_activity_inventory(WORKFLOW_MODULE, DEFINITION_DIGEST, &["echo"])?;
         registry.bind_command::<WorkflowStartCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowSignalCommand<TestWorkflow>>()?;
         registry.bind_command::<WorkflowCancelCommand<TestWorkflow>>()?;
-        registry.bind_query::<WorkflowGetQuery<TestWorkflow>>()
+        registry.bind_command::<WorkflowActivityClaimCommand<TestWorkflow>>()?;
+        registry.bind_command::<WorkflowActivityCompleteCommand<TestWorkflow>>()?;
+        registry.bind_command::<WorkflowActivityExtendCommand<TestWorkflow>>()?;
+        registry.bind_query::<WorkflowGetQuery<TestWorkflow>>()?;
+        registry.bind_query::<WorkflowActivityValidateQuery<TestWorkflow>>()
     }
 }
 
@@ -156,7 +248,7 @@ fn identity(byte: u8) -> MutationIdentity {
 }
 
 #[test]
-fn registry_rejects_a_declared_workflow_without_its_transition_binding() {
+fn registry_rejects_a_declared_activity_without_its_native_binding() {
     let mut builder = RegistryBuilder::new(BuildDescriptor {
         source_revision: "workflow-api-test".into(),
         cargo_lock_digest: Digest::from_bytes([5; 32]),
@@ -164,9 +256,7 @@ fn registry_rejects_a_declared_workflow_without_its_transition_binding() {
     builder.register(MissingDefinitionBinding).unwrap();
     assert!(matches!(
         builder.finish(),
-        Err(Error::Registry(
-            "descriptor and workflow definition bindings differ"
-        ))
+        Err(Error::Registry("descriptor and activity bindings differ"))
     ));
 }
 
@@ -349,5 +439,166 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
             ..
         }
     ));
+    restored.drain().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
+    HEARTBEAT_OBSERVED.store(false, Ordering::Release);
+    let registry = registry();
+    let target = CellTarget::new(
+        TenantId::from_bytes([21; 16]),
+        ApplicationId::from_bytes([22; 16]),
+        WORKFLOW_NAMESPACE,
+        &0_u32.to_be_bytes(),
+    )
+    .unwrap();
+    let cell = target.cell_id();
+    let incarnation = IncarnationId::from_bytes([23; 16]);
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = CellStorageLayout::new(store, Path::from("activity-runtime"), [22; 16]);
+    let replica = CellReplica::new(
+        layout.clone(),
+        *cell.as_bytes(),
+        *incarnation.as_bytes(),
+        Limits::default(),
+    )
+    .unwrap();
+    let catalog = CellCatalog::new(layout.clone(), target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &target,
+                CatalogRole::Workflow,
+                registry.module_code(WORKFLOW_MODULE).unwrap(),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout);
+    let first_session = SessionId::from_bytes([25; 16]);
+    let control = authority
+        .create_initial(
+            &proof,
+            incarnation,
+            Owner {
+                session: first_session,
+                endpoint: "https://activity-first.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let directory = tempfile::TempDir::new().unwrap();
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        first_session,
+    )
+    .unwrap();
+    let handle = runtime
+        .bootstrap(
+            proof.clone(),
+            replica.clone(),
+            authority.clone(),
+            control,
+            directory.path().join("activity-first.sqlite"),
+            install_workflow_schema,
+        )
+        .await
+        .unwrap();
+    let client = CellClient::local(registry.clone(), handle.clone());
+    let workflows = WorkflowNamespace::<TestWorkflow>::new(
+        client.clone(),
+        target.tenant(),
+        target.application(),
+    )
+    .unwrap();
+    workflows
+        .start(
+            identity(26),
+            b"activity-build".to_vec(),
+            b"activity".to_vec(),
+        )
+        .await
+        .unwrap();
+    let activities =
+        WorkflowActivities::<TestWorkflow>::new(client, target.tenant(), target.application())
+            .unwrap();
+    let supervisor = ActivitySupervisor::new(activities, 5_000).unwrap();
+    let completed = supervisor.run_once(0).await.unwrap();
+    let ActivityRunOutcome::Completed { workflow, receipt } = completed else {
+        panic!("native activity was not completed");
+    };
+    assert!(matches!(
+        workflow,
+        WorkflowOutcome::Applied {
+            status: WorkflowStatus::Completed,
+            event_sequence: 2,
+            ..
+        }
+    ));
+    assert!(HEARTBEAT_OBSERVED.load(Ordering::Acquire));
+    let state = workflows
+        .state(b"activity-build".to_vec(), Some(receipt))
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(state.state, b"activity-complete");
+    assert!(state.result.unwrap().ends_with(b"payload-complete"));
+    workflows
+        .start(
+            identity(28),
+            b"retry-build".to_vec(),
+            b"activity-retry".to_vec(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        supervisor.run_once(0).await.unwrap(),
+        ActivityRunOutcome::Retrying { .. }
+    ));
+    handle.drain().await.unwrap();
+
+    let idle = authority.load(cell).await.unwrap().unwrap();
+    let second_session = SessionId::from_bytes([27; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        second_session,
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            replica,
+            authority,
+            idle,
+            directory.path().join("activity-second.sqlite"),
+            Owner {
+                session: second_session,
+                endpoint: "https://activity-second.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let restored_workflows = WorkflowNamespace::<TestWorkflow>::new(
+        CellClient::local(registry, restored.clone()),
+        target.tenant(),
+        target.application(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored_workflows
+            .state(b"activity-build".to_vec(), Some(receipt))
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .state,
+        b"activity-complete"
+    );
     restored.drain().await.unwrap();
 }

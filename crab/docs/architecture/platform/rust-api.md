@@ -330,8 +330,16 @@ from the workflow ID and registry topology, binds the start run identity to the
 runtime mutation identity, returns durable typed rejection for non-applied
 outcomes and supports bounded minimum-receipt state reads. Its integration test
 proves start, signal, duplicate replay, conflict rejection, exact-root restore,
-state and cancellation. Native activity and effect supervision remain node
-services outside this application capability.
+state and cancellation. Catalog-driven activity scheduling and effect supervision
+remain node services outside this application capability. `WorkflowActivities<M>` and
+`ActivitySupervisor<M>` now implement the first native execution unit: registry
+freeze verifies the exact definition/type/handler matrix, claims and validation
+cross a published receipt, the statically linked future runs without a SQLite
+borrow, heartbeat extensions publish as independent commands, and completion or
+retry feeds the pinned state machine. The activity context exposes stable run,
+activity and external-idempotency identities, the current durable lease deadline
+and cooperative cancellation. Pending mutations retain their exact identity for
+resolution. Catalog-driven shard polling and bounded concurrent cycles remain.
 
 WorkflowDefinition::transition(state, event, TransitionContext) -> Decision is
 synchronous; Decision/Action are native owned Rust values. Activities are
