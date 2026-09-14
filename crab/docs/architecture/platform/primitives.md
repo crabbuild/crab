@@ -60,6 +60,18 @@ remain to connect this helper to compiled Crab handlers.
 
 ## Request dedup and outbox
 
+Implementation status: `crab-cell-runtime::effects` implements the reusable
+source `sys_effects` and destination `sys_inbox` mechanics. It derives effect
+IDs from source Cell/incarnation/sequence/ordinal, binds the destination and
+exact operation bytes in a stable digest, enforces 128 intentions/1 MiB per
+command, claims at most 32/1 MiB, and revalidates attempt/token/deadline only
+after publication. Delivery results use a nested savepoint so a business
+rejection rolls back destination writes while its inbox result remains durable.
+Lost responses retry the same effect bytes; the inbox returns the stored result
+without invoking the handler. Source retry/extension/delivery and both retention
+cleanups are bounded. Workflow/Queue effect insertion, compiled codecs, private
+peer transport and the node delivery supervisor remain to implement.
+
 Runtime request outcome values: 1=success, 2=business rejection. Its result is
 the encoded MutationResult or Error, not a transport header. The stored sequence
 constructs a receipt on replay; root digests are not embedded in request rows.

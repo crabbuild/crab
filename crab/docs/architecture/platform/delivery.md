@@ -21,6 +21,7 @@ does not establish a working runtime.
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup and binary pagination | Bind typed registry codecs and scheduler cleanup |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup | Add DLQ effects, registry codecs and native polling scheduler |
 | [workflow.rs](../../../../crates/crab-cell-runtime/src/workflow.rs) | Normative schema, pinned definitions, deterministic start/signal/timer transitions, cancellation, bounded action persistence, published activity claims, leases, retry/completion and terminal cleanup | Add effects, native activity supervision, registry dispatch and scheduler polling |
+| [effects.rs](../../../../crates/crab-cell-runtime/src/effects.rs) | Stable source effect IDs/digests, bounded claim/lease/retry/delivery, target inbox dedup/savepoint isolation and sender/inbox cleanup horizons | Add Workflow/Queue adapters, compiled codecs, authenticated peer delivery and native supervision |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),

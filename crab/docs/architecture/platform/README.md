@@ -54,7 +54,12 @@ outstanding-task limits, terminal cancellation and exact-root restoration are
 implemented. Activity claims, post-publication lease validation, heartbeat extension,
 attempt-bound idempotent completion/failure, retry and terminal retention cleanup
 are now implemented through the same publication path. The node supervisor,
-effect actions and due-Cell scanner remain.
+effect actions and due-Cell scanner remain. The source effect ledger and target
+inbox mechanics now derive immutable identities/digests, enforce command and
+claim bounds, validate only published leases, retry with stable bytes, dedup
+target execution, retain destination receipts beyond the sender horizon and
+clean terminal rows in bounded batches. Private peer delivery and the node
+effect supervisor still remain.
 
 ## Deliverable and contract precedence
 

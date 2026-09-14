@@ -9,6 +9,7 @@ mod actor;
 mod authority;
 mod catalog;
 mod control;
+mod effects;
 mod error;
 mod executor;
 mod identity;
@@ -24,6 +25,12 @@ pub use actor::{CellHandle, CellRuntime};
 pub use authority::{CellAuthority, VersionedControl};
 pub use catalog::{CatalogEntry, CatalogProof, CatalogRole, CellCatalog};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
+pub use effects::{
+    EffectClaim, EffectIntent, EffectLeaseOutcome, EffectState, EffectTokenSource,
+    InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,
+    effect_cleanup_terminal, effect_extend, effect_insert, effect_operation_digest, effect_retry,
+    effect_validate_claim, inbox_apply, inbox_cleanup_expired,
+};
 pub use error::{Error, Result};
 pub use executor::{
     CellExecutor, CommandExecution, HandlerOutcome, MutationIdentity, PendingCommit, Resolution,
