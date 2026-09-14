@@ -1,6 +1,7 @@
 //! Versioned metadata contracts for request-minimal repository publication.
 
 mod capsule;
+mod checkpoint;
 mod root;
 mod run;
 #[cfg(feature = "storage")]
@@ -11,6 +12,7 @@ pub use capsule::{
     Capsule, CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSection, CapsuleSectionKind,
     CapsuleSectionLocation,
 };
+pub use checkpoint::Checkpoint;
 pub use root::{
     CapsulePointer, CheckpointPointer, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES, RepositoryRoot,
     RootRecord,

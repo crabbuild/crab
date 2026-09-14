@@ -186,12 +186,120 @@ pub async fn run_repack(
     config: &RepackConfig,
     cancel: &CancellationToken,
 ) -> Result<RepackOutcome> {
-    match run_repack_with_budget(store, prefix, config, cancel, None).await? {
-        RepackRunResult::Completed { outcome, .. } => Ok(outcome),
-        RepackRunResult::Deferred { .. } => Err(CrabError::Internal(
-            "unbounded repack unexpectedly exceeded a maintenance budget".to_owned(),
-        )),
+    run_request_minimal_repack(store, prefix, config, cancel).await
+}
+
+async fn run_request_minimal_repack(
+    store: &Store,
+    prefix: &str,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+) -> Result<RepackOutcome> {
+    const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+    let started = Instant::now();
+    check_cancelled(cancel)?;
+    let router = StoreLayout::new(store.clone(), prefix.to_owned());
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let view = crab_read::request_minimal::open_view(
+        &layout,
+        crab_read::request_minimal::RequestMinimalReadLimits {
+            max_capsule_bytes: MAX_CHECKPOINT_BYTES,
+            max_frontier_bytes: MAX_CHECKPOINT_BYTES,
+        },
+    )
+    .await?;
+    let root = view.root().root();
+    if root.refs().is_empty() {
+        return Err(CrabError::Protocol(
+            "cannot checkpoint an unborn repository".to_owned(),
+        ));
     }
+    std::fs::create_dir_all(&config.workspace_root)?;
+    let workspace = tempfile::Builder::new()
+        .prefix("crab-v2-checkpoint-")
+        .tempdir_in(&config.workspace_root)?;
+    let git_dir = workspace.path().join("repository.git");
+    let init_path = git_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&init_path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "git init --bare failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    })
+    .await
+    .map_err(|error| CrabError::Internal(format!("checkpoint Git init join failed: {error}")))??;
+    check_cancelled(cancel)?;
+    crab_read::request_minimal::install_git_packs(&view, &git_dir, MAX_CHECKPOINT_BYTES).await?;
+    let tips = root.refs().values().cloned().collect::<Vec<_>>();
+    crate::git::pack::validate_fetched_ref_tips(&git_dir, &tips).await?;
+    let packs = crate::git::request_minimal_push::prepare_complete_git_packs(
+        &git_dir,
+        root.refs(),
+        2 * 1024 * 1024 * 1024,
+    )
+    .await?;
+    let pack_sizes = packs
+        .iter()
+        .map(crab_metadata::request_minimal::CapsuleGitPack::pack_size)
+        .collect::<Vec<_>>();
+    let checkpoint = crab_metadata::request_minimal::Checkpoint::build(
+        root.generation(),
+        view.root().digest(),
+        packs,
+    )?;
+    let packs_before = view
+        .checkpoint()
+        .map_or(0, |checkpoint| checkpoint.git_packs().len())
+        + view
+            .capsules()
+            .iter()
+            .map(|capsule| capsule.git_packs().len())
+            .sum::<usize>();
+    let bytes_before = root
+        .checkpoint()
+        .map_or(0, crab_metadata::request_minimal::CheckpointPointer::size)
+        + root
+            .capsule_frontier()
+            .iter()
+            .map(crab_metadata::request_minimal::CapsulePointer::size)
+            .sum::<u64>();
+    if !config.dry_run {
+        check_cancelled(cancel)?;
+        crab_write::request_minimal::publish_checkpoint(
+            &layout,
+            view.root_snapshot().clone(),
+            &checkpoint,
+        )
+        .await?;
+    }
+    Ok(RepackOutcome {
+        packs_before,
+        packs_after: checkpoint.git_packs().len(),
+        bytes_before,
+        bytes_after: pack_sizes.iter().sum(),
+        bytes_read: bytes_before,
+        bytes_written: if config.dry_run {
+            0
+        } else {
+            checkpoint.bytes().len() as u64
+        },
+        elapsed: started.elapsed(),
+    })
 }
 
 pub(crate) async fn run_bounded_repack(

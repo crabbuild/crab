@@ -1993,6 +1993,7 @@ impl From<crab_write::WriteError> for CrabError {
             error @ (crab_write::WriteError::Namespace(_)
             | crab_write::WriteError::InitialHead { .. }
             | crab_write::WriteError::RequestMinimalCommitUncertain { .. }
+            | crab_write::WriteError::RequestMinimalCheckpointCommitUncertain { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }

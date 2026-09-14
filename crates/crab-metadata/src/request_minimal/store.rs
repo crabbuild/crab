@@ -40,6 +40,24 @@ impl RootSnapshot {
         }
         Ok(Self { record, etag })
     }
+
+    /// Bind a checkpoint-only root replacement to its exact CAS predecessor.
+    pub fn committed_checkpoint(&self, record: RootRecord, etag: ETag) -> Result<Self> {
+        if record.root().generation() != self.record.root().generation()
+            || record.root().parent_root_digest() != Some(self.record.digest())
+            || record.root().repository_id() != self.record.root().repository_id()
+            || record.root().refs() != self.record.root().refs()
+            || record.root().peeled_refs() != self.record.root().peeled_refs()
+            || record.root().head() != self.record.root().head()
+            || !record.root().capsule_frontier().is_empty()
+            || record.root().checkpoint().is_none()
+        {
+            return Err(contract_error(
+                "committed checkpoint root does not replace its exact CAS snapshot",
+            ));
+        }
+        Ok(Self { record, etag })
+    }
 }
 
 /// Create the first root at an empty v2 publication key.

@@ -1,6 +1,10 @@
 //! Verified loading of one request-minimal root and its bounded capsule frontier.
 
-use crab_metadata::request_minimal::{Capsule, CapsulePointer, CapsuleRun, RootRecord, load_root};
+use bytes::Bytes;
+use crab_metadata::request_minimal::{
+    Capsule, CapsuleGitPackDescriptor, CapsulePointer, CapsuleRun, Checkpoint, CheckpointPointer,
+    RootRecord, load_root,
+};
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
 use std::path::{Path, PathBuf};
@@ -19,7 +23,8 @@ pub struct RequestMinimalReadLimits {
 /// One authenticated repository root and every post-checkpoint capsule it names.
 #[derive(Debug, Clone)]
 pub struct RequestMinimalView {
-    root: RootRecord,
+    root: crab_metadata::request_minimal::RootSnapshot,
+    checkpoint: Option<Checkpoint>,
     capsules: Vec<Capsule>,
 }
 
@@ -27,7 +32,19 @@ impl RequestMinimalView {
     /// Return the authoritative repository generation and ref state.
     #[must_use]
     pub fn root(&self) -> &RootRecord {
+        self.root.record()
+    }
+
+    /// Return the provider CAS token bound to the loaded root.
+    #[must_use]
+    pub fn root_snapshot(&self) -> &crab_metadata::request_minimal::RootSnapshot {
         &self.root
+    }
+
+    /// Return the complete base checkpoint, when the root names one.
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<&Checkpoint> {
+        self.checkpoint.as_ref()
     }
 
     /// Return every verified post-checkpoint capsule in publication order.
@@ -46,6 +63,7 @@ pub async fn install_git_packs(
     git_dir: &Path,
     max_input_bytes: u64,
 ) -> Result<Vec<PathBuf>> {
+    let checkpoint = view.checkpoint.clone();
     let capsules = view.capsules.clone();
     let git_dir = git_dir.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -53,15 +71,17 @@ pub async fn install_git_packs(
         std::fs::create_dir_all(&pack_dir)?;
         let mut total = 0_u64;
         let mut installed = Vec::new();
-        for capsule in &capsules {
-            for descriptor in capsule.git_packs() {
-                let pack_location = capsule
-                    .sections()
-                    .get(usize::try_from(descriptor.pack_section()).map_err(|_| {
-                        ReadError::internal("capsule pack section index cannot be represented")
-                    })?)
-                    .ok_or_else(|| corrupt_path("capsule", "pack section is absent"))?;
-                total = total.checked_add(pack_location.length()).ok_or_else(|| {
+        let containers = checkpoint
+            .into_iter()
+            .map(GitPackContainer::Checkpoint)
+            .chain(capsules.into_iter().map(GitPackContainer::Capsule));
+        for container in containers {
+            for descriptor in container.git_packs() {
+                let pack_bytes = container.section_bytes(descriptor.pack_section())?;
+                let pack_size = u64::try_from(pack_bytes.len()).map_err(|_| {
+                    ReadError::internal("Git pack size cannot be represented as u64")
+                })?;
+                total = total.checked_add(pack_size).ok_or_else(|| {
                     ReadError::internal("request-minimal Git intake size overflowed")
                 })?;
                 if max_input_bytes > 0 && total > max_input_bytes {
@@ -76,23 +96,20 @@ pub async fn install_git_packs(
                 let pack_path = temporary.path().join("pack.pack");
                 let index_path = temporary.path().join("pack.idx");
                 let reverse_path = temporary.path().join("pack.rev");
-                std::fs::write(
-                    &pack_path,
-                    capsule.section_bytes(descriptor.pack_section())?,
-                )?;
+                std::fs::write(&pack_path, &pack_bytes)?;
                 std::fs::write(
                     &index_path,
-                    capsule.section_bytes(descriptor.index_section())?,
+                    container.section_bytes(descriptor.index_section())?,
                 )?;
                 std::fs::write(
                     &reverse_path,
-                    capsule.section_bytes(descriptor.reverse_index_section())?,
+                    container.section_bytes(descriptor.reverse_index_section())?,
                 )?;
-                let locator = capsule.section_bytes(descriptor.locator_section())?;
+                let locator = container.section_bytes(descriptor.locator_section())?;
                 let locations = crab_git::pack_locator::PackLocationIter::open(
                     &index_path,
                     &reverse_path,
-                    pack_location.length(),
+                    pack_size,
                 )
                 .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
                 if locations.object_count() != descriptor.object_count()
@@ -109,7 +126,7 @@ pub async fn install_git_packs(
                     locations.object_count(),
                 )
                 .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
-                let canonical_name = pack_location.blake3();
+                let canonical_name = blake3::hash(&pack_bytes).to_hex().to_string();
                 let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
                 let final_index = pack_dir.join(format!("pack-{canonical_name}.idx"));
                 let final_reverse = pack_dir.join(format!("pack-{canonical_name}.rev"));
@@ -118,7 +135,7 @@ pub async fn install_git_packs(
                         crab_git::pack::install_pack_file_from_path(
                             &pack_dir,
                             &pack_path,
-                            canonical_name,
+                            &canonical_name,
                             max_input_bytes,
                             false,
                         )
@@ -128,7 +145,7 @@ pub async fn install_git_packs(
                             &pack_path,
                             &index_path,
                             &reverse_path,
-                            canonical_name,
+                            &canonical_name,
                             max_input_bytes,
                             descriptor.object_count(),
                         )
@@ -149,6 +166,27 @@ pub async fn install_git_packs(
     .map_err(|error| ReadError::Internal(format!("capsule pack install worker failed: {error}")))?
 }
 
+enum GitPackContainer {
+    Checkpoint(Checkpoint),
+    Capsule(Capsule),
+}
+
+impl GitPackContainer {
+    fn git_packs(&self) -> &[CapsuleGitPackDescriptor] {
+        match self {
+            Self::Checkpoint(checkpoint) => checkpoint.git_packs(),
+            Self::Capsule(capsule) => capsule.git_packs(),
+        }
+    }
+
+    fn section_bytes(&self, section: u32) -> Result<Bytes> {
+        match self {
+            Self::Checkpoint(checkpoint) => Ok(checkpoint.section_bytes(section)?),
+            Self::Capsule(capsule) => Ok(capsule.section_bytes(section)?),
+        }
+    }
+}
+
 /// Load a root and its bounded capsule frontier with one request per object.
 ///
 /// Capsule bodies are fetched concurrently, then checked against the exact
@@ -158,20 +196,68 @@ pub async fn open_view(
     limits: RequestMinimalReadLimits,
 ) -> Result<RequestMinimalView> {
     let snapshot = load_root(router).await?;
-    let root = snapshot.record().clone();
-    admit_frontier(root.root().capsule_frontier(), limits)?;
+    admit_frontier(snapshot.record().root().capsule_frontier(), limits)?;
+    let checkpoint = async {
+        match snapshot.record().root().checkpoint() {
+            Some(pointer) => load_checkpoint(router, pointer, limits).await.map(Some),
+            None => Ok(None),
+        }
+    };
     let runs = try_join_all(
-        root.root()
+        snapshot
+            .record()
+            .root()
             .capsule_frontier()
             .iter()
             .map(|pointer| load_run(router, pointer)),
-    )
-    .await?;
+    );
+    let (checkpoint, runs) = tokio::try_join!(checkpoint, runs)?;
     let capsules = runs
         .into_iter()
         .flat_map(|run| run.capsules().to_vec())
         .collect();
-    Ok(RequestMinimalView { root, capsules })
+    Ok(RequestMinimalView {
+        root: snapshot,
+        checkpoint,
+        capsules,
+    })
+}
+
+async fn load_checkpoint(
+    router: &StoreLayout<Store>,
+    pointer: &CheckpointPointer,
+    limits: RequestMinimalReadLimits,
+) -> Result<Checkpoint> {
+    if pointer.size() > limits.max_capsule_bytes {
+        return Err(ReadError::RequestMinimalLimit {
+            resource: "checkpoint bytes",
+            maximum: limits.max_capsule_bytes,
+        });
+    }
+    let path = router.request_minimal_checkpoint_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size())
+        .await?;
+    let checkpoint = Checkpoint::decode(bytes)?;
+    let object_count = checkpoint
+        .git_packs()
+        .iter()
+        .try_fold(0_u64, |total, pack| total.checked_add(pack.object_count()))
+        .ok_or_else(|| ReadError::internal("checkpoint object count overflowed"))?;
+    if checkpoint.hash() != pointer.hash()
+        || checkpoint.bytes().len() as u64 != pointer.size()
+        || checkpoint.covered_generation() != pointer.covered_generation()
+        || checkpoint.covered_root_digest() != pointer.covered_root_digest()
+        || checkpoint.git_packs().len() as u32 != pointer.pack_count()
+        || object_count != pointer.object_count()
+    {
+        return Err(corrupt(
+            &path,
+            "checkpoint does not match its authenticated root pointer",
+        ));
+    }
+    Ok(checkpoint)
 }
 
 fn admit_frontier(pointers: &[CapsulePointer], limits: RequestMinimalReadLimits) -> Result<()> {
