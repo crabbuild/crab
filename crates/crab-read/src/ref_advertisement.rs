@@ -1,4 +1,5 @@
 use crab_metadata::manifests::Manifest;
+use crab_metadata::request_minimal::RepositoryRoot;
 
 use crate::hidden_refs;
 
@@ -23,21 +24,48 @@ pub fn manifest_ref_advertisement(
     manifest: &Manifest,
     hidden_ref_patterns: &[String],
 ) -> ManifestRefAdvertisement {
+    advertisement(
+        &manifest.refs,
+        &manifest.peeled_refs,
+        &manifest.head,
+        hidden_ref_patterns,
+    )
+}
+
+/// Builds ref advertisement from the request-minimal repository root.
+#[must_use]
+pub fn root_ref_advertisement(
+    root: &RepositoryRoot,
+    hidden_ref_patterns: &[String],
+) -> ManifestRefAdvertisement {
+    advertisement(
+        root.refs(),
+        root.peeled_refs(),
+        root.head(),
+        hidden_ref_patterns,
+    )
+}
+
+fn advertisement(
+    refs: &std::collections::BTreeMap<String, String>,
+    peeled_refs: &std::collections::BTreeMap<String, String>,
+    head: &str,
+    hidden_ref_patterns: &[String],
+) -> ManifestRefAdvertisement {
     let hidden_refs = hidden_refs::compile(hidden_ref_patterns);
-    let refs = manifest
-        .refs
+    let refs = refs
         .iter()
         .filter(|(name, _)| !hidden_refs.is_match(name.as_str()))
         .map(|(name, sha)| ManifestRefEntry {
             sha: sha.clone(),
             ref_name: name.clone(),
-            peeled: manifest.peeled_refs.get(name).cloned(),
+            peeled: peeled_refs.get(name).cloned(),
         })
         .collect::<Vec<_>>();
 
     // Preserve the actual symbolic target, including an unborn branch. Hidden
     // targets stay hidden; substituting a visible ref would invent a new HEAD.
-    let head_symref = (!hidden_refs.is_match(&manifest.head)).then(|| manifest.head.clone());
+    let head_symref = (!hidden_refs.is_match(head)).then(|| head.to_owned());
 
     ManifestRefAdvertisement { refs, head_symref }
 }

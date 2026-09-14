@@ -517,6 +517,8 @@ struct SessionCache {
     pack_list: Option<crab_metadata::manifests::PackList>,
     /// Cached result of the `has_commit_graph_summary` probe.
     has_commit_graph: Option<bool>,
+    /// Primary v2 root retained from `list for-push` as the publication CAS base.
+    request_minimal_root: Option<crab_metadata::request_minimal::RootSnapshot>,
     metrics: Arc<Metrics>,
     persisted_metrics: MetricsSummary,
 }
@@ -527,6 +529,7 @@ impl SessionCache {
             config,
             pack_list: None,
             has_commit_graph: None,
+            request_minimal_root: None,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
         }
@@ -1331,28 +1334,17 @@ fn parse_ref_lease(value: &str) -> Result<(String, Option<String>)> {
 
 async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
-    store: &crate::storage::store::Store,
-    router: &StoreLayout,
+    _store: &crate::storage::store::Store,
+    _router: &StoreLayout,
     cache: &mut SessionCache,
-    cancel: &tokio_util::sync::CancellationToken,
+    _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
-    let has_graph =
-        has_commit_graph_summary(Some(store), router.repo_prefix(), Some(router), cache).await;
-    let v2_ready = if crate::git::upload_pack_wire::hidden_ref_patterns_are_valid(
-        &cache.config().transfer_hide_refs,
-    ) {
-        crate::git::upload_pack_wire::snapshot_available(
-            store.as_storage(),
-            router.repo_prefix(),
-            cancel,
-        )
-        .await
-    } else {
-        tracing::warn!("invalid transfer.hideRefs pattern; protocol-v2 remains unavailable");
-        false
-    };
-    let caps = format_capabilities_with_v2(has_graph, v2_ready);
+    cache.has_commit_graph = Some(false);
+    // Capsule-aware shallow and terminal upload-pack are advertised only after
+    // their v2 readers are wired. The ordinary fetch/push helper path remains
+    // complete and capabilities themselves require no storage probe.
+    let caps = format_capabilities_with_v2(false, false);
     writer.write_all(caps.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
@@ -1402,8 +1394,14 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                 let cfg = cache.config();
                 let (read_store, router) =
                     read_store_for_list_batch(s, prefix, remote_url, cfg, *for_push, cancel).await;
-                read_remote_refs_for_advertisement(&read_store, &router, &cfg.transfer_hide_refs)
-                    .await?
+                let (output, root) =
+                    read_remote_refs_with_snapshot(&read_store, &router, &cfg.transfer_hide_refs)
+                        .await
+                        .map_err(map_missing_request_minimal_root)?;
+                if *for_push {
+                    cache.request_minimal_root = Some(root);
+                }
+                output
             } else {
                 ListOutput {
                     refs: Vec::new(),
@@ -2159,9 +2157,24 @@ async fn read_remote_refs(
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
 ) -> Result<ListOutput> {
-    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
-    let manifest = snapshot.materialized_manifest();
-    let advertisement = crab_read::manifest_ref_advertisement(&manifest, hidden_ref_patterns);
+    read_remote_refs_with_snapshot(store, router, hidden_ref_patterns)
+        .await
+        .map(|(output, _)| output)
+}
+
+async fn read_remote_refs_with_snapshot(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    hidden_ref_patterns: &[String],
+) -> Result<(ListOutput, crab_metadata::request_minimal::RootSnapshot)> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let snapshot = crab_write::request_minimal::open_root(&layout).await?;
+    let root = snapshot.record().root();
+    let advertisement = crab_read::root_ref_advertisement(root, hidden_ref_patterns);
 
     let refs = advertisement
         .refs
@@ -2174,15 +2187,19 @@ async fn read_remote_refs(
         .collect();
 
     tracing::debug!(
-        ref_count = manifest.refs.len(),
+        ref_count = root.refs().len(),
+        generation = root.generation(),
         head_symref = ?advertisement.head_symref,
-        "read remote refs from manifest"
+        "read remote refs from request-minimal root"
     );
 
-    Ok(ListOutput {
-        refs,
-        head_symref: advertisement.head_symref,
-    })
+    Ok((
+        ListOutput {
+            refs,
+            head_symref: advertisement.head_symref,
+        },
+        snapshot,
+    ))
 }
 
 async fn read_remote_refs_for_advertisement(
@@ -2192,15 +2209,17 @@ async fn read_remote_refs_for_advertisement(
 ) -> Result<ListOutput> {
     read_remote_refs(store, router, hidden_ref_patterns)
         .await
-        .map_err(|error| match error {
-            CrabError::NotFound { path } if path == router.manifest_path().as_ref() => {
-                CrabError::CorruptObject {
-                    path,
-                    reason: "canonical v1 manifest is missing; retry `crab init` for this isolated development repository".to_owned(),
-                }
-            }
-            other => other,
-        })
+        .map_err(map_missing_request_minimal_root)
+}
+
+fn map_missing_request_minimal_root(error: CrabError) -> CrabError {
+    match error {
+        CrabError::NotFound { path } if path.ends_with("/v2/root") => CrabError::CorruptObject {
+            path,
+            reason: "canonical request-minimal root is missing; retry `crab init` for this isolated development repository".to_owned(),
+        },
+        other => other,
+    }
 }
 
 /// Adapts remote-helper fetch entries to the read-domain upload-pack policy.
@@ -2482,6 +2501,10 @@ async fn fetch_packs(
     cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
+    if !fetch_options.has_constraints() && !classify_raw_object_fetch(entries)? {
+        return fetch_request_minimal_packs(store, router, entries, config, check_connectivity)
+            .await;
+    }
     if classify_raw_object_fetch(entries)? {
         // Git resolves missing partial-clone objects through legacy exact-OID
         // fetches. The catalog planner below authorizes every object against
@@ -2635,6 +2658,82 @@ async fn fetch_packs(
         &git_dir,
         &ref_tips,
         &manifest.git_validation_digest,
+    )
+    .await
+}
+
+async fn fetch_request_minimal_packs(
+    store: &crate::storage::store::Store,
+    router: &StoreLayout,
+    entries: &[FetchEntry],
+    config: &crate::core::config::Config,
+    check_connectivity: bool,
+) -> Result<Option<std::path::PathBuf>> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let maximum = if config.uploadpack_max_egress_bytes == 0 {
+        u64::MAX
+    } else {
+        config.uploadpack_max_egress_bytes
+    };
+    let view = crab_read::request_minimal::open_view(
+        &layout,
+        crab_read::request_minimal::RequestMinimalReadLimits {
+            max_capsule_bytes: maximum,
+            max_frontier_bytes: maximum,
+        },
+    )
+    .await?;
+    let advertisement =
+        crab_read::root_ref_advertisement(view.root().root(), &config.transfer_hide_refs);
+    let visible = advertisement
+        .refs
+        .iter()
+        .map(|entry| (entry.ref_name.as_str(), entry.sha.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for entry in entries {
+        if visible.get(entry.ref_name.as_str()).copied() != Some(entry.sha.as_str()) {
+            return Err(CrabError::Protocol(format!(
+                "fetch ref {} at {} is not visible in the pinned request-minimal root",
+                entry.ref_name, entry.sha
+            )));
+        }
+    }
+    let git_dir = super::discover::discover_git_dir()?;
+    let installed = crab_read::request_minimal::install_git_packs(&view, &git_dir, maximum).await?;
+    crate::git::pack::validate_fetched_ref_tips(
+        &git_dir,
+        &entries
+            .iter()
+            .map(|entry| entry.sha.clone())
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    let repo_root = repo_root_from_git_dir(&git_dir);
+    if let Err(error) = crate::cmd::init::install_filter_driver(&repo_root) {
+        tracing::warn!(%error, "failed to install filter driver after request-minimal fetch");
+    }
+    if let Err(error) = crate::cmd::init::ensure_crab_dir_excluded(&repo_root) {
+        tracing::warn!(%error, "failed to exclude local Crab state after request-minimal fetch");
+    }
+    tracing::info!(
+        installed_packs = installed.len(),
+        generation = view.root().root().generation(),
+        "request-minimal fetch installed authenticated capsule packs"
+    );
+    if !check_connectivity {
+        return Ok(None);
+    }
+    crate::git::pack::create_connectivity_proof_pack(
+        &git_dir,
+        &entries
+            .iter()
+            .map(|entry| entry.sha.clone())
+            .collect::<Vec<_>>(),
+        view.root().digest(),
     )
     .await
 }

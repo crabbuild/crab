@@ -3,6 +3,7 @@
 use crab_metadata::request_minimal::{Capsule, CapsulePointer, CapsuleRun, RootRecord, load_root};
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
+use std::path::{Path, PathBuf};
 
 use crate::{ReadError, Result};
 
@@ -34,6 +35,118 @@ impl RequestMinimalView {
     pub fn capsules(&self) -> &[Capsule] {
         &self.capsules
     }
+}
+
+/// Install every capsule Git pack into a local Git object database.
+///
+/// Pack bodies, indexes, reverse indexes, and locator metadata are validated
+/// as one descriptor before any new pack becomes visible in the destination.
+pub async fn install_git_packs(
+    view: &RequestMinimalView,
+    git_dir: &Path,
+    max_input_bytes: u64,
+) -> Result<Vec<PathBuf>> {
+    let capsules = view.capsules.clone();
+    let git_dir = git_dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let pack_dir = git_dir.join("objects").join("pack");
+        std::fs::create_dir_all(&pack_dir)?;
+        let mut total = 0_u64;
+        let mut installed = Vec::new();
+        for capsule in &capsules {
+            for descriptor in capsule.git_packs() {
+                let pack_location = capsule
+                    .sections()
+                    .get(usize::try_from(descriptor.pack_section()).map_err(|_| {
+                        ReadError::internal("capsule pack section index cannot be represented")
+                    })?)
+                    .ok_or_else(|| corrupt_path("capsule", "pack section is absent"))?;
+                total = total.checked_add(pack_location.length()).ok_or_else(|| {
+                    ReadError::internal("request-minimal Git intake size overflowed")
+                })?;
+                if max_input_bytes > 0 && total > max_input_bytes {
+                    return Err(ReadError::RequestMinimalLimit {
+                        resource: "Git pack intake",
+                        maximum: max_input_bytes,
+                    });
+                }
+                let temporary = tempfile::Builder::new()
+                    .prefix(".crab-capsule-pack-")
+                    .tempdir_in(&pack_dir)?;
+                let pack_path = temporary.path().join("pack.pack");
+                let index_path = temporary.path().join("pack.idx");
+                let reverse_path = temporary.path().join("pack.rev");
+                std::fs::write(
+                    &pack_path,
+                    capsule.section_bytes(descriptor.pack_section())?,
+                )?;
+                std::fs::write(
+                    &index_path,
+                    capsule.section_bytes(descriptor.index_section())?,
+                )?;
+                std::fs::write(
+                    &reverse_path,
+                    capsule.section_bytes(descriptor.reverse_index_section())?,
+                )?;
+                let locator = capsule.section_bytes(descriptor.locator_section())?;
+                let locations = crab_git::pack_locator::PackLocationIter::open(
+                    &index_path,
+                    &reverse_path,
+                    pack_location.length(),
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                if locations.object_count() != descriptor.object_count()
+                    || locations.pack_checksum().to_string() != descriptor.git_checksum()
+                {
+                    return Err(corrupt_path(
+                        "capsule Git locator",
+                        "pack descriptor does not match its index",
+                    ));
+                }
+                crab_git::pack_locator::validate_pack_kind_metadata(
+                    &locator,
+                    locations.pack_checksum(),
+                    locations.object_count(),
+                )
+                .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
+                let canonical_name = pack_location.blake3();
+                let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));
+                let final_index = pack_dir.join(format!("pack-{canonical_name}.idx"));
+                let final_reverse = pack_dir.join(format!("pack-{canonical_name}.rev"));
+                let result =
+                    if final_pack.exists() && final_index.exists() && final_reverse.exists() {
+                        crab_git::pack::install_pack_file_from_path(
+                            &pack_dir,
+                            &pack_path,
+                            canonical_name,
+                            max_input_bytes,
+                            false,
+                        )
+                    } else {
+                        crab_git::pack::install_pack_files_from_paths(
+                            &pack_dir,
+                            &pack_path,
+                            &index_path,
+                            &reverse_path,
+                            canonical_name,
+                            max_input_bytes,
+                            descriptor.object_count(),
+                        )
+                    }
+                    .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
+                if result.git_sha1 != descriptor.git_checksum() {
+                    return Err(corrupt_path(
+                        "capsule Git pack",
+                        "installed pack checksum does not match its descriptor",
+                    ));
+                }
+                installed.push(result.pack_path);
+            }
+        }
+        Ok(installed)
+    })
+    .await
+    .map_err(|error| ReadError::Internal(format!("capsule pack install worker failed: {error}")))?
 }
 
 /// Load a root and its bounded capsule frontier with one request per object.
@@ -120,6 +233,13 @@ async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Resu
 fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> ReadError {
     ReadError::CorruptObject {
         path: path.to_string(),
+        reason: reason.into(),
+    }
+}
+
+fn corrupt_path(path: impl Into<String>, reason: impl Into<String>) -> ReadError {
+    ReadError::CorruptObject {
+        path: path.into(),
         reason: reason.into(),
     }
 }

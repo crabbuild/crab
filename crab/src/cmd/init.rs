@@ -23,13 +23,11 @@ use crate::storage::StoreLayout;
 /// Per-repo prefixes live under `{repo}/`; content-addressed objects live
 /// under the global `.crab/` prefix.
 ///
-/// The descriptor at `{repo}/layout` and unified manifest at
-/// `{repo}/manifest` are the canonical repository roots. Auxiliary empty
-/// `pack-list`, `shard-list`, per-ref, and `HEAD` objects are not created.
+/// The single checksummed object at `{repo}/v2/root` is authoritative.
 const REMOTE_PREFIXES: &[&str] = &[];
 
-/// Global prefixes shared across all repos in the bucket.
-const GLOBAL_PREFIXES: &[&str] = &[".crab/xorbs/", ".crab/shards/"];
+/// Protocol v2 has no bucket-global foreground data roots.
+const GLOBAL_PREFIXES: &[&str] = &[];
 
 /// Schema name for init JSON output.
 const INIT_SCHEMA: &str = "init";
@@ -89,10 +87,10 @@ pub async fn run_init_in(url: &str, root: &Path, cancel: &CancellationToken) -> 
     run_init_with_options(url, root, cancel, OutputMode::Text).await
 }
 
-/// Create the generation-0 manifest for a repository after local init.
+/// Create the generation-zero request-minimal root after local init.
 ///
-/// Existing manifests are adopted, so this operation is safe to repeat and
-/// concurrent callers converge on the manifest created by the first caller.
+/// Existing roots are adopted, so this operation is safe to repeat and
+/// concurrent callers converge on the root created by the first caller.
 ///
 /// # Errors
 ///
@@ -130,8 +128,12 @@ pub(crate) async fn initialize_remote_repository_store(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    crab_write::initialize::initialize_repository(store.as_storage(), &layout, head)
+    let repository_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+        .to_hex()
+        .to_string();
+    crab_write::request_minimal::initialize(&layout, &repository_id, head)
         .await
+        .map(|_| ())
         .map_err(Into::into)
 }
 
@@ -1871,8 +1873,7 @@ storage_provider = "azure"
     }
 
     #[tokio::test]
-    async fn remote_manifest_initialization_adopts_existing_manifest() {
-        use crate::metadata::manifest::read_manifest;
+    async fn remote_initialization_adopts_existing_request_minimal_root() {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -1889,15 +1890,20 @@ storage_provider = "azure"
             .await
             .expect("repeated remote initialization should adopt the manifest");
 
-        let (manifest, _) = read_manifest(&store, &router)
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let root = crab_write::request_minimal::open_root(&layout)
             .await
-            .expect("initialized manifest should remain readable");
-        assert_eq!(manifest.generation, 0);
-        assert_eq!(manifest.head, "refs/heads/main");
+            .expect("initialized root should remain readable");
+        assert_eq!(root.record().root().generation(), 0);
+        assert_eq!(root.record().root().head(), "refs/heads/main");
     }
 
     #[tokio::test]
-    async fn remote_initialization_publishes_canonical_layout_before_manifest() {
+    async fn remote_initialization_publishes_only_the_request_minimal_root() {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -1910,20 +1916,21 @@ storage_provider = "azure"
             .await
             .expect("canonical repository initialization should succeed");
 
-        crate::core::remote_layout::open(&store, &router)
-            .await
-            .expect("layout descriptor should open");
-        let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
-            .await
-            .expect("manifest should follow layout publication");
-        assert_eq!(
-            manifest.version,
-            crate::metadata::manifest::MANIFEST_VERSION
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
         );
+        let root = crab_write::request_minimal::open_root(&layout)
+            .await
+            .expect("request-minimal root should open");
+        assert_eq!(root.record().root().generation(), 0);
+        assert!(store.head(&router.layout_descriptor_path()).await.is_err());
+        assert!(store.head(&router.manifest_path()).await.is_err());
     }
 
     #[tokio::test]
-    async fn conflicting_layout_prevents_manifest_creation() {
+    async fn existing_v1_layout_prevents_request_minimal_root_creation() {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use bytes::Bytes;
@@ -1942,9 +1949,19 @@ storage_provider = "azure"
 
         initialize_remote_repository_store(&store, &router, "refs/heads/main")
             .await
-            .expect_err("non-v1 descriptor must fail closed");
+            .expect_err("nonempty legacy prefix must fail closed");
 
         assert!(store.head(&router.manifest_path()).await.is_err());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        assert!(
+            crab_write::request_minimal::open_root(&layout)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1996,13 +2013,18 @@ storage_provider = "azure"
             .await
             .expect("unrelated bucket objects must not block repository initialization");
 
-        crate::core::remote_layout::open(&store, &router)
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        crab_write::request_minimal::open_root(&layout)
             .await
-            .expect("canonical repository descriptor");
+            .expect("canonical request-minimal root");
     }
 
     #[tokio::test]
-    async fn explicit_init_repairs_missing_manifest_only_after_layout_validation() {
+    async fn explicit_init_does_not_upgrade_a_v1_prefix_in_place() {
         use crate::storage::StoreLayout;
         use crate::storage::store::Store;
         use object_store::memory::InMemory;
@@ -2016,16 +2038,21 @@ storage_provider = "azure"
 
         initialize_remote_repository_store(&store, &router, "refs/heads/main")
             .await
-            .expect("explicit init should restore the missing generation-0 manifest");
+            .expect_err("hard cutover requires a fresh v2 repository prefix");
 
         crate::core::remote_layout::open(&store, &router)
             .await
-            .expect("descriptor remains canonical");
-        let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
-            .await
-            .expect("manifest should be recreated");
-        assert_eq!(manifest.generation, 0);
-        assert_eq!(manifest.head, "refs/heads/main");
+            .expect("legacy descriptor remains unchanged");
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        assert!(
+            crab_write::request_minimal::open_root(&layout)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
