@@ -1,10 +1,11 @@
 use std::sync::OnceLock;
 
 use crab_cell_runtime::{
-    BuildDescriptor, CatalogRole, CellId, CellModule, CommandContext, CommandInvocation, Digest,
-    Error, HandlerOutcome, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
-    OperationDescriptor, QueryContext, QueryInvocation, Registry, RegistryBuilder, SqlBatch,
-    SqlStatement, SqlValue,
+    BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogRole, CellId, CellModule, Command,
+    CommandContext, CommandInvocation, CommandResult, Digest, Error, HandlerOutcome,
+    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, OperationDescriptor,
+    Query, QueryContext, QueryInvocation, Registry, RegistryBuilder, SqlBatch, SqlStatement,
+    SqlValue, WireValue,
 };
 
 const MIGRATION: &str = "CREATE TABLE items(value BLOB NOT NULL)";
@@ -13,8 +14,8 @@ const COMMAND: OperationDescriptor = OperationDescriptor {
     codec_version: 1,
     schema_min: 1,
     schema_max: 1,
-    input_limit: 8,
-    output_limit: 8,
+    input_limit: 16,
+    output_limit: 16,
 };
 const QUERY: OperationDescriptor = OperationDescriptor {
     id: 1,
@@ -22,7 +23,7 @@ const QUERY: OperationDescriptor = OperationDescriptor {
     schema_min: 1,
     schema_max: 1,
     input_limit: 1,
-    output_limit: 8,
+    output_limit: 16,
 };
 
 struct FirstModule;
@@ -35,8 +36,8 @@ impl CellModule for FirstModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        registry.bind_command(Self::NAME, 1, 1, insert)?;
-        registry.bind_query(Self::NAME, 1, 1, read)?;
+        registry.bind_command::<Insert>(Self::NAME)?;
+        registry.bind_query::<Read>(Self::NAME)?;
         Ok(())
     }
 }
@@ -51,8 +52,8 @@ impl CellModule for SecondModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        registry.bind_command(Self::NAME, 1, 1, insert)?;
-        registry.bind_query(Self::NAME, 1, 1, read)?;
+        registry.bind_command::<Insert>(Self::NAME)?;
+        registry.bind_query::<Read>(Self::NAME)?;
         Ok(())
     }
 }
@@ -128,33 +129,83 @@ fn build_registry(reverse: bool) -> Registry {
     builder.finish().unwrap()
 }
 
-fn insert(
-    context: &mut CommandContext<'_, '_>,
-    input: &[u8],
-) -> crab_cell_runtime::Result<HandlerOutcome> {
-    let result = context.sql(&SqlBatch {
-        statements: vec![SqlStatement {
-            sql: "INSERT INTO items(value) VALUES (?)".into(),
-            parameters: vec![SqlValue::Blob(input.to_vec())],
-        }],
-    })?;
-    if result[0].rows_affected != 1 {
-        return Err(Error::Command("test insert did not affect one row"));
+struct Insert;
+
+impl Command for Insert {
+    const ID: u32 = 1;
+    const CODEC_VERSION: u32 = 1;
+    type Input = Vec<u8>;
+    type Output = Vec<u8>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        let result = context.sql(&SqlBatch {
+            statements: vec![SqlStatement {
+                sql: "INSERT INTO items(value) VALUES (?)".into(),
+                parameters: vec![SqlValue::Blob(input.clone())],
+            }],
+        })?;
+        if result[0].rows_affected != 1 {
+            return Err(Error::Command("test insert did not affect one row"));
+        }
+        Ok(CommandResult::Success(input))
     }
-    Ok(HandlerOutcome::Success(input.to_vec()))
 }
 
-fn read(context: &mut QueryContext<'_>, _input: &[u8]) -> crab_cell_runtime::Result<Vec<u8>> {
-    let result = context.sql(&SqlBatch {
-        statements: vec![SqlStatement {
-            sql: "SELECT value FROM items ORDER BY rowid".into(),
-            parameters: Vec::new(),
-        }],
-    })?;
-    match result[0].rows.first().and_then(|row| row.first()) {
-        Some(SqlValue::Blob(value)) => Ok(value.clone()),
-        _ => Err(Error::Command("test query returned no blob")),
+struct Read;
+
+impl Query for Read {
+    const ID: u32 = 1;
+    const CODEC_VERSION: u32 = 1;
+    type Input = ();
+    type Output = Vec<u8>;
+
+    fn execute(
+        context: &mut QueryContext<'_>,
+        _input: Self::Input,
+    ) -> crab_cell_runtime::Result<Self::Output> {
+        let result = context.sql(&SqlBatch {
+            statements: vec![SqlStatement {
+                sql: "SELECT value FROM items ORDER BY rowid".into(),
+                parameters: Vec::new(),
+            }],
+        })?;
+        match result[0].rows.first().and_then(|row| row.first()) {
+            Some(SqlValue::Blob(value)) => Ok(value.clone()),
+            _ => Err(Error::Command("test query returned no blob")),
+        }
     }
+}
+
+struct Extra;
+
+impl Command for Extra {
+    const ID: u32 = 2;
+    const CODEC_VERSION: u32 = 1;
+    type Input = ();
+    type Output = ();
+
+    fn execute(
+        _context: &mut CommandContext<'_, '_>,
+        _input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        Ok(CommandResult::Success(()))
+    }
+}
+
+fn wire<T: WireValue>(value: &T, limit: u32) -> Vec<u8> {
+    let mut encoder = BoundedEncoder::new(limit).unwrap();
+    value.encode(&mut encoder).unwrap();
+    encoder.finish()
+}
+
+fn decode<T: WireValue>(bytes: &[u8], limit: u32) -> T {
+    let mut decoder = BoundedDecoder::new(bytes, limit).unwrap();
+    let value = T::decode(&mut decoder).unwrap();
+    decoder.finish().unwrap();
+    value
 }
 
 #[test]
@@ -168,6 +219,7 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
     let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
     connection.execute_batch(MIGRATION).unwrap();
     let transaction = connection.transaction().unwrap();
+    let input = wire(&b"value".to_vec(), 16);
     let outcome = registry
         .execute_command(
             &transaction,
@@ -179,11 +231,13 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
                 cell: CellId::from_bytes([3; 32]),
                 sequence: 1,
                 now_ms: 10,
-                input: b"value",
+                input: &input,
             },
         )
         .unwrap();
-    assert!(matches!(outcome, HandlerOutcome::Success(ref value) if value == b"value"));
+    assert!(
+        matches!(outcome, HandlerOutcome::Success(ref value) if decode::<Vec<u8>>(value, 16) == b"value")
+    );
     transaction.commit().unwrap();
     assert_eq!(
         registry
@@ -200,7 +254,7 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
                 },
             )
             .unwrap(),
-        b"value"
+        wire(&b"value".to_vec(), 16)
     );
     assert!(matches!(
         registry.execute_query(
@@ -232,7 +286,7 @@ fn compiled_registry_rejects_descriptor_binding_drift() {
 
     let mut extra = RegistryBuilder::new(build());
     extra.register(FirstModule).unwrap();
-    extra.bind_command("first", 2, 1, insert).unwrap();
+    extra.bind_command::<Extra>("first").unwrap();
     assert!(matches!(
         extra.finish(),
         Err(Error::Registry("descriptor and function bindings differ"))

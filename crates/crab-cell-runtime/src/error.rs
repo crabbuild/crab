@@ -18,6 +18,8 @@ pub enum Error {
     CatalogFull,
     #[error("Cell runtime JSON failed")]
     Json(#[from] serde_json::Error),
+    #[error("Cell wire codec failed")]
+    Codec(#[from] crate::CodecError),
     #[error("Cell runtime SQLite schema failed")]
     Sqlite(#[from] rusqlite::Error),
     #[error("Cell SQL returned invalid UTF-8 text")]

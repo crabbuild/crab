@@ -8,6 +8,7 @@
 mod actor;
 mod authority;
 mod catalog;
+mod codec;
 mod control;
 mod effects;
 mod error;
@@ -26,6 +27,7 @@ mod workflow;
 pub use actor::{CellHandle, CellRuntime};
 pub use authority::{CellAuthority, VersionedControl};
 pub use catalog::{CatalogEntry, CatalogProof, CatalogRole, CellCatalog};
+pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use effects::{
     EffectClaim, EffectIntent, EffectLeaseOutcome, EffectState, EffectTokenSource,
@@ -53,9 +55,9 @@ pub use queue::{
     queue_claim, queue_cleanup_expired, queue_send, queue_validate_claim,
 };
 pub use registry::{
-    BuildDescriptor, CellModule, CommandContext, CommandHandler, CommandInvocation,
-    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor, QueryContext,
-    QueryHandler, QueryInvocation, Registry, RegistryBuilder, RegistryError,
+    BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,
+    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor, Query,
+    QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
 };
 pub use scheduler::scheduler_next_due_ms;
 pub use schema::{install_runtime_schema, verify_runtime_schema};

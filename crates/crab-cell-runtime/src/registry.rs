@@ -7,8 +7,8 @@ mod descriptor;
 use descriptor::encode_release;
 
 use crate::{
-    CatalogRole, CellId, Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch,
-    SqlResultSet, sql_batch, sql_query_batch,
+    BoundedDecoder, BoundedEncoder, CatalogRole, CellId, Digest, Error, HandlerOutcome,
+    NamespaceId, Result, SqlBatch, SqlResultSet, WireValue, sql_batch, sql_query_batch,
 };
 
 const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
@@ -77,6 +77,8 @@ pub struct CommandContext<'borrow, 'connection> {
     cell: CellId,
     sequence: u64,
     now_ms: i64,
+    input_limit: u32,
+    output_limit: u32,
 }
 
 impl CommandContext<'_, '_> {
@@ -106,6 +108,8 @@ pub struct QueryContext<'borrow> {
     connection: &'borrow Connection,
     cell: CellId,
     commit_sequence: u64,
+    input_limit: u32,
+    output_limit: u32,
 }
 
 impl QueryContext<'_> {
@@ -125,14 +129,41 @@ impl QueryContext<'_> {
     }
 }
 
-/// Type-erased compiled command function selected only by a validated registry.
-pub type CommandHandler = for<'borrow, 'connection> fn(
+type CommandHandler = for<'borrow, 'connection> fn(
     &mut CommandContext<'borrow, 'connection>,
     &[u8],
 ) -> Result<HandlerOutcome>;
 
-/// Type-erased compiled query function selected only by a validated registry.
-pub type QueryHandler = for<'borrow> fn(&mut QueryContext<'borrow>, &[u8]) -> Result<Vec<u8>>;
+type QueryHandler = for<'borrow> fn(&mut QueryContext<'borrow>, &[u8]) -> Result<Vec<u8>>;
+
+/// Stored command decision encoded with the command's declared output codec.
+pub enum CommandResult<T> {
+    Success(T),
+    Rejected(T),
+}
+
+/// Statically dispatched typed command implemented by compiled Crab code.
+pub trait Command: Send + Sync + 'static {
+    const ID: u32;
+    const CODEC_VERSION: u32;
+    type Input: WireValue;
+    type Output: WireValue;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> Result<CommandResult<Self::Output>>;
+}
+
+/// Statically dispatched typed query implemented by compiled Crab code.
+pub trait Query: Send + Sync + 'static {
+    const ID: u32;
+    const CODEC_VERSION: u32;
+    type Input: WireValue;
+    type Output: WireValue;
+
+    fn execute(context: &mut QueryContext<'_>, input: Self::Input) -> Result<Self::Output>;
+}
 
 /// Validated command selection and bounded input supplied by runtime routing.
 pub struct CommandInvocation<'a> {
@@ -197,31 +228,25 @@ impl RegistryBuilder {
         Ok(())
     }
 
-    /// Binds one descriptor command key to a compiled synchronous function.
-    pub fn bind_command(
+    /// Binds one descriptor command key to its monomorphized typed function.
+    pub fn bind_command<C: Command>(
         &mut self,
         module: &'static str,
-        id: u32,
-        codec_version: u32,
-        handler: CommandHandler,
     ) -> std::result::Result<(), RegistryError> {
-        let key = BindingKey::new(module, id, codec_version)?;
-        if self.commands.insert(key, handler).is_some() {
+        let key = BindingKey::new(module, C::ID, C::CODEC_VERSION)?;
+        if self.commands.insert(key, typed_command::<C>).is_some() {
             return Err(Error::Registry("duplicate command binding"));
         }
         Ok(())
     }
 
-    /// Binds one descriptor query key to a compiled synchronous function.
-    pub fn bind_query(
+    /// Binds one descriptor query key to its monomorphized typed function.
+    pub fn bind_query<Q: Query>(
         &mut self,
         module: &'static str,
-        id: u32,
-        codec_version: u32,
-        handler: QueryHandler,
     ) -> std::result::Result<(), RegistryError> {
-        let key = BindingKey::new(module, id, codec_version)?;
-        if self.queries.insert(key, handler).is_some() {
+        let key = BindingKey::new(module, Q::ID, Q::CODEC_VERSION)?;
+        if self.queries.insert(key, typed_query::<Q>).is_some() {
             return Err(Error::Registry("duplicate query binding"));
         }
         Ok(())
@@ -331,6 +356,8 @@ impl Registry {
             cell: invocation.cell,
             sequence: invocation.sequence,
             now_ms: invocation.now_ms,
+            input_limit: operation.input_limit,
+            output_limit: operation.output_limit,
         };
         let outcome = handler(&mut context, invocation.input)?;
         let output = match &outcome {
@@ -366,6 +393,8 @@ impl Registry {
             connection,
             cell: invocation.cell,
             commit_sequence: invocation.commit_sequence,
+            input_limit: operation.input_limit,
+            output_limit: operation.output_limit,
         };
         let output = handler(&mut context, invocation.input)?;
         if output.len() > operation.output_limit as usize {
@@ -373,6 +402,41 @@ impl Registry {
         }
         Ok(output)
     }
+}
+
+fn typed_command<C: Command>(
+    context: &mut CommandContext<'_, '_>,
+    input: &[u8],
+) -> Result<HandlerOutcome> {
+    let input = decode_wire::<C::Input>(input, context.input_limit)?;
+    let outcome = C::execute(context, input)?;
+    Ok(match outcome {
+        CommandResult::Success(output) => {
+            HandlerOutcome::Success(encode_wire(&output, context.output_limit)?)
+        }
+        CommandResult::Rejected(output) => {
+            HandlerOutcome::Rejected(encode_wire(&output, context.output_limit)?)
+        }
+    })
+}
+
+fn typed_query<Q: Query>(context: &mut QueryContext<'_>, input: &[u8]) -> Result<Vec<u8>> {
+    let input = decode_wire::<Q::Input>(input, context.input_limit)?;
+    let output = Q::execute(context, input)?;
+    encode_wire(&output, context.output_limit)
+}
+
+fn decode_wire<T: WireValue>(input: &[u8], limit: u32) -> Result<T> {
+    let mut decoder = BoundedDecoder::new(input, limit)?;
+    let value = T::decode(&mut decoder)?;
+    decoder.finish()?;
+    Ok(value)
+}
+
+fn encode_wire<T: WireValue>(value: &T, limit: u32) -> Result<Vec<u8>> {
+    let mut encoder = BoundedEncoder::new(limit)?;
+    value.encode(&mut encoder)?;
+    Ok(encoder.finish())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

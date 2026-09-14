@@ -54,8 +54,14 @@ unbounded codec declarations, invalid namespace/effect/DLQ topology, and
 duplicate workflow/activity inventory. Registration order produces identical
 canonical release bytes, module code digests and release digest. Dispatch uses
 `CommandContext`/`QueryContext`, which expose bounded authorized SQL and metadata
-without a raw connection accessor. Typed `WireValue`, typed handler wrappers,
-`CellClient` routing and the server composition root remain to implement.
+without a raw connection accessor. `BoundedEncoder`/`BoundedDecoder` implement
+fixed-width big-endian scalars, length-delimited bytes/text and strict tags;
+they reject incomplete/trailing input, non-finite floats and declared-limit
+overflow; encoding normalizes negative zero while decoding rejects its
+non-canonical bit pattern. Generic `Command`/`Query` registration uses
+monomorphized decode/execute/encode trampolines, with no raw byte-handler
+registration escape hatch. `CellClient` routing, operation-digest integration,
+typed primitive adapters and the server composition root remain to implement.
 
 The trait is a source-level interface, not a stable ABI. Modules use normal
 Cargo dependencies and are monomorphized or privately type-erased inside the
@@ -173,25 +179,23 @@ reruns the handler.
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {
     fn encode(&self, out: &mut BoundedEncoder) -> Result<(), CodecError>;
-    fn decode(input: &[u8]) -> Result<Self, CodecError>;
+    fn decode(input: &mut BoundedDecoder<'_>) -> Result<Self, CodecError>;
 }
 pub trait Command: Send + Sync + 'static {
     const ID: u32;
     const CODEC_VERSION: u32;
     type Input: WireValue;
     type Output: WireValue;
-    fn execute(
-        &self, ctx: &mut CommandContext<'_>, input: Self::Input,
-    ) -> Result<Self::Output, CommandError>;
+    fn execute(ctx: &mut CommandContext<'_, '_>, input: Self::Input)
+        -> Result<CommandResult<Self::Output>>;
 }
 pub trait Query: Send + Sync + 'static {
     const ID: u32;
     const CODEC_VERSION: u32;
     type Input: WireValue;
     type Output: WireValue;
-    fn execute(
-        &self, ctx: &mut QueryContext<'_>, input: Self::Input,
-    ) -> Result<Self::Output, CommandError>;
+    fn execute(ctx: &mut QueryContext<'_>, input: Self::Input)
+        -> Result<Self::Output>;
 }
 impl CellClient {
     pub async fn command<C: Command>(
