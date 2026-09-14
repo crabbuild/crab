@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
 use crab_cell_runtime::{
-    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellRuntime, CellTarget,
-    Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId, Owner, RequestId,
-    SessionId, SqlWorkerPool, TenantId, WorkflowAction, WorkflowContext, WorkflowDecision,
-    WorkflowDefinition, WorkflowOutcome, WorkflowSignal, WorkflowStart, WorkflowStatus,
-    install_runtime_schema, install_workflow_schema, workflow_cancel, workflow_fire_timer,
-    workflow_signal, workflow_start,
+    ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome, ActivitySupport,
+    ActivityTokenSource, ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
+    CellRuntime, CellTarget, Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId,
+    Owner, RequestId, SessionId, SqlWorkerPool, TenantId, WorkflowAction, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowOutcome, WorkflowSignal, WorkflowStart,
+    WorkflowStatus, install_runtime_schema, install_workflow_schema, workflow_cancel,
+    workflow_claim_activities, workflow_cleanup_terminal, workflow_complete_activity,
+    workflow_extend_activity, workflow_fire_timer, workflow_signal, workflow_start,
+    workflow_validate_activity_claim,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -44,7 +47,7 @@ impl WorkflowDefinition for Definition {
                             activity_type: "email".into(),
                             input: b"payload".to_vec(),
                             due_at_ms: 10,
-                            expires_at_ms: 1_000,
+                            expires_at_ms: 20_000,
                         },
                     ],
                 })
@@ -90,6 +93,20 @@ impl WorkflowDefinition for InvalidDefinition {
             result: None,
             actions: vec![WorkflowAction::Timer { due_at_ms: 20 }],
         })
+    }
+}
+
+struct Tokens(u8);
+
+impl ActivityTokenSource for Tokens {
+    fn next_token(&mut self) -> crab_cell_runtime::Result<[u8; 16]> {
+        self.0 = self
+            .0
+            .checked_add(1)
+            .ok_or(crab_cell_runtime::Error::Command(
+                "test activity token overflow",
+            ))?;
+        Ok([self.0; 16])
     }
 }
 
@@ -314,6 +331,169 @@ fn due_timer_fires_once_and_terminal_transition_cancels_sibling_activity() {
     transaction.commit().unwrap();
 }
 
+#[test]
+fn activity_claim_retry_extension_and_completion_bind_exact_attempt() {
+    let mut connection = connection();
+    let definition = Definition {
+        digest: Digest::from_bytes([4; 32]),
+    };
+    let support = ActivitySupport {
+        activity_type: "email".into(),
+        definition_digest: definition.digest(),
+    };
+    let transaction = connection.transaction().unwrap();
+    let (run_id, _, _) = applied(
+        workflow_start(
+            &transaction,
+            NamespaceId::from_bytes([3; 16]),
+            10,
+            &start(5),
+            &definition,
+        )
+        .unwrap(),
+    );
+    let mut tokens = Tokens(0);
+    assert!(
+        workflow_claim_activities(
+            &transaction,
+            10,
+            1,
+            5_000,
+            &[ActivitySupport {
+                activity_type: "email".into(),
+                definition_digest: Digest::from_bytes([99; 32]),
+            }],
+            &mut tokens,
+        )
+        .unwrap()
+        .is_empty()
+    );
+    let first = workflow_claim_activities(
+        &transaction,
+        10,
+        1,
+        5_000,
+        std::slice::from_ref(&support),
+        &mut tokens,
+    )
+    .unwrap()
+    .remove(0);
+    assert_eq!(first.attempt, 1);
+    assert!(
+        workflow_validate_activity_claim(&transaction, 11, std::slice::from_ref(&first)).unwrap()
+    );
+    assert!(
+        !workflow_validate_activity_claim(&transaction, 4_011, std::slice::from_ref(&first))
+            .unwrap()
+    );
+    assert_eq!(
+        workflow_extend_activity(&transaction, 100, &first, 10_000).unwrap(),
+        ActivityLeaseOutcome::Extended {
+            lease_until_ms: 10_100,
+        }
+    );
+
+    let failed = ActivityCompletion {
+        run_id,
+        activity_id: first.activity_id,
+        attempt: first.attempt,
+        lease_token: first.token,
+        completion_token: [7; 16],
+        result: b"transient".to_vec(),
+        failed: true,
+        retryable: true,
+    };
+    assert_eq!(
+        workflow_complete_activity(&transaction, 101, &failed, &definition).unwrap(),
+        ActivityCompletionOutcome::Retrying { due_at_ms: 301 }
+    );
+    assert_eq!(
+        workflow_complete_activity(&transaction, 102, &failed, &definition).unwrap(),
+        ActivityCompletionOutcome::Duplicate {
+            result: b"transient".to_vec(),
+        }
+    );
+    let mut conflict = failed.clone();
+    conflict.result = b"different".to_vec();
+    assert_eq!(
+        workflow_complete_activity(&transaction, 102, &conflict, &definition).unwrap(),
+        ActivityCompletionOutcome::IdentityConflict
+    );
+
+    let second = workflow_claim_activities(&transaction, 301, 1, 5_000, &[support], &mut tokens)
+        .unwrap()
+        .remove(0);
+    assert_eq!(second.attempt, 2);
+    assert_eq!(
+        workflow_complete_activity(&transaction, 302, &failed, &definition).unwrap(),
+        ActivityCompletionOutcome::LeaseLost
+    );
+    let completed = ActivityCompletion {
+        run_id,
+        activity_id: second.activity_id,
+        attempt: second.attempt,
+        lease_token: second.token,
+        completion_token: [8; 16],
+        result: b"sent".to_vec(),
+        failed: false,
+        retryable: false,
+    };
+    assert_eq!(
+        workflow_complete_activity(&transaction, 302, &completed, &definition).unwrap(),
+        ActivityCompletionOutcome::Applied(WorkflowOutcome::Applied {
+            run_id,
+            status: WorkflowStatus::Running,
+            event_sequence: 2,
+        })
+    );
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn terminal_cleanup_removes_children_only_after_retention() {
+    const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+    let mut connection = connection();
+    let definition = Definition {
+        digest: Digest::from_bytes([4; 32]),
+    };
+    let transaction = connection.transaction().unwrap();
+    let (run_id, _, _) = applied(
+        workflow_start(
+            &transaction,
+            NamespaceId::from_bytes([3; 16]),
+            10,
+            &start(5),
+            &definition,
+        )
+        .unwrap(),
+    );
+    let timer_id: [u8; 16] = transaction
+        .query_row("SELECT timer_id FROM workflow_timers", [], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })
+        .unwrap()
+        .try_into()
+        .unwrap();
+    applied(workflow_fire_timer(&transaction, 20, run_id, timer_id, &definition).unwrap());
+    assert_eq!(
+        workflow_cleanup_terminal(&transaction, RETENTION_MS + 19).unwrap(),
+        0
+    );
+    assert_eq!(
+        workflow_cleanup_terminal(&transaction, RETENTION_MS + 20).unwrap(),
+        1
+    );
+    let rows: (i64, i64, i64, i64) = transaction
+        .query_row(
+            "SELECT (SELECT count(*) FROM workflow_runs), (SELECT count(*) FROM workflow_events), (SELECT count(*) FROM workflow_activities), (SELECT count(*) FROM workflow_timers)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(rows, (0, 0, 0, 0));
+    transaction.commit().unwrap();
+}
+
 #[tokio::test]
 async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
     let namespace = NamespaceId::from_bytes([6; 16]);
@@ -447,6 +627,118 @@ async fn published_workflow_restores_from_exact_root_on_a_new_owner() {
             .await
             .unwrap(),
         vec![1]
+    );
+    let claimed = Arc::new(std::sync::Mutex::new(None));
+    let observed = claimed.clone();
+    restored
+        .execute(
+            MutationIdentity {
+                request_id: RequestId::from_bytes([12; 16]),
+                issued_at_ms: 11,
+                expires_at_ms: 10_000,
+            },
+            Digest::from_bytes([13; 32]),
+            11,
+            128,
+            512,
+            Some(5_011),
+            move |transaction| {
+                let mut tokens = Tokens(20);
+                let claim = workflow_claim_activities(
+                    transaction,
+                    11,
+                    1,
+                    5_000,
+                    &[ActivitySupport {
+                        activity_type: "email".into(),
+                        definition_digest: Digest::from_bytes([5; 32]),
+                    }],
+                    &mut tokens,
+                )?
+                .into_iter()
+                .next()
+                .ok_or(crab_cell_runtime::Error::Command(
+                    "missing restored workflow activity",
+                ))?;
+                *observed.lock().unwrap() = Some(claim);
+                Ok(HandlerOutcome::Success(b"claimed".to_vec()))
+            },
+        )
+        .await
+        .unwrap();
+    let claim = claimed.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, {
+                let claim = claim.clone();
+                move |connection| {
+                    Ok(vec![u8::from(workflow_validate_activity_claim(
+                        connection,
+                        12,
+                        &[claim],
+                    )?)])
+                }
+            })
+            .await
+            .unwrap(),
+        vec![1]
+    );
+    restored
+        .execute(
+            MutationIdentity {
+                request_id: RequestId::from_bytes([14; 16]),
+                issued_at_ms: 13,
+                expires_at_ms: 10_000,
+            },
+            Digest::from_bytes([15; 32]),
+            13,
+            128,
+            128,
+            Some(20),
+            move |transaction| {
+                let completion = ActivityCompletion {
+                    run_id: claim.run_id,
+                    activity_id: claim.activity_id,
+                    attempt: claim.attempt,
+                    lease_token: claim.token,
+                    completion_token: [16; 16],
+                    result: b"sent".to_vec(),
+                    failed: false,
+                    retryable: false,
+                };
+                match workflow_complete_activity(
+                    transaction,
+                    13,
+                    &completion,
+                    &Definition {
+                        digest: Digest::from_bytes([5; 32]),
+                    },
+                )? {
+                    ActivityCompletionOutcome::Applied(_) => {
+                        Ok(HandlerOutcome::Success(b"completed".to_vec()))
+                    }
+                    _ => Ok(HandlerOutcome::Rejected(b"completion rejected".to_vec())),
+                }
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let state =
+                    connection.query_row("SELECT state FROM workflow_activities", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                let events =
+                    connection.query_row("SELECT count(*) FROM workflow_events", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                Ok(vec![state as u8, events as u8])
+            })
+            .await
+            .unwrap(),
+        vec![2, 2]
     );
     restored.drain().await.unwrap();
 }

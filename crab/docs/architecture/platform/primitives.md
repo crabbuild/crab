@@ -263,9 +263,18 @@ writes; enforces the 128 outstanding-task and 100K Cell-event ceilings; and
 cancels every pending local activity/timer on a terminal decision. Signal and
 timer identities are idempotent and payload conflicts fail closed. Integration
 coverage publishes a run, releases its owner, restores the exact root under a
-new owner and observes the same event sequence. Activity claim/lease/completion,
-effect actions, terminal retention cleanup and scheduler scanning remain to
-implement.
+new owner, claims and validates an activity only after publication, completes
+it, republishes and observes the resulting event. Activity claim scans filter
+the worker's exact type/definition pairs in SQL, lease tokens and attempts bind
+all extension/completion predicates, retry completions are idempotent, and old
+attempts lose authority after a new claim. Terminal cleanup deletes children
+before at most 128 retained parents. Effect actions, the native activity
+supervisor and scheduler scanning remain to implement.
+
+Timer events passed to the definition are `timer\0 || timer_id`. Activity
+completion events are `activity\0 || failed:u8 || activity_id ||
+result_length:u32be || result`. These encodings are persisted event bytes; change
+them only with a new compiled definition digest and an explicit migration.
 
 Start requires absent workflow_id; an existing run returns PRECONDITION_FAILED
 unless this is a replay of its original request. Allocate run_id from the

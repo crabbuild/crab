@@ -47,7 +47,10 @@ pub use schema::{install_runtime_schema, verify_runtime_schema};
 pub use sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue, sql_batch, sql_query_batch};
 pub use worker::{SqlWorkerPool, WorkerExecution};
 pub use workflow::{
-    WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowOutcome,
-    WorkflowSignal, WorkflowStart, WorkflowStatus, install_workflow_schema, workflow_cancel,
-    workflow_fire_timer, workflow_signal, workflow_start,
+    ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
+    ActivitySupport, ActivityTokenSource, SystemActivityTokens, WorkflowAction, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowOutcome, WorkflowSignal, WorkflowStart,
+    WorkflowStatus, install_workflow_schema, workflow_cancel, workflow_claim_activities,
+    workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
+    workflow_fire_timer, workflow_signal, workflow_start, workflow_validate_activity_claim,
 };

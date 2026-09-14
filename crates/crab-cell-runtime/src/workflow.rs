@@ -2,6 +2,15 @@ use rusqlite::{OptionalExtension, Transaction};
 
 use crate::{Digest, Error, NamespaceId, RequestId, Result};
 
+mod activity;
+
+pub use activity::{
+    ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
+    ActivitySupport, ActivityTokenSource, SystemActivityTokens, workflow_claim_activities,
+    workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
+    workflow_validate_activity_claim,
+};
+
 const WORKFLOW_SCHEMA: &str = include_str!("migrations/workflow.sql");
 const MAX_WORKFLOW_BYTES: usize = 1 << 20;
 const MAX_ACTIVITY_BYTES: usize = 256 << 10;
@@ -234,14 +243,16 @@ pub fn workflow_signal(
     if run.status != WorkflowStatus::Running {
         return Ok(WorkflowOutcome::NotRunning);
     }
-    apply_event(
+    let (sequence, decision) =
+        prepare_transition(transaction, &run, definition, &signal.event, now_ms)?;
+    commit_transition(
         transaction,
-        &signal.workflow_id,
         run.run_id,
-        definition,
+        sequence,
         id,
         &signal.event,
         now_ms,
+        decision,
     )
 }
 
@@ -330,17 +341,7 @@ pub fn workflow_fire_timer(
     }
     let mut event = b"timer\0".to_vec();
     event.extend_from_slice(&timer_id);
-    let sequence = next_sequence(transaction, run.event_sequence)?;
-    let decision = definition.transition(
-        &run.state,
-        &event,
-        WorkflowContext {
-            run_id,
-            event_sequence: sequence,
-            now_ms,
-        },
-    )?;
-    validate_decision(&decision, now_ms)?;
+    let (sequence, decision) = prepare_transition(transaction, &run, definition, &event, now_ms)?;
     if transaction.execute(
         "UPDATE workflow_timers SET state = 1 WHERE run_id = ?1 AND timer_id = ?2 AND state = 0 AND due_at_ms <= ?3",
         (run_id.as_slice(), timer_id.as_slice(), now_ms),
@@ -348,23 +349,24 @@ pub fn workflow_fire_timer(
     {
         return Err(Error::Command("workflow timer changed during serialized fire"));
     }
-    insert_event(
+    commit_transition(
         transaction,
         run_id,
         sequence,
         timer_event_id(run_id, timer_id),
         &event,
-    )?;
-    apply_decision(transaction, run_id, sequence, now_ms, decision)
+        now_ms,
+        decision,
+    )
 }
 
 #[derive(Clone)]
-struct StoredRun {
-    run_id: [u8; 16],
-    definition_digest: [u8; 32],
-    status: WorkflowStatus,
-    state: Vec<u8>,
-    event_sequence: u64,
+pub(super) struct StoredRun {
+    pub(super) run_id: [u8; 16],
+    pub(super) definition_digest: [u8; 32],
+    pub(super) status: WorkflowStatus,
+    pub(super) state: Vec<u8>,
+    pub(super) event_sequence: u64,
 }
 
 fn load_run(transaction: &Transaction<'_>, workflow_id: &[u8]) -> Result<Option<StoredRun>> {
@@ -378,7 +380,10 @@ fn load_run(transaction: &Transaction<'_>, workflow_id: &[u8]) -> Result<Option<
         .map_err(Into::into)
 }
 
-fn load_run_by_id(transaction: &Transaction<'_>, run_id: [u8; 16]) -> Result<Option<StoredRun>> {
+pub(super) fn load_run_by_id(
+    transaction: &Transaction<'_>,
+    run_id: [u8; 16],
+) -> Result<Option<StoredRun>> {
     transaction
         .query_row(
             "SELECT run_id, definition_digest, status, state, event_sequence FROM workflow_runs WHERE run_id = ?1",
@@ -426,40 +431,49 @@ fn invalid_data(field: &'static str) -> rusqlite::Error {
     )
 }
 
-fn verify_definition(run: &StoredRun, definition: &impl WorkflowDefinition) -> Result<()> {
+pub(super) fn verify_definition(
+    run: &StoredRun,
+    definition: &impl WorkflowDefinition,
+) -> Result<()> {
     if run.definition_digest != *definition.digest().as_bytes() {
         return Err(Error::Command("workflow definition digest is unavailable"));
     }
     Ok(())
 }
 
-fn apply_event(
+pub(super) fn prepare_transition(
     transaction: &Transaction<'_>,
-    workflow_id: &[u8],
-    run_id: [u8; 16],
+    run: &StoredRun,
     definition: &impl WorkflowDefinition,
-    id: [u8; 32],
     event: &[u8],
     now_ms: i64,
-) -> Result<WorkflowOutcome> {
-    let run = load_run(transaction, workflow_id)?.ok_or(Error::Command("workflow run missing"))?;
-    if run.run_id != run_id || run.status != WorkflowStatus::Running {
-        return Err(Error::Command("workflow run changed during transition"));
-    }
-    verify_definition(&run, definition)?;
+) -> Result<(u64, WorkflowDecision)> {
+    verify_definition(run, definition)?;
     let sequence = next_sequence(transaction, run.event_sequence)?;
     let context = WorkflowContext {
-        run_id,
+        run_id: run.run_id,
         event_sequence: sequence,
         now_ms,
     };
     let decision = definition.transition(&run.state, event, context)?;
     validate_decision(&decision, now_ms)?;
+    Ok((sequence, decision))
+}
+
+pub(super) fn commit_transition(
+    transaction: &Transaction<'_>,
+    run_id: [u8; 16],
+    sequence: u64,
+    id: [u8; 32],
+    event: &[u8],
+    now_ms: i64,
+    decision: WorkflowDecision,
+) -> Result<WorkflowOutcome> {
     insert_event(transaction, run_id, sequence, id, event)?;
     apply_decision(transaction, run_id, sequence, now_ms, decision)
 }
 
-fn validate_decision(decision: &WorkflowDecision, now_ms: i64) -> Result<()> {
+pub(super) fn validate_decision(decision: &WorkflowDecision, now_ms: i64) -> Result<()> {
     if decision.state.len() > MAX_WORKFLOW_BYTES
         || decision
             .result

@@ -36,7 +36,7 @@ that exits late cannot publish its tentative commit. Sparse page-I/O deadline
 propagation and automatic fenced recovery,
 streaming initial directory construction and directory-backed capture checksums,
 shared directory caching, prepared compaction/bundles,
-Workflow activity completion/effect/scheduler mechanics, typed registry, HTTP cutover and capacity
+Workflow activity supervision/effect/scheduler mechanics, typed registry, HTTP cutover and capacity
 qualification remain incomplete. The scoped KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -51,7 +51,10 @@ The Workflow transition core now installs the normative schema and atomically
 implements start, idempotent signal, cancellation and timer firing against a
 pinned compiled definition digest. Deterministic action IDs, bounded decisions,
 outstanding-task limits, terminal cancellation and exact-root restoration are
-implemented; activity leasing/completion, effects and scanning remain.
+implemented. Activity claims, post-publication lease validation, heartbeat extension,
+attempt-bound idempotent completion/failure, retry and terminal retention cleanup
+are now implemented through the same publication path. The node supervisor,
+effect actions and due-Cell scanner remain.
 
 ## Deliverable and contract precedence
 
