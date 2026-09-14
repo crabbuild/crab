@@ -196,6 +196,23 @@ impl Control {
         Ok(next)
     }
 
+    /// Builds the sole valid successor that releases a drained Cell owner.
+    pub(crate) fn release(&self) -> Result<Self> {
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        next.state = ControlState::Idle;
+        next.owner = None;
+        self.validate_transition(&next, Transition::Release)?;
+        Ok(next)
+    }
+
     /// Validates a named successor before its conditional object-store update.
     pub fn validate_transition(&self, next: &Self, transition: Transition) -> Result<()> {
         self.validate()?;

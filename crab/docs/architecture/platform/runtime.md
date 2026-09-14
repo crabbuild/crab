@@ -34,6 +34,11 @@ only for the original digest, `ABSENT` only after earlier accepted work drained,
 identity. A successor that restores a later authoritative root resolves the
 predecessor's ledger without replay. Deadline/watchdog enforcement and the
 fenced recovery supervisor remain to implement.
+Normal drain now closes the worker-owned SQLite handle and then transitions the
+same observed control to `Idle` with no owner. Release retries provider-classified
+transient failures across pure renewals and reconciles an exact lost response;
+owner/root divergence fails fenced. Activation whose result receiver disappears
+uses the same close-then-release path instead of leaving a ghost owner.
 
 ## Rust interfaces and ownership
 
@@ -256,7 +261,7 @@ execute only after the publisher returns from every preceding mutation. The next
 supervision work must add wall deadlines and SQLite interruption and retain
 fenced Cells for takeover cleanup instead of only stopping admission.
 
-Drain closes admission, resolves accepted publications, captures/publishes any
-checkpoint cuts, closes SQLite, then releases ownership. Fenced sessions only
+Drain closes admission, resolves accepted publications, closes SQLite, then
+releases ownership. Fenced sessions only
 finish proven replies and cleanup. If shutdown budget expires, unresolved clients
 receive unknown outcomes and the successor recovers origin state.

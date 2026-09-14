@@ -169,6 +169,14 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
     ));
     handle.drain().await.unwrap();
 
+    let released = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.value().state, ControlState::Idle);
+    assert!(released.value().owner.is_none());
+
     let connection = crab_ltx::rusqlite::Connection::open(&fixture.database).unwrap();
     assert_eq!(
         connection

@@ -83,6 +83,9 @@ SQLite `query_only`, and enforce declared result bytes. Complete deadlines/SQLit
 interruption, fenced takeover recovery,
 and panic supervision. All transitions use the existing Store conditional
 primitives, preserving sources.
+Drained and orphaned activations close their SQL worker first, then release the
+same observed authority record to `Idle`; transient CAS failures retry across
+pure renewals and exact lost responses reconcile without reviving stale owners.
 
 Add `crates/crab-cell-runtime/tests/publication.rs`:
 
@@ -111,7 +114,8 @@ Current worker coverage is in `crates/crab-cell-runtime/tests/workers.rs`:
 Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
 
 - `dispatcher_serializes_and_publishes_commands_before_drain` proves two queued
-  commits receive sequences one and two and are visible after SQLite close.
+  commits receive sequences one and two, are visible after SQLite close, and the
+  authoritative control is released to `Idle` with no owner.
 - `cancelled_command_waiter_is_resolved_by_original_identity` proves cancellation
   does not stop publication and retry returns the first stored result.
 - `per_cell_request_admission_caps_inflight_and_queued_commands` proves the 64th

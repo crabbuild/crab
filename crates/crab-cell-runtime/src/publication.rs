@@ -161,6 +161,49 @@ impl CellPublisher {
         };
         executor.confirm_published(&root)
     }
+
+    /// Releases ownership after the SQL worker has closed the drained Cell.
+    pub(crate) async fn release(&mut self) -> Result<()> {
+        let mut backoff = PublicationBackoff::default();
+        loop {
+            let successor = self.observed.value().release()?;
+            match self
+                .authority
+                .transition(&self.observed, successor.clone(), Transition::Release)
+                .await
+            {
+                Ok(released) => {
+                    self.observed = released;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let current = loop {
+                        match self.authority.load(self.observed.value().cell).await {
+                            Ok(Some(current)) => break current,
+                            Ok(None) => return Err(Error::Fenced),
+                            Err(load_error) if retryable_publication_error(&load_error) => {
+                                backoff.wait(runtime_retry_hint(&load_error)).await;
+                            }
+                            Err(load_error) => return Err(load_error),
+                        }
+                    };
+                    if current.value() == &successor {
+                        self.observed = current;
+                        return Ok(());
+                    }
+                    let still_owned = current
+                        .value()
+                        .is_same_or_pure_renewal_of(self.observed.value());
+                    if still_owned && retryable_publication_error(&error) {
+                        self.observed = current;
+                        backoff.wait(runtime_retry_hint(&error)).await;
+                        continue;
+                    }
+                    return Err(if still_owned { error } else { Error::Fenced });
+                }
+            }
+        }
+    }
 }
 
 fn retryable_publication_error(error: &Error) -> bool {

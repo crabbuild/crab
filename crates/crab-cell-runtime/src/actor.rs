@@ -692,7 +692,7 @@ fn handle_task(
         } => match result {
             Ok(()) => {
                 if reply.send(Ok(admission.clone())).is_err() {
-                    start_orphan_deactivate(cell, pool, transitioning, tasks);
+                    start_orphan_deactivate(cell, pool, *publisher, transitioning, tasks);
                     return;
                 }
                 transitioning.remove(&cell);
@@ -827,10 +827,16 @@ fn start_deactivate(
     transitioning.insert(cell);
     let pool = pool.clone();
     tasks.spawn(async move {
+        let result = async {
+            pool.deactivate(cell).await?;
+            let mut publisher = active.publisher.ok_or(Error::Fenced)?;
+            publisher.release().await
+        }
+        .await;
         TaskResult::Deactivated {
             cell,
             reply: active.drain,
-            result: pool.deactivate(cell).await,
+            result,
         }
     });
 }
@@ -838,15 +844,21 @@ fn start_deactivate(
 fn start_orphan_deactivate(
     cell: CellId,
     pool: &SqlWorkerPool,
+    mut publisher: CellPublisher,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
 ) {
     let pool = pool.clone();
     tasks.spawn(async move {
+        let result = async {
+            pool.deactivate(cell).await?;
+            publisher.release().await
+        }
+        .await;
         TaskResult::Deactivated {
             cell,
             reply: None,
-            result: pool.deactivate(cell).await,
+            result,
         }
     });
     transitioning.insert(cell);

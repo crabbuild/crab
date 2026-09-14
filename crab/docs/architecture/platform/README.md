@@ -21,7 +21,9 @@ installation commit together, the initial cut is captured, and root publication
 completes before a handle becomes visible. The previous caller-opened runtime
 activation path has been removed. FIFO Resolve now distinguishes authoritative
 stored outcomes, absence, expiry and fenced/in-flight uncertainty, including
-after a successor restores a later root. Deadlines/watchdogs, fenced recovery,
+after a successor restores a later root. Normal drain and orphaned activation
+close the SQL worker before conditionally releasing control ownership to `Idle`.
+Deadlines/watchdogs, fenced recovery,
 streaming directory and checksum updates, prepared compaction/bundles,
 primitives, HTTP cutover and capacity qualification remain incomplete.
 
