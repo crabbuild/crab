@@ -257,7 +257,9 @@ registration-order-independent release bytes, bounded compiled command/query
 execution, schema rejection, startup failure for missing or extra function
 bindings, canonical operation-digest fixtures, published typed execution,
 idempotent replay, durable rejection rollback and minimum receipts. Authenticated
-CellClient forwarding and built-binary release inspection remain required.
+CellClient forwarding remains required. `crab-http-server` now supplies the
+first compiled repository descriptor/migration, and its binary command and tests
+prove release inspection returns the same deterministic registry bytes.
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.
 Pin independent command/input/output fixtures for every registered codec version.

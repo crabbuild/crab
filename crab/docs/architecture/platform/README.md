@@ -123,9 +123,12 @@ fail closed. The local `CellClient` now derives the canonical operation digest,
 validates namespace/module code/schema and incarnation before admission, maps
 typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
-publication path. Private peer routing, server composition and release inspection
-remain; KV, SQL, Queue and Workflow primitive handles are complete for local
-routing.
+publication path. Private peer routing and server runtime composition remain;
+KV, SQL, Queue and Workflow primitive handles are complete for local routing.
+The server now compiles a canonical repository module descriptor and
+its first migration, and `cells release inspect --json` emits those exact
+registry bytes from the built binary. Runtime lifecycle composition and product
+route cutover remain.
 
 ## Deliverable and contract precedence
 

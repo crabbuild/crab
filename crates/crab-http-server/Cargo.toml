@@ -12,6 +12,7 @@ bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 crab-read = { workspace = true }
+crab-cell-runtime = { workspace = true }
 crab-lfs = { workspace = true }
 crab-git = { workspace = true }
 gix-hash = { workspace = true }

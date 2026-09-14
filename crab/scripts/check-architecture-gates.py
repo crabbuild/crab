@@ -1808,6 +1808,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
     "crab-http-server": {
         "normal": {
             "crab-coordination",
+            "crab-cell-runtime",
             "crab-git",
             "crab-lfs",
             "crab-metadata",

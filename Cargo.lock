@@ -2284,6 +2284,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "crab-cell-runtime",
  "crab-coordination",
  "crab-git",
  "crab-lfs",

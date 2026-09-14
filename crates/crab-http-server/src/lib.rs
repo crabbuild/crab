@@ -8,6 +8,7 @@ mod assignees;
 mod auth;
 mod branches;
 pub mod catalog;
+mod cells;
 mod checks;
 mod config;
 mod contents;
@@ -33,6 +34,11 @@ pub use config::{
 };
 pub use server::{probe_storage, serve};
 
+/// Returns the canonical release descriptor compiled into this server binary.
+pub fn cell_release_descriptor() -> Result<Vec<u8>> {
+    Ok(cells::compiled_registry()?.release_bytes().to_vec())
+}
+
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -53,6 +59,8 @@ pub enum Error {
     Storage(#[from] crab_storage::StorageError),
     #[error("object storage coordination failed")]
     Coordination(#[from] crab_coordination::CoordinationError),
+    #[error("embedded Cell runtime initialization failed")]
+    Cell(#[from] crab_cell_runtime::Error),
     #[error("object storage preflight failed: {0}")]
     StorageProbe(&'static str),
     #[error("repository initialization failed")]

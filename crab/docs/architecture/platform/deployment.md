@@ -197,9 +197,10 @@ crab-http-server --config CONFIG cells release activate --expected-revision N --
 crab-http-server --config CONFIG cells release status
 ```
 
-These are target commands, not currently runnable. Inspect is read-only and
-prints the canonical descriptor/digest compiled into this binary. Prepare reads
-only that descriptor. Administrative storage credentials provide authority;
+`cells release inspect --json` is now implemented and read-only; it prints the
+canonical descriptor compiled into the binary without accessing object storage.
+Prepare, activate and status remain target commands. Prepare reads only the
+compiled descriptor. Administrative storage credentials provide authority;
 there is no public deployment API.
 
 release.json <=8 KiB: version=1, application, revision as u64 decimal string,

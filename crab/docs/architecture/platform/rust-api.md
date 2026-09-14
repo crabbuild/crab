@@ -64,7 +64,10 @@ monomorphized decode/execute/encode trampolines, with no raw byte-handler
 registration escape hatch. The implemented local `CellClient` covers canonical
 operation-digest integration and the actor path. Authenticated peer forwarding,
 bounded stale-owner retry and the server composition root remain to implement.
-Typed local SQL, KV, Queue and Workflow capabilities are implemented.
+Typed local SQL, KV, Queue and Workflow capabilities are implemented. The server
+now compiles its repository descriptor and initial identity migration through
+this registry and exposes the exact canonical bytes through the built-binary
+release inspection command.
 
 The trait is a source-level interface, not a stable ABI. Modules use normal
 Cargo dependencies and are monomorphized or privately type-erased inside the

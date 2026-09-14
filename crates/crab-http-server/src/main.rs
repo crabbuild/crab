@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -29,6 +29,29 @@ enum Command {
     Repository {
         #[command(subcommand)]
         command: RepositoryCommand,
+    },
+    /// Inspect or administer the embedded Cell runtime.
+    Cells {
+        #[command(subcommand)]
+        command: CellsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CellsCommand {
+    /// Inspect or administer compiled Cell releases.
+    Release {
+        #[command(subcommand)]
+        command: CellReleaseCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CellReleaseCommand {
+    /// Print the exact canonical descriptor compiled into this binary.
+    Inspect {
+        #[arg(long, required = true)]
+        json: bool,
     },
 }
 
@@ -144,7 +167,25 @@ async fn main() -> crab_http_server::Result<()> {
         Command::Healthcheck => healthcheck(&config).await,
         Command::StorageProbe => crab_http_server::probe_storage(&config).await,
         Command::Repository { command } => repository(&config, command).await,
+        Command::Cells { command } => cells(command),
     }
+}
+
+fn cells(command: CellsCommand) -> crab_http_server::Result<()> {
+    match command {
+        CellsCommand::Release {
+            command: CellReleaseCommand::Inspect { json: true },
+        } => {
+            let descriptor = crab_http_server::cell_release_descriptor()?;
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&descriptor)?;
+            stdout.write_all(b"\n")?;
+        }
+        CellsCommand::Release {
+            command: CellReleaseCommand::Inspect { json: false },
+        } => return Err(crab_http_server::Error::Config("--json is required")),
+    }
+    Ok(())
 }
 
 async fn healthcheck(config: &crab_http_server::Config) -> crab_http_server::Result<()> {
@@ -234,6 +275,40 @@ mod tests {
     #[test]
     fn command_line_contract_is_valid() {
         Arguments::command().debug_assert();
+    }
+
+    #[test]
+    fn release_inspect_requires_the_json_contract() {
+        let arguments = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "inspect",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            arguments.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Inspect { json: true }
+                }
+            })
+        ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "inspect",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
