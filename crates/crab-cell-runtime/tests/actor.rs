@@ -58,12 +58,12 @@ async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::Ce
 async fn activate_runtime(
     fixture: &Fixture,
     node_bytes: usize,
-) -> (CellRuntime, crab_cell_runtime::CellHandle) {
+) -> (CellRuntime, crab_cell_runtime::CellHandle, SqlWorkerPool) {
     let session = SessionId::from_bytes([4; 16]);
-    let runtime =
-        CellRuntime::new(SqlWorkerPool::new(2, 10).unwrap(), node_bytes, session).unwrap();
+    let pool = SqlWorkerPool::new(2, 10).unwrap();
+    let runtime = CellRuntime::new(pool.clone(), node_bytes, session).unwrap();
     let handle = bootstrap_on(&runtime, fixture, session).await;
-    (runtime, handle)
+    (runtime, handle, pool)
 }
 
 async fn bootstrap_on(
@@ -211,7 +211,7 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_shutdown_drains_accepted_work_and_releases_all_owners() {
     let fixture = fixture();
-    let (runtime, handle) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let (runtime, handle, pool) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
     let second_fixture = fixture_for(b"repository-2");
     let second = bootstrap_on(&runtime, &second_fixture, SessionId::from_bytes([4; 16])).await;
     let (started_tx, started_rx) = mpsc::channel();
@@ -268,6 +268,10 @@ async fn runtime_shutdown_drains_accepted_work_and_releases_all_owners() {
         .unwrap();
     assert!(matches!(
         runtime.shutdown().await,
+        Err(crab_cell_runtime::Error::RuntimeClosed)
+    ));
+    assert!(matches!(
+        pool.shutdown().await,
         Err(crab_cell_runtime::Error::RuntimeClosed)
     ));
 

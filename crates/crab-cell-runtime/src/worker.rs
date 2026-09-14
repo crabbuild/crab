@@ -94,10 +94,14 @@ impl SqlWorkerPool {
         }
         Ok(Self {
             inner: Arc::new(PoolInner {
-                workers,
-                threads: Mutex::new(threads),
+                lifecycle: Mutex::new(WorkerLifecycle {
+                    workers,
+                    threads,
+                    closing: false,
+                }),
                 active,
                 max_active_cells,
+                worker_count,
             }),
         })
     }
@@ -338,14 +342,71 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    /// Closes the empty pool and joins every SQL worker thread.
+    ///
+    /// All Cells must first be drained and deactivated. Once shutdown starts,
+    /// every clone is permanently closed and a second call returns
+    /// [`Error::RuntimeClosed`].
+    pub async fn shutdown(&self) -> Result<()> {
+        let threads = {
+            let mut lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .map_err(|_| Error::RuntimeClosed)?;
+            if lifecycle.closing {
+                return Err(Error::RuntimeClosed);
+            }
+            if self.inner.active.load(Ordering::Acquire) != 0 {
+                return Err(Error::Control(
+                    "SQL worker shutdown requires every Cell to be deactivated",
+                ));
+            }
+            lifecycle.closing = true;
+            lifecycle.workers.clear();
+            std::mem::take(&mut lifecycle.threads)
+        };
+        tokio::task::spawn_blocking(move || {
+            let mut panicked = false;
+            for thread in threads {
+                if thread.join().is_err() {
+                    panicked = true;
+                }
+            }
+            if panicked {
+                Err(Error::WorkerPanic)
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .map_err(Error::WorkerJoin)?
+    }
+
     async fn send(&self, cell: CellId, command: WorkerCommand) -> Result<()> {
-        self.inner.workers[worker_index(cell, self.inner.workers.len())]
-            .send(command)
-            .await
-            .map_err(|_| Error::RuntimeClosed)
+        let sender = {
+            let lifecycle = self
+                .inner
+                .lifecycle
+                .lock()
+                .map_err(|_| Error::RuntimeClosed)?;
+            if lifecycle.closing {
+                return Err(Error::RuntimeClosed);
+            }
+            lifecycle.workers[worker_index(cell, self.inner.worker_count)].clone()
+        };
+        sender.send(command).await.map_err(|_| Error::RuntimeClosed)
     }
 
     pub(crate) fn reserve_activation(&self) -> Result<CellReservation> {
+        let lifecycle = self
+            .inner
+            .lifecycle
+            .lock()
+            .map_err(|_| Error::RuntimeClosed)?;
+        if lifecycle.closing {
+            return Err(Error::RuntimeClosed);
+        }
         self.inner
             .active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -359,19 +420,26 @@ impl SqlWorkerPool {
 }
 
 struct PoolInner {
-    workers: Vec<mpsc::Sender<WorkerCommand>>,
-    threads: Mutex<Vec<JoinHandle<()>>>,
+    lifecycle: Mutex<WorkerLifecycle>,
     active: Arc<AtomicUsize>,
     max_active_cells: usize,
+    worker_count: usize,
+}
+
+struct WorkerLifecycle {
+    workers: Vec<mpsc::Sender<WorkerCommand>>,
+    threads: Vec<JoinHandle<()>>,
+    closing: bool,
 }
 
 impl Drop for PoolInner {
     fn drop(&mut self) {
-        self.workers.clear();
-        let threads = match self.threads.get_mut() {
-            Ok(threads) => std::mem::take(threads),
-            Err(poisoned) => std::mem::take(poisoned.into_inner()),
+        let lifecycle = match self.lifecycle.get_mut() {
+            Ok(lifecycle) => lifecycle,
+            Err(poisoned) => poisoned.into_inner(),
         };
+        lifecycle.workers.clear();
+        let threads = std::mem::take(&mut lifecycle.threads);
         for thread in threads {
             let _ = thread.join();
         }

@@ -169,3 +169,21 @@ async fn active_cell_admission_is_global_and_released_after_drain() {
         .unwrap();
     pool.deactivate(replacement.cell).await.unwrap();
 }
+
+#[tokio::test]
+async fn worker_shutdown_requires_an_empty_pool_and_closes_every_clone() {
+    let fixture = fixture(3);
+    let cell = fixture.cell;
+    let pool = SqlWorkerPool::new(2, 10).unwrap();
+    let clone = pool.clone();
+    pool.activate(cell, fixture.executor).await.unwrap();
+    assert!(matches!(pool.shutdown().await, Err(Error::Control(_))));
+
+    pool.deactivate(cell).await.unwrap();
+    pool.shutdown().await.unwrap();
+    assert!(matches!(
+        clone.pending(cell).await,
+        Err(Error::RuntimeClosed)
+    ));
+    assert!(matches!(clone.shutdown().await, Err(Error::RuntimeClosed)));
+}

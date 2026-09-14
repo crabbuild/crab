@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities plus exact native activity execution | Add SQL-worker join ownership, sparse page-I/O deadlines, automatic fenced recovery, private peer routing, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain with explicit worker join, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities plus exact native activity execution | Add sparse page-I/O deadlines, automatic fenced recovery, private peer routing, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
 | [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization, scoped SQLite authorizers, registered codecs and a role-checked SqlCell proven through publish and exact-root restore | Use the completed handle from the repository HTTP adapter |
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup, binary pagination and typed scope-sharded KvNamespace/registry codecs | Add scheduler cleanup invocation |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup plus typed producer-sharded QueueNamespace and registry codecs | Add DLQ effects and native polling scheduler |
@@ -84,8 +84,9 @@ single-flight FIFO publication, 100/200/400/1,000-ms storage retry, structured
 unknown outcomes and accepted-work drain without a permanent task per Cell.
 Its terminal shutdown closes node and per-Cell admission, drains ingress accepted
 before the shutdown marker, publishes accepted work, then closes every active
-SQLite handle and releases every owned control. SQL worker joining remains a
-server-owned lifecycle step after all runtime capabilities are dropped.
+SQLite handle and releases every owned control. It closes the shared worker pool
+and joins all fixed SQL threads before returning; direct pool shutdown rejects
+active Cells so it cannot bypass the authority-release order.
 Immutable catalog pages, CAS heads, concurrent merge, collision rejection,
 proof-before-control creation and local-session activation checks are implemented.
 Exact-root restore now reserves active-Cell admission before I/O, prepares the

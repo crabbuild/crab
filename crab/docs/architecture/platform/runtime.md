@@ -303,9 +303,9 @@ Per-Cell drain closes admission, resolves accepted publications, closes SQLite,
 then releases ownership. Node shutdown first closes node admission and runtime
 ingress, drains every message accepted before the shutdown marker, applies the
 same close-before-release ordering to all Cells, and returns only after every
-deactivation task has settled. The shutdown call intentionally does not claim to
-join the fixed SQL worker threads: `SqlWorkerPool` remains shared by runtime and
-handle clones, so server composition must drop those capabilities before joining
-workers. Fenced sessions only
+deactivation task has settled. It then closes the shared `SqlWorkerPool` and
+joins every fixed worker thread on Tokio's blocking pool; all pool clones remain
+closed. Direct pool shutdown rejects active Cells, preventing SQLite close from
+bypassing control release. Fenced sessions only
 finish proven replies and cleanup. If shutdown budget expires, unresolved clients
 receive unknown outcomes and the successor recovers origin state.

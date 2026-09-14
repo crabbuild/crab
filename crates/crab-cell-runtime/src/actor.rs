@@ -87,7 +87,12 @@ impl CellRuntime {
             .send(Message::Shutdown { reply })
             .await
             .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
+        let drain = response.await.map_err(|_| Error::RuntimeClosed)?;
+        let workers = self.inner.pool.shutdown().await;
+        match drain {
+            Err(error) => Err(error),
+            Ok(()) => workers,
+        }
     }
 
     /// Reports whether node-wide admission has entered its terminal drain.

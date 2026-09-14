@@ -57,6 +57,10 @@ pub enum Error {
     Capacity(&'static str),
     #[error("failed to start Cell SQL worker")]
     WorkerStart(#[source] Box<std::io::Error>),
+    #[error("failed to join Cell SQL worker supervisor")]
+    WorkerJoin(#[source] tokio::task::JoinError),
+    #[error("a Cell SQL worker panicked during shutdown")]
+    WorkerPanic,
     #[error("Cell runtime requires an active Tokio runtime")]
     RuntimeStart(#[source] tokio::runtime::TryCurrentError),
 }

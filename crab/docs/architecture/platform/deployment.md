@@ -287,8 +287,8 @@ never release its permits and continue running it in the background. Successors
 recover authoritative origin roots. VM supervisors use the same lifecycle.
 
 `CellRuntime::shutdown` now implements the Cell-local portion through SQLite
-close and control release. Server signal handling, readiness withdrawal,
-activity cancellation, the 110-second escalation and final SQL-worker join are
+close, control release and final SQL-worker join. Server signal handling,
+readiness withdrawal, activity cancellation and the 110-second escalation are
 still delivery work; the existence of the runtime method alone does not satisfy
 this process-level contract.
 
