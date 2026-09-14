@@ -25,6 +25,8 @@ the released push and read paths:
   concurrently, verifying every size, content, transaction, and base binding;
 - the executable clean-path test proves exactly four object-store operations,
   including advertisement: root GET, capsule PUT, capsule GET, and root PUT;
+- the checksum-qualified AWS S3 test proves exactly three operations, while
+  custom S3 endpoints and other providers retain mandatory readback;
 - the executable one-capsule read test proves exactly two object-store
   operations: root GET and capsule GET;
 - CAS-loser, expected-old mismatch, payload corruption, and lost-root-response
@@ -772,8 +774,9 @@ safe while omitted required bytes violate reconstruction.
 3. **Started:** add a transport request observer and executable budgets before
    wiring push. The readback path has an exact four-request unit gate; live
    provider gates remain.
-4. Implement verified-put capability negotiation and mandatory readback
-   fallback.
+4. **Started:** implement verified-put capability negotiation and mandatory
+   readback fallback. Official AWS S3 uses an explicit SHA-256 request checksum;
+   unqualified and custom endpoints retain readback. Live provider gates remain.
 5. Replace direct push publication with capsule upload plus root CAS.
 6. Implement checkpoint-pack passthrough and selected-object response-pack
    generation over capsule-aware locators.

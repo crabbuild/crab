@@ -24,13 +24,14 @@ pub async fn open_root(router: &StoreLayout<Store>) -> Result<RootSnapshot> {
     Ok(load_root(router).await?)
 }
 
-/// Publish one capsule after readback verification, then atomically advance the root.
+/// Publish one verified capsule, then atomically advance the root.
 ///
 /// The caller supplies the root snapshot retained from advertisement and must
 /// first prove authorization, exact Git graph closure, pack integrity,
 /// fast-forward policy, and every external content dependency against that
-/// snapshot. A clean attempt performs capsule PUT, capsule GET, and root CAS;
-/// together with [`open_root`] the complete push uses four object-store requests.
+/// snapshot. A clean attempt performs capsule PUT, optional capsule readback,
+/// and root CAS; together with [`open_root`] the complete push uses three
+/// requests for a checksum-qualified provider and four otherwise.
 pub async fn publish(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
@@ -39,7 +40,11 @@ pub async fn publish(
 ) -> Result<RootSnapshot> {
     validate_capsule_binding(&base, transaction, capsule)?;
     let (refs, peeled_refs) = apply_ref_edits(&base, transaction)?;
-    verify_capsule_after_upload(router, capsule).await?;
+    let capsule_path = router.request_minimal_capsule_path(capsule.hash());
+    router
+        .store()
+        .put_if_absent_verified(&capsule_path, capsule.bytes().clone())
+        .await?;
 
     let pointer = CapsulePointer::new(
         capsule.hash(),
@@ -124,27 +129,6 @@ fn apply_ref_edits(
     Ok((refs, peeled_refs))
 }
 
-async fn verify_capsule_after_upload(router: &StoreLayout<Store>, capsule: &Capsule) -> Result<()> {
-    let path = router.request_minimal_capsule_path(capsule.hash());
-    let created = router
-        .store()
-        .put_if_absent(&path, capsule.bytes().clone())
-        .await?;
-    if !created {
-        // put_if_absent accepts an existing object only after hashing its full body.
-        return Ok(());
-    }
-    let maximum = u64::try_from(capsule.bytes().len()).unwrap_or(u64::MAX);
-    let (stored, _) = router.store().get_with_etag_bounded(&path, maximum).await?;
-    if blake3::hash(&stored).to_hex().as_str() != capsule.hash() {
-        return Err(WriteError::CorruptObject {
-            path: path.to_string(),
-            reason: "uploaded capsule failed cryptographic readback".to_owned(),
-        });
-    }
-    Ok(())
-}
-
 async fn reconcile_root_update(
     router: &StoreLayout<Store>,
     base: &RootRecord,
@@ -188,7 +172,10 @@ mod tests {
 
     use bytes::Bytes;
     use crab_metadata::request_minimal::{CapsuleRefEdit, CapsuleSection, CapsuleSectionKind};
-    use crab_storage::{StorageObservation, StorageObserver, StorageOperation, StorageOutcome};
+    use crab_storage::{
+        ImmutableWriteVerification, StorageObservation, StorageObserver, StorageOperation,
+        StorageOutcome,
+    };
     use futures_util::stream::BoxStream;
     use object_store::{
         CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -354,6 +341,47 @@ mod tests {
                 StorageOperation::Get,
                 StorageOperation::Put,
                 StorageOperation::Get,
+                StorageOperation::Put,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn checksum_qualified_publication_uses_three_requests_including_root_open() {
+        let inner = Arc::new(InMemory::new());
+        let seed_store = Store::new(inner.clone());
+        let seed_router = StoreLayout::new(seed_store, "repositories/test".to_owned());
+        initialize(&seed_router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner)
+            .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
+            .with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        let base = open_root(&router).await.unwrap();
+        let transaction = transaction(&base, None, &"2".repeat(40));
+        let capsule = capsule(&transaction);
+
+        let published = publish(&router, base, &transaction, &capsule)
+            .await
+            .unwrap();
+
+        assert_eq!(published.record().root().generation(), 1);
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::Put,
                 StorageOperation::Put,
             ]
         );

@@ -61,5 +61,6 @@ pub use provider_store::{
 };
 pub use retry::{RetryClass, RetryPolicy, retry, retry_class};
 pub use store::{
-    ETag, MultipartUploadSource, StagedWrite, StorageObjectStream, StorageReadKind, Store,
+    ETag, ImmutableWriteVerification, MultipartUploadSource, StagedWrite, StorageObjectStream,
+    StorageReadKind, Store,
 };
