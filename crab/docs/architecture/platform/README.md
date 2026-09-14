@@ -132,14 +132,21 @@ typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
 publication path. Private peer routing and server runtime composition remain;
 KV, SQL, Queue and Workflow primitive handles are complete for local routing.
-The server now compiles a canonical repository module descriptor and
-its first migration, and `cells release inspect --json` emits those exact
-registry bytes from the built binary. `cells release prepare` now strict-creates
+The server now compiles and binds the first repository module slice: stable
+create-issue/create-comment commands, get-issue/get-comment queries, bounded
+codecs, and the schema that owns repository identity, sequences, issues and
+comments. Its integration test executes those typed operations through
+`CellClient`, proves exact request replay and a durable business rejection,
+deletes the first owner's complete local database, and reads the published rows
+after exact-root restoration by a new owner. `cells release inspect --json`
+emits those exact registry bytes from the built binary. `cells release prepare` now strict-creates
 or adopts the root's canonical tenant/application identity, uploads the exact
 digest-addressed descriptor, and conditionally publishes a canonical prepared
 release; `cells release status` reads that checked state. Compatibility analysis,
 activation, runtime lifecycle composition, including invoking the implemented
-terminal drain from server shutdown, and product route cutover remain.
+terminal drain from server shutdown, and product
+route cutover remain. Existing HTTP issue/comment routes still use the old
+object documents; the native module is not yet a user-visible storage path.
 
 ## Deliverable and contract precedence
 

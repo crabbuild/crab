@@ -190,126 +190,32 @@ range. All mutations use parameterized SQL and explicit transactions. Persist
 UTC timestamps using the current millisecond convention; use monotonic clocks
 for local deadlines. Timestamps do not establish transaction ordering.
 
-### Core schema example
+### Implemented schema v1
 
-This executable SQL illustrates the core transaction model. It is not a complete
-production migration: the domain inventory below defines additional tables and
-the implementation must supply their constraints and fixtures.
+The exact migration is
+[`0001_repository_identity.sql`](../src/cells/migrations/0001_repository_identity.sql);
+the registry hashes those bytes into the repository module digest. Do not copy a
+second executable schema into this design. Schema v1 currently contains:
 
-```sql
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    checksum TEXT NOT NULL,
-    applied_at_ms INTEGER NOT NULL
-) STRICT;
+| Table | Key | Purpose |
+| --- | --- | --- |
+| `repository_identity` | singleton `1` | 16-byte catalog repository UUID and checked application revision |
+| `repository_sequences` | kind | issue-number allocator, initially `('issue', 0)` |
+| `repository_issues` | number | author snapshot, title/body, state, version and timestamps |
+| `repository_comment_sequences` | issue number | independent checked comment allocator per issue |
+| `repository_issue_comments` | issue number, comment number | author snapshot, body, version and timestamps |
 
-CREATE TABLE repository_identity (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    repository_uuid TEXT NOT NULL UNIQUE,
-    app_revision INTEGER NOT NULL DEFAULT 0
-        CHECK (app_revision BETWEEN 0 AND 9007199254740991)
-) STRICT;
+All tables are `STRICT`. JavaScript-visible counters are checked against
+9,007,199,254,740,991. The foreign keys from comment state to issues use cascade
+deletion, although command handlers also verify parent existence explicitly so
+their business rejection does not depend on connection pragma state.
 
-CREATE TABLE sequences (
-    scope TEXT PRIMARY KEY,
-    last_value INTEGER NOT NULL
-        CHECK (last_value BETWEEN 0 AND 9007199254740991)
-) STRICT;
-
-CREATE TABLE requests (
-    scope TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    actor_issuer TEXT NOT NULL,
-    actor_subject TEXT NOT NULL,
-    request_hash BLOB NOT NULL CHECK (length(request_hash) = 32),
-    state TEXT NOT NULL CHECK (state IN ('pending', 'complete', 'conflict')),
-    response_status INTEGER,
-    response_json TEXT,
-    app_revision INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (scope, request_id),
-    CHECK (
-        (state = 'pending' AND response_status IS NULL AND response_json IS NULL)
-        OR
-        (state IN ('complete', 'conflict')
-         AND response_status IS NOT NULL AND response_json IS NOT NULL)
-    )
-) STRICT;
-
-CREATE TABLE issues (
-    number INTEGER PRIMARY KEY
-        CHECK (number BETWEEN 1 AND 9007199254740990),
-    request_id TEXT NOT NULL UNIQUE,
-    author_issuer TEXT NOT NULL,
-    author_subject TEXT NOT NULL,
-    author_name TEXT NOT NULL,
-    title TEXT NOT NULL,
-    body TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('open', 'closed')),
-    version INTEGER NOT NULL CHECK (version > 0),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
-) STRICT;
-
-CREATE TABLE issue_comments (
-    issue_number INTEGER NOT NULL REFERENCES issues(number),
-    number INTEGER NOT NULL CHECK (number > 0),
-    request_id TEXT NOT NULL,
-    author_issuer TEXT NOT NULL,
-    author_subject TEXT NOT NULL,
-    author_name TEXT NOT NULL,
-    body TEXT NOT NULL,
-    version INTEGER NOT NULL CHECK (version > 0),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (issue_number, number),
-    UNIQUE (issue_number, request_id)
-) STRICT;
-
-CREATE TABLE labels (
-    id INTEGER PRIMARY KEY CHECK (id > 0),
-    name TEXT NOT NULL,
-    normalized_name TEXT NOT NULL,
-    color TEXT NOT NULL,
-    description TEXT NOT NULL,
-    version INTEGER NOT NULL CHECK (version > 0),
-    deleted_at_ms INTEGER
-) STRICT;
-
-CREATE UNIQUE INDEX labels_live_name
-    ON labels(normalized_name) WHERE deleted_at_ms IS NULL;
-
-CREATE TABLE issue_labels (
-    issue_number INTEGER NOT NULL REFERENCES issues(number),
-    label_id INTEGER NOT NULL REFERENCES labels(id),
-    PRIMARY KEY (issue_number, label_id)
-) STRICT;
-
-CREATE TABLE publication_outbox (
-    operation_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL CHECK (kind IN ('pull_merge', 'release_tag')),
-    request_scope TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (
-        state IN ('prepared', 'publishing', 'reconciling', 'complete', 'conflict')
-    ),
-    ref_name TEXT NOT NULL,
-    expected_old_oid TEXT,
-    intended_new_oid TEXT NOT NULL,
-    intent_json TEXT NOT NULL,
-    receipt_json TEXT,
-    version INTEGER NOT NULL CHECK (version > 0),
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    UNIQUE (request_scope, request_id),
-    FOREIGN KEY (request_scope, request_id)
-        REFERENCES requests(scope, request_id)
-) STRICT;
-
-CREATE INDEX issues_state_number ON issues(state, number);
-CREATE INDEX issue_labels_label ON issue_labels(label_id, issue_number);
-CREATE INDEX outbox_work ON publication_outbox(state, created_at_ms, operation_id);
-```
+Runtime-owned `sys_requests` is the sole command deduplication ledger. Do not add
+a second repository `requests` table: `CellClient` binds the request ID to the
+module/command/codec/input digest and the actor stores the typed success or
+business rejection in the same transaction as domain state. Planned outbox rows
+reference their stable effect/operation identity and domain object, not a
+duplicated HTTP response cache.
 
 ### Remaining domain tables
 
@@ -321,7 +227,7 @@ CREATE INDEX outbox_work ON publication_outbox(state, created_at_ms, operation_i
 | Statuses | `commit_statuses` | Immutable status events, exact commit OID and context, deterministic latest selection |
 | Checks | `check_runs`, `check_outputs`, supported annotation rows | Existing state transitions, revision checks, bounded output and request replay |
 | Releases | `releases`, `release_assets`, tag/name claims and upload reservations | Tag identity, asset integrity, metadata tombstones, uniqueness rules |
-| Retry state | Imported reservation/claim representation plus `requests` | Preserve actor/content conflicts and allocated IDs even for incomplete operations |
+| Retry state | Offline mapping from imported reservations/claims into `sys_requests` outcomes | Preserve actor/content conflicts and allocated IDs even for incomplete operations |
 | Replication metadata | Managed capture control tables | Reserved names; never mistaken for user/domain tables |
 
 Separate issue and PR comment tables keep foreign keys concrete. Do not add
@@ -334,26 +240,32 @@ relational domain model.
 
 Within `BEGIN IMMEDIATE`:
 
-1. Look up `(scope = 'issues.create', request_id)`.
-2. If found, compare the actor and canonical request hash. Return the established
-   result or conflict; do not allocate again.
-3. Increment the issue sequence with a checked upper bound.
-4. Insert the issue, labels/assignments if accepted by that endpoint, and version.
-5. Increment `repository_identity.app_revision` once for the logical mutation.
-6. Insert the stable request result at that revision.
-7. Commit locally, capture, upload and publish through the barrier.
+1. The actor looks up request ID plus canonical command digest in `sys_requests`.
+   A matching outcome returns without invoking the handler; a different digest
+   is a request conflict and does not allocate.
+2. Open the application savepoint and validate actor/title/body again inside the
+   compiled handler.
+3. Increment `repository_sequences.last` for kind `issue` with a checked upper
+   bound and read the resulting number in the same outer transaction.
+4. Insert the issue and version 1, then increment
+   `repository_identity.app_revision` exactly once.
+5. Encode the typed result within the registered 80 KiB bound; release the
+   application savepoint and insert the `sys_requests` outcome and runtime
+   sequence.
+6. Commit locally, capture, upload and publish through the barrier. Return the
+   typed output and receipt only after control names that exact root.
 
-The canonical hash covers command kind, normalized validated payload, expected
-version where applicable and relevant domain identifiers. The row separately
-stores actor identity so another author reusing the same scope/ID gets a conflict.
-Do not include transient timestamps generated during a retry.
+The canonical digest covers Cell/incarnation identity, module, command ID, codec
+version, and the exact bounded input bytes. Because author identity is part of
+the input, another actor reusing the same request ID conflicts. Handler-generated
+timestamps are not input bytes and are never regenerated for an exact replay.
 
 ### Versioned edits and durable retries
 
 Optimistic edits use a predicate such as:
 
 ```sql
-UPDATE issues
+UPDATE repository_issues
 SET title = :title, body = :body, version = version + 1,
     updated_at_ms = :updated_at_ms
 WHERE number = :number AND version = :expected_version;

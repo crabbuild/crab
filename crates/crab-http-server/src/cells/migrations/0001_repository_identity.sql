@@ -4,3 +4,43 @@ CREATE TABLE repository_identity (
     app_revision INTEGER NOT NULL DEFAULT 0
         CHECK (app_revision BETWEEN 0 AND 9007199254740991)
 ) STRICT;
+
+CREATE TABLE repository_sequences (
+    kind TEXT PRIMARY KEY,
+    last INTEGER NOT NULL CHECK (last BETWEEN 0 AND 9007199254740991)
+) STRICT;
+
+INSERT INTO repository_sequences(kind, last) VALUES ('issue', 0);
+
+CREATE TABLE repository_issues (
+    number INTEGER PRIMARY KEY CHECK (number BETWEEN 1 AND 9007199254740991),
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    state INTEGER NOT NULL DEFAULT 0 CHECK (state IN (0, 1)),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
+) STRICT;
+
+CREATE TABLE repository_comment_sequences (
+    issue_number INTEGER PRIMARY KEY,
+    last INTEGER NOT NULL CHECK (last BETWEEN 1 AND 9007199254740991),
+    FOREIGN KEY (issue_number) REFERENCES repository_issues(number) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE repository_issue_comments (
+    issue_number INTEGER NOT NULL,
+    number INTEGER NOT NULL CHECK (number BETWEEN 1 AND 9007199254740991),
+    author_issuer TEXT NOT NULL,
+    author_subject TEXT NOT NULL,
+    author_name TEXT NOT NULL,
+    body TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),
+    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
+    PRIMARY KEY (issue_number, number),
+    FOREIGN KEY (issue_number) REFERENCES repository_issues(number) ON DELETE CASCADE
+) STRICT;

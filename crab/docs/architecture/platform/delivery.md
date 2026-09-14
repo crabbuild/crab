@@ -27,7 +27,8 @@ does not establish a working runtime.
 | [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared release CAS and checked status | Add compatibility inventory, node eligibility, Cell migration and activation CAS |
 | [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs) | Canonical bounded scalar/bytes/text/option encoding, strict full-input decoding and finite normalized floats | Add independent fixtures for each product codec and peer integration |
 | [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local command/query/Resolve capability, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts over the FIFO publication actor; typed KV, SQL, Queue and Workflow handles use it | Add authenticated peer transport and stale-owner retry |
-| [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
+| [HTTP cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs) | Static repository registry; typed issue/comment bindings; exact replay, durable rejection, LTX publication and source-loss restore integration test | Compose the runtime into server lifecycle, add private routing and hard-cut the authorized product routes |
+| [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage still serves product routes | Retain only as offline importer input after the coherent HTTP hard cut |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
 [host tests](../../../../crates/crab-ltx/tests/host_hooks.rs) and
@@ -224,11 +225,19 @@ manifest. `crab-cell-runtime` must not depend on server/auth/Git crates, and no
 application registration, module upload or handler replacement is accepted after
 `RegistryBuilder::finish`.
 
-In crab-http-server, construct the runtime from the existing resolved Store and
-register repository commands in cells.rs. Add private peer forwarding to the
-management router and preserve product HTTP authorization in app.rs. Wire one
-real comment create/read path to the runtime in the integration fixture before
-expanding the migration. Do not ship a selectable second persistence backend.
+The first server-side slice is implemented: `cells.rs` is the single registry
+composition root; its schema and stable codecs bind native issue/comment
+commands and queries. The integration fixture provisions a repository Cell,
+creates and replays an issue, records a missing-issue rejection, creates a
+comment, drains the first owner, removes its local database and restores both
+rows from the exact published root on a new owner.
+
+Next, construct the long-lived runtime from the existing resolved Store, add
+private peer forwarding to the management router and preserve product HTTP
+authorization in app.rs. Switch the complete issue/comment route group only
+after its offline importer and route-level recovery test exist. Do not ship a
+selectable second persistence backend or route some mutations to JSON while
+related reads use SQLite.
 
 Add tests:
 
@@ -267,8 +276,12 @@ execution, schema rejection, startup failure for missing or extra function
 bindings, canonical operation-digest fixtures, published typed execution,
 idempotent replay, durable rejection rollback and minimum receipts. Authenticated
 CellClient forwarding remains required. `crab-http-server` now supplies the
-first compiled repository descriptor/migration, and its binary command and tests
-prove release inspection returns the same deterministic registry bytes.
+first compiled repository implementation, including migration, descriptors,
+typed codecs and bindings. Its runtime test
+`repository_commands_publish_replay_reject_and_restore_from_exact_root` proves
+native issue/comment mutation, replay, rejection and source-loss recovery; its
+codec test pins exact bytes for all four operation input/output pairs; its binary
+command and inspection tests prove release bytes remain deterministic.
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.
 Pin independent command/input/output fixtures for every registered codec version.

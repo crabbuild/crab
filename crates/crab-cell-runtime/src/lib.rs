@@ -40,6 +40,7 @@ pub use client::{
 };
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
+pub use crab_ltx::{CellReplica, Limits as ReplicaLimits};
 pub use effects::{
     EffectClaim, EffectIntent, EffectLeaseOutcome, EffectState, EffectTokenSource,
     InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,

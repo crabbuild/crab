@@ -46,9 +46,13 @@ loss, process kill, independent CRC/format vectors and byte-identical
 snapshot/compaction recovery. Remote tests additionally cover concurrent/stale
 CAS, malformed indexes/heads, range corruption and paged SQLite. A real RustFS
 round trip covers publication, source loss, SQL readback and remote compaction.
-This is library-level evidence only. No HTTP route
-currently calls `ManagedDb`; application JSON persistence, Git publication and
-browser behavior above remain unchanged. See [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
+The server's static repository module now calls the managed runtime indirectly
+through typed `CellClient` commands and queries. Its schema owns repository
+identity, issue/comment sequences and rows; an integration test proves replay,
+durable rejection, LTX publication, full first-owner local deletion and exact-root
+readback on a second owner. This is still below the product route: no HTTP route
+currently calls that module, so application JSON persistence, Git publication
+and browser behavior above remain unchanged. See [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 
 ### Existing tests to preserve or evolve
 

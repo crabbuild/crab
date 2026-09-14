@@ -8,14 +8,11 @@ runtime plugin loader or public primitive SDK.
 
 ## Compile-time application composition
 
-`crab-http-server` is the sole composition root. The target source layout is:
+`crab-http-server` is the sole composition root. The current source layout is:
 
 ```text
 crates/crab-http-server/src/cells.rs
 crates/crab-http-server/src/cells/repository.rs
-crates/crab-http-server/src/cells/commands.rs
-crates/crab-http-server/src/cells/queries.rs
-crates/crab-http-server/src/cells/activities.rs
 crates/crab-http-server/src/cells/migrations/*.sql
 ```
 
@@ -31,14 +28,20 @@ pub trait CellModule: Send + Sync + 'static {
     fn register(self, registry: &mut RegistryBuilder) -> Result<(), RegistryError>;
 }
 
-pub(crate) fn repository_registry() -> Result<Registry, RegistryError> {
-    let mut registry = Registry::builder();
-    registry.register(RepositoryModule)?;
-    registry.register(QueueModule)?;
-    registry.register(WorkflowModule)?;
-    registry.finish()
+pub(crate) fn compiled_registry() -> Result<Registry, RegistryError> {
+    let mut builder = RegistryBuilder::new(BuildDescriptor {
+        source_revision: source_revision().to_owned(),
+        cargo_lock_digest: digest(include_bytes!("../../../Cargo.lock")),
+    });
+    builder.register(RepositoryModule)?;
+    builder.finish()
 }
 ```
+
+Primitive registries are reusable runtime mechanics; they are not automatically
+part of the product release. Add a KV, Queue or Workflow module to this function
+only with a concrete Crab route/activity caller, its namespace and migration,
+and the corresponding hard-cutover data plan.
 
 `ModuleDescriptor` contains the module's stable namespace IDs, migration bytes
 and digests, command/query IDs and codec versions, workflow definition digests,
@@ -62,12 +65,37 @@ overflow; encoding normalizes negative zero while decoding rejects its
 non-canonical bit pattern. Generic `Command`/`Query` registration uses
 monomorphized decode/execute/encode trampolines, with no raw byte-handler
 registration escape hatch. The implemented local `CellClient` covers canonical
-operation-digest integration and the actor path. Authenticated peer forwarding,
-bounded stale-owner retry and the server composition root remain to implement.
-Typed local SQL, KV, Queue and Workflow capabilities are implemented. The server
-now compiles its repository descriptor and initial identity migration through
-this registry and exposes the exact canonical bytes through the built-binary
-release inspection command.
+operation-digest integration and the actor path. Authenticated peer forwarding
+and bounded stale-owner retry remain to implement. Typed local SQL, KV, Queue
+and Workflow capabilities are implemented. The server composition root now
+compiles and binds create-issue/create-comment commands and get-issue/get-comment
+queries with its repository identity/sequence/issue/comment migration. A server
+integration test drives those bindings through the runtime, publishes each
+decision through LTX, removes the first local SQLite database and restores the
+same records under a second owner. The built-binary release inspection command
+exposes the resulting exact canonical registry bytes.
+
+The currently assigned repository operation inventory is fixed below. IDs are
+scoped independently to commands and queries; a later operation must use a new
+ID or a new codec version and retain any version referenced by authoritative
+roots during rollout.
+
+| Kind | ID | Rust type | Input bound | Output bound | Transaction effect |
+| --- | ---: | --- | ---: | ---: | --- |
+| command | 1 | `CreateIssue` | 80 KiB | 80 KiB | Allocate issue number, insert row, advance app revision |
+| command | 2 | `CreateComment` | 80 KiB | 80 KiB | Reject if issue is absent; otherwise allocate number, insert row, advance app revision |
+| query | 1 | `GetIssue` | 8 B | 80 KiB | Primary-key read |
+| query | 2 | `GetComment` | 16 B | 80 KiB | `(issue, number)` primary-key read |
+
+All four use codec version 1 and schema version 1. Issue/comment numbers and
+versions are positive integers no larger than 9,007,199,254,740,991. The
+initializer writes the catalog repository UUID to the singleton identity row;
+handlers fail the complete application savepoint if that row is missing or its
+application revision is exhausted. The durable missing-issue rejection does not
+consume a comment number or advance the application revision, but does advance
+the runtime command sequence and therefore carries a receipt.
+One exact byte fixture for every command input/output and query input/output
+pins codec v1 independently of descriptor construction and runtime dispatch.
 
 The trait is a source-level interface, not a stable ABI. Modules use normal
 Cargo dependencies and are monomorphized or privately type-erased inside the
