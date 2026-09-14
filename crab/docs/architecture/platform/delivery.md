@@ -23,6 +23,7 @@ does not establish a working runtime.
 | [workflow.rs](../../../../crates/crab-cell-runtime/src/workflow.rs) | Normative schema, pinned definitions, deterministic start/signal/timer transitions, cancellation, bounded action persistence, published activity claims, leases, retry/completion and terminal cleanup | Add effects, native activity supervision, registry dispatch and scheduler polling |
 | [effects.rs](../../../../crates/crab-cell-runtime/src/effects.rs) | Stable source effect IDs/digests, bounded claim/lease/retry/delivery, target inbox dedup/savepoint isolation and sender/inbox cleanup horizons | Add Workflow/Queue adapters, compiled codecs, authenticated peer delivery and native supervision |
 | [scheduler.rs](../../../../crates/crab-cell-runtime/src/scheduler.rs) | Derives the earliest durable work/lease/expiry/retention deadline inside bootstrap and every command transaction; publication binds it to the exact pending root | Add catalog shard assignment/scanning and bounded idempotent Tick dispatch |
+| [registry.rs](../../../../crates/crab-cell-runtime/src/registry.rs) | Startup-only static module registration, migration/schema/namespace validation, exact descriptor/function inventory matching, canonical module/release digests and transaction-scoped compiled dispatch | Add typed WireValue handlers, CellClient routing and server composition/release inspection |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -244,6 +245,12 @@ Add tests:
 - `native_watchdog_fences_without_recycling_worker_permits`: block native code,
   expire its budget, verify no further admission or premature permit release;
   unblock it for test cleanup and prove its tentative writes never publish.
+
+Current registry coverage in `crates/crab-cell-runtime/tests/registry.rs` proves
+registration-order-independent release bytes, bounded compiled command/query
+execution, schema rejection, and startup failure for missing or extra function
+bindings. Typed codec fixtures, CellClient forwarding and built-binary release
+inspection remain required.
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.
 Pin independent command/input/output fixtures for every registered codec version.

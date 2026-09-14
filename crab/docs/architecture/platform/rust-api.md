@@ -46,6 +46,17 @@ function. `finish` sorts and validates descriptors, rejects missing or extra
 bindings and duplicate IDs, and produces the canonical release bytes. It must
 fail readiness if the runtime registry and release descriptor differ.
 
+Implementation status: `crab-cell-runtime::RegistryBuilder` now registers static
+`CellModule` descriptors and compiled command/query function pointers, then
+freezes them into an immutable `Registry`. `finish` rejects descriptor/binding
+drift, duplicate identifiers, invalid migration digests/schema coverage,
+unbounded codec declarations, invalid namespace/effect/DLQ topology, and
+duplicate workflow/activity inventory. Registration order produces identical
+canonical release bytes, module code digests and release digest. Dispatch uses
+`CommandContext`/`QueryContext`, which expose bounded authorized SQL and metadata
+without a raw connection accessor. Typed `WireValue`, typed handler wrappers,
+`CellClient` routing and the server composition root remain to implement.
+
 The trait is a source-level interface, not a stable ABI. Modules use normal
 Cargo dependencies and are monomorphized or privately type-erased inside the
 registry. No `libloading`, dynamic library, Wasmtime, V8, subprocess protocol or

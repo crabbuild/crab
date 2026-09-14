@@ -10,6 +10,8 @@ pub enum Error {
     Control(&'static str),
     #[error("invalid Cell catalog: {0}")]
     Catalog(&'static str),
+    #[error("invalid compiled Cell registry: {0}")]
+    Registry(&'static str),
     #[error("Cell ID collides with a different catalog entry")]
     CatalogCollision,
     #[error("Cell catalog shard reached its 65,536-entry limit")]

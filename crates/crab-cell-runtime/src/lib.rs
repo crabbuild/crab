@@ -16,6 +16,7 @@ mod identity;
 mod kv;
 mod publication;
 mod queue;
+mod registry;
 mod scheduler;
 mod schema;
 mod sql;
@@ -50,6 +51,11 @@ pub use queue::{
     QueueLeaseAction, QueueLeaseOutcome, QueueMessage, QueueSendOutcome, QueueSendRequest,
     QueueState, QueueTokenSource, SystemQueueTokens, install_queue_schema, queue_apply_lease,
     queue_claim, queue_cleanup_expired, queue_send, queue_validate_claim,
+};
+pub use registry::{
+    BuildDescriptor, CellModule, CommandContext, CommandHandler, CommandInvocation,
+    MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor, QueryContext,
+    QueryHandler, QueryInvocation, Registry, RegistryBuilder, RegistryError,
 };
 pub use scheduler::scheduler_next_due_ms;
 pub use schema::{install_runtime_schema, verify_runtime_schema};

@@ -36,7 +36,7 @@ that exits late cannot publish its tentative commit. Sparse page-I/O deadline
 propagation and automatic fenced recovery,
 streaming initial directory construction and directory-backed capture checksums,
 shared directory caching, prepared compaction/bundles,
-Workflow activity/effect supervision, scheduler scanning/Tick, typed registry, HTTP cutover and capacity
+Workflow activity/effect supervision, scheduler scanning/Tick, typed codecs/CellClient, HTTP cutover and capacity
 qualification remain incomplete. The scoped KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -65,6 +65,14 @@ retention deadline from SQLite inside the same transaction. The runtime binds
 that summary to the pending LTX cut and publishes it in control; application
 handlers can no longer omit or spoof scheduler state. Catalog scanning and
 bounded Tick execution still remain.
+The startup-only compiled registry now validates module names, exact migration
+bytes/digests and contiguous schema ranges, command/query codec ranges and byte
+limits, namespace topology/effect targets/DLQ cycles, workflow/activity
+inventories, and exact descriptor-to-function binding equality. It produces
+order-independent canonical release bytes, module code digests and one release
+digest, then exposes only immutable command/query dispatch through transaction-
+scoped contexts. Typed `WireValue`, `CellClient`, server composition and release
+inspection remain.
 
 ## Deliverable and contract precedence
 
