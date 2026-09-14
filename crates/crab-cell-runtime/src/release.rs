@@ -2,7 +2,10 @@ use bytes::Bytes;
 use crab_storage::{CellStorageLayout, ETag, StorageError};
 use serde::{Deserialize, Serialize};
 
-use crate::{ApplicationIdentity, Digest, Error, RequestId, Result, identity::encode_hex};
+use crate::{
+    ApplicationIdentity, CatalogEntry, CatalogProof, CellCatalog, Digest, Error, Registry,
+    RequestId, Result, identity::encode_hex,
+};
 
 const MAX_RELEASE_BYTES: u64 = 8 * 1024;
 const MAX_DESCRIPTOR_BYTES: u64 = 256 * 1024;
@@ -305,6 +308,53 @@ impl ReleaseStore {
         Ok(descriptor.to_vec())
     }
 
+    /// Publishes one catalog entry under an exact ready or activating release.
+    ///
+    /// A failed post-publication recheck leaves the immutable catalog entry
+    /// visible, so a later activation must admit it before becoming ready.
+    pub async fn provision(
+        &self,
+        catalog: &CellCatalog,
+        registry: &Registry,
+        entry: CatalogEntry,
+    ) -> Result<CatalogProof> {
+        if !catalog.matches_identity(self.identity) {
+            return Err(Error::Release(
+                "catalog and release application identities differ",
+            ));
+        }
+        let before = self
+            .load()
+            .await?
+            .ok_or(Error::Release("release is not ready for provisioning"))?
+            .record;
+        let selected = selected_provision_release(&before)?;
+        if selected != registry.release_digest()
+            || self.descriptor(selected).await? != registry.release_bytes()
+            || !registry.supports_cell(
+                entry.namespace(),
+                entry.role(),
+                entry.initial_code(),
+                entry.initial_schema(),
+            )
+        {
+            return Err(Error::Release(
+                "compiled release does not support the catalog entry",
+            ));
+        }
+
+        let proof = catalog.provision(entry).await?;
+        let after = self
+            .load()
+            .await?
+            .ok_or(Error::Release("release disappeared during provisioning"))?
+            .record;
+        if !provision_release_continues(&before, &after, selected) {
+            return Err(Error::Release("release changed during provisioning"));
+        }
+        Ok(proof)
+    }
+
     /// CASes one prepared release into its resumable activation phase.
     ///
     /// The caller must complete fleet and Cell compatibility admission before
@@ -480,6 +530,39 @@ fn completion_retry(record: &ReleaseRecord, expected_revision: u64, operation: R
         && expected_revision
             .checked_add(1)
             .is_some_and(|revision| record.revision == revision)
+}
+
+fn selected_provision_release(record: &ReleaseRecord) -> Result<Digest> {
+    match record.state {
+        ReleaseState::Ready => record
+            .current
+            .filter(|current| Some(*current) == record.desired)
+            .ok_or(Error::Release("ready release has no current descriptor")),
+        ReleaseState::Activating => record.desired.ok_or(Error::Release(
+            "activating release has no desired descriptor",
+        )),
+        _ => Err(Error::Release("release is not ready for provisioning")),
+    }
+}
+
+fn provision_release_continues(
+    before: &ReleaseRecord,
+    after: &ReleaseRecord,
+    selected: Digest,
+) -> bool {
+    if before == after {
+        return true;
+    }
+    before.state == ReleaseState::Activating
+        && after.state == ReleaseState::Ready
+        && before
+            .revision
+            .checked_add(1)
+            .is_some_and(|revision| after.revision == revision)
+        && after.operation == before.operation
+        && after.current == Some(selected)
+        && after.desired == Some(selected)
+        && after.desired_image == before.desired_image
 }
 
 fn validate_image(image: &str) -> Result<()> {
@@ -767,5 +850,31 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn provisioning_recheck_accepts_only_the_exact_activation_completion() {
+        let (_, _, digest) = fixture();
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+        );
+        let before = ReleaseRecord {
+            application: identity.application(),
+            revision: 2,
+            current: None,
+            desired: Some(digest),
+            desired_image: format!("sha256:{}", "a".repeat(64)),
+            operation: RequestId::from_bytes([3; 16]),
+            state: ReleaseState::Activating,
+        };
+        let mut completed = before.clone();
+        completed.revision = 3;
+        completed.current = Some(digest);
+        completed.state = ReleaseState::Ready;
+        assert!(provision_release_continues(&before, &completed, digest));
+
+        completed.operation = RequestId::from_bytes([4; 16]);
+        assert!(!provision_release_continues(&before, &completed, digest));
     }
 }

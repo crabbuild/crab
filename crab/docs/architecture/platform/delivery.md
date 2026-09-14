@@ -24,10 +24,10 @@ does not establish a working runtime.
 | [effects.rs](../../../../crates/crab-cell-runtime/src/effects.rs) | Stable source effect IDs/digests, bounded claim/lease/retry/delivery, target inbox dedup/savepoint isolation and sender/inbox cleanup horizons | Add Workflow/Queue adapters, compiled codecs, authenticated peer delivery and native supervision |
 | [scheduler.rs](../../../../crates/crab-cell-runtime/src/scheduler.rs) | Derives the earliest durable work/lease/expiry/retention deadline inside bootstrap and every command transaction; publication binds it to the exact pending root | Add catalog shard assignment/scanning and bounded idempotent Tick dispatch |
 | [registry.rs](../../../../crates/crab-cell-runtime/src/registry.rs) | Startup-only static module registration, migration/schema/namespace validation, exact descriptor/function/Workflow-definition/native-activity inventory matching, canonical module/release digests, typed Command/Query trampolines, transaction-scoped compiled dispatch, async activity dispatch and exact namespace/role/code/schema support checks | Add retained old-code dispatch and remote dispatch support |
-| [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared CAS, verified descriptor reads and operation-bound resumable activating/ready transitions | Add eligible-node quorum, Cell migration progress and maintenance activation |
+| [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared CAS, verified descriptor reads, operation-bound resumable activating/ready transitions and release-aware catalog provisioning with post-publication operation recheck | Add eligible-node quorum, Cell migration progress and maintenance activation |
 | [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs) | Canonical bounded scalar/bytes/text/option encoding, strict full-input decoding and finite normalized floats | Add independent fixtures for each product codec and peer integration |
 | [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local command/query/Resolve capability, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts over the FIFO publication actor; typed KV, SQL, Queue and Workflow handles use it | Add authenticated peer transport and stale-owner retry |
-| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs) | Static repository registry; typed issue/comment bindings; exact replay, durable rejection and source-loss restore; process-session runtime lifecycle; compatible activation scans all catalog/control pairs and publishes the exact compiled descriptor current | Add release-aware provisioning fence, release/current startup gate, migration/node eligibility, resource-derived local Cell configuration, private routing and hard-cut the authorized product routes |
+| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs) | Static repository registry; typed issue/comment bindings; exact replay, durable rejection and source-loss restore; process-session runtime lifecycle; compatible activation scans all catalog/control pairs and publishes the exact compiled descriptor current; release-aware provisioning is proven against the real repository registry | Add release/current startup gate, migration/node eligibility, resource-derived local Cell configuration, private routing and hard-cut the authorized product routes |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage still serves product routes | Retain only as offline importer input after the coherent HTTP hard cut |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -330,11 +330,13 @@ and explicit old/new definition dispatch, not language-engine behavior.
 ## Work package 6: releases, cutover and operations
 
 Embedded release descriptors, compile-time registry validation, read-only
-inspection, immutable root identity, descriptor upload, prepared-state CAS and
-status are implemented in the existing `crab-http-server` binary. Continue with
-compatibility analysis, activation, namespace provisioning, migration and drain
-procedures from deployment.md, reusing its image build, storage/auth construction,
-health routes and metrics exporter.
+inspection, immutable root identity, descriptor upload, prepared/activating/ready
+CAS, exact-compatible inventory scans, status and release-aware namespace
+provisioning are implemented. The provision path verifies descriptor bytes and
+initial namespace contract before its catalog write, then rechecks the exact
+release operation after publication. Continue with migration, eligible-node
+quorum and maintenance/drain procedures from deployment.md, reusing the existing
+image build, storage/auth construction, health routes and metrics exporter.
 
 Add `migration_digest_conflict_blocks_activation`,
 `lost_activation_cas_reconciles_published_cells`,

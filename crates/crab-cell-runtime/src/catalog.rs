@@ -201,6 +201,10 @@ impl CellCatalog {
         }
     }
 
+    pub(crate) fn matches_identity(&self, identity: crate::ApplicationIdentity) -> bool {
+        self.tenant == identity.tenant() && self.application == identity.application()
+    }
+
     /// Adds one entry with immutable-page-before-head publication ordering.
     pub async fn provision(&self, entry: CatalogEntry) -> Result<CatalogProof> {
         entry.validate(self.tenant, self.application)?;

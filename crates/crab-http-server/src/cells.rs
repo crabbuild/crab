@@ -379,6 +379,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_fence_admits_selected_code_and_blocks_prepared_provisioning() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("release-provision"),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let operation = RequestId::from_bytes([3; 16]);
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                operation,
+            )
+            .await
+            .unwrap();
+        let activating = releases
+            .start_activation(prepared.revision(), operation)
+            .await
+            .unwrap();
+        let catalog = CellCatalog::new(layout, identity.tenant());
+        let target = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            &[5; 16],
+        )
+        .unwrap();
+        let entry = CatalogEntry::new(
+            &target,
+            CatalogRole::Repository,
+            registry.module_code(RepositoryModule::NAME).unwrap(),
+            1,
+        )
+        .unwrap();
+        let proof = releases
+            .provision(&catalog, &registry, entry.clone())
+            .await
+            .unwrap();
+        assert_eq!(proof.entry(), &entry);
+
+        let ready = releases
+            .complete_activation(activating.revision(), operation)
+            .await
+            .unwrap();
+        releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                ready.revision(),
+                &format!("sha256:{}", "b".repeat(64)),
+                RequestId::from_bytes([4; 16]),
+            )
+            .await
+            .unwrap();
+        let blocked = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            &[6; 16],
+        )
+        .unwrap();
+        assert!(
+            releases
+                .provision(
+                    &catalog,
+                    &registry,
+                    CatalogEntry::new(
+                        &blocked,
+                        CatalogRole::Repository,
+                        registry.module_code(RepositoryModule::NAME).unwrap(),
+                        1,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .is_err()
+        );
+        assert!(catalog.lookup(blocked.cell_id()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn repository_commands_publish_replay_reject_and_restore_from_exact_root() {
         let registry = Arc::new(compiled_registry().unwrap());
         let tenant = TenantId::from_bytes([1; 16]);

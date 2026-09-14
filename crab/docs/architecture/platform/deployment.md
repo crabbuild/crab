@@ -213,11 +213,17 @@ compatible inventories; old-code/schema migration and eligible-node quorum remai
 target behavior. Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
 
-No production Cell-provisioning path exists yet. Before route cutover, provisioning
-must reload release state, admit only the desired initial code/schema while state
-is `activating`, and recheck the same operation after publishing the catalog head.
-That protocol closes the interval between the activator's final shard revision
-check and ready CAS; revision rechecks alone cannot provide cross-object atomicity.
+`ReleaseStore::provision` implements the release-aware catalog boundary. It first
+requires the exact compiled descriptor bytes selected by `ready.current` or
+`activating.desired`, verifies the requested namespace/role/initial code/schema,
+then publishes the immutable page and catalog head. It reloads release state after
+publication and accepts only the identical record or the same operation's exact
+`activating → ready` successor. Any other change fails before control creation;
+the already-visible catalog entry remains activation input and cannot be hidden.
+This closes the interval between the activator's final shard revision check and
+ready CAS without pretending the two objects share a transaction. Revision
+rechecks alone are insufficient. No production Cell-creation route invokes this
+boundary yet; route cutover must use it before `CellAuthority::create_initial`.
 
 release.json <=8 KiB: version=1, application, revision as u64 decimal string,
 current/desired descriptor digest or null, desired_image, operation ID hex16,

@@ -153,12 +153,16 @@ operation-bound release through `prepared → activating → ready`, scans all 2
 catalog shards, checks every live control or bootstrap pair against the compiled
 namespace/role/code/schema inventory, rejects an unstable catalog snapshot and
 resumes exact retries without a new operation. The initial empty/exact-compatible
-activation path is proven against real RustFS. Release-aware provisioning that
-closes the final catalog-recheck/release-CAS race must land before any product
-route can create Cells; no such route exists yet. Node eligibility, old-code/schema
-migration, persistent Cell-directory configuration, product routing and capacity
-qualification remain. Existing HTTP issue/comment routes still use the old object
-documents; the native module is not yet a user-visible storage path.
+activation path is proven against real RustFS. `ReleaseStore::provision` now admits
+only the exact compiled descriptor selected by `ready.current` or
+`activating.desired`, publishes the catalog entry, and reloads the same release
+operation before returning its proof. It accepts only the exact activation-to-ready
+successor, so a late catalog publication cannot introduce unsupported initial
+code/schema across the activator's final scan. No product route creates Cells yet.
+Node eligibility, old-code/schema migration, persistent Cell-directory
+configuration, product routing and capacity qualification remain. Existing HTTP
+issue/comment routes still use the old object documents; the native module is not
+yet a user-visible storage path.
 
 ## Deliverable and contract precedence
 
