@@ -24,4 +24,14 @@ pub enum Error {
     PendingPublication,
     #[error("Cell executor is fenced pending origin recovery")]
     Fenced,
+    #[error("Cell runtime worker pool is closed")]
+    RuntimeClosed,
+    #[error("Cell is not active on its assigned worker")]
+    CellNotActive,
+    #[error("Cell is already active on its assigned worker")]
+    CellAlreadyActive,
+    #[error("Cell runtime capacity exhausted: {0}")]
+    Capacity(&'static str),
+    #[error("failed to start Cell SQL worker")]
+    WorkerStart(#[source] Box<std::io::Error>),
 }

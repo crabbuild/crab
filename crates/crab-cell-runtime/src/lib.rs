@@ -12,6 +12,7 @@ mod executor;
 mod identity;
 mod publication;
 mod schema;
+mod worker;
 
 pub use authority::{CellAuthority, VersionedControl};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
@@ -25,3 +26,4 @@ pub use identity::{
 };
 pub use publication::CellPublisher;
 pub use schema::{install_runtime_schema, verify_runtime_schema};
+pub use worker::{SqlWorkerPool, WorkerExecution};

@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema plus a single-Cell request-ledger executor that retains cuts/results through exact prepared-root confirmation | Add catalog proof, bounded worker/mailbox actor, CAS reconciliation and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, exact-root publication reconciliation, and a fixed bounded SQL worker pool that retains accepted commands/cuts after caller cancellation | Add catalog proof, per-Cell mailbox/publication supervision, later-root resolution and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -55,13 +55,15 @@ Identity derivation, strict control encoding, transition predicates, ETag update
 runtime.sql installation and the synchronous command-ledger executor are
 implemented. The executor runs application changes inside a savepoint, records
 success or rejection once, captures post-commit cuts, blocks later commands and
-releases the result only after the exact bound root is confirmed. Complete catalog
-proof, the bounded worker/mailbox actor and publication/CAS reconciliation. Enforce
-the bounded worker/mailbox actor and later-root request resolution. Exact-root
-lost-response reconciliation and renewal-token refresh are implemented without
-SQL replay. Enforce the remaining runtime.md timing, cancellation and panic
-supervision rules. All transitions use the existing Store conditional primitives,
-preserving sources.
+releases the result only after the exact bound root is confirmed. The fixed SQL
+worker layer is also implemented: 1-16 OS threads, 256-command bounded shard
+queues, stable Cell-ID routing, a node-wide 10,000-Cell admission ceiling, and
+continued execution after an accepted caller is cancelled. Exact-root lost-response
+reconciliation and renewal-token refresh are implemented without SQL replay.
+Complete catalog proof, per-Cell byte/request mailboxes, asynchronous publication
+coordination, later-root request resolution, and the remaining runtime.md timing,
+cancellation and panic supervision rules. All transitions use the existing Store
+conditional primitives, preserving sources.
 
 Add `crates/crab-cell-runtime/tests/publication.rs`:
 
@@ -75,6 +77,17 @@ Add `crates/crab-cell-runtime/tests/publication.rs`:
   supervisor completes or fences, and memory accounting remains reserved.
 - `business_rejection_rolls_back_effects_but_records_outcome`: savepoint rollback
   preserves only the rejection/dedup record after publication.
+
+Current worker coverage is in `crates/crab-cell-runtime/tests/workers.rs`:
+
+- `fixed_workers_own_execute_prepare_confirm_and_dedup` proves worker ownership,
+  pending-cut retention, exact-root confirmation, replay dedup and drained removal.
+- `cancelled_waiter_does_not_cancel_an_accepted_sql_command` aborts the awaiting
+  Tokio task after handler entry and proves the worker still commits and retains
+  its pending publication for later preparation and confirmation.
+- `active_cell_admission_is_global_and_released_after_drain` places Cells on
+  different worker shards and proves the node-wide ceiling is returned only by
+  a completed drain.
 
 Exit: two local runtime processes against isolated RustFS pass counter increment,
 owner kill, full source-directory removal and query recovery.

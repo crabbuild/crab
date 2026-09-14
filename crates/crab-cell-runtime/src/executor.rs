@@ -71,6 +71,7 @@ impl StoredOutcome {
 }
 
 /// Locally committed command retained until immutable upload and control CAS.
+#[derive(Clone)]
 pub struct PendingCommit {
     identity: MutationIdentity,
     operation_digest: Digest,
@@ -349,6 +350,10 @@ impl CellExecutor {
 
     pub(crate) fn fence(&mut self) {
         self.fenced = true;
+    }
+
+    pub(crate) fn drained(&self) -> bool {
+        self.pending.is_none() && !self.fenced
     }
 }
 

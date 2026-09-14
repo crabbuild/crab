@@ -8,8 +8,11 @@ Implementation status: `CellExecutor` implements mutation lifetime checks,
 logical-clock advancement, post-commit capture ownership, prepared-root binding
 and exact-root confirmation. `CellPublisher` performs immutable preparation,
 control CAS, exact-root reconciliation after a lost response, and safe renewal
-refresh without SQL replay. The node-wide mailbox actor, deadline/watchdog,
-later-root request resolution and recovery supervisor remain to implement.
+refresh without SQL replay. `SqlWorkerPool` provides fixed worker ownership,
+bounded shard queues, stable Cell routing, global activation admission, and
+cancellation-safe completion of accepted SQL commands. The per-Cell mailbox,
+publication coordinator integration, deadline/watchdog, later-root request
+resolution and recovery supervisor remain to implement.
 
 ## Rust interfaces and ownership
 
@@ -195,6 +198,24 @@ this can affect every Cell in it. Do not detach blocked work and recycle permits
 Native handlers must not perform blocking network I/O or unbounded computation.
 The runtime fences before cleanup on unwind; panic=abort uses normal source-loss
 recovery. Neither policy turns a panic into a business rejection.
+
+The implemented `SqlWorkerPool` is the first half of this contract. Construction
+accepts one through sixteen workers and one through 10,000 active Cells. Each OS
+thread owns a `HashMap<CellId, CellExecutor>` and consumes a Tokio MPSC channel
+with capacity 256 through `blocking_recv`; no Tokio runtime is created on the
+worker. The first eight Cell-ID bytes select the worker, so activation and every
+later command use the same connection owner. A node-global atomic reservation is
+acquired before activation enters a queue and is released only when activation
+fails, the fully drained Cell is deactivated, or the pool closes. Dropping an
+awaiting task can discard only its oneshot receiver: the queued command, handler,
+commit, captured cuts and pending publication remain worker-owned.
+
+This worker queue is deliberately not the public/per-Cell mailbox limit. The
+actor layer must still enforce 64 requests and 8 MiB per Cell before dispatch,
+hold byte permits across publication, multiplex preparation/CAS without blocking
+the SQL worker, and stop dispatch after the watchdog fences a Cell. It must use
+`pending`, `bind_prepared` and `confirm_published` to drive the existing exact-root
+publication state machine; direct access to worker-owned executors is forbidden.
 
 Drain closes admission, resolves accepted publications, captures/publishes any
 checkpoint cuts, closes SQLite, then releases ownership. Fenced sessions only
