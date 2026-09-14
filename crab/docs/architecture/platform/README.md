@@ -26,7 +26,10 @@ close the SQL worker before conditionally releasing control ownership to `Idle`.
 The dispatcher now renews idle owners through one bounded node-level scanner;
 strict CAS reconciliation accepts an exact lost response, and an observed
 takeover fences the old executor. Long immutable-root preparation interleaves
-the same renewals. SQL/native deadlines, takeover acquisition and fenced recovery,
+the same renewals. Idle acquisition reserves local capacity before its owner CAS;
+active takeover requires an exact control remain unchanged for 15 seconds, then
+CASes the new owner before downloading and restoring the root. SQL/native
+deadlines and automatic fenced recovery,
 streaming directory and checksum updates, prepared compaction/bundles,
 primitives, HTTP cutover and capacity qualification remain incomplete.
 

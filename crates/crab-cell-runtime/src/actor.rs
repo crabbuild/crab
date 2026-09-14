@@ -18,8 +18,9 @@ pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
 use crate::{
-    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, MutationIdentity,
-    Resolution, SessionId, SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
+    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, MutationIdentity, Owner,
+    Resolution, SessionId, SqlWorkerPool, StoredOutcome, Transition, VersionedControl,
+    WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
@@ -28,6 +29,7 @@ const CELL_REQUESTS: usize = 64;
 const CELL_BYTES: usize = 8 * 1024 * 1024;
 const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_RENEWALS_IN_FLIGHT: usize = 32;
+const TAKEOVER_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Node-wide dispatcher for bounded per-Cell command mailboxes.
 #[derive(Clone)]
@@ -117,8 +119,140 @@ impl CellRuntime {
         observed: VersionedControl,
         destination: PathBuf,
     ) -> crate::Result<CellHandle> {
-        let cell = self.activation_cell(&catalog, &observed)?;
         let reservation = self.inner.pool.reserve_activation()?;
+        self.activate_restored_reserved(
+            catalog,
+            replica,
+            authority,
+            observed,
+            destination,
+            reservation,
+        )
+        .await
+    }
+
+    /// Acquires an idle published Cell and restores its exact immutable root.
+    pub async fn acquire_idle_restored(
+        &self,
+        catalog: CatalogProof,
+        replica: crab_ltx::CellReplica,
+        authority: CellAuthority,
+        observed: VersionedControl,
+        destination: PathBuf,
+        owner: Owner,
+    ) -> crate::Result<CellHandle> {
+        self.claiming_cell(&catalog, &observed, &owner)?;
+        if observed.value().state != crate::ControlState::Idle
+            || observed.value().owner.is_some()
+            || observed.value().root.is_none()
+        {
+            return Err(Error::Control(
+                "idle acquisition requires a published idle control",
+            ));
+        }
+        let reservation = self.inner.pool.reserve_activation()?;
+        let successor = observed.value().takeover(owner)?;
+        let claimed = match authority
+            .transition(&observed, successor.clone(), Transition::Takeover)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                let current = authority
+                    .load(observed.value().cell)
+                    .await?
+                    .ok_or(Error::Fenced)?;
+                if current.value() != &successor {
+                    return Err(error);
+                }
+                current
+            }
+        };
+        self.activate_restored_reserved(
+            catalog,
+            replica,
+            authority,
+            claimed,
+            destination,
+            reservation,
+        )
+        .await
+    }
+
+    /// Takes over an unchanged owner after the fixed observation interval.
+    pub async fn takeover_restored(
+        &self,
+        catalog: CatalogProof,
+        replica: crab_ltx::CellReplica,
+        authority: CellAuthority,
+        mut observed: VersionedControl,
+        destination: PathBuf,
+        owner: Owner,
+    ) -> crate::Result<CellHandle> {
+        let cell = self.claiming_cell(&catalog, &observed, &owner)?;
+        loop {
+            if !matches!(
+                observed.value().state,
+                crate::ControlState::Recovering | crate::ControlState::Serving
+            ) || observed.value().owner.is_none()
+                || observed.value().root.is_none()
+            {
+                return Err(Error::Control(
+                    "takeover requires a published control with an active owner",
+                ));
+            }
+            tokio::time::sleep(TAKEOVER_OBSERVATION).await;
+            let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
+            if current.value() != observed.value() {
+                self.claiming_cell(&catalog, &current, &owner)?;
+                observed = current;
+                continue;
+            }
+            let reservation = self.inner.pool.reserve_activation()?;
+            let successor = current.value().takeover(owner.clone())?;
+            let claimed = match authority
+                .transition(&current, successor.clone(), Transition::Takeover)
+                .await
+            {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    let latest = authority.load(cell).await?.ok_or(Error::Fenced)?;
+                    if latest.value() == &successor {
+                        latest
+                    } else if matches!(
+                        &error,
+                        Error::Storage(crab_storage::StorageError::StateConflict { .. })
+                    ) {
+                        observed = latest;
+                        continue;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            };
+            return self
+                .activate_restored_reserved(
+                    catalog,
+                    replica,
+                    authority,
+                    claimed,
+                    destination,
+                    reservation,
+                )
+                .await;
+        }
+    }
+
+    async fn activate_restored_reserved(
+        &self,
+        catalog: CatalogProof,
+        replica: crab_ltx::CellReplica,
+        authority: CellAuthority,
+        observed: VersionedControl,
+        destination: PathBuf,
+        reservation: CellReservation,
+    ) -> crate::Result<CellHandle> {
+        let cell = self.activation_cell(&catalog, &observed)?;
         let control = observed.value();
         let root = control
             .ltx_root()
@@ -151,6 +285,30 @@ impl CellRuntime {
             current,
         )
         .await
+    }
+
+    fn claiming_cell(
+        &self,
+        catalog: &CatalogProof,
+        observed: &VersionedControl,
+        owner: &Owner,
+    ) -> crate::Result<CellId> {
+        let cell = catalog.entry().cell();
+        if observed.value().cell != cell {
+            return Err(Error::Control("ownership control changed Cell"));
+        }
+        if owner.session != self.inner.session {
+            return Err(Error::Fenced);
+        }
+        if observed
+            .value()
+            .owner
+            .as_ref()
+            .is_some_and(|current| current.session == owner.session)
+        {
+            return Err(Error::CellAlreadyActive);
+        }
+        Ok(cell)
     }
 
     fn activation_cell(

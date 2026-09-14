@@ -256,6 +256,131 @@ async fn observed_takeover_fences_the_old_cell_before_more_work() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn idle_control_is_acquired_before_exact_root_restore() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    handle.drain().await.unwrap();
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let session = SessionId::from_bytes([40; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        session,
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            idle,
+            fixture._directory.path().join("idle-acquire.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://idle-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    let owned = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owned.value().state, ControlState::Recovering);
+    assert_eq!(owned.value().epoch, 2);
+    assert_eq!(owned.value().owner.as_ref().unwrap().session, session);
+    restored.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn unchanged_dead_owner_is_taken_over_then_restored() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    drop(handle);
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let stale = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let session = SessionId::from_bytes([41; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        session,
+    )
+    .unwrap();
+    let restored = runtime
+        .takeover_restored(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            stale,
+            fixture._directory.path().join("takeover.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://takeover-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        0_i64.to_be_bytes()
+    );
+    let owned = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owned.value().epoch, 2);
+    assert_eq!(owned.value().owner.as_ref().unwrap().session, session);
+    restored.drain().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn query_waits_for_preceding_publication_and_cannot_write() {
     let fixture = fixture();

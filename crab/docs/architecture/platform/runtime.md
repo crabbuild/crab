@@ -33,7 +33,7 @@ only for the original digest, `ABSENT` only after earlier accepted work drained,
 `UNKNOWN` when publication fenced, and `EXPIRED` for a structurally valid expired
 identity. A successor that restores a later authoritative root resolves the
 predecessor's ledger without replay. Deadline/watchdog enforcement and the
-takeover acquisition/fenced recovery supervisor remain to implement. A single
+automatic fenced recovery supervisor remain to implement. A single
 dispatcher timer currently scans every 100 ms and admits at most 32 concurrent
 owner renewals. Each idle owner renews every 3 s without a permanent per-Cell
 task. Renewal uses the same strict control CAS, reconciles exact lost responses,
@@ -42,6 +42,17 @@ proven within the 10 s renewal attempt. Immutable-root preparation interleaves
 renewal so retrying object I/O does not silently stop owner progress. SQL work
 still needs the specified 5 s interruption path so a blocking callback cannot
 delay its next renewal indefinitely.
+
+`CellRuntime::acquire_idle_restored` handles an `Idle` control immediately;
+`CellRuntime::takeover_restored` handles a published `Recovering` or `Serving`
+control owned by another session. Both validate the catalog and destination
+session and reserve local active-Cell capacity before the ownership CAS. Active
+takeover sleeps 15 seconds, reloads the exact control, and restarts the complete
+observation interval after any change. Only an unchanged record may advance the
+epoch and owner. A lost CAS response is adopted only if origin equals the exact
+successor. Root download and sparse-writer activation begin after that proof, so
+a losing contender does not hydrate database data. A CAS conflict reloads and
+restarts observation; it never reuses elapsed time from a prior owner/progress.
 Normal drain now closes the worker-owned SQLite handle and then transitions the
 same observed control to `Idle` with no owner. Release retries provider-classified
 transient failures across pure renewals and reconciles an exact lost response;
