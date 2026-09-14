@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crab_coordination::{PushLock, PushLockAcquireContext};
 use crab_metadata::{
     manifest_store::RepositorySnapshot,
-    manifests::PackManifestEntry,
+    manifests::{Manifest, PackManifestEntry},
     ref_journal::{self, RefJournalCommitResult, RefJournalEdit, RefJournalTransaction},
 };
 use crab_storage::{Store, StoreLayout};
@@ -87,6 +87,35 @@ pub async fn capture_existing_ref_commit_base(
     ref_name: &str,
 ) -> Result<Option<ExistingRefCommitBase>> {
     let head = ref_journal::read_ref_head(store, router, ref_name).await?;
+    capture_existing_ref_commit_base_at_head(store, router, ref_name, head, None).await
+}
+
+/// Capture one existing ref and the manifest needed to prepare its update.
+///
+/// The caller must already hold and continue renewing the ref lease. The head
+/// and manifest reads overlap; manifest-only refs reuse that manifest instead
+/// of issuing a duplicate read. Missing refs return `None`.
+pub async fn capture_existing_ref_commit_base_with_manifest(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    ref_name: &str,
+) -> Result<Option<(ExistingRefCommitBase, Manifest)>> {
+    let read_head = ref_journal::read_ref_head(store, router, ref_name);
+    let read_manifest = crab_metadata::manifest_store::read_manifest(store, router);
+    let (head, (manifest, _)) = tokio::try_join!(read_head, read_manifest)?;
+    let base =
+        capture_existing_ref_commit_base_at_head(store, router, ref_name, head, Some(&manifest))
+            .await?;
+    Ok(base.map(|base| (base, manifest)))
+}
+
+async fn capture_existing_ref_commit_base_at_head(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    ref_name: &str,
+    head: ref_journal::RefJournalHeadSnapshot,
+    manifest: Option<&Manifest>,
+) -> Result<Option<ExistingRefCommitBase>> {
     let transaction_id = head.visible_transaction.clone();
     let old_oid = if let Some(transaction_id) = transaction_id.as_deref() {
         let transaction = ref_journal::read_transaction(store, router, transaction_id).await?;
@@ -95,6 +124,8 @@ pub async fn capture_existing_ref_commit_base(
             .iter()
             .find(|edit| edit.ref_name == ref_name)
             .and_then(|edit| edit.new_oid.clone())
+    } else if let Some(manifest) = manifest {
+        manifest.refs.get(ref_name).cloned()
     } else {
         let (manifest, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
         manifest.refs.get(ref_name).cloned()

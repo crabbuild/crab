@@ -378,15 +378,20 @@ async fn run_native_push_inner(
         let refs = refs.clone();
         let incremental = config.incremental;
         let git_dirs = git_dirs.clone();
+        // Blocking workers do not inherit a thread-local dispatcher. Carry it
+        // across so discovery diagnostics remain visible to callers.
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
-            phase_discover(
-                &specs,
-                &push_state,
-                &remote_url,
-                Some(&refs),
-                incremental,
-                &git_dirs,
-            )
+            tracing::dispatcher::with_default(&dispatch, || {
+                phase_discover(
+                    &specs,
+                    &push_state,
+                    &remote_url,
+                    Some(&refs),
+                    incremental,
+                    &git_dirs,
+                )
+            })
         })
     });
     let mut speculative_discovery = None;

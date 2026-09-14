@@ -6543,22 +6543,14 @@ pub(crate) async fn read_existing_ref_push_base(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let capture_base = async {
-        crab_write::journal::capture_existing_ref_commit_base(
-            store.as_storage(),
-            &storage_layout,
-            &spec.dst,
-        )
-        .await
-        .map_err(CrabError::from)
-    };
-    let read_manifest = async {
-        crab_metadata::manifest_store::read_manifest(store.as_storage(), &storage_layout)
-            .await
-            .map_err(CrabError::from)
-    };
-    let (commit_base, (manifest, _)) = tokio::try_join!(capture_base, read_manifest)?;
-    let Some(commit_base) = commit_base else {
+    let captured = crab_write::journal::capture_existing_ref_commit_base_with_manifest(
+        store.as_storage(),
+        &storage_layout,
+        &spec.dst,
+    )
+    .await
+    .map_err(CrabError::from)?;
+    let Some((commit_base, manifest)) = captured else {
         return Ok(None);
     };
 
