@@ -2481,173 +2481,26 @@ async fn fetch_packs(
     router: &StoreLayout,
     entries: &[FetchEntry],
     fetch_options: &FetchOptions,
-    filter_requested: bool,
+    _filter_requested: bool,
     config: &crate::core::config::Config,
-    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
-    caching_store: Option<&crab_cache_store::CachingStore>,
-    cache: &mut SessionCache,
-    cancel: &tokio_util::sync::CancellationToken,
+    _writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    _caching_store: Option<&crab_cache_store::CachingStore>,
+    _cache: &mut SessionCache,
+    _cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
-    if !fetch_options.has_constraints() && !classify_raw_object_fetch(entries)? {
-        return fetch_request_minimal_packs(store, router, entries, config, check_connectivity)
-            .await;
+    if fetch_options.has_constraints() {
+        return Err(CrabError::Protocol(
+            "shallow and filtered fetch are not yet part of the request-minimal protocol"
+                .to_owned(),
+        ));
     }
     if classify_raw_object_fetch(entries)? {
-        // Git resolves missing partial-clone objects through legacy exact-OID
-        // fetches. The catalog planner below authorizes every object against
-        // visible ref closure before generating or returning pack bytes.
-        fetch_promisor_objects(
-            store,
-            router.repo_prefix(),
-            entries,
-            config,
-            filter_requested,
-            cancel,
-        )
-        .await?;
-        return Ok(None);
+        return Err(CrabError::Protocol(
+            "raw-object fetch is not yet part of the request-minimal protocol".to_owned(),
+        ));
     }
-
-    let snapshot = crate::metadata::manifest::read_repository_snapshot(store, router).await?;
-    let manifest = snapshot.materialized_manifest();
-
-    let fetch_store = Arc::new(RemoteFetchStore::new(
-        store.clone(),
-        router.clone(),
-        manifest.generation,
-        snapshot.journal.packs,
-        caching_store.cloned(),
-    ));
-
-    // A rejected entry produces a per-entry `error {ref}
-    // {protocol-tag} ({detail})` line on the writer (matching the
-    // push response shape), but does not fail the batch. If every
-    // entry is rejected, we skip the pack download entirely — the
-    // trailing `\n` that terminates the fetch response is emitted
-    // by the caller in `dispatch_batch`.
-    //
-    if !entries.is_empty() {
-        let summary = if config.uploadpack_allow_reachable_sha_in_want
-            && !config.uploadpack_allow_any_sha_in_want
-        {
-            fetch_store.fetch_commit_graph().await?
-        } else {
-            None
-        };
-        let validation =
-            validate_fetch_entries_with_manifest(entries, &manifest, summary.as_deref(), config);
-        let mut any_allowed = false;
-        for (entry, outcome) in &validation {
-            match outcome {
-                Ok(()) => {
-                    any_allowed = true;
-                }
-                Err(reason) => {
-                    let detail = one_line_protocol_text(&reason.to_string());
-                    let line = format!(
-                        "error {} {} ({})\n",
-                        entry.ref_name,
-                        reason.protocol_tag(),
-                        detail
-                    );
-                    writer.write_all(line.as_bytes()).await?;
-                    tracing::warn!(
-                        sha = %entry.sha,
-                        ref_name = %entry.ref_name,
-                        tag = reason.protocol_tag(),
-                        "rejected fetch entry on upload-pack policy"
-                    );
-                }
-            }
-        }
-        // Every entry was rejected — skip the pack download path so
-        // a hostile client cannot induce any store reads.
-        if !any_allowed {
-            writer.flush().await?;
-            return Ok(None);
-        }
-    }
-
-    let git_dir = super::discover::discover_git_dir()?;
-    let exact_shallow_install = try_fetch_exact_shallow_closure(
-        store,
-        router,
-        &manifest,
-        entries,
-        fetch_options,
-        &git_dir,
-        cancel,
-    )
-    .await?;
-    let mut fetch_config = FetchConfig::from_config(config);
-    fetch_config.git_dir = git_dir.clone();
-
-    let installed = if let Some(installed) = exact_shallow_install {
-        installed
-    } else {
-        run_fetch_batch(
-            entries,
-            &manifest,
-            &fetch_config,
-            fetch_store.clone(),
-            Some(fetch_store.as_ref()),
-            fetch_options,
-            cancel,
-        )
-        .await?
-    };
-
-    if let Some(pack_list) = fetch_store.cached_pack_list().await {
-        cache.pack_list = Some(pack_list);
-    }
-
-    tracing::info!(
-        installed_packs = installed.len(),
-        depth = ?fetch_options.depth,
-        "remote-helper fetch pipeline complete"
-    );
-
-    // After a successful fetch, ensure the filter driver is configured
-    // in the local repo. This is critical for clones — without it, the
-    // smudge filter won't run and pointer files won't be reconstructed.
-    //
-    // `git_dir` may be relative (e.g. `.git` when the remote helper is
-    // invoked with `GIT_DIR=.git`), in which case `.parent()` returns
-    // `Some("")` — an empty path that fails as `current_dir` for
-    // spawned git subprocesses with ENOENT. Canonicalize first, then
-    // fall back to the current working directory so `install_filter_driver`
-    // always receives a usable repo root.
-    let repo_root = repo_root_from_git_dir(&git_dir);
-    if let Err(e) = crate::cmd::init::install_filter_driver(&repo_root) {
-        tracing::warn!(error = %e, "failed to install filter driver after fetch");
-    } else {
-        tracing::debug!("filter driver installed after fetch");
-    }
-    if let Err(e) = crate::cmd::init::ensure_crab_dir_excluded(&repo_root) {
-        tracing::warn!(error = %e, "failed to exclude local .crab state after fetch");
-    }
-
-    let crab_dir = repo_root.join(".crab");
-    std::fs::create_dir_all(&crab_dir)?;
-    ensure_lazy_checkout_config_for_new_helper_repo(&repo_root);
-
-    // Git accepts the producer proof only when the helper also identifies one
-    // pack containing every requested tip. Shallow or filtered selections
-    // intentionally retain Git's boundary-aware connectivity check.
-    if !check_connectivity || fetch_options.has_constraints() {
-        return Ok(None);
-    }
-    let ref_tips = entries
-        .iter()
-        .map(|entry| entry.sha.clone())
-        .collect::<Vec<_>>();
-    crate::git::pack::create_connectivity_proof_pack(
-        &git_dir,
-        &ref_tips,
-        &manifest.git_validation_digest,
-    )
-    .await
+    fetch_request_minimal_packs(store, router, entries, config, check_connectivity).await
 }
 
 async fn fetch_request_minimal_packs(

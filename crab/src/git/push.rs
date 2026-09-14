@@ -3633,6 +3633,9 @@ fn uncertain_commit_identity(error: &CrabError) -> Option<&str> {
                 checkpoint_hash,
                 ..
             } => Some(checkpoint_hash),
+            crab_write::WriteError::RequestMinimalMaintenanceCommitUncertain {
+                fence_id, ..
+            } => Some(fence_id),
             _ => None,
         };
     }

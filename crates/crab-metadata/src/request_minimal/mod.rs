@@ -14,8 +14,8 @@ pub use capsule::{
 };
 pub use checkpoint::Checkpoint;
 pub use root::{
-    CapsulePointer, CheckpointPointer, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES, RepositoryRoot,
-    RootRecord,
+    CapsulePointer, CheckpointPointer, GcFence, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES,
+    RepositoryRoot, RootRecord,
 };
 pub use run::{CapsuleRun, MAX_CAPSULES_PER_RUN};
 #[cfg(feature = "storage")]

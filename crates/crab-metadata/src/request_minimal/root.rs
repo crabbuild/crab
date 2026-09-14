@@ -13,9 +13,44 @@ const ROOT_DIGEST_BYTES: usize = 32;
 /// Maximum encoded repository-root size accepted by readers and writers.
 pub const MAX_ROOT_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum post-checkpoint capsules kept in one repository root.
-pub const MAX_CAPSULE_FRONTIER: usize = 9;
+pub const MAX_CAPSULE_FRONTIER: usize = 8;
 /// Maximum ref transactions admitted before a complete checkpoint is required.
 pub const MAX_DELTA_DEPTH: u32 = 500;
+
+/// Root fence that excludes publications during one GC sweep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GcFence {
+    id: String,
+    expires_at_unix: u64,
+}
+
+impl GcFence {
+    /// Create one bounded maintenance-fence identity.
+    pub fn new(id: impl Into<String>, expires_at_unix: u64) -> Result<Self> {
+        let fence = Self {
+            id: id.into(),
+            expires_at_unix,
+        };
+        validate_gc_fence(&fence)?;
+        Ok(fence)
+    }
+
+    /// Return the content-hash-shaped owner identity.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Return the wall-clock deadline used to diagnose a stranded fence.
+    ///
+    /// Expiry never transfers ownership: only the exact fence owner may clear
+    /// it, because a paused sweeper could otherwise race a new publication.
+    #[must_use]
+    pub fn expires_at_unix(&self) -> u64 {
+        self.expires_at_unix
+    }
+}
 
 /// Root reference to one durable immutable capsule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,12 +203,14 @@ pub struct RepositoryRoot {
     repository_id: String,
     generation: u64,
     parent_root_digest: Option<String>,
+    latest_transaction_base_digest: Option<String>,
     refs: BTreeMap<String, String>,
     peeled_refs: BTreeMap<String, String>,
     head: String,
     checkpoint: Option<CheckpointPointer>,
     capsule_frontier: Vec<CapsulePointer>,
     delta_depth: u32,
+    gc_fence: Option<GcFence>,
     capabilities: BTreeSet<String>,
 }
 
@@ -185,12 +222,14 @@ impl RepositoryRoot {
             repository_id: repository_id.to_owned(),
             generation: 0,
             parent_root_digest: None,
+            latest_transaction_base_digest: None,
             refs: BTreeMap::new(),
             peeled_refs: BTreeMap::new(),
             head: head.to_owned(),
             checkpoint: None,
             capsule_frontier: Vec::new(),
             delta_depth: 0,
+            gc_fence: None,
             capabilities: BTreeSet::new(),
         };
         validate_root(&root)?;
@@ -206,6 +245,11 @@ impl RepositoryRoot {
         capsule_frontier: Vec<CapsulePointer>,
         transaction_id: &str,
     ) -> Result<Self> {
+        if self.gc_fence.is_some() {
+            return Err(contract_error(
+                "ref publication is forbidden while the GC fence is active",
+            ));
+        }
         validate_content_hash(
             transaction_id,
             "new root transaction id",
@@ -247,6 +291,7 @@ impl RepositoryRoot {
                 .checked_add(1)
                 .ok_or_else(|| contract_error("root generation overflowed"))?,
             parent_root_digest: Some(parent_root_digest.to_owned()),
+            latest_transaction_base_digest: Some(parent_root_digest.to_owned()),
             refs,
             peeled_refs,
             head: self.head.clone(),
@@ -256,6 +301,7 @@ impl RepositoryRoot {
                 .delta_depth
                 .checked_add(1)
                 .ok_or_else(|| contract_error("root delta depth overflowed"))?,
+            gc_fence: None,
             capabilities: self.capabilities.clone(),
         };
         validate_root(&root)?;
@@ -268,6 +314,11 @@ impl RepositoryRoot {
         parent_root_digest: &str,
         checkpoint: CheckpointPointer,
     ) -> Result<Self> {
+        if self.gc_fence.is_some() {
+            return Err(contract_error(
+                "checkpoint publication is forbidden while the GC fence is active",
+            ));
+        }
         if checkpoint.covered_generation != self.generation
             || checkpoint.covered_root_digest != parent_root_digest
         {
@@ -280,14 +331,54 @@ impl RepositoryRoot {
             repository_id: self.repository_id.clone(),
             generation: self.generation,
             parent_root_digest: Some(parent_root_digest.to_owned()),
+            latest_transaction_base_digest: None,
             refs: self.refs.clone(),
             peeled_refs: self.peeled_refs.clone(),
             head: self.head.clone(),
             checkpoint: Some(checkpoint),
             capsule_frontier: Vec::new(),
             delta_depth: 0,
+            gc_fence: None,
             capabilities: self.capabilities.clone(),
         };
+        validate_root(&root)?;
+        Ok(root)
+    }
+
+    /// Install an exclusive GC fence without changing logical repository state.
+    pub fn begin_gc(&self, parent_root_digest: &str, fence: GcFence) -> Result<Self> {
+        if self.generation == 0 || self.gc_fence.is_some() {
+            return Err(contract_error(
+                "GC fencing requires a non-empty, unfenced repository root",
+            ));
+        }
+        let root = Self {
+            version: ROOT_VERSION,
+            repository_id: self.repository_id.clone(),
+            generation: self.generation,
+            parent_root_digest: Some(parent_root_digest.to_owned()),
+            latest_transaction_base_digest: self.latest_transaction_base_digest.clone(),
+            refs: self.refs.clone(),
+            peeled_refs: self.peeled_refs.clone(),
+            head: self.head.clone(),
+            checkpoint: self.checkpoint.clone(),
+            capsule_frontier: self.capsule_frontier.clone(),
+            delta_depth: self.delta_depth,
+            gc_fence: Some(fence),
+            capabilities: self.capabilities.clone(),
+        };
+        validate_root(&root)?;
+        Ok(root)
+    }
+
+    /// Remove the exact GC fence after its sweep finishes.
+    pub fn end_gc(&self, parent_root_digest: &str, fence_id: &str) -> Result<Self> {
+        if self.gc_fence.as_ref().map(GcFence::id) != Some(fence_id) {
+            return Err(contract_error("GC fence owner does not match"));
+        }
+        let mut root = self.clone();
+        root.parent_root_digest = Some(parent_root_digest.to_owned());
+        root.gc_fence = None;
         validate_root(&root)?;
         Ok(root)
     }
@@ -332,6 +423,12 @@ impl RepositoryRoot {
     #[must_use]
     pub fn checkpoint(&self) -> Option<&CheckpointPointer> {
         self.checkpoint.as_ref()
+    }
+
+    /// Return the active exclusive GC fence, when present.
+    #[must_use]
+    pub fn gc_fence(&self) -> Option<&GcFence> {
+        self.gc_fence.as_ref()
     }
 
     /// Return the bounded post-checkpoint capsule frontier.
@@ -506,6 +603,14 @@ fn validate_checkpoint_pointer(pointer: &CheckpointPointer) -> Result<()> {
     Ok(())
 }
 
+fn validate_gc_fence(fence: &GcFence) -> Result<()> {
+    validate_content_hash(&fence.id, "root GC fence id", "request-minimal root")?;
+    if fence.expires_at_unix == 0 {
+        return Err(contract_error("root GC fence expiry must be non-zero"));
+    }
+    Ok(())
+}
+
 fn validate_root(root: &RepositoryRoot) -> Result<()> {
     if root.version != ROOT_VERSION {
         return Err(corrupt(format!("root must use version {ROOT_VERSION}")));
@@ -544,8 +649,10 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
     }
     if root.generation == 0 {
         if root.parent_root_digest.is_some()
+            || root.latest_transaction_base_digest.is_some()
             || root.checkpoint.is_some()
             || !root.capsule_frontier.is_empty()
+            || root.gc_fence.is_some()
         {
             return Err(contract_error(
                 "generation-zero root cannot have a parent or frontier",
@@ -557,15 +664,9 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
             .as_deref()
             .ok_or_else(|| contract_error("non-zero root generation requires a parent digest"))?;
         validate_content_hash(parent, "root parent digest", "request-minimal root")?;
-        if root
-            .capsule_frontier
-            .last()
-            .is_some_and(|run| run.newest_base_root_digest != parent)
-        {
-            return Err(contract_error(
-                "newest capsule does not extend the root parent generation",
-            ));
-        }
+    }
+    if let Some(fence) = &root.gc_fence {
+        validate_gc_fence(fence)?;
     }
     if let Some(checkpoint) = &root.checkpoint {
         validate_checkpoint_pointer(checkpoint)?;
@@ -605,6 +706,24 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
         return Err(contract_error(
             "root delta depth does not equal its capsule run inventory",
         ));
+    }
+    match (
+        root.capsule_frontier.last(),
+        root.latest_transaction_base_digest.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(run), Some(base)) if run.newest_base_root_digest == base => {
+            validate_content_hash(
+                base,
+                "latest transaction base digest",
+                "request-minimal root",
+            )?;
+        }
+        _ => {
+            return Err(contract_error(
+                "latest transaction base does not match the capsule frontier",
+            ));
+        }
     }
     Ok(())
 }
@@ -749,5 +868,40 @@ mod tests {
         assert_eq!(next.capsule_frontier().len(), 1);
         assert_eq!(checkpoint_record.root().generation(), 10);
         assert_eq!(next.generation(), 11);
+    }
+
+    #[test]
+    fn gc_fence_preserves_logical_state_and_blocks_publication() {
+        let initial = RootRecord::encode(
+            RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+        )
+        .unwrap();
+        let published = advance_with_synthetic_run(&initial, 1).unwrap();
+        let fence = GcFence::new("f".repeat(64), 1).unwrap();
+        let fenced = RootRecord::encode(
+            published
+                .root()
+                .begin_gc(published.digest(), fence)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(fenced.root().generation(), published.root().generation());
+        assert_eq!(fenced.root().refs(), published.root().refs());
+        assert_eq!(
+            fenced.root().capsule_frontier(),
+            published.root().capsule_frontier()
+        );
+        assert!(advance_with_synthetic_run(&fenced, 2).is_err());
+
+        let released = RootRecord::encode(
+            fenced
+                .root()
+                .end_gc(fenced.digest(), &"f".repeat(64))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(released.root().gc_fence().is_none());
+        assert!(advance_with_synthetic_run(&released, 2).is_ok());
     }
 }
