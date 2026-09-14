@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable Cell/shard IDs, strict control codec/transitions, ETag authority updates, runtime schema installation and checked prepared-root publication successors | Add catalog proof, actor/executor/reconciliation and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema plus a single-Cell request-ledger executor that retains cuts/results through exact prepared-root confirmation | Add catalog proof, bounded worker/mailbox actor, CAS reconciliation and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -51,12 +51,14 @@ Exit: default/replica builds and existing tests pass, plus live source-loss test
 
 ## Work package 2: runtime command and authority
 
-Identity derivation, strict control encoding, transition predicates, ETag updates
-and runtime.sql installation are implemented. Complete catalog proof, actor.rs,
-executor.rs and publication.rs. Enforce the remaining runtime.md timing and
-supervision rules. Add a command fixture
-that increments a counter and stores request outcome. All transitions use the
-existing Store conditional primitives, preserving their source errors.
+Identity derivation, strict control encoding, transition predicates, ETag updates,
+runtime.sql installation and the synchronous command-ledger executor are
+implemented. The executor runs application changes inside a savepoint, records
+success or rejection once, captures post-commit cuts, blocks later commands and
+releases the result only after the exact bound root is confirmed. Complete catalog
+proof, the bounded worker/mailbox actor and publication/CAS reconciliation. Enforce
+the remaining runtime.md timing, cancellation and panic supervision rules. All
+transitions use the existing Store conditional primitives, preserving sources.
 
 Add `crates/crab-cell-runtime/tests/publication.rs`:
 

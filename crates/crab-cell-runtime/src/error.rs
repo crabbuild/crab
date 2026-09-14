@@ -16,4 +16,12 @@ pub enum Error {
     Storage(#[from] crab_storage::StorageError),
     #[error("Cell LTX publication failed")]
     Ltx(#[from] crab_ltx::CrabError),
+    #[error("invalid Cell command: {0}")]
+    Command(&'static str),
+    #[error("request ID was already used for different command bytes")]
+    RequestConflict,
+    #[error("Cell has a local commit awaiting durable publication")]
+    PendingPublication,
+    #[error("Cell executor is fenced pending origin recovery")]
+    Fenced,
 }

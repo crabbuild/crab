@@ -3,6 +3,12 @@
 [Index](README.md). Formats are in [storage](storage.md); install the
 [runtime migration](contracts/runtime.sql) before registering handlers.
 
+Implementation status: `CellExecutor` implements mutation lifetime checks,
+`sys_requests` dedup/conflict handling, application savepoint rollback, sequence/
+logical-clock advancement, post-commit capture ownership, prepared-root binding
+and exact-root confirmation. The node-wide mailbox actor, deadline/watchdog,
+authority-CAS reconciliation and recovery supervisor below remain to implement.
+
 ## Rust interfaces and ownership
 
 `CellId`, `RootRef` and `Control` are specified in storage.md. Operations and
