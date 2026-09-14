@@ -26,6 +26,7 @@ pub mod push_edits;
 pub mod push_native;
 pub mod push_staging;
 pub mod remote_helper;
+pub(crate) mod request_minimal_push;
 pub mod shallow;
 pub mod smudge;
 pub mod upload_pack_wire;
