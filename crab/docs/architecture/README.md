@@ -9,7 +9,7 @@ each subsystem, and how the components fit together.
 | Document | Scope |
 |----------|-------|
 | [System Overview](system-overview.md) | High-level architecture, component diagram, data flow |
-| [Rust Core and Multi-Language Platform](platform/README.md) | Proposed Cell runtime, SQL/KV/Queue/Workflow primitives, Rust/JS/WASM and remote SDKs, fleet deployment and qualification |
+| [Rust Core and Multi-Language Platform](platform/README.md) | Low-level Rust runtime, LTX/control formats, executable SQL/Protobuf contracts, language adapters, deployment procedures and acceptance tests |
 | [Multi-Crate Transition Plan](multi-crate-transition.md) | Phased crate split plan, target workspace DAG, hardening gates |
 | [Rust SDK Design and Delivery Plan](crab-sdk.md) | Public remote/local API, publication recovery, Git compatibility, executable phases and acceptance criteria |
 | [Crab SDK API](crab-sdk-api.md) | Unified repository facade, remote/local interfaces, task namespaces, feature boundaries, and qualification gates |

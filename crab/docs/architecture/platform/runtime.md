@@ -1,271 +1,187 @@
-# Cell runtime and durability
+# Cell runtime implementation
 
-[Design index](README.md). Proposed contracts; source baseline in the index.
+[Index](README.md). Formats are in [storage](storage.md); install the
+[runtime migration](contracts/runtime.sql) before registering handlers.
 
-## Identity and persisted authority
+## Rust interfaces and ownership
 
-Resolve a binding to an authorized namespace before routing. A Cell identity
-contains tenant ID, application ID, namespace ID and partition bytes. Encode
-components with length prefixes and domain separation before hashing; ambiguous
-concatenation of namespace and key bytes must not alias two Cells. Public names
-resolve to stable IDs, so renaming a service does not move its databases.
-
-Keep these counters distinct:
-
-| Field | Meaning |
-| --- | --- |
-| `incarnation` | Database replacement/restore lineage; changes on deliberate reset |
-| `owner_epoch` | Monotonic fencing number; changes on every acquisition |
-| `control_revision` | Increases for every conditional control update |
-| `commit_sequence` | Logical committed operation sequence within an incarnation |
-| `ltx_position` | Exact LTX TXID and database checksum; may advance during maintenance |
-| `deployment_digest` | Code and binding version admitted for this Cell |
-| `schema_version` | Transactionally installed application schema |
-
-Illustrative control record:
-
-```text
-Control {
-  cell_id, incarnation, owner_epoch, control_revision,
-  state: recovering | serving | draining | idle | tombstoned,
-  owner: { session_id, private_endpoint, progress_sequence } | absent,
-  published: { root_digest, commit_sequence, ltx_position },
-  deployment_digest, schema_version, format_capabilities,
-  next_due_time: optional conservative scheduler wake time
-}
-```
-
-The opaque provider update token accompanies the read; it is not a content
-checksum. Owner changes, renewals, user commits and maintenance roots all update
-this same control key. A coordinator serializes those transitions per Cell.
-Checksums validate data integrity against a trusted root; they do not authenticate
-an attacker who can replace both data and authority. IAM protects authority.
-
-Proposed physical namespace, independent of repository Git paths:
-
-```text
-platform/v1/apps/<app-id>/catalog-root
-platform/v1/apps/<app-id>/deployments/<digest>
-platform/v1/apps/<app-id>/cells/<cell-id>/control
-platform/v1/apps/<app-id>/cells/<cell-id>/objects/<digest>
-platform/v1/apps/<app-id>/pins/<pin-id>
-platform/v1/nodes/<session-id>
-```
-
-The application catalog uses bounded immutable pages behind a conditional root.
-Provision a Cell/namespace entry before accepting its first operation. Concurrent
-provisioning can leave empty catalog entries, which are safe. The catalog lets
-schedulers and backup tools enumerate durable work without trusting LIST to be
-complete. Dynamic Cell creation is rate-limited and catalog updates may batch.
-
-## Placement and ownership
-
-Use capacity-weighted rendezvous placement as a preference over eligible nodes.
-Eligibility includes memory/SSD reservations, runtime and format support,
-tenant policy and deployment availability. A node must reserve activation
-capacity before attempting acquisition. Placement is sticky while an owner is
-healthy, with hysteresis to limit churn as capacity reports change.
-
-An entry node authenticates the caller, resolves binding/Cell identity, then
-uses a cached owner hint. It either submits locally, proxies directly to that
-session's private endpoint, or refreshes origin authority. Each invocation has
-a bounded forwarding hop count and deadline. The public load balancer is not
-used for owner-specific forwarding.
-
-Unowned Cells can be acquired with CAS. For a suspected dead owner, observe an
-unchanged progress sequence for a full takeover interval using local monotonic
-time, then CAS the observed record. Any progress restarts the observation.
-The owner self-fences on a conservative renewal deadline; delayed responses
-cannot revive a fenced activation. Foreign wall-clock expiry is not ownership
-proof. This follows the [HTTP lease contract](../../../../crates/crab-http-server/next-architecture/ownership-and-load-balancing.md).
-
-An acquisition increments the epoch and preserves the published root exactly.
-Open that root in a fresh exclusive local session, validate formats/schema,
-and enable serving only after any required continuation or migration root is
-published. No new full database snapshot is required merely to activate a
-verified sparse continuation. That optimizes the HTTP design's initial full
-restore/snapshot path only after integration and recovery tests prove it.
-
-## Command execution and publication
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant R as Rust Cell runtime
-    participant A as Application or primitive handler
-    participant D as SQLite
-    participant L as crab-ltx
-    participant S as Authoritative object store
-    C->>R: Command, stable request ID, payload
-    R->>R: Authorize, route, reserve, serialize
-    R->>D: Check dedup and BEGIN IMMEDIATE
-    R->>A: Transaction-scoped invocation
-    A->>D: Domain writes and effect intents
-    R->>D: Store bounded result and request digest
-    R->>D: COMMIT
-    R->>L: Capture all committed cuts
-    L->>S: Verified immutable data and manifest
-    L-->>R: Prepared exact recovery root
-    R->>S: CAS owner, predecessor and root
-    S-->>R: Published
-    R-->>C: Stored result and commit receipt
-```
-
-The runtime owns the transaction boundary. Handler success requests a commit;
-it does not independently acknowledge durability. Application mutations, inbox
-dedup rows, result bytes and outbox rows enter one SQLite transaction. Encode
-and size-check the response before COMMIT so encoding failure can roll back.
-
-First release: one pending publication per Cell. Later requests wait in a bounded
-mailbox or receive overload. Unpublished state cannot feed a read response,
-an error containing application data, an activity payload, or a network call.
-Compaction/checkpoint work also transfers every generated cut to the coordinator.
-No maintenance operation may silently consume pending user cuts.
-
-The successful control CAS is the mutation's linearization point. If takeover
-wins first, the stale publication fails. If publication wins first, takeover
-must inherit its root. A delayed success response remains valid after takeover
-when it proves the already published operation.
-
-## Cancellation, crashes and retries
-
-Acceptance creates a supervised runtime operation independent of the caller's
-wait future. Before SQL commit, cancellation requests interruption and rollback;
-a request that may already have committed is treated as indeterminate. After
-commit, retain ownership of the batch and reconcile publication even if the
-client disconnects. Never free job reservations while blocking work still runs.
-
-Pending local state records the expected predecessor, request identities,
-captured segment metadata and publication attempt. It improves retry and
-diagnostics, but local files alone cannot establish remote durability. The
-currently implemented `ManagedDb::resume` restores an exact verified plan into
-a fresh session; it is not crash reopening of an arbitrary surviving WAL.
-
-On restart, recover the authoritative published root. If unpublished work was
-lost with the node, it is allowed to be absent: no success was returned. A retry
-with the same request ID can execute against the published lineage after the
-new owner proves no durable result exists. Never merge a former owner's
-tentative WAL into a successor. Future warm reopening needs an additional
-verified checkpoint protocol before it can reuse local files.
-
-| Observed outcome | Action |
-| --- | --- |
-| Immutable upload times out | Retry the same content identity with integrity checks |
-| CAS response is lost | Pause dependent work; reread origin and reconcile |
-| Same predecessor and valid ownership | Retry the same prepared transition with validated token |
-| Published root or verified successor includes the request | Return stored durable result |
-| Successor owner is present | Ask it to resolve the request in its published database |
-| Authority cannot be read | Return `OUTCOME_UNKNOWN`, retaining the operation ID |
-| Source disk disappears | Restore only acknowledged remote state; retry unknown commands safely |
-
-Dedup identity is `(cell incarnation, request ID)` plus a canonical operation
-digest. Payload mismatch is a conflict. TTL/retention is advertised to clients;
-an expired dedup record cannot support an unlimited exactly-once promise.
-Long-lived business identities, such as payment IDs, should be persisted by the
-application independently of transport dedup retention.
-
-## Read consistency
-
-Offer two explicit modes initially:
-
-- `current`: read origin control during the request and materialize that pinned
-  root, or serialize behind publication on the owner and validate origin state
-  for the chosen snapshot. The origin observation establishes a point within
-  the request interval; a later concurrent commit does not invalidate it.
-- `snapshot(receipt)`: read an explicitly pinned published root. This can be
-  historical and requires a retention pin or returns `SNAPSHOT_EXPIRED`.
-
-A minimum-position request waits for a published descendant containing that
-receipt or rejects incompatible incarnations. Numeric TXID comparison alone
-cannot prove ancestry. Initially return bounded materialized SQL results. Later
-streaming can hold a retained immutable snapshot and release database locks;
-each page carries snapshot identity and expires predictably.
-
-## Rust execution and guest transactions
-
-SQL handles belong to a bounded executor shard. Many inactive Cell handles may
-share a shard; one database does not imply one thread. Execute synchronous native
-transaction callbacks there. Embedded JS/WASM Cell invocations use worker slots
-that own the guest and transaction scope; local host calls can run SQL without
-a remote round trip. A slot can block on a sparse page fault, so the page I/O
-driver must progress independently of the SQL/guest worker pool.
-
-A transaction capability is valid only for the current invocation and Cell.
-The runtime invalidates it at commit, rollback, trap or deadline. Commands have
-CPU, wall-time, changed-page, response-byte and outbox-byte limits. Restrict
-transaction host imports to local SQL, deterministic context and effect intent
-creation. No fetch, arbitrary filesystem, timer wait or remote Cell invocation
-is available while the transaction is open.
-
-Trusted native Rust code is an operator trust boundary; it cannot be securely
-sandboxed by API convention. An uncooperative native callback may require
-process termination. Guest CPU termination also does not automatically cancel
-already dispatched host I/O; Rust supervises its completion and cleans up the
-transaction before releasing capacity.
-
-## Required LTX evolution
-
-Current [replica source](../../../../crates/crab-ltx/src/replica.rs) exposes
-`replicate`, which both uploads data and CASes a per-epoch head. It does not
-expose the immutable-only preparation interface required below. Proposed types:
+`CellId`, `RootRef` and `Control` are specified in storage.md. Operations and
+results map to the checked Protobuf descriptor. `RuntimeError` preserves
+SQLite/LTX/storage sources and carries the protocol outcome classification.
 
 ```rust,ignore
-// API shape only; these platform interfaces do not exist yet.
-struct RecoveryRoot { /* cell/storage scope, digest, position, format */ }
-struct PreparedRoot { /* predecessor, root, dependency closure */ }
-
-impl ReplicaStore {
-    async fn prepare_append(
-        &self,
-        predecessor: &RecoveryRoot,
-        cuts: &CaptureBatch,
-    ) -> Result<PreparedRoot>;
-
-    async fn open_exact(&self, root: &RecoveryRoot) -> Result<VerifiedView>;
+pub struct AcceptedCommand {
+    pub identity: CommandIdentity,
+    pub digest: [u8; 32],
+    pub operation: Operation,
+    pub reply: tokio::sync::oneshot::Sender<MutationReply>,
 }
-
+pub struct PendingCommit {
+    pub identity: CommandIdentity,
+    pub predecessor: Control,
+    pub commit_sequence: u64,
+    pub encoded_reply: Vec<u8>,
+    pub cuts: crab_ltx::CaptureBatch,
+    pub prepared: Option<PreparedRoot>,
+}
+pub enum CellState {
+    Recovering, Serving, Publishing(PendingCommit),
+    Reconciling(PendingCommit), Draining, Fenced,
+}
+pub enum CommandIdentity {
+    Client(MutationIdentity),
+    Effect(EffectIdentity),
+    Internal { request_id: [u8; 16], expires_at_ms: i64 },
+}
+pub struct VersionedControl {
+    pub value: Control,
+    pub token: crab_storage::ETag,
+}
+pub struct OwnedControl {
+    pub value: Control,
+    pub token: crab_storage::ETag,
+    pub renewal_started: std::time::Instant,
+}
 impl CellAuthority {
-    async fn publish(
-        &self,
-        expected: &OwnedControl,
-        prepared: &PreparedRoot,
-    ) -> Result<PublishedReceipt>;
+    pub async fn load(&self, id: CellId) -> Result<Option<VersionedControl>>;
+    pub async fn acquire(&self, observed: VersionedControl, session: SessionId)
+        -> Result<OwnedControl>;
+    pub async fn transition(&self, old: &OwnedControl, next: Control)
+        -> Result<OwnedControl>;
+}
+impl CellHandle {
+    pub async fn submit(&self, command: AcceptedCommand) -> Result<()>;
+    pub async fn read(&self, query: ReadRequest) -> Result<ReadReply>;
+    pub async fn drain(&self) -> Result<()>;
 }
 ```
 
-Preparation validates the predecessor and every new cut, uploads immutable
-objects and returns an exact root without changing mutable authority. Bind
-roots to storage scope and Cell identity so a root cannot be replayed against
-an unrelated bucket. First creation, epoch inheritance, bundles and compaction
-must share this preparation path. A historical receipt never grants ownership.
+`CellHandle` is a cloneable mailbox sender. Its actor owns current control,
+state and pending cuts. A SQL worker owns ManagedDb; the actor holds an executor
+key, never a connection shared between threads. Losing a reply waiter does not
+drop the accepted command or release its resource reservations.
 
-Use one authoritative publication route for the new platform. Whether the
-existing standalone per-epoch-head convenience API remains is a separate
-consumer/release-contract decision; it must not become a second authority in
-the platform. Hard cutover allows replacing unreleased internal formats after
-inventory and qualification, not silently weakening checksum or manifest checks.
+Client/internal outcomes use sys_requests; private Effect outcomes use sys_inbox.
+The actor's lookup/store-outcome helpers dispatch on CommandIdentity, so a
+7-day effect is not accidentally subjected to the public 24-hour request limit.
+Effect lookup includes its 32-byte ID and destination incarnation. Internal
+requests have a 60-second admission validity and are never accepted from the
+public listener. The same pending-publication state machine supervises all three.
 
-Other required work includes authenticated block-addressable metadata, bounded
-streaming capture/recovery/compaction, host-level memory estimates, a controlled
-read API, and maintenance that produces prepared roots. The current
-[scalability audit](../../../../crates/crab-ltx/SCALABILITY.md) documents why sparse
-page data alone does not bound page-locator memory.
+## Conditional transitions
 
-## Maintenance and resource ownership
+One coordinator executes all transitions. Validate these predicates, encode
+the replacement, then call `Store::update` with exactly the observed token.
 
-Runtime reservations cover guest heaps, SQLite caches, dirty/WAL pages, capture
-buffers, metadata, network buffers, local scratch, FDs and queued payloads.
-Acquire byte and job budgets before reads/allocations; count semaphores alone
-cannot constrain memory. Use tenant fairness and separate foreground/recovery/
-maintenance pools with explicit nonzero maintenance capacity.
+| Operation | Preconditions | Replacement |
+| --- | --- | --- |
+| Create | Catalog entry exists; control absent | recovering, epoch/revision 1, new incarnation/session, null root |
+| Acquire idle | idle; root present | recovering, epoch + 1, new session; preserve root/code/schema |
+| Takeover | Same epoch/session/progress observed for 15 s | As acquire, preserving exact root |
+| Renew | Same incarnation/epoch/session; before local deadline | progress/revision + 1; retain all other fields |
+| Publish | Same owner identity and predecessor root; serving/recovering | prepared root, due summary, code/schema for migration; progress/revision + 1 |
+| Release | Drained SQL/mailbox; no pending cuts | idle, owner null; retain root/code/schema/epoch; revision + 1 |
+| Tombstone | Maintenance authority; drained writer | tombstoned, owner null, epoch/revision + 1; root retained |
 
-State transitions are `cold → activating → serving → draining → warm/cold`,
-with `publishing`, `blocked` and terminal `fenced` substates. Eviction drains
-accepted work and closes SQLite before releasing the owner. Initially local
-files are disposable and reopening uses exact remote recovery. Warm reuse is
-enabled only after checkpoint verification is implemented.
+Every transition increments revision; all increments are checked. Overflow
+fences the Cell. A token conflict reloads origin and revalidates every predicate.
+Renewal goes through the coordinator so it cannot overwrite a newly published
+root. During long preparation, renewals can replace the token; pending work
+compares predecessor root/owner, then uses the latest validated renewal token.
 
-Compaction prepares a replacement graph at the same logical state and CASes it
-only against its predecessor. A racing commit either wins or causes a rebuild;
-maintenance cannot rewind the head. Publication success makes old inputs
-eligible for retention analysis, not immediate deletion.
+Self-fence deadline is renewal request start + 10 s. Late success cannot revive
+Serving. A contender restarts its observation whenever progress changes and
+after its own process restarts. Node heartbeats supply routing hints only.
+A late acknowledgement for an already published operation remains valid after
+takeover; initiating another operation requires a current ownership session.
+
+## Command transaction procedure
+
+`actor::execute` is the sole mutation path, including internal timer/outbox work.
+The SQL worker runs steps 3–9 synchronously. The steps below name the client
+ledger; effect commands substitute sys_inbox and its longer retention:
+
+1. Authorize binding and validate role, identity, expiry and size. Reserve encoded
+   bytes and a mailbox entry. Failure before acceptance is NOT_STARTED.
+2. Wait for Serving with no pending publication. Recheck owner deadline and
+   expiry. Transfer reservations to the supervised command.
+3. Read the identity's outcome ledger. A matching ID/digest returns its stored result only after
+   published-root proof. Digest mismatch returns REQUEST_ID_CONFLICT.
+4. BEGIN IMMEDIATE. Compute `n = commit_sequence + 1`, bounded by i64::MAX.
+   Set `now = max(system_utc_ms, sys_meta.logical_time_ms)`.
+5. SAVEPOINT application. Invoke the handler. A business rejection rolls back
+   to this savepoint and releases it, then becomes a bounded rejection result.
+   Infrastructure error, SQL interruption or guest trap rolls back everything.
+6. On success RELEASE savepoint. Encode and size-check result before COMMIT.
+7. Insert ID/digest/outcome/result at n with identity-specific retention. Update sys_meta
+   sequence/time. A recorded business rejection advances n without domain writes.
+8. COMMIT. Any commit error fences the local writer and enters origin recovery;
+   it cannot be treated as proven rollback.
+9. Capture all cuts and transfer them into PendingCommit. Post-commit capture
+   failure fences admission; no result escapes as durable success.
+10. Prepare immutable LTX/root objects. Compute due summary from the committed
+    indexed tables, including outstanding lease deadlines.
+11. CAS the control transition. Mark cuts published before emitting the stored
+    reply and allowing verified local pruning.
+
+Only durable success and stored business rejection carry receipts. Format,
+authorization and admission failures carry NOT_STARTED/REJECTED without one.
+Runtime sequence counts user and internal commands; LTX TXIDs are independent.
+
+## Reconciliation and Resolve
+
+Retain PendingCommit and its reservations. Retry origin observations after
+100/200/400 ms then at 1 s intervals. Caller timeout emits OUTCOME_UNKNOWN with
+request ID, never tentative output; supervision continues until fenced or proven.
+
+1. Origin root equals prepared root: publication succeeded.
+2. A later root exists: inspect its request record through its current owner or
+   verified read-only recovery. Exact ID/digest/result proves inclusion; sequence
+   or TXID comparison alone does not.
+3. Root remains predecessor and owner is valid: retry the same prepared transition
+   with a newly validated token, without rerunning SQL.
+4. Owner changed: finish supervised jobs, fence this activation and ask successor
+   to resolve. Never append old local WAL to a successor's database.
+
+Resolve returns ABSENT only after the owner drains accepted work for that ID,
+or a newly fenced owner restores the published root and checks it. If an old
+publisher may still commit, absence at a historical root is UNKNOWN. Expired
+identities return EXPIRED; a client must not silently issue them as new work.
+
+## Reads
+
+V1 current reads run on the owner behind pending publication. Observe origin
+control, compare its root to the local published endpoint, then materialize
+the bounded query on the SQL worker without a concurrent local writer. If the
+root/owner changed, refresh routing and retry within the request deadline.
+The successful origin observation is the read's linearization point.
+
+Minimum receipts must match Cell/incarnation; wait until authoritative sequence
+reaches the requested sequence. Restore changes incarnation and rejects old
+receipts. Return the observed receipt with every read result. Historical snapshot
+streaming and replica routing are outside the v1 API.
+
+Add a ManagedDb read callback that installs the read-only authorizer, opens a
+read transaction, materializes at most 1,000 rows/1 MiB, and restores the trusted
+authorizer on every exit. SQL cursors never survive a network round trip.
+
+## Workers and drain
+
+Create `max(1, min(available_vcpu, 16))` worker shards. A bounded channel feeds
+each shard; Cell ID hashes to one worker that owns its ManagedDb map. JS Cells
+use JS-capable shards; primitives/native Cells use SQL shards. Every invocation
+is synchronous within that worker, including local guest SQL calls. Session
+movement requires drain and exact-root reopen. The page-fault I/O driver runs
+independently of all SQL/JS workers. No thread or isolate is allocated per Cell.
+
+Per-Cell mailbox ceiling: 64 requests and 8 MiB, further constrained by node
+byte admission. A dispatched job retains permits until actual completion even
+after waiter cancellation. Guest CPU is interrupted at 50 ms; SQL/page waits
+have a 5 s transaction wall deadline. Timed-out host jobs must finish rollback
+or fence before their sessions become reusable. Native modules are trusted;
+an uncooperative native callback can require terminating its process.
+
+Drain closes admission, resolves accepted publications, captures/publishes any
+checkpoint cuts, closes SQLite, then releases ownership. Fenced sessions only
+finish proven replies and cleanup. If shutdown budget expires, unresolved clients
+receive unknown outcomes and the successor recovers origin state.

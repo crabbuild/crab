@@ -1,329 +1,215 @@
-# Languages, SDKs and the application programming model
+# RPC, Rust and JavaScript adapter implementation
 
-[Design index](README.md). Names, package coordinates, commands and code examples
-are proposed API sketches, not installable packages or tested samples.
+[Index](README.md). Compile [platform.proto](contracts/platform.proto) to Rust,
+TypeScript and Python transport types. The descriptor defines the v1 public
+service; adapters must not invent separate SQL/KV/lease semantics.
 
-## Supported forms of application execution
+## Transport and authenticated routing
 
-| Model | Where application code runs | Transaction branching | Deployment artifact |
-| --- | --- | --- | --- |
-| Trusted native Rust | Runtime process built by the operator | Yes, synchronous transaction callback | Operator runtime OCI image/binary |
-| Embedded JS/TypeScript | Guest execution worker on the Cell owner | Yes, restricted local host calls | Compiled JS module plus manifest |
-| Qualified WASM component | Component instance on the Cell owner | Yes, capability-scoped host calls | Component, WIT package/version and manifest |
-| External service in any language | Ordinary application process/container | Invoke commands or atomic batches | Service OCI image plus bindings |
-| External activity worker | Ordinary worker process/container | Activities complete through RPC | Worker OCI image and activity subscriptions |
+Expose gRPC service `crab.platform.v1.Platform` on the public TLS listener.
+HTTP JSON equivalents are POST `/v1/mutate`, `/v1/read`, `/v1/resolve`, using
+ProtoJSON field names and representations. Both invoke the same Rust handlers.
+Read the body through a 1 MiB limit before decoding; reject duplicate JSON keys,
+unknown fields, unknown enum values, unset oneofs and invalid byte lengths.
 
-Language support has an explicit compatibility matrix. HTTP/gRPC makes every
-primitive accessible from any language with a suitable client. It does not
-automatically make that language an embedded Cell runtime. Python or Java
-services deploy as ordinary containers first. Node.js libraries requiring native
-addons or broad OS access use this container model too.
+`Target.binding` is 1..64 ASCII characters `[a-z][a-z0-9_-]*`. Resolve it through
+the authenticated application's active deployment. Namespace role determines
+which operation cases are permitted. Tenant/app identity never comes from an
+unchecked field in the request. `partition` is <=1024 bytes; KV/workflow/queue
+producers recompute shard routing and reject mismatches.
 
-The JS adapter should evaluate `deno_core` for embedding V8 and Rust host
-operations. It is an engine substrate, not a ready-made Node/Deno compatibility
-promise; module loading, permissions and supported APIs belong to our adapter.
-See its [upstream repository](https://github.com/denoland/deno_core). Pin the
-qualified version during implementation rather than copying a moving version
-from documentation. TypeScript is bundled/transpiled during build.
+Private forwarding uses `/internal/v1/forward` over mTLS. An envelope contains
+original encoded request, tenant/app/principal IDs, authorized action set,
+deployment digest, elapsed timeout, origin session and hop_count. Sign the
+envelope with the originating node session key; validate mTLS/session enrollment,
+signature and target binding before forwarding to local handlers. Maximum hops
+is 2. Never forward through the public Service address.
 
-For the later WASM adapter, Wasmtime supplies component hosting, WIT-generated
-Rust bindings and host resources, as described in its
-[component API](https://docs.wasmtime.dev/api/wasmtime/component/index.html).
-Qualify compiler, component ABI, WASI imports and library support per language.
-Do not advertise all languages as compiling to the same supported component
-without those tests. JS and external services do not depend on this phase.
+After authentication, read cached owner hint. Local requests go to CellHandle;
+peer requests go directly to the advertised session endpoint. On stale-owner
+response reload control once, then route/acquire within the remaining timeout.
+Admit local activation before CAS. Owner cache is limited to 100K entries/32 MiB
+and 3 s TTL; a cache hit never replaces command publication checks.
 
-## Two application contexts
+## RPC operation mapping
 
-`ServiceContext` handles HTTP and activity execution. It exposes authorized
-remote primitives, request deadlines and allowed network calls. Each call can
-cross a Cell boundary; it is not implicitly one transaction.
+| Proto operation | Required role | Handler/result |
+| --- | --- | --- |
+| cell_command | native/js Cell | Registered method → command_output bytes |
+| sql_batch | SQL Cell | Atomic statements → SqlResults |
+| kv_atomic | KV shard | Checks/mutations → ordered KvResult |
+| queue_send | Queue shard | Dedup enqueue → one message identity |
+| queue_claim | Queue shard | Published leases → QueueMessages |
+| queue_lease | Queue shard | Ack/retry/extend → applied |
+| workflow_start | Workflow shard | Create/version-pin → workflow_run_id |
+| workflow_signal, workflow_cancel | Workflow shard | Event transition → applied |
+| activity_claim | Workflow shard | Published activity leases → ActivityTasks |
+| activity_lease | Workflow shard | Complete/fail/extend → applied |
+| describe | Any | Exists plus current receipt/incarnation |
+| sql_query | SQL Cell | Read-only query → ResultSet |
+| kv_get, kv_list | KV shard | Logical-expiry query → KvPage |
+| workflow_get | Workflow shard | Current run → WorkflowState |
+| cell_query | native/js Cell | Registered read callback → command_output |
 
-`CommandContext` exists only during an owner-local command. It exposes a single
-Cell transaction, a stable request ID, sampled time, deterministic random input
-where needed, and an outbox. It has no external network or remote Cell binding.
-Results remain private until Rust commits and publishes the operation.
+Describe with `true` may lazily provision/activate an explicit-key namespace
+only if its binding grants `create`; otherwise absent returns NOT_FOUND. Fixed
+primitive shards are provisioned during deployment. A null bootstrap root returns
+UNAVAILABLE until its initialized schema is published. Describe supplies the
+incarnation required by MutationIdentity; clients cache it until restore conflict.
 
-Do not infer transaction semantics from the host language's `async` keyword.
-The baseline native/JS/WASM command invocation is bounded and synchronous at the
-guest API boundary. Remote calls and activities are asynchronous outside it.
-SQLite page faults may wait for Rust I/O while the invocation occupies a worker
-slot; the independent page driver avoids executor deadlock.
+`issued_at_ms >= 0`, `expires > issued`, lifetime <=24h, issued <=now+5 min,
+expires>now. Revalidate after mailbox wait. timeout_ms zero means 30,000;
+otherwise 1..60,000. Request expiry controls dedup validity; transport timeout
+only controls how long the caller waits. Changing either identity timestamp on
+retry is REQUEST_ID_CONFLICT because they enter the operation digest.
 
-## Rust Cell module
+## Canonical operation digest
 
-Illustrative service definition with one command and one published-state query:
+SDKs encode requests once and preserve them during retries. Server computes
+the digest from decoded, validated values using this canonical codec, not raw
+Protobuf/JSON bytes:
+
+1. Start with ASCII `crab.op.v1\0`, Cell ID, incarnation, request_id,
+   issued/expires i64 big-endian and operation field number u16.
+2. Encode operation message fields in ascending Protobuf field number. Every
+   known non-oneof field is included, with defaults materialized. timeout_ms,
+   authenticated principal and transport headers are excluded.
+3. Scalars: bool=u8 0/1; enum=u32; u32/u64/i64 fixed-width big-endian;
+   f64 IEEE bits big-endian, rejecting NaN/infinity and normalizing -0 to +0.
+4. Strings/bytes: u32 byte length then exact bytes. Text is UTF-8 without implicit
+   Unicode normalization. Repeated fields: u32 count then encoded items in
+   caller order. Nested messages: u32 encoded length then bytes.
+5. Oneof: selected field number u16 followed by its value; unset is invalid.
+   Optional fields: u8 presence then value if present. No maps exist in v1.
+6. BLAKE3 over that byte stream is operation_digest for dedup and Resolve.
+
+Adding operation fields changes the digest codec version; v1 rejects unknown
+fields rather than silently hashing an incomplete operation. Generate fixtures
+for reordered wire fields, JSON field order, bigint limits, empty bytes vs
+missing oneof, and negative zero. All three SDKs must match Rust digests.
+
+## Error and HTTP status mapping
+
+The Proto Error carries a code plus NOT_STARTED, REJECTED or UNKNOWN. A
+MutationReply may contain a receipt alongside a recorded business rejection.
+Keep structured error fields in HTTP bodies and gRPC error details; primitive
+outcomes are normal typed replies, while authentication/transport faults may
+use gRPC status without executing a command.
+
+| Code | HTTP | Client action |
+| --- | --- | --- |
+| INVALID_ARGUMENT | 400 | Correct input; do not retry unchanged |
+| PERMISSION_DENIED | 403 | Refresh authorized identity or stop |
+| NOT_FOUND | 404 | Stop or explicitly provision |
+| PRECONDITION_FAILED, REQUEST_ID_CONFLICT | 409 | Resolve application conflict |
+| REQUEST_EXPIRED | 410 | Do not replay; request explicit new operation |
+| LEASE_LOST | 409 | Drop task ownership; never complete with replacement token |
+| RESOURCE_EXHAUSTED | 429 | Backoff within original identity/expiry |
+| OUTCOME_UNKNOWN | 503 | Resolve by identity/digest before application retry |
+| UNAVAILABLE | 503 | Retry reads; mutations follow outcome classification |
+| SCHEMA_INCOMPATIBLE | 409 | Deploy compatible code/schema |
+| INTERNAL | 500 | Preserve operation identity; resolve if outcome UNKNOWN |
+
+SDK retry ceiling is five transport attempts with 100/200/400/800 ms delays,
+bounded by original timeout/expiry. Resolve COMMITTED/REJECTED returns stored
+reply. ABSENT permits resubmitting the original mutation. UNKNOWN polls with
+backoff until deadline and returns a typed UnknownOutcomeError containing the
+identity/digest. A client must never manufacture a new request ID automatically.
+
+## Native Rust ABI
+
+Register trusted Cell definitions at build time:
 
 ```rust,ignore
-struct Counter;
-
-impl CellDefinition for Counter {
-    type Command = Increment;
-    type Query = ReadValue;
-    type Reply = CounterValue;
-
-    fn command(
-        &self,
-        ctx: &mut CommandContext<'_>,
-        command: Increment,
-    ) -> ServiceResult<CounterValue> {
-        ctx.sql().execute(
-            "UPDATE counter SET value = value + ?1 WHERE id = 1",
-            &[SqlValue::Integer(command.amount)],
-        )?;
-        let value = ctx.sql().integer(
-            "SELECT value FROM counter WHERE id = 1", &[],
-        )?;
-        Ok(CounterValue { value })
-    }
-
-    fn query(
-        &self,
-        ctx: &mut QueryContext<'_>,
-        _: ReadValue,
-    ) -> ServiceResult<CounterValue> {
-        Ok(CounterValue {
-            value: ctx.sql().integer(
-                "SELECT value FROM counter WHERE id = 1", &[],
-            )?,
-        })
-    }
+pub trait CellModule: Send + Sync {
+    fn command(&self, ctx: &mut CommandContext<'_>, method: &str, input: &[u8])
+        -> Result<Vec<u8>, CommandError>;
+    fn query(&self, ctx: &mut QueryContext<'_>, method: &str, input: &[u8])
+        -> Result<Vec<u8>, CommandError>;
+}
+pub trait WorkflowModule: Send + Sync {
+    fn transition(&self, ctx: &TransitionContext, state: &[u8], event: &[u8])
+        -> Result<Decision, CommandError>;
 }
 ```
 
-Migrations create the initial row. Framework registration binds the definition,
-wire schemas and migrations to a namespace. Rust generics stop at the native
-adapter: remote users invoke the schema-defined command, not a serialized Rust
-closure. Trusted native code links into a deployment image; loading arbitrary
-Rust shared libraries does not provide a stable or isolated plugin ABI.
+Registry key is immutable module digest plus method name, validated against
+the deployment manifest. No Rust shared-library loading or async transaction
+callback is part of v1. Errors preserve typed sources internally; public errors
+do not expose SQL text, credentials or input bytes.
 
-## TypeScript Cell and HTTP service
+## JavaScript host ABI
 
-The same counter in the proposed embedded JS SDK:
+Use deno_core's JsRuntime/extension host operations. Pin its exact version and
+Rust/V8 toolchain in the adapter's initial implementation commit; no second JS
+engine is supported. The [upstream engine](https://github.com/denoland/deno_core)
+provides embedding, while this adapter owns module loading and API restrictions.
+
+Load only modules listed by digest in the verified deployment artifact. TS is
+compiled to JS during build. Network imports, native addons and ambient Node/Deno
+filesystem APIs are absent. Every command worker uses an invocation table keyed
+by `(worker_generation, invocation_number)`; a host call must match both and
+the current Cell. Remove the entry on return, error or trap. A saved JS reference
+cannot access a later invocation's transaction.
+
+| Context | Host operation | Sync/async and bound |
+| --- | --- | --- |
+| Command | sql_execute(statement, parameters) | Sync; <=128 statements, typed row/result budget |
+| Command/query | sql_query(statement, parameters) | Sync; authorizer depends on context |
+| Command | emit(binding, bytes) | Sync; inserts sys_effects, no network |
+| Command/transition | context() | Sync; request/run ID, sequence and sampled time |
+| HTTP/activity | invoke(target, operation, identity) | Async; same Rust RPC path |
+| HTTP/activity | fetch(request) | Async; only manifest-approved destinations |
+
+Command callback must return a plain bounded result, not Promise/thenable.
+Reject asynchronous returns before COMMIT. Workflow transition has only context
+and action constructors; it cannot call SQL. Query callback lacks writes/effects.
+Catch declared `CommandRejected(code, bytes)` as a business rejection; all other
+exceptions/traps are infrastructure failure and rollback.
+
+Expose SQL integers as bigint, blobs as Uint8Array, null as null. Results crossing
+HTTP ProtoJSON encode integers as decimal strings and bytes as base64, following
+[ProtoJSON](https://protobuf.dev/programming-guides/json/). Application command
+input/output is opaque bytes; the generated user contract chooses its codec and
+validates it before JS invocation. Do not serialize arbitrary closures or objects.
 
 ```ts
-import { defineCell, defineService } from "@crab-platform/sdk";
-
-export const Counter = defineCell({
-  name: "counter",
-  schema: "./contracts/counter.json",
-  migrations: "./migrations/counter",
-
-  command(ctx, input: { amount: bigint }) {
-    ctx.sql.execute(
-      "UPDATE counter SET value = value + ? WHERE id = 1",
-      [input.amount],
+// Target SDK API. Registration owns SQL transaction and acknowledgement.
+export const inventory = defineCell({
+  command(ctx, input) {
+    const updated = ctx.sql.execute(
+      "UPDATE inventory SET stock=stock-? WHERE sku=? AND stock>=?",
+      [input.quantity, input.sku, input.quantity],
     );
-    const row = ctx.sql.first<{ value: bigint }>(
-      "SELECT value FROM counter WHERE id = 1",
-    );
-    if (!row) throw new Error("counter migration invariant violated");
-    return { value: row.value };
-  },
-});
-
-export default defineService({
-  async fetch(request, env) {
-    const principal = await env.identity.requireUser(request);
-    const requestId = request.headers.get("Idempotency-Key");
-    if (!requestId) return new Response("Idempotency-Key required", { status: 400 });
-
-    const counter = env.cells.counter(principal.accountId);
-    const receipt = await counter.command({ amount: 1n }, { requestId });
-    return Response.json({ value: receipt.value.value.toString() });
+    if (updated.rowsChanged !== 1n) throw new CommandRejected("OUT_OF_STOCK");
+    ctx.emit("fulfillment", encodeOrder(input));
+    return encodeReservation(input.reservationId);
   },
 });
 ```
 
-Command input is validated at the Rust boundary using the deployed contract.
-The gateway maps the signed-in identity to an authorized account partition.
-It preserves a client-supplied idempotency key; generating a new key for each
-HTTP retry would defeat deduplication. Integer results use `bigint` in JS and
-decimal strings at the JSON boundary, avoiding silent precision loss.
+Guest heap ceiling is 32 MiB/worker plus bounded host buffers. Reuse compiled
+module data, but clear invocation globals by disposing/recreating the context
+between tenants/deployments. Persistent JS heap state is not durable Cell state.
+Resource-limit traps never cause an early durability response.
 
-A Cell invocation can insert an outbox effect in the same transaction through
-`ctx.outbox.enqueue(...)`. Calling `env.queues.send(...)` from a stateless HTTP
-handler is a separate durable operation. The names and documentation must make
-this distinction visible to application builders.
+## External language deployment and activities
 
-## External Python/Node/Go services
-
-An ordinary Python worker uses the same Rust workflow/queue engines:
+The TS/Python SDK wraps generated clients, preserves identities, derives shards,
+converts typed values and supervises activity leases. A container uses a workload
+token bound to app/deployment/actions; it receives no bucket credentials.
+The SDK's activity loop polls allowed shards with at most 32 concurrent tasks,
+heartbeats at lease/3 and stops ownership on LEASE_LOST.
 
 ```python
-# Proposed SDK sketch; package not published.
-from crab_platform import Client
-
-client = Client(endpoint=endpoint, workload_identity=identity)
-
-await client.kv("settings").put(
-    key=b"theme",
-    value=b"dark",
-    request_id=request_id,
-)
-
-async for task in client.activities("invoice-renderer").poll():
-    result = await render_invoice(
-        task.input,
-        idempotency_key=task.effect_id,
-    )
+# Target SDK API; all orchestration/durability remains in Rust.
+async for task in client.activities("invoice", definitions=[definition]).poll():
+    result = await render_invoice(task.input, idempotency_key=task.effect_id)
     await task.complete(result)
 ```
 
-The production worker SDK supervises lease heartbeats, consumer credits,
-cancellation and completion retries. The abbreviated loop illustrates ownership
-of the business activity, not a complete lease implementation. A lost lease
-prevents completion from changing workflow state; an already issued external
-effect may still complete and needs destination deduplication.
-
-An external Node service invokes a deployed command rather than fetching rows
-and holding a network transaction:
-
-```ts
-const receipt = await client.cells("inventory", warehouseId).command(
-  "reserve",
-  { sku, quantity, reservationId },
-  { requestId: reservationId },
-);
-```
-
-Customers deploy these services using their normal container pipeline or the
-platform CLI's generated Kubernetes resources. The platform does not execute
-arbitrary containers inside the Rust database process.
-
-## Wire contract
-
-Use versioned Protobuf definitions for RPC and an explicitly specified JSON
-mapping for HTTP. Generate transport clients, then provide small ergonomic SDKs.
-Transport packages do not independently implement retry or primitive semantics.
-Keep WIT types separate but map them into the same internal validated operations;
-conformance tests catch differences across adapters.
-
-| Concern | Cross-language representation |
-| --- | --- |
-| SQL values | Tagged null, signed 64-bit integer, finite f64, UTF-8 text, bytes |
-| JSON integers | Decimal strings for 64-bit fields; no lossy JS Number conversion |
-| Binary payloads | Protobuf bytes; base64 in HTTP JSON; Uint8Array/bytes in SDKs |
-| KV versions and receipts | Opaque bounded tokens, compared by server |
-| Time | Explicit UTC milliseconds for persisted due times; separate request timeout budget |
-| SQL rows | Ordered values plus column descriptors |
-| User schemas | Versioned digest in deployment manifest; JSON Schema initially for command payloads |
-| Request IDs | Caller-stable opaque IDs scoped by authenticated Cell identity |
-| Errors | Stable code, outcome classification, request ID and retry advice |
-
-Follow the [Protobuf JSON mapping](https://protobuf.dev/programming-guides/json/)
-when exposing generated fields; custom typed payloads must declare their encoding.
-Choose canonical request hashing after validation. Hash semantic typed values
-using a specified encoding; arbitrary JSON key order or Protobuf serialization
-order must not turn equivalent requests into different dedup identities.
-
-Representative endpoints:
-
-```text
-POST /v1/cells:command          binding, partition, operation, request ID, input
-POST /v1/cells:query            binding, partition, query, consistency
-POST /v1/sql:batch              binding, partition, typed statements, request ID
-POST /v1/sql:query              binding, partition, typed statement, read options
-POST /v1/kv:atomic              binding, scope, checks, mutations, request ID
-POST /v1/queues:send            binding, payload, dedup identity
-POST /v1/queues:receive         binding, consumer credit, wait budget
-POST /v1/queues:ack             binding, message ID, lease token, request ID
-POST /v1/workflows:start        binding, workflow ID, input, request ID
-POST /v1/workflows:signal       binding, run ID, signal ID, payload
-POST /v1/activities:complete    binding, run/activity/attempt, token, result
-GET  /v1/operations/{id}        resolve an indeterminate operation
-```
-
-Using body fields for arbitrary keys avoids interpreting binary keys or slashes
-as path traversal. RPC equivalents carry the same data. Tenant/application
-identity comes from authentication and authorized binding resolution; supplying
-an application ID never grants access. Private forwarding carries verified
-principal context, deployment capability and hop/deadline state.
-
-Important errors include `VERSION_CONFLICT`, `REQUEST_ID_CONFLICT`,
-`LEASE_LOST`, `RESOURCE_EXHAUSTED`, `SCHEMA_INCOMPATIBLE`, `SNAPSHOT_EXPIRED`
-and `OUTCOME_UNKNOWN`. Distinguish outcomes `not_started`, `rejected`,
-`committed` and `unknown`. A retryable boolean alone is insufficient. SDK retries
-preserve request identity and operation bytes, have bounded budgets, and resolve
-unknown outcomes rather than automatically issuing a new mutation.
-
-## Embedded host boundary
-
-The JS adapter resolves each imported binding to a Rust capability. A WASM
-interface can similarly use a transaction resource valid for one invocation:
-
-```wit
-package crab:cell@1.0.0;
-
-interface types {
-  variant sql-value {
-    null-value,
-    integer(s64),
-    real(float64),
-    text(string),
-    blob(list<u8>),
-  }
-  record statement {
-    sql: string,
-    params: list<sql-value>,
-  }
-  record cell-error {
-    code: string,
-    message: string,
-  }
-}
-
-interface transaction {
-  use types.{statement, cell-error};
-  resource tx {
-    execute: func(query: statement) -> result<u64, cell-error>;
-    emit: func(binding: string, payload: list<u8>) -> result<_, cell-error>;
-  }
-}
-
-world command {
-  import transaction;
-  use transaction.{tx};
-  export invoke: func(scope: borrow<tx>, input: list<u8>)
-    -> result<list<u8>, string>;
-}
-```
-
-This is a proposed interface sketch requiring validation against the chosen WIT
-toolchain. Full query/result operations and application errors are added when
-the concrete adapter is implemented. Guest return does not call COMMIT: the
-host validates output, closes capabilities, commits/captures/publishes, and then
-responds. A trapped or invalid guest result rolls back if commit has not begun.
-
-Each guest has memory/CPU limits, bounded host buffers and an import allowlist.
-Do not allocate one isolate per registered Cell. Share compiled code and use a
-bounded invocation pool; keep durable state in SQLite and treat guest globals as
-disposable cache. Support persistent in-memory actor identity or WebSocket
-hibernation only as separately specified features.
-
-## Local development
-
-Proposed application layout:
-
-```text
-service/
-  crab.toml
-  src/http.ts
-  src/cells/inventory.ts
-  src/workflows/fulfillment.ts
-  migrations/inventory/0001.sql
-  contracts/inventory.json
-  workers/invoice/Dockerfile
-  tests/
-```
-
-`crab-platform dev` runs the actual Rust Cell/primitive engine, chosen language
-adapter and a local storage adapter. Fast local mode uses filesystem storage;
-durability qualification mode uses isolated RustFS with the real conditional
-publication path. The former must not be reported as cloud/provider proof.
-
-The inspector shows active owner, published sequence, pending publication,
-queues and workflow state without revealing provider credentials. Fault commands
-exercise owner kill, storage failure, delayed publication and source-directory
-loss. SDK contract tests run the same scenario against local and network
-adapters. Deployment details are in [deployment](deployment.md).
+The supervisor runs heartbeats while the application awaits. Cancellation stops
+new external work when possible, but an already issued side effect can complete.
+The completion call carries run/activity/attempt/token, original request identity
+and result bytes. Repeated completion preserves them. SDKs suppress payloads from
+claim replies with less than the required lease margin.

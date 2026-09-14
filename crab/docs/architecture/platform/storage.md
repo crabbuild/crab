@@ -1,0 +1,226 @@
+# Storage identities, records and LTX integration
+
+[Index](README.md). All multi-byte binary fields below use big-endian encoding.
+All JSON objects reject unknown fields, duplicate keys and oversized bodies.
+
+## Identity and path codec
+
+IDs are byte arrays: tenant/application/namespace/session/incarnation/request
+IDs are 16 bytes; Cell IDs and BLAKE3 digests are 32 bytes. Public names resolve
+to IDs through authorized deployment bindings. Partition bytes are at most
+1,024 bytes. Define `LP(x) = u32(length(x)) || x`.
+
+```text
+cell_id = BLAKE3("crab.cell.v1\0" || tenant_id || app_id || namespace_id
+                 || LP(partition))
+shard = first_u64(BLAKE3("crab.shard.v1\0" || namespace_id || LP(scope))) % N
+partition_for_shard = u32(shard)
+```
+
+KV routes by scope only; queue/workflow namespace shard counts are powers of
+two in 1..4096 and cannot change after provisioning. Workflow routing hashes
+workflow_id; queue send hashes producer_id. Claims explicitly address one shard;
+the SDK cycles shards rather than making one cross-shard transaction.
+
+Paths relative to a configured authoritative storage root:
+
+```text
+platform/v1/apps/<app>/deployment.json
+platform/v1/apps/<app>/catalog/<00..ff>/head.json
+platform/v1/apps/<app>/catalog/objects/<digest>.json
+platform/v1/apps/<app>/cells/<cell>/control.json
+platform/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/<digest>.<kind>
+platform/v1/apps/<app>/artifacts/<digest>
+platform/v1/apps/<app>/pins/<pin-id>.json
+platform/v1/nodes/<session>.json
+```
+
+IDs in paths are lowercase fixed-width hex. `kind` is one of ltx, index, dir,
+root or bundle. Encoders accept typed IDs, never concatenate caller path text.
+`crab-storage` owns physical path construction; LTX receives a validated scoped
+layout. ETags are mutation tokens, never content hashes. Origin control/catalog
+reads bypass caches and staging; immutable reads may use verified caches.
+
+## Control JSON v1
+
+Required fields and exact representations:
+
+| Field | JSON type and validation |
+| --- | --- |
+| version | integer 1 |
+| cell | 64 lowercase hex characters; matches path |
+| incarnation | 32 lowercase hex; immutable except explicit restore |
+| epoch, revision, progress | Decimal strings, u64; revision/epoch >= 1 |
+| state | recovering, serving, idle, tombstoned |
+| owner | null or `{session: hex32, endpoint: string}`; endpoint <= 512 bytes |
+| root | null or RootRef below |
+| deployment | artifact digest hex64 |
+| schema | integer u32 >= 1 |
+| next_due_ms | null or decimal i64 string >= 0 |
+
+RootRef has exactly `digest` (hex64), `txid` (u64 decimal string), `checksum`
+(16 lowercase hex), and `commit_sequence` (u64 decimal <= i64::MAX). RootRef
+inherits Cell/incarnation from control; a public/internal typed reference includes
+those identities so it cannot be used against a different layout.
+
+Control body limit is 8 KiB. Serving requires owner and root; idle/tombstoned
+require owner null. Recovering can have root null only before first initialized
+database publication. A takeover of such a record preserves its incarnation
+and initializes from the catalog's declared schema; it does not invent a new
+incarnation. Every replacement validates the transition table in runtime.md.
+
+Root updates must match actual SQLite sequence/schema and LTX position. Clock
+or scheduling summary changes never replace a root independently of its data.
+Renewals preserve the published next_due_ms value.
+
+## Root codec and dependency graph
+
+Root JSON fields: `version=1`, `cell`, `incarnation`, `txid`, `checksum`,
+`commit_sequence`, `page_size`, `database_pages`, `schema`, `directory_digest`,
+`directory_height`, `segment_pages` and `blob_ref_count`. Integer representations
+match control (u64 decimal strings; page size/count/height are JSON integers).
+Serialize keys lexicographically with no whitespace; hash the resulting bytes.
+Readers verify those bytes' digest before decoding, without reserialization.
+
+Root <= 32 KiB; at most 32 segment-page digests. Each immutable segment-page JSON
+array has at most 128 ordered descriptors and is <= 64 KiB. Descriptor fields
+are the existing SegmentInfo fields plus physical `object_digest`, `offset`,
+`length`, `index_digest` and `index_length`. Native bodies have offset zero;
+bundle bodies identify the exact original LTX extent. No body-location fallback.
+Every size/offset addition uses checked arithmetic before I/O.
+
+The first segment is a full snapshot; subsequent ranges are contiguous through
+the exact root TXID. Verify pre/post checksum continuity and every decoded
+body's BLAKE3, including intermediate states on full restore. Maintain a maximum
+4,096 segment descriptors; at 3,072 schedule compaction aggressively, and at
+4,096 reject new writes until maintenance frees descriptor capacity. Never grow
+an unbounded linked list of predecessor roots.
+
+Old immutable roots are retained; the new root reuses descriptor pages and page
+directory nodes by digest. Compaction replaces descriptors at identical logical
+sequence/schema, validates equivalent page state, then proposes a normal control
+CAS. The control record is the only mutable authority used by the platform.
+
+## Authenticated page directory
+
+For retained application artifacts, sys_blob_refs kind 1 names the active
+deployment manifest, with owner_id=Cell ID; kind 2 names a running workflow's
+definition manifest, with owner_id=run ID. Insert/update these references with
+the corresponding migration/start transaction, and remove the workflow row only
+when its retained run is deleted. Digests reference immutable artifact manifests
+whose verified inventory supplies transitive blob dependencies. Backup/GC walks
+this table from the pinned SQLite root; root.blob_ref_count must equal its count.
+
+Replace the fully resident locator map with a persistent radix tree. Leaf index
+is `(page_number - 1) / 256`; branch fanout is 256. Leaves list actual page
+numbers in strictly increasing order. A database page must have one locator
+except SQLite's reserved lock page, handled by the existing VFS rule. Missing
+allocated pages fail verification; holes never become zero-filled user data.
+
+Binary node header is 32 bytes: magic `CRBDIR01` (8), version u16=1, kind u8
+(leaf=0/branch=1), reserved u8=0, entry_count u32, live_pages u64, XOR page
+checksum u64. No trailing bytes are accepted.
+
+Leaf record is 88 bytes: page_number u32, physical_object_digest[32], absolute
+frame_offset u64, frame_length u32, frame_BLAKE3[32], decoded_page_crc u64.
+Branch record is 56 bytes: first_page u32, last_page u32, child_digest[32],
+live_pages u64, XOR checksum u64. At most 256 records/node; tree ranges must
+match radix boundaries without overlap. Parent aggregates equal XOR/count of
+children. Top-level count/checksum must match the existing verified page-state
+algorithm, including the LTX checksum flag/reserved-page rules.
+
+Updating a cut loads only affected leaves and ancestors, verifies their hashes,
+applies verified new page locators, removes truncated suffixes and recomputes
+aggregates. Verify growth-page coverage before accepting the new root. Changed
+nodes are copy-on-write immutable objects; original nodes remain usable by
+historical roots. Initial snapshot construction streams sorted verified pages
+into leaves; it does not allocate one locator per page.
+
+The local capture checksum tracker must use this same bounded directory through
+an injected page-state interface: lookup/update a changed page CRC, truncate a
+suffix, and read the aggregate checksum. Replace the current Vec/whole-map clone
+in managed capture; otherwise sparse reads would be bounded while every write
+still allocates database-proportional checksum state. Checkpoint and snapshot
+paths share that interface, and verify each cut's checksum before sealing it.
+
+Resident node cache uses a process-wide byte ceiling, keyed by storage identity,
+Cell/incarnation and node digest. Eviction loses only verified cached bytes.
+Disk cache uses the same key and verifies BLAKE3 after reopening. Fault reads
+verify node path, frame hash, decoded page identity and CRC before installation.
+Hydration and foreground writes retain the existing writable-VFS overwrite and
+truncate ordering. Concurrent hydration cannot reinstall an obsolete page.
+
+## LTX APIs to implement
+
+```rust,ignore
+pub struct RootRef {
+    pub cell: [u8; 32],
+    pub incarnation: [u8; 16],
+    pub digest: [u8; 32],
+    pub position: crab_ltx::Position,
+    pub commit_sequence: u64,
+}
+pub struct PreparedRoot {
+    predecessor: Option<RootRef>,
+    root: RootRef,
+}
+impl Replica {
+    pub async fn prepare(
+        &self, base: Option<&RootRef>, cuts: &CaptureBatch,
+        sequence: u64, schema: u32,
+    ) -> Result<PreparedRoot>;
+    pub async fn open_root(&self, root: &RootRef) -> Result<VerifiedRoot>;
+    pub async fn prepare_compaction(
+        &self, base: &RootRef, range: std::ops::Range<usize>, level: u8,
+    ) -> Result<PreparedRoot>;
+}
+```
+
+Reuse verification in replica/append.rs and the native/bundle frame resolver.
+`prepare` uploads immutable dependencies only: no per-epoch head write. It
+accepts a verified historical root without a mutation token; authority remains
+the runtime's responsibility. New incarnation uses `base=None` and a complete
+snapshot. Existing incarnation continues exact TXID/checksum without epoch
+renumbering. Ownership epoch is not the physical LTX namespace in this format.
+
+`PreparedRoot` fields are private; constructors must verify scope, complete
+dependency upload, cut continuity and root metadata. The platform cannot build
+an unchecked prepared value. Maintenance and bundled appends use the same path.
+Keep checksums mandatory and existing LTX sized-block encoding. This new root/
+directory format uses a separate versioned namespace; hard cutover is explicit.
+
+Extend ManagedDb transaction handling to preserve service errors instead of
+coercing them into rusqlite errors: `TransactionError<E> = Operation(E) | Sqlite
+| Capture`, preserving sources. Capture after local commit stays separately
+owned by the actor. Add scoped read/authorizer entry points; never expose a raw
+connection that can alter pager settings through the guest or remote SQL API.
+
+## Streaming and scratch
+
+Use 8 MiB I/O buffers and a 64 MiB memory reservation per capture/recovery/
+compaction job, excluding the shared caches. Oversized encoded/decode units fail
+admission. Snapshot/restore write sequentially to exclusive scratch files and
+sync file then parent before installation. At 5,000 MB, reserve two database
+sizes plus 64 MiB scratch before full recovery/compaction; sparse activation
+reserves only dirty-page/WAL budgets plus bounded metadata.
+
+Compaction performs external merge by page number through bounded scratch runs,
+choosing the last page in the selected TXID range. Verify output against an
+independent reduction/directory aggregate before preparation. Never materialize
+the full database or all input LTX bytes in Vec buffers. Only selected bodies
+download; unselected authenticated descriptors remain referenced.
+
+## Catalog and startup
+
+Catalog shard is first byte of Cell ID. Its CAS head contains version, revision
+and up to 256 immutable page digests; each sorted page holds up to 256 entries
+`{cell, namespace, partition, role, initial_deployment, initial_schema}`. A shard
+caps at 65,536 entries; return RESOURCE_EXHAUSTED at this v1 bound. Writers CAS
+the head after uploading changed pages, with ID collision checks. Provision
+catalog before control so crashes can leave only harmless empty entries.
+
+Startup validates provider strict-create and failed-update behavior in a private
+probe prefix, loads deployment/catalog roots, opens local capacity budgets, then
+accepts traffic. Cell activation reserves capacity, acquires control, opens its
+exact root with the managed sparse VFS and checks sys_meta identity/sequence/schema.
+Local files are a cache; v1 never resumes arbitrary surviving WAL after restart.

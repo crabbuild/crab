@@ -1,140 +1,183 @@
-# Delivery plan and qualification
+# Implementation work packages and acceptance tests
 
-[Design index](README.md). This is an implementation plan, not a completion
-report. No new platform capability is qualified by writing these documents.
+[Index](README.md). Packages below are ordered dependencies with concrete
+changes and tests. Contract files define the target; passing their validator
+does not establish a working runtime.
 
-## Current source evidence
+## Existing implementation to reuse
 
-The design was checked against the following source boundaries at
-`996cde6911e9ab519c4200df0c977366377f16bd`:
-
-| Surface | Current behavior | Design consequence |
+| Source | Current behavior | Required change |
 | --- | --- | --- |
-| [ManagedDb](../../../../crates/crab-ltx/src/managed.rs) | Synchronous trusted transaction callback; capture/checkpoint/snapshot return local cuts | Runtime must own transaction result, all cuts and output gate; guest SQL needs restrictions |
-| [Replica](../../../../crates/crab-ltx/src/replica.rs) | Immutable manifests plus per-epoch mutable head; exact open/restore | Add an immutable preparation boundary for combined owner/root publication |
-| [Append verification](../../../../crates/crab-ltx/src/replica/append.rs) | Private verification path shared by append operations | Refactor existing verified mechanics; do not create a weaker platform uploader |
-| [Paged database](../../../../crates/crab-ltx/src/paged.rs) | Authenticated page map, sparse writable activation and checked range reads | Reuse correctness path; replace unbounded metadata residency before scale claims |
-| [Host hooks](../../../../crates/crab-ltx/src/environment.rs) | Injectable filesystem/executor and shared count-based admission | Add byte budgets and runtime scheduler ownership above this seam |
-| [Store update](../../../../crates/crab-storage/src/store.rs) | Conditional update; ambiguous errors intentionally not retried | Caller must reconcile publication and retain stable operation identity |
-| [HTTP manifest](../../../../crates/crab-http-server/Cargo.toml) and [app storage](../../../../crates/crab-http-server/src/app_storage.rs) | No runtime LTX dependency; existing application storage | HTTP Cell integration remains a delivery slice |
-| [Existing workflow](../../../../crates/crab-workflow/src/lib.rs) | Git/DVC planning, stage execution, artifacts and experiments | Keep platform durable workflows distinct from this existing product API |
-| [Library tests](../../../../crates/crab-ltx/tests/publication.rs) and [RustFS fixture](../../../../crates/crab-ltx/tests/remote.rs) | Replication/publication mechanics have test coverage | Extend with owner/runtime/protocol tests; library tests are not platform E2E proof |
+| [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Trusted synchronous SQL callback; separate capture; local-only commit | Typed operation errors, restricted read/guest callbacks and actor-owned cut transfer |
+| [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Immutable manifest plus per-epoch mutable head | Immutable-only prepare/open_root; platform never uses epoch head as authority |
+| [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
+| [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
+| [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
+| [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
+| [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
-The [LTX README](../../../../crates/crab-ltx/README.md),
-[parity matrix](../../../../crates/crab-ltx/PARITY.md) and
-[scalability audit](../../../../crates/crab-ltx/SCALABILITY.md) record existing
-qualification and gaps. This documentation change does not rerun or upgrade
-that evidence. An internal `prepare_append` helper does not already provide a
-public immutable-root API: it still participates in the per-epoch-head path.
+Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
+[host tests](../../../../crates/crab-ltx/tests/host_hooks.rs) and
+[RustFS fixture](../../../../crates/crab-ltx/tests/remote.rs). They are library
+mechanics evidence; none already proves multi-owner HTTP output gating.
 
-## Delivery slices
+## Work package 1: immutable LTX preparation
 
-Each slice is a vertical behavior with a visible result. Introduce packages only
-when its implementation needs the ownership boundary. Do not ship stub bindings
-that silently use memory or bypass publication.
+Modify replica.rs/append.rs/bundles.rs to route through prepared.rs/root.rs.
+Implement RootRef scope validation, root/descriptor codecs and prepare/prepare_
+compaction methods from storage.md. Remove any platform call to mutable epoch
+heads. Check existing standalone callers before changing their public API.
 
-| Slice | Work and dependency | Acceptance gate |
-| --- | --- | --- |
-| 1. Root preparation | Refactor LTX verification/upload, immutable root identity, first-create/inherit/compaction paths | Prepare without mutable writes; recover exactly; reject corrupt bodies/indexes on every path |
-| 2. Single-node durable SQL | Cell command executor, dedup/result records, commit capture, control CAS, read barrier | Command → RustFS → delete local source → restart → same result/query |
-| 3. Ownership and routing | Catalog, capacity admission, sessions, monotonic suspicion, peer auth, handoff | Competing owners, pause/partition and lost CAS response cannot lose acknowledged writes |
-| 4. Remote protocol | Versioned SQL/Cell RPC/HTTP, auth, typed values, Rust and TS clients | Rust/TS invoke same command and resolve same unknown operation; no integer loss |
-| 5. Embedded JS and deploy | Guest command sandbox, module loader, schemas/migrations, immutable deploy flow | Deploy TS Cell + HTTP handler; kill owner; query restored state through another node |
-| 6. Durable effects | Outbox/inbox, scheduler summaries, catalog rescanning | Lose every notification and restart all workers; effect still delivers with correct dedup |
-| 7. KV and Queue | Partitioning, TTL/versions, published leases, retries/DLQ | Cross-language conditional writes and queue delivery survive source loss and delayed ack |
-| 8. Workflow + activities | Explicit state machine, timers/signals, run/attempt fencing, Python worker SDK | TS workflow calls Python activity, survives node/worker loss and duplicate completion |
-| 9. Fleet operations | OCI services, deployment status, migration/drain, restore, retention | Customer Kubernetes rollout and recovery with pinned running workflow definitions |
-| 10. Scale infrastructure | Bounded metadata, streaming operations, byte budgets, workload harness | Profile-specific 1K/10K active DB and aggregate TPS measurements within explicit limits |
-| 11. WASM host | Qualified WIT ABI, guest runtime and toolchain matrix | One supported language runs transactional commands with the same conformance/fault tests |
-| 12. Additional products | Async workflow replay, online GC, object API, optional peer durability | Separate protocol decisions and acceptance proofs before support claims |
+Add `crates/crab-ltx/tests/prepared.rs` cases:
 
-Resource bounds and cancellation supervision start in slice 2; slice 10 proves
-the larger envelope and completes storage changes needed for it. Embedded JS
-depends on native SQL/ownership/protocol boundaries, while remote container
-services can become useful at slice 4. WASM is not a prerequisite for Python,
-Go or Java access over the protocol.
+- `prepare_does_not_write_mutable_keys`: instrument transport; assert no head/
+  control update during native, bundled and compaction preparation.
+- `prepared_root_restores_after_source_loss`: real RustFS upload, delete local
+  source, reopen exact root and compare SQL and database checksums.
+- `root_rejects_other_cell_or_incarnation`: reuse a valid digest in another scope.
+- `snapshot_transfers_all_pending_cuts`: interleave transaction/checkpoint/snapshot;
+  verify no local committed cut disappears from the caller-owned batch.
 
-`crab-http-server` can adopt the native Cell API after slice 3 with its own
-application migrations and browser acceptance work. It need not wait for
-WASM or the general Workflow primitive. Share the Cell engine and publication
-rules instead of implementing a second repository-only owner protocol.
+Exit: default/replica builds and existing tests pass, plus live source-loss test.
 
-## Contract and fault tests
+## Work package 2: runtime command and authority
 
-| Invariant | Required adversarial scenario |
+Implement identity.rs, authority.rs, actor.rs, executor.rs and publication.rs.
+Install runtime.sql and enforce the runtime.md state table. Add a command fixture
+that increments a counter and stores request outcome. All transitions use the
+existing Store conditional primitives, preserving their source errors.
+
+Add `crates/crab-cell-runtime/tests/publication.rs`:
+
+- `lost_cas_response_resolves_without_sql_replay`: drop response after origin
+  accepts CAS; same request increments once and returns stored result.
+- `takeover_preserves_winning_publication`: enumerate CAS orderings; any returned
+  success survives successor activation, including delayed old-owner response.
+- `resolve_absent_waits_for_inflight_publisher`: hide pending upload from a
+  historical root; Resolve must return UNKNOWN until drain/fence proves absence.
+- `client_drop_retains_pending_cut_and_permits`: cancel at commit/capture/upload;
+  supervisor completes or fences, and memory accounting remains reserved.
+- `business_rejection_rolls_back_effects_but_records_outcome`: savepoint rollback
+  preserves only the rejection/dedup record after publication.
+
+Exit: two local runtime processes against isolated RustFS pass counter increment,
+owner kill, full source-directory removal and query recovery.
+
+## Work package 3: bounded storage
+
+Implement directory.rs, streaming root construction, external-merge compaction,
+and directory-backed capture checksum updates. Remove whole-DB buffers from
+active paths; do not preserve a second unbounded implementation as fallback.
+
+Add tests `directory_hash_and_coverage_reject_missing_page`,
+`truncate_regrow_cannot_reuse_old_locator`, `changed_cut_loads_only_touched_nodes`,
+`five_gb_restore_stays_within_job_reservation`, and
+`sparse_fault_pool_progresses_under_saturated_sql_workers`. Run large tests in
+dedicated infrastructure. Assert actual peak RSS/scratch and requested bytes,
+not just configured semaphore counts.
+
+Exit: 5,000 MB incompressible source-loss restore, low-disk failure and concurrent
+capture/compaction pass without memory proportional to database size.
+
+## Work package 4: public protocol and language adapters
+
+Copy platform.proto into crab-platform-protocol; use generated Rust transport
+types with explicit validation before handlers. Implement canonical digest codec,
+HTTP/gRPC dispatch, auth and owner forwarding. Generate TS/Python transport
+clients and implement the same bounded retry/Resolve state machine in each.
+
+Add `canonical_codec_cross_language_vectors`, `i64_max_roundtrips_json`,
+`expired_identity_cannot_reexecute_after_dedup_gc`,
+`unknown_outcome_keeps_request_identity`, and `forward_hop_limit_preserves_auth`.
+Test malformed/unknown fields before any actor admission. Fuzz protobuf/JSON
+validation and identity/path encoding.
+
+Implement native guest traits and deno_core adapter. Register synchronous
+command/query/transition callbacks and async HTTP primitives. Tests:
+`promise_return_rolls_back`, `saved_capability_cannot_reenter_next_invocation`,
+`guest_cannot_attach_or_modify_system_table`, `guest_timeout_fences_host_job`,
+and `js_counter_survives_owner_source_loss` through the public API.
+
+Exit: TS HTTP service and Python client deployed against two runtimes exchange
+typed SQL values and safely resolve the same interrupted mutation.
+
+## Work package 5: primitives and durable scheduler
+
+Implement migrations and SQL algorithms in primitives.md exactly once in Rust.
+Add sys_inbox/sys_effects handler and private authenticated DeliverEffect
+protocol; public callers cannot forge source effect identities. Implement
+catalog scanner and Tick through the normal actor command loop.
+
+| Test file | Required cases |
 | --- | --- |
-| No lost acknowledged writes | Kill after every SQL/capture/upload/CAS boundary; remove all owner-local files; restore on another node |
-| No stale publication | Pause owner, acquire successor, resume old process and race user/maintenance/heartbeat updates |
-| Unknown outcome reconciliation | Drop successful CAS response and every subsequent response in turn; retry same ID and compare durable result |
-| No tentative-state exposure | Block publication and attempt query, error response, queue claim, workflow activity and guest network effect |
-| Cut completeness | Snapshot/checkpoint/hydration/compaction overlap writes; every committed cut is either published or reported unresolved |
-| Consistent language semantics | Null/blob/large integer/duplicate columns, request hashing, errors and deadlines agree in Rust, TS and Python |
-| SQL isolation/security | Attempt system-table edits, pager PRAGMA, ATTACH, transaction escape, guest trap and oversized result |
-| KV version safety | Delete/recreate cannot satisfy an old CAS token; TTL agrees across read/check/list; scoped keys colocate |
-| Queue delivery safety | Claim publication delayed past lease, worker crash, expired token ack, duplicate receive and DLQ response loss |
-| Workflow progress | Duplicate events, stale activity attempts, missing notifications, sleeping cold shards, cancellation and version-pinned runs |
-| Bounded resource use | Saturate guest/SQL pools with sparse faults; inject disk full, cancellation and oversized incompressible DBs |
-| Safe retention | Backup/read/upload pins race collection; attempted publication while maintenance barrier is active is rejected |
-| Deployment recovery | Incompatible schema, partial container rollout, failed migration publication and old workflow worker removal |
+| tests/kv.rs | scoped routing, delete/recreate token, expired checked put/list, all-or-none multi-key mutation |
+| tests/queue.rs | producer dedup after ack, expired-token ack, delayed claim emission, retry/extend and DLQ delivery response loss |
+| tests/workflow.rs | signal identity conflict, stale attempt completion, cancellation, pinned definition and duplicate timer firing |
+| tests/scheduler.rs | drop every wake notification, evict all due Cells, restart scanner and observe eventual published progress |
+| tests/effects.rs | target commits/source response lost, source retries same effect; inbox retention exceeds sender horizon |
 
-Provider tests must prove conditional create/update, strong origin reads,
-immutable integrity and range correctness using the actual transport and
-production filesystem. RustFS/S3 success does not automatically qualify GCS,
-Azure or another S3-compatible endpoint. Include provider request failures and
-real persistent-volume restart/power-loss evidence where feasible.
+Exit: TS workflow schedules a Python activity, worker dies after its external
+idempotent effect, replacement completes once in workflow history. Kill every
+runtime and recover pending queue/timer/outbox state from RustFS.
 
-SDK packages need serialization fixtures and protocol conformance, not a
-separate reimplementation of durability tests for every convenience method.
-Fuzz untrusted codecs, SQL parameters, cursors, manifests and guest boundaries.
-Model the owner/publication state machine and check acknowledged-history
-linearizability under controlled races.
+## Work package 6: deployment and operations
+
+Implement config/deployment records and admin operations from deployment.md.
+CLI stages artifact digests, provisions namespaces, applies container resources
+and waits for readiness before activation. Add tests for migration digest conflict,
+partial readiness, lost activation CAS response and workflow definition retention.
+
+Use a Kubernetes qualification job with three runtimes, TS service and Python
+worker, persistent object storage, rolling drain and offline restore. Verify
+acknowledged operation history after removing one runtime's entire local volume.
+Test offline GC only in a disposable application namespace with real writer
+revocation; attempts to publish during collection must fail.
+
+Exit: documented command sequence builds/deploys/queries a service on a customer
+cluster, rolls its schema and restores an isolated copy with effects disabled.
+Then integrate crab-http-server's repository application through native handlers
+and its accepted hard-cutover/browser tests.
 
 ## Capacity qualification
 
-Use the [specified node profiles](deployment.md#resource-profiles-and-capacity-targets)
-in isolated infrastructure. Do not run 5 GB × 10K workloads on a developer's
-checkout or count logical registrations as open databases.
+Run every [hardware profile](deployment.md#resource-profiles-and-capacity-targets)
+separately. Sweep 1K then 10K open databases with a declared distribution: 70%
+100 MB, 25% 500 MB, 5% 5,000 MB, plus a worst-case 5,000 MB cohort. Object-store
+capacity belongs in dedicated infrastructure; local SSD holds admitted working
+sets. Test uniform traffic and 50% of traffic concentrated on 1% of Cells.
 
-For each profile, record memory/CPU/SSD limits, filesystem, provider, RTT,
-bandwidth, payload and changed-page distribution, compression, read/write mix,
-skew, open DB count and maintenance load. Include 100 MB and 5,000 MB databases,
-incompressible data, empty/idle and continuously active connections. State whether
-the 1,000 TPS workload counts user commands only; separately report primitive
-internal claims, acks and timer transactions.
+Offer 1,000 user mutation commands/s for 60 minutes, each modifying 1, 8 and 64
+4-KiB pages in separate runs. Report user commands independently of request
+dedup, queue claims/acks, renewal and scheduler transactions. Repeat with
+hydration/compaction and a ten-node-equivalent takeover burst.
 
-Measure achieved TPS, p50/p95/p99 latency, recovery time, takeover lag, queue age,
-timer lateness, peak RSS/SSD/FDs/threads, object requests per operation and write
-amplification. Sweep offered load to saturation; preserve visible overload and
-no-loss behavior rather than buffering requests without limit.
+Record actual TPS, latency percentiles, queue age, timer lag, control requests,
+write amplification, RSS/FD/thread/scratch peaks and recovery time. Initial
+acceptance gate: zero lost acknowledged operations, bounded configured memory/
+disk, p99 user latency <=1 s, scan lag <=5 s, and no growing publication backlog
+during the steady portion under an origin with measured p99 CAS <=50 ms.
+These are test gates, not claims that all profiles currently meet them. Publish
+the maximum passing envelope and any failed target; never relabel cold Cell
+registrations as simultaneously open databases.
 
-Run writes with background hydration/compaction, hot-shard traffic, rollout,
-simultaneous takeover and provider errors. Capacity passes only for the measured
-profile/distribution and agreed latency budget. Reports must include unsuccessful
-target cells and the limiting resource. The small profile can remain supported
-at a lower admitted workload without advertising unproven 10K-active capacity.
+## Repeatable design-contract validation
 
-## Decisions still requiring measurements or implementation proof
+Run from repository root:
 
-| Decision | Baseline | Evidence needed before broadening |
-| --- | --- | --- |
-| Acknowledgement latency | Object-store publication | User latency SLO and provider benchmarks; peer durability needs a new protocol |
-| Runtime engines | Native Rust + qualified JS; WASM later | Engine versions, cross-platform builds, isolation/resource tests |
-| Storage format | Preserve verified digest/checksum semantics | Versioned block-addressable format fixtures and hard-cutover procedure |
-| Dedup/queue/workflow horizons | Explicit configured retention | Maximum client retry, redrive and external activity duration |
-| Clock policy | Monotonic ownership suspicion; qualified wall time for schedules | Skew/jump tests and stated timer/lease timing guarantees |
-| Online GC | Scoped maintenance collection first | Reference/pin publication fencing and concurrent deletion proof |
-| Global transactions | One Cell only | Separate coordination design if a real consumer requires more |
-| Cloudflare compatibility | Own versioned platform API | Explicit API-by-API compatibility suite; engine reuse is insufficient |
+```sh
+node crab/docs/architecture/platform/validate.mjs
+git diff --check
+cargo fmt --all -- --check
+```
 
-The design fixes ownership, semantics and delivery order now. Exact performance
-defaults and language/toolchain support remain qualification results, not guessed
-configuration constants.
+Prerequisites: Node.js, sqlite3 with STRICT-table support, protoc with proto3
+optional support. The validator creates only an isolated temporary descriptor
+directory, removes it afterward, and uses in-memory SQLite. It checks all four
+schema compositions, lease null/state constraints, stale queue-token updates,
+workflow event uniqueness/foreign keys, completion token pairs, Protobuf compile,
+signed-64-bit roundtrip, document links and Markdown fences/whitespace.
 
-## Design validation
-
-Documentation checks cover relative links, fenced-block structure, schema syntax
-where a block is standalone SQL, and diagram syntax where renderer tooling is
-available. Rust/TypeScript/WIT examples are explicitly proposed API shapes;
-implementation slices must turn them into compiling, versioned conformance
-examples before SDK release. No runtime feature or dependency is added by this
-document set.
+These executable inputs make the design reviewable before implementation.
+They do not claim Rust runtime, SDK retry, cloud durability or guest-isolation
+tests already pass. Each work package's named tests remain required delivery
+evidence, alongside existing crate checks and provider-qualified CI.

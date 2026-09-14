@@ -1,0 +1,264 @@
+syntax = "proto3";
+package crab.platform.v1;
+
+// This descriptor is the v1 contract to implement, not an existing server.
+service Platform {
+  rpc Mutate(MutationRequest) returns (MutationReply);
+  rpc Read(ReadRequest) returns (ReadReply);
+  rpc Resolve(ResolveRequest) returns (ResolveReply);
+}
+
+// Bind only on the private, authenticated peer listener.
+service PeerEffects {
+  rpc Deliver(EffectRequest) returns (MutationReply);
+  rpc Resolve(EffectResolveRequest) returns (ResolveReply);
+}
+message EffectIdentity {
+  bytes effect_id = 1;
+  bytes source_cell = 2;
+  bytes source_incarnation = 3;
+  uint64 source_sequence = 4;
+  uint32 ordinal = 5;
+  int64 expires_at_ms = 6;
+}
+message EffectRequest {
+  Target target = 1;
+  bytes destination_incarnation = 2;
+  EffectIdentity identity = 3;
+  oneof operation {
+    CellCommand cell_command = 10;
+    QueueSend queue_send = 13;
+    WorkflowStart workflow_start = 16;
+    WorkflowSignal workflow_signal = 17;
+  }
+}
+message EffectResolveRequest {
+  Target target = 1;
+  bytes destination_incarnation = 2;
+  EffectIdentity identity = 3;
+  bytes operation_digest = 4;
+}
+
+// Serialized host/guest transition output, not a public mutation endpoint.
+message WorkflowDecision {
+  enum Status { RUNNING = 0; COMPLETED = 1; FAILED = 2; CANCELLED = 3; }
+  Status status = 1;
+  bytes next_state = 2;
+  optional bytes result = 3;
+  repeated WorkflowAction actions = 4;
+}
+message WorkflowAction {
+  oneof action {
+    ScheduleActivity activity = 1;
+    ScheduleTimer timer = 2;
+    EmitEffect emit = 3;
+  }
+}
+message ScheduleActivity { string activity_type = 1; bytes input = 2; }
+message ScheduleTimer { int64 due_at_ms = 1; }
+message EmitEffect { string binding = 1; bytes partition = 2; bytes operation = 3; }
+
+message Target {
+  string binding = 1;
+  bytes partition = 2;
+}
+message MutationIdentity {
+  bytes request_id = 1;       // 16 bytes; immutable across retries.
+  bytes incarnation = 2;      // 16 bytes; obtained by Read or provisioning.
+  int64 issued_at_ms = 3;
+  int64 expires_at_ms = 4;
+}
+message SqlValue {
+  oneof value {
+    bool null_value = 1;      // Must be true when selected.
+    sint64 integer = 2;
+    double real = 3;          // Finite only; normalize negative zero.
+    string text = 4;
+    bytes blob = 5;
+  }
+}
+message Statement { string sql = 1; repeated SqlValue parameters = 2; }
+message Row { repeated SqlValue values = 1; }
+message ResultSet {
+  repeated string columns = 1;
+  repeated Row rows = 2;
+  uint64 rows_changed = 3;
+}
+message SqlBatch { repeated Statement statements = 1; }
+message CellCommand { string method = 1; bytes input = 2; }
+message KvCheck {
+  bytes key = 1;
+  oneof expected { bool absent = 2; bytes version = 3; }
+}
+message KvMutation {
+  bytes key = 1;
+  oneof change { bytes put = 2; bool delete = 3; }
+  optional int64 expires_at_ms = 4;
+}
+message KvAtomic {
+  bytes scope = 1;
+  repeated KvCheck checks = 2;
+  repeated KvMutation mutations = 3;
+}
+message QueueSend {
+  bytes producer_id = 1;
+  bytes payload = 2;
+  int64 available_at_ms = 3;
+}
+message QueueClaim { uint32 limit = 1; uint32 lease_ms = 2; }
+message QueueLease {
+  bytes message_id = 1;
+  bytes token = 2;
+  enum Action { INVALID = 0; ACK = 1; RETRY = 2; EXTEND = 3; }
+  Action action = 3;
+  uint32 delay_or_extension_ms = 4;
+}
+message WorkflowStart {
+  bytes workflow_id = 1;
+  bytes input = 2;
+}
+message WorkflowSignal {
+  bytes workflow_id = 1;
+  bytes run_id = 2;
+  bytes signal_id = 3;
+  string name = 4;
+  bytes input = 5;
+}
+message WorkflowCancel { bytes workflow_id = 1; bytes run_id = 2; }
+message ActivityClaim {
+  string activity_type = 1;
+  uint32 limit = 2;
+  uint32 lease_ms = 3;
+  repeated bytes definition_digests = 4;
+}
+message ActivityLease {
+  bytes run_id = 1;
+  bytes activity_id = 2;
+  uint32 attempt = 3;
+  bytes token = 4;
+  enum Action { INVALID = 0; COMPLETE = 1; FAIL = 2; EXTEND = 3; }
+  Action action = 5;
+  bytes result = 6;
+  bool retryable = 7;
+  uint32 extension_ms = 8;
+}
+message MutationRequest {
+  Target target = 1;
+  MutationIdentity identity = 2;
+  uint32 timeout_ms = 3;
+  oneof operation {
+    CellCommand cell_command = 10;
+    SqlBatch sql_batch = 11;
+    KvAtomic kv_atomic = 12;
+    QueueSend queue_send = 13;
+    QueueClaim queue_claim = 14;
+    QueueLease queue_lease = 15;
+    WorkflowStart workflow_start = 16;
+    WorkflowSignal workflow_signal = 17;
+    WorkflowCancel workflow_cancel = 18;
+    ActivityClaim activity_claim = 19;
+    ActivityLease activity_lease = 20;
+  }
+}
+message Receipt {
+  bytes cell_id = 1;
+  bytes incarnation = 2;
+  uint64 commit_sequence = 3;
+}
+message Error {
+  enum Code {
+    INVALID = 0;
+    INVALID_ARGUMENT = 1;
+    PERMISSION_DENIED = 2;
+    NOT_FOUND = 3;
+    PRECONDITION_FAILED = 4;
+    REQUEST_ID_CONFLICT = 5;
+    REQUEST_EXPIRED = 6;
+    LEASE_LOST = 7;
+    RESOURCE_EXHAUSTED = 8;
+    OUTCOME_UNKNOWN = 9;
+    UNAVAILABLE = 10;
+    SCHEMA_INCOMPATIBLE = 11;
+    INTERNAL = 12;
+  }
+  enum Outcome { UNSPECIFIED = 0; NOT_STARTED = 1; REJECTED = 2; UNKNOWN = 3; }
+  Code code = 1;
+  Outcome outcome = 2;
+  string message = 3;
+  uint32 retry_after_ms = 4;
+  bytes application_details = 5;
+}
+message KvVersion { bytes key = 1; bytes version = 2; bool deleted = 3; }
+message KvResult { repeated KvVersion versions = 1; }
+message QueueMessage {
+  bytes message_id = 1;
+  bytes payload = 2;
+  bytes token = 3;
+  uint32 attempt = 4;
+  int64 lease_until_ms = 5;
+}
+message ActivityTask {
+  bytes run_id = 1;
+  bytes activity_id = 2;
+  string activity_type = 3;
+  bytes input = 4;
+  uint32 attempt = 5;
+  bytes token = 6;
+  int64 lease_until_ms = 7;
+  bytes definition_digest = 8;
+}
+message MutationResult {
+  oneof result {
+    bytes command_output = 1;
+    SqlResults sql = 2;
+    KvResult kv = 3;
+    QueueMessages queue = 4;
+    ActivityTasks activities = 5;
+    bytes workflow_run_id = 6;
+    bool applied = 7;
+  }
+}
+message SqlResults { repeated ResultSet results = 1; }
+message QueueMessages { repeated QueueMessage messages = 1; }
+message ActivityTasks { repeated ActivityTask tasks = 1; }
+message MutationReply {
+  Receipt receipt = 1; // Present for a durable success or stored rejection.
+  oneof outcome { MutationResult result = 2; Error error = 3; }
+}
+message KvGet { bytes scope = 1; bytes key = 2; }
+message KvList { bytes scope = 1; bytes prefix = 2; bytes after_key = 3; uint32 limit = 4; }
+message WorkflowGet { bytes workflow_id = 1; }
+message CellQuery { string method = 1; bytes input = 2; }
+message ReadRequest {
+  Target target = 1;
+  uint32 timeout_ms = 2;
+  Receipt minimum = 3;
+  oneof operation {
+    bool describe = 10;
+    Statement sql_query = 11;
+    KvGet kv_get = 12;
+    KvList kv_list = 13;
+    WorkflowGet workflow_get = 14;
+    CellQuery cell_query = 15;
+  }
+}
+message KvEntry { bytes key = 1; bytes value = 2; bytes version = 3; optional int64 expires_at_ms = 4; }
+message KvPage { repeated KvEntry entries = 1; bytes next_after_key = 2; bool has_more = 3; }
+message WorkflowState { bytes run_id = 1; uint32 status = 2; bytes state = 3; bytes result = 4; }
+message ReadReply {
+  Receipt receipt = 1;
+  oneof result {
+    bool exists = 2;
+    ResultSet sql = 3;
+    KvPage kv = 4;
+    WorkflowState workflow = 5;
+    bytes command_output = 6;
+    Error error = 7;
+  }
+}
+message ResolveRequest { Target target = 1; MutationIdentity identity = 2; bytes operation_digest = 3; }
+message ResolveReply {
+  enum State { INVALID = 0; COMMITTED = 1; REJECTED = 2; ABSENT = 3; UNKNOWN = 4; EXPIRED = 5; }
+  State state = 1;
+  MutationReply reply = 2;
+}

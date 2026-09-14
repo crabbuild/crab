@@ -1,360 +1,296 @@
-# SQL, KV, Queue and Workflow primitives
+# Primitive handlers and SQL procedures
 
-[Design index](README.md). All APIs and schemas here are proposed. The schemas
-show necessary invariants, not complete executable migrations.
+[Index](README.md). Install runtime.sql in all Cells and exactly one of kv.sql,
+queue.sql or workflow.sql in the corresponding primitive role. User SQL Cells
+install application migrations instead. No namespace column is necessary:
+Cell identity already selects exactly one namespace and shard.
 
-## One implementation, shared durability
-
-Rust primitive handlers receive an authorized binding, resolved Cell identity,
-validated operation and transaction capability from the Cell runtime. The same
-handler serves native Rust, JS host calls, WASM imports and HTTP/gRPC requests.
-Transport adapters validate representation; handlers own domain semantics;
-the runtime owns transaction/publication ordering.
-
-| Primitive | Cell partition | Atomic operations | External work |
-| --- | --- | --- | --- |
-| SQL | Named DB or explicit application partition | One command or atomic batch | Durable outbox |
-| KV | Fixed virtual shard or explicit colocated scope | Conditional mutations within one shard | Large blob uploads before reference publication |
-| Queue | Fixed queue shard or explicit ordering group | Enqueue, claim, ack, retry, lease change | Consumer execution after published claim |
-| Workflow | Fixed workflow shard containing many instances | One event, state transition and effect intents | Leased activity workers |
-
-Namespace manifests freeze shard count, partition algorithm and encoding.
-Length-prefix components before hashing. In ordinary KV mode, partition by key;
-in scoped mode, partition by scope alone and store the complete key within it.
-Including the key in the scoped hash would break multi-key colocation.
-Increasing node count moves ownership, not keys. Changing virtual partitioning
-requires an explicit data migration and new partition-map version.
-
-## SQL
-
-Expose `query`, `execute` and `batch`; a batch is always atomic within one Cell.
-Avoid a mode flag that makes otherwise identical calls partially commit.
-Return column descriptors and ordered arrays of typed values, preserving
-duplicate column names and SQL NULL. An empty result still carries column types
-where the driver can provide them; unknown dynamic types remain explicit.
-
-SQLite serializes writers and supports read snapshots; see the upstream
-[isolation contract](https://www.sqlite.org/isolation.html). Platform replication
-adds the publication barrier defined in [runtime](runtime.md). SQLite COMMIT by
-itself does not establish the platform's remote-durability receipt.
-
-Native Rust and embedded guest commands can branch using a transaction handle:
+## Handler boundary and SQL authorization
 
 ```rust,ignore
-fn reserve(tx: &mut CellTransaction, input: Reserve) -> Result<Reservation> {
-    let changed = tx.execute(
-        "UPDATE inventory SET available = available - ?1
-          WHERE sku = ?2 AND available >= ?1",
-        &[input.quantity.into(), input.sku.clone().into()],
-    )?;
-    if changed != 1 {
-        return Err(ServiceError::InsufficientInventory);
-    }
-    tx.outbox().enqueue("fulfillment", input.reservation_id, &input)?;
-    Ok(Reservation { id: input.reservation_id })
+pub trait CommandHandler {
+    fn execute(
+        &self, tx: &mut CommandContext<'_>, op: &Operation,
+    ) -> Result<MutationResult, CommandError>;
+}
+pub struct CommandContext<'a> {
+    tx: &'a rusqlite::Transaction<'a>,
+    cell: CellId,
+    incarnation: [u8; 16],
+    sequence: u64,
+    now_ms: i64,
+    next_effect: u32,
 }
 ```
 
-The runtime supplies the transaction and stores the result/idempotency record.
-The callback returns a decision to commit; only the runtime can publish and
-acknowledge it. A remote SDK instead submits an atomic batch or invokes a
-deployed command. It does not hold BEGIN/COMMIT open across client requests.
+Only the runtime constructs CommandContext. Primitive modules have trusted SQL
+access; application/remote SQL uses a scoped SQLite authorizer. Reject ATTACH,
+DETACH, transaction/savepoint commands, PRAGMA, extension loading and access to
+sys_* or primitive-owned tables. Match authorizer operations and resolved object
+names, not a regex over SQL text. Reject user table/view/trigger/index names
+starting sys_. Disable triggers/views that indirectly reach protected tables
+by enforcing authorization for their underlying accesses too.
 
-Application SQL cannot modify system tables. Use SQLite authorization hooks
-and a capability-restricted connection path; table-name conventions alone are
-insufficient. Reject transaction-control SQL, ATTACH, extension loading and
-pager/VFS PRAGMAs that bypass runtime ownership. Apply statement, row, returned
-byte, execution time, changed-page and database-size limits. Migrations run
-through a separate authorized deployment operation under Cell ownership.
+`SqlBatch` executes 1..128 prepared statements in one command transaction,
+binding every parameter with the typed SqlValue codec. Return one ResultSet per
+statement. Limit aggregate returned rows to 1,000 and encoded bytes to 1 MiB;
+overflow rolls back before runtime result persistence. Read statements run under
+the read authorizer and cannot include RETURNING from a mutating statement.
 
-## Transactional inbox and outbox
+## Request dedup and outbox
 
-All primitives share these runtime-owned concepts:
+Runtime request outcome values: 1=success, 2=business rejection. Its result is
+the encoded MutationResult or Error, not a transport header. The stored sequence
+constructs a receipt on replay; root digests are not embedded in request rows.
+Expired requests are rejected before dedup lookup even if a row remains.
 
-```sql
-CREATE TABLE sys_requests (
-    incarnation BLOB NOT NULL,
-    request_id BLOB NOT NULL,
-    operation_digest BLOB NOT NULL,
-    result BLOB NOT NULL,
-    commit_sequence INTEGER NOT NULL,
-    retain_until_ms INTEGER NOT NULL,
-    PRIMARY KEY (incarnation, request_id)
-);
+Effect state: 0=ready, 1=leased, 2=delivered, 3=failed. Generate
+`effect_id = BLAKE3("crab.effect.v1\0" || cell || incarnation || u64(sequence)
+|| u32(effect_ordinal))`. Increment ordinal for each intention in a command.
+Destination and operation bytes are immutable once inserted. Enforce at most
+128 effects and 1 MiB aggregate effect bytes per command.
 
-CREATE TABLE sys_effects (
-    effect_id BLOB PRIMARY KEY,
-    destination BLOB NOT NULL,
-    operation BLOB NOT NULL,
-    created_sequence INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    attempt INTEGER NOT NULL DEFAULT 0,
-    next_attempt_ms INTEGER NOT NULL,
-    lease_token BLOB,
-    lease_deadline_ms INTEGER
-);
-CREATE INDEX sys_effects_due ON sys_effects(state, next_attempt_ms);
-```
+Persist the exact encoded EffectRequest from platform.proto, including resolved
+destination incarnation, in sys_effects.operation. Resolve destination metadata
+from declared bindings before the source transaction; a stale incarnation causes
+delivery conflict, never silent redirection into restored data. Delivery validates
+effect_id against source Cell/incarnation/sequence/ordinal. Its digest uses the
+canonical typed codec with domain `crab.effect-op.v1\0`; include destination
+Cell/incarnation, EffectIdentity and selected operation. Transport headers are
+excluded, and the digest never changes between delivery attempts.
 
-An outbox dispatcher obtains work through Cell commands; it does not read a
-writer's tentative SQLite tables directly. Publish the claim before dispatch.
-The target stores the effect ID in its inbox in the same transaction as its
-business mutation, and publishes before replying. The source then publishes
-completion. Crash anywhere between target commit and source completion causes
-redelivery with the same effect ID.
+If a command requests a destination missing from its binding cache, return
+UnresolvedTarget before inserting an effect. Roll back the whole transaction,
+resolve the target outside the SQL worker, reset guest invocation state, then
+retry at most twice. This is allowed only after proven rollback; a commit or
+capture ambiguity uses reconciliation instead of SQL replay.
 
-This makes the source mutation atomic with the intention to deliver, not with
-the destination's state change. Destination dedup retention must cover the
-source's maximum delivery/retry/redrive horizon. Expired effects require an
-explicit redrive decision with a new identity; silently deleting inbox records
-while old effects can retry would repeat business effects.
+The source dispatcher uses the same claim/lease procedure as Queue, with a
+30 s lease and 7-day maximum delivery horizon. It sends a private authenticated
+DeliverEffect envelope containing effect_id, destination, operation digest,
+expiry and operation bytes. This is a peer-only operation; public callers
+cannot invoke arbitrary trusted primitive SQL.
 
-```mermaid
-sequenceDiagram
-    participant S as Source Cell
-    participant D as Dispatcher
-    participant T as Target Cell
-    S->>S: Publish domain change and outbox row
-    D->>S: Claim effect through command
-    S-->>D: Published claim and stable effect ID
-    D->>T: Deliver effect ID and operation
-    T->>T: Dedup, mutate and publish
-    T-->>D: Durable target receipt
-    D->>S: Mark effect complete
-    S->>S: Publish completion
-```
+At the target, BEGIN IMMEDIATE, reject expired effect, then lookup sys_inbox.
+Same ID/digest returns stored result; mismatch rejects. Otherwise apply the
+primitive operation, insert inbox/result and commit through normal publication.
+Retain inbox through effect expiry+7 days. After target publication, source
+publishes state=delivered. Every retry preserves ID and payload. Retry delay is
+`min(60s, 100ms * 2^min(attempt, 10))`; expire to failed rather than deleting
+an undelivered intention. Redrive allocates a new explicit effect identity.
 
-## KV
+If the next retry would reach/past expiry, mark failed and clear the lease
+instead of storing a due_at beyond expires_at. Private Resolve uses the same
+drain/fence-before-ABSENT rule as public Resolve, with sys_inbox as evidence.
 
-A KV namespace uses multiple shard databases. Millions of keys do not imply
-millions of SQLite files. Partition configuration is provisioned durably before
-accepting writes; each shard is a schedulable Cell.
+## KV procedures
+
+V1 KV is scoped. `Target.partition` must equal u32(hash(scope) % shard_count);
+Rust recomputes and rejects mismatches. Keys are 1..1024 bytes, scope <=1024,
+values <=65536 bytes. Reject duplicate mutation keys in an atomic operation.
+At least one check or mutation is required; a check-only command still gets a
+durable dedup outcome.
+
+`kv_atomic` runs all checks before writes in the same transaction. For each key:
 
 ```sql
-CREATE TABLE kv_entries (
-    key BLOB PRIMARY KEY,
-    version BLOB NOT NULL,
-    inline_value BLOB,
-    object_digest BLOB,
-    size_bytes INTEGER NOT NULL,
-    expires_at_ms INTEGER,
-    metadata BLOB,
-    CHECK ((inline_value IS NOT NULL AND object_digest IS NULL)
-        OR (inline_value IS NULL AND object_digest IS NOT NULL))
-);
-CREATE INDEX kv_expiration ON kv_entries(expires_at_ms)
-    WHERE expires_at_ms IS NOT NULL;
+SELECT version, value, expires_at_ms FROM kv_entries
+WHERE scope = :scope AND key = :key
+  AND (expires_at_ms IS NULL OR expires_at_ms > :now);
 ```
 
-Use opaque versions that do not repeat after delete/recreate. Derive them from
-the Cell incarnation and monotonic mutation sequence, or allocate equivalent
-nonreusable tokens. Restarting a row counter at one creates an ABA bug in CAS.
-
-Operations are `get`, `put`, `delete`, `list(scope)` and
-`atomic(scope, checks, mutations)`. A conditional mutation checks version or
-absence and changes all selected rows within one transaction. Expired entries
-are logically absent according to owner-supplied time even before cleanup.
-The same logical expiration rule applies to `get`, checks, delete and list.
-Use one sampled time per operation; record chosen absolute expiry in its command.
-
-For large values, stream an immutable blob upload, validate its digest and size,
-then publish the SQLite reference. Upload admission and temporary reachability
-pins precede upload. The reference and root must preserve the blob dependency
-for backup/GC. A failed conditional mutation can leave an unreferenced object;
-it is collected only through the retention protocol. The inline threshold is a
-measured storage policy, not a new caller-visible correctness mode.
-
-Scope-local listing is ordered by key with a cursor tied to query, scope,
-snapshot and expiry. Namespace-wide listing over hashed shards fans out and
-merges bounded pages; its contract is a set of per-shard snapshots, not one
-global instant. A cursor encodes bounded server-held snapshot state or references
-it by token. Do not promise a global atomic prefix scan from hashed partitioning.
-
-## Queue
-
-Each shard owns messages and their leases. Default queues are at-least-once
-with no global FIFO promise. An ordering group maps to one shard; strict group
-ordering, if exposed, permits one in-flight message per group and constrains
-throughput. A shard hot spot requires application repartitioning or migration.
+Absent check requires no row; version check requires an exact 28-byte match.
+Failure returns PRECONDITION_FAILED, and runtime records that rejection without
+KV changes. Version for mutation ordinal i is
+`incarnation[16] || u64(sequence) || u32(i)`; delete/recreate cannot reuse it.
+Expiry on put must be greater than sampled now, or omitted; it is an absolute
+time stored in the request, so retries do not extend TTL.
 
 ```sql
-CREATE TABLE queue_messages (
-    message_id BLOB PRIMARY KEY,
-    payload BLOB NOT NULL,
-    state TEXT NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    available_at_ms INTEGER NOT NULL,
-    lease_token BLOB,
-    lease_deadline_ms INTEGER,
-    created_sequence INTEGER NOT NULL
-);
-CREATE INDEX queue_ready ON queue_messages(state, available_at_ms);
-CREATE INDEX queue_leases ON queue_messages(state, lease_deadline_ms);
-
-CREATE TABLE queue_dedup (
-    producer_key BLOB PRIMARY KEY,
-    payload_digest BLOB NOT NULL,
-    message_id BLOB NOT NULL,
-    retain_until_ms INTEGER NOT NULL
-);
+INSERT INTO kv_entries(scope, key, version, value, expires_at_ms)
+VALUES (:scope, :key, :version, :value, :expiry)
+ON CONFLICT(scope, key) DO UPDATE SET
+  version = excluded.version, value = excluded.value,
+  expires_at_ms = excluded.expires_at_ms;
 ```
 
-Dedup records are separate from live messages so acknowledgement cannot erase
-producer dedup immediately. Reject reuse with a different payload. Large message
-bodies may use immutable blob references under the same retention rules as KV.
+Delete removes the row and returns `{key, deleted=true}`; the version field is
+empty for deletion. Put returns its new token. Results preserve mutation order.
+An absent unconditional delete succeeds; checked delete uses the same initial
+logical-expiry test as checked put.
 
-`send` publishes insertion. `receive` is a mutating command: reclaim expired
-leases, select a bounded ready batch and install new unpredictable lease tokens
-inside one transaction. Publish before returning payloads. Scope every row
-mutation to its queue/shard and complete message identity.
+Get returns KvPage with zero or one entry. List is scope-local and reads live
+keys in binary ascending order after after_key, matching a byte prefix. Compute
+the exclusive prefix successor by incrementing the last non-0xff byte; all-0xff
+or empty prefix has no upper bound. Query LIMIT limit+1 with limit in 1..1000;
+return at most limit and the last emitted key. Each page is a current read with
+its own receipt: concurrent writes can change later pages. No cross-page snapshot
+or global hashed-namespace listing is promised.
 
-`ack`, `retry` and `extend_lease` validate the current token, message state and
-deadline. A stale worker cannot acknowledge or extend a replacement delivery.
-Publish changes before success. If lease publication consumes most of its
-duration, renew or suppress delivery; never hand out an already expired lease.
-Queue deadlines use a qualified wall-clock policy with bounded skew and clock
-jump handling. Fencing tokens prevent stale acknowledgements even when timing
-causes an extra delivery; exactly-once external execution is not implied.
+TTL cleanup selects at most 128 expired keys via kv_expiry and deletes them in
+an internal published command. It affects physical storage only; foreground
+operations already treat those rows as absent.
 
-Cross-Cell dead-letter delivery uses an outbox. Mark the source `dead_lettering`
-and create the delivery intent atomically, keeping its payload reachable. Retire
-it after the destination's deduplicated publication. A single atomic MOVE across
-two queue databases is not available.
+## Queue send and claim
 
-Long polling waits outside SQLite. Notifications wake waiters but are hints;
-the durable `receive` command decides what can be delivered. Polling deadlines,
-consumer credits and maximum bytes bound buffering. When a disconnected receive
-may have published leases, redelivery follows lease recovery rather than an
-unbounded transport replay of the original payload batch.
+Queue state: 0=ready, 1=leased, 2=acked, 3=dead. Send hashes producer_id to the
+shard, validates payload <=256 KiB and available_at within now..now+7 days.
+Message ID is first 16 bytes of BLAKE3(namespace || producer_id), with a stored
+payload digest to detect identity conflict. Existing queue_dedup returns the
+same message identity if payload and scheduling attributes match. Its digest
+therefore includes payload and available_at. Retain it for 30 days.
 
-## Workflow
+New send inserts ready, attempt=0, expiry=now+30 days, null token/deadline.
+Reply contains one QueueMessage with ID, empty token/payload, attempt=0 and
+lease_until=0. Send does not grant a consumer lease.
 
-Workflow orchestration is a Rust state machine over sharded SQLite databases.
-Many workflow instances share each shard. Bind every instance to a unique
-`run_id`, definition version and deployment digest; reusing a business workflow
-ID for a new run must not accept completions from the old run.
+Claim accepts limit 1..32 and lease in 5..300 seconds. Inside one transaction:
+
+1. Reclaim at most 128 expired leases using queue_leases. Rows at attempt 20 or
+   message expiry become dead; remaining rows become ready with due_at=now.
+   Clear token/deadline for every reclaimed row.
+2. Select ready, unexpired rows with attempts <20 ordered by due_at,message_id.
+   Accumulate at most limit and 512 KiB payload; stop before exceeding either.
+3. Allocate an unpredictable 16-byte token per row. Set state=leased,
+   attempt=attempt+1, lease_until=min(now+lease_ms, expires_at).
+4. Runtime persists the claim result and publishes before emitting any task.
+
+Representative per-row conditional update after selection:
 
 ```sql
-CREATE TABLE workflow_instances (
-    workflow_id BLOB PRIMARY KEY,
-    run_id BLOB NOT NULL UNIQUE,
-    definition_digest BLOB NOT NULL,
-    deployment_digest BLOB NOT NULL,
-    status TEXT NOT NULL,
-    state BLOB NOT NULL,
-    revision INTEGER NOT NULL,
-    result BLOB
-);
-CREATE TABLE workflow_events (
-    run_id BLOB NOT NULL,
-    sequence INTEGER NOT NULL,
-    event_id BLOB NOT NULL,
-    payload BLOB NOT NULL,
-    PRIMARY KEY (run_id, sequence),
-    UNIQUE (run_id, event_id)
-);
-CREATE TABLE workflow_activities (
-    run_id BLOB NOT NULL,
-    activity_id BLOB NOT NULL,
-    attempt INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    input BLOB NOT NULL,
-    lease_token BLOB,
-    lease_deadline_ms INTEGER,
-    available_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (run_id, activity_id)
-);
-CREATE INDEX activities_ready
-    ON workflow_activities(state, available_at_ms);
-CREATE TABLE workflow_timers (
-    run_id BLOB NOT NULL,
-    timer_id BLOB NOT NULL,
-    due_at_ms INTEGER NOT NULL,
-    state TEXT NOT NULL,
-    PRIMARY KEY (run_id, timer_id)
-);
-CREATE INDEX timers_due ON workflow_timers(state, due_at_ms);
+UPDATE queue_messages
+SET state = 1, attempt = attempt + 1,
+    token = :token, lease_until_ms = :deadline
+WHERE message_id = :id AND state = 0
+  AND due_at_ms <= :now AND expires_at_ms > :now AND attempt < 20;
 ```
 
-A transition receives serialized state, one validated event and deterministic
-context, then returns new state and effect descriptions. Persist event dedup,
-state, activities/timers and result in one transaction and publish it. Rust,
-JS or qualified WASM can implement the transition. No network or arbitrary time
-read is available to it. A state-machine implementation does not need to replay
-all history on every activation; history supports audit/debugging and explicit
-versioned replay where implemented.
+Require one changed row. Claim holds the Cell writer so failure implies an
+implementation invariant violation, not a reason to return a partial batch.
+An empty claim returns an empty list as a published command. SDK polling backs
+off 100 ms to 1 s on empties; v1 has no server-side long-poll stream.
 
-```text
-Pending + Started
-  → Building + ScheduleActivity(build, stable activity ID)
+Before emitting a claim, check every token against current published state and
+require >=1 s lease remaining. A replay of an old request with expired tokens
+returns LEASE_LOST, preserving its receipt. Persisted claim success is not a
+promise that its transient lease remains valid forever. Clients issue a new
+claim identity; they never process payloads from an expired cached reply.
 
-Building + ActivityCompleted(build, current attempt/token)
-  → Completed + StoreResult(artifact reference)
+Apply this emission check to normal replies, dedup replays and Resolve replies,
+for both queues and activities. The error does not mean the historical claim
+rolled back: its receipt remains present, but its lease is no longer usable.
 
-Building + ActivityFailed(build, retryable)
-  → Building + ScheduleRetry(existing activity ID, next attempt)
-```
+## Queue ack, retry, extension and dead letters
 
-An activity claim is a published mutation, with the same lease discipline as
-Queue. Workers may run in any language. Completion includes run ID, activity ID,
-attempt and lease token; duplicate accepted completions return the stored result,
-while stale attempts cannot advance the workflow. External idempotency keys use
-the stable run/activity identity across retries. Attempt numbers alone would
-allow duplicate payment or provisioning effects.
+Every lease mutation first checks state=leased, matching token and deadline>now.
+Use the same predicates in its UPDATE and require exactly one changed row.
+Ack sets state=acked and clears token/deadline. Retry clears lease and sets
+ready/due_at=now+delay (delay <=1h), or dead if attempt/expiry limit is reached.
+Extend sets deadline=min(now+extension, expires_at), with extension in 5..300 s;
+it never shortens an existing valid deadline. Publish before acknowledging.
 
-Signals are events with stable dedup IDs. Timers fire through commands that
-check the persisted timer ID/status and atomically record delivery. Cancellation
-is also an event: it suppresses future scheduling and rejects stale completions
-according to the definition, but cannot undo external work already in progress.
-Compensation is explicit workflow logic, never an automatic distributed rollback.
+Duplicate lease mutations replay by runtime request ID. A different request ID
+with a stale token returns LEASE_LOST; it cannot ack a replacement delivery.
+An external consumer may execute twice after lease loss, so destination effects
+use the stable message ID as an idempotency key.
 
-Persist large activity results as immutable blobs and include them in retention
-roots. Bound event/state size and history growth. Pruning completed runs observes
-the configured event, dedup, activity-redelivery and deployment retention horizons.
+If a namespace declares a dead-letter target, transition to dead and insert a
+sys_effects row atomically using a deterministic effect ID derived from source
+Cell/message ID. Its destination QueueSend producer ID is the source message
+ID, scoped by the target namespace. Retain dead payload until delivery completes
+or an operator resolves the failed effect. GC cannot delete it at message expiry
+while that effect remains pending. Without DLQ, retain dead rows until expiry
+for inspection. Namespace graph validation rejects DLQ cycles.
 
-The convenient `await step(...)` API is a later layer. It needs deterministic
-replay, stable step IDs, recorded nondeterministic results, versioning and replay
-tests. It cannot be implemented by serializing JS promises, stack frames or Rust
-futures. The explicit transition API is sufficient for the first implementation.
+## Workflow transitions and activities
 
-## Waking cold Cells
+Run status: 0=running, 1=completed, 2=failed, 3=cancelled. Activity state:
+0=ready, 1=leased, 2=completed, 3=failed, 4=cancelled. Timer state: 0=pending,
+1=fired, 2=cancelled. Full tables and constraints are in workflow.sql.
 
-Process-local timers are wake hints, not durable scheduling authority. Every Cell
-with outbox work, queue leases/retries or workflow timers publishes a conservative
-`next_due_time` in its control record in the same CAS as its database root.
-Derive the summary from that committed state. A summary may wake too early;
-it must never hide earlier durable work.
+Start requires absent workflow_id; an existing run returns PRECONDITION_FAILED
+unless this is a replay of its original request. Allocate run_id from the
+request identity and namespace via domain-separated BLAKE3 truncated to 16 bytes.
+Pin the deployment definition digest in workflow_runs. Insert event sequence 1
+with event_id=BLAKE3(run_id || request_id), execute the definition's start
+transition, then persist state and resulting activities/timers. Publication
+makes the run and all scheduling intentions visible together.
 
-Scheduler workers divide the application's durable catalog into bounded scan
-ranges using placement hints. They inspect control summaries, request Cell
-activation when due, and submit idempotent scheduling commands. Multiple workers
-can race safely: Cell ownership and row tokens decide. Workers periodically
-rescan all assigned catalog ranges, redistributing after node loss. Notifications
-accelerate this scan but losing one cannot permanently strand a cold workflow.
+Definition callback is `transition(state_bytes, event_bytes, Context) -> Decision`.
+Context contains run_id, current event sequence and sampled now; no network,
+clock, random or SQL import. Decision contains next status/state/result and
+at most 128 activity/timer/effect actions totalling <=1 MiB. Activity and timer
+IDs are allocated from run_id, event sequence and action ordinal. Guest code
+can reference allocated IDs from persisted state on later transitions.
 
-The baseline cost is proportional to catalog/control records, not database
-pages. Measure scan period and read cost at 10K Cells. Hierarchical due-work
-indexes can be introduced only with an outbox-backed registration and repair
-protocol that cannot lose wakeups across their separate Cell transactions.
+Use WorkflowDecision/WorkflowAction in platform.proto for serialized output.
+`context.action_id(i)` returns first16(BLAKE3(`crab.action.v1\0` || run_id ||
+u64(event_sequence) || u32(i))); i must match the action's output ordinal. This
+lets the callback store IDs in next_state before returning. Terminal decisions
+may emit effects but cannot schedule new timers/activities; cancel outstanding
+tasks in the same transaction. Enforce at most 128 outstanding tasks per run
+so terminal cancellation has bounded work.
 
-## Blob primitive and consistency limits
+Signal requires matching run_id and running status. Its event ID is
+BLAKE3(run_id || signal_id); same ID with a different event_digest conflicts.
+Inside one transaction, append event, invoke transition, apply decision and
+increment event_sequence. Reject unknown definition digest before opening a
+writer transaction. Cancellation appends a cancellation event, sets terminal
+status, marks outstanding activities/timers cancelled and clears leases. It
+cannot reverse external side effects already executed.
 
-Provide verified immutable `upload`, `read`, `pin` and `release` handles for KV,
-queue/workflow payloads and application artifacts. Logical object names can live
-in a dedicated SQL Cell. Reference publication follows upload completion.
-This is enough for the first four primitives; multipart namespace semantics and
-an R2/S3-compatible API require a separate design and qualification.
+ActivityClaim uses the queue claim algorithm over workflow_activities, joined
+with running workflow_runs. Filter activity_type and definitions the worker
+advertises as supported. Return run/activity/type/input/definition/attempt/token.
+Keep claim payload <=512 KiB. Workers heartbeat through ActivityLease EXTEND;
+extension predicates match current run state, attempt, token and deadline.
 
-The host maintains a system blob-reference table within each Cell transaction.
-Publishing a blob handle inserts its digest/length and logical owner; removing
-the last logical reference retires that row. Initial backup/GC opens each pinned
-SQLite root read-only and enumerates this table as well as its LTX dependencies.
-That can be expensive but is exact. Later authenticated reference sidecars may
-accelerate traversal only if publication verifies equivalence to the transaction's
-reference state. A digest stored as arbitrary application text is not a managed
-blob reference and does not implicitly pin an object.
+Complete/fail first checks a stored completion_token/digest: identical duplicate
+returns the previous applied result; different bytes conflict. Otherwise require
+running run, leased activity, matching attempt/token and unexpired deadline.
+Persist completion_token/digest before clearing the active lease. Completion
+appends an event and executes the transition in the same transaction. Retryable
+failure below attempt/lifetime limit schedules another delivery with exponential
+delay capped at 60 s; terminal failure emits ActivityFailed to the definition.
+New claims clear old completion tokens; earlier attempts then fail LEASE_LOST.
 
-None of these primitives gives a cross-Cell snapshot or global transaction.
-For example, debit in account A plus credit in B requires a transfer workflow
-with reservations, idempotent effects and compensation. If both must change in
-one SQLite transaction, choose a partition that deliberately colocates them.
+External idempotency is stable `(run_id, activity_id)`, never attempt/token.
+Activity completion payload <=256 KiB. Workflow state/results <=1 MiB. Retain
+terminal run/event rows for 30 days, then delete child rows before the parent in
+one bounded cleanup procedure. Running histories cap at 100K events/Cell; stop
+new transitions with RESOURCE_EXHAUSTED instead of silently pruning required
+history. Capacity remediation is an operator action, not arbitrary stack replay.
+
+## Scheduler commands
+
+After every commit, compute minimum outstanding due time using indexed minima
+for ready effects, leased-effect deadlines, KV expirations, ready queue rows,
+queue lease deadlines, ready activities, activity deadlines and pending timers.
+Clamp already-due values to sampled now; null means no scheduled work. Terminal
+retention cleanup contributes its expiry too. Persist this summary in the same
+control CAS as the database root.
+
+Include sys_requests_expiry and sys_inbox_expiry in that minimum. Each Tick
+deletes at most 128 eligible ledger rows, with strict expiry checks; it cannot
+shorten either advertised dedup horizon.
+
+Assign catalog shards to nodes using rendezvous order; only the preferred live
+scanner polls normally, and another scans if its advertisement stops progressing
+for 15 s. Scanner ownership is advisory; duplicate scans are safe. Load catalog
+pages by digest and inspect each Cell control with bounded I/O. Complete a pass
+within 5 s at admitted load; expose scan lag and reject further provisioning if
+that budget cannot be sustained.
+
+For a due Cell, route/acquire ownership and submit Tick containing a 16-byte
+internal request ID and expected summary revision. Tick rechecks row state and
+processes at most 128 due items, then republishes a new summary. A timer tick
+appends event ID=BLAKE3(run_id || timer_id || "fired"), changes pending→fired,
+and applies the transition atomically. Deadline races are resolved by the same
+serialized command loop. Losing all notifications cannot strand work because
+the catalog scanner revisits published summaries.
+
+Wall-clock time is sampled once per command and clamped against sys_meta.
+Ownership uses monotonic time. Nodes detect wall/monotonic divergence >5 s
+between periodic samples, fence admission and require clock correction/restart.
+Scheduler liveness depends on qualified host clocks; duplicate external activity
+execution remains possible even with correct timing and is covered by idempotency.
