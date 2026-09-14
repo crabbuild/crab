@@ -24,6 +24,7 @@ Scoped rules for `crates/`. Root `AGENTS.md` also applies.
 - `crab-staging` — local segment staging, chunk indexes, prepared push plans, multipart resume, compaction, and recovery.
 - `crab-coordination` — push locks, write coordination, and feature-gated DynamoDB, Spanner, and Cosmos DB active-active backends.
 - `crab-lfs` — Git LFS object layout, storage access, and integrity checks; pointer parsing remains in `crab-git`.
+- `crab-ltx` — managed SQLite WAL capture, checksum-bearing LTX, exact recovery; optional `replica` adds crab-storage transport, epoch inheritance/head CAS, bundles, range compaction and immutable/writable sparse SQL with hydration. Provenance in `crab-ltx/UPSTREAM.md`; provider construction, leases and HTTP control policy remain outside.
 
 ### Read, Cache, and Virtual Filesystems
 

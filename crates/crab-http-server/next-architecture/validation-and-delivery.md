@@ -134,13 +134,40 @@ Level 4 adds visible error paths. Level 5 requires the broader performance,
 accessibility, retention, upgrade and operational evidence. A compiled schema or
 an in-memory HTTP test alone does not satisfy these levels.
 
-### Verification scope for this document
+### Verification scope for the current implementation
 
-This change is documentation only. Validate local links and section anchors,
-parse the Mermaid diagrams, execute the core SQL example in an isolated database,
-and inspect the diff for accidental runtime/configuration changes. Runtime
-compilation, live RustFS/Kubernetes tests and implementation correctness remain
-future delivery gates; they must not be reported as passed by this design review.
+The local `crab-ltx` crate is implemented. Its unit/integration suite covers real
+SQLite, checkpoint boundary cuts, auto-vacuum shrink/regrowth, exact cold restore,
+process kill and original-directory loss, snapshot/compaction byte identity,
+independent CRC and frame/block vectors, malformed inputs and admission limits.
+A runnable local round-trip example restores a visible SQL issue row.
+The optional `replica` suite covers immutable transport, epoch-head CAS races,
+stale-compaction rejection, exact historical manifests, authenticated paging,
+malformed index/head rejection and SQLite VFS reads. An isolated real RustFS
+run publishes SQL changes, deletes the source SQLite directory, restores and
+queries the data through full restore and paged SQL, then verifies remote
+snapshot compaction. The parity path additionally inherits a bundled epoch,
+commits SQL before full hydration, tests all checkpoint modes and shrink/regrowth,
+compacts a delta range, restores exact bytes and resumes capture. Corruption
+tests reject bundle fallback. Host tests inject partial artifact writes, sync and
+rename failures, committed-WAL reads, session claims, atomic restore installation
+and sparse allocation failures. Pruning retries failed directory sync without
+losing accounting. Named base VFS and independent worker lifecycle are exercised;
+512/4096/65536-byte sparse partial writes and mixed bundle/native recovery across
+three epochs additionally cover these storage boundaries.
+This does not simulate RustFS disk/power loss.
+
+Run the [crate's scoped commands](../../crab-ltx/README.md#verification) for tests,
+Clippy and format checks. Existing dependency versions remain unchanged and the
+workspace resolves a single SQLite linkage. The existing workspace CI will run
+the new member; broad CI and cross-platform results must be recorded separately.
+
+This does **not** complete phase 2's external golden/interoperability, fuzz,
+filesystem fault and measured-resource qualification. It does not prove phases
+1 or 3 onward: combined HTTP owner/control CAS, HTTP output barriers, ownership takeover,
+browser workflows and Kubernetes operations are still unimplemented. Validate
+design links/anchors alongside runtime changes; do not report those server gates
+as passed because the library tests pass.
 
 ## Delivery sequence
 
@@ -150,7 +177,7 @@ Do not introduce placeholder backends or partially wired production routes.
 | Phase | Work | Exit evidence |
 | --- | --- | --- |
 | 1. Protocol foundation | Control schema/transitions, immutable manifest graph, provider capability diagnosis | Model/property tests and independent RustFS CAS race |
-| 2. Replication mechanics | [Pinned Celld source integration](crab-ltx.md), managed capture/checkpoint, rolling checksum and explicit-plan restore | Import/notices audit, real WAL lifecycle, checksum oracle, golden fixtures and cold restore |
+| 2. Replication mechanics — library capabilities implemented | [Pinned Celld integration](crab-ltx.md), capture/checkpoints, checksums, exact/inherited recovery, bundles, range compaction and sparse SQL/hydration | Local/process-kill/CRC and real RustFS round-trip proof; external interoperability, broad platform/fault/memory proof remains |
 | 3. Single-node issue slice | SQL issue/comment model, dedup, response barrier, tracked cancellation | Browser create/edit/retry, kill process, restore from RustFS |
 | 4. Multi-node ownership | Session identity, leases, peer TLS, route policy, cold capacity admission, strong owner reads | Wrong-node routing, competing acquisition, overload, stale owner and lost-response tests |
 | 5. Domain parity | PR/reviews, labels/assignees, statuses/checks, release metadata/assets | Existing domain/API suites plus real UI workflows |
@@ -176,7 +203,7 @@ Expected changes by owner:
 - `server.rs`: stable UUID propagation, lifecycle and route composition.
 - `app.rs`: accepted command ownership, error mapping and response barrier.
 - Application domain modules: SQL queries and transactions replacing JSON calls.
-- `crab-ltx`: capture, encoding, restore and compaction mechanics.
+- `crab-ltx`: capture, encoding, exact local/remote recovery, epoch inheritance/publication, bundles, range compaction, paged/sparse SQL and hydration; not HTTP ownership authority.
 - `crab-storage`: only necessary reusable provider/path/conditional contracts.
 - Shared Git crates: only evidence-backed publication recovery APIs, if needed.
 - `packages/repository`: explicitly required retry/error/cursor contract changes.

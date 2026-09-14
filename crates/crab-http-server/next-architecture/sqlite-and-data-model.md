@@ -4,7 +4,12 @@
 
 The SQL transaction and WAL boundaries here feed the
 [publication coordinator](storage-protocol.md#commit-publication-and-response-gating).
-The [crab-ltx design](crab-ltx.md) defines the reused engine and its adaptations.
+The [crab-ltx implementation](crab-ltx.md#implemented-state) supplies local capture,
+snapshot and exact restore, plus optional remote transport, immutable views and
+writable sparse SQL with checksum-seeded continuation. Full restoration remains
+the initial server activation policy; sparse support is a library capability,
+not yet a wired AppCell workflow. The domain schema, executor and HTTP publication wiring
+in this document are still proposed.
 Restore and takeover follow [recovery rules](recovery-and-retention.md);
 the [offline importer](hard-cutover.md) must preserve domain identities and retry
 semantics when constructing these tables.
@@ -24,8 +29,10 @@ Async object-store operations run outside SQL transactions. While a publication
 is pending, the actor can handle control messages and renewal, but it does not
 start another application mutation in the first version. Other cells continue.
 
-Use one canonical connection factory for application, replication and restore
-connections. No untracked database opener may change checkpoint behavior.
+`ManagedDb` now owns the application writer and both replication connections.
+Domain commands use its transaction callback; no independent writer factory
+may bypass it. Restore uses explicit local files before managed activation.
+No untracked database opener may change checkpoint behavior.
 
 ### Initial database settings
 
@@ -34,11 +41,12 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
 PRAGMA foreign_keys = ON;
 PRAGMA wal_autocheckpoint = 0;
-PRAGMA busy_timeout = 5000;
+PRAGMA busy_timeout = 1000;
 ```
 
-These are proposed baseline settings. Assert their effective values during
-database initialization. Restrict read connections to query-only use. Pin and
+These are the implemented managed-connection defaults. The writer also receives
+a `max_page_count` derived from library admission. Domain schema initialization
+and future query-only read connections must enforce the same factory policy. Pin and
 test the compiled SQLite version, enabled features, page size and restore codec.
 
 SQLite WAL permits concurrent readers but only one writer. WAL shared-memory
