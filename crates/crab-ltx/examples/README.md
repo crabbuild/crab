@@ -13,6 +13,8 @@ their S3, RustFS, GCS, or Azure provider.
 | `sparse_writer` | Externally allocated epoch inheritance, writable sparse activation, publication, and exact restore |
 | `compact_history` | Full-chain compaction plus reopening and restoring an immutable historical manifest |
 | `repository_replication_lifecycle` | Complete per-repository lifecycle: write, capture, publish, paged read, epoch handoff, sparse write, compact, historical reopen, and exact restore |
+| `million_record_replication_load` | One million batched records, LTX publication and pruning, source loss, exact recovery, and throughput reporting |
+| `million_record_paged_read_performance` | One million published records followed by cold head/page-map opening, paged point/range queries, and a full aggregate scan |
 
 From the repository root:
 
@@ -35,6 +37,33 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
   cargo run -p crab-ltx --features replica --example repository_replication_lifecycle --locked
 ```
+
+## Million-record workloads
+
+Run performance examples with optimizations enabled:
+
+```sh
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
+  cargo run --release -p crab-ltx --features replica \
+  --example million_record_replication_load --locked
+
+CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
+  cargo run --release -p crab-ltx --features replica \
+  --example million_record_paged_read_performance --locked
+```
+
+Both workloads always create and verify exactly 1,000,000 records. The load
+workload uses 100 transactions of 10,000 records, publishes each captured cut,
+and prunes local LTX files only after publication. The read workload deletes the
+source database before reopening the remote head and running SQLite queries.
+
+These are reproducible executable workloads, not statistically rigorous
+benchmarks. Their default in-memory object store isolates `crab-ltx` CPU,
+SQLite, verification, and CAS overhead from network variance, while retaining
+remote objects in process memory. Replace `InMemory` with the service's
+configured S3 or RustFS `Store` to measure provider latency, and run several
+iterations under representative CPU, disk, memory, and network limits before
+using the results for capacity planning.
 
 ## Public API
 

@@ -49,3 +49,11 @@ required-features = ["replica"]
 [[example]]
 name = "repository_replication_lifecycle"
 required-features = ["replica"]
+
+[[example]]
+name = "million_record_replication_load"
+required-features = ["replica"]
+
+[[example]]
+name = "million_record_paged_read_performance"
+required-features = ["replica"]
