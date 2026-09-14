@@ -88,7 +88,7 @@ impl PendingMutation {
 
 /// Outcome-aware typed invocation failure.
 pub enum InvocationError<T> {
-    Rejected(Committed<T>),
+    Rejected(Box<Committed<T>>),
     Pending(Box<PendingMutation>),
     InvalidPublishedResult {
         receipt: Receipt,
@@ -320,11 +320,11 @@ impl CellClient {
             Ok(StoredOutcome::Rejected {
                 result,
                 commit_sequence,
-            }) => Err(InvocationError::Rejected(decode_committed(
+            }) => Err(InvocationError::Rejected(Box::new(decode_committed(
                 &result,
                 operation.output_limit,
                 receipt(description, commit_sequence),
-            )?)),
+            )?))),
             Err(Error::OutcomeUnknown {
                 request_id,
                 operation_digest,

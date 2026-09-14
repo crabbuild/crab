@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "e288521ccd5f58a3de7a6b90191b9e5a17d3446740590be2070a9624c58d5a78"
+            "fe8972321d1b64847d25ef44c2241c203ff46b2354eee29eab3a559929649361"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
