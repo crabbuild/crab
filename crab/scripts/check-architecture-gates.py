@@ -1793,7 +1793,7 @@ ALLOWED_SERVER_DEV_FIXTURES = {
     "crab-s3-gateway": set(),
 }
 WORKSPACE_DEPENDENCY_POLICY = {
-    "crab-cell-runtime": {"normal": {"crab-storage"}},
+    "crab-cell-runtime": {"normal": {"crab-ltx", "crab-storage"}},
     "crab-ltx": {"normal": {"crab-storage"}},
     "crab-remote": {
         "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},

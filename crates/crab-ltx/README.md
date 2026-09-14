@@ -5,10 +5,12 @@ replication and paged SQL reads. Crab-owned integration of Celld's mechanics;
 no Celld Git dependency or Litestream daemon. Default features remain empty.
 Enable `replica` for the existing `crab-storage` transport and Tokio integration.
 
-Status: local and remote replication library implemented. **Not wired into
-`crab-http-server` yet.** The HTTP server still uses its existing application
-storage. See the [next architecture](../crab-http-server/next-architecture/README.md)
-for the publication, ownership and hard-cutover work that remains.
+Status: local and standalone remote replication are implemented. Native LTX cuts
+can also be prepared as immutable Cell/incarnation-scoped roots and bound to a
+checked `crab-cell-runtime` control successor. **This is not wired into
+`crab-http-server` yet.** Prepared bundle/compaction roots, lazy directory-backed
+activation, actor reconciliation and the hard cutover still remain. See the
+[next architecture](../crab-http-server/next-architecture/README.md).
 
 ## Contract
 
@@ -107,6 +109,33 @@ sparse writable continuation, compaction, and historical recovery. See the
 Enable `crab-ltx`'s `replica` feature. Construct a `crab_storage::Store` using
 Crab's existing credential/provider builders; wrap it in a repository
 `StoreLayout`. There is no second S3 URL parser or credential stack.
+
+The next Cell runtime uses `CellReplica`, not the standalone epoch head:
+
+| API | Result |
+| --- | --- |
+| `CellReplica::new(layout, cell, incarnation, limits)` | Binds every immutable path to one typed Cell incarnation and rejects staged stores |
+| `prepare(base, cuts, sequence, schema).await` | Admits the complete chain, verifies native LTX/index bytes, writes content-addressed directory/descriptor/root objects and returns an unforgeable `PreparedRoot`; writes no mutable key |
+| `open_root(root).await` | Reopens the exact digest, validates canonical metadata, scope, chain, object extents and the authenticated radix directory |
+| `PreparedRoot::{root,predecessor,verified}` | Supplies the exact publication proposal and predecessor proof without exposing an unchecked constructor |
+
+`crab-cell-runtime::Control::publish_prepared` verifies Cell/incarnation, schema
+and predecessor identity before constructing the one legal control successor.
+Only `CellAuthority` may then apply the ETag update. An upload or a returned
+`PreparedRoot` alone is not publication and must never release an application
+response.
+
+Cell objects use `CellStorageLayout` under
+`cells/v1/apps/<app>/cells/<cell>/inc/<inc>/objects/`. Root JSON is canonical
+compact v1 and references at most 64 pages of 96 segment descriptors. Its binary
+`CRBDIR01` radix tree has 256-entry leaves/branches, hashes every node and binds
+the live-page count and rolling SQLite checksum. Construction currently rebuilds
+and verifies the resident locator set, so it is functional but not yet the lazy,
+streaming 5 GB path required by the platform capacity gate. Cell-root bundle,
+compaction, restore and writable VFS APIs also remain to be implemented.
+
+The older `Replica` API below remains for standalone repository replication and
+its existing callers. Its mutable epoch head is not Cell ownership authority.
 
 | API | Result |
 | --- | --- |

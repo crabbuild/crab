@@ -88,8 +88,9 @@ match control (u64 decimal strings; page size/count/height are JSON integers).
 Serialize keys lexicographically with no whitespace; hash the resulting bytes.
 Readers verify those bytes' digest before decoding, without reserialization.
 
-Root <= 32 KiB; at most 32 segment-page digests. Each immutable segment-page JSON
-array has at most 128 ordered descriptors and is <= 64 KiB. Descriptor fields
+Root <= 32 KiB; at most 64 segment-page digests. Each immutable segment-page JSON
+array has at most 96 ordered descriptors and is <= 64 KiB. This covers the 4,096
+descriptor limit even at maximum canonical integer widths. Descriptor fields
 are the existing SegmentInfo fields plus physical `object_digest`, `offset`,
 `length`, `index_digest` and `index_length`. Native bodies have offset zero;
 bundle bodies identify the exact original LTX extent. No body-location fallback.

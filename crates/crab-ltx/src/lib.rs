@@ -29,6 +29,8 @@ mod wal;
 #[cfg(feature = "replica")]
 pub mod bundle;
 #[cfg(feature = "replica")]
+mod cell_replica;
+#[cfg(feature = "replica")]
 mod paged;
 #[cfg(feature = "replica")]
 mod paged_io;
@@ -42,6 +44,8 @@ mod writable_vfs;
 pub use writable_vfs::Hydration;
 #[cfg(feature = "replica")]
 mod schedule;
+#[cfg(feature = "replica")]
+pub use cell_replica::{CellReplica, PreparedRoot, RootRef, VerifiedRoot};
 #[cfg(feature = "replica")]
 pub use paged::PagedDatabase;
 #[cfg(feature = "replica")]

@@ -9,13 +9,14 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Trusted synchronous SQL callback; separate capture; local-only commit | Typed operation errors, restricted application/read callbacks and actor-owned cut transfer |
-| [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Immutable manifest plus per-epoch mutable head | Immutable-only prepare/open_root; Cell runtime never uses epoch head as authority |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell/incarnation-scoped roots and `open_root` verifies their complete metadata graph without a mutable head | Add prepared compaction/bundles, lazy page faults and streaming directory updates |
+| [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable Cell/shard IDs, strict control codec/transitions, ETag authority updates and runtime schema installation | Add catalog proof, immutable LTX roots, actor/executor/publication and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable Cell/shard IDs, strict control codec/transitions, ETag authority updates, runtime schema installation and checked prepared-root publication successors | Add catalog proof, actor/executor/reconciliation and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -25,12 +26,17 @@ mechanics evidence; none already proves multi-owner HTTP output gating.
 
 ## Work package 1: immutable LTX preparation
 
-Modify replica.rs/append.rs/bundles.rs to route through prepared.rs/root.rs.
-Implement RootRef scope validation, root/descriptor codecs and prepare/prepare_
-compaction methods from storage.md. Remove any Cell-runtime call to mutable epoch
-heads. Check existing standalone callers before changing their public API.
+`CellReplica::prepare` and `open_root` now implement native-cut scope validation,
+canonical root/descriptor codecs, immutable dependency upload and the persistent
+radix directory format. `Control::publish_prepared` binds that checked proposal
+to exactly one Cell/incarnation/predecessor before the authority CAS. Complete
+this package by sharing the preparation path with bundles and compaction, making
+directory update/open lazy and adding exact Cell-root restore/writable activation.
+Existing standalone `Replica` callers retain their current API; Cell runtime
+code must not call its mutable epoch head.
 
-Add `crates/crab-ltx/tests/prepared.rs` cases:
+Current local coverage is in `crates/crab-ltx/tests/cell_roots.rs` and
+`crates/crab-cell-runtime/tests/publication.rs`. Add the remaining cases:
 
 - `prepare_does_not_write_mutable_keys`: instrument transport; assert no head/
   control update during native, bundled and compaction preparation.

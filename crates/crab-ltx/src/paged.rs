@@ -9,6 +9,14 @@ use map::PageMap;
 const ENTRY_BYTES: usize = 60;
 const FRAME_PREFIX: usize = crate::ltx::PAGE_HEADER_SIZE + 4;
 
+pub(crate) struct IndexEntry {
+    pub page: u32,
+    pub offset: u64,
+    pub size: u64,
+    pub hash: [u8; 32],
+    pub checksum: u64,
+}
+
 #[derive(Clone)]
 struct Locator {
     segment: Arc<RemoteSegment>,
@@ -202,19 +210,15 @@ pub(crate) fn extend(
         page_size = info.page_size;
         count = info.database_pages;
         let lock = crate::ltx::lock_pgno(page_size);
-        if bytes.len() % ENTRY_BYTES != 0 {
-            return Err(CrabError::LTXCorrupted);
-        }
         // Apply each truncation before the next delta; a later regrowth must not
         // revive old pages from a version predating that truncation.
         pages.truncate(count);
         let mut previous = 0;
         let mut end = crate::ltx::HEADER_SIZE as u64;
-        for entry in bytes.as_chunks::<ENTRY_BYTES>().0 {
-            let pgno = u32::from_be_bytes(array(&entry[..4])?);
-            let offset = u64::from_be_bytes(array(&entry[4..12])?);
-            let size = u64::from_be_bytes(array(&entry[12..20])?);
-            let checksum = u64::from_be_bytes(array(&entry[52..60])?);
+        for entry in decode_index(&bytes)? {
+            let pgno = entry.page;
+            let offset = entry.offset;
+            let size = entry.size;
             if pgno <= previous
                 || pgno > count
                 || pgno == lock
@@ -237,8 +241,8 @@ pub(crate) fn extend(
                     segment: segment.clone(),
                     offset,
                     size,
-                    hash: array(&entry[20..52])?,
-                    checksum,
+                    hash: entry.hash,
+                    checksum: entry.checksum,
                 },
             );
             previous = pgno;
@@ -264,6 +268,26 @@ pub(crate) fn extend(
         count,
         position,
     })
+}
+
+pub(crate) fn decode_index(bytes: &[u8]) -> Result<Vec<IndexEntry>> {
+    if !bytes.len().is_multiple_of(ENTRY_BYTES) {
+        return Err(CrabError::LTXCorrupted);
+    }
+    bytes
+        .as_chunks::<ENTRY_BYTES>()
+        .0
+        .iter()
+        .map(|entry| {
+            Ok(IndexEntry {
+                page: u32::from_be_bytes(array(&entry[..4])?),
+                offset: u64::from_be_bytes(array(&entry[4..12])?),
+                size: u64::from_be_bytes(array(&entry[12..20])?),
+                hash: array(&entry[20..52])?,
+                checksum: u64::from_be_bytes(array(&entry[52..60])?),
+            })
+        })
+        .collect()
 }
 
 // The sidecar binds offsets and compressed-frame digests to the CAS head. The

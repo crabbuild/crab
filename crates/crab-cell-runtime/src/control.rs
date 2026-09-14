@@ -15,6 +15,40 @@ pub struct RootRef {
     pub commit_sequence: u64,
 }
 
+impl RootRef {
+    /// Narrows a Cell-scoped LTX reference to the fields persisted in control JSON.
+    pub fn from_ltx(
+        cell: CellId,
+        incarnation: IncarnationId,
+        root: crab_ltx::RootRef,
+    ) -> Result<Self> {
+        if root.cell != *cell.as_bytes() || root.incarnation != *incarnation.as_bytes() {
+            return Err(Error::Control("prepared root changed Cell scope"));
+        }
+        Ok(Self {
+            digest: Digest::from_bytes(root.digest),
+            txid: root.position.txid,
+            checksum: root.position.checksum,
+            commit_sequence: root.commit_sequence,
+        })
+    }
+
+    /// Restores the typed Cell/incarnation scope inherited from its control record.
+    #[must_use]
+    pub fn to_ltx(&self, cell: CellId, incarnation: IncarnationId) -> crab_ltx::RootRef {
+        crab_ltx::RootRef {
+            cell: *cell.as_bytes(),
+            incarnation: *incarnation.as_bytes(),
+            digest: *self.digest.as_bytes(),
+            position: crab_ltx::Position {
+                txid: self.txid,
+                checksum: self.checksum,
+            },
+            commit_sequence: self.commit_sequence,
+        }
+    }
+}
+
 /// Enrolled process currently responsible for one Cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
@@ -106,6 +140,44 @@ impl Control {
             return Err(Error::Control("JSON is not canonical"));
         }
         Ok(control)
+    }
+
+    /// Reattaches this control record's Cell scope to its immutable LTX root.
+    #[must_use]
+    pub fn ltx_root(&self) -> Option<crab_ltx::RootRef> {
+        self.root
+            .as_ref()
+            .map(|root| root.to_ltx(self.cell, self.incarnation))
+    }
+
+    /// Builds the sole valid publication successor for an uploaded root proposal.
+    pub fn publish_prepared(
+        &self,
+        prepared: &crab_ltx::PreparedRoot,
+        next_due_ms: Option<i64>,
+    ) -> Result<Self> {
+        if prepared.predecessor() != self.ltx_root() || prepared.verified().schema() != self.schema
+        {
+            return Err(Error::Control("prepared root does not continue control"));
+        }
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        next.state = ControlState::Serving;
+        next.root = Some(RootRef::from_ltx(
+            self.cell,
+            self.incarnation,
+            prepared.root(),
+        )?);
+        next.next_due_ms = next_due_ms;
+        self.validate_transition(&next, Transition::Publish)?;
+        Ok(next)
     }
 
     /// Validates a named successor before its conditional object-store update.

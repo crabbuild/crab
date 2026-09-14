@@ -14,4 +14,6 @@ pub enum Error {
     Sqlite(#[from] rusqlite::Error),
     #[error("Cell authority storage failed")]
     Storage(#[from] crab_storage::StorageError),
+    #[error("Cell LTX publication failed")]
+    Ltx(#[from] crab_ltx::CrabError),
 }

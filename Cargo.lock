@@ -2190,11 +2190,13 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
+ "crab-ltx",
  "crab-storage",
  "object_store",
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
 ]

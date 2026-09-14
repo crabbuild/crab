@@ -118,8 +118,11 @@ Paths in the first column are relative to upstream `crates/ltx/`.
 
 Still omitted: duplicate provider/URL construction, epoch election, listing-based
 discovery, complete virtual-filesystem simulation, B-tree prediction heuristics,
-node-wide shared-bundle aggregation, node-log and cell-runtime integration. Retention planning,
-leases, permission checks and durable HTTP responses remain server policy.
+node-wide shared-bundle aggregation and the Cell actor/HTTP integration. Native
+Cell cuts now have a Crab-specific immutable root and authenticated radix-directory
+format; prepared bundle/compaction roots and lazy Cell VFS activation remain.
+Retention planning, leases, permission checks and durable HTTP responses remain
+server policy.
 The new remote modules are focused Crab adaptations of the referenced designs,
 not unmodified copies of those entire upstream files.
 
