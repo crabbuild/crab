@@ -1,8 +1,10 @@
 # Embedded Rust Cell runtime: low-level implementation specification
 
 Status: design to implement. Revision: 2026-09-14. Existing-code baseline:
-`ec20643073a`. SQL and peer contracts are implementation inputs; this PR does
-not implement the Cell runtime or qualify its performance.
+`ec20643073a`. SQL and peer contracts are implementation inputs. The initial
+identity/control/schema foundation now exists in `crab-cell-runtime`; actor,
+immutable-root publication, primitives, HTTP cutover and capacity qualification
+remain incomplete.
 
 ## Deliverable and contract precedence
 

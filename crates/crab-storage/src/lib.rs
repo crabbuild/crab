@@ -1,6 +1,7 @@
 //! Object-store layout and transport helpers for Crab.
 
 pub mod cas;
+mod cell_layout;
 pub mod error;
 pub mod error_map;
 pub mod external;
@@ -28,6 +29,7 @@ pub mod read_transport {
 pub use cas::{
     DEFAULT_MAX_ATTEMPTS, MAX_CAS_OBJECT_BYTES, cas_update, cas_update_bounded, cas_update_default,
 };
+pub use cell_layout::{CellObjectKind, CellStorageLayout};
 pub use crab_types::storage::StorageScope;
 pub use error::{Result, StorageError, read_rejection};
 pub use error_map::{classify_auth_error, map_object_store_error};

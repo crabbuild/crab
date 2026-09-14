@@ -237,32 +237,58 @@ impl ManagedDb {
         &mut self,
         operation: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<T>,
     ) -> Result<T> {
-        self.ensure_active()?;
-        self.ensure_capacity()?;
+        self.transaction_with(operation)
+            .map_err(|error| match error {
+                crate::TransactionError::Operation(error)
+                | crate::TransactionError::Sqlite(error) => error.into(),
+                crate::TransactionError::Capture(error) => error,
+            })
+    }
+
+    /// Commits one transaction while preserving application-domain failures.
+    ///
+    /// An `Operation` result guarantees the transaction was rolled back and the
+    /// writer remains reusable. SQLite commit/rollback ambiguity fences the
+    /// writer. A successful return is still local-only until capture and remote
+    /// publication complete.
+    pub fn transaction_with<T, E>(
+        &mut self,
+        operation: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, crate::TransactionError<E>>
+    where
+        E: std::error::Error + 'static,
+    {
+        self.ensure_active()
+            .map_err(crate::TransactionError::Capture)?;
+        self.ensure_capacity()
+            .map_err(crate::TransactionError::Capture)?;
         self.observer.reset();
-        let result: rusqlite::Result<T> = (|| {
-            let tx = self
-                .writer
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let result = operation(&tx)?;
-            if let Err(error) = tx.commit() {
-                // Commit failure is potentially ambiguous even if SQLite did
-                // not invoke the WAL hook. Never accept another mutation here.
-                self.fenced = true;
-                return Err(error);
+        let tx = self
+            .writer
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(crate::TransactionError::Sqlite)?;
+        let value = match operation(&tx) {
+            Ok(value) => value,
+            Err(error) => {
+                if let Err(rollback) = tx.rollback() {
+                    self.fenced = true;
+                    return Err(crate::TransactionError::Sqlite(rollback));
+                }
+                return Err(crate::TransactionError::Operation(error));
             }
-            Ok(result)
-        })();
-        if result.is_err() && (self.observer.frames() != 0 || !self.writer.is_autocommit()) {
+        };
+        if let Err(error) = tx.commit() {
+            // Commit failure is potentially ambiguous even if SQLite did not
+            // invoke the WAL hook. Never accept another mutation here.
             self.fenced = true;
+            return Err(crate::TransactionError::Sqlite(error));
         }
-        let value = result?;
         match self.observer.cut(&self.path, &self.host) {
             Ok(Some(cut)) => self.required_cut = Some(cut),
             Ok(None) => {}
             Err(error) => {
                 self.fenced = true;
-                return Err(error);
+                return Err(crate::TransactionError::Capture(error));
             }
         }
         Ok(value)
@@ -459,6 +485,41 @@ pub(crate) fn read_main(connection: &Connection, offset: u64, size: usize) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("inventory rejected the command")]
+    struct Rejected;
+
+    #[test]
+    fn typed_operation_error_rolls_back_and_keeps_writer_usable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut db = ManagedDb::open(&temp.path().join("typed.sqlite"), Limits::default()).unwrap();
+        db.transaction(|tx| tx.execute_batch("CREATE TABLE inventory(value INTEGER NOT NULL)"))
+            .unwrap();
+
+        let rejected = db.transaction_with(|tx| {
+            tx.execute("INSERT INTO inventory VALUES (1)", [])
+                .map_err(|_| Rejected)?;
+            Err::<(), _>(Rejected)
+        });
+        assert!(matches!(
+            rejected,
+            Err(crate::TransactionError::Operation(Rejected))
+        ));
+
+        db.transaction(|tx| {
+            tx.execute("INSERT INTO inventory VALUES (2)", [])
+                .map(|_| ())
+        })
+        .unwrap();
+        let count = db
+            .writer
+            .query_row("SELECT count(*) FROM inventory", [], |row| {
+                row.get::<_, u32>(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+    }
 
     #[test]
     fn truncate_checkpoint_and_auto_vacuum_preserve_every_cut() {

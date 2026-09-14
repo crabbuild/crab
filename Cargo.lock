@@ -2185,6 +2185,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-cell-runtime"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "crab-storage",
+ "object_store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "crab-coordination"
 version = "0.1.0"
 dependencies = [

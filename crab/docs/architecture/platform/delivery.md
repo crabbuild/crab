@@ -14,6 +14,8 @@ does not establish a working runtime.
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
+| [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable Cell/shard IDs, strict control codec/transitions, ETag authority updates and runtime schema installation | Add catalog proof, immutable LTX roots, actor/executor/publication and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -42,8 +44,10 @@ Exit: default/replica builds and existing tests pass, plus live source-loss test
 
 ## Work package 2: runtime command and authority
 
-Implement identity.rs, authority.rs, actor.rs, executor.rs and publication.rs.
-Install runtime.sql and enforce the runtime.md state table. Add a command fixture
+Identity derivation, strict control encoding, transition predicates, ETag updates
+and runtime.sql installation are implemented. Complete catalog proof, actor.rs,
+executor.rs and publication.rs. Enforce the remaining runtime.md timing and
+supervision rules. Add a command fixture
 that increments a counter and stores request outcome. All transitions use the
 existing Store conditional primitives, preserving their source errors.
 

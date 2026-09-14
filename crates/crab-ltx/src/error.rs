@@ -3,6 +3,22 @@
 /// Result of a local replication operation.
 pub type Result<T> = std::result::Result<T, CrabError>;
 
+/// Failure from a managed transaction without erasing a handler's domain error.
+///
+/// `Operation` proves SQLite rolled the transaction back. `Sqlite` includes
+/// begin, rollback, or commit failures; commit failures fence the writer because
+/// their outcome can be ambiguous. `Capture` occurs after a successful commit
+/// while establishing the WAL cut required for later LTX capture.
+#[derive(Debug, thiserror::Error)]
+pub enum TransactionError<E: std::error::Error + 'static> {
+    #[error("transaction operation failed")]
+    Operation(#[source] E),
+    #[error("SQLite transaction failed")]
+    Sqlite(#[source] rusqlite::Error),
+    #[error("WAL capture boundary failed")]
+    Capture(#[source] CrabError),
+}
+
 /// Capture and recovery failures; none imply remote publication succeeded.
 #[derive(Debug, thiserror::Error)]
 pub enum CrabError {

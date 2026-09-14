@@ -55,7 +55,7 @@ pub use schedule::CompactionSchedule;
 mod format_tests;
 
 pub use db::CheckpointMode;
-pub use error::{CrabError, Result};
+pub use error::{CrabError, Result, TransactionError};
 pub use managed::ManagedDb;
 pub use recovery::{VerifiedLocalPlan, compact_exact, restore_exact};
 pub use rusqlite;
