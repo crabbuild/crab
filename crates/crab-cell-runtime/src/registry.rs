@@ -103,6 +103,10 @@ impl CommandContext<'_, '_> {
     pub fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>> {
         sql_batch(self.transaction, batch)
     }
+
+    pub(crate) const fn primitive_transaction(&self) -> &Transaction<'_> {
+        self.transaction
+    }
 }
 
 /// Read-only application query context with no raw connection accessor.
@@ -110,6 +114,7 @@ pub struct QueryContext<'borrow> {
     connection: &'borrow Connection,
     cell: CellId,
     commit_sequence: u64,
+    now_ms: i64,
     input_limit: u32,
     output_limit: u32,
 }
@@ -125,9 +130,18 @@ impl QueryContext<'_> {
         self.commit_sequence
     }
 
+    #[must_use]
+    pub const fn now_ms(&self) -> i64 {
+        self.now_ms
+    }
+
     /// Executes bounded read-only application SQL under the runtime authorizer.
     pub fn sql(&self, batch: &SqlBatch) -> Result<Vec<SqlResultSet>> {
         sql_query_batch(self.connection, batch)
+    }
+
+    pub(crate) const fn primitive_connection(&self) -> &Connection {
+        self.connection
     }
 }
 
@@ -189,6 +203,7 @@ pub struct QueryInvocation<'a> {
     pub schema: u32,
     pub cell: CellId,
     pub commit_sequence: u64,
+    pub now_ms: i64,
     pub input: &'a [u8],
 }
 
@@ -297,7 +312,7 @@ impl RegistryBuilder {
             query_descriptors,
             namespace_modules: namespace_owners
                 .into_iter()
-                .map(|(namespace, (module, _))| (namespace, module))
+                .map(|(namespace, (module, descriptor))| (namespace, (module, descriptor.role)))
                 .collect(),
         })
     }
@@ -312,7 +327,7 @@ pub struct Registry {
     command_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     queries: BTreeMap<BindingKey, QueryHandler>,
     query_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
-    namespace_modules: HashMap<NamespaceId, &'static str>,
+    namespace_modules: HashMap<NamespaceId, (&'static str, CatalogRole)>,
 }
 
 impl Registry {
@@ -329,6 +344,13 @@ impl Registry {
     #[must_use]
     pub fn module_code(&self, module: &str) -> Option<Digest> {
         self.module_codes.get(module).copied()
+    }
+
+    pub(crate) fn namespace_contract(
+        &self,
+        namespace: NamespaceId,
+    ) -> Option<(&'static str, CatalogRole)> {
+        self.namespace_modules.get(&namespace).copied()
     }
 
     pub(crate) fn command_contract<C: Command>(
@@ -365,7 +387,12 @@ impl Registry {
         codec_version: u32,
         descriptors: &BTreeMap<BindingKey, OperationDescriptor>,
     ) -> Result<(OperationDescriptor, Digest)> {
-        if self.namespace_modules.get(&namespace).copied() != Some(module) {
+        if self
+            .namespace_modules
+            .get(&namespace)
+            .map(|(owner, _)| *owner)
+            != Some(module)
+        {
             return Err(Error::Registry("operation module does not own namespace"));
         }
         let key = BindingKey::new(module, id, codec_version)?;
@@ -428,6 +455,9 @@ impl Registry {
         connection: &Connection,
         invocation: QueryInvocation<'_>,
     ) -> Result<Vec<u8>> {
+        if invocation.now_ms < 0 {
+            return Err(Error::Command("invalid registered query context"));
+        }
         let key = BindingKey::new(
             invocation.module,
             invocation.operation_id,
@@ -446,6 +476,7 @@ impl Registry {
             connection,
             cell: invocation.cell,
             commit_sequence: invocation.commit_sequence,
+            now_ms: invocation.now_ms,
             input_limit: operation.input_limit,
             output_limit: operation.output_limit,
         };

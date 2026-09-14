@@ -12,9 +12,9 @@ use std::{
 use crab_ltx::rusqlite::OptionalExtension;
 
 use crate::{
-    CellHandle, CellId, CellTarget, Command, CommandInvocation, Digest, Error, IncarnationId,
-    MutationIdentity, OperationDescriptor, Query, QueryInvocation, Registry, Resolution, Result,
-    StoredOutcome,
+    CatalogRole, CellHandle, CellId, CellTarget, Command, CommandInvocation, Digest, Error,
+    IncarnationId, MutationIdentity, OperationDescriptor, Query, QueryInvocation, Registry,
+    Resolution, Result, StoredOutcome,
     codec::{decode_wire, encode_wire},
 };
 
@@ -161,6 +161,7 @@ struct EncodedQuery {
     target: CellTarget,
     expected: CellDescription,
     minimum: Option<Receipt>,
+    now_ms: i64,
     module: &'static str,
     operation_id: u32,
     codec_version: u32,
@@ -232,6 +233,20 @@ impl CellClient {
             handle,
         });
         Self::new(registry, transport)
+    }
+
+    pub(crate) fn require_namespace(
+        &self,
+        namespace: crate::NamespaceId,
+        module: &'static str,
+        role: CatalogRole,
+    ) -> Result<()> {
+        if self.registry.namespace_contract(namespace) != Some((module, role)) {
+            return Err(Error::Registry(
+                "namespace module or role does not match primitive",
+            ));
+        }
+        Ok(())
     }
 
     /// Executes one typed command with a digest derived from validated values.
@@ -310,6 +325,7 @@ impl CellClient {
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> std::result::Result<Observed<Q::Output>, InvocationError<Q::Output>> {
+        let now_ms = unix_time_ms().map_err(InvocationError::NotStarted)?;
         let description = self.describe::<Q::Output>(target).await?;
         let (operation, code) = self
             .registry
@@ -326,6 +342,7 @@ impl CellClient {
                 target: target.clone(),
                 expected: description,
                 minimum,
+                now_ms,
                 module: Q::MODULE,
                 operation_id: Q::ID,
                 codec_version: Q::CODEC_VERSION,
@@ -487,6 +504,7 @@ impl CellTransport for LocalCellTransport {
                             schema,
                             cell,
                             commit_sequence,
+                            now_ms: query.now_ms,
                             input: &query.input,
                         },
                     )

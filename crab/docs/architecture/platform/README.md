@@ -41,7 +41,11 @@ routing, HTTP cutover and capacity qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
-runtime publication path. Queue now implements producer dedup, bounded claims,
+runtime publication path. Its typed `KvNamespace` now derives the fixed shard
+from scope, binds stable registered codecs, publishes atomic mutations through
+`CellClient`, maps precondition failure to a durable rejection, and returns
+receipted point/list reads using owner-sampled logical time. Queue now implements
+producer dedup, bounded claims,
 unpredictable lease tokens, published-token validation, ack/retry/extend, expired
 lease reclamation, attempt limits and terminal cleanup. Dead-letter delivery
 still depends on the remaining effect subsystem. The application SQL boundary
@@ -80,8 +84,9 @@ fail closed. The local `CellClient` now derives the canonical operation digest,
 validates namespace/module code/schema and incarnation before admission, maps
 typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
-publication path. Private peer routing, typed primitive handles, server
-composition and release inspection remain.
+publication path. Private peer routing, server composition and release inspection
+remain; KV is the first completed primitive handle, while SQL, Queue and
+Workflow adapters remain.
 
 ## Deliverable and contract precedence
 

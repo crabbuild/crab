@@ -50,8 +50,9 @@ pub use identity::{
     TenantId, partition_for_shard, shard_for_scope,
 };
 pub use kv::{
-    KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvEntry, KvMutation, KvMutationResult,
-    KvPage, install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list,
+    KvAtomicCommand, KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvEntry, KvGetQuery,
+    KvGetRequest, KvListQuery, KvListRequest, KvModule, KvMutation, KvMutationResult, KvNamespace,
+    KvPage, install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list, register_kv,
 };
 pub use publication::CellPublisher;
 pub use queue::{

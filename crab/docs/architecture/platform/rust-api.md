@@ -304,6 +304,14 @@ locally or forward privately. No new public /sql, /kv or /workflow API is added.
 | WorkflowNamespace | start, signal, cancel, state | One workflow-ID shard |
 | Native activity supervisor | claim, complete, fail, extend | Published claim and completion are separate commands |
 
+Implementation status: `KvNamespace<M>` is complete for local routing. A
+compile-time `KvModule` supplies atomic/get/list IDs and codec version;
+`register_kv` binds those typed handlers to the static registry. The capability
+hashes scope into its fixed shard, maps failed checks to durable typed rejection,
+and exposes receipted point/list reads whose TTL time is sampled by the owner.
+Its integration test covers publication, rejection rollback, list encoding and
+exact-root restore. SqlCell, QueueNamespace and WorkflowNamespace remain.
+
 WorkflowDefinition::transition(state, event, TransitionContext) -> Decision is
 synchronous; Decision/Action are native owned Rust values. Activities are
 registered asynchronous functions returning bounded bytes and typed failures.

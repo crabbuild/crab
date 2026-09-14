@@ -4,6 +4,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, types::Value};
 
 use crate::{Error, Result};
 
+mod api;
+
+pub use api::{
+    KvAtomicCommand, KvGetQuery, KvGetRequest, KvListQuery, KvListRequest, KvModule, KvNamespace,
+    register_kv,
+};
+
 const KV_SCHEMA: &str = include_str!("migrations/kv.sql");
 const MAX_SCOPE_BYTES: usize = 1_024;
 const MAX_KEY_BYTES: usize = 1_024;

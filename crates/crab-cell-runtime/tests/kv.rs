@@ -1,15 +1,113 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::UNIX_EPOCH};
 
 use crab_cell_runtime::{
-    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellRuntime, CellTarget,
-    Digest, HandlerOutcome, IncarnationId, KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition,
-    KvMutation, MutationIdentity, NamespaceId, Owner, RequestId, SessionId, SqlWorkerPool,
+    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
+    CellClient, CellModule, CellRuntime, CellTarget, Digest, IncarnationId, InvocationError,
+    KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvListRequest, KvModule, KvMutation,
+    KvNamespace, MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor,
+    NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlWorkerPool,
     TenantId, install_kv_schema, install_runtime_schema, kv_atomic, kv_cleanup_expired, kv_get,
-    kv_list,
+    kv_list, register_kv,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
+
+const KV_MODULE: &str = "kv-test";
+const KV_NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
+const KV_MIGRATION: &str = include_str!("../src/migrations/kv.sql");
+
+struct TestKv;
+
+impl KvModule for TestKv {
+    const MODULE: &'static str = KV_MODULE;
+    const ATOMIC_COMMAND_ID: u32 = 1;
+    const GET_QUERY_ID: u32 = 1;
+    const LIST_QUERY_ID: u32 = 2;
+}
+
+impl CellModule for TestKv {
+    const NAME: &'static str = KV_MODULE;
+
+    fn descriptor(&self) -> &'static ModuleDescriptor {
+        static DESCRIPTOR: std::sync::OnceLock<ModuleDescriptor> = std::sync::OnceLock::new();
+        DESCRIPTOR.get_or_init(|| ModuleDescriptor {
+            name: KV_MODULE,
+            source_digest: Digest::from_bytes([4; 32]),
+            schema_min: 1,
+            schema_max: 1,
+            migrations: Box::leak(Box::new([MigrationDescriptor {
+                version: 1,
+                sql: KV_MIGRATION,
+                digest: Digest::from_bytes(*blake3::hash(KV_MIGRATION.as_bytes()).as_bytes()),
+            }])),
+            commands: &[OperationDescriptor {
+                id: 1,
+                codec_version: 1,
+                schema_min: 1,
+                schema_max: 1,
+                input_limit: 1024 * 1024,
+                output_limit: 1024 * 1024,
+            }],
+            queries: &[
+                OperationDescriptor {
+                    id: 1,
+                    codec_version: 1,
+                    schema_min: 1,
+                    schema_max: 1,
+                    input_limit: 4096,
+                    output_limit: 70 * 1024,
+                },
+                OperationDescriptor {
+                    id: 2,
+                    codec_version: 1,
+                    schema_min: 1,
+                    schema_max: 1,
+                    input_limit: 4096,
+                    output_limit: 1024 * 1024,
+                },
+            ],
+            workflow_definitions: &[],
+            activity_types: &[],
+            namespaces: &[NamespaceDescriptor {
+                id: KV_NAMESPACE,
+                name: KV_MODULE,
+                role: CatalogRole::Kv,
+                shards: 1,
+                effect_targets: &[],
+                dead_letter: None,
+            }],
+        })
+    }
+
+    fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+        register_kv::<Self>(registry)
+    }
+}
+
+fn kv_registry() -> Arc<crab_cell_runtime::Registry> {
+    let mut builder = RegistryBuilder::new(BuildDescriptor {
+        source_revision: "kv-api-test".into(),
+        cargo_lock_digest: Digest::from_bytes([5; 32]),
+    });
+    builder.register(TestKv).unwrap();
+    Arc::new(builder.finish().unwrap())
+}
+
+fn current_identity(byte: u8) -> MutationIdentity {
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    MutationIdentity {
+        request_id: RequestId::from_bytes([byte; 16]),
+        issued_at_ms: now_ms,
+        expires_at_ms: now_ms + 60_000,
+    }
+}
 
 fn connection() -> crab_ltx::rusqlite::Connection {
     let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
@@ -213,11 +311,12 @@ fn duplicate_mutation_keys_and_expired_puts_fail_before_writes() {
 }
 
 #[tokio::test]
-async fn kv_command_publishes_and_survives_idle_owner_restore() {
+async fn typed_kv_namespace_publishes_rejects_lists_and_survives_restore() {
+    let registry = kv_registry();
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([3; 16]),
-        NamespaceId::from_bytes([6; 16]),
+        KV_NAMESPACE,
         &0_u32.to_be_bytes(),
     )
     .unwrap();
@@ -235,7 +334,13 @@ async fn kv_command_publishes_and_survives_idle_owner_restore() {
     let catalog = CellCatalog::new(layout.clone(), target.tenant());
     let proof = catalog
         .provision(
-            CatalogEntry::new(&target, CatalogRole::Kv, Digest::from_bytes([5; 32]), 1).unwrap(),
+            CatalogEntry::new(
+                &target,
+                CatalogRole::Kv,
+                registry.module_code(KV_MODULE).unwrap(),
+                1,
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -270,31 +375,72 @@ async fn kv_command_publishes_and_survives_idle_owner_restore() {
         )
         .await
         .unwrap();
+    let namespace = KvNamespace::<TestKv>::new(
+        CellClient::local(registry.clone(), handle.clone()),
+        target.tenant(),
+        target.application(),
+        KV_NAMESPACE,
+        1,
+    )
+    .unwrap();
     let request = KvAtomicRequest {
         scope: b"repository".to_vec(),
         checks: Vec::new(),
         mutations: vec![put(b"branch", b"main", None)],
     };
-    handle
-        .execute(
-            MutationIdentity {
-                request_id: RequestId::from_bytes([7; 16]),
-                issued_at_ms: 10,
-                expires_at_ms: 10_000,
-            },
-            Digest::from_bytes([8; 32]),
-            20,
-            128,
-            128,
-            move |transaction| match kv_atomic(transaction, 20, &request)? {
-                KvAtomicOutcome::Applied(_) => Ok(HandlerOutcome::Success(b"applied".to_vec())),
-                KvAtomicOutcome::PreconditionFailed { .. } => {
-                    Ok(HandlerOutcome::Rejected(b"precondition".to_vec()))
-                }
-            },
-        )
+    let committed = namespace
+        .atomic(current_identity(7), request)
         .await
         .unwrap();
+    assert!(matches!(committed.output, KvAtomicOutcome::Applied(_)));
+    let entry = namespace
+        .get(
+            b"repository".to_vec(),
+            b"branch".to_vec(),
+            Some(committed.receipt),
+        )
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(entry.value, b"main");
+    assert_eq!(
+        namespace
+            .list(
+                KvListRequest {
+                    scope: b"repository".to_vec(),
+                    prefix: b"br".to_vec(),
+                    after_key: None,
+                    limit: 10,
+                },
+                Some(committed.receipt),
+            )
+            .await
+            .unwrap()
+            .output
+            .entries,
+        vec![entry]
+    );
+    let rejected = namespace
+        .atomic(
+            current_identity(8),
+            KvAtomicRequest {
+                scope: b"repository".to_vec(),
+                checks: vec![KvCheck {
+                    key: b"branch".to_vec(),
+                    condition: KvCondition::Absent,
+                }],
+                mutations: vec![put(b"branch", b"wrong", None)],
+            },
+        )
+        .await;
+    assert!(matches!(
+        rejected,
+        Err(InvocationError::Rejected(outcome))
+            if outcome.output == KvAtomicOutcome::PreconditionFailed {
+                key: b"branch".to_vec()
+            }
+    ));
     handle.drain().await.unwrap();
 
     let idle = authority.load(cell).await.unwrap().unwrap();
@@ -319,17 +465,26 @@ async fn kv_command_publishes_and_survives_idle_owner_restore() {
         )
         .await
         .unwrap();
+    let restored_namespace = KvNamespace::<TestKv>::new(
+        CellClient::local(registry, restored.clone()),
+        target.tenant(),
+        target.application(),
+        KV_NAMESPACE,
+        1,
+    )
+    .unwrap();
     assert_eq!(
-        restored
-            .query(64, 64, |connection| {
-                Ok(kv_get(connection, b"repository", b"branch", 21)?
-                    .ok_or(crab_cell_runtime::Error::Command(
-                        "missing restored KV entry",
-                    ))?
-                    .value)
-            })
+        restored_namespace
+            .get(
+                b"repository".to_vec(),
+                b"branch".to_vec(),
+                Some(committed.receipt),
+            )
             .await
-            .unwrap(),
+            .unwrap()
+            .output
+            .unwrap()
+            .value,
         b"main"
     );
     restored.drain().await.unwrap();

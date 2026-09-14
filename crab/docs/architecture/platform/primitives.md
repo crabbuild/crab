@@ -124,10 +124,14 @@ precondition before writing, rejects duplicate mutation keys, derives the exact
 28-byte incarnation/sequence/ordinal version and preserves mutation order.
 `kv_get` and `kv_list` apply logical expiry; list uses binary prefix bounds and
 caps both count and materialized page bytes. `kv_cleanup_expired` deletes at most
-128 rows. Integration coverage executes a KV mutation through `CellHandle`,
-publishes its LTX root, releases the owner, restores on a new owner and reads the
-same value. A typed `KvNamespace`/registry codec adapter and scheduler invocation
-of cleanup remain to implement.
+128 rows. Integration coverage executes a KV mutation through typed
+`KvNamespace`, publishes its LTX root, validates a minimum-receipt point/list
+read and durable precondition rejection, releases the owner, restores on a new
+owner and reads the same value. `KvModule` supplies compile-time operation IDs;
+`register_kv` binds stable bounded codecs for atomic, get and list without
+exposing handler selection. Scope determines the fixed shard before routing,
+and query TTL uses owner-sampled logical time. Scheduler invocation of cleanup
+remains to implement.
 
 V1 KV is scoped. `Target.partition` must equal u32(hash(scope) % shard_count);
 Rust recomputes and rejects mismatches. Keys are 1..1024 bytes, scope <=1024,

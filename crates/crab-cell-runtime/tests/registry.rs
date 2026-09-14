@@ -287,6 +287,7 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
                     schema: 1,
                     cell: CellId::from_bytes([3; 32]),
                     commit_sequence: 1,
+                    now_ms: 10,
                     input: b"",
                 },
             )
@@ -303,6 +304,7 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
                 schema: 2,
                 cell: CellId::from_bytes([3; 32]),
                 commit_sequence: 1,
+                now_ms: 10,
                 input: b"",
             },
         ),
