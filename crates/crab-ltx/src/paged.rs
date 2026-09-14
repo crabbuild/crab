@@ -330,7 +330,7 @@ fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N]> {
     bytes.try_into().map_err(|_| CrabError::LTXCorrupted)
 }
 
-fn decode_frame(frame: &[u8], page_size: u32, pgno: u32) -> Result<Vec<u8>> {
+pub(crate) fn decode_frame(frame: &[u8], page_size: u32, pgno: u32) -> Result<Vec<u8>> {
     let prefix = frame.get(..FRAME_PREFIX).ok_or(CrabError::LTXCorrupted)?;
     let header = crate::ltx::PageHeader::parse(&prefix[..crate::ltx::PAGE_HEADER_SIZE])?;
     header.validate()?;

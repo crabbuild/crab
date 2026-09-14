@@ -3,9 +3,10 @@
 Status: design to implement. Revision: 2026-09-14. Existing-code baseline:
 `ec20643073a`. SQL and peer contracts are implementation inputs. The initial
 identity/control/schema foundation and native-cut immutable root preparation now
-exist in `crab-cell-runtime` and `crab-ltx`. Actor supervision, lazy directory-
-backed activation, prepared compaction/bundles, primitives, HTTP cutover and
-capacity qualification remain incomplete.
+exist in `crab-cell-runtime` and `crab-ltx`; exact roots also support lazy,
+authenticated page reads. Actor supervision, directory-backed writable SQLite,
+streaming directory updates, prepared compaction/bundles, primitives, HTTP
+cutover and capacity qualification remain incomplete.
 
 ## Deliverable and contract precedence
 

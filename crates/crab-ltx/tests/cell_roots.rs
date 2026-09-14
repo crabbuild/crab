@@ -1,8 +1,11 @@
 #![cfg(feature = "replica")]
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
-use crab_ltx::{CellReplica, Limits, ManagedDb, RootRef};
+use crab_ltx::{CellReplica, Limits, ManagedDb, RootRef, VerifiedLocalPlan, restore_exact};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
 
@@ -25,11 +28,18 @@ async fn prepared_root_reopens_without_a_mutable_head() {
         .transaction(|transaction| {
             transaction.execute_batch(
                 "CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT);\
-                 INSERT INTO messages(body) VALUES ('first')",
+                 INSERT INTO messages(body) VALUES ('first');\
+                 CREATE TABLE payload(value BLOB);\
+                 INSERT INTO payload VALUES(randomblob(2000000))",
             )
         })
         .unwrap();
-    let store = Store::new(Arc::new(InMemory::new()));
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let observed = read_bytes.clone();
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes, Ordering::SeqCst);
+        }));
     let replica = replica(store.clone(), [1; 32], [2; 16]);
     let first = writer.capture().unwrap();
     let prepared = replica.prepare(None, &first, 1, 7).await.unwrap();
@@ -52,6 +62,21 @@ async fn prepared_root_reopens_without_a_mutable_head() {
     assert_eq!(prepared.verified().segment_count(), 2);
     assert_eq!(prepared.root().position, second.position);
 
+    let expected_dir = tempfile::TempDir::new().unwrap();
+    let expected_path = expected_dir.path().join("expected.sqlite");
+    let segments = first
+        .segments
+        .iter()
+        .chain(&second.segments)
+        .cloned()
+        .collect::<Vec<_>>();
+    let plan = VerifiedLocalPlan::new(&segments, second.position, Limits::default()).unwrap();
+    restore_exact(&plan, &expected_path).unwrap();
+    let expected = std::fs::read(expected_path).unwrap();
+    writer.close().unwrap();
+    directory.close().unwrap();
+
+    read_bytes.store(0, Ordering::SeqCst);
     let reopened = replica.open_root(&prepared.root()).await.unwrap();
     assert_eq!(reopened.root(), prepared.root());
     assert_eq!(
@@ -59,7 +84,16 @@ async fn prepared_root_reopens_without_a_mutable_head() {
         prepared.verified().database_pages()
     );
     assert!(reopened.page_size().is_power_of_two());
-    writer.close().unwrap();
+    assert!(
+        read_bytes.load(Ordering::SeqCst) < 100_000,
+        "activation must not fetch the LTX bodies or every directory leaf"
+    );
+    let pages = reopened.paged();
+    let mut restored = Vec::with_capacity(expected.len());
+    for page in 1..=pages.page_count() {
+        restored.extend(pages.read_page(page).await.unwrap());
+    }
+    assert_eq!(restored, expected);
 }
 
 #[tokio::test]

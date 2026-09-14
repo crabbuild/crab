@@ -9,7 +9,7 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Trusted synchronous SQL callback; separate capture; local-only commit | Typed operation errors, restricted application/read callbacks and actor-owned cut transfer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell/incarnation-scoped roots and `open_root` verifies their complete metadata graph without a mutable head | Add prepared compaction/bundles, lazy page faults and streaming directory updates |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell/incarnation-scoped roots; cold open and page reads traverse exact digest-pinned radix paths without a mutable head | Add prepared compaction/bundles, writable SQLite activation, shared node cache and streaming directory updates |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -31,7 +31,8 @@ canonical root/descriptor codecs, immutable dependency upload and the persistent
 radix directory format. `Control::publish_prepared` binds that checked proposal
 to exactly one Cell/incarnation/predecessor before the authority CAS. Complete
 this package by sharing the preparation path with bundles and compaction, making
-directory update/open lazy and adding exact Cell-root restore/writable activation.
+directory updates streaming, adding the shared node cache, and wiring exact
+Cell-root sequential restore/writable activation.
 Existing standalone `Replica` callers retain their current API; Cell runtime
 code must not call its mutable epoch head.
 

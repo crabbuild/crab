@@ -1,10 +1,8 @@
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::BTreeMap;
 
 use crab_storage::{CellObjectKind, CellStorageLayout};
 
 use crate::{CrabError, Host, Result};
-
-use super::root::SegmentDescriptor;
 
 const MAGIC: &[u8; 8] = b"CRBDIR01";
 const HEADER_BYTES: usize = 32;
@@ -204,11 +202,18 @@ pub(super) struct Verification<'a> {
     pub incarnation: &'a [u8; 16],
     pub page_size: u32,
     pub database_pages: u32,
-    pub descriptors: &'a [SegmentDescriptor],
+    pub extents: &'a BTreeMap<[u8; 32], ObjectExtent>,
     pub host: &'a Host,
 }
 
-pub(super) async fn verify_tree(
+#[derive(Clone, Copy)]
+pub(super) struct ObjectExtent {
+    pub kind: CellObjectKind,
+    pub offset: u64,
+    pub length: u64,
+}
+
+pub(super) async fn verify_root(
     verification: Verification<'_>,
     root: [u8; 32],
     height: u32,
@@ -216,100 +221,99 @@ pub(super) async fn verify_tree(
     if height > 3 || verification.database_pages == 0 {
         return Err(CrabError::LTXCorrupted);
     }
-    let mut extents = BTreeMap::new();
-    for descriptor in verification.descriptors {
-        let (digest, offset, length, kind) = descriptor.object_extent();
-        extents.insert(digest, (offset, length));
-        let object_path = verification.layout.incarnation_object_path(
-            verification.cell,
-            verification.incarnation,
-            &digest,
-            kind,
-        );
-        let index_path = verification.layout.incarnation_object_path(
-            verification.cell,
-            verification.incarnation,
-            &descriptor.index_digest,
-            CellObjectKind::Index,
-        );
-        let _permit = verification.host.io_permit().await?;
-        if verification.layout.store().head(&object_path).await?.size != offset + length
-            || verification.layout.store().head(&index_path).await?.size != descriptor.index_length
-        {
-            return Err(CrabError::ChecksumMismatch);
-        }
+    let bytes = read_node(&verification, root).await?;
+    let header = Header::parse(&bytes)?;
+    if (height == 0) != (header.kind == 0) {
+        return Err(CrabError::LTXCorrupted);
     }
-
-    let mut queue = VecDeque::from([(root, height, None)]);
-    let mut visited = HashSet::new();
-    let mut root_aggregate = None;
-    let mut leaf_pages = 0u64;
-    let mut leaf_checksum = 0u64;
-    let mut previous_leaf_page = 0u32;
-    while let Some((digest, node_height, expected)) = queue.pop_front() {
-        if !visited.insert(digest) {
-            return Err(CrabError::LTXCorrupted);
-        }
-        let path = verification.layout.incarnation_object_path(
-            verification.cell,
-            verification.incarnation,
-            &digest,
-            CellObjectKind::Directory,
-        );
-        let _permit = verification.host.io_permit().await?;
-        let (bytes, _) = verification
-            .layout
-            .store()
-            .get_with_etag_bounded(&path, MAX_NODE_BYTES)
-            .await?;
-        if *blake3::hash(&bytes).as_bytes() != digest {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        let header = Header::parse(&bytes)?;
-        if (node_height == 0) != (header.kind == 0) {
-            return Err(CrabError::LTXCorrupted);
-        }
-        let aggregate = if header.kind == 0 {
-            verify_leaf(
-                &bytes,
-                &header,
-                verification.page_size,
-                verification.database_pages,
-                &extents,
-                &mut previous_leaf_page,
-            )?
-        } else {
-            let (aggregate, children) = verify_branch(&bytes, &header)?;
-            for child in children {
-                queue.push_back((child.digest, node_height - 1, Some(child.aggregate)));
-            }
-            aggregate
-        };
-        if expected.is_some_and(|value| value != aggregate) {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        if root_aggregate.is_none() {
-            root_aggregate = Some(aggregate);
-        }
-        if header.kind == 0 {
-            leaf_pages = leaf_pages
-                .checked_add(aggregate.live_pages)
-                .ok_or(CrabError::LTXCorrupted)?;
-            leaf_checksum ^= aggregate.checksum;
-        }
-    }
-    let root_aggregate = root_aggregate.ok_or(CrabError::LTXCorrupted)?;
+    let root_aggregate = if header.kind == 0 {
+        verify_leaf(
+            &bytes,
+            &header,
+            verification.page_size,
+            verification.database_pages,
+            verification.extents,
+        )?
+        .0
+    } else {
+        verify_branch(&bytes, &header)?.0
+    };
     let lock = crate::ltx::lock_pgno(verification.page_size);
     let expected_pages =
         u64::from(verification.database_pages) - u64::from(lock <= verification.database_pages);
-    let checksum = leaf_checksum | crate::CHECKSUM_FLAG;
-    if leaf_pages != expected_pages
-        || root_aggregate.live_pages != leaf_pages
-        || root_aggregate.checksum != checksum
+    if root_aggregate.live_pages != expected_pages
+        || root_aggregate.first == 0
+        || root_aggregate.last > verification.database_pages
     {
         return Err(CrabError::ChecksumMismatch);
     }
     Ok(root_aggregate)
+}
+
+pub(super) async fn lookup(
+    verification: Verification<'_>,
+    root: [u8; 32],
+    mut height: u32,
+    page: u32,
+) -> Result<DirectoryEntry> {
+    if page == 0 || page > verification.database_pages {
+        return Err(CrabError::TxNotAvailable);
+    }
+    let mut digest = root;
+    let mut expected = None;
+    loop {
+        let bytes = read_node(&verification, digest).await?;
+        let header = Header::parse(&bytes)?;
+        if (height == 0) != (header.kind == 0) {
+            return Err(CrabError::LTXCorrupted);
+        }
+        if header.kind == 0 {
+            let (aggregate, entries) = verify_leaf(
+                &bytes,
+                &header,
+                verification.page_size,
+                verification.database_pages,
+                verification.extents,
+            )?;
+            if expected.is_some_and(|value| value != aggregate) {
+                return Err(CrabError::ChecksumMismatch);
+            }
+            return entries
+                .into_iter()
+                .find(|entry| entry.page == page)
+                .ok_or(CrabError::LTXCorrupted);
+        }
+        let (aggregate, children) = verify_branch(&bytes, &header)?;
+        if expected.is_some_and(|value| value != aggregate) {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let child = children
+            .into_iter()
+            .find(|child| child.aggregate.first <= page && page <= child.aggregate.last)
+            .ok_or(CrabError::LTXCorrupted)?;
+        digest = child.digest;
+        expected = Some(child.aggregate);
+        height = height.checked_sub(1).ok_or(CrabError::LTXCorrupted)?;
+    }
+}
+
+async fn read_node(verification: &Verification<'_>, digest: [u8; 32]) -> Result<Vec<u8>> {
+    let path = verification.layout.incarnation_object_path(
+        verification.cell,
+        verification.incarnation,
+        &digest,
+        CellObjectKind::Directory,
+    );
+    let _permit = verification.host.io_permit().await?;
+    let (bytes, _) = verification
+        .layout
+        .store()
+        .get_with_etag_bounded(&path, MAX_NODE_BYTES)
+        .await?;
+    if *blake3::hash(&bytes).as_bytes() != digest {
+        return Err(CrabError::ChecksumMismatch);
+    }
+    Ok(bytes.to_vec())
 }
 
 fn encode_leaf(entries: &[DirectoryEntry]) -> Result<Vec<u8>> {
@@ -372,23 +376,26 @@ fn verify_leaf(
     header: &Header,
     page_size: u32,
     database_pages: u32,
-    extents: &BTreeMap<[u8; 32], (u64, u64)>,
-    previous_tree_page: &mut u32,
-) -> Result<Aggregate> {
+    extents: &BTreeMap<[u8; 32], ObjectExtent>,
+) -> Result<(Aggregate, Vec<DirectoryEntry>)> {
     let lock = crate::ltx::lock_pgno(page_size);
     let mut checksum = 0;
     let mut first = 0;
     let mut last = 0;
+    let mut previous = 0;
+    let mut entries = Vec::with_capacity(header.entries as usize);
     for index in 0..header.entries as usize {
         let start = HEADER_BYTES + index * LEAF_RECORD_BYTES;
         let page = read_u32(bytes, start)?;
         let object = array(&bytes[start + 4..start + 36])?;
         let offset = read_u64(bytes, start + 36)?;
         let length = read_u32(bytes, start + 44)?;
+        let frame_hash = array(&bytes[start + 48..start + 80])?;
         let page_checksum = read_u64(bytes, start + 80)?;
-        let (base, object_length) = extents.get(&object).ok_or(CrabError::LTXCorrupted)?;
-        let object_end = base
-            .checked_add(*object_length)
+        let extent = extents.get(&object).ok_or(CrabError::LTXCorrupted)?;
+        let object_end = extent
+            .offset
+            .checked_add(extent.length)
             .ok_or(CrabError::LTXCorrupted)?;
         let frame_end = offset
             .checked_add(u64::from(length))
@@ -396,10 +403,10 @@ fn verify_leaf(
         if page == 0
             || page > database_pages
             || page == lock
-            || page <= *previous_tree_page
+            || page <= previous
             || page_checksum & crate::CHECKSUM_FLAG == 0
             || length == 0
-            || offset < *base
+            || offset < extent.offset
             || frame_end > object_end
         {
             return Err(CrabError::LTXCorrupted);
@@ -408,8 +415,19 @@ fn verify_leaf(
             first = page;
         }
         last = page;
-        *previous_tree_page = page;
+        previous = page;
         checksum ^= page_checksum;
+        entries.push(DirectoryEntry {
+            page,
+            object,
+            offset,
+            length,
+            frame_hash,
+            checksum: page_checksum,
+        });
+    }
+    if (first - 1) / FANOUT as u32 != (last - 1) / FANOUT as u32 {
+        return Err(CrabError::LTXCorrupted);
     }
     let aggregate = Aggregate {
         live_pages: u64::from(header.entries),
@@ -420,7 +438,7 @@ fn verify_leaf(
     if aggregate.live_pages != header.live_pages || aggregate.checksum != header.checksum {
         return Err(CrabError::ChecksumMismatch);
     }
-    Ok(aggregate)
+    Ok((aggregate, entries))
 }
 
 fn verify_branch(bytes: &[u8], header: &Header) -> Result<(Aggregate, Vec<Node>)> {

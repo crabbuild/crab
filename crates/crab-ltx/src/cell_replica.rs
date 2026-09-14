@@ -1,6 +1,6 @@
 //! Immutable Cell-scoped LTX roots prepared independently of ownership CAS.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
 use crab_storage::{CellObjectKind, CellStorageLayout};
@@ -10,7 +10,7 @@ use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 mod directory;
 mod root;
 
-use directory::{DirectoryEntry, DirectoryTree};
+use directory::{DirectoryEntry, DirectoryTree, ObjectExtent};
 use root::{
     RootDocument, SegmentDescriptor, decode_root, decode_segment_page, encode_root,
     encode_segment_page,
@@ -68,6 +68,7 @@ pub struct VerifiedRoot {
     schema: u32,
     segment_count: usize,
     directory_height: u32,
+    pages: CellPagedDatabase,
 }
 
 impl VerifiedRoot {
@@ -99,6 +100,94 @@ impl VerifiedRoot {
     #[must_use]
     pub fn directory_height(&self) -> u32 {
         self.directory_height
+    }
+
+    /// Returns a pinned, lazy page reader for this exact root.
+    #[must_use]
+    pub fn paged(&self) -> CellPagedDatabase {
+        self.pages.clone()
+    }
+}
+
+/// Lazy authenticated page access through one immutable Cell root.
+#[derive(Clone)]
+pub struct CellPagedDatabase {
+    replica: CellReplica,
+    directory_digest: [u8; 32],
+    directory_height: u32,
+    extents: Arc<BTreeMap<[u8; 32], ObjectExtent>>,
+    page_size: u32,
+    database_pages: u32,
+    position: Position,
+}
+
+impl CellPagedDatabase {
+    #[must_use]
+    pub fn position(&self) -> Position {
+        self.position
+    }
+
+    #[must_use]
+    pub fn page_size(&self) -> u32 {
+        self.page_size
+    }
+
+    #[must_use]
+    pub fn page_count(&self) -> u32 {
+        self.database_pages
+    }
+
+    /// Reads one page by verifying every radix node and the selected LTX frame.
+    pub async fn read_page(&self, page: u32) -> Result<Vec<u8>> {
+        if page == crate::ltx::lock_pgno(self.page_size) && page <= self.database_pages {
+            return Ok(vec![0; self.page_size as usize]);
+        }
+        let entry = directory::lookup(
+            directory::Verification {
+                layout: &self.replica.layout,
+                cell: &self.replica.cell,
+                incarnation: &self.replica.incarnation,
+                page_size: self.page_size,
+                database_pages: self.database_pages,
+                extents: &self.extents,
+                host: &self.replica.host,
+            },
+            self.directory_digest,
+            self.directory_height,
+            page,
+        )
+        .await?;
+        let extent = self
+            .extents
+            .get(&entry.object)
+            .ok_or(CrabError::LTXCorrupted)?;
+        let end = entry
+            .offset
+            .checked_add(u64::from(entry.length))
+            .ok_or(CrabError::LTXCorrupted)?;
+        let path = self.replica.layout.incarnation_object_path(
+            &self.replica.cell,
+            &self.replica.incarnation,
+            &entry.object,
+            extent.kind,
+        );
+        let _permit = self.replica.host.io_permit().await?;
+        let frame = self
+            .replica
+            .layout
+            .store()
+            .range_get(&path, entry.offset..end)
+            .await?;
+        if frame.len() != entry.length as usize
+            || *blake3::hash(&frame).as_bytes() != entry.frame_hash
+        {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        let bytes = crate::paged::decode_frame(&frame, self.page_size, page)?;
+        if crate::ltx::checksum_page(page, &bytes) != entry.checksum {
+            return Err(CrabError::ChecksumMismatch);
+        }
+        Ok(bytes)
     }
 }
 
@@ -256,18 +345,14 @@ impl CellReplica {
         };
         Ok(PreparedRoot {
             predecessor: base.copied(),
-            verified: VerifiedRoot::from_graph(root, &document, descriptors.len()),
+            verified: VerifiedRoot::from_graph(self.clone(), root, &document, descriptors)?,
         })
     }
 
     /// Reopens and verifies an exact immutable root and its metadata graph.
     pub async fn open_root(&self, root: &RootRef) -> Result<VerifiedRoot> {
         let graph = self.load_graph(root).await?;
-        Ok(VerifiedRoot::from_graph(
-            *root,
-            &graph.document,
-            graph.descriptors.len(),
-        ))
+        VerifiedRoot::from_graph(self.clone(), *root, &graph.document, graph.descriptors)
     }
 
     async fn load_graph(&self, root: &RootRef) -> Result<LoadedGraph> {
@@ -312,14 +397,15 @@ impl CellReplica {
         {
             return Err(CrabError::LTXCorrupted);
         }
-        let aggregate = directory::verify_tree(
+        let extents = object_extents(&descriptors)?;
+        let aggregate = directory::verify_root(
             directory::Verification {
                 layout: &self.layout,
                 cell: &self.cell,
                 incarnation: &self.incarnation,
                 page_size: document.page_size,
                 database_pages: document.database_pages,
-                descriptors: &descriptors,
+                extents: &extents,
                 host: &self.host,
             },
             document.directory_digest,
@@ -469,14 +555,47 @@ struct LoadedGraph {
 }
 
 impl VerifiedRoot {
-    fn from_graph(root: RootRef, document: &RootDocument, segment_count: usize) -> Self {
-        Self {
+    fn from_graph(
+        replica: CellReplica,
+        root: RootRef,
+        document: &RootDocument,
+        descriptors: Vec<SegmentDescriptor>,
+    ) -> Result<Self> {
+        let extents = object_extents(&descriptors)?;
+        Ok(Self {
             root,
             page_size: document.page_size,
             database_pages: document.database_pages,
             schema: document.schema,
-            segment_count,
+            segment_count: descriptors.len(),
             directory_height: document.directory_height,
+            pages: CellPagedDatabase {
+                replica,
+                directory_digest: document.directory_digest,
+                directory_height: document.directory_height,
+                extents: Arc::new(extents),
+                page_size: document.page_size,
+                database_pages: document.database_pages,
+                position: root.position,
+            },
+        })
+    }
+}
+
+fn object_extents(descriptors: &[SegmentDescriptor]) -> Result<BTreeMap<[u8; 32], ObjectExtent>> {
+    let mut extents = BTreeMap::new();
+    for descriptor in descriptors {
+        let (digest, offset, length, kind) = descriptor.object_extent();
+        let extent = ObjectExtent {
+            kind,
+            offset,
+            length,
+        };
+        if let Some(previous) = extents.insert(digest, extent)
+            && (previous.kind != kind || previous.offset != offset || previous.length != length)
+        {
+            return Err(CrabError::LTXCorrupted);
         }
     }
+    Ok(extents)
 }
