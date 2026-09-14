@@ -195,9 +195,14 @@ production implementation uses the process cryptographic RNG. The runtime caller
 publishes the encoded claim before `queue_validate_claim` permits emission.
 `queue_apply_lease` implements conditional ack/retry/extend and attempt/expiry
 death; cleanup removes at most 128 dedup and 128 terminal rows. Integration
-coverage sends and claims through `CellHandle`, validates only after publication,
-then restores another owner and validates the same lease. DLQ effect insertion,
-typed registry codecs and scheduler polling remain to implement.
+coverage sends and claims through typed `QueueNamespace`, validates only after
+publication, then restores another owner, validates the same lease and
+acknowledges it through the typed API. `QueueModule` supplies stable send/claim/
+lease/query IDs and its fixed namespace; `register_queue` binds bounded codecs.
+The capability derives producer shards, requires an explicit consumer shard and
+loads the immutable shard count from the compiled registry. Producer conflicts
+and lost leases are durable typed rejections. DLQ effect insertion and scheduler
+polling remain to implement.
 
 Queue state: 0=ready, 1=leased, 2=acked, 3=dead. Send hashes producer_id to the
 shard, validates payload <=256 KiB and available_at within now..now+7 days.

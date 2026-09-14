@@ -310,10 +310,7 @@ impl RegistryBuilder {
             command_descriptors,
             queries: self.queries,
             query_descriptors,
-            namespace_modules: namespace_owners
-                .into_iter()
-                .map(|(namespace, (module, descriptor))| (namespace, (module, descriptor.role)))
-                .collect(),
+            namespace_modules: namespace_owners,
         })
     }
 }
@@ -327,7 +324,7 @@ pub struct Registry {
     command_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     queries: BTreeMap<BindingKey, QueryHandler>,
     query_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
-    namespace_modules: HashMap<NamespaceId, (&'static str, CatalogRole)>,
+    namespace_modules: HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
 }
 
 impl Registry {
@@ -349,7 +346,7 @@ impl Registry {
     pub(crate) fn namespace_contract(
         &self,
         namespace: NamespaceId,
-    ) -> Option<(&'static str, CatalogRole)> {
+    ) -> Option<(&'static str, NamespaceDescriptor)> {
         self.namespace_modules.get(&namespace).copied()
     }
 

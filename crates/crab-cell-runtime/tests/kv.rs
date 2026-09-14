@@ -380,7 +380,6 @@ async fn typed_kv_namespace_publishes_rejects_lists_and_survives_restore() {
         target.tenant(),
         target.application(),
         KV_NAMESPACE,
-        1,
     )
     .unwrap();
     let request = KvAtomicRequest {
@@ -470,7 +469,6 @@ async fn typed_kv_namespace_publishes_rejects_lists_and_survives_restore() {
         target.tenant(),
         target.application(),
         KV_NAMESPACE,
-        1,
     )
     .unwrap();
     assert_eq!(

@@ -1,16 +1,113 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::UNIX_EPOCH};
 
 use crab_cell_runtime::{
-    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellRuntime, CellTarget,
-    Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId, Owner, QueueLeaseAction,
-    QueueLeaseOutcome, QueueMessage, QueueSendOutcome, QueueSendRequest, QueueState,
-    QueueTokenSource, RequestId, SessionId, SqlWorkerPool, StoredOutcome, TenantId,
-    install_queue_schema, install_runtime_schema, queue_apply_lease, queue_claim,
-    queue_cleanup_expired, queue_send, queue_validate_claim,
+    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
+    CellClient, CellModule, CellRuntime, CellTarget, Digest, IncarnationId, InvocationError,
+    MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId,
+    OperationDescriptor, Owner, QueueClaimRequest, QueueLeaseAction, QueueLeaseOutcome,
+    QueueModule, QueueNamespace, QueueSendOutcome, QueueSendRequest, QueueState, QueueTokenSource,
+    RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId, install_queue_schema,
+    install_runtime_schema, queue_apply_lease, queue_claim, queue_cleanup_expired, queue_send,
+    queue_validate_claim, register_queue,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
+
+const QUEUE_MODULE: &str = "queue-test";
+const QUEUE_NAMESPACE: NamespaceId = NamespaceId::from_bytes([6; 16]);
+const QUEUE_MIGRATION: &str = include_str!("../src/migrations/queue.sql");
+const QUEUE_COMMANDS: &[OperationDescriptor] = &[
+    operation(1, 270 * 1024, 32),
+    operation(2, 8, 530 * 1024),
+    operation(3, 64, 16),
+];
+const QUEUE_QUERIES: &[OperationDescriptor] = &[operation(1, 530 * 1024, 1)];
+
+struct TestQueue;
+
+impl QueueModule for TestQueue {
+    const MODULE: &'static str = QUEUE_MODULE;
+    const NAMESPACE: NamespaceId = QUEUE_NAMESPACE;
+    const SEND_COMMAND_ID: u32 = 1;
+    const CLAIM_COMMAND_ID: u32 = 2;
+    const LEASE_COMMAND_ID: u32 = 3;
+    const VALIDATE_QUERY_ID: u32 = 1;
+}
+
+impl CellModule for TestQueue {
+    const NAME: &'static str = QUEUE_MODULE;
+
+    fn descriptor(&self) -> &'static ModuleDescriptor {
+        static DESCRIPTOR: std::sync::OnceLock<ModuleDescriptor> = std::sync::OnceLock::new();
+        DESCRIPTOR.get_or_init(|| ModuleDescriptor {
+            name: QUEUE_MODULE,
+            source_digest: Digest::from_bytes([4; 32]),
+            schema_min: 1,
+            schema_max: 1,
+            migrations: Box::leak(Box::new([MigrationDescriptor {
+                version: 1,
+                sql: QUEUE_MIGRATION,
+                digest: Digest::from_bytes(*blake3::hash(QUEUE_MIGRATION.as_bytes()).as_bytes()),
+            }])),
+            commands: QUEUE_COMMANDS,
+            queries: QUEUE_QUERIES,
+            workflow_definitions: &[],
+            activity_types: &[],
+            namespaces: &[NamespaceDescriptor {
+                id: QUEUE_NAMESPACE,
+                name: QUEUE_MODULE,
+                role: CatalogRole::Queue,
+                shards: 1,
+                effect_targets: &[],
+                dead_letter: None,
+            }],
+        })
+    }
+
+    fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+        register_queue::<Self>(registry)
+    }
+}
+
+const fn operation(id: u32, input_limit: u32, output_limit: u32) -> OperationDescriptor {
+    OperationDescriptor {
+        id,
+        codec_version: 1,
+        schema_min: 1,
+        schema_max: 1,
+        input_limit,
+        output_limit,
+    }
+}
+
+fn queue_registry() -> Arc<crab_cell_runtime::Registry> {
+    let mut builder = RegistryBuilder::new(BuildDescriptor {
+        source_revision: "queue-api-test".into(),
+        cargo_lock_digest: Digest::from_bytes([5; 32]),
+    });
+    builder.register(TestQueue).unwrap();
+    Arc::new(builder.finish().unwrap())
+}
+
+fn current_identity(byte: u8) -> MutationIdentity {
+    let now_ms = unix_time_ms();
+    MutationIdentity {
+        request_id: RequestId::from_bytes([byte; 16]),
+        issued_at_ms: now_ms,
+        expires_at_ms: now_ms + 60_000,
+    }
+}
+
+fn unix_time_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
+}
 
 struct Tokens(u8);
 
@@ -242,33 +339,13 @@ fn retry_and_expired_reclaim_preserve_attempt_limits_and_cleanup_bounds() {
     transaction.commit().unwrap();
 }
 
-fn encode_claim(message: &QueueMessage) -> Vec<u8> {
-    let mut encoded = Vec::with_capacity(44 + message.payload.len());
-    encoded.extend_from_slice(&message.message_id);
-    encoded.extend_from_slice(&message.token);
-    encoded.extend_from_slice(&message.attempt.to_be_bytes());
-    encoded.extend_from_slice(&message.lease_until_ms.to_be_bytes());
-    encoded.extend_from_slice(&message.payload);
-    encoded
-}
-
-fn decode_claim(encoded: &[u8]) -> QueueMessage {
-    QueueMessage {
-        message_id: encoded[..16].try_into().unwrap(),
-        token: encoded[16..32].try_into().unwrap(),
-        attempt: u32::from_be_bytes(encoded[32..36].try_into().unwrap()),
-        lease_until_ms: i64::from_be_bytes(encoded[36..44].try_into().unwrap()),
-        payload: encoded[44..].to_vec(),
-    }
-}
-
 #[tokio::test]
-async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
-    let namespace = NamespaceId::from_bytes([6; 16]);
+async fn typed_queue_namespace_publishes_validates_and_survives_restore() {
+    let registry = queue_registry();
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([3; 16]),
-        namespace,
+        QUEUE_NAMESPACE,
         &0_u32.to_be_bytes(),
     )
     .unwrap();
@@ -286,7 +363,13 @@ async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
     let catalog = CellCatalog::new(layout.clone(), target.tenant());
     let proof = catalog
         .provision(
-            CatalogEntry::new(&target, CatalogRole::Queue, Digest::from_bytes([5; 32]), 1).unwrap(),
+            CatalogEntry::new(
+                &target,
+                CatalogRole::Queue,
+                registry.module_code(QUEUE_MODULE).unwrap(),
+                1,
+            )
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -321,58 +404,54 @@ async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
         )
         .await
         .unwrap();
-    let request = send_request(7, b"job", 20);
-    handle
-        .execute(
-            MutationIdentity {
-                request_id: RequestId::from_bytes([7; 16]),
-                issued_at_ms: 10,
-                expires_at_ms: 10_000,
-            },
-            Digest::from_bytes([8; 32]),
-            20,
-            128,
-            128,
-            move |transaction| {
-                let outcome = queue_send(transaction, namespace, 20, &request)?;
-                match outcome {
-                    QueueSendOutcome::Sent { message_id } => {
-                        Ok(HandlerOutcome::Success(message_id.to_vec()))
-                    }
-                    QueueSendOutcome::ProducerConflict => {
-                        Ok(HandlerOutcome::Rejected(b"producer conflict".to_vec()))
-                    }
-                }
+    let queue = QueueNamespace::<TestQueue>::new(
+        CellClient::local(registry.clone(), handle.clone()),
+        target.tenant(),
+        target.application(),
+    )
+    .unwrap();
+    let available_at_ms = unix_time_ms() + 100;
+    let sent = queue
+        .send(
+            current_identity(7),
+            QueueSendRequest {
+                producer_id: [7; 16],
+                payload: b"job".to_vec(),
+                available_at_ms,
             },
         )
         .await
         .unwrap();
-    let claimed = handle
-        .execute(
-            MutationIdentity {
-                request_id: RequestId::from_bytes([9; 16]),
-                issued_at_ms: 21,
-                expires_at_ms: 10_000,
+    assert!(matches!(sent.output, QueueSendOutcome::Sent { .. }));
+    let conflict = queue
+        .send(
+            current_identity(8),
+            QueueSendRequest {
+                producer_id: [7; 16],
+                payload: b"different".to_vec(),
+                available_at_ms,
             },
-            Digest::from_bytes([10; 32]),
-            21,
-            64,
-            512,
-            |transaction| {
-                let mut tokens = Tokens(10);
-                let claim = queue_claim(transaction, 21, 1, 5_000, &mut tokens)?
-                    .into_iter()
-                    .next()
-                    .ok_or(crab_cell_runtime::Error::Command("missing queued task"))?;
-                Ok(HandlerOutcome::Success(encode_claim(&claim)))
+        )
+        .await;
+    assert!(matches!(
+        conflict,
+        Err(InvocationError::Rejected(outcome))
+            if outcome.output == QueueSendOutcome::ProducerConflict
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let claimed = queue
+        .claim(
+            current_identity(9),
+            0,
+            QueueClaimRequest {
+                limit: 1,
+                lease_ms: 10_000,
             },
         )
         .await
         .unwrap();
-    let claimed = match claimed {
-        StoredOutcome::Success { result, .. } => decode_claim(&result),
-        StoredOutcome::Rejected { .. } => panic!("queue claim was rejected"),
-    };
+    assert_eq!(claimed.output.len(), 1);
+    assert_eq!(claimed.output[0].payload, b"job");
     assert_eq!(
         authority
             .load(cell)
@@ -381,23 +460,14 @@ async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
             .unwrap()
             .value()
             .next_due_ms,
-        Some(5_021)
+        Some(claimed.output[0].lease_until_ms)
     );
     assert!(
-        handle
-            .query(64, 64, {
-                let claimed = claimed.clone();
-                move |connection| {
-                    Ok(vec![u8::from(queue_validate_claim(
-                        connection,
-                        22,
-                        &[claimed],
-                    )?)])
-                }
-            })
+        queue
+            .validate_claim(0, claimed.output.clone(), Some(claimed.receipt))
             .await
-            .unwrap()[0]
-            != 0
+            .unwrap()
+            .output
     );
     handle.drain().await.unwrap();
 
@@ -423,18 +493,34 @@ async fn claimed_task_is_emitted_only_after_publication_and_survives_restore() {
         )
         .await
         .unwrap();
+    let restored_queue = QueueNamespace::<TestQueue>::new(
+        CellClient::local(registry, restored.clone()),
+        target.tenant(),
+        target.application(),
+    )
+    .unwrap();
     assert!(
-        restored
-            .query(64, 64, move |connection| {
-                Ok(vec![u8::from(queue_validate_claim(
-                    connection,
-                    23,
-                    &[claimed],
-                )?)])
-            })
+        restored_queue
+            .validate_claim(0, claimed.output.clone(), Some(claimed.receipt))
             .await
-            .unwrap()[0]
-            != 0
+            .unwrap()
+            .output
+    );
+    let acked = restored_queue
+        .ack(
+            current_identity(10),
+            0,
+            claimed.output[0].message_id,
+            claimed.output[0].token,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        acked.output,
+        QueueLeaseOutcome::Applied {
+            state: QueueState::Acked,
+            lease_until_ms: None,
+        }
     );
     restored.drain().await.unwrap();
 }

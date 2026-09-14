@@ -48,7 +48,11 @@ receipted point/list reads using owner-sampled logical time. Queue now implement
 producer dedup, bounded claims,
 unpredictable lease tokens, published-token validation, ack/retry/extend, expired
 lease reclamation, attempt limits and terminal cleanup. Dead-letter delivery
-still depends on the remaining effect subsystem. The application SQL boundary
+still depends on the remaining effect subsystem. Its typed `QueueNamespace`
+derives send shards from producer IDs, requires consumers to select one fixed
+shard, publishes claims before returning payloads, revalidates exact leases at a
+minimum receipt and exposes token-bound ack/retry/extend commands. Shard counts
+come only from the compiled registry. The application SQL boundary
 now executes typed, bounded batches, classifies statements through SQLite,
 materializes bounded results and installs a scoped native authorizer that denies
 runtime/primitive access and connection, schema or transaction control. Its
@@ -90,8 +94,8 @@ validates namespace/module code/schema and incarnation before admission, maps
 typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
 publication path. Private peer routing, server composition and release inspection
-remain; KV and SQL primitive handles are complete for local routing, while Queue
-and Workflow adapters remain.
+remain; KV, SQL and Queue primitive handles are complete for local routing,
+while the Workflow adapter remains.
 
 ## Deliverable and contract precedence
 

@@ -56,9 +56,11 @@ pub use kv::{
 };
 pub use publication::CellPublisher;
 pub use queue::{
-    QueueLeaseAction, QueueLeaseOutcome, QueueMessage, QueueSendOutcome, QueueSendRequest,
-    QueueState, QueueTokenSource, SystemQueueTokens, install_queue_schema, queue_apply_lease,
-    queue_claim, queue_cleanup_expired, queue_send, queue_validate_claim,
+    QueueClaimCommand, QueueClaimRequest, QueueLeaseAction, QueueLeaseCommand, QueueLeaseOutcome,
+    QueueLeaseRequest, QueueMessage, QueueModule, QueueNamespace, QueueSendCommand,
+    QueueSendOutcome, QueueSendRequest, QueueState, QueueTokenSource, QueueValidateClaimQuery,
+    QueueValidateRequest, SystemQueueTokens, install_queue_schema, queue_apply_lease, queue_claim,
+    queue_cleanup_expired, queue_send, queue_validate_claim, register_queue,
 };
 pub use registry::{
     BuildDescriptor, CellModule, Command, CommandContext, CommandInvocation, CommandResult,

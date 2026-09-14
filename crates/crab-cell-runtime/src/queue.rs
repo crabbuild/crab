@@ -3,6 +3,14 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::{Error, NamespaceId, Result};
 
+mod api;
+
+pub use api::{
+    QueueClaimCommand, QueueClaimRequest, QueueLeaseCommand, QueueLeaseRequest, QueueModule,
+    QueueNamespace, QueueSendCommand, QueueValidateClaimQuery, QueueValidateRequest,
+    register_queue,
+};
+
 const QUEUE_SCHEMA: &str = include_str!("migrations/queue.sql");
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_CLAIM_BYTES: usize = 512 * 1024;

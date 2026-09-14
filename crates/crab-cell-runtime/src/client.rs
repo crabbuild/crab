@@ -240,13 +240,16 @@ impl CellClient {
         namespace: crate::NamespaceId,
         module: &'static str,
         role: CatalogRole,
-    ) -> Result<()> {
-        if self.registry.namespace_contract(namespace) != Some((module, role)) {
+    ) -> Result<u32> {
+        let Some((owner, descriptor)) = self.registry.namespace_contract(namespace) else {
+            return Err(Error::Registry("namespace is not registered"));
+        };
+        if owner != module || descriptor.role != role {
             return Err(Error::Registry(
                 "namespace module or role does not match primitive",
             ));
         }
-        Ok(())
+        Ok(descriptor.shards)
     }
 
     /// Executes one typed command with a digest derived from validated values.

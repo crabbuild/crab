@@ -146,10 +146,8 @@ impl<M: KvModule> KvNamespace<M> {
         tenant: TenantId,
         application: ApplicationId,
         namespace: NamespaceId,
-        shards: u32,
     ) -> crate::Result<Self> {
-        client.require_namespace(namespace, M::MODULE, CatalogRole::Kv)?;
-        shard_for_scope(namespace, &[], shards)?;
+        let shards = client.require_namespace(namespace, M::MODULE, CatalogRole::Kv)?;
         Ok(Self {
             client,
             tenant,

@@ -75,7 +75,7 @@ pub struct SqlCell<M> {
 impl<M: SqlModule> SqlCell<M> {
     /// Creates a SQL capability after validating its compiled namespace role.
     pub fn new(client: CellClient, target: CellTarget) -> crate::Result<Self> {
-        client.require_namespace(target.namespace(), M::MODULE, CatalogRole::Sql)?;
+        let _ = client.require_namespace(target.namespace(), M::MODULE, CatalogRole::Sql)?;
         Ok(Self {
             client,
             target,
