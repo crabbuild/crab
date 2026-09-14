@@ -147,6 +147,14 @@ Generate private message types from peer.proto inside crab-cell-runtime; no
 protocol facade crate or public gRPC service. Implement canonical digest codec,
 bounded decoding and outcome-aware retry/Resolve once in CellClient.
 
+Make `crab-http-server/src/cells.rs` the only composition root. Its static module
+descriptors and bindings must produce one canonical registry or fail startup.
+Add the read-only `cells release inspect --json` command and run it in the image
+pipeline so release evidence is derived from the built binary, not a parallel
+manifest. `crab-cell-runtime` must not depend on server/auth/Git crates, and no
+application registration, module upload or handler replacement is accepted after
+`RegistryBuilder::finish`.
+
 In crab-http-server, construct the runtime from the existing resolved Store and
 register repository commands in cells.rs. Add private peer forwarding to the
 management router and preserve product HTTP authorization in app.rs. Wire one
@@ -161,6 +169,13 @@ Add tests:
   `expired_identity_cannot_reexecute_after_dedup_gc`.
 - `unknown_outcome_keeps_request_identity`: cancellation/transport loss returns
   a resolvable identity, never an automatic new submission.
+- `compiled_registry_rejects_descriptor_binding_drift`: missing, extra or
+  duplicate function bindings fail before listener readiness.
+- `release_inspect_matches_running_registry`: the built binary's inspection
+  bytes and startup release digest are byte-identical.
+- `repository_route_uses_the_single_static_registry`: a real HTTP command reaches
+  the registered native handler; no route can supply code, a handler name or a
+  caller-selected command ID.
 - `peer_auth_rechecks_repository_membership`, `forward_hop_limit_preserves_auth`,
   `public_router_has_no_primitive_or_peer_endpoint` and
   `unregistered_owner_endpoint_receives_no_credentials`.
@@ -174,6 +189,9 @@ Add tests:
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.
 Pin independent command/input/output fixtures for every registered codec version.
+Use `cargo tree -p crab-http-server` plus source-policy checks to reject dynamic
+loader, V8, Wasm and guest-runtime dependencies unless this architecture is
+replaced through a separately approved design.
 
 Exit: the browser creates a comment through node A while node B owns its Cell;
 kill B and remove its local state, then fetch the same comment through A from

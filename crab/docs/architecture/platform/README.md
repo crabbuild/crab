@@ -1,6 +1,6 @@
 # Embedded Rust Cell runtime: low-level implementation specification
 
-Status: design to implement. Revision: 2026-09-14. Existing-code baseline:
+Status: implementation in progress. Revision: 2026-09-14. Existing-code baseline:
 `ec20643073a`. SQL and peer contracts are implementation inputs. The initial
 identity/control/schema foundation and native-cut immutable root preparation now
 exist in `crab-cell-runtime` and `crab-ltx`; exact roots support lazy,
@@ -36,6 +36,43 @@ that design retains repository-specific data, Git and cutover requirements.
 The directory name `platform/` is retained for documentation links, not a
 standalone product or server.
 
+## Accepted product decision: Rust code embedded in Crab
+
+V1 is a Crab subsystem, not a general application-hosting product. The only
+application extension boundary is reviewed Rust source compiled with
+`crab-http-server`. A release is the ordinary Crab OCI image plus its canonical
+compiled-registry descriptor; operators do not upload functions, modules or
+language bundles at runtime.
+
+This fixes the dependency and request path:
+
+```mermaid
+flowchart LR
+    Browser[React client or Git client] --> Public[Crab public HTTP routes]
+    Public --> Product[crab-http-server auth and repository policy]
+    Product --> Registry[Statically linked Rust command registry]
+    Registry --> Runtime[crab-cell-runtime]
+    Runtime --> Ltx[crab-ltx managed SQLite and immutable roots]
+    Ltx --> Storage[crab-storage object-store origin]
+    Product -. owner is another node .-> Peer[Private authenticated peer route]
+    Peer --> Remote[Another crab-http-server process]
+    Remote --> Registry
+```
+
+The arrows are also the allowed policy direction. `crab-cell-runtime` defines
+generic Cell mechanics and typed handler contracts but cannot import HTTP,
+repository, auth or Git policy. `crab-http-server` owns the compiled module list,
+maps product HTTP requests to typed commands, and adapts durable outcomes back
+to existing product responses. `crab-ltx` and `crab-storage` remain unaware of
+commands, users and repositories.
+
+The browser is not a runtime language client: it continues to call Crab's
+repository HTTP API. Native modules are not third-party untrusted code; adding
+one is a Crab source change subject to the same review, tests, image signing and
+fleet rollout as any other server change. Therefore V1 needs no guest sandbox,
+FFI ABI, dynamic loader, per-language codec, workload-token issuer, public
+primitive endpoint or separate platform control plane.
+
 | Specification | Implementation input |
 | --- | --- |
 | [Runtime](runtime.md) | Ownership types, command loop, CAS predicates, executor lifecycle and failure actions |
@@ -70,6 +107,11 @@ listener, dynamic code loading, or service-bundle deployment system. The existin
 React browser application remains a client of Crab's product HTTP API.
 Cross-Cell transactions, online GC and peer-disk durability acknowledgements
 are also outside v1. Native code is trusted, not a tenant sandbox.
+
+This is a hard architecture boundary, not deferred optional work. Supporting
+untrusted or independently deployed application code later would require a new
+threat model, resource isolation contract and public protocol design; it must not
+be introduced as an adapter around the V1 transaction API.
 
 ## Source ownership and target files
 

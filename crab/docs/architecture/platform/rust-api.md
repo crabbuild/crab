@@ -4,6 +4,67 @@
 ordinary Rust modules to Crab and rebuild its image; there is no language host,
 runtime plugin loader or public primitive SDK.
 
+## Compile-time application composition
+
+`crab-http-server` is the sole composition root. The target source layout is:
+
+```text
+crates/crab-http-server/src/cells.rs
+crates/crab-http-server/src/cells/repository.rs
+crates/crab-http-server/src/cells/commands.rs
+crates/crab-http-server/src/cells/queries.rs
+crates/crab-http-server/src/cells/activities.rs
+crates/crab-http-server/src/cells/migrations/*.sql
+```
+
+`cells.rs` constructs exactly one immutable registry before either listener
+becomes ready. A module contributes stable descriptors and function pointers;
+it cannot register after startup. The concrete target interface is:
+
+```rust,ignore
+pub trait CellModule: Send + Sync + 'static {
+    const NAME: &'static str;
+
+    fn descriptor(&self) -> &'static ModuleDescriptor;
+    fn register(self, registry: &mut RegistryBuilder) -> Result<(), RegistryError>;
+}
+
+pub(crate) fn repository_registry() -> Result<Registry, RegistryError> {
+    let mut registry = Registry::builder();
+    registry.register(RepositoryModule)?;
+    registry.register(QueueModule)?;
+    registry.register(WorkflowModule)?;
+    registry.finish()
+}
+```
+
+`ModuleDescriptor` contains the module's stable namespace IDs, migration bytes
+and digests, command/query IDs and codec versions, workflow definition digests,
+and activity types. `register` binds each descriptor entry to one compiled Rust
+function. `finish` sorts and validates descriptors, rejects missing or extra
+bindings and duplicate IDs, and produces the canonical release bytes. It must
+fail readiness if the runtime registry and release descriptor differ.
+
+The trait is a source-level interface, not a stable ABI. Modules use normal
+Cargo dependencies and are monomorphized or privately type-erased inside the
+registry. No `libloading`, dynamic library, Wasmtime, V8, subprocess protocol or
+network registration path is permitted. This lets command inputs and outputs
+remain strongly typed inside Crab while the private peer codec carries only
+bounded registered bytes between identical compatible binaries.
+
+The crate dependency direction is fixed:
+
+```text
+crab-storage <- crab-ltx <- crab-cell-runtime <- crab-http-server
+                                            ^
+                                            |
+                         compiled repository modules
+```
+
+Repository handlers may call narrow public contracts from existing Git crates,
+but those calls occur in asynchronous activities after a durable SQL intention;
+they do not add server or Git dependencies to `crab-cell-runtime`.
+
 ## Typed commands, not remotely shipped closures
 
 The service boundary accepts serializable commands and queries. Local and remote
@@ -117,7 +178,7 @@ impl Command for AddComment {
         let id = input.comment_id;
         let now = ctx.now_ms();
         ctx.sql().execute(
-            "INSERT INTO comments(id, issue_id, author_id, body, created_at_ms) +VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO comments(id, issue_id, author_id, body, created_at_ms) VALUES (?, ?, ?, ?, ?)",
             params![id, input.issue_id, input.author_id, input.body, now],
         )?;
         Ok(id)
@@ -213,6 +274,22 @@ Rust cannot prevent hidden clocks, randomness or network calls in trusted code.
 | [app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Replace collaboration JSON persistence with typed SQL handlers after hard cutover |
 | [config.rs](../../../../crates/crab-http-server/src/config.rs) | Extend existing config for local Cell data and private peers; do not add a second provider/auth stack |
 | [main.rs](../../../../crates/crab-http-server/src/main.rs) | Keep current serve lifecycle; add release/migration administrative subcommands in the same executable |
+
+The server startup order is normative:
+
+1. Resolve existing Crab configuration, credentials and object-store `Store`.
+2. Build and validate the static registry; derive its canonical release digest.
+3. Verify root identity, catalog and active release compatibility.
+4. Start bounded SQL/page-I/O/activity workers and the Cell supervisor.
+5. Register the private peer route on the management router.
+6. Construct product routes with a cloneable `CellClient` capability.
+7. Become ready only after the management listener and public listener can use
+   the same validated registry/runtime generation.
+
+Shutdown reverses ownership: remove readiness, reject new work/acquisition,
+drain accepted commands and activities, release Cell controls, close managed
+SQLite handles, join workers, then stop listeners. `Server` owns the runtime
+join handle; a detached global runtime or handler-created runtime is invalid.
 
 Resolve repository UUID from the durable catalog; renaming owner/name must not
 change its Cell ID. Keep issues/comments/pulls and their related application

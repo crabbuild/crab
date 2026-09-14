@@ -117,6 +117,34 @@ asset build remains required. Pin the deployed OCI image by digest. There is
 no crab-platform build command, application manifest interpreter, module fetch,
 user container scheduler or executable artifact upload endpoint.
 
+The registry is expressed as static Rust descriptors and function bindings.
+`RegistryBuilder::finish` deterministically emits canonical descriptor bytes at
+startup and in the administrative `cells release inspect` command. The image
+pipeline runs that command against the just-built binary and stores the exact
+bytes as release evidence; startup recomputes them from the same compiled
+registry. Do not introduce a second handwritten application manifest that can
+drift from executable handlers.
+
+The deployable unit is always the complete `crab-http-server` image:
+
+```text
+source modules + migrations + Cargo.lock + React assets
+                         |
+                         v
+              crab-http-server image
+                         |
+             cells release inspect/prepare
+                         |
+                         v
+          ordinary Kubernetes/VM fleet rollout
+```
+
+A repository owner cannot select a different executable module set from another
+repository on the same process. Compatibility dispatch may retain older compiled
+codec/schema/definition versions during a rolling release, but every retained
+implementation is still part of the same signed image. Removing an old binding
+requires the inventory and maintenance rules below.
+
 The build produces a bounded canonical release descriptor embedded in the binary.
 The same bytes may be copied to the object store as metadata. Fields:
 
@@ -157,14 +185,16 @@ capability labels; APIs carry resolved IDs.
 Implement administrative subcommands in the existing executable:
 
 ```text
+crab-http-server --config CONFIG cells release inspect --json
 crab-http-server --config CONFIG cells release prepare --expected-revision N --image DIGEST
 crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible
 crab-http-server --config CONFIG cells release status
 ```
 
-These are target commands, not currently runnable. Prepare reads only the
-descriptor compiled into this binary. Administrative storage credentials provide
-authority; there is no public deployment API.
+These are target commands, not currently runnable. Inspect is read-only and
+prints the canonical descriptor/digest compiled into this binary. Prepare reads
+only that descriptor. Administrative storage credentials provide authority;
+there is no public deployment API.
 
 release.json <=8 KiB: version=1, application, revision as u64 decimal string,
 current/desired descriptor digest or null, desired_image, operation ID hex16,
