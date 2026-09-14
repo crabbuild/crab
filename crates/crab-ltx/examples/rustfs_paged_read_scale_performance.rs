@@ -1,10 +1,11 @@
 mod support;
 
-use crab_ltx::{CrabError, Limits, ManagedDb, Replica};
+use crab_ltx::{CrabError, ManagedDb, Replica};
 use crab_storage::StoreLayout;
 use std::time::Instant;
 use support::{
-    RECORD_COUNT, expected_object_size_sum, publish_records, records_per_second, rustfs_target,
+    expected_object_size_sum, publish_records, records_per_second, rustfs_target, selected_profile,
+    workload_directory,
 };
 
 struct QueryReport {
@@ -16,14 +17,19 @@ struct QueryReport {
 
 #[tokio::main]
 async fn main() -> crab_ltx::Result<()> {
-    let source_directory = tempfile::tempdir()?;
-    let limits = Limits::default();
+    let profile = selected_profile()?;
+    let source_directory = workload_directory(profile, "source")?;
+    let limits = profile.limits;
     let writer = ManagedDb::open(&source_directory.path().join("repository.sqlite"), limits)?;
-    let target = rustfs_target("million-record-paged-read")?;
+    let target = rustfs_target(&format!("{}-paged-read", profile.label))?;
+    println!(
+        "Scale profile: {} records in batches of {}",
+        profile.records, profile.batch_size
+    );
     println!("RustFS object prefix: {}", target.repository_prefix);
     let layout = StoreLayout::new(target.store, target.repository_prefix);
     let replica = Replica::new(layout, "epoch-1", limits)?;
-    let report = publish_records(writer, &replica).await?;
+    let report = publish_records(writer, &replica, profile).await?;
     let published_position = report.head.position();
     let manifest_segments = report.head.segment_count();
     let load_elapsed = report.elapsed;
@@ -56,7 +62,8 @@ async fn main() -> crab_ltx::Result<()> {
     let page_map_elapsed = page_map_started.elapsed();
     let page_count = paged.page_count();
     let page_size = paged.page_size();
-    let expected_sum = expected_object_size_sum();
+    let expected_sum = expected_object_size_sum(profile.records);
+    let records = profile.records;
     let queries = tokio::task::spawn_blocking(move || -> crab_ltx::Result<QueryReport> {
         let sqlite_started = Instant::now();
         let connection = paged.open_sqlite()?;
@@ -65,11 +72,11 @@ async fn main() -> crab_ltx::Result<()> {
         let point_started = Instant::now();
         let point_path: String = connection.connection().query_row(
             "SELECT path FROM repository_entries WHERE id = ?1",
-            [RECORD_COUNT],
+            [records],
             |row| row.get(0),
         )?;
         let point_lookup_micros = point_started.elapsed().as_micros();
-        if point_path != format!("objects/{RECORD_COUNT:010}") {
+        if point_path != format!("objects/{records:010}") {
             return Err(CrabError::InvalidState(
                 "million-record point lookup returned wrong row",
             ));
@@ -82,7 +89,7 @@ async fn main() -> crab_ltx::Result<()> {
             |row| row.get(0),
         )?;
         let range_query_micros = range_started.elapsed().as_micros();
-        if range_count != RECORD_COUNT / 1_000 {
+        if range_count != records / 1_000 {
             return Err(CrabError::InvalidState(
                 "million-record range query returned wrong count",
             ));
@@ -95,7 +102,7 @@ async fn main() -> crab_ltx::Result<()> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let full_scan_micros = scan_started.elapsed().as_micros();
-        if record_count != RECORD_COUNT || object_size_sum != expected_sum {
+        if record_count != records || object_size_sum != expected_sum {
             return Err(CrabError::InvalidState(
                 "million-record full scan returned wrong aggregate",
             ));
@@ -113,8 +120,9 @@ async fn main() -> crab_ltx::Result<()> {
     .await
     .map_err(|_| CrabError::InvalidState("performance reader stopped"))??;
 
-    println!("\nMillion-record paged-read performance complete");
-    println!("records:              {RECORD_COUNT}");
+    println!("\nRustFS paged-read scale performance complete");
+    println!("profile:              {}", profile.label);
+    println!("records:              {}", profile.records);
     println!("remote SQLite pages:  {page_count} x {page_size} bytes");
     println!("captured segments:    {captured_segments}");
     println!("manifest segments:    {manifest_segments}");
@@ -124,7 +132,7 @@ async fn main() -> crab_ltx::Result<()> {
     println!("load preparation:     {load_elapsed:.3?}");
     println!(
         "load throughput:      {:.0} records/s",
-        records_per_second(RECORD_COUNT, load_elapsed)
+        records_per_second(profile.records, load_elapsed)
     );
     println!("head read:            {head_elapsed:.3?}");
     println!("page-map construction: {page_map_elapsed:.3?}");

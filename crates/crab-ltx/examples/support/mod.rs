@@ -1,11 +1,18 @@
-use crab_ltx::{CrabError, ManagedDb, Replica, ReplicaHead};
+use crab_ltx::{CrabError, Limits, ManagedDb, Replica, ReplicaHead};
 use crab_storage::{ObjectStoreCredentials, Store};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const RECORD_COUNT: i64 = 1_000_000;
-pub const BATCH_SIZE: i64 = 10_000;
 const REPOSITORY_COUNT: i64 = 1_000;
-const PROGRESS_INTERVAL: i64 = 100_000;
+const MIB: u64 = 1 << 20;
+const GIB: u64 = 1 << 30;
+
+#[derive(Clone, Copy)]
+pub struct ScaleProfile {
+    pub label: &'static str,
+    pub records: i64,
+    pub batch_size: i64,
+    pub limits: Limits,
+}
 
 pub struct LoadReport {
     pub writer: ManagedDb,
@@ -20,6 +27,43 @@ pub struct LoadReport {
 pub struct RustfsTarget {
     pub store: Store,
     pub repository_prefix: String,
+}
+
+pub fn selected_profile() -> crab_ltx::Result<ScaleProfile> {
+    let mut arguments = std::env::args().skip(1);
+    let selected = arguments.next();
+    if arguments.next().is_some() {
+        return Err(CrabError::InvalidState(
+            "expected one scale profile: 1m, 10m, or 100m",
+        ));
+    }
+    match selected.as_deref().unwrap_or("1m") {
+        "1m" => Ok(profile("1m", 1_000_000, 10_000, 256 * MIB, 2 * GIB)),
+        "10m" => Ok(profile("10m", 10_000_000, 100_000, 2 * GIB, 4 * GIB)),
+        "100m" => Ok(profile("100m", 100_000_000, 1_000_000, 16 * GIB, 32 * GIB)),
+        _ => Err(CrabError::InvalidState(
+            "unknown scale profile; use 1m, 10m, or 100m",
+        )),
+    }
+}
+
+pub fn workload_directory(
+    profile: ScaleProfile,
+    purpose: &str,
+) -> crab_ltx::Result<tempfile::TempDir> {
+    let root = match std::env::var("CRAB_LTX_WORKLOAD_ROOT") {
+        Ok(root) => root,
+        Err(_) if profile.records == 1_000_000 => return Ok(tempfile::tempdir()?),
+        Err(_) => {
+            return Err(CrabError::InvalidState(
+                "10m and 100m profiles require CRAB_LTX_WORKLOAD_ROOT",
+            ));
+        }
+    };
+    std::fs::create_dir_all(&root)?;
+    Ok(tempfile::Builder::new()
+        .prefix(&format!("crab-ltx-{}-{purpose}-", profile.label))
+        .tempdir_in(root)?)
 }
 
 pub fn rustfs_target(workload: &str) -> crab_ltx::Result<RustfsTarget> {
@@ -60,6 +104,7 @@ pub fn rustfs_target(workload: &str) -> crab_ltx::Result<RustfsTarget> {
 pub async fn publish_records(
     mut writer: ManagedDb,
     replica: &Replica,
+    profile: ScaleProfile,
 ) -> crab_ltx::Result<LoadReport> {
     let started = Instant::now();
     let mut sqlite_elapsed = Duration::ZERO;
@@ -69,8 +114,8 @@ pub async fn publish_records(
     let mut head = None;
     let mut first = 1;
 
-    while first <= RECORD_COUNT {
-        let last = (first + BATCH_SIZE - 1).min(RECORD_COUNT);
+    while first <= profile.records {
+        let last = (first + profile.batch_size - 1).min(profile.records);
         let (next_writer, batch, local_elapsed) =
             tokio::task::spawn_blocking(move || -> crab_ltx::Result<_> {
                 let local_started = Instant::now();
@@ -99,9 +144,10 @@ pub async fn publish_records(
         pruned_segments += removed;
         head = Some(next_head);
 
-        if last % PROGRESS_INTERVAL == 0 || last == RECORD_COUNT {
+        if last % (profile.records / 10) == 0 || last == profile.records {
             println!(
-                "published {last:>9} / {RECORD_COUNT} records ({:.0} records/s)",
+                "published {last:>9} / {} records ({:.0} records/s)",
+                profile.records,
                 records_per_second(last, started.elapsed())
             );
         }
@@ -126,8 +172,30 @@ pub fn records_per_second(records: i64, elapsed: Duration) -> f64 {
     records as f64 / elapsed.as_secs_f64()
 }
 
-pub fn expected_object_size_sum() -> i64 {
-    (1..=RECORD_COUNT).map(|id| 4096 + id % 256).sum()
+pub fn expected_object_size_sum(records: i64) -> i64 {
+    let cycles = records / 256;
+    let remainder = records % 256;
+    records * 4096 + cycles * 32_640 + remainder * (remainder + 1) / 2
+}
+
+fn profile(
+    label: &'static str,
+    records: i64,
+    batch_size: i64,
+    max_database_bytes: u64,
+    max_plan_bytes: u64,
+) -> ScaleProfile {
+    ScaleProfile {
+        label,
+        records,
+        batch_size,
+        limits: Limits {
+            max_database_bytes,
+            max_file_bytes: 512 * MIB,
+            max_plan_bytes,
+            max_segments: 512,
+        },
+    }
 }
 
 fn insert_batch(writer: &mut ManagedDb, first: i64, last: i64) -> crab_ltx::Result<()> {

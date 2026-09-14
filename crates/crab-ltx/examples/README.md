@@ -13,8 +13,8 @@ the same `crab_storage::Store` used by production callers.
 | `sparse_writer` | Externally allocated epoch inheritance, writable sparse activation, publication, and exact restore |
 | `compact_history` | Full-chain compaction plus reopening and restoring an immutable historical manifest |
 | `repository_replication_lifecycle` | Complete per-repository lifecycle: write, capture, publish, paged read, epoch handoff, sparse write, compact, historical reopen, and exact restore |
-| `million_record_rustfs_replication_load` | One million batched records, real RustFS LTX publication and pruning, source loss, exact recovery, and throughput reporting |
-| `million_record_rustfs_paged_read_performance` | One million RustFS-published records followed by cold head/page-map opening, paged point/range queries, and a full aggregate scan |
+| `rustfs_replication_scale_load` | The 1M/10M/100M profiles with real RustFS publication, pruning, source loss, remote verification, and throughput reporting |
+| `rustfs_paged_read_scale_performance` | The 1M/10M/100M profiles followed by cold RustFS head/page-map opening, paged point/range queries, and a full aggregate scan |
 
 From the repository root:
 
@@ -48,6 +48,7 @@ export CRAB_LTX_TEST_BUCKET=crab-ltx-examples
 export CRAB_LTX_TEST_ENDPOINT=http://127.0.0.1:9000
 export AWS_ACCESS_KEY_ID="<RustFS access key>"
 export AWS_SECRET_ACCESS_KEY="<RustFS secret key>"
+export CRAB_LTX_WORKLOAD_ROOT="$HOME/Workspace/crab-ltx-workloads"
 ```
 
 Then run the workloads with optimizations enabled:
@@ -55,17 +56,41 @@ Then run the workloads with optimizations enabled:
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
   cargo run --release -p crab-ltx --features replica \
-  --example million_record_rustfs_replication_load --locked
+  --example rustfs_replication_scale_load --locked -- 1m
 
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
   cargo run --release -p crab-ltx --features replica \
-  --example million_record_rustfs_paged_read_performance --locked
+  --example rustfs_paged_read_scale_performance --locked -- 10m
 ```
 
-Both workloads always create and verify exactly 1,000,000 records. The load
-workload uses 100 transactions of 10,000 records, publishes each captured cut,
-and prunes local LTX files only after publication. The read workload deletes the
-source database before reopening the remote head and running SQLite queries.
+Both workloads accept exactly one scale profile: `1m` (the default), `10m`, or
+`100m`. Every profile uses about 100 transactions by increasing the batch size
+from 10,000 to 100,000 and then 1,000,000 records. This bounds head growth while
+each captured cut is published and its local file is pruned only after the CAS
+receipt. The read workload deletes the source database before reopening the
+remote head and running SQLite queries.
+
+| Profile | Database limit | Plan limit | Verification |
+| --- | ---: | ---: | --- |
+| `1m` | 256 MiB | 2 GiB | Exact restore and aggregate query |
+| `10m` | 2 GiB | 4 GiB | Exact restore and aggregate query |
+| `100m` | 16 GiB | 32 GiB | Paged aggregate after source deletion |
+
+The `10m` and `100m` profiles require `CRAB_LTX_WORKLOAD_ROOT`; put it on a
+dedicated volume with enough space for source and recovery files. The `100m`
+load deliberately uses paged verification instead of full restore because the
+current recovery path retains database-sized buffers. It is an opt-in soak
+workload, not evidence that 100M full recovery has bounded memory.
+
+An isolated loopback RustFS qualification completed both `10m` workloads with
+an 838,262,784-byte database, 204,654 pages and 200 published segments. The load
+path sustained 42,339 records/second and completed exact restore plus aggregate
+verification in 36.4 seconds. A separate cold paged run opened the head in 18
+milliseconds, constructed its page map in 264 milliseconds, completed a point
+lookup in 9.2 milliseconds, counted an indexed repository range in 209
+milliseconds and scanned the 10M-row aggregate in 78.0 seconds. These are
+single-host qualification observations, not portable performance promises.
+The `100m` profile has not been executed or qualified.
 
 These are reproducible executable workloads, not statistically rigorous
 benchmarks. They use `crab-storage`'s real S3-compatible client, including

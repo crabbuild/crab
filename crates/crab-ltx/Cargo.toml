@@ -51,9 +51,9 @@ name = "repository_replication_lifecycle"
 required-features = ["replica"]
 
 [[example]]
-name = "million_record_rustfs_replication_load"
+name = "rustfs_replication_scale_load"
 required-features = ["replica"]
 
 [[example]]
-name = "million_record_rustfs_paged_read_performance"
+name = "rustfs_paged_read_scale_performance"
 required-features = ["replica"]
