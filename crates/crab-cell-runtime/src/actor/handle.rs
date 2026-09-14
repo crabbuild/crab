@@ -6,7 +6,9 @@ use std::sync::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, oneshot};
 
 use super::{Message, QueuedCommand, QueuedQuery, QueuedResolve, RuntimeInner};
-use crate::{CatalogProof, CellId, Digest, Error, MutationIdentity, Resolution, StoredOutcome};
+use crate::{
+    CatalogProof, CellId, Digest, Error, IncarnationId, MutationIdentity, Resolution, StoredOutcome,
+};
 
 const MAX_OPERATION_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 1024 * 1024;
@@ -15,6 +17,9 @@ const MAX_RESULT_BYTES: usize = 1024 * 1024;
 #[derive(Clone)]
 pub struct CellHandle {
     pub(super) cell: CellId,
+    pub(super) incarnation: IncarnationId,
+    pub(super) code: Digest,
+    pub(super) schema: u32,
     pub(super) catalog: CatalogProof,
     pub(super) inner: Arc<RuntimeInner>,
     pub(super) admission: Arc<CellAdmission>,
@@ -37,6 +42,26 @@ impl CellHandle {
     #[must_use]
     pub const fn catalog(&self) -> &CatalogProof {
         &self.catalog
+    }
+
+    #[must_use]
+    pub const fn cell_id(&self) -> CellId {
+        self.cell
+    }
+
+    #[must_use]
+    pub const fn incarnation(&self) -> IncarnationId {
+        self.incarnation
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> Digest {
+        self.code
+    }
+
+    #[must_use]
+    pub const fn schema(&self) -> u32 {
+        self.schema
     }
 
     /// Runs and publishes one command while retaining admission after cancellation.
@@ -73,7 +98,11 @@ impl CellHandle {
             })))
             .await
             .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
+        response.await.map_err(|_| Error::OutcomeUnknown {
+            request_id: identity.request_id,
+            operation_digest,
+            source: Box::new(Error::RuntimeClosed),
+        })?
     }
 
     /// Runs one FIFO-ordered bounded read after all preceding writes publish.
@@ -137,7 +166,10 @@ impl CellHandle {
             })))
             .await
             .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
+        match response.await {
+            Ok(result) => result,
+            Err(_) => Ok(Resolution::Unknown),
+        }
     }
 
     /// Stops admission, publishes accepted commands, then closes the SQLite handle.

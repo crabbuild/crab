@@ -60,8 +60,10 @@ they reject incomplete/trailing input, non-finite floats and declared-limit
 overflow; encoding normalizes negative zero while decoding rejects its
 non-canonical bit pattern. Generic `Command`/`Query` registration uses
 monomorphized decode/execute/encode trampolines, with no raw byte-handler
-registration escape hatch. `CellClient` routing, operation-digest integration,
-typed primitive adapters and the server composition root remain to implement.
+registration escape hatch. The implemented local `CellClient` covers canonical
+operation-digest integration and the actor path. Authenticated peer forwarding,
+bounded stale-owner retry, typed primitive adapters and the server composition
+root remain to implement.
 
 The trait is a source-level interface, not a stable ABI. Modules use normal
 Cargo dependencies and are monomorphized or privately type-erased inside the
@@ -167,10 +169,10 @@ pub async fn resolve(
 ```
 
 This is an internal construction API, not the final application surface. The
-registry must derive the digest and byte declarations from a registered codec,
-hide the raw transaction behind `CommandContext`, and map `OutcomeUnknown` to
-`PendingMutation`. HTTP code must not accept caller-selected digests, byte limits
-or closures. The lower-level query shares mutation admission and FIFO ordering;
+implemented `CellClient` derives the digest and byte declarations from a
+registered codec, hides the raw transaction behind `CommandContext`, and maps
+`OutcomeUnknown` to `PendingMutation`. HTTP code cannot select module names,
+digests, byte limits or closures. The lower-level query shares mutation admission and FIFO ordering;
 its SQLite connection is set to `query_only` for the callback and its output is
 bounded before admission and again on the SQL worker. Resolve uses that same FIFO
 but returns a typed committed, absent, unknown or expired observation and never
@@ -182,6 +184,7 @@ pub trait WireValue: Sized + Send + 'static {
     fn decode(input: &mut BoundedDecoder<'_>) -> Result<Self, CodecError>;
 }
 pub trait Command: Send + Sync + 'static {
+    const MODULE: &'static str;
     const ID: u32;
     const CODEC_VERSION: u32;
     type Input: WireValue;
@@ -190,6 +193,7 @@ pub trait Command: Send + Sync + 'static {
         -> Result<CommandResult<Self::Output>>;
 }
 pub trait Query: Send + Sync + 'static {
+    const MODULE: &'static str;
     const ID: u32;
     const CODEC_VERSION: u32;
     type Input: WireValue;
@@ -200,27 +204,39 @@ pub trait Query: Send + Sync + 'static {
 impl CellClient {
     pub async fn command<C: Command>(
         &self, target: &CellTarget, identity: MutationIdentity, input: C::Input,
-    ) -> Result<Committed<C::Output>, InvocationError>;
+    ) -> Result<Committed<C::Output>, InvocationError<C::Output>>;
     pub async fn query<Q: Query>(
         &self, target: &CellTarget, minimum: Option<Receipt>, input: Q::Input,
-    ) -> Result<Observed<Q::Output>, InvocationError>;
+    ) -> Result<Observed<Q::Output>, InvocationError<Q::Output>>;
     pub async fn resolve(
         &self, pending: &PendingMutation,
-    ) -> Result<Resolution, InvocationError>;
+    ) -> Result<Resolution, InvocationError<Vec<u8>>>;
 }
 ```
 
 Committed contains output and receipt; InvocationError includes a stored
-business rejection with receipt, a proven not-started failure, or PendingMutation
-with identity/digest for unknown outcome. Never flatten these into a retryable
-string error. SQL/LTX/storage errors preserve their sources internally; HTTP
-mapping redacts SQL text, secrets and input bytes.
+business rejection with receipt, a proven not-started failure, PendingMutation
+with identity/digest for unknown outcome, or an invalid typed payload carrying
+the already-published receipt. The last case is not safe to replay as though the
+mutation never ran. Never flatten these into a retryable string error.
+SQL/LTX/storage errors preserve their sources internally; HTTP mapping redacts
+SQL text, secrets and input bytes.
+
+The local implementation describes the active handle before dispatch and checks
+target Cell, incarnation, registry-owned namespace, canonical module code and
+schema range. It hashes `crab.op.v1`, Cell/incarnation, immutable mutation
+identity, the CellCommand tag, typed command ID/codec version and exact encoded
+input. The transport rechecks the description immediately before actor
+admission. A query reads its receipt from `sys_meta` on the same FIFO SQL worker
+and fails if it cannot satisfy the requested minimum.
 
 CellTarget is created only from an authorized namespace capability and partition,
 not an arbitrary bucket/path. The registry selects handlers by namespace role,
 control.code, command/query ID and codec version. Registration rejects duplicate
 keys, missing migration digests and incompatible schema ranges before readiness.
-Command IDs are unique per module; queries have a separate ID space. Methods are
+Command IDs are unique per module; queries have a separate ID space. The module
+name is an associated constant on the compiled Rust type, not a route parameter.
+Methods are
 not discovered from a Rust type name, TypeId or process address.
 
 WireValue is a small explicit bounded codec, using the canonical scalar/length

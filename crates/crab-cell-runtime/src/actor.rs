@@ -341,6 +341,9 @@ impl CellRuntime {
         observed: VersionedControl,
     ) -> crate::Result<CellHandle> {
         let cell = self.activation_cell(&catalog, &observed)?;
+        let incarnation = observed.value().incarnation;
+        let code = observed.value().code;
+        let schema = observed.value().schema;
         let (reply, response) = oneshot::channel();
         self.inner
             .sender
@@ -355,6 +358,9 @@ impl CellRuntime {
         let admission = response.await.map_err(|_| Error::RuntimeClosed)??;
         Ok(CellHandle {
             cell,
+            incarnation,
+            code,
+            schema,
             catalog,
             inner: self.inner.clone(),
             admission,

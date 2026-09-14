@@ -8,6 +8,7 @@
 mod actor;
 mod authority;
 mod catalog;
+mod client;
 mod codec;
 mod control;
 mod effects;
@@ -27,6 +28,10 @@ mod workflow;
 pub use actor::{CellHandle, CellRuntime};
 pub use authority::{CellAuthority, VersionedControl};
 pub use catalog::{CatalogEntry, CatalogProof, CatalogRole, CellCatalog};
+pub use client::{
+    CellClient, CellDescription, Committed, InvocationError, Observed, PendingMutation, Receipt,
+    command_operation_digest,
+};
 pub use codec::{BoundedDecoder, BoundedEncoder, CodecError, WireValue};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use effects::{

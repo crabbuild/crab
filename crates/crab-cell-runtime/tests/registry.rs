@@ -36,8 +36,8 @@ impl CellModule for FirstModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        registry.bind_command::<Insert>(Self::NAME)?;
-        registry.bind_query::<Read>(Self::NAME)?;
+        registry.bind_command::<Insert>()?;
+        registry.bind_query::<Read>()?;
         Ok(())
     }
 }
@@ -52,8 +52,8 @@ impl CellModule for SecondModule {
     }
 
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
-        registry.bind_command::<Insert>(Self::NAME)?;
-        registry.bind_query::<Read>(Self::NAME)?;
+        registry.bind_command::<SecondInsert>()?;
+        registry.bind_query::<SecondRead>()?;
         Ok(())
     }
 }
@@ -132,6 +132,7 @@ fn build_registry(reverse: bool) -> Registry {
 struct Insert;
 
 impl Command for Insert {
+    const MODULE: &'static str = "first";
     const ID: u32 = 1;
     const CODEC_VERSION: u32 = 1;
     type Input = Vec<u8>;
@@ -157,6 +158,7 @@ impl Command for Insert {
 struct Read;
 
 impl Query for Read {
+    const MODULE: &'static str = "first";
     const ID: u32 = 1;
     const CODEC_VERSION: u32 = 1;
     type Input = ();
@@ -179,9 +181,44 @@ impl Query for Read {
     }
 }
 
+struct SecondInsert;
+
+impl Command for SecondInsert {
+    const MODULE: &'static str = "second";
+    const ID: u32 = Insert::ID;
+    const CODEC_VERSION: u32 = Insert::CODEC_VERSION;
+    type Input = Vec<u8>;
+    type Output = Vec<u8>;
+
+    fn execute(
+        context: &mut CommandContext<'_, '_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<CommandResult<Self::Output>> {
+        Insert::execute(context, input)
+    }
+}
+
+struct SecondRead;
+
+impl Query for SecondRead {
+    const MODULE: &'static str = "second";
+    const ID: u32 = Read::ID;
+    const CODEC_VERSION: u32 = Read::CODEC_VERSION;
+    type Input = ();
+    type Output = Vec<u8>;
+
+    fn execute(
+        context: &mut QueryContext<'_>,
+        input: Self::Input,
+    ) -> crab_cell_runtime::Result<Self::Output> {
+        Read::execute(context, input)
+    }
+}
+
 struct Extra;
 
 impl Command for Extra {
+    const MODULE: &'static str = "first";
     const ID: u32 = 2;
     const CODEC_VERSION: u32 = 1;
     type Input = ();
@@ -286,7 +323,7 @@ fn compiled_registry_rejects_descriptor_binding_drift() {
 
     let mut extra = RegistryBuilder::new(build());
     extra.register(FirstModule).unwrap();
-    extra.bind_command::<Extra>("first").unwrap();
+    extra.bind_command::<Extra>().unwrap();
     assert!(matches!(
         extra.finish(),
         Err(Error::Registry("descriptor and function bindings differ"))

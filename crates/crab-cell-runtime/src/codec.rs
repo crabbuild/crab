@@ -256,3 +256,16 @@ impl WireValue for () {
         Ok(())
     }
 }
+
+pub(crate) fn decode_wire<T: WireValue>(input: &[u8], limit: u32) -> Result<T, CodecError> {
+    let mut decoder = BoundedDecoder::new(input, limit)?;
+    let value = T::decode(&mut decoder)?;
+    decoder.finish()?;
+    Ok(value)
+}
+
+pub(crate) fn encode_wire<T: WireValue>(value: &T, limit: u32) -> Result<Vec<u8>, CodecError> {
+    let mut encoder = BoundedEncoder::new(limit)?;
+    value.encode(&mut encoder)?;
+    Ok(encoder.finish())
+}

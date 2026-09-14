@@ -16,7 +16,7 @@ pub struct MutationIdentity {
 }
 
 impl MutationIdentity {
-    fn validate(self, now_ms: i64) -> Result<()> {
+    pub(crate) fn validate(self, now_ms: i64) -> Result<()> {
         self.validate_bounds(now_ms)?;
         if self.expires_at_ms <= now_ms {
             return Err(Error::Command("invalid mutation identity lifetime"));

@@ -36,8 +36,9 @@ that exits late cannot publish its tentative commit. Sparse page-I/O deadline
 propagation and automatic fenced recovery,
 streaming initial directory construction and directory-backed capture checksums,
 shared directory caching, prepared compaction/bundles,
-Workflow activity/effect supervision, scheduler scanning/Tick, CellClient, HTTP cutover and capacity
-qualification remain incomplete. The scoped KV primitive now installs
+Workflow activity/effect supervision, scheduler scanning/Tick, private peer
+routing, HTTP cutover and capacity qualification remain incomplete. The scoped
+KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
 runtime publication path. Queue now implements producer dedup, bounded claims,
@@ -75,7 +76,12 @@ scoped contexts. The canonical bounded `WireValue` codec and generic typed
 `Command`/`Query` trampolines are implemented: inputs must decode completely
 before handler entry, outputs use the declared limit, and invalid tags,
 truncation, trailing bytes, non-finite/negative-zero floats and oversized values
-fail closed. `CellClient`, server composition and release inspection remain.
+fail closed. The local `CellClient` now derives the canonical operation digest,
+validates namespace/module code/schema and incarnation before admission, maps
+typed success or durable rejection to a receipt, preserves unknown mutation
+identity, and executes minimum-receipt reads through the same FIFO actor and LTX
+publication path. Private peer routing, typed primitive handles, server
+composition and release inspection remain.
 
 ## Deliverable and contract precedence
 

@@ -16,15 +16,16 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, drain, transactional scheduler summaries and bounded authorized SQL/KV/Queue plus Workflow transition/activity mechanics | Add sparse page-I/O deadlines, automatic fenced recovery, typed registry adapters, Workflow activity/effect supervision and scheduler scanning/Tick |
-| [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization and scoped SQLite authorizers | Bind the helper to private compiled command/query contexts and stable codecs |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, drain, transactional scheduler summaries, typed registry/CellClient and bounded authorized SQL/KV/Queue plus Workflow transition/activity mechanics | Add sparse page-I/O deadlines, automatic fenced recovery, primitive adapters, private peer routing, Workflow activity/effect supervision and scheduler scanning/Tick |
+| [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization and scoped SQLite authorizers bound to compiled command/query contexts | Add the SqlCell application adapter |
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup and binary pagination | Bind typed registry codecs and scheduler cleanup |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup | Add DLQ effects, registry codecs and native polling scheduler |
 | [workflow.rs](../../../../crates/crab-cell-runtime/src/workflow.rs) | Normative schema, pinned definitions, deterministic start/signal/timer transitions, cancellation, bounded action persistence, published activity claims, leases, retry/completion and terminal cleanup | Add effects, native activity supervision, registry dispatch and scheduler polling |
 | [effects.rs](../../../../crates/crab-cell-runtime/src/effects.rs) | Stable source effect IDs/digests, bounded claim/lease/retry/delivery, target inbox dedup/savepoint isolation and sender/inbox cleanup horizons | Add Workflow/Queue adapters, compiled codecs, authenticated peer delivery and native supervision |
 | [scheduler.rs](../../../../crates/crab-cell-runtime/src/scheduler.rs) | Derives the earliest durable work/lease/expiry/retention deadline inside bootstrap and every command transaction; publication binds it to the exact pending root | Add catalog shard assignment/scanning and bounded idempotent Tick dispatch |
-| [registry.rs](../../../../crates/crab-cell-runtime/src/registry.rs) | Startup-only static module registration, migration/schema/namespace validation, exact descriptor/function inventory matching, canonical module/release digests, typed Command/Query trampolines and transaction-scoped compiled dispatch | Add CellClient routing and server composition/release inspection |
-| [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs) | Canonical bounded scalar/bytes/text/option encoding, strict full-input decoding and finite normalized floats | Add independent product codec fixtures, operation digest and CellClient/peer integration |
+| [registry.rs](../../../../crates/crab-cell-runtime/src/registry.rs) | Startup-only static module registration, migration/schema/namespace validation, exact descriptor/function inventory matching, canonical module/release digests, typed Command/Query trampolines and transaction-scoped compiled dispatch | Add primitive bindings and server composition/release inspection |
+| [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs) | Canonical bounded scalar/bytes/text/option encoding, strict full-input decoding and finite normalized floats | Add independent fixtures for each product codec and peer integration |
+| [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local command/query/Resolve capability, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts over the FIFO publication actor | Add authenticated peer transport, stale-owner retry and primitive handles |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -247,11 +248,13 @@ Add tests:
   expire its budget, verify no further admission or premature permit release;
   unblock it for test cleanup and prove its tentative writes never publish.
 
-Current registry coverage in `crates/crab-cell-runtime/tests/registry.rs` proves
+Current registry and client coverage in `crates/crab-cell-runtime/tests/registry.rs`
+and `crates/crab-cell-runtime/tests/client.rs` proves
 registration-order-independent release bytes, bounded compiled command/query
-execution, schema rejection, and startup failure for missing or extra function
-bindings. Typed codec fixtures, CellClient forwarding and built-binary release
-inspection remain required.
+execution, schema rejection, startup failure for missing or extra function
+bindings, canonical operation-digest fixtures, published typed execution,
+idempotent replay, durable rejection rollback and minimum receipts. Authenticated
+CellClient forwarding and built-binary release inspection remain required.
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.
 Pin independent command/input/output fixtures for every registered codec version.

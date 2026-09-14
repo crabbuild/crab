@@ -7,8 +7,10 @@ mod descriptor;
 use descriptor::encode_release;
 
 use crate::{
-    BoundedDecoder, BoundedEncoder, CatalogRole, CellId, Digest, Error, HandlerOutcome,
-    NamespaceId, Result, SqlBatch, SqlResultSet, WireValue, sql_batch, sql_query_batch,
+    CatalogRole, CellId, Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch,
+    SqlResultSet, WireValue,
+    codec::{decode_wire, encode_wire},
+    sql_batch, sql_query_batch,
 };
 
 const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
@@ -144,6 +146,7 @@ pub enum CommandResult<T> {
 
 /// Statically dispatched typed command implemented by compiled Crab code.
 pub trait Command: Send + Sync + 'static {
+    const MODULE: &'static str;
     const ID: u32;
     const CODEC_VERSION: u32;
     type Input: WireValue;
@@ -157,6 +160,7 @@ pub trait Command: Send + Sync + 'static {
 
 /// Statically dispatched typed query implemented by compiled Crab code.
 pub trait Query: Send + Sync + 'static {
+    const MODULE: &'static str;
     const ID: u32;
     const CODEC_VERSION: u32;
     type Input: WireValue;
@@ -229,11 +233,8 @@ impl RegistryBuilder {
     }
 
     /// Binds one descriptor command key to its monomorphized typed function.
-    pub fn bind_command<C: Command>(
-        &mut self,
-        module: &'static str,
-    ) -> std::result::Result<(), RegistryError> {
-        let key = BindingKey::new(module, C::ID, C::CODEC_VERSION)?;
+    pub fn bind_command<C: Command>(&mut self) -> std::result::Result<(), RegistryError> {
+        let key = BindingKey::new(C::MODULE, C::ID, C::CODEC_VERSION)?;
         if self.commands.insert(key, typed_command::<C>).is_some() {
             return Err(Error::Registry("duplicate command binding"));
         }
@@ -241,11 +242,8 @@ impl RegistryBuilder {
     }
 
     /// Binds one descriptor query key to its monomorphized typed function.
-    pub fn bind_query<Q: Query>(
-        &mut self,
-        module: &'static str,
-    ) -> std::result::Result<(), RegistryError> {
-        let key = BindingKey::new(module, Q::ID, Q::CODEC_VERSION)?;
+    pub fn bind_query<Q: Query>(&mut self) -> std::result::Result<(), RegistryError> {
+        let key = BindingKey::new(Q::MODULE, Q::ID, Q::CODEC_VERSION)?;
         if self.queries.insert(key, typed_query::<Q>).is_some() {
             return Err(Error::Registry("duplicate query binding"));
         }
@@ -297,6 +295,10 @@ impl RegistryBuilder {
             command_descriptors,
             queries: self.queries,
             query_descriptors,
+            namespace_modules: namespace_owners
+                .into_iter()
+                .map(|(namespace, (module, _))| (namespace, module))
+                .collect(),
         })
     }
 }
@@ -310,6 +312,7 @@ pub struct Registry {
     command_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     queries: BTreeMap<BindingKey, QueryHandler>,
     query_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
+    namespace_modules: HashMap<NamespaceId, &'static str>,
 }
 
 impl Registry {
@@ -326,6 +329,56 @@ impl Registry {
     #[must_use]
     pub fn module_code(&self, module: &str) -> Option<Digest> {
         self.module_codes.get(module).copied()
+    }
+
+    pub(crate) fn command_contract<C: Command>(
+        &self,
+        namespace: NamespaceId,
+    ) -> Result<(OperationDescriptor, Digest)> {
+        self.operation_contract(
+            namespace,
+            C::MODULE,
+            C::ID,
+            C::CODEC_VERSION,
+            &self.command_descriptors,
+        )
+    }
+
+    pub(crate) fn query_contract<Q: Query>(
+        &self,
+        namespace: NamespaceId,
+    ) -> Result<(OperationDescriptor, Digest)> {
+        self.operation_contract(
+            namespace,
+            Q::MODULE,
+            Q::ID,
+            Q::CODEC_VERSION,
+            &self.query_descriptors,
+        )
+    }
+
+    fn operation_contract(
+        &self,
+        namespace: NamespaceId,
+        module: &'static str,
+        id: u32,
+        codec_version: u32,
+        descriptors: &BTreeMap<BindingKey, OperationDescriptor>,
+    ) -> Result<(OperationDescriptor, Digest)> {
+        if self.namespace_modules.get(&namespace).copied() != Some(module) {
+            return Err(Error::Registry("operation module does not own namespace"));
+        }
+        let key = BindingKey::new(module, id, codec_version)?;
+        let operation = descriptors
+            .get(&key)
+            .copied()
+            .ok_or(Error::Registry("operation descriptor is unavailable"))?;
+        let code = self
+            .module_codes
+            .get(module)
+            .copied()
+            .ok_or(Error::Registry("module code is unavailable"))?;
+        Ok((operation, code))
     }
 
     /// Executes one already bounded command through its exact compiled binding.
@@ -423,20 +476,7 @@ fn typed_command<C: Command>(
 fn typed_query<Q: Query>(context: &mut QueryContext<'_>, input: &[u8]) -> Result<Vec<u8>> {
     let input = decode_wire::<Q::Input>(input, context.input_limit)?;
     let output = Q::execute(context, input)?;
-    encode_wire(&output, context.output_limit)
-}
-
-fn decode_wire<T: WireValue>(input: &[u8], limit: u32) -> Result<T> {
-    let mut decoder = BoundedDecoder::new(input, limit)?;
-    let value = T::decode(&mut decoder)?;
-    decoder.finish()?;
-    Ok(value)
-}
-
-fn encode_wire<T: WireValue>(value: &T, limit: u32) -> Result<Vec<u8>> {
-    let mut encoder = BoundedEncoder::new(limit)?;
-    value.encode(&mut encoder)?;
-    Ok(encoder.finish())
+    Ok(encode_wire(&output, context.output_limit)?)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
