@@ -107,6 +107,14 @@ pub async fn query<F>(
 where
     F: FnOnce(&rusqlite::Connection)
         -> Result<Vec<u8>> + Send + 'static;
+
+pub async fn resolve(
+    &self,
+    identity: MutationIdentity,
+    operation_digest: Digest,
+    now_ms: i64,
+    max_result_bytes: usize,
+) -> Result<Resolution>;
 ```
 
 This is an internal construction API, not the final application surface. The
@@ -115,7 +123,9 @@ hide the raw transaction behind `CommandContext`, and map `OutcomeUnknown` to
 `PendingMutation`. HTTP code must not accept caller-selected digests, byte limits
 or closures. The lower-level query shares mutation admission and FIFO ordering;
 its SQLite connection is set to `query_only` for the callback and its output is
-bounded before admission and again on the SQL worker.
+bounded before admission and again on the SQL worker. Resolve uses that same FIFO
+but returns a typed committed, absent, unknown or expired observation and never
+reruns the handler.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {

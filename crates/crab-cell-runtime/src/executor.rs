@@ -17,16 +17,28 @@ pub struct MutationIdentity {
 
 impl MutationIdentity {
     fn validate(self, now_ms: i64) -> Result<()> {
+        self.validate_bounds(now_ms)?;
+        if self.expires_at_ms <= now_ms {
+            return Err(Error::Command("invalid mutation identity lifetime"));
+        }
+        Ok(())
+    }
+
+    fn validate_bounds(self, now_ms: i64) -> Result<()> {
         if now_ms < 0
             || self.issued_at_ms < 0
             || self.expires_at_ms <= self.issued_at_ms
-            || self.expires_at_ms <= now_ms
             || self.expires_at_ms - self.issued_at_ms > MAX_REQUEST_LIFETIME_MS
             || self.issued_at_ms > now_ms.saturating_add(MAX_ISSUED_FUTURE_MS)
         {
             return Err(Error::Command("invalid mutation identity lifetime"));
         }
         Ok(())
+    }
+
+    pub(crate) fn expired(self, now_ms: i64) -> Result<bool> {
+        self.validate_bounds(now_ms)?;
+        Ok(self.expires_at_ms <= now_ms)
     }
 }
 
@@ -47,6 +59,15 @@ pub enum StoredOutcome {
         result: Vec<u8>,
         commit_sequence: u64,
     },
+}
+
+/// Authoritative request-ledger observation from the current Cell owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    Committed(StoredOutcome),
+    Absent,
+    Unknown,
+    Expired,
 }
 
 impl StoredOutcome {
@@ -425,6 +446,67 @@ impl CellExecutor {
                 Err(error.into())
             }
         }
+    }
+
+    /// Resolves one identity against the current published SQLite state.
+    pub fn resolve(
+        &mut self,
+        identity: MutationIdentity,
+        operation_digest: Digest,
+        now_ms: i64,
+        max_result_bytes: usize,
+    ) -> Result<Resolution> {
+        if self.fenced {
+            return Ok(Resolution::Unknown);
+        }
+        if self.pending.is_some() {
+            return Ok(Resolution::Unknown);
+        }
+        if identity.expired(now_ms)? {
+            return Ok(Resolution::Expired);
+        }
+        if max_result_bytes > MAX_RESULT_BYTES {
+            return Err(Error::Command("result limit exceeds 1 MiB"));
+        }
+        let result = self.db.query_with(|connection| {
+            connection
+                .query_row(
+                    "SELECT operation_digest, outcome, result, commit_sequence FROM sys_requests WHERE request_id = ?1",
+                    [identity.request_id.as_bytes().as_slice()],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()
+        });
+        let existing = match result {
+            Ok(existing) => existing,
+            Err(crab_ltx::QueryError::Operation(error)) => return Err(error.into()),
+            Err(crab_ltx::QueryError::Sqlite(error)) => {
+                self.fenced = true;
+                return Err(error.into());
+            }
+            Err(crab_ltx::QueryError::State(error)) => {
+                self.fenced = true;
+                return Err(error.into());
+            }
+        };
+        let Some((digest, outcome, result, sequence)) = existing else {
+            return Ok(Resolution::Absent);
+        };
+        if digest.as_slice() != operation_digest.as_bytes() {
+            return Err(Error::RequestConflict);
+        }
+        let outcome = stored_outcome(outcome, result, sequence)?;
+        if outcome.result().len() > max_result_bytes {
+            return Err(Error::Command("stored result exceeds command limit"));
+        }
+        Ok(Resolution::Committed(outcome))
     }
 
     #[must_use]

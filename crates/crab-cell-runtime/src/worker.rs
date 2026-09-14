@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome, MutationIdentity,
-    PendingCommit, Result, StoredOutcome,
+    PendingCommit, Resolution, Result, StoredOutcome,
 };
 
 const MAX_WORKERS: usize = 16;
@@ -236,6 +236,31 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    /// Resolves one request ledger entry on the Cell's assigned worker.
+    pub(crate) async fn resolve(
+        &self,
+        cell: CellId,
+        identity: MutationIdentity,
+        operation_digest: Digest,
+        now_ms: i64,
+        max_result_bytes: usize,
+    ) -> Result<Resolution> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::Resolve {
+                cell,
+                identity,
+                operation_digest,
+                now_ms,
+                max_result_bytes,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     /// Binds the immutable proposal before any authority CAS can use it.
     pub async fn bind_prepared(
         &self,
@@ -370,6 +395,14 @@ enum WorkerCommand {
         max_result_bytes: usize,
         handler: QueryHandler,
         reply: oneshot::Sender<Result<Vec<u8>>>,
+    },
+    Resolve {
+        cell: CellId,
+        identity: MutationIdentity,
+        operation_digest: Digest,
+        now_ms: i64,
+        max_result_bytes: usize,
+        reply: oneshot::Sender<Result<Resolution>>,
     },
     BindPrepared {
         cell: CellId,
@@ -547,6 +580,23 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
                     .and_then(|cell| cell.executor.query(max_result_bytes, handler));
+                let _ = reply.send(result);
+            }
+            WorkerCommand::Resolve {
+                cell,
+                identity,
+                operation_digest,
+                now_ms,
+                max_result_bytes,
+                reply,
+            } => {
+                let result = cells
+                    .get_mut(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| {
+                        cell.executor
+                            .resolve(identity, operation_digest, now_ms, max_result_bytes)
+                    });
                 let _ = reply.send(result);
             }
             WorkerCommand::BindPrepared {

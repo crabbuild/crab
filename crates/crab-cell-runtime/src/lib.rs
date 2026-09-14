@@ -22,7 +22,8 @@ pub use catalog::{CatalogEntry, CatalogProof, CatalogRole, CellCatalog};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use error::{Error, Result};
 pub use executor::{
-    CellExecutor, CommandExecution, HandlerOutcome, MutationIdentity, PendingCommit, StoredOutcome,
+    CellExecutor, CommandExecution, HandlerOutcome, MutationIdentity, PendingCommit, Resolution,
+    StoredOutcome,
 };
 pub use identity::{
     ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,

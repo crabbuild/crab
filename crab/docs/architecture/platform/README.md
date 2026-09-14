@@ -19,10 +19,11 @@ after complete local source loss and a new owner session. New Cells are now
 exclusively created on their assigned SQL worker: runtime and application schema
 installation commit together, the initial cut is captured, and root publication
 completes before a handle becomes visible. The previous caller-opened runtime
-activation path has been removed. Deadlines/watchdogs, later-root request
-resolution, fenced recovery, streaming directory and checksum updates,
-prepared compaction/bundles, primitives, HTTP cutover and capacity qualification
-remain incomplete.
+activation path has been removed. FIFO Resolve now distinguishes authoritative
+stored outcomes, absence, expiry and fenced/in-flight uncertainty, including
+after a successor restores a later root. Deadlines/watchdogs, fenced recovery,
+streaming directory and checksum updates, prepared compaction/bundles,
+primitives, HTTP cutover and capacity qualification remain incomplete.
 
 ## Deliverable and contract precedence
 

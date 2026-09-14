@@ -3,7 +3,7 @@ use std::sync::{Arc, mpsc};
 use crab_cell_runtime::{
     ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime, CellTarget, ControlState,
     Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId, Owner, RequestId,
-    SessionId, SqlWorkerPool, StoredOutcome, TenantId, Transition,
+    Resolution, SessionId, SqlWorkerPool, StoredOutcome, TenantId, Transition,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellObjectKind, CellStorageLayout, Store};
@@ -101,6 +101,20 @@ fn identity(byte: u8) -> MutationIdentity {
         issued_at_ms: 10,
         expires_at_ms: 10_000,
     }
+}
+
+async fn delete_control_root(fixture: &Fixture) {
+    let cell = fixture.target.cell_id();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let control = authority.load(cell).await.unwrap().unwrap();
+    let root = control.value().root.as_ref().unwrap();
+    let root_path = fixture.layout.incarnation_object_path(
+        cell.as_bytes(),
+        control.value().incarnation.as_bytes(),
+        root.digest.as_bytes(),
+        CellObjectKind::Root,
+    );
+    fixture.layout.store().delete(&root_path).await.unwrap();
 }
 
 #[tokio::test]
@@ -288,6 +302,91 @@ async fn cancelled_command_waiter_is_resolved_by_original_identity() {
 }
 
 #[tokio::test]
+async fn resolve_distinguishes_committed_absent_conflict_and_expired() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let request = identity(54);
+    let digest = Digest::from_bytes([55; 32]);
+    let outcome = handle
+        .execute(request, digest, 20, 1_024, 1_024, None, |transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(HandlerOutcome::Rejected(b"recorded".to_vec()))
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.resolve(request, digest, 21, 1_024).await.unwrap(),
+        Resolution::Committed(outcome)
+    );
+    assert!(matches!(
+        handle
+            .resolve(request, Digest::from_bytes([56; 32]), 21, 1_024)
+            .await,
+        Err(crab_cell_runtime::Error::RequestConflict)
+    ));
+    assert_eq!(
+        handle
+            .resolve(identity(57), Digest::from_bytes([58; 32]), 21, 1_024)
+            .await
+            .unwrap(),
+        Resolution::Absent
+    );
+    assert_eq!(
+        handle
+            .resolve(identity(59), Digest::from_bytes([60; 32]), 10_000, 1_024)
+            .await
+            .unwrap(),
+        Resolution::Expired
+    );
+    handle.drain().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_waits_for_inflight_publication_and_returns_unknown_after_fence() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    delete_control_root(&fixture).await;
+    let request = identity(61);
+    let digest = Digest::from_bytes([62; 32]);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mutation = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    request,
+                    digest,
+                    20,
+                    1_024,
+                    1_024,
+                    None,
+                    move |transaction| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(Vec::new()))
+                    },
+                )
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let resolution = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.resolve(request, digest, 21, 1_024).await })
+    };
+    release_tx.send(()).unwrap();
+    assert!(matches!(
+        mutation.await.unwrap(),
+        Err(crab_cell_runtime::Error::OutcomeUnknown { .. })
+    ));
+    assert_eq!(resolution.await.unwrap().unwrap(), Resolution::Unknown);
+}
+
+#[tokio::test]
 async fn node_byte_admission_rejects_before_sql_execution() {
     let fixture = fixture();
     let handle = activate(&fixture, 1024 * 1024).await;
@@ -312,17 +411,7 @@ async fn node_byte_admission_rejects_before_sql_execution() {
 async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
     let fixture = fixture();
     let handle = activate(&fixture, 16 * 1024 * 1024).await;
-    let cell = fixture.target.cell_id();
-    let authority = CellAuthority::new(fixture.layout.clone());
-    let control = authority.load(cell).await.unwrap().unwrap();
-    let root = control.value().root.as_ref().unwrap();
-    let root_path = fixture.layout.incarnation_object_path(
-        cell.as_bytes(),
-        control.value().incarnation.as_bytes(),
-        root.digest.as_bytes(),
-        CellObjectKind::Root,
-    );
-    fixture.layout.store().delete(&root_path).await.unwrap();
+    delete_control_root(&fixture).await;
     let request = identity(14);
     let digest = Digest::from_bytes([15; 32]);
     assert!(matches!(
@@ -346,6 +435,10 @@ async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
             .await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
+    assert_eq!(
+        handle.resolve(request, digest, 21, 1_024).await.unwrap(),
+        Resolution::Unknown
+    );
 }
 
 #[tokio::test]
@@ -667,22 +760,25 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
         )
         .await
         .unwrap();
+    let first_identity = identity(47);
+    let first_digest = Digest::from_bytes([48; 32]);
+    let first_outcome = first
+        .execute(
+            first_identity,
+            first_digest,
+            20,
+            1_024,
+            1_024,
+            None,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"first".to_vec()))
+            },
+        )
+        .await
+        .unwrap();
     assert!(matches!(
-        first
-            .execute(
-                identity(47),
-                Digest::from_bytes([48; 32]),
-                20,
-                1_024,
-                1_024,
-                None,
-                |transaction| {
-                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
-                    Ok(HandlerOutcome::Success(b"first".to_vec()))
-                },
-            )
-            .await
-            .unwrap(),
+        first_outcome,
         StoredOutcome::Success {
             commit_sequence: 1,
             ..
@@ -725,6 +821,13 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        second
+            .resolve(first_identity, first_digest, 21, 1_024)
+            .await
+            .unwrap(),
+        Resolution::Committed(first_outcome)
+    );
     assert!(matches!(
         second
             .execute(

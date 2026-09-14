@@ -8,21 +8,24 @@ use std::{
 };
 
 use tokio::{
-    sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc, oneshot},
+    sync::{Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
 
+mod handle;
+
+pub use handle::CellHandle;
+use handle::{CellAdmission, WorkAdmission};
+
 use crate::{
-    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, MutationIdentity, SessionId,
-    SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
+    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, MutationIdentity,
+    Resolution, SessionId, SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
 const INGRESS_REQUESTS: usize = 1_024;
 const CELL_REQUESTS: usize = 64;
 const CELL_BYTES: usize = 8 * 1024 * 1024;
-const MAX_OPERATION_BYTES: usize = 1024 * 1024;
-const MAX_RESULT_BYTES: usize = 1024 * 1024;
 
 /// Node-wide dispatcher for bounded per-Cell command mailboxes.
 #[derive(Clone)]
@@ -30,27 +33,11 @@ pub struct CellRuntime {
     inner: Arc<RuntimeInner>,
 }
 
-/// Cloneable capability for one activated Cell.
-#[derive(Clone)]
-pub struct CellHandle {
-    cell: CellId,
-    catalog: CatalogProof,
-    inner: Arc<RuntimeInner>,
-    admission: Arc<CellAdmission>,
-}
-
-struct RuntimeInner {
+pub(super) struct RuntimeInner {
     sender: mpsc::Sender<Message>,
     node_bytes: Arc<Semaphore>,
     session: SessionId,
     pool: SqlWorkerPool,
-}
-
-struct CellAdmission {
-    requests: Arc<Semaphore>,
-    bytes: Arc<Semaphore>,
-    draining: AtomicBool,
-    fenced: AtomicBool,
 }
 
 impl CellRuntime {
@@ -237,173 +224,6 @@ struct BootstrapActivation {
     reservation: CellReservation,
 }
 
-impl CellHandle {
-    #[must_use]
-    pub const fn catalog(&self) -> &CatalogProof {
-        &self.catalog
-    }
-
-    /// Runs and publishes one command while retaining admission after cancellation.
-    pub async fn execute<F>(
-        &self,
-        identity: MutationIdentity,
-        operation_digest: Digest,
-        now_ms: i64,
-        operation_bytes: usize,
-        max_result_bytes: usize,
-        next_due_ms: Option<i64>,
-        handler: F,
-    ) -> crate::Result<StoredOutcome>
-    where
-        F: for<'connection> FnOnce(
-                &crab_ltx::rusqlite::Transaction<'connection>,
-            ) -> crate::Result<crate::HandlerOutcome>
-            + Send
-            + 'static,
-    {
-        let admission = self.reserve_work(operation_bytes, max_result_bytes)?;
-
-        let (reply, response) = oneshot::channel();
-        self.inner
-            .sender
-            .send(Message::Execute(Box::new(QueuedCommand {
-                cell: self.cell,
-                admission: self.admission.clone(),
-                identity,
-                operation_digest,
-                now_ms,
-                max_result_bytes,
-                next_due_ms,
-                handler: Some(Box::new(handler)),
-                reply,
-                _work: admission,
-            })))
-            .await
-            .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
-    }
-
-    /// Runs one FIFO-ordered bounded read after all preceding writes publish.
-    pub async fn query<F>(
-        &self,
-        operation_bytes: usize,
-        max_result_bytes: usize,
-        handler: F,
-    ) -> crate::Result<Vec<u8>>
-    where
-        F: FnOnce(&crab_ltx::rusqlite::Connection) -> crate::Result<Vec<u8>> + Send + 'static,
-    {
-        let admission = self.reserve_work(operation_bytes, max_result_bytes)?;
-
-        let (reply, response) = oneshot::channel();
-        self.inner
-            .sender
-            .send(Message::Query(Box::new(QueuedQuery {
-                cell: self.cell,
-                admission: self.admission.clone(),
-                max_result_bytes,
-                handler: Some(Box::new(handler)),
-                reply,
-                _work: admission,
-            })))
-            .await
-            .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
-    }
-
-    fn reserve_work(
-        &self,
-        operation_bytes: usize,
-        max_result_bytes: usize,
-    ) -> crate::Result<WorkAdmission> {
-        if operation_bytes > MAX_OPERATION_BYTES || max_result_bytes > MAX_RESULT_BYTES {
-            return Err(Error::Capacity("operation or result bytes"));
-        }
-        let reservation_bytes = operation_bytes
-            .checked_add(max_result_bytes)
-            .filter(|bytes| *bytes != 0)
-            .ok_or(Error::Capacity("mailbox bytes"))?;
-        if self.admission.fenced.load(Ordering::Acquire) {
-            return Err(Error::Fenced);
-        }
-        if self.admission.draining.load(Ordering::Acquire) {
-            return Err(Error::CellDraining);
-        }
-        let admission = WorkAdmission {
-            _request: try_one(self.admission.requests.clone(), "Cell mailbox requests")?,
-            _cell_bytes: try_many(
-                self.admission.bytes.clone(),
-                reservation_bytes,
-                "Cell mailbox bytes",
-            )?,
-            _node_bytes: try_many(
-                self.inner.node_bytes.clone(),
-                reservation_bytes,
-                "node mailbox bytes",
-            )?,
-        };
-        if self.admission.fenced.load(Ordering::Acquire) {
-            return Err(Error::Fenced);
-        }
-        if self.admission.draining.load(Ordering::Acquire) {
-            return Err(Error::CellDraining);
-        }
-        Ok(admission)
-    }
-
-    /// Stops admission, publishes accepted commands, then closes the SQLite handle.
-    pub async fn drain(&self) -> crate::Result<()> {
-        if self
-            .admission
-            .draining
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(Error::CellDraining);
-        }
-        self.admission.requests.close();
-        self.admission.bytes.close();
-        let (reply, response) = oneshot::channel();
-        self.inner
-            .sender
-            .send(Message::Drain {
-                cell: self.cell,
-                admission: self.admission.clone(),
-                reply,
-            })
-            .await
-            .map_err(|_| Error::RuntimeClosed)?;
-        response.await.map_err(|_| Error::RuntimeClosed)?
-    }
-}
-
-fn try_one(
-    semaphore: Arc<Semaphore>,
-    resource: &'static str,
-) -> crate::Result<OwnedSemaphorePermit> {
-    semaphore
-        .try_acquire_owned()
-        .map_err(|error| admission_error(error, resource))
-}
-
-fn try_many(
-    semaphore: Arc<Semaphore>,
-    permits: usize,
-    resource: &'static str,
-) -> crate::Result<OwnedSemaphorePermit> {
-    let permits = u32::try_from(permits).map_err(|_| Error::Capacity(resource))?;
-    semaphore
-        .try_acquire_many_owned(permits)
-        .map_err(|error| admission_error(error, resource))
-}
-
-fn admission_error(error: TryAcquireError, resource: &'static str) -> Error {
-    match error {
-        TryAcquireError::Closed => Error::CellDraining,
-        TryAcquireError::NoPermits => Error::Capacity(resource),
-    }
-}
-
 enum Message {
     Activate {
         cell: CellId,
@@ -413,6 +233,7 @@ enum Message {
     },
     Execute(Box<QueuedCommand>),
     Query(Box<QueuedQuery>),
+    Resolve(Box<QueuedResolve>),
     Drain {
         cell: CellId,
         admission: Arc<CellAdmission>,
@@ -442,15 +263,21 @@ struct QueuedQuery {
     _work: WorkAdmission,
 }
 
-struct WorkAdmission {
-    _request: OwnedSemaphorePermit,
-    _cell_bytes: OwnedSemaphorePermit,
-    _node_bytes: OwnedSemaphorePermit,
+struct QueuedResolve {
+    cell: CellId,
+    admission: Arc<CellAdmission>,
+    identity: MutationIdentity,
+    operation_digest: Digest,
+    now_ms: i64,
+    max_result_bytes: usize,
+    reply: oneshot::Sender<crate::Result<Resolution>>,
+    _work: WorkAdmission,
 }
 
 enum QueuedWork {
     Command(Box<QueuedCommand>),
     Query(Box<QueuedQuery>),
+    Resolve(Box<QueuedResolve>),
 }
 
 struct ActiveCell {
@@ -481,6 +308,12 @@ enum TaskResult {
         cell: CellId,
         query: Box<QueuedQuery>,
         result: crate::Result<Vec<u8>>,
+        fenced: bool,
+    },
+    Resolved {
+        cell: CellId,
+        resolve: Box<QueuedResolve>,
+        result: crate::Result<Resolution>,
         fenced: bool,
     },
     Deactivated {
@@ -624,6 +457,26 @@ fn handle_message(
             active.queue.push_back(QueuedWork::Query(query));
             start_next(active, pool, tasks);
         }
+        Message::Resolve(resolve) => {
+            let Some(active) = cells.get_mut(&resolve.cell) else {
+                let _ = resolve.reply.send(Err(Error::CellNotActive));
+                return;
+            };
+            if !Arc::ptr_eq(&active.admission, &resolve.admission) {
+                let _ = resolve.reply.send(Err(Error::CellNotActive));
+                return;
+            }
+            if active.fenced {
+                let _ = resolve.reply.send(Ok(Resolution::Unknown));
+                return;
+            }
+            if active.drain.is_some() {
+                let _ = resolve.reply.send(Err(Error::CellDraining));
+                return;
+            }
+            active.queue.push_back(QueuedWork::Resolve(resolve));
+            start_next(active, pool, tasks);
+        }
         Message::Drain {
             cell,
             admission,
@@ -713,6 +566,9 @@ fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet
         QueuedWork::Query(query) => {
             tasks.spawn(async move { execute_query(pool, query).await });
         }
+        QueuedWork::Resolve(resolve) => {
+            tasks.spawn(async move { execute_resolve(pool, resolve).await });
+        }
     }
 }
 
@@ -791,6 +647,29 @@ async fn execute_query(pool: SqlWorkerPool, mut query: Box<QueuedQuery>) -> Task
     TaskResult::Queried {
         cell: query.cell,
         query,
+        result,
+        fenced,
+    }
+}
+
+async fn execute_resolve(pool: SqlWorkerPool, resolve: Box<QueuedResolve>) -> TaskResult {
+    let result = pool
+        .resolve(
+            resolve.cell,
+            resolve.identity,
+            resolve.operation_digest,
+            resolve.now_ms,
+            resolve.max_result_bytes,
+        )
+        .await;
+    let fenced =
+        result.is_err() && !matches!(pool.state(resolve.cell).await, Ok(WorkerState::Ready));
+    if fenced {
+        let _ = pool.fence(resolve.cell).await;
+    }
+    TaskResult::Resolved {
+        cell: resolve.cell,
+        resolve,
         result,
         fenced,
     }
@@ -880,6 +759,28 @@ fn handle_task(
                 start_next(active, pool, tasks);
             }
         }
+        TaskResult::Resolved {
+            cell,
+            resolve,
+            result,
+            fenced,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                let _ = resolve.reply.send(Err(Error::CellNotActive));
+                return;
+            };
+            active.busy = false;
+            active.fenced |= fenced;
+            if active.fenced {
+                fence_active(active);
+            }
+            let _ = resolve.reply.send(result);
+            if active.drain.is_some() && active.queue.is_empty() {
+                start_deactivate(cell, pool, cells, transitioning, tasks);
+            } else {
+                start_next(active, pool, tasks);
+            }
+        }
         TaskResult::Deactivated {
             cell,
             reply,
@@ -905,6 +806,9 @@ fn fence_active(active: &mut ActiveCell) {
             }
             QueuedWork::Query(query) => {
                 let _ = query.reply.send(Err(Error::Fenced));
+            }
+            QueuedWork::Resolve(resolve) => {
+                let _ = resolve.reply.send(Ok(Resolution::Unknown));
             }
         }
     }

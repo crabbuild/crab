@@ -80,7 +80,7 @@ removed. Exact-root lost-response reconciliation also rejects a subsequent
 takeover instead of letting the old executor serve. Ordered queries now share
 Cell/node admission and the mutation FIFO, run only after prior publication, use
 SQLite `query_only`, and enforce declared result bytes. Complete deadlines/SQLite
-interruption, later-root request resolution, fenced takeover recovery,
+interruption, fenced takeover recovery,
 and panic supervision. All transitions use the existing Store conditional
 primitives, preserving sources.
 
@@ -123,14 +123,18 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
   not inherit infrastructure fencing.
 - `source_loss_takeover_restores_exact_root_and_continues_publication` deletes
   bootstrap and first-owner local state, changes owner session, restores from the
-  published root and advances the command sequence again.
+  published root, resolves a predecessor request from that root and advances the
+  command sequence again.
 - `failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity` proves
   application migration rollback leaves no root and returns the one active-Cell
   slot for a successful retry at a fresh destination.
 - `query_waits_for_preceding_publication_and_cannot_write` proves a concurrent
   read observes the preceding published mutation, a write through the query
   callback is rejected, and the Cell remains readable.
-
+- `resolve_distinguishes_committed_absent_conflict_and_expired` proves the local
+  typed resolution states and digest binding;
+  `resolve_waits_for_inflight_publication_and_returns_unknown_after_fence` proves
+  a queued resolver cannot claim absence while its publisher is unresolved.
 `publication_rebases_over_a_pure_lease_renewal_without_sql_replay` covers the
 coordinator's latest-token retry path;
 `published_root_observed_after_takeover_fences_the_old_executor` proves that
