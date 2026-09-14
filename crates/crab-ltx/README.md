@@ -98,6 +98,10 @@ It writes an issue to real SQLite, copies LTX artifacts to another local
 directory, deletes the original database directory, restores and queries the
 issue. This demonstrates local mechanics, **not RustFS publication**.
 
+Additional runnable examples cover object-store replication, paged reads,
+sparse writable continuation, compaction, and historical recovery. See the
+[examples guide](examples/README.md).
+
 ## Object-store replication and paged SQLite
 
 Enable `crab-ltx`'s `replica` feature. Construct a `crab_storage::Store` using
