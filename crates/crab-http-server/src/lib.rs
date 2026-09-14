@@ -55,6 +55,12 @@ pub async fn cell_release_status(config: &Config) -> Result<Vec<u8>> {
     cells::release_status(config).await
 }
 
+/// Activates the prepared compiled release after exact Cell compatibility checks.
+pub async fn activate_cell_release(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::activate_release(config, expected_revision).await
+}
+
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

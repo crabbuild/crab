@@ -134,7 +134,7 @@ typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
 publication path. The server composition root now owns one process-session
 `CellRuntime`, validates the compiled registry before admission, and shuts it
-down with the server. Private peer routing, release-gated activation, resource-
+down with the server. Private peer routing, upgrade migrations, resource-
 derived budgets and repository Cell routing remain; KV, SQL, Queue and Workflow
 primitive handles are complete for local routing.
 The server now compiles and binds the first repository module slice: stable
@@ -147,10 +147,18 @@ after exact-root restoration by a new owner. `cells release inspect --json`
 emits those exact registry bytes from the built binary. `cells release prepare` now strict-creates
 or adopts the root's canonical tenant/application identity, uploads the exact
 digest-addressed descriptor, and conditionally publishes a canonical prepared
-release; `cells release status` reads that checked state. Compatibility analysis,
-activation, persistent Cell-directory configuration, product routing and
-capacity qualification remain. Existing HTTP issue/comment routes still use the old
-object documents; the native module is not yet a user-visible storage path.
+release; `cells release status` reads that checked state. `cells release activate
+--strategy compatible` now verifies the exact compiled descriptor, CASes the
+operation-bound release through `prepared → activating → ready`, scans all 256
+catalog shards, checks every live control or bootstrap pair against the compiled
+namespace/role/code/schema inventory, rejects an unstable catalog snapshot and
+resumes exact retries without a new operation. The initial empty/exact-compatible
+activation path is proven against real RustFS. Release-aware provisioning that
+closes the final catalog-recheck/release-CAS race must land before any product
+route can create Cells; no such route exists yet. Node eligibility, old-code/schema
+migration, persistent Cell-directory configuration, product routing and capacity
+qualification remain. Existing HTTP issue/comment routes still use the old object
+documents; the native module is not yet a user-visible storage path.
 
 ## Deliverable and contract precedence
 

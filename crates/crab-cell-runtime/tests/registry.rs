@@ -251,7 +251,41 @@ fn compiled_registry_is_canonical_and_executes_only_declared_bindings() {
     let reversed = build_registry(true);
     assert_eq!(registry.release_bytes(), reversed.release_bytes());
     assert_eq!(registry.release_digest(), reversed.release_digest());
-    assert!(registry.module_code("first").is_some());
+    let first_code = registry.module_code("first").unwrap();
+    assert!(registry.supports_cell(
+        NamespaceId::from_bytes([1; 16]),
+        CatalogRole::Repository,
+        first_code,
+        1,
+    ));
+    for (namespace, role, code, schema) in [
+        (
+            NamespaceId::from_bytes([9; 16]),
+            CatalogRole::Repository,
+            first_code,
+            1,
+        ),
+        (
+            NamespaceId::from_bytes([1; 16]),
+            CatalogRole::Kv,
+            first_code,
+            1,
+        ),
+        (
+            NamespaceId::from_bytes([1; 16]),
+            CatalogRole::Repository,
+            Digest::from_bytes([8; 32]),
+            1,
+        ),
+        (
+            NamespaceId::from_bytes([1; 16]),
+            CatalogRole::Repository,
+            first_code,
+            2,
+        ),
+    ] {
+        assert!(!registry.supports_cell(namespace, role, code, schema));
+    }
 
     let mut connection = crab_ltx::rusqlite::Connection::open_in_memory().unwrap();
     connection.execute_batch(MIGRATION).unwrap();

@@ -199,14 +199,25 @@ crab-http-server --config CONFIG cells release status
 
 `cells release inspect --json` is now implemented and read-only; it prints the
 canonical descriptor compiled into the binary without accessing object storage.
-`cells release prepare` and `cells release status` are also implemented. The
+`cells release prepare`, `cells release activate --strategy compatible` and
+`cells release status` are also implemented. The
 first prepare strict-creates or adopts the root identity, uploads only the exact
 compiled descriptor, validates its digest and image digest, then strict-creates
 or ETag-updates canonical release state at the expected revision. Exact retries
-reuse the winning operation ID and bytes. Compatibility inventory, activation
-and migration remain target behavior; until activation exists, prepare does not
-make the descriptor current or authorize serving Cells. Administrative storage
-credentials provide authority; there is no public deployment API.
+reuse the winning operation ID and bytes. Activate reloads the desired descriptor,
+requires byte equality with this binary, enters `activating` through CAS, scans
+every catalog shard and exact control code/schema pair, verifies shard revisions
+remain stable, then CASes `current=desired,state=ready`. Repeating the original
+command adopts the same ready record. It currently admits initial or already exact
+compatible inventories; old-code/schema migration and eligible-node quorum remain
+target behavior. Prepare alone never makes the descriptor current. Administrative
+storage credentials provide authority; there is no public deployment API.
+
+No production Cell-provisioning path exists yet. Before route cutover, provisioning
+must reload release state, admit only the desired initial code/schema while state
+is `activating`, and recheck the same operation after publishing the catalog head.
+That protocol closes the interval between the activator's final shard revision
+check and ready CAS; revision rechecks alone cannot provide cross-object atomicity.
 
 release.json <=8 KiB: version=1, application, revision as u64 decimal string,
 current/desired descriptor digest or null, desired_image, operation ID hex16,

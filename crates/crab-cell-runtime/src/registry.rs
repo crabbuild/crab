@@ -394,6 +394,16 @@ impl RegistryBuilder {
 
         let command_descriptors = operation_descriptors(&self.modules, |module| module.commands);
         let query_descriptors = operation_descriptors(&self.modules, |module| module.queries);
+        let module_schemas = self
+            .modules
+            .iter()
+            .map(|module| {
+                (
+                    module.name.to_owned(),
+                    (module.schema_min, module.schema_max),
+                )
+            })
+            .collect();
 
         let (release_bytes, module_codes) = encode_release(&self.build, &self.modules)?;
         if release_bytes.len() > MAX_DESCRIPTOR_BYTES {
@@ -404,6 +414,7 @@ impl RegistryBuilder {
             release_bytes,
             release_digest,
             module_codes,
+            module_schemas,
             commands: self.commands,
             command_descriptors,
             queries: self.queries,
@@ -419,6 +430,7 @@ pub struct Registry {
     release_bytes: Vec<u8>,
     release_digest: Digest,
     module_codes: BTreeMap<String, Digest>,
+    module_schemas: BTreeMap<String, (u32, u32)>,
     commands: BTreeMap<BindingKey, CommandHandler>,
     command_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     queries: BTreeMap<BindingKey, QueryHandler>,
@@ -441,6 +453,26 @@ impl Registry {
     #[must_use]
     pub fn module_code(&self, module: &str) -> Option<Digest> {
         self.module_codes.get(module).copied()
+    }
+
+    /// Reports whether this binary can execute one authoritative Cell pair.
+    #[must_use]
+    pub fn supports_cell(
+        &self,
+        namespace: NamespaceId,
+        role: CatalogRole,
+        code: Digest,
+        schema: u32,
+    ) -> bool {
+        let Some((module, descriptor)) = self.namespace_modules.get(&namespace) else {
+            return false;
+        };
+        let Some((schema_min, schema_max)) = self.module_schemas.get(*module) else {
+            return false;
+        };
+        descriptor.role == role
+            && self.module_codes.get(*module) == Some(&code)
+            && (*schema_min..=*schema_max).contains(&schema)
     }
 
     pub(crate) fn activity_support(

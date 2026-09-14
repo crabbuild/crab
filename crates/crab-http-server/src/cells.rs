@@ -2,9 +2,11 @@ use std::sync::OnceLock;
 
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
-    CellModule, Digest, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
-    OperationDescriptor, Registry, RegistryBuilder, ReleaseStore, RequestId, TenantId,
+    CellAuthority, CellCatalog, CellModule, ControlState, Digest, MigrationDescriptor,
+    ModuleDescriptor, NamespaceDescriptor, NamespaceId, OperationDescriptor, Registry,
+    RegistryBuilder, ReleaseState, ReleaseStore, RequestId, TenantId,
 };
+use crab_storage::CellStorageLayout;
 use object_store::path::Path;
 use uuid::Uuid;
 
@@ -106,6 +108,98 @@ pub(crate) async fn release_status(config: &Config) -> Result<Vec<u8>> {
         .map_err(Error::from)
 }
 
+pub(crate) async fn activate_release(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+    let root = StorageRoot::build(&config.storage)?;
+    let identities =
+        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+    let identity = identities
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application is not initialized"))?;
+    let layout = identities.layout(identity).await?;
+    let releases = ReleaseStore::new(layout.clone(), identity)?;
+    let registry = compiled_registry()?;
+    let observed = releases
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application release is not prepared"))?;
+    if observed.record().desired() != Some(registry.release_digest()) {
+        return Err(Error::Config(
+            "prepared Cell release differs from this binary",
+        ));
+    }
+    let desired = releases.descriptor(registry.release_digest()).await?;
+    if desired != registry.release_bytes() {
+        return Err(Error::Config(
+            "prepared Cell descriptor differs from this binary",
+        ));
+    }
+    let operation = observed.record().operation();
+    let activating = releases
+        .start_activation(expected_revision, operation)
+        .await?;
+    if activating.state() == ReleaseState::Ready {
+        return activating.encode().map_err(Error::from);
+    }
+    verify_compatible_cells(&layout, identity, &registry).await?;
+    releases
+        .complete_activation(activating.revision(), operation)
+        .await?
+        .encode()
+        .map_err(Error::from)
+}
+
+async fn verify_compatible_cells(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    registry: &Registry,
+) -> Result<()> {
+    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+    let authority = CellAuthority::new(layout.clone());
+    for _ in 0..3 {
+        let mut revisions = [0_u64; 256];
+        for shard in 0_u8..=u8::MAX {
+            let mut scan = catalog.scan_shard(shard).await?;
+            revisions[usize::from(shard)] = scan.revision();
+            while let Some(page) = scan.next_page().await? {
+                for proof in page.entries() {
+                    let entry = proof.entry();
+                    let supported = match authority.load(entry.cell()).await? {
+                        Some(control) if control.value().state == ControlState::Tombstoned => true,
+                        Some(control) => registry.supports_cell(
+                            entry.namespace(),
+                            entry.role(),
+                            control.value().code,
+                            control.value().schema,
+                        ),
+                        None => registry.supports_cell(
+                            entry.namespace(),
+                            entry.role(),
+                            entry.initial_code(),
+                            entry.initial_schema(),
+                        ),
+                    };
+                    if !supported {
+                        return Err(Error::Config(
+                            "compiled release cannot execute every cataloged Cell",
+                        ));
+                    }
+                }
+            }
+        }
+        let mut stable = true;
+        for shard in 0_u8..=u8::MAX {
+            stable &= catalog.scan_shard(shard).await?.revision() == revisions[usize::from(shard)];
+        }
+        if stable {
+            return Ok(());
+        }
+    }
+    Err(Error::Config(
+        "Cell catalog changed repeatedly during release activation",
+    ))
+}
+
 fn repository_descriptor() -> &'static ModuleDescriptor {
     static MIGRATIONS: OnceLock<[MigrationDescriptor; 1]> = OnceLock::new();
     static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
@@ -141,7 +235,6 @@ fn repository_source_digest() -> Digest {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"crab.http.repository.module.v1\0");
     hasher.update(REPOSITORY_MIGRATION.as_bytes());
-    hasher.update(include_bytes!("cells.rs"));
     hasher.update(include_bytes!("cells/repository.rs"));
     Digest::from_bytes(*hasher.finalize().as_bytes())
 }
@@ -196,6 +289,10 @@ mod tests {
         let descriptor: Value = serde_json::from_slice(first.release_bytes()).unwrap();
         assert_eq!(descriptor["runtime"], "crab-http-server");
         assert_eq!(descriptor["modules"][0]["name"], "repository");
+        assert_eq!(
+            descriptor["modules"][0]["code"],
+            "e288521ccd5f58a3de7a6b90191b9e5a17d3446740590be2070a9624c58d5a78"
+        );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);
         assert_eq!(
@@ -214,6 +311,71 @@ mod tests {
         );
         assert_eq!(descriptor["namespaces"][0]["role"], "repository");
         assert_eq!(descriptor["namespaces"][0]["shards"], 1);
+    }
+
+    #[tokio::test]
+    async fn release_inventory_accepts_exact_cells_and_rejects_unsupported_code() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([1; 16]),
+            ApplicationId::from_bytes([2; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("release-inventory"),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        verify_compatible_cells(&layout, identity, &registry)
+            .await
+            .unwrap();
+        let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+        let supported = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            &[3; 16],
+        )
+        .unwrap();
+        catalog
+            .provision(
+                CatalogEntry::new(
+                    &supported,
+                    CatalogRole::Repository,
+                    registry.module_code(RepositoryModule::NAME).unwrap(),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        verify_compatible_cells(&layout, identity, &registry)
+            .await
+            .unwrap();
+
+        let unsupported = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            REPOSITORY_NAMESPACE,
+            &[4; 16],
+        )
+        .unwrap();
+        catalog
+            .provision(
+                CatalogEntry::new(
+                    &unsupported,
+                    CatalogRole::Repository,
+                    Digest::from_bytes([9; 32]),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            verify_compatible_cells(&layout, identity, &registry)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

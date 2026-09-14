@@ -124,6 +124,13 @@ impl ReleaseRecord {
                 "release phase requires a desired descriptor",
             ));
         }
+        if self.state == ReleaseState::Ready
+            && (self.current.is_none() || self.current != self.desired)
+        {
+            return Err(Error::Release(
+                "ready release requires one current desired descriptor",
+            ));
+        }
         Ok(())
     }
 }
@@ -222,6 +229,14 @@ impl ReleaseStore {
         if observed.as_ref().map_or(0, |value| value.record.revision) != expected_revision {
             return Err(Error::Release("release revision changed concurrently"));
         }
+        if observed.as_ref().is_some_and(|value| {
+            matches!(
+                value.record.state,
+                ReleaseState::Activating | ReleaseState::Maintenance
+            )
+        }) {
+            return Err(Error::Release("release activation is already in progress"));
+        }
         let next = ReleaseRecord {
             application: self.identity.application(),
             revision: expected_revision
@@ -274,6 +289,127 @@ impl ReleaseStore {
         }
     }
 
+    /// Loads and verifies one immutable descriptor selected by release state.
+    pub async fn descriptor(&self, digest: Digest) -> Result<Vec<u8>> {
+        let path = self.layout.release_descriptor_path(digest.as_bytes());
+        let (descriptor, _) = self
+            .layout
+            .store()
+            .get_with_etag_bounded(&path, MAX_DESCRIPTOR_BYTES)
+            .await?;
+        if descriptor.is_empty() || blake3::hash(&descriptor).as_bytes() != digest.as_bytes() {
+            return Err(Error::Release(
+                "stored descriptor digest or size is invalid",
+            ));
+        }
+        Ok(descriptor.to_vec())
+    }
+
+    /// CASes one prepared release into its resumable activation phase.
+    ///
+    /// The caller must complete fleet and Cell compatibility admission before
+    /// calling `complete_activation`; this storage owner only serializes phases.
+    pub async fn start_activation(
+        &self,
+        expected_revision: u64,
+        operation: RequestId,
+    ) -> Result<ReleaseRecord> {
+        let observed = self
+            .load()
+            .await?
+            .ok_or(Error::Release("release is not prepared"))?;
+        if activation_retry(&observed.record, expected_revision, operation) {
+            let desired = observed
+                .record
+                .desired
+                .ok_or(Error::Release("release activation has no descriptor"))?;
+            self.descriptor(desired).await?;
+            return Ok(observed.record);
+        }
+        if observed.record.revision != expected_revision
+            || observed.record.state != ReleaseState::Prepared
+            || observed.record.operation != operation
+        {
+            return Err(Error::Release("prepared release changed concurrently"));
+        }
+        let desired = observed
+            .record
+            .desired
+            .ok_or(Error::Release("prepared release has no descriptor"))?;
+        self.descriptor(desired).await?;
+        let mut next = observed.record.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Release("release revision overflow"))?;
+        next.state = ReleaseState::Activating;
+        self.update_exact(observed, next).await
+    }
+
+    /// Publishes the desired descriptor as current after caller-side admission.
+    pub async fn complete_activation(
+        &self,
+        expected_revision: u64,
+        operation: RequestId,
+    ) -> Result<ReleaseRecord> {
+        let observed = self
+            .load()
+            .await?
+            .ok_or(Error::Release("release is not activating"))?;
+        if completion_retry(&observed.record, expected_revision, operation) {
+            let desired = observed
+                .record
+                .desired
+                .ok_or(Error::Release("ready release has no descriptor"))?;
+            self.descriptor(desired).await?;
+            return Ok(observed.record);
+        }
+        if observed.record.revision != expected_revision
+            || observed.record.state != ReleaseState::Activating
+            || observed.record.operation != operation
+        {
+            return Err(Error::Release("activating release changed concurrently"));
+        }
+        let desired = observed
+            .record
+            .desired
+            .ok_or(Error::Release("activating release has no descriptor"))?;
+        self.descriptor(desired).await?;
+        let mut next = observed.record.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Release("release revision overflow"))?;
+        next.current = Some(desired);
+        next.state = ReleaseState::Ready;
+        self.update_exact(observed, next).await
+    }
+
+    async fn update_exact(
+        &self,
+        observed: VersionedRelease,
+        next: ReleaseRecord,
+    ) -> Result<ReleaseRecord> {
+        next.validate(self.identity)?;
+        let write = self
+            .layout
+            .store()
+            .update(
+                &self.layout.release_path(),
+                Bytes::from(next.encode()?),
+                observed.token,
+            )
+            .await;
+        match write {
+            Ok(_) => Ok(next),
+            Err(write_error) => match self.load().await? {
+                Some(current) if current.record == next => Ok(current.record),
+                Some(_) => Err(Error::Release("release changed concurrently")),
+                None => Err(write_error.into()),
+            },
+        }
+    }
+
     async fn publish_descriptor(&self, descriptor: &[u8], digest: Digest) -> Result<()> {
         let path = self.layout.release_descriptor_path(digest.as_bytes());
         match self
@@ -317,6 +453,33 @@ fn prepared_matches(
         && record.desired_image == image
         && record.state == ReleaseState::Prepared
         && record.operation == operation
+}
+
+fn activation_retry(record: &ReleaseRecord, expected_revision: u64, operation: RequestId) -> bool {
+    if record.operation != operation || record.desired.is_none() {
+        return false;
+    }
+    match record.state {
+        ReleaseState::Activating => expected_revision
+            .checked_add(1)
+            .is_some_and(|revision| record.revision == revision),
+        ReleaseState::Ready => {
+            expected_revision
+                .checked_add(2)
+                .is_some_and(|revision| record.revision == revision)
+                && record.current == record.desired
+        }
+        _ => false,
+    }
+}
+
+fn completion_retry(record: &ReleaseRecord, expected_revision: u64, operation: RequestId) -> bool {
+    record.operation == operation
+        && record.state == ReleaseState::Ready
+        && record.current == record.desired
+        && expected_revision
+            .checked_add(1)
+            .is_some_and(|revision| record.revision == revision)
 }
 
 fn validate_image(image: &str) -> Result<()> {
@@ -475,5 +638,134 @@ mod tests {
                 .await,
             Err(Error::Release(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn activation_is_operation_bound_resumable_and_publishes_current() {
+        let (releases, descriptor, digest) = fixture();
+        let operation = RequestId::from_bytes([3; 16]);
+        let prepared = releases
+            .prepare(
+                &descriptor,
+                digest,
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                operation,
+            )
+            .await
+            .unwrap();
+
+        let activating = releases
+            .start_activation(prepared.revision(), operation)
+            .await
+            .unwrap();
+        assert_eq!(activating.revision(), 2);
+        assert_eq!(activating.state(), ReleaseState::Activating);
+        assert_eq!(activating.current(), None);
+        assert_eq!(
+            releases
+                .start_activation(prepared.revision(), operation)
+                .await
+                .unwrap(),
+            activating
+        );
+
+        let ready = releases
+            .complete_activation(activating.revision(), operation)
+            .await
+            .unwrap();
+        assert_eq!(ready.revision(), 3);
+        assert_eq!(ready.state(), ReleaseState::Ready);
+        assert_eq!(ready.current(), Some(digest));
+        assert_eq!(ready.current(), ready.desired());
+        assert_eq!(
+            releases
+                .start_activation(prepared.revision(), operation)
+                .await
+                .unwrap(),
+            ready
+        );
+        assert_eq!(
+            releases
+                .complete_activation(activating.revision(), operation)
+                .await
+                .unwrap(),
+            ready
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_rejects_operation_revision_and_descriptor_drift() {
+        let (releases, descriptor, digest) = fixture();
+        let operation = RequestId::from_bytes([3; 16]);
+        let prepared = releases
+            .prepare(
+                &descriptor,
+                digest,
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                operation,
+            )
+            .await
+            .unwrap();
+        assert!(
+            releases
+                .start_activation(prepared.revision(), RequestId::from_bytes([4; 16]))
+                .await
+                .is_err()
+        );
+        assert!(
+            releases
+                .start_activation(prepared.revision() + 1, operation)
+                .await
+                .is_err()
+        );
+
+        let path = releases.layout.release_descriptor_path(digest.as_bytes());
+        releases
+            .layout
+            .store()
+            .put_overwrite(&path, Bytes::from_static(b"corrupt"))
+            .await
+            .unwrap();
+        assert!(
+            releases
+                .start_activation(prepared.revision(), operation)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_cannot_replace_an_activation_in_progress() {
+        let (releases, descriptor, digest) = fixture();
+        let operation = RequestId::from_bytes([3; 16]);
+        let prepared = releases
+            .prepare(
+                &descriptor,
+                digest,
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                operation,
+            )
+            .await
+            .unwrap();
+        let activating = releases
+            .start_activation(prepared.revision(), operation)
+            .await
+            .unwrap();
+
+        assert!(
+            releases
+                .prepare(
+                    &descriptor,
+                    digest,
+                    activating.revision(),
+                    &format!("sha256:{}", "b".repeat(64)),
+                    RequestId::from_bytes([5; 16]),
+                )
+                .await
+                .is_err()
+        );
     }
 }

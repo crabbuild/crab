@@ -53,8 +53,12 @@ durable rejection, LTX publication, full first-owner local deletion and exact-ro
 readback on a second owner. `serve` now owns the same runtime lifecycle: it starts
 one process session with fixed SQL workers, includes terminal Cell drain in
 readiness, and drains/releases/joins it after accepted HTTP and Git work. This is
-still below the product route: no HTTP route
-currently calls that module, so application JSON persistence, Git publication
+still below the product route. Release administration can now CAS one prepared
+descriptor through activating to ready after checking all catalog shards and live
+control code/schema pairs against the exact binary registry; retries retain the
+same operation, and a real RustFS run reached canonical `current=desired` state.
+Old-version migration and node quorum are not implemented. No HTTP route currently
+calls that module, so application JSON persistence, Git publication
 and browser behavior above remain unchanged. See [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 
 ### Existing tests to preserve or evolve

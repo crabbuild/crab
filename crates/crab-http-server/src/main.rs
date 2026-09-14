@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use crab_http_server::catalog::CatalogStore;
 use crab_http_server::{RepositoryAccess, RepositoryMember};
 use serde::Deserialize;
@@ -60,8 +60,20 @@ enum CellReleaseCommand {
         #[arg(long)]
         image: String,
     },
+    /// Verify every cataloged Cell and publish the prepared release as current.
+    Activate {
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long, value_enum)]
+        strategy: ActivationStrategy,
+    },
     /// Print the canonical durable release selection.
     Status,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ActivationStrategy {
+    Compatible,
 }
 
 #[derive(Subcommand)]
@@ -199,6 +211,13 @@ async fn cells(
                 },
         } => crab_http_server::prepare_cell_release(config, expected_revision, &image).await?,
         CellsCommand::Release {
+            command:
+                CellReleaseCommand::Activate {
+                    expected_revision,
+                    strategy: ActivationStrategy::Compatible,
+                },
+        } => crab_http_server::activate_cell_release(config, expected_revision).await?,
+        CellsCommand::Release {
             command: CellReleaseCommand::Status,
         } => crab_http_server::cell_release_status(config).await?,
     };
@@ -332,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn release_prepare_and_status_match_the_administration_contract() {
+    fn release_prepare_activate_and_status_match_the_administration_contract() {
         let prepare = Arguments::try_parse_from([
             "crab-http-server",
             "--config",
@@ -353,6 +372,31 @@ mod tests {
                     command: CellReleaseCommand::Prepare {
                         expected_revision: 7,
                         ..
+                    }
+                }
+            })
+        ));
+
+        let activate = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "activate",
+            "--expected-revision",
+            "8",
+            "--strategy",
+            "compatible",
+        ])
+        .unwrap();
+        assert!(matches!(
+            activate.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Activate {
+                        expected_revision: 8,
+                        strategy: ActivationStrategy::Compatible,
                     }
                 }
             })
