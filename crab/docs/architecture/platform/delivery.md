@@ -203,6 +203,9 @@ unless one pull request contains its migration and digest, stable codecs and
 fixtures, native bindings, authorized product-route adapter and end-to-end test.
 Do not add a module package format, scaffold command, external application SDK or
 per-repository module selector. The complete server image is the sole artifact.
+Do not keep an abstraction for a hypothetical guest language unless the same
+change gives it a concrete compiled Crab caller and it reduces the canonical
+Rust path's ownership or duplication.
 
 Make `crab-http-server/src/cells.rs` the only composition root. Its static module
 descriptors and bindings must produce one canonical registry or fail startup.

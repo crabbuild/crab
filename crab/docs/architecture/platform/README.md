@@ -37,8 +37,8 @@ propagation and automatic fenced recovery,
 streaming initial directory construction and directory-backed capture checksums,
 shared directory caching, prepared compaction/bundles,
 Workflow effect supervision, catalog-driven activity scheduling, scheduler
-scanning/Tick, private peer
-routing, HTTP cutover and capacity qualification remain incomplete. The scoped
+progress advertisement and remote/idle routing, private peer routing, HTTP
+cutover and capacity qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -236,6 +236,11 @@ This is a hard architecture boundary, not deferred optional work. Supporting
 untrusted or independently deployed application code later would require a new
 threat model, resource isolation contract and public protocol design; it must not
 be introduced as an adapter around the V1 transaction API.
+
+This decision supersedes the earlier standalone, multi-language platform
+direction. Runtime abstractions must have a concrete in-tree Crab caller; do not
+add guest-neutral manifests, public wire APIs, language-host lifecycle, or
+deployment indirection solely to preserve a possible future non-Rust host.
 
 ## Source ownership and target files
 

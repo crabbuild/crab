@@ -1,9 +1,10 @@
 # Native Rust programming model and private peer protocol
 
-[Index](README.md). These are proposed interfaces. Crab contributors add ordinary
-Rust modules to the server source and rebuild the complete image; repository
-owners do not provide executable code. There is no language host, runtime plugin
-loader or public primitive SDK.
+[Index](README.md). This document marks implemented interfaces explicitly; all
+other signatures and source layouts are target contracts. Crab contributors add
+ordinary Rust modules to the server source and rebuild the complete image;
+repository owners do not provide executable code. There is no language host,
+runtime plugin loader or public primitive SDK.
 
 ## Compile-time application composition
 
