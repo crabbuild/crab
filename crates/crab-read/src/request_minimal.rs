@@ -1,6 +1,6 @@
 //! Verified loading of one request-minimal root and its bounded capsule frontier.
 
-use crab_metadata::request_minimal::{Capsule, CapsulePointer, RootRecord, load_root};
+use crab_metadata::request_minimal::{Capsule, CapsulePointer, CapsuleRun, RootRecord, load_root};
 use crab_storage::{Store, StoreLayout};
 use futures_util::future::try_join_all;
 
@@ -47,13 +47,17 @@ pub async fn open_view(
     let snapshot = load_root(router).await?;
     let root = snapshot.record().clone();
     admit_frontier(root.root().capsule_frontier(), limits)?;
-    let capsules = try_join_all(
+    let runs = try_join_all(
         root.root()
             .capsule_frontier()
             .iter()
-            .map(|pointer| load_capsule(router, pointer)),
+            .map(|pointer| load_run(router, pointer)),
     )
     .await?;
+    let capsules = runs
+        .into_iter()
+        .flat_map(|run| run.capsules().to_vec())
+        .collect();
     Ok(RequestMinimalView { root, capsules })
 }
 
@@ -82,7 +86,7 @@ fn admit_frontier(pointers: &[CapsulePointer], limits: RequestMinimalReadLimits)
     Ok(())
 }
 
-async fn load_capsule(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<Capsule> {
+async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
     let path = router.request_minimal_capsule_path(pointer.hash());
     let (bytes, _) = router
         .store()
@@ -99,17 +103,18 @@ async fn load_capsule(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> 
             ),
         ));
     }
-    let capsule = Capsule::decode(bytes)?;
-    if capsule.hash() != pointer.hash()
-        || capsule.transaction_id() != pointer.transaction_id()
-        || capsule.base_root_digest() != pointer.base_root_digest()
+    let run = CapsuleRun::decode(bytes)?;
+    if run.hash() != pointer.hash()
+        || run.level() != pointer.level()
+        || run.transaction_ids() != pointer.transaction_ids()
+        || run.newest_base_root_digest() != pointer.newest_base_root_digest()
     {
         return Err(corrupt(
             &path,
-            "capsule does not match its authenticated root pointer",
+            "capsule run does not match its authenticated root pointer",
         ));
     }
-    Ok(capsule)
+    Ok(run)
 }
 
 fn corrupt(path: &object_store::path::Path, reason: impl Into<String>) -> ReadError {
@@ -184,20 +189,25 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
         store
             .put(
-                &router.request_minimal_capsule_path(capsule.hash()),
-                capsule.bytes().clone(),
+                &router.request_minimal_capsule_path(run.hash()),
+                run.bytes().clone(),
             )
             .await
             .unwrap();
+        let mut transaction_ids = run.transaction_ids();
+        if let Some(pointer_transaction_id) = pointer_transaction_id {
+            transaction_ids[0] = pointer_transaction_id;
+        }
+        let pointer_transaction_id = transaction_ids[0].clone();
         let pointer = CapsulePointer::new(
-            capsule.hash(),
-            capsule.bytes().len() as u64,
-            pointer_transaction_id
-                .as_deref()
-                .unwrap_or_else(|| capsule.transaction_id()),
-            capsule.base_root_digest(),
+            run.hash(),
+            run.bytes().len() as u64,
+            run.level(),
+            transaction_ids,
+            run.newest_base_root_digest(),
         )
         .unwrap();
         let next = initial
@@ -206,7 +216,8 @@ mod tests {
                 initial.digest(),
                 std::collections::BTreeMap::from([("refs/heads/main".to_owned(), "2".repeat(40))]),
                 std::collections::BTreeMap::new(),
-                pointer,
+                vec![pointer],
+                &pointer_transaction_id,
             )
             .unwrap();
         let root = RootRecord::encode(next).unwrap();

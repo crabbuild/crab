@@ -23,12 +23,16 @@ the released push and read paths:
   CAS;
 - `crab-read::request_minimal` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
+- equal-size capsule runs merge as a binary counter, so a 500-push checkpoint
+  window has at most nine run objects and contains six after push 500;
 - the executable clean-path test proves exactly four object-store operations,
-  including advertisement: root GET, capsule PUT, capsule GET, and root PUT;
+  including advertisement: root GET, capsule-run PUT, run GET, and root PUT;
 - the checksum-qualified AWS S3 test proves exactly three operations, while
   custom S3 endpoints and other providers retain mandatory readback;
 - the executable one-capsule read test proves exactly two object-store
-  operations: root GET and capsule GET;
+  operations: root GET and capsule-run GET;
+- a 500-push executable model proves 1,994 qualified object-store operations,
+  or 3.988 per push including advertisement and binary carry compaction;
 - CAS-loser, expected-old mismatch, payload corruption, and lost-root-response
   tests fail closed or reconcile through exact transaction identity.
 
@@ -145,7 +149,8 @@ report those operations separately.
 | No-op after advertisement | 0 | 0 | The advertised root already proves the result |
 | No-op including advertisement | 1 | 1 | Root GET only |
 | Ref-only update | 3 | 4 | A small capsule preserves transaction history and recovery evidence |
-| New small capsule | 3 | 4 | Root GET, capsule PUT, optional capsule GET, root CAS |
+| New small capsule, no carry | 3 | 4 | Root GET, run PUT, optional run GET, root CAS |
+| Binary carry across `C` occupied levels | `3 + C` | `4 + C` | Each carried level adds one run GET; only the final merged run is PUT |
 | Existing verified capsule | 4 | 4 | Create conflict requires body verification before reuse |
 | New multipart capsule with `P` parts | `P + 4` | `P + 5` | Root GET, initiate, parts, complete, optional GET, root CAS |
 | Root CAS conflict | `+2` per retry | `+2` per retry | Refresh root, revalidate/merge, retry CAS |
@@ -308,7 +313,14 @@ equals its complete catalog. Hidden refs, partial-clone filters, shallow
 boundaries, or any smaller selection require Crab to generate a pack containing
 only the authorized selected objects.
 
-The root points to one checkpoint and a bounded frontier of later capsules.
+The root points to one checkpoint and a bounded binary frontier of later
+capsule runs. Level `L` contains exactly `2^L` complete capsules. Appending a
+leaf merges equal-level suffixes like a binary counter; only the final merged
+run is uploaded. With a hard checkpoint interval of 500 pushes, at most nine
+runs are addressable and generation 500 has six. The amortized number of carry
+GETs is less than one per push, while a reader fetches one object per set bit
+in the post-checkpoint transaction count.
+
 Checkpoint construction is background maintenance and is not part of the
 clean push budget. A checkpoint becomes visible through the same root CAS and
 must preserve an equivalent ref state.
@@ -553,21 +565,29 @@ these budgets until section 18's LFS protocol decision is closed.
 
 ### 10.6 Read request budgets
 
-Let `D` be the number of post-checkpoint capsules and `R` the number of
-coalesced capsule ranges needed for an incremental selection. Assuming the
+Let `D` be the number of post-checkpoint transactions, `popcount(D)` the
+number of binary capsule runs, and `R` the number of coalesced ranges needed
+for an incremental selection. Assuming the
 root contains the checkpoint pack descriptor and one GET can return a complete
-capsule or required contiguous pack range, the theoretical minima are:
+run or required contiguous pack range, the theoretical minima are:
 
 | Operation | Minimum object-store reads | Qualification |
 | --- | ---: | --- |
 | Ref advertisement | **1** | Root GET |
 | Full authorized clone at checkpoint generation | **2** | Root GET plus checkpoint pack range |
-| Full clone ahead of checkpoint | **2 + D** | Root, checkpoint pack, and each frontier capsule |
+| Full clone ahead of checkpoint | **2 + popcount(D)** | Root, checkpoint pack, and each frontier run |
 | Incremental fetch or pull | **1 + R** | Root plus selected coalesced ranges |
 | Lazy object fetch | **2** | Root plus one range only when object and bases co-locate |
 
+At the fixed 500-transaction checkpoint interval, `popcount(D) <= 8`, so an
+unfiltered clone requires at most ten object reads and requires eight at the
+500-transaction boundary. Over one complete 500-push window, binary carries
+add `500 - popcount(500) = 494` GETs. The qualified single-PUT path therefore
+uses `4N - popcount(N) = 1,994` total operations, or 3.988 per push; mandatory
+readback uses 2,494, or 4.988 per push.
+
 These are origin-request minima, not universal guarantees. A selected object
-and its delta bases may span multiple capsules; authorization or filtering may
+and its delta bases may span multiple runs; authorization or filtering may
 force selected-object reconstruction; retries count again; hydrate and LFS add
 their own reads. Claiming a constant two-request fetch would therefore be
 incorrect.
@@ -806,9 +826,10 @@ production wiring and format freeze require these decisions to be closed:
 - **Partly decided:** roots are capped at 8 MiB. Repositories whose complete
   ref map cannot fit require a separately designed protocol and cannot use v2;
 - the maximum capsule size before multipart and the multipart part policy;
-- **Provisional:** the implementation blocks an eighth post-checkpoint capsule,
-  keeping `2 + D` clone reads below ten. Large-repository evidence must confirm
-  or revise the seven-capsule limit before format freeze;
+- **Decided:** checkpoint windows contain at most 500 ref transactions and use
+  power-of-two capsule runs. The frontier has no more than eight populated
+  levels in that interval, keeping root + checkpoint + frontier reads at ten
+  or fewer while amortized qualified push operations remain below four;
 - whether native LFS bodies are capsule sections or retain a separately
   counted protocol;
 - the exact active-active boundary, which cannot use one object-store root as

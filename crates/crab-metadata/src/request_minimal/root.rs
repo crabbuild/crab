@@ -14,7 +14,9 @@ const ROOT_DIGEST_BYTES: usize = 32;
 /// Maximum encoded repository-root size accepted by readers and writers.
 pub const MAX_ROOT_BYTES: u64 = 8 * 1024 * 1024;
 /// Maximum post-checkpoint capsules kept in one repository root.
-pub const MAX_CAPSULE_FRONTIER: usize = 7;
+pub const MAX_CAPSULE_FRONTIER: usize = 9;
+/// Maximum ref transactions admitted before a complete checkpoint is required.
+pub const MAX_DELTA_DEPTH: u32 = 500;
 
 /// Root reference to one durable immutable capsule.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,8 +24,10 @@ pub const MAX_CAPSULE_FRONTIER: usize = 7;
 pub struct CapsulePointer {
     hash: String,
     size: u64,
-    transaction_id: String,
-    base_root_digest: String,
+    level: u8,
+    capsule_count: u32,
+    transaction_ids: Vec<String>,
+    newest_base_root_digest: String,
 }
 
 impl CapsulePointer {
@@ -31,14 +35,19 @@ impl CapsulePointer {
     pub fn new(
         hash: impl Into<String>,
         size: u64,
-        transaction_id: impl Into<String>,
-        base_root_digest: impl Into<String>,
+        level: u8,
+        transaction_ids: Vec<String>,
+        newest_base_root_digest: impl Into<String>,
     ) -> Result<Self> {
+        let capsule_count = u32::try_from(transaction_ids.len())
+            .map_err(|_| contract_error("root capsule run count cannot be represented"))?;
         let pointer = Self {
             hash: hash.into(),
             size,
-            transaction_id: transaction_id.into(),
-            base_root_digest: base_root_digest.into(),
+            level,
+            capsule_count,
+            transaction_ids,
+            newest_base_root_digest: newest_base_root_digest.into(),
         };
         validate_capsule_pointer(&pointer)?;
         Ok(pointer)
@@ -56,16 +65,28 @@ impl CapsulePointer {
         self.size
     }
 
-    /// Return the embedded ref transaction identity.
+    /// Return the binary merge level of this capsule run.
     #[must_use]
-    pub fn transaction_id(&self) -> &str {
-        &self.transaction_id
+    pub fn level(&self) -> u8 {
+        self.level
     }
 
-    /// Return the repository-root digest on which the capsule depends.
+    /// Return the number of complete capsules in this run.
     #[must_use]
-    pub fn base_root_digest(&self) -> &str {
-        &self.base_root_digest
+    pub fn capsule_count(&self) -> u32 {
+        self.capsule_count
+    }
+
+    /// Return transaction identities in publication order.
+    #[must_use]
+    pub fn transaction_ids(&self) -> &[String] {
+        &self.transaction_ids
+    }
+
+    /// Return the parent root digest extended by the newest capsule.
+    #[must_use]
+    pub fn newest_base_root_digest(&self) -> &str {
+        &self.newest_base_root_digest
     }
 }
 
@@ -192,20 +213,42 @@ impl RepositoryRoot {
         parent_root_digest: &str,
         refs: BTreeMap<String, String>,
         peeled_refs: BTreeMap<String, String>,
-        capsule: CapsulePointer,
+        capsule_frontier: Vec<CapsulePointer>,
+        transaction_id: &str,
     ) -> Result<Self> {
-        if capsule.base_root_digest != parent_root_digest {
+        validate_content_hash(
+            transaction_id,
+            "new root transaction id",
+            "request-minimal root",
+        )?;
+        if capsule_frontier
+            .last()
+            .is_none_or(|run| run.newest_base_root_digest != parent_root_digest)
+        {
             return Err(contract_error(
-                "capsule base does not match the parent root",
+                "newest capsule run does not extend the parent root",
             ));
         }
-        if self.capsule_frontier.len() >= MAX_CAPSULE_FRONTIER {
-            return Err(contract_error(format!(
-                "capsule frontier reached its {MAX_CAPSULE_FRONTIER}-generation checkpoint limit"
-            )));
+        let retained = self
+            .capsule_frontier
+            .iter()
+            .flat_map(|run| run.transaction_ids.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let next = capsule_frontier
+            .iter()
+            .flat_map(|run| run.transaction_ids.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if retained.contains(transaction_id)
+            || !next.contains(transaction_id)
+            || !retained.is_subset(&next)
+            || next.len() != retained.len() + 1
+        {
+            return Err(contract_error(
+                "new capsule frontier must retain every transaction and add exactly one",
+            ));
         }
-        let mut frontier = self.capsule_frontier.clone();
-        frontier.push(capsule);
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
@@ -218,8 +261,11 @@ impl RepositoryRoot {
             peeled_refs,
             head: self.head.clone(),
             checkpoint: self.checkpoint.clone(),
-            capsule_frontier: frontier,
-            delta_depth: self.delta_depth + 1,
+            capsule_frontier,
+            delta_depth: self
+                .delta_depth
+                .checked_add(1)
+                .ok_or_else(|| contract_error("root delta depth overflowed"))?,
             capabilities: self.capabilities.clone(),
         };
         validate_root(&root)?;
@@ -242,10 +288,7 @@ impl RepositoryRoot {
         let root = Self {
             version: ROOT_VERSION,
             repository_id: self.repository_id.clone(),
-            generation: self
-                .generation
-                .checked_add(1)
-                .ok_or_else(|| contract_error("root generation overflowed"))?,
+            generation: self.generation,
             parent_root_digest: Some(parent_root_digest.to_owned()),
             refs: self.refs.clone(),
             peeled_refs: self.peeled_refs.clone(),
@@ -312,7 +355,7 @@ impl RepositoryRoot {
     pub fn contains_transaction(&self, transaction_id: &str) -> bool {
         self.capsule_frontier
             .iter()
-            .any(|capsule| capsule.transaction_id == transaction_id)
+            .any(|run| run.transaction_ids.iter().any(|id| id == transaction_id))
     }
 }
 
@@ -427,17 +470,31 @@ impl RootRecord {
 fn validate_capsule_pointer(pointer: &CapsulePointer) -> Result<()> {
     validate_content_hash(&pointer.hash, "root capsule hash", "request-minimal root")?;
     validate_content_hash(
-        &pointer.transaction_id,
-        "root transaction id",
-        "request-minimal root",
-    )?;
-    validate_content_hash(
-        &pointer.base_root_digest,
+        &pointer.newest_base_root_digest,
         "root capsule base digest",
         "request-minimal root",
     )?;
-    if pointer.size == 0 {
-        return Err(contract_error("root capsule size must be non-zero"));
+    let expected_count = 1_u32
+        .checked_shl(u32::from(pointer.level))
+        .ok_or_else(|| contract_error("root capsule run level is too large"))?;
+    if pointer.size == 0
+        || pointer.capsule_count != expected_count
+        || usize::try_from(pointer.capsule_count).ok() != Some(pointer.transaction_ids.len())
+    {
+        return Err(contract_error("root capsule run descriptor is invalid"));
+    }
+    let mut transactions = BTreeSet::new();
+    for transaction_id in &pointer.transaction_ids {
+        validate_content_hash(
+            transaction_id,
+            "root transaction id",
+            "request-minimal root",
+        )?;
+        if !transactions.insert(transaction_id) {
+            return Err(contract_error(
+                "root capsule run repeats a transaction identity",
+            ));
+        }
     }
     Ok(())
 }
@@ -510,9 +567,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
             "root contains a peeled target without its ref",
         ));
     }
-    if root.capsule_frontier.len() > MAX_CAPSULE_FRONTIER
-        || root.delta_depth as usize != root.capsule_frontier.len()
-    {
+    if root.capsule_frontier.len() > MAX_CAPSULE_FRONTIER || root.delta_depth > MAX_DELTA_DEPTH {
         return Err(contract_error(
             "root capsule frontier is not bounded by delta depth",
         ));
@@ -535,7 +590,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
         if root
             .capsule_frontier
             .last()
-            .is_some_and(|capsule| capsule.base_root_digest != parent)
+            .is_some_and(|run| run.newest_base_root_digest != parent)
         {
             return Err(contract_error(
                 "newest capsule does not extend the root parent generation",
@@ -544,7 +599,7 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
     }
     if let Some(checkpoint) = &root.checkpoint {
         validate_checkpoint_pointer(checkpoint)?;
-        if checkpoint.covered_generation >= root.generation {
+        if checkpoint.covered_generation > root.generation {
             return Err(contract_error(
                 "checkpoint must cover a generation before its publishing root",
             ));
@@ -552,15 +607,34 @@ fn validate_root(root: &RepositoryRoot) -> Result<()> {
     }
     let mut capsules = BTreeSet::new();
     let mut transactions = BTreeSet::new();
-    for capsule in &root.capsule_frontier {
-        validate_capsule_pointer(capsule)?;
-        if !capsules.insert(capsule.hash.as_str())
-            || !transactions.insert(capsule.transaction_id.as_str())
-        {
+    let mut previous_level = None;
+    let mut capsule_count = 0_u32;
+    for run in &root.capsule_frontier {
+        validate_capsule_pointer(run)?;
+        if previous_level.is_some_and(|level| level <= run.level) {
             return Err(contract_error(
-                "root capsule frontier repeats a capsule or transaction",
+                "root capsule run levels must be strictly descending",
             ));
         }
+        previous_level = Some(run.level);
+        capsule_count = capsule_count
+            .checked_add(run.capsule_count)
+            .ok_or_else(|| contract_error("root capsule count overflowed"))?;
+        if !capsules.insert(run.hash.as_str()) {
+            return Err(contract_error("root capsule frontier repeats a run"));
+        }
+        for transaction_id in &run.transaction_ids {
+            if !transactions.insert(transaction_id.as_str()) {
+                return Err(contract_error(
+                    "root capsule frontier repeats a transaction",
+                ));
+            }
+        }
+    }
+    if capsule_count != root.delta_depth {
+        return Err(contract_error(
+            "root delta depth does not equal its capsule run inventory",
+        ));
     }
     Ok(())
 }
@@ -618,33 +692,54 @@ mod tests {
         assert!(matches!(error, MetadataError::CorruptObject { .. }));
     }
 
+    fn advance_with_synthetic_run(record: &RootRecord, sequence: u64) -> Result<RootRecord> {
+        let transaction_id = format!("{:064x}", sequence + 10);
+        let mut frontier = record.root().capsule_frontier().to_vec();
+        let mut level = 0_u8;
+        let mut transaction_ids = vec![transaction_id.clone()];
+        while frontier
+            .last()
+            .is_some_and(|pointer| pointer.level() == level)
+        {
+            let older = frontier
+                .pop()
+                .ok_or_else(|| contract_error("synthetic frontier became empty"))?;
+            let mut merged = older.transaction_ids().to_vec();
+            merged.extend(transaction_ids);
+            transaction_ids = merged;
+            level += 1;
+        }
+        frontier.push(CapsulePointer::new(
+            format!(
+                "{:064x}",
+                sequence.saturating_mul(16) + u64::from(level) + 1
+            ),
+            1,
+            level,
+            transaction_ids,
+            record.digest(),
+        )?);
+        RootRecord::encode(record.root().advance(
+            record.digest(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            frontier,
+            &transaction_id,
+        )?)
+    }
+
     #[test]
-    fn frontier_limit_requires_checkpoint_before_an_eighth_delta() {
+    fn delta_limit_requires_checkpoint_before_transaction_501() {
         let mut record = RootRecord::encode(
             RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
         )
         .unwrap();
-        for generation in 0..MAX_CAPSULE_FRONTIER {
-            let pointer = CapsulePointer::new(
-                format!("{generation:064x}"),
-                1,
-                format!("{:064x}", generation + 10),
-                record.digest(),
-            )
-            .unwrap();
-            let root = record
-                .root()
-                .advance(record.digest(), BTreeMap::new(), BTreeMap::new(), pointer)
-                .unwrap();
-            record = RootRecord::encode(root).unwrap();
+        for generation in 0..MAX_DELTA_DEPTH {
+            record = advance_with_synthetic_run(&record, u64::from(generation)).unwrap();
         }
-        let pointer =
-            CapsulePointer::new("f".repeat(64), 1, "e".repeat(64), record.digest()).unwrap();
 
-        let error = record
-            .root()
-            .advance(record.digest(), BTreeMap::new(), BTreeMap::new(), pointer)
-            .expect_err("frontier must stay bounded");
+        let error = advance_with_synthetic_run(&record, u64::from(MAX_DELTA_DEPTH))
+            .expect_err("checkpoint must bound the transaction window");
 
         assert!(matches!(
             error,
@@ -658,21 +753,8 @@ mod tests {
             RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
         )
         .unwrap();
-        for generation in 0..MAX_CAPSULE_FRONTIER {
-            let pointer = CapsulePointer::new(
-                format!("{generation:064x}"),
-                1,
-                format!("{:064x}", generation + 10),
-                record.digest(),
-            )
-            .unwrap();
-            record = RootRecord::encode(
-                record
-                    .root()
-                    .advance(record.digest(), BTreeMap::new(), BTreeMap::new(), pointer)
-                    .unwrap(),
-            )
-            .unwrap();
+        for generation in 0..10 {
+            record = advance_with_synthetic_run(&record, generation).unwrap();
         }
         let checkpoint_transaction = CapsuleTransaction::new(
             record.digest(),
@@ -719,24 +801,14 @@ mod tests {
             .unwrap();
         let checkpoint_record = RootRecord::encode(checkpoint_root).unwrap();
 
-        let next_pointer = CapsulePointer::new(
-            "c".repeat(64),
-            1,
-            "d".repeat(64),
-            checkpoint_record.digest(),
-        )
-        .unwrap();
-        let next = checkpoint_record
+        let next = advance_with_synthetic_run(&checkpoint_record, 100)
+            .unwrap()
             .root()
-            .advance(
-                checkpoint_record.digest(),
-                BTreeMap::new(),
-                BTreeMap::new(),
-                next_pointer,
-            )
-            .unwrap();
+            .clone();
 
         assert_eq!(checkpoint_record.root().capsule_frontier().len(), 0);
         assert_eq!(next.capsule_frontier().len(), 1);
+        assert_eq!(checkpoint_record.root().generation(), 10);
+        assert_eq!(next.generation(), 11);
     }
 }
