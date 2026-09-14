@@ -18882,9 +18882,16 @@ mod tests {
     }
 
     async fn initialize_test_repository(store: &Store, router: &StoreLayout) {
-        crate::cmd::init::initialize_remote_repository_store(store, router, "refs/heads/main")
+        crate::core::remote_layout::initialize(store, router)
             .await
             .expect("initialize canonical test repository");
+        crate::metadata::manifest::create_manifest(
+            store,
+            router,
+            &Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("initialize canonical v1 test manifest");
     }
 
     async fn ensure_test_layout(store: &Store, router: &StoreLayout) {

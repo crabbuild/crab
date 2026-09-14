@@ -458,6 +458,7 @@ pub async fn build_repository_url_store_with_root(
     Ok((store, root))
 }
 
+#[cfg(test)]
 pub(crate) async fn validate_repository_store(
     store: &Store,
     repository_prefix: &str,

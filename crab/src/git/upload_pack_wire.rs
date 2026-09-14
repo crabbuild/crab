@@ -121,6 +121,7 @@ impl UploadPackVisibilityProof {
         }
     }
 
+    #[cfg(test)]
     fn into_catalog(self) -> Result<GitCatalogVisibilityIndex> {
         match self {
             Self::Catalog(visibility) => Ok(visibility),
@@ -351,6 +352,7 @@ fn visibility_index_needs_repair(error: &RemoteGitError) -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn hidden_ref_patterns_are_valid(patterns: &[String]) -> bool {
     compile_hidden_refs(patterns).is_ok()
 }
@@ -1080,6 +1082,7 @@ async fn open_repository_with_visibility_requirement(
     }))
 }
 
+#[cfg(test)]
 pub(crate) async fn open_repository_with_catalog_visibility(
     store: &crab_storage::Store,
     prefix: &str,
@@ -1091,6 +1094,7 @@ pub(crate) async fn open_repository_with_catalog_visibility(
     Ok((repository, proof))
 }
 
+#[cfg(test)]
 pub(crate) async fn open_repository_with_optional_catalog_visibility(
     store: &crab_storage::Store,
     prefix: &str,

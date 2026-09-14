@@ -4309,9 +4309,16 @@ mod tests {
         run_git(fixture.work_tree(), &["commit", "-m", "pointer"]);
 
         let router = StoreLayout::new(store.clone(), TEST_REPLICA_PREFIX.to_owned());
-        crate::cmd::init::initialize_remote_repository_store(&store, &router, "refs/heads/main")
+        crate::core::remote_layout::initialize(&store, &router)
             .await
             .expect("initialize canonical command-path repository");
+        crate::metadata::manifest::create_manifest(
+            &store,
+            &router,
+            &crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main"),
+        )
+        .await
+        .expect("initialize canonical v1 command-path manifest");
 
         let result = run_push_batch(
             &[PushSpec {

@@ -105,8 +105,7 @@ pub async fn run_mirror_pre_push(
         &refspecs,
         Some(expected),
         cancel,
-    )
-    .await?;
+    )?;
     let checker =
         crate::cmd::fsck_store::StoreChecker::new(store.clone(), router.repo_prefix().to_owned());
     let after = destination_snapshot(&store, &router, cancel).await?;

@@ -119,6 +119,7 @@ impl<'a> NativePushInputs<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_pre_acquired_locks(
         mut self,
         pre_acquired_locks: Option<PushLockLease>,

@@ -24,13 +24,10 @@ use crate::git::push::{
     PushConfig, PushFailureStage, PushRejectReason, PushResult, RefPushOutcome,
     configure_active_active_push_coordinator, record_push_audit_event,
 };
-use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
-use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::{AGENT_REBASE_FETCH_REF_FILTERING_ENV, PushSpec};
 use crate::git::url::CrabUrl;
 use crate::replication::StoreResolver;
-use crate::storage::StoreLayout;
 
 const INTEGRATION_RETRY_BACKOFF_BASE: Duration = Duration::from_millis(250);
 const INTEGRATION_RETRY_BACKOFF_CAP: Duration = Duration::from_secs(3);
@@ -374,154 +371,20 @@ fn push_failure_source(specs: &[PushSpec], result: &PushResult) -> CrabError {
     CrabError::Internal("push failed without a per-ref failure outcome".to_owned())
 }
 
-/// Push explicit refspecs without emitting command output.
+/// Reject prepared mirror and recovery pushes until they have a v2 adapter.
 ///
-/// Used after recovery staging or mirror batch admission. Expected refs,
-/// when provided, require an atomic full-walk batch with exact destination
-/// coverage. The normal push pipeline still owns every remote mutation:
-/// xorb uploads, shard/index writes, manifest CAS, ref CAS, push-state
-/// update, and audit logging.
-pub(crate) async fn run_push_prepared_refspecs(
-    remote: Option<&str>,
-    refspecs: &[String],
-    expected_refs: Option<BTreeMap<String, Option<String>>>,
-    cancel: &CancellationToken,
+/// Continuing through the retired staged-payload publisher would create v1
+/// objects that protocol-v2 readers cannot observe.
+pub(crate) fn run_push_prepared_refspecs(
+    _remote: Option<&str>,
+    _refspecs: &[String],
+    _expected_refs: Option<BTreeMap<String, Option<String>>>,
+    _cancel: &CancellationToken,
 ) -> Result<PushSummaryPayload> {
-    let start = Instant::now();
-    let repo_root = resolve_push_repo_root()?;
-    let target = resolve_push_target(remote)?;
-    let remote_name = target.remote;
-    let remote_url = target.url;
-    let parsed_url = target.parsed_url;
-    let config = crate::core::config::Config::resolve_local()?;
-    let staging = PushStaging::open(repo_root.join(".crab/staging")).await?;
-    let specs = resolve_push_specs(refspecs, &remote_name, false)?;
-    if let Some(expected) = &expected_refs
-        && (expected.len() != specs.len()
-            || specs.iter().any(|spec| !expected.contains_key(&spec.dst)))
-    {
-        return Err(CrabError::Protocol(
-            "prepared push requires one expected-old value per destination".to_owned(),
-        ));
-    }
-    if specs.is_empty() {
-        return Ok(PushSummaryPayload {
-            refs_pushed: 0,
-            refs: Vec::new(),
-            duration_ms: start.elapsed().as_millis() as u64,
-            remote_url,
-            integration_retries: None,
-            integration_retry_limit: None,
-            integration_retry_stages: None,
-            operation_id: None,
-            coordinator_epoch: None,
-            writer_region: None,
-            commit_state: None,
-        });
-    }
-
-    let mut push_state = PushState::load(&repo_root);
-    let mut push_config = PushConfig::from_config(&config);
-    let leased_batch = expected_refs.is_some();
-    if let Some(expected_refs) = expected_refs {
-        push_config.atomic = true;
-        push_config.expected_refs = expected_refs;
-    }
-    configure_active_active_push_coordinator(
-        &config,
-        Some(&remote_url),
-        &parsed_url.repo_path,
-        &mut push_config,
-    )
-    .await?;
-
-    let (store, router) = if matches!(
-        config.auth.provider,
-        crate::core::config::AuthProvider::CrabAuth
-    ) {
-        let protected = crate::git::protected_push::prepare_crab_auth_push(
-            &config,
-            &parsed_url,
-            &specs,
-            cancel,
-        )
-        .await?;
-        push_config.atomic = true;
-        push_config.protected_push = Some(protected.session);
-        let store = protected.store;
-        let router = StoreLayout::new(store.clone(), parsed_url.repo_path.clone());
-        (store, router)
-    } else {
-        let selection = StoreResolver::new(&config, &parsed_url, cancel)
-            .write_store("push.prepared_refs")
-            .await?;
-        (selection.store, selection.router)
-    };
-    let repo_prefix = router.repo_prefix().to_owned();
-    let caching_store = crab_cache_store::CachingStore::try_build_healthy(
-        store.as_storage().clone(),
-        &config.cache,
-    )
-    .await;
-
-    let mut native_config = NativePushConfig::new(push_config);
-    // A hook must enumerate its supplied snapshot, not just changes since
-    // the last local push-state entry. Origin-byte proof is a separate guard.
-    native_config.incremental = !leased_batch;
-    native_config.progress = false;
-    native_config.emit_summary = false;
-    native_config.color = false;
-    let result = run_native_push(
-        &native_config,
-        &specs,
-        NativePushInputs::new(
-            Some(store),
-            caching_store,
-            staging,
-            router,
-            &mut push_state,
-            &remote_name,
-            &remote_url,
-            None,
-            cancel.clone(),
-        ),
-    )
-    .await?;
-
-    if let Err(err) = record_push_audit_event(
-        &repo_root.join(default_log_path()),
-        Some(&remote_url),
-        &repo_prefix,
-        &specs,
-        &result,
-        Some(start.elapsed().as_millis() as u64),
-    ) {
-        warn!(%err, "failed to append prepared push audit event");
-    }
-
-    if !result.all_ok() {
-        return Err(CrabError::Internal(
-            "prepared push failed for one or more refs".to_owned(),
-        ));
-    }
-
-    for spec in &specs {
-        if spec.src.is_empty() {
-            continue;
-        }
-        if let Some(sha) = resolve_rev(&spec.src) {
-            push_state.set(&remote_url, &spec.dst, &sha);
-        }
-    }
-    push_state.save(&repo_root)?;
-
-    Ok(build_push_summary(
-        &specs,
-        &result,
-        &remote_url,
-        start.elapsed(),
-        None,
-    ))
+    Err(CrabError::Configuration {
+        key: "request-minimal prepared push".to_owned(),
+        origin: "mirror and recovery push require a protocol-v2 staged-payload adapter".to_owned(),
+    })
 }
 
 async fn run_push_once(
@@ -860,6 +723,7 @@ fn current_head_push_branch(specs: &[PushSpec]) -> Option<&str> {
     Some(branch)
 }
 
+#[cfg(test)]
 fn agent_integration_lock_branch<'a>(args: &PushArgs, specs: &'a [PushSpec]) -> Option<&'a str> {
     args.rebase_on_non_fast_forward
         .then(|| current_head_push_branch(specs))
@@ -994,6 +858,7 @@ fn run_git_pull_rebase(
     Err(git_command_diagnostics(&output.stdout, &output.stderr))
 }
 
+#[cfg(test)]
 fn remote_branch_exists(
     repo_root: &Path,
     remote: &str,
@@ -1058,6 +923,7 @@ fn integration_command(remote: &str, branch: &str) -> String {
     format!("git pull --rebase --autostash {remote} {branch}")
 }
 
+#[cfg(test)]
 fn remote_branch_probe_command(remote: &str, branch: &str) -> String {
     format!("git ls-remote --exit-code {remote} refs/heads/{branch}")
 }
@@ -1435,6 +1301,7 @@ pub(crate) fn git_config_value(key: &str) -> Option<String> {
 ///
 /// On `--features gix-facade`, resolves through `repo.rev_parse_single()`.
 /// Default builds shell out to `git rev-parse <spec>`.
+#[cfg(test)]
 fn resolve_rev(refspec: &str) -> Option<String> {
     #[cfg(feature = "gix-facade")]
     {
