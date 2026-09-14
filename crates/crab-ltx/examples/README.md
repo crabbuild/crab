@@ -1,9 +1,9 @@
 # `crab-ltx` examples
 
 These programs demonstrate the library boundary with real SQLite databases.
-The replica examples use an in-memory object store so they need no cloud
-credentials. Production callers construct the same `crab_storage::Store` with
-their S3, RustFS, GCS, or Azure provider.
+The focused replica examples use an in-memory object store and need no cloud
+credentials. The million-record workloads use a real RustFS endpoint through
+the same `crab_storage::Store` used by production callers.
 
 | Example | Demonstrates |
 | --- | --- |
@@ -13,8 +13,8 @@ their S3, RustFS, GCS, or Azure provider.
 | `sparse_writer` | Externally allocated epoch inheritance, writable sparse activation, publication, and exact restore |
 | `compact_history` | Full-chain compaction plus reopening and restoring an immutable historical manifest |
 | `repository_replication_lifecycle` | Complete per-repository lifecycle: write, capture, publish, paged read, epoch handoff, sparse write, compact, historical reopen, and exact restore |
-| `million_record_replication_load` | One million batched records, LTX publication and pruning, source loss, exact recovery, and throughput reporting |
-| `million_record_paged_read_performance` | One million published records followed by cold head/page-map opening, paged point/range queries, and a full aggregate scan |
+| `million_record_rustfs_replication_load` | One million batched records, real RustFS LTX publication and pruning, source loss, exact recovery, and throughput reporting |
+| `million_record_rustfs_paged_read_performance` | One million RustFS-published records followed by cold head/page-map opening, paged point/range queries, and a full aggregate scan |
 
 From the repository root:
 
@@ -40,16 +40,26 @@ CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
 
 ## Million-record workloads
 
-Run performance examples with optimizations enabled:
+Provision a disposable, pre-created RustFS bucket and export its endpoint and
+credentials outside tracked files:
+
+```sh
+export CRAB_LTX_TEST_BUCKET=crab-ltx-examples
+export CRAB_LTX_TEST_ENDPOINT=http://127.0.0.1:9000
+export AWS_ACCESS_KEY_ID="<RustFS access key>"
+export AWS_SECRET_ACCESS_KEY="<RustFS secret key>"
+```
+
+Then run the workloads with optimizations enabled:
 
 ```sh
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
   cargo run --release -p crab-ltx --features replica \
-  --example million_record_replication_load --locked
+  --example million_record_rustfs_replication_load --locked
 
 CARGO_TARGET_DIR="$HOME/Workspace/crabbuild-target/crab-main" \
   cargo run --release -p crab-ltx --features replica \
-  --example million_record_paged_read_performance --locked
+  --example million_record_rustfs_paged_read_performance --locked
 ```
 
 Both workloads always create and verify exactly 1,000,000 records. The load
@@ -58,12 +68,13 @@ and prunes local LTX files only after publication. The read workload deletes the
 source database before reopening the remote head and running SQLite queries.
 
 These are reproducible executable workloads, not statistically rigorous
-benchmarks. Their default in-memory object store isolates `crab-ltx` CPU,
-SQLite, verification, and CAS overhead from network variance, while retaining
-remote objects in process memory. Replace `InMemory` with the service's
-configured S3 or RustFS `Store` to measure provider latency, and run several
-iterations under representative CPU, disk, memory, and network limits before
-using the results for capacity planning.
+benchmarks. They use `crab-storage`'s real S3-compatible client, including
+RustFS network I/O and conditional head publication. Each invocation prints a
+unique repository prefix so an old head cannot collide with a new measurement.
+The examples never list or delete remote objects; use only a disposable bucket
+and let the bucket owner remove its contents afterward. Run several iterations
+under representative CPU, disk, memory, and network limits before using the
+results for capacity planning.
 
 ## Public API
 

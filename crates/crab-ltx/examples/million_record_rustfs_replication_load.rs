@@ -1,10 +1,11 @@
 mod support;
 
 use crab_ltx::{CrabError, Limits, ManagedDb, Replica};
-use crab_storage::{Store, StoreLayout};
-use object_store::memory::InMemory;
-use std::{sync::Arc, time::Instant};
-use support::{RECORD_COUNT, expected_object_size_sum, publish_records, records_per_second};
+use crab_storage::StoreLayout;
+use std::time::Instant;
+use support::{
+    RECORD_COUNT, expected_object_size_sum, publish_records, records_per_second, rustfs_target,
+};
 
 #[tokio::main]
 async fn main() -> crab_ltx::Result<()> {
@@ -14,10 +15,9 @@ async fn main() -> crab_ltx::Result<()> {
     let database = source_directory.path().join("repository.sqlite");
     let writer = ManagedDb::open(&database, limits)?;
 
-    // InMemory isolates crab-ltx throughput from network variance. Replace it
-    // with the service's S3/RustFS Store to measure provider end-to-end latency.
-    let store = Store::new(Arc::new(InMemory::new()));
-    let layout = StoreLayout::new(store, "benchmarks/million-record-load".into());
+    let target = rustfs_target("million-record-replication-load")?;
+    println!("RustFS object prefix: {}", target.repository_prefix);
+    let layout = StoreLayout::new(target.store, target.repository_prefix);
     let replica = Replica::new(layout, "epoch-1", limits)?;
     let report = publish_records(writer, &replica).await?;
     let database_bytes = std::fs::metadata(report.writer.path())?.len();
