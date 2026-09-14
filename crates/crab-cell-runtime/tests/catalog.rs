@@ -193,7 +193,7 @@ fn same_shard_targets() -> (CellStorageLayout, CellCatalog, CellTarget, CellTarg
 
 fn decode_digest(value: &str) -> [u8; 32] {
     let mut digest = [0; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         digest[index] = (nibble(pair[0]) << 4) | nibble(pair[1]);
     }
     digest

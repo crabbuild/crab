@@ -490,7 +490,9 @@ fn decode_hex(value: &str) -> Result<Vec<u8>> {
     }
     value
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let high = nibble(pair[0]).ok_or(Error::Catalog("hex is not lowercase"))?;
             let low = nibble(pair[1]).ok_or(Error::Catalog("hex is not lowercase"))?;

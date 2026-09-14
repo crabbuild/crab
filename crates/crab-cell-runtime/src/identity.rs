@@ -161,7 +161,7 @@ pub(crate) fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N]> {
         return Err(Error::Control("hex field length"));
     }
     let mut decoded = [0; N];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = nibble(pair[0]).ok_or(Error::Control("hex field must be lowercase"))?;
         let low = nibble(pair[1]).ok_or(Error::Control("hex field must be lowercase"))?;
         decoded[index] = (high << 4) | low;

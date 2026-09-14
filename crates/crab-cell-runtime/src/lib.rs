@@ -18,6 +18,7 @@ mod queue;
 mod schema;
 mod sql;
 mod worker;
+mod workflow;
 
 pub use actor::{CellHandle, CellRuntime};
 pub use authority::{CellAuthority, VersionedControl};
@@ -45,3 +46,8 @@ pub use queue::{
 pub use schema::{install_runtime_schema, verify_runtime_schema};
 pub use sql::{SqlBatch, SqlResultSet, SqlStatement, SqlValue, sql_batch, sql_query_batch};
 pub use worker::{SqlWorkerPool, WorkerExecution};
+pub use workflow::{
+    WorkflowAction, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowOutcome,
+    WorkflowSignal, WorkflowStart, WorkflowStatus, install_workflow_schema, workflow_cancel,
+    workflow_fire_timer, workflow_signal, workflow_start,
+};

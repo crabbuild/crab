@@ -255,6 +255,18 @@ Run status: 0=running, 1=completed, 2=failed, 3=cancelled. Activity state:
 0=ready, 1=leased, 2=completed, 3=failed, 4=cancelled. Timer state: 0=pending,
 1=fired, 2=cancelled. Full tables and constraints are in workflow.sql.
 
+Implementation status: `crab-cell-runtime::workflow` embeds and byte-verifies
+the normative Workflow migration. It implements atomic start, signal,
+cancellation and timer firing through a pinned `WorkflowDefinition`; derives
+run, event and action IDs exactly; validates state/result/action bounds before
+writes; enforces the 128 outstanding-task and 100K Cell-event ceilings; and
+cancels every pending local activity/timer on a terminal decision. Signal and
+timer identities are idempotent and payload conflicts fail closed. Integration
+coverage publishes a run, releases its owner, restores the exact root under a
+new owner and observes the same event sequence. Activity claim/lease/completion,
+effect actions, terminal retention cleanup and scheduler scanning remain to
+implement.
+
 Start requires absent workflow_id; an existing run returns PRECONDITION_FAILED
 unless this is a replay of its original request. Allocate run_id from the
 request identity and namespace via domain-separated BLAKE3 truncated to 16 bytes.
