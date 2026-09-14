@@ -29,7 +29,7 @@ pub enum CellState {
     Reconciling(PendingCommit), Draining, Fenced,
 }
 pub enum CommandIdentity {
-    Client(MutationIdentity),
+    Application(MutationIdentity),
     Effect(EffectIdentity),
     Internal { request_id: [u8; 16], expires_at_ms: i64 },
 }
@@ -61,9 +61,9 @@ state and pending cuts. A SQL worker owns ManagedDb; the actor holds an executor
 key, never a connection shared between threads. Losing a reply waiter does not
 drop the accepted command or release its resource reservations.
 
-Client/internal outcomes use sys_requests; private Effect outcomes use sys_inbox.
+Application/internal outcomes use sys_requests; private Effect outcomes use sys_inbox.
 The actor's lookup/store-outcome helpers dispatch on CommandIdentity, so a
-7-day effect is not accidentally subjected to the public 24-hour request limit.
+7-day effect is not accidentally subjected to the application 24-hour request limit.
 Effect lookup includes its 32-byte ID and destination incarnation. Internal
 requests have a 60-second admission validity and are never accepted from the
 public listener. The same pending-publication state machine supervises all three.
@@ -101,8 +101,8 @@ takeover; initiating another operation requires a current ownership session.
 The SQL worker runs steps 3–9 synchronously. The steps below name the client
 ledger; effect commands substitute sys_inbox and its longer retention:
 
-1. Authorize binding and validate role, identity, expiry and size. Reserve encoded
-   bytes and a mailbox entry. Failure before acceptance is NOT_STARTED.
+1. Authorize the resolved namespace capability; validate role, identity, expiry
+   and size. Reserve encoded bytes and a mailbox entry. Failure before acceptance is NOT_STARTED.
 2. Wait for Serving with no pending publication. Recheck owner deadline and
    expiry. Transfer reservations to the supervised command.
 3. Read the identity's outcome ledger. A matching ID/digest returns its stored result only after
@@ -111,7 +111,8 @@ ledger; effect commands substitute sys_inbox and its longer retention:
    Set `now = max(system_utc_ms, sys_meta.logical_time_ms)`.
 5. SAVEPOINT application. Invoke the handler. A business rejection rolls back
    to this savepoint and releases it, then becomes a bounded rejection result.
-   Infrastructure error, SQL interruption or guest trap rolls back everything.
+   Infrastructure error or SQL interruption rolls back everything. An unwinding
+   native panic fences the activation; never reuse that worker's connection.
 6. On success RELEASE savepoint. Encode and size-check result before COMMIT.
 7. Insert ID/digest/outcome/result at n with identity-specific retention. Update sys_meta
    sequence/time. A recorded business rejection advances n without domain writes.
@@ -168,18 +169,24 @@ authorizer on every exit. SQL cursors never survive a network round trip.
 ## Workers and drain
 
 Create `max(1, min(available_vcpu, 16))` worker shards. A bounded channel feeds
-each shard; Cell ID hashes to one worker that owns its ManagedDb map. JS Cells
-use JS-capable shards; primitives/native Cells use SQL shards. Every invocation
-is synchronous within that worker, including local guest SQL calls. Session
-movement requires drain and exact-root reopen. The page-fault I/O driver runs
-independently of all SQL/JS workers. No thread or isolate is allocated per Cell.
+each shard; Cell ID hashes to one worker that owns its ManagedDb map. Every
+command/query/transition is synchronous within that worker. Activities run on
+Tokio outside SQLite and return through queued commands. Session movement
+requires drain and exact-root reopen. The page-fault I/O driver runs independently
+of SQL workers. No worker thread or permanent activity task is allocated per Cell.
 
 Per-Cell mailbox ceiling: 64 requests and 8 MiB, further constrained by node
 byte admission. A dispatched job retains permits until actual completion even
-after waiter cancellation. Guest CPU is interrupted at 50 ms; SQL/page waits
-have a 5 s transaction wall deadline. Timed-out host jobs must finish rollback
-or fence before their sessions become reusable. Native modules are trusted;
-an uncooperative native callback can require terminating its process.
+after waiter cancellation. SQL/page waits have a 5 s transaction wall deadline;
+install a SQLite progress handler/interrupt and propagate deadlines into page I/O.
+Check the deadline before and after native callbacks and before COMMIT. Native
+Rust has no safe forced interruption: a watchdog fences admission and ownership,
+but retains job permits/connection ownership until the job really ends. A
+callback stuck outside SQLite requires supervisor termination of this process;
+this can affect every Cell in it. Do not detach blocked work and recycle permits.
+Native handlers must not perform blocking network I/O or unbounded computation.
+The runtime fences before cleanup on unwind; panic=abort uses normal source-loss
+recovery. Neither policy turns a panic into a business rejection.
 
 Drain closes admission, resolves accepted publications, captures/publishes any
 checkpoint cuts, closes SQLite, then releases ownership. Fenced sessions only

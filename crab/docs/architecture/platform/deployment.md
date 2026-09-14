@@ -1,37 +1,55 @@
-# Deployment records, admission and operations
+# Embedded server releases, admission and operations
 
-[Index](README.md). This is the v1 deployment procedure to implement, including
-its persisted states and error actions.
+[Index](README.md). Deploy the existing Crab server image. This specification
+adds Cell lifecycle management to that executable, not another server product,
+language runtime or application deployment control plane.
 
 ## Node configuration and startup
 
-Implement `crab-platform-server --config <path>`. The TOML decoder rejects
-unknown fields and validates all paths/identities before opening listeners.
+Reuse `crab-http-server --config <path> serve` and its existing listen,
+management_listen, storage.url and auth fields. Provider credentials still use
+the existing Crab construction path. Browser OIDC/session authorization remains
+at the product boundary; native activities need no public workload-token SDK.
 
-| Field | Required/type | Validation/default |
+Extend the existing strict TOML config with a cells section only for resources
+that current configuration cannot identify:
+
+| Field | Type/validation | Reason |
 | --- | --- | --- |
-| fleet_id | yes, hex16 | Used in peer enrollment and logs |
-| store | yes, existing Crab store configuration | One authoritative endpoint/root and existing credential construction |
-| public_listen | socket address | 0.0.0.0:8080 |
-| peer_listen | socket address | 0.0.0.0:8081; never public ingress |
-| peer_advertise | yes, HTTPS URL | Direct Pod/VM address, <=512 bytes |
-| data_dir | yes, absolute directory | Exclusive process session, no shared writable SQLite files |
-| identity | yes, certificate/key references | Node enrollment binds fleet and unique boot session |
-| auth_issuer, auth_audience | yes, strings | Validate workload JWT issuer/audience/expiry |
-| memory_bytes | optional u64 | Min(configured, detected cgroup/physical limit); configuration may only lower detected capacity |
-| disk_bytes | optional u64 | Min(configured, usable data_dir volume capacity) |
+| cells.data_dir | Required absolute directory on private node volume | SQLite/WAL/scratch need durable filesystem semantics; not present in current HTTP config |
+| cells.peer_advertise | Required HTTPS URL, <=512 bytes, direct Pod/VM endpoint on management_listen | A Service address cannot identify the current owner |
+| cells.peer_identity | Required PEM path containing node key/cert chain | Private mTLS and signed delegation, separate trust from browser login |
+| cells.peer_ca | Required PEM path for fleet trust root | Reject nodes from another fleet |
 
-Startup order: parse/validate config; exclusive-create session directory; enroll
-new random 16-byte session; open budgets/workers; run strict-create/stale-CAS
-provider probes; load deployment/catalog roots; register signed node advertisement;
-start peer listener; start public readiness. Failed provider or format checks
-leave readiness false. Credential values never enter manifests or diagnostics.
+No separate public/peer port setting: use listen and management_listen. No
+new storage credential or OIDC issuer settings. Detect CPU, effective memory and
+usable local disk from process/cgroup/volume limits; operators adjust Pod/VM
+resources instead of parallel runtime budget knobs. Single-node development is
+one replica with a local test CA and direct loopback endpoint, not an insecure
+peer bypass. Existing healthcheck must gain management CA verification; never
+disable TLS verification to preserve an old probe invocation.
 
-Node advertisement fields: version=1, fleet/session IDs, direct endpoint,
-progress u64, runtime image digest, supported host API versions and free
-memory/disk/job credits. Strict-create at boot; refresh every 3 s. Placement uses
-hints only. Prefer the highest rendezvous hash among candidates with sufficient
-credits and required module support; admit/reserve again locally before CAS.
+The peer certificate uses an Ed25519 enrollment key; the same key signs private
+delegation envelopes. Enrollment binds the fleet trust-root fingerprint,
+advertised endpoint and a new 16-byte process session in an authenticated node
+record. Both certificate and enrollment must validate. Key rotation creates a
+new session and drains the old one. The issuer may be the cluster's certificate
+operator or a VM fleet CA; automated CA provisioning is not a runtime feature.
+
+Startup order: parse/validate config; exclusive-create session directory; load
+compiled registry/release descriptor; establish new session; open budgets/workers;
+run strict-create/stale-CAS provider probes; verify release/catalog roots and
+registry compatibility; publish signed node advertisement; start private listener;
+then enable public readiness. Failed checks leave readiness false. Keys never
+enter descriptors, control records or diagnostic output.
+
+Advertisement fields: version=1, fleet fingerprint, session, endpoint, progress
+u64, image/release digest, supported module descriptor digests, peer versions and
+free memory/disk/job credits. Strict-create at boot; refresh every 3 s. Place a
+Cell on the highest rendezvous-ranked eligible node with adequate hinted credits;
+eligibility requires its control.code or bootstrap initial_code. Always
+reserve/check capacity locally again before acquiring the control CAS.
+Advertisements are hints, not ownership leases.
 
 ## Resource profiles and capacity targets
 
@@ -42,19 +60,22 @@ credits and required module support; admit/reserve again locally before CAS.
 | Large | 16 | 32–64 GB | 500–1,000 GB |
 
 Target: 1,000 user commands/s aggregate per node; 1K–10K simultaneously open
-databases with typical sizes 100–5,000 MB. A node advertises only measured
-capacity for its profile. Count registered, owned, open and executing separately.
+databases of typical size 100–5,000 MB. Advertise measured capacity, not a promise
+that the smallest node meets the largest target. Count registered, owned, open
+and executing separately. A released idle connection cannot serve current reads
+or writes until reacquisition and exact-root verification; counting it as open
+does not make it an active owner.
 
-Compute budgets at startup from effective memory M and disk D:
+Compute budgets at startup from effective memory M and usable volume capacity D:
 
 ```text
-memory reserve = max(512 MiB, M / 4)
-budget B = M - reserve
-SQLite page caches = 30% B
-directory/frame caches = 20% B
-guest heaps = 20% B
-queued payloads = 5% B
-capture/recovery/host I/O buffers = 25% B
+process/HTTP/Git baseline reserve = max(512 MiB, M / 4)
+Cell budget B = M - reserve
+SQLite page caches = 35% B
+directory/frame caches = 25% B
+queued command and activity payloads = 5% B
+capture/recovery/compaction/page I/O buffers = 25% B
+connection/SHM/actor/native task overhead = 10% B
 
 disk reserve = max(10 GiB, D / 5)
 usable disk = D - reserve
@@ -62,169 +83,215 @@ scratch ceiling = usable disk / 3
 cache/WAL/pending cuts = usable disk - scratch ceiling
 ```
 
-Reject startup if M<2 GiB or usable disk<20 GiB. Account allocation categories
-without double-counting shared buffers. Give each open SQLite session a 64 KiB
-minimum cache reservation, then allocate additional pages from its shared pool;
-measure connection/SHM overhead separately and reserve its observed upper bound
-before admission. All three ManagedDb connections enter FD accounting.
+Reject startup if M<2 GiB or usable disk<20 GiB. Account actual HTTP/Git transfer
+reservations against the process reserve; exceeding that reserve reduces Cell
+admission, never silently consumes its memory. No JS heap reservation remains.
+Measure baseline growth during combined Git/browser/Cell qualification.
+Include native thread stacks, registry data, connection and SHM overhead in
+measured accounting; reservations are not an RSS guarantee by themselves.
 
-Dirty/WAL growth reserves additional disk/memory before SQL mutation; enforce
-changed-page limits via the managed connection. Full operations reserve two DB
-sizes+64 MiB scratch and 64 MiB job memory. Concurrent large jobs are bounded by
-both bytes and `min(vCPU, 2)` slots. Shared object I/O ceiling is 32 requests.
-If a reservation cannot fit, return RESOURCE_EXHAUSTED before downloading data.
+Each open SQLite session reserves a 64 KiB minimum page cache plus its measured
+overhead upper bound. Additional pages come from the shared pool. All three
+ManagedDb connections and SQLite sidecar files enter FD accounting; startup
+validates available RLIMIT_NOFILE and activation reserves descriptors. A profile
+with insufficient memory or FDs rejects activation rather than substituting cold
+registrations for the requested open-DB target.
 
-At 10K 5,000 MB DBs, logical data is 50 TB and current 60-byte/page full indexes
-alone total about 732 GB. The authenticated directory and streaming work in
-storage.md are required before qualifying that workload. Control traffic also
-matters: 10K owned Cells renewed every 3 s produce about 3,333 updates/s before
-user writes. Commits carry renewal progress; idle owners release after 60 s.
-Do not report 1,000 logical commands as 1,000 total storage writes.
+Dirty/WAL growth reserves extra disk/memory before mutation; enforce changed-page
+limits on managed SQL. Full jobs reserve two DB sizes+64 MiB scratch and 64 MiB
+job memory. Large jobs cap at min(vCPU, 2) plus byte admission; object I/O caps
+at 32 concurrent requests. Page-fault progress has reserved I/O slots independent
+of maintenance. Lack of capacity returns RESOURCE_EXHAUSTED before downloading.
 
-## Application build manifest
+10K 5,000 MB DBs imply 50 TB logical data; 60-byte/page full indexes alone occupy
+about 732 GB. The bounded directory and streaming changes are prerequisites.
+10K owned Cells renewed every 3 s imply about 3,333 control updates/s before user
+writes. Commits also advance renewal progress; idle owners release after 60 s.
+Report logical commands, all internal commands and storage requests separately.
 
-CLI: `crab-platform build --manifest crab.toml --output <dir>`. Input fields:
+## Compiled registry and release descriptor
 
-| Field | Type/constraint |
+Add modules/migrations to the Crab source tree and register them explicitly in
+cells.rs. Build through the existing HTTP image pipeline; its existing React
+asset build remains required. Pin the deployed OCI image by digest. There is
+no crab-platform build command, application manifest interpreter, module fetch,
+user container scheduler or executable artifact upload endpoint.
+
+The build produces a bounded canonical release descriptor embedded in the binary.
+The same bytes may be copied to the object store as metadata. Fields:
+
+| Field | Contract |
 | --- | --- |
-| manifest_version | integer 1 |
-| application | stable hex16 ID provisioned by administrator |
-| services | array of `{name, runtime, entry, routes}`; runtime js/native/container |
-| namespaces | array of `{name, id, role, shards, module, migrations}` |
-| activities | array of `{name, image_digest, definition_digests}` |
-| permissions | array of `{service, binding, actions}` |
-| egress | array of HTTPS origins allowed for each external-work service |
+| version | integer 1 |
+| runtime | literal crab-http-server; descriptor is independent of fleet IDs |
+| peer_versions | sorted unique integers, v1 supports [1] |
+| modules | sorted entries described below, maximum 128 |
+| namespaces | stable id/name/role/shards/module binding; maximum 128 |
+| build | source revision and Cargo.lock digest, informational |
 
-For explicit-key SQL/Cell namespaces shards is absent; primitive shards are
-1..4096 powers of two. IDs and shard counts cannot change for an existing binding.
-Native module identifies a module registered in the runtime image. JS entry is
-a path in the build root; migrations are numbered SQL files. Container entries
-must be immutable OCI image digests. Workload permissions resolve to namespace
-IDs and explicit commands/read/claim/deploy grants.
+Each module entry contains name, code digest, schema_min/schema_max, migrations
+ordered by version/digest, command/query ID+codec+schema ranges, supported workflow
+definition digests and activity types. A module's code digest hashes its canonical
+descriptor excluding the code field itself, including a build-generated
+source/dependency digest. The release digest is BLAKE3 of the exact canonical
+descriptor (sorted JSON keys, no whitespace).
+Image digest is recorded by the operator in release.json, not inside its own image.
 
-Build output is `manifest.json` plus content-addressed artifact files. Manifest
-fields are version, application, artifact table `{digest,length,kind}`, services,
-namespaces, permissions, egress, required_host_api=1 and build_toolchain_digests.
-Serialize JSON with lexicographically sorted keys and no whitespace; deployment
-ID is BLAKE3 of exact manifest bytes. Validate every referenced artifact, contract
-and migration exists. Node/TypeScript dependency lockfiles contribute digests;
-dynamic remote module imports fail build.
+Descriptor limit 256 KiB; reject duplicate IDs, invalid roles, undeclared effect
+destinations and DLQ cycles at build/startup. A workflow definition digest hashes
+its state/event codec version, transition source and dependency digest; changing
+transition semantics creates a new digest. A descriptor references only handlers
+and SQL actually compiled into the binary. Do not mark an older digest supported
+unless the corresponding implementation is registered.
 
-## Deployment API and persisted state
+For explicit-key repository Cells, partition is stable repository UUID bytes.
+Primitive shard counts are powers of two 1..4096; IDs/shards never change for an
+existing namespace. Tenant and application IDs are persisted once under the
+configured Crab root during initialization, not derived from a mutable URL or
+repository name. The same image works in different fleets: only release.json
+and root identity carry the environment's application ID. Names are compile-time
+capability labels; APIs carry resolved IDs.
 
-Administrative endpoints require deploy permission:
+## Release activation state machine
+
+Implement administrative subcommands in the existing executable:
 
 ```text
-POST /admin/v1/deployments:stage
-  {application, manifest_digest, expected_revision, artifact_upload_receipts}
-POST /admin/v1/deployments:activate
-  {application, manifest_digest, expected_revision, strategy: compatible|maintenance}
-GET /admin/v1/deployments/{manifest_digest}
-  {state, desired, ready_nodes, pending_cells, failed_cells, error_code}
+crab-http-server --config CONFIG cells release prepare --expected-revision N --image DIGEST
+crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible
+crab-http-server --config CONFIG cells release status
 ```
 
-Application deployment.json (<=64 KiB) fields: version=1, application, revision
-u64 string, current digest|null, desired digest|null, state
-`ready|staging|maintenance|activating|failed`, and operation ID hex16. All updates
-use strict-create/CAS. A lost CAS response is reconciled by digest/operation ID.
+These are target commands, not currently runnable. Prepare reads only the
+descriptor compiled into this binary. Administrative storage credentials provide
+authority; there is no public deployment API.
 
-Staging procedure:
+release.json <=8 KiB: version=1, application, revision as u64 decimal string,
+current/desired descriptor digest or null, desired_image, operation ID hex16,
+state ready|prepared|maintenance|activating|failed. Descriptor objects use
+releases/<digest>.json. All updates strict-create/CAS; reconcile lost responses
+using exact operation ID/digest. Retrying a phase retains its operation ID.
 
-1. Verify every upload receipt and digest before recording desired deployment.
-2. Validate binding IDs/shards against the existing catalog. Provision new
-   catalog entries and fixed primitive shard Cells with initialized schemas.
-3. Eligible runtime nodes load modules, validate host capabilities and report
-   `{session,deployment,ready,error}` through immutable status plus node progress.
-4. CLI submits container Deployments/Services using OCI digests, workload identity,
-   resource limits and declared probes; wait for their ready replicas.
-5. Required modules need at least two ready runtime sessions in multi-node mode,
-   or one in explicitly single-node development mode, before activation.
+1. Prepare validates descriptor, current namespaces and migration digests; uploads
+   metadata; CASes desired/prepared. It neither loads code nor runs workloads.
+2. Operator rolls out the ordinary Crab Deployment/VM binary. Candidate nodes
+   register their compiled support and serve existing code/schema only where
+   compatible. Incompatible nodes remain unready for that release.
+3. Require two eligible sessions in a multi-node fleet, or one for a one-replica
+   deployment. Remove old public-serving nodes before exposing new API semantics.
+   The operator supplies fleet membership; a transient missing heartbeat is not
+   proof that an old binary stopped.
+4. Compatible activation requires the descriptor support every old command codec
+   through its retry horizon, old queue payloads and retained workflow definitions.
+   Set activating, migrate each Cell through its owner, then CAS current=desired,
+   state=ready only after all catalog entries are verified. New Cells during this
+   phase use the desired initial_code/schema; old Cells migrate before new APIs run.
+5. Report bounded cursor-based lists of pending/failed Cells. Repeated activate
+   inspects published code/schema and skips completed migrations. Partial progress
+   never makes an unpublished SQL migration authoritative.
 
-Compatible activation CASes current=desired after readiness. Ingress resolves
-the current deployment per request; each Cell still checks its active schema/
-module version. Failure before activation retains current. Partial container
-rollout never changes authoritative Cell roots.
-
-Maintenance activation gates new commands at ingress, drains Cells, then changes
-their owner/code/schema under the procedure below. If any Cell fails, report the
-precise failed set and keep affected admission gated. Repeated activate with the
-same operation ID resumes from published Cell state; it does not rerun completed
-migrations. No mixed incompatible writer fleet is admitted.
+Compatible means both old and new published schema/code pairs remain executable
+in the rolling binary set; no automatic downmigration. Incompatible activation
+first enters maintenance, stops public admission and background activities,
+drains publishers, and verifies all old process sessions have stopped or lost
+storage write access. Only then may the maintenance binary change Cell schemas.
+A release flag alone cannot fence a stale process because it is not the per-Cell
+CAS authority. Leave affected admission gated after failure. Resume using the
+same operation identity and already published roots.
 
 ## Per-Cell migration and version dispatch
 
-Control schema must match sys_meta.schema_version. To migrate N→N+1: drain
-pending work, verify migration digest is the next declared version, reserve
-transaction resources, BEGIN, execute SQL on the trusted migration connection,
-insert sys_migrations(version,digest,sequence), update sys_meta, COMMIT/capture,
-then CAS root/schema/deployment together. Only after success run new code.
-Guest and remote users cannot call the migration connection.
+control.schema must match sys_meta.schema_version. To migrate N→N+1: drain
+pending work, verify next migration digest and new module support, reserve normal
+transaction resources, BEGIN, execute trusted migration SQL, insert sys_migrations,
+update sys_meta, COMMIT/capture, then CAS root/schema/code together. Only then
+execute new code. Application SQL cannot reach the migration connection.
+Code-only changes also publish a system transaction/root at the next sequence;
+renewals never independently swap executable semantics.
 
-An existing sys_migrations row with another digest is SCHEMA_INCOMPATIBLE.
-Runtime result/schema validation is done before COMMIT. A failed CAS follows
-normal reconciliation; takeover opens whichever schema root was actually
-published. V1 migrations must fit normal changed-page/memory/time budgets;
-larger transforms require offline export/import into a new incarnation.
+An existing migration version with another digest is SCHEMA_INCOMPATIBLE.
+Validate result/schema before COMMIT; failed publication uses normal
+reconciliation. A successor opens the actually published schema/code pair.
+Large transforms exceeding normal page/memory/time limits use maintenance
+export/import into a new incarnation, not unbounded migration transactions.
 
-Workflow runs pin definition digests. A workflow shard's new Rust storage
-schema must remain readable by its pinned definitions, or the deployment is
-rejected until runs drain. ActivityClaim advertises worker-supported definition
-digests and only returns compatible tasks. Keep those worker versions/modules
-until all pinned runs expire. V1 queue input schema changes require draining
-messages or maintenance transformation; there is no implicit coercion.
+A new module must include all definitions its predecessor may still have in
+running/retained workflow rows, and old activity/result codecs. Removing one
+requires maintenance inventory proving no remaining run/task/outbox/request
+needs it, or draining/explicit migration first. Keeping a definition digest or
+an image in a registry is insufficient: an eligible executing node must contain
+that implementation. ActivityClaim filters supported definitions; takeover
+requires the whole Cell's required code, not just one claimed activity type.
+
+Rollbacks use a binary supporting the already-published schema and definitions.
+A routing rollback cannot undo migrated data. Retain rollback images and release
+descriptors alongside backups. Queue payload changes require compatibility
+or drained/transformed messages; never implicitly coerce bytes.
 
 ## Kubernetes and VM process lifecycle
 
-Runtime Kubernetes Deployment has public port 8080, peer port 8081, private
-per-Pod data volume, readiness `/readyz`, liveness `/livez`, termination grace
-120 s and a disruption budget preserving one serving runtime. NetworkPolicy
-limits peer port to enrolled runtimes. Public Service may select any ready node;
-private forwarding targets peer_advertise. No Service session affinity is required.
+One existing Crab container per Pod owns HTTP, peer routing, Cell runtime, SQL
+workers and native activity supervision. Object storage is shared; SQLite and
+cache volumes are private per Pod. Kubernetes public Service selects any ready
+node; private forwarding targets direct peer_advertise, with no sticky sessions.
+Use existing configured public/management ports, not a new primitive Service.
 
-SIGTERM marks node draining, removes public readiness, rejects new acquisition,
-drains accepted publications, closes SQLite, releases control and joins workers.
-At 110 s force unresolved waiters to UNKNOWN; process exits by 120 s. A provider
-outage makes readiness false but does not fail liveness and restart every node.
-VM deployment uses the same binary, isolated data directory and supervisor
-termination policy. External language services remain separate containers.
+Readiness on the management listener requires valid storage/registry and
+non-draining admission. Liveness detects process failure, not a transient
+object-store outage. NetworkPolicy restricts peer operations to enrolled nodes;
+probes access only health routes, never infer peer authority from source IP.
+Termination grace is 120 s; disruption budget preserves one compatible server.
+
+SIGTERM marks draining, removes readiness, rejects new acquisition and activity
+claims, cooperatively cancels external work, drains accepted publication, closes
+SQLite, releases controls and joins workers. At 110 s unresolved waiters receive
+UNKNOWN; exit by 120 s. A stuck native callback requires process termination;
+never release its permits and continue running it in the background. Successors
+recover authoritative origin roots. VM supervisors use the same lifecycle.
 
 ## Backup, restore and offline collection
 
-Backup request pins exact Cell/incarnation/root in a strict-created pin record
-before returning. Enumerate catalog to produce multi-Cell backup manifests;
-without a write/effect barrier this is explicitly a set of per-Cell snapshots.
-Collector traverses each root's LTX graph and sys_blob_refs through verified
-read-only SQLite, plus retained deployments and workflow definition artifacts.
+Backup pins exact Cell/incarnation/root with strict-create before returning,
+and records required release descriptors/image digests. Multi-Cell backup without
+a write/effect barrier is explicitly a set of per-Cell snapshots, not a globally
+atomic restore point. Verify executable availability before claiming restorability.
 
-V1 destructive GC is offline: stop all application runtime/worker publishers,
-revoke their object-store write access, verify in-flight writes settled, load
-catalog/control/pins, mark complete dependencies, and delete unmarked objects
-older than 24h grace with a separate scoped collector identity. Never use a
-bucket-wide delete. Missing catalog dependencies abort collection; incomplete
-LIST can only postpone deletions. Restore write access only after collection.
+V1 destructive GC is offline: stop application publishers/activities, revoke
+their storage write access, settle in-flight writes, load catalog/control/pins,
+mark complete LTX/root dependencies and delete only unmarked Cell objects older
+than 24h grace using a scoped collector identity. Missing dependencies abort;
+incomplete LIST may only postpone deletion. It must not collect existing
+Git/Xet/LFS/release-asset prefixes. No dynamic-code artifact GC is needed.
 
-Restore defaults to an isolated app with effects disabled. Verify root/body/
-directory checksums and SQL integrity, create a new incarnation and translate
-retained metadata explicitly. Enabling effects is a separate operator action
-because prior activities may already have run. Routing rollback cannot undo a
-schema migration; old code must support current schema or use a forward fix.
+Restore defaults to isolated application identity with effects disabled. Verify
+root/body/directory checksums and SQL integrity; create new incarnation and
+translate retained identities explicitly. Start a binary supporting the recorded
+schema/definitions. Reenabling effects is a separate operator action: external
+Git/network operations may already have happened before backup.
 
 ## Repository application cutover
 
-For crab-http-server: stop old collaboration writes, inventory repository UUIDs,
-import application JSON into per-repository SQL, validate counts/relationships,
-publish initial roots, then switch the fleet to the native Cell consumer.
-Validate browser create/edit/list flows and Git/SQL outbox reconciliation before
-reopening writes. No dual-write or legacy application-storage fallback is added.
-Existing Git/Xet/LFS objects are outside this application-data migration.
+Stop old collaboration writes and background writers. Inventory repository UUIDs;
+import application JSON into repository SQL; validate counts, IDs, permissions,
+relationships and retained submission identities. Publish initial roots and
+switch the fleet to the native consumer in one maintenance cutover. No dual
+writes, legacy read fallback or second collaboration persistence path remains.
+
+Validate browser create/edit/list/search and error flows, plus Git/SQL outbox
+reconciliation, before reopening admission. Existing public product routes and
+React UI stay in place; only explicitly designed outcome/receipt additions change
+their contract. Existing Git/Xet/LFS objects and publication are outside this
+application-data migration. Production binaries no longer call app_storage's
+JSON path; any importer is maintenance-only.
 
 ## Operational metrics
 
-Implement histograms for admission/SQL/capture/upload/CAS latency and recovery
-duration; gauges for open DBs, memory categories, SSD reservations, FDs, worker
-queues, oldest pending commit and scheduler scan lag; counters for unknown
-outcomes, owner changes, expired leases, dedup conflicts and rejected admission.
-Labels are application/primitive/profile/error class, never unbounded Cell IDs.
-Inspect one Cell through authenticated admin endpoints with secret/payload
-redaction. A capacity run fails if work is silently dropped or backlog grows
-without bound despite meeting superficial request-rate targets.
+Histograms: admission/SQL/capture/upload/CAS/recovery latency. Gauges: open/owned
+DBs, memory categories, SSD/FD reservations, SQL/activity queues, oldest pending
+commit, required code availability and scheduler lag. Counters: unknown outcomes,
+owner changes, lost leases, dedup conflicts, native watchdog fencing and rejected
+admission. Reuse existing server metrics exporter and lifecycle.
+
+Labels are primitive/profile/error class, not Cell/run/request IDs. Inspect one
+Cell through authenticated administrative commands with payload redaction.
+A capacity run fails on dropped work or unbounded backlog regardless of TPS.

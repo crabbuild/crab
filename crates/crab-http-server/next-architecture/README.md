@@ -11,6 +11,13 @@ limits and qualification status are recorded in [crab-ltx](crab-ltx.md).
 Audience: implementers of the HTTP application, storage and publication owners,
 operators, and reviewers of correctness and migration evidence.
 
+The [embedded Rust Cell runtime specification](../../../crab/docs/architecture/platform/README.md)
+now owns the low-level shared runtime APIs, Cell formats, primitive contracts and
+compiled-release lifecycle. It narrows delivery to Rust handlers embedded in this
+server; no standalone multi-language platform is planned. For overlapping runtime
+details, use that specification; this folder retains the repository data model,
+Git integration and hard-cutover requirements.
+
 This design replaces collaboration JSON documents with one SQLite database per
 cataloged repository. A Rust subsystem captures SQLite WAL changes into LTX
 files. Object storage holds the authoritative recovery graph. Multiple HTTP

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Validate design inputs only; this does not exercise a platform implementation.
+// Validate design inputs only; this does not exercise an embedded runtime implementation.
 const root = path.dirname(fileURLToPath(import.meta.url));
 const contracts = path.join(root, 'contracts');
 const runtime = readFileSync(path.join(contracts, 'runtime.sql'), 'utf8');
@@ -63,29 +63,53 @@ rejects(workflow, run + activity + `UPDATE workflow_activities SET completion_to
 rejects(workflow, run + activity + `UPDATE workflow_activities SET state=1, lease_until_ms=100;`, /CHECK constraint/);
 rejects('', `INSERT INTO sys_effects VALUES(zeroblob(32), zeroblob(32), X'', 1, 1, 0, 1000, NULL, 100, 1, NULL);`, /CHECK constraint/);
 
-const scratch = mkdtempSync(path.join(tmpdir(), 'crab-platform-contracts-'));
+// Only message contracts are intended: product HTTP APIs remain in Crab.
+const peer = readFileSync(path.join(contracts, 'peer.proto'), 'utf8');
+assert(!/^\s*service\s/m.test(peer), 'private contract must not generate a public service');
+assert(!/\b(?:WorkflowDecision|WorkflowAction)\b/.test(peer), 'native decisions do not cross peer RPC');
+assertions += 2;
+
+const scratch = mkdtempSync(path.join(tmpdir(), 'crab-cell-contracts-'));
 try {
   const compile = spawnSync('protoc', [
     `--proto_path=${contracts}`,
-    `--descriptor_set_out=${path.join(scratch, 'platform.pb')}`,
-    'platform.proto',
+    `--descriptor_set_out=${path.join(scratch, 'peer.pb')}`,
+    'peer.proto',
   ], { encoding: 'utf8' });
   if (compile.error) throw compile.error;
   assert.equal(compile.status, 0, compile.stderr);
   assertions++;
-  const encoded = spawnSync('protoc', [
-    `--proto_path=${contracts}`, '--encode=crab.platform.v1.MutationRequest', 'platform.proto',
-  ], { input: `target { binding: "sql" partition: "p" }
-identity { request_id: "1234567890123456" incarnation: "abcdefghijklmnop" issued_at_ms: 1 expires_at_ms: 2 }
-sql_batch { statements { sql: "SELECT ?" parameters { integer: 9223372036854775807 } } }` });
-  if (encoded.error) throw encoded.error;
-  assert.equal(encoded.status, 0, encoded.stderr.toString());
-  const decoded = spawnSync('protoc', [
-    `--proto_path=${contracts}`, '--decode=crab.platform.v1.MutationRequest', 'platform.proto',
-  ], { input: encoded.stdout, encoding: 'utf8' });
-  assert.equal(decoded.status, 0, decoded.stderr);
-  assert.match(decoded.stdout, /integer: 9223372036854775807/);
-  assertions++;
+  const target = 'target { tenant_id: "tenant0000000001" application_id: "app0000000000001" namespace_id: "sql0000000000001" partition: "p" }';
+  const identity = 'identity { request_id: "1234567890123456" incarnation: "abcdefghijklmnop" issued_at_ms: 1 expires_at_ms: 2 }';
+  // Serialization fixtures only; they do not prove authentication or signature validation.
+  const fixtures = [
+    {
+      type: 'MutationRequest',
+      input: target + identity + 'sql_batch { statements { sql: "SELECT ?" parameters { integer: 9223372036854775807 } } }',
+      expected: /integer: 9223372036854775807/,
+    },
+    {
+      type: 'PeerRequest',
+      input: 'version: 1 hop_count: 1 remaining_ms: 1000 authorization { origin_session: "session000000001" actions: "comment.write" } mutate {'
+        + target + identity + 'cell_command { command_id: 17 codec_version: 2 input: "comment" } }',
+      expected: /cell_command \{\s+command_id: 17\s+codec_version: 2\s+input: "comment"/,
+    },
+  ];
+  for (const fixture of fixtures) {
+    const type = 'crab.cell.peer.v1.' + fixture.type;
+    const encoded = spawnSync('protoc', [
+      '--proto_path=' + contracts, '--encode=' + type, 'peer.proto',
+    ], { input: fixture.input });
+    if (encoded.error) throw encoded.error;
+    assert.equal(encoded.status, 0, encoded.stderr.toString());
+    const decoded = spawnSync('protoc', [
+      '--proto_path=' + contracts, '--decode=' + type, 'peer.proto',
+    ], { input: encoded.stdout, encoding: 'utf8' });
+    if (decoded.error) throw decoded.error;
+    assert.equal(decoded.status, 0, decoded.stderr);
+    assert.match(decoded.stdout, fixture.expected);
+    assertions++;
+  }
 } finally {
   // Only the unique directory created by this validation run is removed.
   rmSync(scratch, { recursive: true });

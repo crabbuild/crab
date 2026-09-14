@@ -1,18 +1,41 @@
 syntax = "proto3";
-package crab.platform.v1;
+package crab.cell.peer.v1;
 
-// This descriptor is the v1 contract to implement, not an existing server.
-service Platform {
-  rpc Mutate(MutationRequest) returns (MutationReply);
-  rpc Read(ReadRequest) returns (ReadReply);
-  rpc Resolve(ResolveRequest) returns (ResolveReply);
+// Private messages for enrolled Crab nodes, not a public gRPC service.
+// This descriptor is a design input; no peer implementation exists yet.
+message PeerAuthorization {
+  bytes origin_session = 1;  // 16 bytes; enrollment binds the signing public key.
+  string principal_issuer = 2;
+  string principal_subject = 3;
+  repeated string actions = 4; // Sorted unique compiled action identifiers.
+  bytes release_digest = 5;  // 32 bytes.
+  int64 issued_at_ms = 6;
+  int64 expires_at_ms = 7;
+  bytes payload_digest = 8;  // BLAKE3 of exact nested operation bytes.
+  bytes signature = 9;       // Ed25519; 64 bytes.
+}
+message PeerRequest {
+  uint32 version = 1;        // Exactly 1.
+  PeerAuthorization authorization = 2;
+  uint32 hop_count = 3;      // 1..2 on wire; local calls do not forward.
+  uint32 remaining_ms = 4;   // 1..60000; never extend the signed expiry.
+  oneof operation {
+    MutationRequest mutate = 10;
+    ReadRequest read = 11;
+    ResolveRequest resolve = 12;
+    EffectRequest deliver_effect = 13;
+    EffectResolveRequest resolve_effect = 14;
+  }
+}
+message PeerReply {
+  oneof outcome {
+    MutationReply mutation = 1;
+    ReadReply read = 2;
+    ResolveReply resolve = 3;
+    Error error = 4;
+  }
 }
 
-// Bind only on the private, authenticated peer listener.
-service PeerEffects {
-  rpc Deliver(EffectRequest) returns (MutationReply);
-  rpc Resolve(EffectResolveRequest) returns (ResolveReply);
-}
 message EffectIdentity {
   bytes effect_id = 1;
   bytes source_cell = 2;
@@ -39,28 +62,11 @@ message EffectResolveRequest {
   bytes operation_digest = 4;
 }
 
-// Serialized host/guest transition output, not a public mutation endpoint.
-message WorkflowDecision {
-  enum Status { RUNNING = 0; COMPLETED = 1; FAILED = 2; CANCELLED = 3; }
-  Status status = 1;
-  bytes next_state = 2;
-  optional bytes result = 3;
-  repeated WorkflowAction actions = 4;
-}
-message WorkflowAction {
-  oneof action {
-    ScheduleActivity activity = 1;
-    ScheduleTimer timer = 2;
-    EmitEffect emit = 3;
-  }
-}
-message ScheduleActivity { string activity_type = 1; bytes input = 2; }
-message ScheduleTimer { int64 due_at_ms = 1; }
-message EmitEffect { string binding = 1; bytes partition = 2; bytes operation = 3; }
-
 message Target {
-  string binding = 1;
-  bytes partition = 2;
+  bytes tenant_id = 1;
+  bytes application_id = 2;
+  bytes namespace_id = 3;
+  bytes partition = 4;
 }
 message MutationIdentity {
   bytes request_id = 1;       // 16 bytes; immutable across retries.
@@ -85,7 +91,7 @@ message ResultSet {
   uint64 rows_changed = 3;
 }
 message SqlBatch { repeated Statement statements = 1; }
-message CellCommand { string method = 1; bytes input = 2; }
+message CellCommand { uint32 command_id = 1; uint32 codec_version = 2; bytes input = 3; }
 message KvCheck {
   bytes key = 1;
   oneof expected { bool absent = 2; bytes version = 3; }
@@ -228,7 +234,7 @@ message MutationReply {
 message KvGet { bytes scope = 1; bytes key = 2; }
 message KvList { bytes scope = 1; bytes prefix = 2; bytes after_key = 3; uint32 limit = 4; }
 message WorkflowGet { bytes workflow_id = 1; }
-message CellQuery { string method = 1; bytes input = 2; }
+message CellQuery { uint32 query_id = 1; uint32 codec_version = 2; bytes input = 3; }
 message ReadRequest {
   Target target = 1;
   uint32 timeout_ms = 2;

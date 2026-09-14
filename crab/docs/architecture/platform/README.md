@@ -1,109 +1,118 @@
-# Crab platform v1: low-level implementation specification
+# Embedded Rust Cell runtime: low-level implementation specification
 
-Status: design to implement. Revision: 2026-09-13. Existing-code baseline:
-`ec20643073a`. Contract files are implementation inputs; no platform server or
-SDK is implemented by this documentation change.
+Status: design to implement. Revision: 2026-09-14. Existing-code baseline:
+`ec20643073a`. SQL and peer contracts are implementation inputs; this PR does
+not implement the Cell runtime or qualify its performance.
 
 ## Deliverable and contract precedence
 
-Deliver a Rust runtime exposing SQL, scoped KV, partitioned Queue and explicit
-state-machine Workflow through native calls and one versioned HTTP/gRPC API.
-Deliver embedded TypeScript/JavaScript services and ordinary OCI services and
-activity workers in other languages. One command changes one SQLite Cell and
-is acknowledged only after LTX dependencies and its control CAS are durable.
+Embed SQL, scoped KV, partitioned Queue and explicit state-machine Workflow
+in the existing `crab-http-server` process. Crab application handlers and
+activities are trusted Rust code compiled into that binary. One command changes
+one SQLite Cell and is acknowledged only after its immutable LTX dependencies
+and owner/root CAS are durable. A repository's collaboration data uses one Cell;
+shared queue/KV/workflow namespaces use separate fixed shards where needed.
 
-The SQL migrations and Protobuf descriptor are normative. Prose supplies
-validations, ordering and preconditions not expressible in those formats.
-Rust signatures specify interfaces to implement, not existing library symbols.
+The SQL migrations and private Protobuf descriptor are normative. Prose supplies
+validation, ordering and preconditions not expressible in those formats. Rust
+signatures below are interfaces to implement, not existing library symbols.
+This specification refines the shared runtime contracts in the earlier
+[HTTP next architecture](../../../../crates/crab-http-server/next-architecture/README.md);
+that design retains repository-specific data, Git and cutover requirements.
+The directory name `platform/` is retained for documentation links, not a
+standalone product or server.
 
 | Specification | Implementation input |
 | --- | --- |
-| [Runtime](runtime.md) | Rust ownership types, command loop, CAS predicates, executor lifecycle and failure actions |
+| [Runtime](runtime.md) | Ownership types, command loop, CAS predicates, executor lifecycle and failure actions |
 | [Storage](storage.md) | Identity encoding, object keys, control/root formats, LTX API changes and activation |
 | [Primitives](primitives.md) | SQL statements, leases, dedup, state transitions and scheduler procedures |
-| [Language adapters](languages.md) | RPC mapping, typed values, host capability ABI and SDK retries |
-| [Deployment](deployment.md) | Configuration, admission equations, deployment records, migrations and operator procedures |
+| [Rust API and peer protocol](rust-api.md) | Typed handlers, transaction lifetimes, internal forwarding and Crab integration |
+| [Deployment](deployment.md) | Existing server configuration extensions, admission, compiled releases, migrations and operations |
 | [Delivery](delivery.md) | Source changes, dependency order, named tests and executable contract validation |
 | [Runtime migration](contracts/runtime.sql) | Install in every Cell |
 | [KV migration](contracts/kv.sql) | Install in KV shard Cells |
 | [Queue migration](contracts/queue.sql) | Install in Queue shard Cells |
 | [Workflow migration](contracts/workflow.sql) | Install in Workflow shard Cells |
-| [Wire descriptor](contracts/platform.proto) | Compilable Protobuf v3 data API |
+| [Private peer descriptor](contracts/peer.proto) | Protobuf messages for enrolled Crab nodes, not a public primitive service |
 
 ## Fixed v1 boundary
 
 | Item | Implementation decision |
 | --- | --- |
+| Executable | Existing `crab-http-server`, one binary/container per node |
+| Application model | Build-time Rust registry; typed synchronous commands/queries and asynchronous activities |
+| Calls | In-process Rust calls for local owners; versioned private messages for remote owners |
 | Durability | One object-store origin; immutable LTX preparation then owner/root CAS |
-| Rust modules | Trusted code statically registered in the operator runtime image |
-| JavaScript | deno_core host with synchronous command imports and async HTTP imports |
-| Other languages | Protobuf/HTTP clients in OCI containers; TS and Python SDKs delivered |
-| Workflow | Deterministic transition callback plus persisted activities/timers/signals |
+| Workflow | Explicit transition callback plus persisted activities/timers/signals; no stack replay |
 | KV | Values up to 64 KiB; scoped atomic mutations and scope-local listing |
 | Queue | Payloads up to 256 KiB; at-least-once, no FIFO guarantee |
-| Blobs | Internal immutable artifacts/references; no public object API in v1 |
-| Upgrades | Transactional per-Cell schema switch; incompatible deployments use maintenance |
+| Git and blobs | Existing Git/Xet/LFS/release-asset owners; no second public object API |
+| Upgrades | Compiled schema/definition versions; incompatible changes use maintenance |
 | GC | Offline application-scoped collection; writers stopped and write access revoked |
 
-WASM embedding, async workflow replay, large KV spill, global KV listing,
-public object/multipart APIs, peer-disk acknowledgements, online GC and
-cross-Cell transactions have no v1 endpoint or stub implementation. Other
-languages deploy through containers and use every v1 primitive over RPC.
+No JS/V8/WASM execution, multi-language backend SDKs, generic public SQL/KV/RPC
+listener, dynamic code loading, or service-bundle deployment system. The existing
+React browser application remains a client of Crab's product HTTP API.
+Cross-Cell transactions, online GC and peer-disk durability acknowledgements
+are also outside v1. Native code is trusted, not a tenant sandbox.
 
 ## Source ownership and target files
 
-Create these modules with their first working caller. This is the implementation
-allocation, not a list of alternative crate structures.
+Create one new crate, `crab-cell-runtime`, with its first working Crab caller.
+Primitive modules share its transaction and publication owner; separate facade,
+protocol, SDK and platform-server crates are unnecessary.
 
 ```text
-crates/crab-ltx/src/replica/prepared.rs       immutable root preparation
-crates/crab-ltx/src/replica/root.rs           bounded root/page codec
-crates/crab-ltx/src/paged/directory.rs        authenticated page directory
-crates/crab-ltx/src/managed.rs                transaction/read hooks
+crates/crab-http-server/src/
+  server.rs, app.rs            lifecycle, auth/admission and existing HTTP routing
+  cells.rs                    compiled repository registry and runtime composition
+  peer.rs                     private authenticated forwarding on management listener
+  cells/commands.rs           repository command/query types and handlers
+  cells/activities.rs         native Git/outbox activity adapters
+  cells/migrations/           repository SQL migrations
 
 crates/crab-cell-runtime/src/
-  identity.rs       CellId, request hashing, partition mapping
-  authority.rs      Control codec and conditional transitions
-  actor.rs          per-Cell supervised command state machine
-  executor.rs       bounded synchronous SQL worker shards
-  publication.rs   pending cut ownership and reconciliation
-  catalog.rs       fixed catalog shards and provision-before-use
-  scheduler.rs     due-summary scanner and maintenance commands
+  identity.rs, authority.rs    Cell identity and owner/control CAS
+  actor.rs, executor.rs        supervised commands and bounded SQL workers
+  publication.rs              pending cut ownership and reconciliation
+  catalog.rs, scheduler.rs     provision-before-use and due-summary scanning
+  registry.rs, api.rs          typed definitions, codecs and capability handles
+  peer.rs                     private message codec, no listener/auth policy
+  sql.rs, kv.rs, queue.rs,
+  workflow.rs, effects.rs      primitive mechanics
+  migrations/                 SQL copied from contracts/
 
-crates/crab-platform/src/
-  sql.rs, kv.rs, queue.rs, workflow.rs, effects.rs
-  migrations/      SQL copied from contracts/
-  guest.rs         transaction-scoped native handler interfaces
+crates/crab-ltx/src/
+  replica/prepared.rs          immutable root preparation
+  replica/root.rs              bounded root/page codec
+  paged/directory.rs           authenticated page directory
+  managed.rs                  transaction/read hooks
 
-crates/crab-platform-protocol/               platform.proto + generated types
-crates/crab-platform-server/src/
-  rpc.rs, auth.rs, peers.rs, deployment.rs, main.rs
-  javascript.rs    deno_core adapter and module registry
-
-packages/platform-sdk/                      TypeScript client
-packages/platform-python/                   Python client/activity supervisor
+crates/crab-storage/src/       scoped layout and existing provider-neutral storage
 ```
 
 Keep `crab-workflow` Git/DVC APIs and `crab-sdk` Git APIs unchanged.
-`crab-http-server` consumes the native Cell runtime for repository application
-data; Git/Xet/LFS retain their current publication owners. Apply the accepted
-hard cutover using [deployment](deployment.md#repository-application-cutover).
+The runtime owns no repository policy, HTTP listener or provider credentials.
+Git/Xet/LFS keep their current publication owners; SQL coordinates with them
+through durable intentions, not a cross-system atomic commit. Apply the accepted
+[hard cutover](deployment.md#repository-application-cutover).
 
-## Fixed initial protocol limits
+## Fixed initial operation limits
 
-These are wire admission limits and initial implementation defaults, not
-benchmark claims. A larger wire limit requires updated capability/contract tests.
+These are admission limits and implementation defaults, not benchmark claims.
 
 | Limit | v1 value |
 | --- | --- |
-| Request | 1 MiB encoded; up to 128 SQL statements or KV mutations |
-| Command/result/state | 1 MiB each; SQL read at most 1,000 rows and 1 MiB |
+| Operation/result/state | 1 MiB each; SQL read at most 1,000 rows and 1 MiB |
+| Peer envelope | Operation limit plus 16 KiB authenticated metadata |
+| Batch | Up to 128 SQL statements or KV mutations |
 | Request ID/incarnation | 16 bytes; digests and Cell IDs 32 bytes |
 | Request validity | expires - issued <= 24h; issued at most 5 min in future |
 | Request record retention | Through request expiry + 24h |
 | Effect lifetime / inbox retention | 7 days / effect expiry + 7 days |
 | Transport wait | Default 30 s, maximum 60 s |
-| Guest transaction CPU / wall time | 50 ms / 5 s; host page waits count toward wall time |
+| Native transaction wall budget | 5 s cooperative deadline; cannot forcibly preempt arbitrary Rust |
 | Queue/activity lease | Default 30 s, allowed 5–300 s |
 | Delivery margin | At least 1 s remaining before emitting a claimed task |
 | Queue attempts / retention | 20 deliveries / 30 days from enqueue |
@@ -111,7 +120,7 @@ benchmark claims. A larger wire limit requires updated capability/contract tests
 | Renewal / self-fence / takeover observation | 3 s / 10 s / 15 s |
 | Scheduler scan pass | <= 5 s for the admitted catalog |
 
-Capacity targets are 1K–10K simultaneously open DBs and 1,000 user commands/s
+Capacity targets remain 1K–10K simultaneously open DBs and 1,000 user commands/s
 aggregate per node. Hardware and qualification are in [deployment](deployment.md#resource-profiles-and-capacity-targets)
-and [delivery](delivery.md#capacity-qualification). Meeting these targets requires
-bounded storage; raising today's `Limits` alone is insufficient.
+and [delivery](delivery.md#capacity-qualification). No profile is promised to
+meet these targets without measurement.

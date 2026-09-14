@@ -24,7 +24,7 @@ pub struct CommandContext<'a> {
 ```
 
 Only the runtime constructs CommandContext. Primitive modules have trusted SQL
-access; application/remote SQL uses a scoped SQLite authorizer. Reject ATTACH,
+access; application SQL uses a scoped SQLite authorizer. Reject ATTACH,
 DETACH, transaction/savepoint commands, PRAGMA, extension loading and access to
 sys_* or primitive-owned tables. Match authorizer operations and resolved object
 names, not a regex over SQL text. Reject user table/view/trigger/index names
@@ -50,18 +50,18 @@ Effect state: 0=ready, 1=leased, 2=delivered, 3=failed. Generate
 Destination and operation bytes are immutable once inserted. Enforce at most
 128 effects and 1 MiB aggregate effect bytes per command.
 
-Persist the exact encoded EffectRequest from platform.proto, including resolved
+Persist the exact encoded EffectRequest from peer.proto, including resolved
 destination incarnation, in sys_effects.operation. Resolve destination metadata
-from declared bindings before the source transaction; a stale incarnation causes
+from compiled namespace capabilities before the source transaction; a stale incarnation causes
 delivery conflict, never silent redirection into restored data. Delivery validates
 effect_id against source Cell/incarnation/sequence/ordinal. Its digest uses the
 canonical typed codec with domain `crab.effect-op.v1\0`; include destination
 Cell/incarnation, EffectIdentity and selected operation. Transport headers are
 excluded, and the digest never changes between delivery attempts.
 
-If a command requests a destination missing from its binding cache, return
+If a command requests a destination missing from its resolved capability cache, return
 UnresolvedTarget before inserting an effect. Roll back the whole transaction,
-resolve the target outside the SQL worker, reset guest invocation state, then
+resolve the target outside the SQL worker, reconstruct the typed command context, then
 retry at most twice. This is allowed only after proven rollback; a commit or
 capture ambiguity uses reconciliation instead of SQL replay.
 
@@ -81,7 +81,7 @@ an undelivered intention. Redrive allocates a new explicit effect identity.
 
 If the next retry would reach/past expiry, mark failed and clear the lease
 instead of storing a due_at beyond expires_at. Private Resolve uses the same
-drain/fence-before-ABSENT rule as public Resolve, with sys_inbox as evidence.
+drain/fence-before-ABSENT rule as application Resolve, with sys_inbox as evidence.
 
 ## KV procedures
 
@@ -167,7 +167,7 @@ WHERE message_id = :id AND state = 0
 
 Require one changed row. Claim holds the Cell writer so failure implies an
 implementation invariant violation, not a reason to return a partial batch.
-An empty claim returns an empty list as a published command. SDK polling backs
+An empty claim returns an empty list as a published command. Native supervisor polling backs
 off 100 ms to 1 s on empties; v1 has no server-side long-poll stream.
 
 Before emitting a claim, check every token against current published state and
@@ -191,13 +191,14 @@ it never shortens an existing valid deadline. Publish before acknowledging.
 
 Duplicate lease mutations replay by runtime request ID. A different request ID
 with a stale token returns LEASE_LOST; it cannot ack a replacement delivery.
-An external consumer may execute twice after lease loss, so destination effects
+A native consumer may execute twice after lease loss, so destination effects
 use the stable message ID as an idempotency key.
 
 If a namespace declares a dead-letter target, transition to dead and insert a
-sys_effects row atomically using a deterministic effect ID derived from source
-Cell/message ID. Its destination QueueSend producer ID is the source message
-ID, scoped by the target namespace. Retain dead payload until delivery completes
+sys_effects row atomically using the normal source sequence/ordinal effect ID.
+Only the first transition to dead creates this intention; repeated maintenance
+cannot create a second one. Its destination QueueSend producer ID includes the
+source Cell/incarnation/message ID, scoped by the target namespace. Retain dead payload until delivery completes
 or an operator resolves the failed effect. GC cannot delete it at message expiry
 while that effect remains pending. Without DLQ, retain dead rows until expiry
 for inspection. Namespace graph validation rejects DLQ cycles.
@@ -211,19 +212,22 @@ Run status: 0=running, 1=completed, 2=failed, 3=cancelled. Activity state:
 Start requires absent workflow_id; an existing run returns PRECONDITION_FAILED
 unless this is a replay of its original request. Allocate run_id from the
 request identity and namespace via domain-separated BLAKE3 truncated to 16 bytes.
-Pin the deployment definition digest in workflow_runs. Insert event sequence 1
+Pin the registered definition digest in workflow_runs. Insert event sequence 1
 with event_id=BLAKE3(run_id || request_id), execute the definition's start
 transition, then persist state and resulting activities/timers. Publication
 makes the run and all scheduling intentions visible together.
 
 Definition callback is `transition(state_bytes, event_bytes, Context) -> Decision`.
 Context contains run_id, current event sequence and sampled now; no network,
-clock, random or SQL import. Decision contains next status/state/result and
+ambient clock, randomness or SQL in its interface. These are programming
+restrictions on trusted Rust, not enforced sandbox isolation; test deterministic
+re-execution and review handlers for hidden I/O or mutable global state.
+Decision contains next status/state/result and
 at most 128 activity/timer/effect actions totalling <=1 MiB. Activity and timer
-IDs are allocated from run_id, event sequence and action ordinal. Guest code
+IDs are allocated from run_id, event sequence and action ordinal. The Rust transition
 can reference allocated IDs from persisted state on later transitions.
 
-Use WorkflowDecision/WorkflowAction in platform.proto for serialized output.
+Use native Decision/Action values in the SQL worker; they are not peer RPCs.
 `context.action_id(i)` returns first16(BLAKE3(`crab.action.v1\0` || run_id ||
 u64(event_sequence) || u32(i))); i must match the action's output ordinal. This
 lets the callback store IDs in next_state before returning. Terminal decisions

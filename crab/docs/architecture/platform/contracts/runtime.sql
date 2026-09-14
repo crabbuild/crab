@@ -50,16 +50,6 @@ CREATE TABLE sys_effects (
 CREATE INDEX sys_effects_due ON sys_effects(state, due_at_ms);
 CREATE INDEX sys_effects_leases ON sys_effects(state, lease_until_ms);
 
-CREATE TABLE sys_blob_refs (
-    owner_kind INTEGER NOT NULL CHECK (owner_kind IN (1, 2)),
-    owner_id BLOB NOT NULL,
-    digest BLOB NOT NULL CHECK (length(digest) = 32),
-    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
-    PRIMARY KEY (owner_kind, owner_id, digest),
-    CHECK ((owner_kind = 1 AND length(owner_id) = 32)
-        OR (owner_kind = 2 AND length(owner_id) = 16))
-) STRICT, WITHOUT ROWID;
-
 CREATE TABLE sys_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
     digest BLOB NOT NULL CHECK (length(digest) = 32),

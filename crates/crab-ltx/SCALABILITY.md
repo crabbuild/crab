@@ -21,7 +21,7 @@ SSD IOPS, network bandwidth, transaction sizes, read/write ratio, latency
 objectives and durability latency remain unspecified. No benchmark here
 establishes the target on any profile; the hardware ranges are not a claim that
 a small node can sustain 10K open databases at 1,000 TPS. See the proposed
-[general platform capacity model](../../crab/docs/architecture/platform/deployment.md#resource-profiles-and-capacity-targets)
+[embedded runtime capacity model](../../crab/docs/architecture/platform/deployment.md#resource-profiles-and-capacity-targets)
 and [qualification plan](../../crab/docs/architecture/platform/delivery.md#capacity-qualification).
 
 Treat active as simultaneously open unless the service explicitly defines an
