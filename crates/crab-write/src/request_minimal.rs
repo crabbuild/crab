@@ -1,7 +1,8 @@
 //! Request-minimal publication through one immutable capsule and one mutable root.
 
 use crab_metadata::request_minimal::{
-    Capsule, CapsulePointer, CapsuleTransaction, RepositoryRoot, RootRecord, create_root, load_root,
+    Capsule, CapsulePointer, CapsuleRun, CapsuleTransaction, RepositoryRoot, RootRecord,
+    create_root, load_root,
 };
 use crab_storage::{StorageError, Store, StoreLayout};
 
@@ -40,22 +41,40 @@ pub async fn publish(
 ) -> Result<RootSnapshot> {
     validate_capsule_binding(&base, transaction, capsule)?;
     let (refs, peeled_refs) = apply_ref_edits(&base, transaction)?;
-    let capsule_path = router.request_minimal_capsule_path(capsule.hash());
+    let mut run = CapsuleRun::leaf(capsule.clone())?;
+    let mut frontier = base.record().root().capsule_frontier().to_vec();
+    while frontier
+        .last()
+        .is_some_and(|existing| existing.level() == run.level())
+    {
+        let pointer = frontier
+            .pop()
+            .ok_or_else(|| WriteError::Internal("capsule run frontier became empty".to_owned()))?;
+        let older = load_run(router, &pointer).await?;
+        run = older.merge(&run)?;
+    }
+    let capsule_path = router.request_minimal_capsule_path(run.hash());
     router
         .store()
-        .put_if_absent_verified(&capsule_path, capsule.bytes().clone())
+        .put_if_absent_verified(&capsule_path, run.bytes().clone())
         .await?;
 
     let pointer = CapsulePointer::new(
-        capsule.hash(),
-        capsule.bytes().len() as u64,
-        capsule.transaction_id(),
-        capsule.base_root_digest(),
+        run.hash(),
+        run.bytes().len() as u64,
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
     )?;
-    let next = base
-        .record()
-        .root()
-        .advance(base.record().digest(), refs, peeled_refs, pointer)?;
+    frontier.push(pointer);
+    let transaction_id = transaction.id()?;
+    let next = base.record().root().advance(
+        base.record().digest(),
+        refs,
+        peeled_refs,
+        frontier,
+        &transaction_id,
+    )?;
     let candidate = RootRecord::encode(next)?;
     let root_path = router.request_minimal_root_path();
     match router
@@ -71,6 +90,29 @@ pub async fn publish(
             reconcile_root_update(router, base.record(), candidate, transaction, source).await
         }
     }
+}
+
+async fn load_run(router: &StoreLayout<Store>, pointer: &CapsulePointer) -> Result<CapsuleRun> {
+    let path = router.request_minimal_capsule_path(pointer.hash());
+    let (bytes, _) = router
+        .store()
+        .get_with_etag_bounded(&path, pointer.size())
+        .await?;
+    let actual_size = u64::try_from(bytes.len())
+        .map_err(|_| WriteError::Internal("capsule run size cannot be represented".to_owned()))?;
+    let run = CapsuleRun::decode(bytes)?;
+    if actual_size != pointer.size()
+        || run.hash() != pointer.hash()
+        || run.level() != pointer.level()
+        || run.transaction_ids() != pointer.transaction_ids()
+        || run.newest_base_root_digest() != pointer.newest_base_root_digest()
+    {
+        return Err(WriteError::CorruptObject {
+            path: path.to_string(),
+            reason: "capsule run does not match its authenticated root pointer".to_owned(),
+        });
+    }
+    Ok(run)
 }
 
 fn validate_capsule_binding(
@@ -393,6 +435,92 @@ mod tests {
                 StorageOperation::Put,
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn binary_carry_adds_one_get_without_an_intermediate_put() {
+        let inner = Arc::new(InMemory::new());
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner)
+            .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
+            .with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let base = open_root(&router).await.unwrap();
+        let first = transaction(&base, None, &"2".repeat(40));
+        publish(&router, base, &first, &capsule(&first))
+            .await
+            .unwrap();
+        observer.observations.lock().unwrap().clear();
+
+        let base = open_root(&router).await.unwrap();
+        let second = transaction(&base, Some(&"2".repeat(40)), &"3".repeat(40));
+        let published = publish(&router, base, &second, &capsule(&second))
+            .await
+            .unwrap();
+
+        assert_eq!(published.record().root().capsule_frontier().len(), 1);
+        assert_eq!(published.record().root().capsule_frontier()[0].level(), 1);
+        let operations = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .map(|observation| observation.operation)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            operations,
+            vec![
+                StorageOperation::Get,
+                StorageOperation::Get,
+                StorageOperation::Put,
+                StorageOperation::Put,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn five_hundred_small_pushes_average_fewer_than_four_qualified_requests() {
+        let inner = Arc::new(InMemory::new());
+        let observer = Arc::new(RecordingObserver::default());
+        let store = Store::new(inner)
+            .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
+            .with_storage_observer(observer.clone());
+        let router = StoreLayout::new(store, "repositories/test".to_owned());
+        initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        observer.observations.lock().unwrap().clear();
+
+        let mut previous = None;
+        let mut published = None;
+        for sequence in 1..=500_u64 {
+            let base = open_root(&router).await.unwrap();
+            let next = format!("{sequence:040x}");
+            let transaction = transaction(&base, previous.as_deref(), &next);
+            published = Some(
+                publish(&router, base, &transaction, &capsule(&transaction))
+                    .await
+                    .unwrap(),
+            );
+            previous = Some(next);
+        }
+
+        let published = published.unwrap();
+        assert_eq!(published.record().root().generation(), 500);
+        assert_eq!(published.record().root().capsule_frontier().len(), 6);
+        let request_count = observer
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|observation| observation.outcome == StorageOutcome::Success)
+            .count();
+        assert_eq!(request_count, 1_994);
+        assert!((request_count as f64 / 500.0) < 4.0);
     }
 
     #[tokio::test]
