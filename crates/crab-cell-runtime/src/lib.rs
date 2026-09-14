@@ -14,6 +14,7 @@ mod executor;
 mod identity;
 mod kv;
 mod publication;
+mod queue;
 mod schema;
 mod worker;
 
@@ -35,5 +36,10 @@ pub use kv::{
     KvPage, install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list,
 };
 pub use publication::CellPublisher;
+pub use queue::{
+    QueueLeaseAction, QueueLeaseOutcome, QueueMessage, QueueSendOutcome, QueueSendRequest,
+    QueueState, QueueTokenSource, SystemQueueTokens, install_queue_schema, queue_apply_lease,
+    queue_claim, queue_cleanup_expired, queue_send, queue_validate_claim,
+};
 pub use schema::{install_runtime_schema, verify_runtime_schema};
 pub use worker::{SqlWorkerPool, WorkerExecution};

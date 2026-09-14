@@ -144,10 +144,24 @@ operations already treat those rows as absent.
 
 ## Queue send and claim
 
+Implementation status: `crab-cell-runtime::queue` embeds and verifies the
+normative Queue migration. `queue_send` binds a stable producer ID to the exact
+payload and schedule digest and derives `message_id` as the first 16 bytes of
+`BLAKE3("crab.queue-message.v1\0" || namespace || producer_id)`. `queue_claim`
+reclaims at most 128 expired leases, orders ready rows, caps each claim at 32
+messages/512 KiB and obtains 16-byte tokens through an injectable source whose
+production implementation uses the process cryptographic RNG. The runtime caller
+publishes the encoded claim before `queue_validate_claim` permits emission.
+`queue_apply_lease` implements conditional ack/retry/extend and attempt/expiry
+death; cleanup removes at most 128 dedup and 128 terminal rows. Integration
+coverage sends and claims through `CellHandle`, validates only after publication,
+then restores another owner and validates the same lease. DLQ effect insertion,
+typed registry codecs and scheduler polling remain to implement.
+
 Queue state: 0=ready, 1=leased, 2=acked, 3=dead. Send hashes producer_id to the
 shard, validates payload <=256 KiB and available_at within now..now+7 days.
-Message ID is first 16 bytes of BLAKE3(namespace || producer_id), with a stored
-payload digest to detect identity conflict. Existing queue_dedup returns the
+Message ID is first 16 bytes of BLAKE3(`crab.queue-message.v1\0` || namespace ||
+producer_id), with a stored payload digest to detect identity conflict. Existing queue_dedup returns the
 same message identity if payload and scheduling attributes match. Its digest
 therefore includes payload and available_at. Retain it for 30 days.
 
