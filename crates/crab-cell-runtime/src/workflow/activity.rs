@@ -12,7 +12,7 @@ const MAX_CLAIM_BYTES: usize = 512 << 10;
 const MAX_SCAN_ITEMS: usize = 128;
 pub(super) const MAX_ACTIVITY_BYTES: usize = 256 << 10;
 const MAX_ACTIVITY_TYPE_BYTES: usize = 256;
-const MAX_ATTEMPTS: u32 = 20;
+pub(super) const MAX_ATTEMPTS: u32 = 20;
 const MIN_LEASE_MS: u32 = 5_000;
 const MAX_LEASE_MS: u32 = 300_000;
 const DELIVERY_MARGIN_MS: i64 = 1_000;
@@ -101,7 +101,7 @@ pub fn workflow_claim_activities(
         return Err(Error::Command("activity lease must be in 5..=300 seconds"));
     }
     validate_support(supported)?;
-    reclaim_expired(transaction, now_ms)?;
+    workflow_reclaim_expired_bounded(transaction, now_ms, MAX_SCAN_ITEMS)?;
 
     let mut sql = "SELECT a.run_id, a.activity_id, a.activity_type, a.input, r.definition_digest, a.attempt, a.expires_at_ms FROM workflow_activities a INDEXED BY activities_ready JOIN workflow_runs r ON r.run_id = a.run_id WHERE a.state = 0 AND a.due_at_ms <= ? AND a.expires_at_ms > ? AND a.attempt < ? AND r.status = 0 AND (a.activity_type, r.definition_digest) IN (".to_owned();
     for index in 0..supported.len() {
@@ -379,16 +379,26 @@ pub fn workflow_complete_activity(
 
 /// Deletes at most 128 terminal workflow runs whose retention has elapsed.
 pub fn workflow_cleanup_terminal(transaction: &Transaction<'_>, now_ms: i64) -> Result<usize> {
+    workflow_cleanup_terminal_bounded(transaction, now_ms, MAX_SCAN_ITEMS)
+}
+
+pub(crate) fn workflow_cleanup_terminal_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
     validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
     let cutoff = now_ms.saturating_sub(TERMINAL_RETENTION_MS);
     let run_ids = {
         let mut statement = transaction.prepare(
             "SELECT run_id FROM workflow_runs WHERE status != 0 AND completed_at_ms <= ?1 ORDER BY completed_at_ms, run_id LIMIT ?2",
         )?;
         statement
-            .query_map((cutoff, MAX_SCAN_ITEMS as i64), |row| {
-                row.get::<_, Vec<u8>>(0)
-            })?
+            .query_map((cutoff, limit as i64), |row| row.get::<_, Vec<u8>>(0))?
             .collect::<std::result::Result<Vec<_>, _>>()?
     };
     for value in &run_ids {
@@ -507,11 +517,26 @@ fn update_completion(
     Ok(())
 }
 
-fn reclaim_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<()> {
-    transaction.execute(
-        "WITH expired(run_id, activity_id) AS (SELECT run_id, activity_id FROM workflow_activities INDEXED BY activities_leases WHERE state = 1 AND lease_until_ms <= ?1 ORDER BY lease_until_ms, run_id, activity_id LIMIT ?2) UPDATE workflow_activities SET state = CASE WHEN attempt >= ?3 OR expires_at_ms <= ?1 THEN 3 ELSE 0 END, due_at_ms = CASE WHEN attempt >= ?3 OR expires_at_ms <= ?1 THEN due_at_ms ELSE ?1 END, token = NULL, lease_until_ms = NULL WHERE (run_id, activity_id) IN (SELECT run_id, activity_id FROM expired)",
-        (now_ms, MAX_SCAN_ITEMS as i64, i64::from(MAX_ATTEMPTS)),
-    )?;
+pub(crate) fn workflow_reclaim_expired_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
+    validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
+    Ok(transaction.execute(
+        "WITH expired(run_id, activity_id) AS (SELECT run_id, activity_id FROM workflow_activities INDEXED BY activities_leases WHERE state = 1 AND lease_until_ms <= ?1 ORDER BY lease_until_ms, run_id, activity_id LIMIT ?2) UPDATE workflow_activities SET state = 0, due_at_ms = CASE WHEN attempt >= ?3 OR expires_at_ms <= ?1 THEN due_at_ms ELSE ?1 END, token = NULL, lease_until_ms = NULL WHERE (run_id, activity_id) IN (SELECT run_id, activity_id FROM expired)",
+        (now_ms, limit as i64, i64::from(MAX_ATTEMPTS)),
+    )?)
+}
+
+fn validate_maintenance_limit(limit: usize) -> Result<()> {
+    if limit > MAX_SCAN_ITEMS {
+        return Err(Error::Command("workflow maintenance limit exceeds 128"));
+    }
     Ok(())
 }
 

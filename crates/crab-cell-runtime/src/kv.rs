@@ -280,10 +280,24 @@ pub fn kv_list(
 
 /// Deletes at most 128 physically expired entries in one internal command.
 pub fn kv_cleanup_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<usize> {
+    kv_cleanup_expired_bounded(transaction, now_ms, CLEANUP_ITEMS)
+}
+
+pub(crate) fn kv_cleanup_expired_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
     validate_now(now_ms)?;
+    if limit > CLEANUP_ITEMS {
+        return Err(Error::Command("KV cleanup limit exceeds 128"));
+    }
+    if limit == 0 {
+        return Ok(0);
+    }
     let changed = transaction.execute(
         "DELETE FROM kv_entries WHERE (scope, key) IN (SELECT scope, key FROM kv_entries INDEXED BY kv_expiry WHERE expires_at_ms IS NOT NULL AND expires_at_ms <= ?1 ORDER BY expires_at_ms, scope, key LIMIT ?2)",
-        (now_ms, CLEANUP_ITEMS as i64),
+        (now_ms, limit as i64),
     )?;
     Ok(changed)
 }

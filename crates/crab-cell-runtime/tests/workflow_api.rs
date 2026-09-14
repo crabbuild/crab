@@ -12,6 +12,7 @@ use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
     ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
     CellClient, CellModule, CellRuntime, CellTarget, Digest, Error, IncarnationId, InvocationError,
+    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
     MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId,
     OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId,
     WorkflowAction, WorkflowActivities, WorkflowActivityClaimCommand,
@@ -19,7 +20,8 @@ use crab_cell_runtime::{
     WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext, WorkflowDecision,
     WorkflowDefinition, WorkflowGetQuery, WorkflowModule, WorkflowNamespace, WorkflowOutcome,
     WorkflowSignal, WorkflowSignalCommand, WorkflowStartCommand, WorkflowStatus,
-    install_workflow_schema, register_activity, register_workflow, register_workflow_activities,
+    install_workflow_schema, register_activity, register_maintenance, register_workflow,
+    register_workflow_activities,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -37,6 +39,7 @@ const COMMANDS: &[OperationDescriptor] = &[
     operation(4, 1024 * 1024, 1024 * 1024),
     operation(5, 1024 * 1024, 1024 * 1024),
     operation(6, 1024 * 1024, 64),
+    operation(7, 8, 5),
 ];
 const QUERIES: &[OperationDescriptor] = &[
     operation(1, 2048, 1024 * 1024),
@@ -84,6 +87,24 @@ impl WorkflowDefinition for Definition {
                 state: b"activity-complete".to_vec(),
                 result: Some(event.to_vec()),
                 actions: Vec::new(),
+            });
+        }
+        if event.starts_with(b"timer\0") {
+            return Ok(WorkflowDecision {
+                status: WorkflowStatus::Completed,
+                state: b"timer-complete".to_vec(),
+                result: Some(event.to_vec()),
+                actions: Vec::new(),
+            });
+        }
+        if event == b"timer" {
+            return Ok(WorkflowDecision {
+                status: WorkflowStatus::Running,
+                state: b"timer-waiting".to_vec(),
+                result: None,
+                actions: vec![WorkflowAction::Timer {
+                    due_at_ms: context.now_ms(),
+                }],
             });
         }
         if event == b"finish" {
@@ -146,6 +167,12 @@ impl WorkflowActivityModule for TestWorkflow {
     const ACTIVITY_COMPLETE_COMMAND_ID: u32 = 5;
     const ACTIVITY_EXTEND_COMMAND_ID: u32 = 6;
     const ACTIVITY_VALIDATE_QUERY_ID: u32 = 2;
+}
+
+impl MaintenanceModule for TestWorkflow {
+    const MODULE: &'static str = WORKFLOW_MODULE;
+    const TICK_COMMAND_ID: u32 = 7;
+    const WORKFLOW_DEFINITIONS: &'static [&'static dyn WorkflowDefinition] = &DEFINITIONS;
 }
 
 struct EchoActivity;
@@ -213,7 +240,8 @@ impl CellModule for TestWorkflow {
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
         register_workflow::<Self>(registry)?;
         register_workflow_activities::<Self>(registry)?;
-        register_activity::<Self, EchoActivity>(registry)
+        register_activity::<Self, EchoActivity>(registry)?;
+        register_maintenance::<Self>(registry)
     }
 }
 
@@ -239,6 +267,7 @@ impl CellModule for MissingDefinitionBinding {
         registry.bind_command::<WorkflowActivityExtendCommand<TestWorkflow>>()?;
         registry.bind_query::<WorkflowGetQuery<TestWorkflow>>()?;
         registry.bind_query::<WorkflowActivityValidateQuery<TestWorkflow>>()?;
+        registry.bind_command::<MaintenanceTickCommand<TestWorkflow>>()?;
         registry.bind_activity::<EchoActivity>(WORKFLOW_MODULE, DEFINITION_DIGEST)
     }
 }
@@ -356,8 +385,9 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         )
         .await
         .unwrap();
+    let client = CellClient::local(registry.clone(), handle.clone());
     let workflows = WorkflowNamespace::<TestWorkflow>::new(
-        CellClient::local(registry.clone(), handle.clone()),
+        client.clone(),
         target.tenant(),
         target.application(),
     )
@@ -410,6 +440,45 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         .unwrap();
     assert_eq!(state.state, b"continue");
     assert_eq!(state.event_sequence, 2);
+    let timer = workflows
+        .start(identity(16), b"timer-build".to_vec(), b"timer".to_vec())
+        .await
+        .unwrap();
+    let tick = client
+        .command::<MaintenanceTickCommand<TestWorkflow>>(
+            &target,
+            identity(17),
+            MaintenanceTickRequest {
+                expected_commit_sequence: timer.receipt.commit_sequence,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        tick.output,
+        MaintenanceTickOutcome::Applied { processed: 1 }
+    );
+    assert_eq!(
+        workflows
+            .state(b"timer-build".to_vec(), Some(tick.receipt))
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .state,
+        b"timer-complete"
+    );
+    let stale = client
+        .command::<MaintenanceTickCommand<TestWorkflow>>(
+            &target,
+            identity(18),
+            MaintenanceTickRequest {
+                expected_commit_sequence: timer.receipt.commit_sequence,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(stale.output, MaintenanceTickOutcome::Stale);
     handle.drain().await.unwrap();
 
     let idle = authority.load(cell).await.unwrap().unwrap();

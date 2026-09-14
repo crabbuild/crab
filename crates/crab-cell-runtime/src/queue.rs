@@ -196,7 +196,7 @@ pub fn queue_claim(
     if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&lease_ms) {
         return Err(Error::Command("queue lease must be in 5..=300 seconds"));
     }
-    reclaim_expired(transaction, now_ms)?;
+    queue_reclaim_expired_bounded(transaction, now_ms, MAX_RECLAIM_ITEMS)?;
 
     let mut statement = transaction.prepare(
         "SELECT message_id, payload, attempt, expires_at_ms FROM queue_messages INDEXED BY queue_ready WHERE state = 0 AND due_at_ms <= ?1 AND expires_at_ms > ?1 AND attempt < ?2 ORDER BY due_at_ms, message_id LIMIT ?3",
@@ -399,25 +399,50 @@ pub fn queue_apply_lease(
 
 /// Deletes bounded expired dedup and terminal message rows.
 pub fn queue_cleanup_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<usize> {
+    queue_cleanup_expired_bounded(transaction, now_ms, MAX_RECLAIM_ITEMS)
+}
+
+pub(crate) fn queue_cleanup_expired_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
     validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
     let dedup = transaction.execute(
         "DELETE FROM queue_dedup WHERE producer_id IN (SELECT producer_id FROM queue_dedup INDEXED BY queue_dedup_expiry WHERE retain_until_ms <= ?1 ORDER BY retain_until_ms, producer_id LIMIT ?2)",
-        (now_ms, MAX_RECLAIM_ITEMS as i64),
+        (now_ms, limit as i64),
     )?;
+    let remaining = limit.saturating_sub(dedup);
+    if remaining == 0 {
+        return Ok(dedup);
+    }
     let messages = transaction.execute(
         "DELETE FROM queue_messages WHERE message_id IN (SELECT message_id FROM queue_messages INDEXED BY queue_retention WHERE state IN (2, 3) AND expires_at_ms <= ?1 ORDER BY expires_at_ms, message_id LIMIT ?2)",
-        (now_ms, MAX_RECLAIM_ITEMS as i64),
+        (now_ms, remaining as i64),
     )?;
     dedup
         .checked_add(messages)
         .ok_or(Error::Command("queue cleanup count overflow"))
 }
 
-fn reclaim_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<()> {
+pub(crate) fn queue_reclaim_expired_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
+    validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
     let mut statement = transaction.prepare(
         "SELECT message_id, attempt, expires_at_ms FROM queue_messages INDEXED BY queue_leases WHERE state = 1 AND lease_until_ms <= ?1 ORDER BY lease_until_ms, message_id LIMIT ?2",
     )?;
-    let rows = statement.query_map((now_ms, MAX_RECLAIM_ITEMS as i64), |row| {
+    let rows = statement.query_map((now_ms, limit as i64), |row| {
         Ok((
             row.get::<_, Vec<u8>>(0)?,
             row.get::<_, i64>(1)?,
@@ -429,6 +454,7 @@ fn reclaim_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<()> {
         expired.push(row?);
     }
     drop(statement);
+    let count = expired.len();
     for (message_id, attempt, expires_at_ms) in expired {
         let next_state = if attempt >= i64::from(MAX_ATTEMPTS) || expires_at_ms <= now_ms {
             QueueState::Dead
@@ -442,6 +468,29 @@ fn reclaim_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<()> {
         if changed != 1 {
             return Err(Error::Command("queue reclaim lost selected lease"));
         }
+    }
+    Ok(count)
+}
+
+pub(crate) fn queue_expire_ready_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
+    validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
+    Ok(transaction.execute(
+        "UPDATE queue_messages SET state = 3 WHERE message_id IN (SELECT message_id FROM queue_messages INDEXED BY queue_ready WHERE state = 0 AND (expires_at_ms <= ?1 OR attempt >= ?2) ORDER BY due_at_ms, message_id LIMIT ?3)",
+        (now_ms, i64::from(MAX_ATTEMPTS), limit as i64),
+    )?)
+}
+
+fn validate_maintenance_limit(limit: usize) -> Result<()> {
+    if limit > MAX_RECLAIM_ITEMS {
+        return Err(Error::Command("queue maintenance limit exceeds 128"));
     }
     Ok(())
 }

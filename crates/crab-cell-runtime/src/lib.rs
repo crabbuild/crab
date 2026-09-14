@@ -16,6 +16,7 @@ mod error;
 mod executor;
 mod identity;
 mod kv;
+mod maintenance;
 mod publication;
 mod queue;
 mod registry;
@@ -54,6 +55,10 @@ pub use kv::{
     KvGetRequest, KvListQuery, KvListRequest, KvModule, KvMutation, KvMutationResult, KvNamespace,
     KvPage, install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list, register_kv,
 };
+pub use maintenance::{
+    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
+    register_maintenance,
+};
 pub use publication::CellPublisher;
 pub use queue::{
     QueueClaimCommand, QueueClaimRequest, QueueLeaseAction, QueueLeaseCommand, QueueLeaseOutcome,
@@ -67,7 +72,7 @@ pub use registry::{
     MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor, Query,
     QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
 };
-pub use scheduler::scheduler_next_due_ms;
+pub use scheduler::{SchedulerTickOutcome, scheduler_next_due_ms, scheduler_tick};
 pub use schema::{install_runtime_schema, verify_runtime_schema};
 pub use sql::{
     SqlBatch, SqlBatchCommand, SqlBatchQuery, SqlCell, SqlModule, SqlResultSet, SqlStatement,

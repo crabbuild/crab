@@ -303,6 +303,7 @@ locally or forward privately. No new public /sql, /kv or /workflow API is added.
 | QueueNamespace | send, claim, ack, retry, extend | One producer/consumer shard |
 | WorkflowNamespace | start, signal, cancel, state | One workflow-ID shard |
 | Native activity supervisor | claim, complete, fail, extend | Published claim and completion are separate commands |
+| Maintenance Tick | bounded expiry, lease recovery, timers, retention | One scanned root position |
 
 Implementation status: `KvNamespace<M>`, `SqlCell<M>` and `QueueNamespace<M>`
 are complete for local routing. A
@@ -342,8 +343,14 @@ borrow, heartbeat extensions publish as independent commands, and completion or
 retry feeds the pinned state machine. The activity context exposes stable run,
 activity and external-idempotency identities, the current durable lease deadline
 and cooperative cancellation. Pending mutations retain their exact identity for
-resolution. Catalog-driven shard polling, timer dispatch and bounded concurrent
-cycles remain.
+resolution. Catalog-driven shard polling and bounded concurrent cycles remain;
+the maintenance Tick owns timer dispatch.
+
+`MaintenanceModule` binds one private Tick operation ID. A scanner submits the
+published root's commit sequence; `MaintenanceTickCommand` no-ops stale scans,
+uses one budget across every installed primitive, and relies on the executor to
+publish the new scheduler summary. Application routes never construct Tick
+requests.
 
 ```rust,ignore
 pub trait WorkflowModule: Send + Sync + 'static {

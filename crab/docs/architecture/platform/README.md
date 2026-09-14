@@ -96,8 +96,12 @@ effect supervisor still remain.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds
 that summary to the pending LTX cut and publishes it in control; application
-handlers can no longer omit or spoof scheduler state. Catalog scanning and
-bounded Tick execution still remain.
+handlers can no longer omit or spoof scheduler state. A typed internal Tick now
+rechecks the scanned root position, advances at most 128 ledger, expiry, lease,
+timer or retention items through the normal actor and republishes the resulting
+summary. It dispatches timer and terminal activity events through the run's
+retained definition. Catalog discovery, due-Cell routing and retry supervision
+remain.
 The startup-only compiled registry now validates module names, exact migration
 bytes/digests and contiguous schema ranges, command/query codec ranges and byte
 limits, namespace topology/effect targets/DLQ cycles, workflow/activity

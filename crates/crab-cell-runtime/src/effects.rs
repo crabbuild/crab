@@ -196,7 +196,7 @@ pub fn effect_claim(
     if !(MIN_LEASE_MS..=MAX_LEASE_MS).contains(&lease_ms) {
         return Err(Error::Command("effect lease must be in 5..=300 seconds"));
     }
-    reclaim_expired(transaction, now_ms)?;
+    effect_reclaim_expired_bounded(transaction, now_ms, MAX_RECLAIM_ITEMS)?;
     let candidates = {
         let mut statement = transaction.prepare(
             "SELECT effect_id, destination, operation, attempt, expires_at_ms, created_sequence FROM sys_effects INDEXED BY sys_effects_due WHERE state = 0 AND due_at_ms <= ?1 AND expires_at_ms > ?1 AND attempt < ?2 ORDER BY due_at_ms, effect_id LIMIT ?3",
@@ -512,11 +512,24 @@ pub fn inbox_apply(
 
 /// Removes at most 128 terminal source effects after their delivery horizon.
 pub fn effect_cleanup_terminal(transaction: &Transaction<'_>, now_ms: i64) -> Result<usize> {
+    effect_cleanup_terminal_bounded(transaction, now_ms, MAX_RECLAIM_ITEMS)
+}
+
+pub(crate) fn effect_cleanup_terminal_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
     validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
     let ids = select_ids(
         transaction,
         "SELECT effect_id FROM sys_effects WHERE state IN (2, 3) AND expires_at_ms <= ?1 ORDER BY expires_at_ms, effect_id LIMIT ?2",
         now_ms,
+        limit,
     )?;
     for id in &ids {
         transaction.execute(
@@ -529,11 +542,24 @@ pub fn effect_cleanup_terminal(transaction: &Transaction<'_>, now_ms: i64) -> Re
 
 /// Removes at most 128 inbox receipts after sender expiry plus seven days.
 pub fn inbox_cleanup_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<usize> {
+    inbox_cleanup_expired_bounded(transaction, now_ms, MAX_RECLAIM_ITEMS)
+}
+
+pub(crate) fn inbox_cleanup_expired_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
     validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
     let ids = select_ids(
         transaction,
         "SELECT effect_id FROM sys_inbox WHERE retain_until_ms <= ?1 ORDER BY retain_until_ms, effect_id LIMIT ?2",
         now_ms,
+        limit,
     )?;
     for id in &ids {
         transaction.execute(
@@ -594,13 +620,22 @@ fn apply_lease(
     Ok(changed == 1)
 }
 
-fn reclaim_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<()> {
+pub(crate) fn effect_reclaim_expired_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
+    validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
     let expired = {
         let mut statement = transaction.prepare(
             "SELECT effect_id, attempt, expires_at_ms FROM sys_effects INDEXED BY sys_effects_leases WHERE state = 1 AND lease_until_ms <= ?1 ORDER BY lease_until_ms, effect_id LIMIT ?2",
         )?;
         statement
-            .query_map((now_ms, MAX_RECLAIM_ITEMS as i64), |row| {
+            .query_map((now_ms, limit as i64), |row| {
                 Ok((
                     row.get::<_, Vec<u8>>(0)?,
                     row.get::<_, i64>(1)?,
@@ -609,6 +644,7 @@ fn reclaim_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<()> {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
     };
+    let count = expired.len();
     for (id, attempt, expires_at_ms) in expired {
         if attempt < 0 {
             return Err(Error::Command("invalid stored effect attempt"));
@@ -626,7 +662,23 @@ fn reclaim_expired(transaction: &Transaction<'_>, now_ms: i64) -> Result<()> {
             (state.encode(), due_at_ms, id, now_ms),
         )?;
     }
-    Ok(())
+    Ok(count)
+}
+
+pub(crate) fn effect_expire_ready_bounded(
+    transaction: &Transaction<'_>,
+    now_ms: i64,
+    limit: usize,
+) -> Result<usize> {
+    validate_now(now_ms)?;
+    validate_maintenance_limit(limit)?;
+    if limit == 0 {
+        return Ok(0);
+    }
+    Ok(transaction.execute(
+        "UPDATE sys_effects SET state = 3 WHERE effect_id IN (SELECT effect_id FROM sys_effects INDEXED BY sys_effects_due WHERE state = 0 AND (expires_at_ms <= ?1 OR attempt >= ?2) ORDER BY due_at_ms, effect_id LIMIT ?3)",
+        (now_ms, i64::from(MAX_ATTEMPTS), limit as i64),
+    )?)
 }
 
 fn inbox_outcome(
@@ -656,14 +708,24 @@ fn inbox_outcome(
     }
 }
 
-fn select_ids(transaction: &Transaction<'_>, sql: &str, now_ms: i64) -> Result<Vec<[u8; 32]>> {
+fn select_ids(
+    transaction: &Transaction<'_>,
+    sql: &str,
+    now_ms: i64,
+    limit: usize,
+) -> Result<Vec<[u8; 32]>> {
     let mut statement = transaction.prepare(sql)?;
     statement
-        .query_map((now_ms, MAX_RECLAIM_ITEMS as i64), |row| {
-            row.get::<_, Vec<u8>>(0)
-        })?
+        .query_map((now_ms, limit as i64), |row| row.get::<_, Vec<u8>>(0))?
         .map(|row| exact::<32>(row.map_err(Error::from)?, "invalid stored effect ID"))
         .collect()
+}
+
+fn validate_maintenance_limit(limit: usize) -> Result<()> {
+    if limit > MAX_RECLAIM_ITEMS {
+        return Err(Error::Command("effect maintenance limit exceeds 128"));
+    }
+    Ok(())
 }
 
 fn retry_delay_ms(attempt: u32) -> i64 {

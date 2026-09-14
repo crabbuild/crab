@@ -303,8 +303,8 @@ outcomes retain their mutation evidence, and cancellation is signalled if the
 cycle is dropped or loses its lease. Integration coverage holds an activity
 past its first heartbeat, completes its state-machine transition, then restores
 and reads that terminal result from the exact LTX root. Effect actions,
-catalog-driven shard polling, bounded concurrent orchestration and timer
-dispatch across retained definitions remain to implement.
+catalog-driven shard polling and bounded concurrent orchestration remain to
+implement; the maintenance Tick now dispatches timers across retained definitions.
 
 `WorkflowModule` binds one namespace, one current definition, a bounded static
 inventory of retained definitions, and fixed start/signal/cancel/state operation
@@ -394,8 +394,13 @@ request/inbox retention, source effects, installed KV/Queue/Workflow schemas,
 ready work, live lease deadlines, expirations, pending timers and terminal
 retention. Overdue values clamp to the command's logical time. `CellHandle`
 does not accept a caller-provided summary; the exact computed value follows the
-pending LTX cut into the same control publication. Catalog scanning and bounded
-Tick processing remain to implement.
+pending LTX cut into the same control publication. `scheduler_tick` and
+`MaintenanceTickCommand` now enforce one 128-item budget across request/inbox
+cleanup, effect/queue expiry and lease recovery, KV expiry, Workflow retention,
+terminal activity events and due timers. The command rejects a stale scanned
+root position before doing maintenance, and its resulting summary publishes
+through the ordinary actor/LTX/control path. Catalog scanning, routing and Tick
+retry supervision remain to implement.
 
 After every commit, compute minimum outstanding due time using indexed minima
 for ready effects, leased-effect deadlines, KV expirations, ready queue rows,
@@ -416,8 +421,10 @@ within 5 s at admitted load; expose scan lag and reject further provisioning if
 that budget cannot be sustained.
 
 For a due Cell, route/acquire ownership and submit Tick containing a 16-byte
-internal request ID and expected summary revision. Tick rechecks row state and
-processes at most 128 due items, then republishes a new summary. A timer tick
+internal request ID and the commit sequence of the root that carried the due
+summary. Tick returns `Stale` if that root position has already advanced;
+otherwise it rechecks row state, processes at most 128 due items, then
+republishes a new summary. A timer tick
 appends event ID=BLAKE3(run_id || timer_id || "fired"), changes pending→fired,
 and applies the transition atomically. Deadline races are resolved by the same
 serialized command loop. Losing all notifications cannot strand work because
