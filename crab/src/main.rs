@@ -5668,9 +5668,8 @@ async fn run_repack_command(
     let parsed = crab::git::url::CrabUrl::parse(url)?;
     let prefix = parsed.repo_path.clone();
 
-    let store = create_cli_store(&parsed.bucket, &config, "repack", cancel).await?;
-    let router = crab::storage::StoreLayout::new(store.clone(), prefix.clone());
-    crab::core::remote_layout::open(&store, &router).await?;
+    let (store, root) =
+        crab::auth::build_repository_url_store_with_root(&config, parsed, "repack", cancel).await?;
 
     let repack_config = crab::cmd::repack::RepackConfig {
         lock_ttl: std::time::Duration::from_secs(config.push_lock_ttl_secs),
@@ -5680,7 +5679,9 @@ async fn run_repack_command(
         workspace_root: crab::cache::default_cache_root().join("maintenance"),
     };
 
-    let outcome = crab::cmd::repack::run_repack(&store, &prefix, &repack_config, cancel).await?;
+    let outcome =
+        crab::cmd::repack::run_repack_from_root(&store, &prefix, root, &repack_config, cancel)
+            .await?;
     let summary = outcome.to_summary();
 
     match mode {

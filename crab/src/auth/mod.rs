@@ -427,10 +427,10 @@ async fn build_aws_sdk_store(config: &Config, _bucket: &str) -> Result<Option<Bu
     Ok(None)
 }
 
-/// Build and validate the store for one direct canonical-v1 repository URL.
+/// Build and validate the store for one direct protocol-v2 repository URL.
 ///
 /// Bucket-level and arbitrary object-source callers must continue to use
-/// [`build_store`]; this boundary rejects missing or non-v1 repository state
+/// [`build_store`]; this boundary rejects missing or invalid repository state
 /// before a repository command can read or mutate metadata.
 pub async fn build_repository_url_store(
     config: &Config,
@@ -438,12 +438,24 @@ pub async fn build_repository_url_store(
     operation: &str,
     cancel: &CancellationToken,
 ) -> Result<Store> {
+    build_repository_url_store_with_root(config, url, operation, cancel)
+        .await
+        .map(|(store, _)| store)
+}
+
+/// Build one direct store and retain the authenticated v2 root admission read.
+pub async fn build_repository_url_store_with_root(
+    config: &Config,
+    url: impl Into<crab_git::url::CrabUrl>,
+    operation: &str,
+    cancel: &CancellationToken,
+) -> Result<(Store, crab_metadata::request_minimal::RootSnapshot)> {
     let url = url.into();
     let repository_prefix = url.repo_path.clone();
     let remote_url = format!("crab://{}/{}", url.bucket, url.repo_path);
     let store = build_store(config, url, operation, cancel).await?;
-    validate_repository_store(&store, &repository_prefix, &remote_url).await?;
-    Ok(store)
+    let root = open_repository_root(&store, &repository_prefix, &remote_url).await?;
+    Ok((store, root))
 }
 
 pub(crate) async fn validate_repository_store(
@@ -451,14 +463,29 @@ pub(crate) async fn validate_repository_store(
     repository_prefix: &str,
     remote_url: &str,
 ) -> Result<()> {
+    open_repository_root(store, repository_prefix, remote_url)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn open_repository_root(
+    store: &Store,
+    repository_prefix: &str,
+    remote_url: &str,
+) -> Result<crab_metadata::request_minimal::RootSnapshot> {
     let router = crate::storage::StoreLayout::new(store.clone(), repository_prefix.to_owned());
-    match crate::core::remote_layout::open(store, &router).await {
-        Err(CrabError::NotFound { path }) if path == router.layout_descriptor_path().as_ref() => {
-            Err(CrabError::RepositoryNotInitialized {
-                url: remote_url.to_owned(),
-            })
-        }
-        result => result.map(|_| ()),
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    match crab_write::request_minimal::open_root(&layout).await {
+        Err(crab_write::WriteError::Metadata(crab_metadata::error::MetadataError::Storage {
+            source: crab_storage::StorageError::NotFound { .. },
+        })) => Err(CrabError::RepositoryNotInitialized {
+            url: remote_url.to_owned(),
+        }),
+        result => result.map_err(Into::into),
     }
 }
 
@@ -523,13 +550,13 @@ mod tests {
     static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[tokio::test]
-    async fn repository_validation_requires_descriptor_without_creating_state() {
+    async fn repository_validation_requires_v2_root_without_creating_state() {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
 
         let error = validate_repository_store(&store, "org/repo", "crab://bucket/org/repo")
             .await
-            .expect_err("descriptor-less repository must fail closed");
+            .expect_err("root-less repository must fail closed");
 
         assert!(matches!(
             error,
@@ -541,16 +568,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repository_validation_accepts_only_initialized_canonical_v1() {
+    async fn repository_validation_accepts_initialized_protocol_v2_root() {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        crab_write::request_minimal::initialize(&layout, &"1".repeat(64), "refs/heads/main")
             .await
-            .expect("initialize canonical descriptor");
+            .expect("initialize protocol-v2 root");
 
         validate_repository_store(&store, "org/repo", "crab://bucket/org/repo")
             .await
-            .expect("canonical descriptor should open");
+            .expect("protocol-v2 root should open");
     }
 
     /// Helper: build a `Config` with the given auth provider and storage provider.

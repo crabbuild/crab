@@ -196,6 +196,18 @@ pub async fn open_view(
     limits: RequestMinimalReadLimits,
 ) -> Result<RequestMinimalView> {
     let snapshot = load_root(router).await?;
+    open_view_from_root(router, snapshot, limits).await
+}
+
+/// Load the immutable objects named by one already authenticated root.
+///
+/// Remote-helper sessions use this entry point to bind advertisement and
+/// transfer to one root while avoiding a redundant mutable-root request.
+pub async fn open_view_from_root(
+    router: &StoreLayout<Store>,
+    snapshot: crab_metadata::request_minimal::RootSnapshot,
+    limits: RequestMinimalReadLimits,
+) -> Result<RequestMinimalView> {
     admit_frontier(snapshot.record().root().capsule_frontier(), limits)?;
     let checkpoint = async {
         match snapshot.record().root().checkpoint() {

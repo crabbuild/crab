@@ -7,10 +7,8 @@
 //! just faster for multi-file pushes.
 
 use std::collections::BTreeMap;
-use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -22,15 +20,11 @@ use tracing::{debug, info, warn};
 use crate::audit::default_log_path;
 use crate::core::error::{CrabError, Result};
 use crate::core::output::{JsonlStream, OutputMode, emit_json};
-use crate::core::perf_phase::PerfPhaseSink;
 use crate::git::push::{
     PushConfig, PushFailureStage, PushRejectReason, PushResult, RefPushOutcome,
-    acquire_push_lock_leases, configure_active_active_push_coordinator, record_push_audit_event,
-    release_push_lock_leases,
+    configure_active_active_push_coordinator, record_push_audit_event,
 };
-use crate::git::push_native::{
-    NativePushConfig, NativePushInputs, NativePushProgressStream, run_native_push,
-};
+use crate::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
 use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::git::remote_helper::{AGENT_REBASE_FETCH_REF_FILTERING_ENV, PushSpec};
@@ -570,10 +564,6 @@ async fn run_push_once(
         crate::core::config::Config::resolve_local()?
     };
 
-    // Wait for a concurrent clean filter, retaining the actual lock outcome
-    // until discovery establishes whether this push needs staged payloads.
-    let staging = PushStaging::open(repo_root.join(".crab/staging")).await?;
-
     // Resolve refspecs.
     let specs = resolve_push_specs(&args.refspecs, &remote_name, args.force)?;
     if specs.is_empty() {
@@ -618,7 +608,7 @@ async fn run_push_once(
     );
 
     // Load push state for incremental walk.
-    let mut push_state = PushState::load(&repo_root);
+    let push_state = PushState::load(&repo_root);
 
     // Dry-run: print what would be pushed and return.
     if args.dry_run {
@@ -691,186 +681,49 @@ async fn run_push_once(
     {
         return retryable_setup_failure(error, PushFailureStage::StoreResolve);
     }
-    let (store, router) = if matches!(
+    if matches!(
         config.auth.provider,
         crate::core::config::AuthProvider::CrabAuth
     ) {
-        let protected = match crate::git::protected_push::prepare_crab_auth_push(
-            &config,
-            &parsed_url,
-            &specs,
-            cancel,
-        )
+        return Err(CrabError::Configuration {
+            key: "request-minimal push authorization".to_owned(),
+            origin: "managed protected pushes require a protocol-v2 authorization commit adapter"
+                .to_owned(),
+        });
+    }
+    if args.follow_tags || args.no_incremental {
+        return Err(CrabError::Configuration {
+            key: "request-minimal push options".to_owned(),
+            origin:
+                "--follow-tags and --no-incremental are not part of the protocol-v2 hard cutover"
+                    .to_owned(),
+        });
+    }
+    let selection = match StoreResolver::new(&config, &parsed_url, cancel)
+        .write_store("push")
         .await
-        {
-            Ok(protected) => protected,
-            Err(error) => {
-                return retryable_setup_failure(error, PushFailureStage::StoreResolve);
-            }
-        };
-        push_config.atomic = true;
-        push_config.protected_push = Some(protected.session);
-        let store = protected.store;
-        let router = StoreLayout::new(store.clone(), parsed_url.repo_path.clone());
-        (store, router)
-    } else {
-        let selection = match StoreResolver::new(&config, &parsed_url, cancel)
-            .write_store("push")
-            .await
-        {
-            Ok(selection) => selection,
-            Err(error) => {
-                return retryable_setup_failure(error, PushFailureStage::StoreResolve);
-            }
-        };
-        (selection.store, selection.router)
-    };
-    let repo_prefix = router.repo_prefix().to_owned();
-
-    // Build CachingStore when a cache service is configured and healthy.
-    let caching_store = crab_cache_store::CachingStore::try_build_healthy(
-        store.as_storage().clone(),
-        &config.cache,
-    )
-    .await;
-
-    // Build the optional JSONL stream for streaming mode.
-    let jsonl_stream: Option<Arc<Mutex<JsonlStream<Stdout>>>> = match mode {
-        OutputMode::Jsonl if emit_terminal => Some(Arc::new(Mutex::new(JsonlStream::new(
-            "push.event",
-            "1.0",
-            std::io::stdout(),
-        )))),
-        _ => None,
-    };
-    if let Some(stream) = &jsonl_stream {
-        push_config.perf_phase_sink = Some(PerfPhaseSink::Stdout(Arc::clone(stream)));
-    }
-
-    let mut pre_acquired_locks = None;
-    if push_config.protected_push.is_none()
-        && let Some(branch) = agent_integration_lock_branch(args, &specs)
-        && current_branch().as_deref() == Some(branch)
     {
-        let branch = branch.to_owned();
-        match acquire_push_lock_leases(&store, router.repo_prefix(), &specs, &push_config, cancel)
-            .await
-        {
-            Ok(leases) => {
-                let integration_error =
-                    match remote_branch_exists(&repo_root, &remote_name, &branch) {
-                        Ok(true) => run_git_pull_rebase(&repo_root, &remote_name, &branch)
-                            .err()
-                            .map(|message| (integration_command(&remote_name, &branch), message)),
-                        Ok(false) => None,
-                        Err(message) => {
-                            Some((remote_branch_probe_command(&remote_name, &branch), message))
-                        }
-                    };
-
-                if let Some((command, message)) = integration_error {
-                    release_push_lock_leases(leases).await;
-                    let result = push_result_from_reason(
-                        &specs,
-                        PushRejectReason::IntegrationFailed {
-                            command: command.clone(),
-                            message: message.clone(),
-                        },
-                    );
-                    if let Err(err) = record_push_audit_event(
-                        &repo_root.join(default_log_path()),
-                        Some(&remote_url),
-                        &repo_prefix,
-                        &specs,
-                        &result,
-                        Some(start.elapsed().as_millis() as u64),
-                    ) {
-                        warn!(%err, "failed to append push audit event");
-                    }
-                    let failure = PushAttemptFailure {
-                        repo_root,
-                        remote_name,
-                        remote_url,
-                        specs: specs.clone(),
-                        result,
-                        elapsed: start.elapsed(),
-                        integration: push_integration_summary(
-                            args,
-                            integration_retries,
-                            integration_retry_stages,
-                        ),
-                        agent_integration_lock: true,
-                    };
-                    if emit_terminal || mode == OutputMode::Text {
-                        emit_push_failure(&failure, mode);
-                    }
-                    return Err(CrabError::PushIntegrationFailed { command, message });
-                }
-
-                pre_acquired_locks = Some(leases);
-            }
-            Err(e) => {
-                let result =
-                    push_result_from_error(&specs, &e).with_failure_stage(PushFailureStage::Lock);
-                if let Err(err) = record_push_audit_event(
-                    &repo_root.join(default_log_path()),
-                    Some(&remote_url),
-                    &repo_prefix,
-                    &specs,
-                    &result,
-                    Some(start.elapsed().as_millis() as u64),
-                ) {
-                    warn!(%err, "failed to append push audit event");
-                }
-                return Ok(PushAttempt::Failed(Box::new(PushAttemptFailure {
-                    repo_root,
-                    remote_name,
-                    remote_url,
-                    specs: specs.clone(),
-                    result,
-                    elapsed: start.elapsed(),
-                    integration: push_integration_summary(
-                        args,
-                        integration_retries,
-                        integration_retry_stages,
-                    ),
-                    agent_integration_lock: true,
-                })));
-            }
+        Ok(selection) => selection,
+        Err(error) => {
+            return retryable_setup_failure(error, PushFailureStage::StoreResolve);
         }
-    }
-
-    let mut native_config = NativePushConfig::new(push_config);
-    native_config.incremental = !args.no_incremental;
-    native_config.color = !args.no_color && crate::git::progress::is_tty();
-    native_config.verbose = args.verbose;
-    native_config.progress = mode == OutputMode::Text;
-    native_config.followtags = args.follow_tags;
-    if let Some(stream) = &jsonl_stream {
-        native_config.output_mode = Some(OutputMode::Jsonl);
-        native_config.jsonl_progress_stream =
-            Some(NativePushProgressStream::Stdout(Arc::clone(stream)));
-    }
-
-    let native_result = run_native_push(
-        &native_config,
+    };
+    let store = selection.store;
+    let router = selection.router;
+    let root = selection.request_minimal_root;
+    let repo_prefix = router.repo_prefix().to_owned();
+    let result = match crate::git::request_minimal_push::run(
+        &push_config,
         &specs,
-        NativePushInputs::new(
-            Some(store),
-            caching_store,
-            staging,
-            router,
-            &mut push_state,
-            &remote_name,
-            &remote_url,
-            None,
-            cancel.clone(),
-        )
-        .with_pre_acquired_locks(pre_acquired_locks),
+        &store,
+        &router,
+        Some(root),
+        &config.transfer_hide_refs,
+        cancel,
     )
-    .await;
-    let result = match native_result {
-        Ok(result) => result,
+    .await
+    {
+        Ok((result, _)) => result,
         Err(error) => return retryable_setup_failure(error, PushFailureStage::Discovery),
     };
 
@@ -903,11 +756,9 @@ async fn run_push_once(
                 }
             }
             OutputMode::Jsonl => {
-                if emit_terminal
-                    && let Some(ref stream) = jsonl_stream
-                    && let Ok(mut s) = stream.lock()
-                {
-                    s.emit_result(&summary)?;
+                if emit_terminal {
+                    JsonlStream::new("push.event", "1.0", std::io::stdout())
+                        .emit_result(&summary)?;
                 }
             }
         }
