@@ -741,10 +741,12 @@ pub async fn run_remote_helper(
 
     // Load push state for incremental walk (used by native push pipeline).
     let repo_root = push_state_repo_root();
+    let mut cache = SessionCache::new(config);
+    cache.request_minimal_root = Some(resolved.request_minimal_root);
     let context = RemoteHelperContext {
         store: resolved.store,
         prefix: resolved.repository_prefix,
-        cache: SessionCache::new(config),
+        cache,
         push_state: PushState::load(&repo_root),
         push_state_repo_root: repo_root,
         progress_mode,
@@ -1391,16 +1393,32 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
         Batch::List { for_push } => {
             tracing::debug!(for_push, "list requested");
             let output = if let Some(s) = store {
-                let cfg = cache.config();
-                let (read_store, router) =
-                    read_store_for_list_batch(s, prefix, remote_url, cfg, *for_push, cancel).await;
-                let (output, root) =
-                    read_remote_refs_with_snapshot(&read_store, &router, &cfg.transfer_hide_refs)
+                let (read_store, router, hidden_ref_patterns, may_reuse_primary_root) = {
+                    let cfg = cache.config();
+                    let selected =
+                        read_store_for_list_batch(s, prefix, remote_url, cfg, *for_push, cancel)
+                            .await;
+                    let may_reuse_primary_root = *for_push
+                        || cfg
+                            .replication
+                            .as_ref()
+                            .is_none_or(|replication| !replication.has_read_replicas());
+                    (
+                        selected.0,
+                        selected.1,
+                        cfg.transfer_hide_refs.clone(),
+                        may_reuse_primary_root,
+                    )
+                };
+                let (output, root) = match cache.request_minimal_root.take() {
+                    Some(root) if may_reuse_primary_root => {
+                        (list_output_from_root(&root, &hidden_ref_patterns), root)
+                    }
+                    _ => read_remote_refs_with_snapshot(&read_store, &router, &hidden_ref_patterns)
                         .await
-                        .map_err(map_missing_request_minimal_root)?;
-                if *for_push {
-                    cache.request_minimal_root = Some(root);
-                }
+                        .map_err(map_missing_request_minimal_root)?,
+                };
+                cache.request_minimal_root = Some(root);
                 output
             } else {
                 ListOutput {
@@ -1858,8 +1876,6 @@ where
             options.check_connectivity,
         )
         .await?;
-        let primary_router = StoreLayout::new(s.clone(), prefix.to_owned());
-        check_repack_threshold(s, &primary_router, cache).await;
     } else {
         tracing::warn!("no store available for fetch");
     }
@@ -2161,6 +2177,16 @@ async fn read_remote_refs_with_snapshot(
         router.global_prefix().to_owned(),
     );
     let snapshot = crab_write::request_minimal::open_root(&layout).await?;
+    Ok((
+        list_output_from_root(&snapshot, hidden_ref_patterns),
+        snapshot,
+    ))
+}
+
+fn list_output_from_root(
+    snapshot: &crab_metadata::request_minimal::RootSnapshot,
+    hidden_ref_patterns: &[String],
+) -> ListOutput {
     let root = snapshot.record().root();
     let advertisement = crab_read::root_ref_advertisement(root, hidden_ref_patterns);
 
@@ -2181,13 +2207,10 @@ async fn read_remote_refs_with_snapshot(
         "read remote refs from request-minimal root"
     );
 
-    Ok((
-        ListOutput {
-            refs,
-            head_symref: advertisement.head_symref,
-        },
-        snapshot,
-    ))
+    ListOutput {
+        refs,
+        head_symref: advertisement.head_symref,
+    }
 }
 
 async fn read_remote_refs_for_advertisement(
@@ -2485,7 +2508,7 @@ async fn fetch_packs(
     config: &crate::core::config::Config,
     _writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     _caching_store: Option<&crab_cache_store::CachingStore>,
-    _cache: &mut SessionCache,
+    cache: &mut SessionCache,
     _cancel: &tokio_util::sync::CancellationToken,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
@@ -2500,7 +2523,15 @@ async fn fetch_packs(
             "raw-object fetch is not yet part of the request-minimal protocol".to_owned(),
         ));
     }
-    fetch_request_minimal_packs(store, router, entries, config, check_connectivity).await
+    fetch_request_minimal_packs(
+        store,
+        router,
+        entries,
+        config,
+        cache.request_minimal_root.take(),
+        check_connectivity,
+    )
+    .await
 }
 
 async fn fetch_request_minimal_packs(
@@ -2508,6 +2539,7 @@ async fn fetch_request_minimal_packs(
     router: &StoreLayout,
     entries: &[FetchEntry],
     config: &crate::core::config::Config,
+    root: Option<crab_metadata::request_minimal::RootSnapshot>,
     check_connectivity: bool,
 ) -> Result<Option<std::path::PathBuf>> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
@@ -2520,14 +2552,16 @@ async fn fetch_request_minimal_packs(
     } else {
         config.uploadpack_max_egress_bytes
     };
-    let view = crab_read::request_minimal::open_view(
-        &layout,
-        crab_read::request_minimal::RequestMinimalReadLimits {
-            max_capsule_bytes: maximum,
-            max_frontier_bytes: maximum,
-        },
-    )
-    .await?;
+    let limits = crab_read::request_minimal::RequestMinimalReadLimits {
+        max_capsule_bytes: maximum,
+        max_frontier_bytes: maximum,
+    };
+    let view = match root {
+        Some(root) => {
+            crab_read::request_minimal::open_view_from_root(&layout, root, limits).await?
+        }
+        None => crab_read::request_minimal::open_view(&layout, limits).await?,
+    };
     let advertisement =
         crab_read::root_ref_advertisement(view.root().root(), &config.transfer_hide_refs);
     let visible = advertisement
@@ -2940,50 +2974,6 @@ fn linked_worktree_root_from_git_dir(git_dir: &std::path::Path) -> Option<std::p
     };
     let root = gitfile_path.parent()?.to_path_buf();
     Some(root.canonicalize().unwrap_or(root))
-}
-
-///
-/// Reads the current pack count from the repository snapshot. Uses the
-/// session cache for config resolution. Falls back silently on errors.
-async fn check_repack_threshold(
-    store: &crate::storage::store::Store,
-    router: &StoreLayout,
-    cache: &mut SessionCache,
-) {
-    let threshold = cache.config().repack_auto_threshold;
-
-    let pack_count = if let Some(ref pl) = cache.pack_list {
-        pl.entries.len()
-    } else {
-        let Ok(snapshot) = crate::metadata::manifest::read_repository_snapshot(store, router).await
-        else {
-            return;
-        };
-        let count = snapshot.journal.packs.len();
-        cache.pack_list = Some(crab_metadata::manifests::PackList {
-            generation: snapshot.manifest.generation,
-            entries: snapshot
-                .journal
-                .packs
-                .iter()
-                .map(|entry| {
-                    crab_metadata::manifests::PackEntry::new(
-                        &entry.pack_id,
-                        entry.size,
-                        entry.ref_tips.clone(),
-                    )
-                })
-                .collect(),
-        });
-        count
-    };
-
-    if pack_count > threshold {
-        eprintln!(
-            "warning: repository has {pack_count} packs (threshold: {threshold}). \
-             Consider running `crab repack` to consolidate."
-        );
-    }
 }
 
 #[cfg(test)]

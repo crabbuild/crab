@@ -186,7 +186,18 @@ pub async fn run_repack(
     config: &RepackConfig,
     cancel: &CancellationToken,
 ) -> Result<RepackOutcome> {
-    run_request_minimal_repack(store, prefix, config, cancel).await
+    run_request_minimal_repack(store, prefix, config, cancel, None).await
+}
+
+/// Checkpoint a repository using an already authenticated protocol-v2 root.
+pub async fn run_repack_from_root(
+    store: &Store,
+    prefix: &str,
+    root: crab_metadata::request_minimal::RootSnapshot,
+    config: &RepackConfig,
+    cancel: &CancellationToken,
+) -> Result<RepackOutcome> {
+    run_request_minimal_repack(store, prefix, config, cancel, Some(root)).await
 }
 
 async fn run_request_minimal_repack(
@@ -194,6 +205,7 @@ async fn run_request_minimal_repack(
     prefix: &str,
     config: &RepackConfig,
     cancel: &CancellationToken,
+    root: Option<crab_metadata::request_minimal::RootSnapshot>,
 ) -> Result<RepackOutcome> {
     const MAX_CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
@@ -205,14 +217,16 @@ async fn run_request_minimal_repack(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let view = crab_read::request_minimal::open_view(
-        &layout,
-        crab_read::request_minimal::RequestMinimalReadLimits {
-            max_capsule_bytes: MAX_CHECKPOINT_BYTES,
-            max_frontier_bytes: MAX_CHECKPOINT_BYTES,
-        },
-    )
-    .await?;
+    let limits = crab_read::request_minimal::RequestMinimalReadLimits {
+        max_capsule_bytes: MAX_CHECKPOINT_BYTES,
+        max_frontier_bytes: MAX_CHECKPOINT_BYTES,
+    };
+    let view = match root {
+        Some(root) => {
+            crab_read::request_minimal::open_view_from_root(&layout, root, limits).await?
+        }
+        None => crab_read::request_minimal::open_view(&layout, limits).await?,
+    };
     let root = view.root().root();
     if root.refs().is_empty() {
         return Err(CrabError::Protocol(

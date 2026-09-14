@@ -8352,6 +8352,7 @@ pub type ReadStoreSelection = crab_read::ReadStoreSelection<Store, StoreLayout>;
 pub struct WriteStoreSelection {
     pub store: Store,
     pub router: StoreLayout,
+    pub request_minimal_root: crab_metadata::request_minimal::RootSnapshot,
 }
 
 struct SelectedReadReplicaStore {
@@ -8463,7 +8464,7 @@ impl<'a> StoreResolver<'a> {
 
     /// Selects the primary store for write-class operations.
     pub async fn write_store(&self, operation: &str) -> Result<WriteStoreSelection> {
-        let store = crate::auth::build_repository_url_store(
+        let (store, request_minimal_root) = crate::auth::build_repository_url_store_with_root(
             self.config,
             self.primary_url.clone(),
             operation,
@@ -8471,7 +8472,11 @@ impl<'a> StoreResolver<'a> {
         )
         .await?;
         let router = StoreLayout::new(store.clone(), self.primary_url.repo_path.clone());
-        Ok(WriteStoreSelection { store, router })
+        Ok(WriteStoreSelection {
+            store,
+            router,
+            request_minimal_root,
+        })
     }
 }
 

@@ -3,7 +3,7 @@ use crab_auth::token_cache::expand_token_cache_path;
 use crab_auth_store::ManagedRepositoryResolver;
 use tokio_util::sync::CancellationToken;
 
-use super::{build_repository_url_store, validate_repository_store};
+use super::{build_store, open_repository_root};
 use crate::core::config::Config;
 use crate::core::error::Result;
 use crate::storage::store::Store;
@@ -12,6 +12,7 @@ use crate::storage::store::Store;
 pub struct RepositoryStore {
     pub store: Store,
     pub repository_prefix: String,
+    pub request_minimal_root: crab_metadata::request_minimal::RootSnapshot,
 }
 
 /// Resolves a direct or managed repository into the canonical store abstraction.
@@ -24,16 +25,20 @@ pub async fn build_repository_store(
     match locator {
         crab_git::RepositoryLocator::Direct(repository) => {
             let repository_prefix = repository.repo_prefix.clone();
-            let store = build_repository_url_store(
+            let canonical_url = format!("crab://{}/{}", repository.bucket, repository_prefix);
+            let store = build_store(
                 config,
                 crab_git::url::CrabUrl::from(repository),
                 transfer_operation_name(operation),
                 cancel,
             )
             .await?;
+            let request_minimal_root =
+                open_repository_root(&store, &repository_prefix, &canonical_url).await?;
             Ok(RepositoryStore {
                 store,
                 repository_prefix,
+                request_minimal_root,
             })
         }
         crab_git::RepositoryLocator::Managed(repository) => {
@@ -43,10 +48,12 @@ pub async fn build_repository_store(
                 .resolve(&repository, operation, cancel)
                 .await?;
             let store = Store::from_storage(managed.store);
-            validate_repository_store(&store, &managed.repository_prefix, &canonical_url).await?;
+            let request_minimal_root =
+                open_repository_root(&store, &managed.repository_prefix, &canonical_url).await?;
             Ok(RepositoryStore {
                 store,
                 repository_prefix: managed.repository_prefix,
+                request_minimal_root,
             })
         }
     }

@@ -219,7 +219,19 @@ pub async fn run(
         return Err(CrabError::Cancelled);
     }
     let committed =
-        crab_write::request_minimal::publish(&layout, base, &transaction, &capsule).await?;
+        match crab_write::request_minimal::publish(&layout, base, &transaction, &capsule).await {
+            Ok(committed) => committed,
+            Err(crab_write::WriteError::RequestMinimalRootChanged { .. }) => {
+                for edit in transaction.edits() {
+                    outcomes.insert(
+                        edit.ref_name().to_owned(),
+                        RefPushOutcome::Rejected(PushRejectReason::StaleInfo),
+                    );
+                }
+                return Ok((PushResult::new(outcomes), None));
+            }
+            Err(error) => return Err(error.into()),
+        };
     for edit in transaction.edits() {
         outcomes.insert(edit.ref_name().to_owned(), RefPushOutcome::Ok);
     }
