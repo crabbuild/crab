@@ -592,9 +592,7 @@ fn corrupt(reason: impl Into<String>) -> MetadataError {
 #[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
 mod tests {
     use super::*;
-    use crate::request_minimal::{
-        Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
-    };
+    use crate::request_minimal::{Capsule, CapsuleGitPack, CapsuleRefEdit, CapsuleTransaction};
 
     #[test]
     fn root_round_trip_preserves_digest_and_generation() {
@@ -688,18 +686,23 @@ mod tests {
         .unwrap();
         let checkpoint = Capsule::build(
             &checkpoint_transaction,
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::GitPack,
-                Bytes::from_static(b"PACK checkpoint"),
-            )],
+            vec![
+                CapsuleGitPack::new(
+                    Bytes::from_static(b"PACK checkpoint"),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "b".repeat(40),
+                    1,
+                )
+                .unwrap(),
+            ],
+            Vec::new(),
         )
         .unwrap();
-        let pack = checkpoint
-            .sections()
-            .iter()
-            .find(|section| section.kind() == CapsuleSectionKind::GitPack)
-            .unwrap()
-            .clone();
+        let pack = checkpoint.sections()
+            [usize::try_from(checkpoint.git_packs()[0].pack_section()).unwrap()]
+        .clone();
         let pointer = CheckpointPointer::new(
             checkpoint.hash(),
             checkpoint.bytes().len() as u64,

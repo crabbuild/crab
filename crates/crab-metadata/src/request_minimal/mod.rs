@@ -6,7 +6,10 @@ mod root;
 mod store;
 mod transaction;
 
-pub use capsule::{Capsule, CapsuleSection, CapsuleSectionKind, CapsuleSectionLocation};
+pub use capsule::{
+    Capsule, CapsuleGitPack, CapsuleGitPackDescriptor, CapsuleSection, CapsuleSectionKind,
+    CapsuleSectionLocation,
+};
 pub use root::{
     CapsulePointer, CheckpointPointer, MAX_CAPSULE_FRONTIER, MAX_ROOT_BYTES, RepositoryRoot,
     RootRecord,
