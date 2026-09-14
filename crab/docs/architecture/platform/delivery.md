@@ -277,7 +277,9 @@ Current implementation includes the bounded Tick transaction and typed actor
 command, including stale-root rejection, timer dispatch and terminal activity
 events. It also includes revision-pinned page enumeration, 32-control due
 batches and deterministic rendezvous assignment. Node-progress advertisements,
-fallback, route/acquire and retry remain.
+fallback, remote/idle route orchestration and retry remain. Active-local routing
+already revalidates dispatcher admission and the scanned control identity before
+submitting Tick through a reconstructed capability.
 
 | Test file | Required cases |
 | --- | --- |

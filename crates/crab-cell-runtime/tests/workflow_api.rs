@@ -459,7 +459,13 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
             .commit_sequence,
         timer.receipt.commit_sequence
     );
-    let tick = client
+    let routed = runtime
+        .local_handle(due[0].catalog().clone(), due[0].control())
+        .await
+        .unwrap()
+        .unwrap();
+    let scheduler_client = CellClient::local(registry.clone(), routed);
+    let tick = scheduler_client
         .command::<MaintenanceTickCommand<TestWorkflow>>(
             &target,
             identity(17),
@@ -483,7 +489,7 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
             .state,
         b"timer-complete"
     );
-    let stale = client
+    let stale = scheduler_client
         .command::<MaintenanceTickCommand<TestWorkflow>>(
             &target,
             identity(18),

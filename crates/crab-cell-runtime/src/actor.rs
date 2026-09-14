@@ -68,6 +68,53 @@ impl CellRuntime {
         })
     }
 
+    /// Resolves an active local owner without exposing the dispatcher's Cell map.
+    pub async fn local_handle(
+        &self,
+        catalog: CatalogProof,
+        control: &VersionedControl,
+    ) -> crate::Result<Option<CellHandle>> {
+        let value = control.value();
+        if catalog.entry().cell() != value.cell {
+            return Err(Error::Control("scheduler catalog and control differ"));
+        }
+        if value
+            .owner
+            .as_ref()
+            .is_none_or(|owner| owner.session != self.inner.session)
+            || value.root.is_none()
+        {
+            return Ok(None);
+        }
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::Lookup {
+                cell: value.cell,
+                reply,
+            })
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        let Some(local) = response.await.map_err(|_| Error::RuntimeClosed)? else {
+            return Ok(None);
+        };
+        if local.incarnation != value.incarnation
+            || local.code != value.code
+            || local.schema != value.schema
+        {
+            return Ok(None);
+        }
+        Ok(Some(CellHandle {
+            cell: value.cell,
+            incarnation: value.incarnation,
+            code: value.code,
+            schema: value.schema,
+            catalog,
+            inner: self.inner.clone(),
+            admission: local.admission,
+        }))
+    }
+
     /// Creates, initializes and publishes a new Cell before returning a handle.
     pub async fn bootstrap<F>(
         &self,
@@ -401,6 +448,10 @@ enum Message {
     Execute(Box<QueuedCommand>),
     Query(Box<QueuedQuery>),
     Resolve(Box<QueuedResolve>),
+    Lookup {
+        cell: CellId,
+        reply: oneshot::Sender<Option<LocalCell>>,
+    },
     Drain {
         cell: CellId,
         admission: Arc<CellAdmission>,
@@ -448,6 +499,9 @@ enum QueuedWork {
 
 struct ActiveCell {
     admission: Arc<CellAdmission>,
+    incarnation: crate::IncarnationId,
+    code: Digest,
+    schema: u32,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
     publisher: Option<CellPublisher>,
     queue: VecDeque<QueuedWork>,
@@ -455,6 +509,13 @@ struct ActiveCell {
     renewing: bool,
     fenced: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
+}
+
+struct LocalCell {
+    admission: Arc<CellAdmission>,
+    incarnation: crate::IncarnationId,
+    code: Digest,
+    schema: u32,
 }
 
 enum TaskResult {
@@ -666,6 +727,17 @@ fn handle_message(
             }
             active.queue.push_back(QueuedWork::Resolve(resolve));
             start_next(active, pool, tasks);
+        }
+        Message::Lookup { cell, reply } => {
+            let local = cells.get(&cell).and_then(|active| {
+                (!active.fenced && active.drain.is_none()).then(|| LocalCell {
+                    admission: active.admission.clone(),
+                    incarnation: active.incarnation,
+                    code: active.code,
+                    schema: active.schema,
+                })
+            });
+            let _ = reply.send(local);
         }
         Message::Drain {
             cell,
@@ -955,10 +1027,17 @@ fn handle_task(
                     return;
                 }
                 transitioning.remove(&cell);
+                let control = publisher.control().value();
+                let incarnation = control.incarnation;
+                let code = control.code;
+                let schema = control.schema;
                 cells.insert(
                     cell,
                     ActiveCell {
                         admission,
+                        incarnation,
+                        code,
+                        schema,
                         interrupt,
                         publisher: Some(*publisher),
                         queue: VecDeque::new(),

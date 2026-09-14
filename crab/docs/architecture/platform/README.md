@@ -103,8 +103,11 @@ summary. It dispatches timer and terminal activity events through the run's
 retained definition. Revision-pinned catalog iteration now verifies one immutable
 256-entry page at a time; due filtering reads at most 32 controls per step, and
 the preferred scanner is selected by order-independent rendezvous hashing.
-Node-progress advertisements, 15-second fallback, due-Cell route/acquire and
-retry supervision remain.
+Node-progress advertisements, 15-second fallback, remote/idle route orchestration
+and retry supervision remain. `CellRuntime::local_handle` now resolves a due Cell
+only when the dispatcher still owns the exact incarnation/code/schema under the
+current session and the admission is neither fenced nor draining; it never
+exposes the internal Cell map or SQLite handle.
 The startup-only compiled registry now validates module names, exact migration
 bytes/digests and contiguous schema ranges, command/query codec ranges and byte
 limits, namespace topology/effect targets/DLQ cycles, workflow/activity

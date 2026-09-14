@@ -354,7 +354,11 @@ requests. `CatalogShardScan` keeps a fixed head revision while reading one
 digest-verified page at a time. `DueCellScan` bounds each step to 32 control
 reads; a zero-result batch still advances the scan. Rendezvous selection is pure
 and independent of node-list ordering. Liveness advertisements, fallback and
-route/acquire orchestration remain node-supervisor work.
+route/acquire orchestration remain node-supervisor work. For a locally owned
+Cell, `CellRuntime::local_handle` asks the dispatcher for a capability and
+returns one only if the scanned control's session/incarnation/code/schema still
+match an unfenced, non-draining active entry. Callers never inspect the runtime's
+Cell map.
 
 ```rust,ignore
 pub trait WorkflowModule: Send + Sync + 'static {

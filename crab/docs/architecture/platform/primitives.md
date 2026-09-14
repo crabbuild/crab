@@ -402,8 +402,10 @@ root position before doing maintenance, and its resulting summary publishes
 through the ordinary actor/LTX/control path. `CatalogShardScan` pins one head
 revision and verifies one immutable page per call; `DueCellScan` inspects at
 most 32 controls per step, and `preferred_scanner` implements deterministic
-rendezvous assignment. Node advertisements and fallback, due-Cell route/acquire
-and Tick retry supervision remain to implement.
+rendezvous assignment. Node advertisements and fallback, remote/idle routing
+and Tick retry supervision remain to implement. Active-local routing can already
+recover a capability from the dispatcher only when session, incarnation, code
+and schema match the scanned control and the Cell is not fenced or draining.
 
 After every commit, compute minimum outstanding due time using indexed minima
 for ready effects, leased-effect deadlines, KV expirations, ready queue rows,
