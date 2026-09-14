@@ -1,0 +1,564 @@
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use prost::Message;
+
+use crate::{ApplicationId, CellTarget, Digest, Error, NamespaceId, Result, SessionId, TenantId};
+
+mod protobuf;
+
+use protobuf::{
+    MessageKind, field_payload, oneof_payload, require_fields, validate_message, validate_operation,
+};
+
+const PROTOCOL_VERSION: u32 = 1;
+const MAX_AUTHORIZATION_BYTES: usize = 16 * 1024;
+const MAX_OPERATION_BYTES: usize = 1024 * 1024;
+const MAX_REQUEST_BYTES: usize = MAX_AUTHORIZATION_BYTES + MAX_OPERATION_BYTES + 128;
+const MAX_ACTIONS: usize = 128;
+const MAX_PRINCIPAL_BYTES: usize = 512;
+const MAX_AUTH_LIFETIME_MS: i64 = 60_000;
+const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
+const MAX_MUTATION_LIFETIME_MS: i64 = 24 * 60 * 60_000;
+
+/// Generated private peer messages. They are not a public service or application API.
+pub mod wire {
+    include!(concat!(env!("OUT_DIR"), "/crab.cell.peer.v1.rs"));
+}
+
+/// One peer operation currently executable by the typed Cell client.
+#[derive(Clone)]
+pub enum PeerOperation {
+    Mutate(wire::MutationRequest),
+    Read(wire::ReadRequest),
+    Resolve(wire::ResolveRequest),
+}
+
+impl PeerOperation {
+    fn tag(&self) -> u32 {
+        match self {
+            Self::Mutate(_) => 10,
+            Self::Read(_) => 11,
+            Self::Resolve(_) => 12,
+        }
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Mutate(value) => value.encode_to_vec(),
+            Self::Read(value) => value.encode_to_vec(),
+            Self::Resolve(value) => value.encode_to_vec(),
+        }
+    }
+
+    fn validate(&self, now_ms: i64) -> Result<()> {
+        match self {
+            Self::Mutate(value) => validate_mutation(value, now_ms),
+            Self::Read(value) => validate_read(value),
+            Self::Resolve(value) => validate_resolve(value, now_ms),
+        }
+    }
+}
+
+/// Original authorized principal delegated across one private peer hop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerPrincipal {
+    pub issuer: String,
+    pub subject: String,
+    pub actions: Vec<String>,
+}
+
+/// Boot-session signer used only after node enrollment has bound its public key.
+pub struct PeerSigner {
+    session: SessionId,
+    release: Digest,
+    key: SigningKey,
+}
+
+impl PeerSigner {
+    #[must_use]
+    pub fn new(session: SessionId, release: Digest, key: SigningKey) -> Self {
+        Self {
+            session,
+            release,
+            key,
+        }
+    }
+
+    #[must_use]
+    pub fn verifying_key(&self) -> VerifyingKey {
+        self.key.verifying_key()
+    }
+
+    /// Encodes and signs one bounded private request without changing its operation bytes.
+    pub fn sign(
+        &self,
+        principal: PeerPrincipal,
+        issued_at_ms: i64,
+        expires_at_ms: i64,
+        remaining_ms: u32,
+        operation: PeerOperation,
+    ) -> Result<Vec<u8>> {
+        validate_principal(&principal)?;
+        validate_time_bounds(issued_at_ms, expires_at_ms, issued_at_ms, remaining_ms)?;
+        operation.validate(issued_at_ms)?;
+        let tag = operation.tag();
+        let payload = operation.encode();
+        if payload.len() > MAX_OPERATION_BYTES {
+            return Err(Error::Peer("operation exceeds one MiB"));
+        }
+        validate_operation(tag, &payload)?;
+        let payload_digest = blake3::hash(&payload);
+        let mut authorization = wire::PeerAuthorization {
+            origin_session: self.session.as_bytes().to_vec(),
+            principal_issuer: principal.issuer,
+            principal_subject: principal.subject,
+            actions: principal.actions,
+            release_digest: self.release.as_bytes().to_vec(),
+            issued_at_ms,
+            expires_at_ms,
+            payload_digest: payload_digest.as_bytes().to_vec(),
+            signature: Vec::new(),
+        };
+        let signing_bytes = signing_bytes(tag, &authorization)?;
+        authorization.signature = self.key.sign(&signing_bytes).to_bytes().to_vec();
+        encode_request(authorization, 1, remaining_ms, tag, &payload)
+    }
+}
+
+/// Enrollment-bound verifier for one currently advertised node session.
+pub struct PeerVerifier {
+    session: SessionId,
+    release: Digest,
+    key: VerifyingKey,
+}
+
+impl PeerVerifier {
+    #[must_use]
+    pub fn new(session: SessionId, release: Digest, key: VerifyingKey) -> Self {
+        Self {
+            session,
+            release,
+            key,
+        }
+    }
+
+    /// Strictly decodes and authenticates one request before actor admission.
+    pub fn verify(&self, input: &[u8], now_ms: i64) -> Result<VerifiedPeerRequest> {
+        if input.len() > MAX_REQUEST_BYTES {
+            return Err(Error::Peer("request exceeds peer byte limit"));
+        }
+        let fields = validate_message(input, MessageKind::PeerRequest)?;
+        require_fields(&fields, &[1, 2, 3, 4])?;
+        let (tag, payload) = oneof_payload(input, &fields, &[10, 11, 12, 13, 14])?;
+        if !matches!(tag, 10..=12) {
+            return Err(Error::Peer("peer operation is not implemented"));
+        }
+        if payload.len() > MAX_OPERATION_BYTES {
+            return Err(Error::Peer("operation exceeds one MiB"));
+        }
+        validate_operation(tag, payload)?;
+        let request = wire::PeerRequest::decode(input)?;
+        if request.version != PROTOCOL_VERSION
+            || !(1..=2).contains(&request.hop_count)
+            || !(1..=60_000).contains(&request.remaining_ms)
+        {
+            return Err(Error::Peer("unsupported peer version, hop, or deadline"));
+        }
+        validate_decoded_operation(request.operation.as_ref(), now_ms)?;
+        let authorization = request
+            .authorization
+            .as_ref()
+            .ok_or(Error::Peer("authorization is missing"))?;
+        let authorization_bytes = field_payload(&fields, 2)?;
+        if authorization_bytes.len() > MAX_AUTHORIZATION_BYTES {
+            return Err(Error::Peer("authorization exceeds 16 KiB"));
+        }
+        validate_authorization(authorization, now_ms, request.remaining_ms)?;
+        if authorization.origin_session.as_slice() != self.session.as_bytes()
+            || authorization.release_digest.as_slice() != self.release.as_bytes()
+        {
+            return Err(Error::Peer("peer enrollment or release does not match"));
+        }
+        let expected_digest = blake3::hash(payload);
+        if authorization.payload_digest.as_slice() != expected_digest.as_bytes() {
+            return Err(Error::Peer("peer payload digest does not match"));
+        }
+        let signature =
+            Signature::from_slice(&authorization.signature).map_err(Error::PeerSignature)?;
+        self.key
+            .verify_strict(&signing_bytes(tag, authorization)?, &signature)
+            .map_err(Error::PeerSignature)?;
+        let target = operation_target(request.operation.as_ref())?;
+        let principal = PeerPrincipal {
+            issuer: authorization.principal_issuer.clone(),
+            subject: authorization.principal_subject.clone(),
+            actions: authorization.actions.clone(),
+        };
+        Ok(VerifiedPeerRequest {
+            request,
+            target,
+            principal,
+            operation_tag: tag,
+            operation_bytes: payload.to_vec(),
+        })
+    }
+}
+
+/// Authenticated request retaining the exact signed nested operation bytes.
+pub struct VerifiedPeerRequest {
+    request: wire::PeerRequest,
+    target: CellTarget,
+    principal: PeerPrincipal,
+    operation_tag: u32,
+    operation_bytes: Vec<u8>,
+}
+
+impl VerifiedPeerRequest {
+    #[must_use]
+    pub const fn target(&self) -> &CellTarget {
+        &self.target
+    }
+
+    #[must_use]
+    pub const fn principal(&self) -> &PeerPrincipal {
+        &self.principal
+    }
+
+    #[must_use]
+    pub const fn hop_count(&self) -> u32 {
+        self.request.hop_count
+    }
+
+    #[must_use]
+    pub const fn remaining_ms(&self) -> u32 {
+        self.request.remaining_ms
+    }
+
+    #[must_use]
+    pub const fn operation_tag(&self) -> u32 {
+        self.operation_tag
+    }
+
+    #[must_use]
+    pub fn operation(&self) -> Option<&wire::peer_request::Operation> {
+        self.request.operation.as_ref()
+    }
+
+    #[must_use]
+    pub fn permits(&self, action: &str) -> bool {
+        self.principal
+            .actions
+            .binary_search_by(|candidate| candidate.as_str().cmp(action))
+            .is_ok()
+    }
+
+    /// Preserves signed payload bytes while reducing the deadline for one final hop.
+    pub fn forward(&self, remaining_ms: u32) -> Result<Vec<u8>> {
+        if self.request.hop_count >= 2 {
+            return Err(Error::Peer("peer hop limit reached"));
+        }
+        if remaining_ms == 0 || remaining_ms > self.request.remaining_ms {
+            return Err(Error::Peer("forwarding extended or exhausted the deadline"));
+        }
+        let authorization = self
+            .request
+            .authorization
+            .clone()
+            .ok_or(Error::Peer("authorization is missing"))?;
+        encode_request(
+            authorization,
+            self.request.hop_count + 1,
+            remaining_ms,
+            self.operation_tag,
+            &self.operation_bytes,
+        )
+    }
+}
+
+fn validate_principal(principal: &PeerPrincipal) -> Result<()> {
+    if principal.issuer.is_empty()
+        || principal.subject.is_empty()
+        || principal.issuer.len() > MAX_PRINCIPAL_BYTES
+        || principal.subject.len() > MAX_PRINCIPAL_BYTES
+        || principal.actions.is_empty()
+        || principal.actions.len() > MAX_ACTIONS
+    {
+        return Err(Error::Peer("invalid peer principal bounds"));
+    }
+    let mut previous: Option<&str> = None;
+    for action in &principal.actions {
+        if action.is_empty()
+            || action.len() > 128
+            || !action.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'_' | b'-')
+            })
+            || previous.is_some_and(|previous| previous >= action.as_str())
+        {
+            return Err(Error::Peer(
+                "peer actions must be sorted unique identifiers",
+            ));
+        }
+        previous = Some(action);
+    }
+    Ok(())
+}
+
+fn validate_authorization(
+    authorization: &wire::PeerAuthorization,
+    now_ms: i64,
+    remaining_ms: u32,
+) -> Result<()> {
+    let principal = PeerPrincipal {
+        issuer: authorization.principal_issuer.clone(),
+        subject: authorization.principal_subject.clone(),
+        actions: authorization.actions.clone(),
+    };
+    validate_principal(&principal)?;
+    if authorization.origin_session.len() != 16
+        || authorization.release_digest.len() != 32
+        || authorization.payload_digest.len() != 32
+        || authorization.signature.len() != 64
+    {
+        return Err(Error::Peer("invalid peer authorization identity length"));
+    }
+    validate_time_bounds(
+        authorization.issued_at_ms,
+        authorization.expires_at_ms,
+        now_ms,
+        remaining_ms,
+    )
+}
+
+fn validate_time_bounds(
+    issued_at_ms: i64,
+    expires_at_ms: i64,
+    now_ms: i64,
+    remaining_ms: u32,
+) -> Result<()> {
+    if issued_at_ms < 0
+        || expires_at_ms <= issued_at_ms
+        || expires_at_ms - issued_at_ms > MAX_AUTH_LIFETIME_MS
+        || issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+        || expires_at_ms <= now_ms
+        || !(1..=60_000).contains(&remaining_ms)
+        || i64::from(remaining_ms) > expires_at_ms - now_ms
+    {
+        return Err(Error::Peer("invalid or expired peer authorization time"));
+    }
+    Ok(())
+}
+
+fn operation_target(operation: Option<&wire::peer_request::Operation>) -> Result<CellTarget> {
+    let target = match operation {
+        Some(wire::peer_request::Operation::Mutate(value)) => value.target.as_ref(),
+        Some(wire::peer_request::Operation::Read(value)) => value.target.as_ref(),
+        Some(wire::peer_request::Operation::Resolve(value)) => value.target.as_ref(),
+        Some(
+            wire::peer_request::Operation::DeliverEffect(_)
+            | wire::peer_request::Operation::ResolveEffect(_),
+        )
+        | None => return Err(Error::Peer("peer operation is not implemented")),
+    }
+    .ok_or(Error::Peer("peer target is missing"))?;
+    CellTarget::new(
+        TenantId::try_from(target.tenant_id.as_slice())?,
+        ApplicationId::try_from(target.application_id.as_slice())?,
+        NamespaceId::try_from(target.namespace_id.as_slice())?,
+        &target.partition,
+    )
+}
+
+fn validate_decoded_operation(
+    operation: Option<&wire::peer_request::Operation>,
+    now_ms: i64,
+) -> Result<()> {
+    match operation {
+        Some(wire::peer_request::Operation::Mutate(value)) => validate_mutation(value, now_ms),
+        Some(wire::peer_request::Operation::Read(value)) => validate_read(value),
+        Some(wire::peer_request::Operation::Resolve(value)) => validate_resolve(value, now_ms),
+        Some(
+            wire::peer_request::Operation::DeliverEffect(_)
+            | wire::peer_request::Operation::ResolveEffect(_),
+        )
+        | None => Err(Error::Peer("peer operation is not implemented")),
+    }
+}
+
+fn validate_mutation(request: &wire::MutationRequest, now_ms: i64) -> Result<()> {
+    validate_target_wire(request.target.as_ref())?;
+    validate_timeout(request.timeout_ms)?;
+    let identity = request
+        .identity
+        .as_ref()
+        .ok_or(Error::Peer("mutation identity is missing"))?;
+    validate_mutation_identity(identity, now_ms)?;
+    match request.operation.as_ref() {
+        Some(wire::mutation_request::Operation::CellCommand(command))
+            if command.command_id != 0 && command.codec_version != 0 =>
+        {
+            Ok(())
+        }
+        Some(wire::mutation_request::Operation::CellCommand(_)) => {
+            Err(Error::Peer("invalid Cell command identifier"))
+        }
+        Some(_) => Err(Error::Peer("typed mutation operation is not implemented")),
+        None => Err(Error::Peer("mutation operation is missing")),
+    }
+}
+
+fn validate_read(request: &wire::ReadRequest) -> Result<()> {
+    validate_target_wire(request.target.as_ref())?;
+    validate_timeout(request.timeout_ms)?;
+    if let Some(receipt) = &request.minimum
+        && (receipt.cell_id.len() != 32 || receipt.incarnation.len() != 16)
+    {
+        return Err(Error::Peer("invalid minimum receipt identity length"));
+    }
+    match request.operation.as_ref() {
+        Some(wire::read_request::Operation::Describe(true)) => Ok(()),
+        Some(wire::read_request::Operation::Describe(false)) => {
+            Err(Error::Peer("describe selector must be true"))
+        }
+        Some(wire::read_request::Operation::CellQuery(query))
+            if query.query_id != 0 && query.codec_version != 0 =>
+        {
+            Ok(())
+        }
+        Some(wire::read_request::Operation::CellQuery(_)) => {
+            Err(Error::Peer("invalid Cell query identifier"))
+        }
+        Some(_) => Err(Error::Peer("typed read operation is not implemented")),
+        None => Err(Error::Peer("read operation is missing")),
+    }
+}
+
+fn validate_resolve(request: &wire::ResolveRequest, now_ms: i64) -> Result<()> {
+    validate_target_wire(request.target.as_ref())?;
+    let identity = request
+        .identity
+        .as_ref()
+        .ok_or(Error::Peer("resolve identity is missing"))?;
+    validate_mutation_identity(identity, now_ms)?;
+    if request.operation_digest.len() != 32 {
+        return Err(Error::Peer("invalid operation digest length"));
+    }
+    Ok(())
+}
+
+fn validate_target_wire(target: Option<&wire::Target>) -> Result<()> {
+    let target = target.ok_or(Error::Peer("peer target is missing"))?;
+    if target.tenant_id.len() != 16
+        || target.application_id.len() != 16
+        || target.namespace_id.len() != 16
+        || target.partition.len() > 1_024
+    {
+        return Err(Error::Peer("invalid peer target bounds"));
+    }
+    Ok(())
+}
+
+fn validate_mutation_identity(identity: &wire::MutationIdentity, now_ms: i64) -> Result<()> {
+    if identity.request_id.len() != 16
+        || identity.incarnation.len() != 16
+        || identity.issued_at_ms < 0
+        || identity.expires_at_ms <= identity.issued_at_ms
+        || identity.expires_at_ms - identity.issued_at_ms > MAX_MUTATION_LIFETIME_MS
+        || identity.issued_at_ms > now_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+        || identity.expires_at_ms <= now_ms
+    {
+        return Err(Error::Peer("invalid or expired mutation identity"));
+    }
+    Ok(())
+}
+
+fn validate_timeout(timeout_ms: u32) -> Result<()> {
+    if timeout_ms > 60_000 {
+        return Err(Error::Peer("peer operation timeout exceeds 60 seconds"));
+    }
+    Ok(())
+}
+
+fn signing_bytes(tag: u32, authorization: &wire::PeerAuthorization) -> Result<Vec<u8>> {
+    let tag = u16::try_from(tag).map_err(|_| Error::Peer("operation tag overflow"))?;
+    let mut output = Vec::with_capacity(256);
+    output.extend_from_slice(b"crab.peer.v1\0");
+    output.extend_from_slice(&tag.to_be_bytes());
+    append_bytes(&mut output, &authorization.origin_session)?;
+    append_bytes(&mut output, authorization.principal_issuer.as_bytes())?;
+    append_bytes(&mut output, authorization.principal_subject.as_bytes())?;
+    append_u32(&mut output, authorization.actions.len())?;
+    for action in &authorization.actions {
+        append_bytes(&mut output, action.as_bytes())?;
+    }
+    append_bytes(&mut output, &authorization.release_digest)?;
+    output.extend_from_slice(&authorization.issued_at_ms.to_be_bytes());
+    output.extend_from_slice(&authorization.expires_at_ms.to_be_bytes());
+    append_bytes(&mut output, &authorization.payload_digest)?;
+    if output.len() > MAX_AUTHORIZATION_BYTES {
+        return Err(Error::Peer("canonical authorization exceeds 16 KiB"));
+    }
+    Ok(output)
+}
+
+fn append_u32(output: &mut Vec<u8>, value: usize) -> Result<()> {
+    output.extend_from_slice(
+        &u32::try_from(value)
+            .map_err(|_| Error::Peer("canonical value exceeds u32"))?
+            .to_be_bytes(),
+    );
+    Ok(())
+}
+
+fn append_bytes(output: &mut Vec<u8>, value: &[u8]) -> Result<()> {
+    append_u32(output, value.len())?;
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+fn encode_request(
+    authorization: wire::PeerAuthorization,
+    hop_count: u32,
+    remaining_ms: u32,
+    operation_tag: u32,
+    operation: &[u8],
+) -> Result<Vec<u8>> {
+    let authorization = authorization.encode_to_vec();
+    if authorization.len() > MAX_AUTHORIZATION_BYTES || operation.len() > MAX_OPERATION_BYTES {
+        return Err(Error::Peer("peer request component exceeds limit"));
+    }
+    let mut output = Vec::with_capacity(authorization.len() + operation.len() + 32);
+    encode_varint_field(&mut output, 1, u64::from(PROTOCOL_VERSION));
+    encode_bytes_field(&mut output, 2, &authorization)?;
+    encode_varint_field(&mut output, 3, u64::from(hop_count));
+    encode_varint_field(&mut output, 4, u64::from(remaining_ms));
+    encode_bytes_field(&mut output, operation_tag, operation)?;
+    if output.len() > MAX_REQUEST_BYTES {
+        return Err(Error::Peer("request exceeds peer byte limit"));
+    }
+    Ok(output)
+}
+
+fn encode_varint_field(output: &mut Vec<u8>, field: u32, value: u64) {
+    encode_varint(output, u64::from(field) << 3);
+    encode_varint(output, value);
+}
+
+fn encode_bytes_field(output: &mut Vec<u8>, field: u32, value: &[u8]) -> Result<()> {
+    encode_varint(output, (u64::from(field) << 3) | 2);
+    encode_varint(
+        output,
+        u64::try_from(value.len()).map_err(|_| Error::Peer("peer field length overflow"))?,
+    );
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+fn encode_varint(output: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        output.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+#[cfg(test)]
+mod tests;

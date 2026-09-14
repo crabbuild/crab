@@ -2,7 +2,7 @@ syntax = "proto3";
 package crab.cell.peer.v1;
 
 // Private messages for enrolled Crab nodes, not a public gRPC service.
-// This descriptor is a design input; no peer implementation exists yet.
+// Rust message types are generated privately inside crab-cell-runtime.
 message PeerAuthorization {
   bytes origin_session = 1;  // 16 bytes; enrollment binds the signing public key.
   string principal_issuer = 2;

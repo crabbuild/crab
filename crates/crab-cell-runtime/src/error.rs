@@ -22,6 +22,12 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("Cell wire codec failed")]
     Codec(#[from] crate::CodecError),
+    #[error("invalid Cell peer protocol: {0}")]
+    Peer(&'static str),
+    #[error("Cell peer Protobuf decoding failed")]
+    PeerDecode(#[from] prost::DecodeError),
+    #[error("Cell peer signature verification failed")]
+    PeerSignature(#[source] ed25519_dalek::SignatureError),
     #[error("Cell runtime SQLite schema failed")]
     Sqlite(#[from] rusqlite::Error),
     #[error("Cell SQL returned invalid UTF-8 text")]

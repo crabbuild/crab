@@ -18,6 +18,7 @@ mod executor;
 mod identity;
 mod kv;
 mod maintenance;
+mod peer;
 mod publication;
 mod queue;
 mod registry;
@@ -64,6 +65,9 @@ pub use kv::{
 pub use maintenance::{
     MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
     register_maintenance,
+};
+pub use peer::{
+    PeerOperation, PeerPrincipal, PeerSigner, PeerVerifier, VerifiedPeerRequest, wire as peer_wire,
 };
 pub use publication::CellPublisher;
 pub use queue::{

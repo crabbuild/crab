@@ -508,6 +508,15 @@ application/x-protobuf. Its PeerRequest payload selects mutate, read, resolve,
 deliver_effect or resolve_effect. PeerReply carries the corresponding result.
 This path is never registered on the public router.
 
+The peer module in `crab-cell-runtime` is the implemented wire boundary. It generates
+private Rust messages from the checked-in descriptor and signs canonical
+authorization bytes, but preserves and hashes the exact nested Protobuf bytes.
+Its strict pre-decoder rejects unknown fields, duplicate singular fields and
+duplicate oneofs before Prost can discard that evidence. The verifier binds the
+enrolled session public key, release digest, original principal/actions, current
+time, decreasing deadline and operation tag. The HTTP route must use this
+verifier and must not decode `PeerRequest` directly.
+
 Target contains resolved tenant/application/namespace IDs (16 bytes each) and
 partition (<=1024 bytes). Recompute Cell ID and shard; compare namespace role,
 operation and authenticated capability. Envelope metadata carries origin session,

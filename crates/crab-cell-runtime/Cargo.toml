@@ -13,13 +13,19 @@ blake3.workspace = true
 bytes.workspace = true
 crab-storage.workspace = true
 crab-ltx = { workspace = true, features = ["replica"] }
+ed25519-dalek.workspace = true
 object_store.workspace = true
+prost.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }
 rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[build-dependencies]
+prost-build = "0.13"
+protoc-bin-vendored = "3"
 
 [dev-dependencies]
 tempfile.workspace = true
