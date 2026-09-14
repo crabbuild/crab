@@ -18,11 +18,15 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_for(b"repository-1")
+}
+
+fn fixture_for(partition: &[u8]) -> Fixture {
     let target = CellTarget::new(
         TenantId::from_bytes([1; 16]),
         ApplicationId::from_bytes([3; 16]),
         NamespaceId::from_bytes([6; 16]),
-        b"repository-1",
+        partition,
     )
     .unwrap();
     let cell = target.cell_id();
@@ -48,6 +52,25 @@ fn fixture() -> Fixture {
 }
 
 async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::CellHandle {
+    activate_runtime(fixture, node_bytes).await.1
+}
+
+async fn activate_runtime(
+    fixture: &Fixture,
+    node_bytes: usize,
+) -> (CellRuntime, crab_cell_runtime::CellHandle) {
+    let session = SessionId::from_bytes([4; 16]);
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(2, 10).unwrap(), node_bytes, session).unwrap();
+    let handle = bootstrap_on(&runtime, fixture, session).await;
+    (runtime, handle)
+}
+
+async fn bootstrap_on(
+    runtime: &CellRuntime,
+    fixture: &Fixture,
+    session: SessionId,
+) -> crab_cell_runtime::CellHandle {
     let catalog =
         crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
     let proof = catalog
@@ -62,7 +85,6 @@ async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::Ce
         )
         .await
         .unwrap();
-    let session = SessionId::from_bytes([4; 16]);
     let authority = CellAuthority::new(fixture.layout.clone());
     let observed = authority
         .create_initial(
@@ -75,8 +97,6 @@ async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::Ce
         )
         .await
         .unwrap();
-    let runtime =
-        CellRuntime::new(SqlWorkerPool::new(2, 10).unwrap(), node_bytes, session).unwrap();
     runtime
         .bootstrap(
             proof,
@@ -186,6 +206,86 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
             .unwrap(),
         2
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_shutdown_drains_accepted_work_and_releases_all_owners() {
+    let fixture = fixture();
+    let (runtime, handle) = activate_runtime(&fixture, 16 * 1024 * 1024).await;
+    let second_fixture = fixture_for(b"repository-2");
+    let second = bootstrap_on(&runtime, &second_fixture, SessionId::from_bytes([4; 16])).await;
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mutation = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    identity(111),
+                    Digest::from_bytes([112; 32]),
+                    20,
+                    1_024,
+                    1_024,
+                    move |transaction| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(b"published".to_vec()))
+                    },
+                )
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+        .await
+        .unwrap();
+
+    let shutdown = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.shutdown().await }
+    });
+    while !runtime.is_shutting_down() {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(
+        handle.query(1, 1, |_| Ok(Vec::new())).await,
+        Err(crab_cell_runtime::Error::RuntimeClosed)
+    ));
+    assert!(!shutdown.is_finished());
+
+    release_tx.send(()).unwrap();
+    assert!(matches!(
+        mutation.await.unwrap().unwrap(),
+        StoredOutcome::Success {
+            ref result,
+            commit_sequence: 1
+        } if result == b"published"
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        runtime.shutdown().await,
+        Err(crab_cell_runtime::Error::RuntimeClosed)
+    ));
+
+    let released = CellAuthority::new(fixture.layout.clone())
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.value().state, ControlState::Idle);
+    assert!(released.value().owner.is_none());
+    assert_eq!(released.value().root.as_ref().unwrap().commit_sequence, 1);
+    let second_released = CellAuthority::new(second_fixture.layout.clone())
+        .load(second.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_released.value().state, ControlState::Idle);
+    assert!(second_released.value().owner.is_none());
 }
 
 #[tokio::test]

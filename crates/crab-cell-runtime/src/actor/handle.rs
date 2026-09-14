@@ -202,6 +202,9 @@ impl CellHandle {
         operation_bytes: usize,
         max_result_bytes: usize,
     ) -> crate::Result<WorkAdmission> {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(Error::RuntimeClosed);
+        }
         if operation_bytes > MAX_OPERATION_BYTES || max_result_bytes > MAX_RESULT_BYTES {
             return Err(Error::Capacity("operation or result bytes"));
         }

@@ -12,8 +12,13 @@ refresh without SQL replay. `SqlWorkerPool` provides fixed worker ownership,
 bounded shard queues, stable Cell routing, global activation admission, and
 cancellation-safe completion of accepted SQL commands. `CellRuntime` now owns
 the node-wide dispatcher, per-Cell and node byte admission, FIFO single-flight
-execution/publication, pure-renewal retry, unknown-outcome classification and
-drain. Catalog-driven `activate_restored` reserves active-Cell capacity before
+execution/publication, pure-renewal retry, unknown-outcome classification,
+per-Cell drain and node-wide terminal shutdown. Terminal shutdown atomically
+rejects new admission, closes the dispatcher ingress after messages already
+accepted by it, settles those messages through normal publication, then closes
+every active SQLite handle and releases every owned control. A second shutdown
+call fails closed with `RuntimeClosed`. Catalog-driven `activate_restored`
+reserves active-Cell capacity before
 remote reads, opens only control's exact immutable root through the sparse VFS on
 the assigned SQL worker, verifies `sys_meta` and root position/sequence, reloads
 authority after recovery, and accepts only the same control or pure renewals.
@@ -111,6 +116,10 @@ impl CellAuthority {
         -> Result<OwnedControl>;
     pub async fn transition(&self, old: &OwnedControl, next: Control)
         -> Result<OwnedControl>;
+}
+impl CellRuntime {
+    pub async fn shutdown(&self) -> Result<()>;
+    pub fn is_shutting_down(&self) -> bool;
 }
 impl CellHandle {
     pub async fn submit(&self, command: AcceptedCommand) -> Result<()>;
@@ -287,10 +296,16 @@ handler rollback consults worker state and leaves the Cell usable.
 The dispatcher uses `pending`, `bind_prepared` and `confirm_published`; direct
 access to worker-owned executors is impossible. Reads enter the same FIFO and
 execute only after the publisher returns from every preceding mutation. The next
-supervision work must add wall deadlines and SQLite interruption and retain
-fenced Cells for takeover cleanup instead of only stopping admission.
+supervision work must propagate deadlines through sparse page I/O and add
+automatic recovery of fenced Cells instead of only stopping admission.
 
-Drain closes admission, resolves accepted publications, closes SQLite, then
-releases ownership. Fenced sessions only
+Per-Cell drain closes admission, resolves accepted publications, closes SQLite,
+then releases ownership. Node shutdown first closes node admission and runtime
+ingress, drains every message accepted before the shutdown marker, applies the
+same close-before-release ordering to all Cells, and returns only after every
+deactivation task has settled. The shutdown call intentionally does not claim to
+join the fixed SQL worker threads: `SqlWorkerPool` remains shared by runtime and
+handle clones, so server composition must drop those capabilities before joining
+workers. Fenced sessions only
 finish proven replies and cleanup. If shutdown budget expires, unresolved clients
 receive unknown outcomes and the successor recovers origin state.

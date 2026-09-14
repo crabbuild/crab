@@ -41,6 +41,7 @@ pub struct CellRuntime {
 pub(super) struct RuntimeInner {
     sender: mpsc::Sender<Message>,
     node_bytes: Arc<Semaphore>,
+    shutting_down: AtomicBool,
     session: SessionId,
     pool: SqlWorkerPool,
 }
@@ -62,10 +63,37 @@ impl CellRuntime {
             inner: Arc::new(RuntimeInner {
                 sender,
                 node_bytes: Arc::new(Semaphore::new(node_mailbox_bytes)),
+                shutting_down: AtomicBool::new(false),
                 session,
                 pool,
             }),
         })
+    }
+
+    /// Stops admission, drains accepted work, closes every Cell, and releases ownership.
+    pub async fn shutdown(&self) -> crate::Result<()> {
+        if self
+            .inner
+            .shutting_down
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(Error::RuntimeClosed);
+        }
+        self.inner.node_bytes.close();
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::Shutdown { reply })
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        response.await.map_err(|_| Error::RuntimeClosed)?
+    }
+
+    /// Reports whether node-wide admission has entered its terminal drain.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(Ordering::Acquire)
     }
 
     /// Resolves an active local owner without exposing the dispatcher's Cell map.
@@ -74,6 +102,7 @@ impl CellRuntime {
         catalog: CatalogProof,
         control: &VersionedControl,
     ) -> crate::Result<Option<CellHandle>> {
+        self.ensure_running()?;
         let value = control.value();
         if catalog.entry().cell() != value.cell {
             return Err(Error::Control("scheduler catalog and control differ"));
@@ -132,6 +161,7 @@ impl CellRuntime {
             + Send
             + 'static,
     {
+        self.ensure_running()?;
         self.activation_cell(&catalog, &observed)?;
         if observed.value().state != crate::ControlState::Recovering
             || observed.value().root.is_some()
@@ -167,6 +197,7 @@ impl CellRuntime {
         observed: VersionedControl,
         destination: PathBuf,
     ) -> crate::Result<CellHandle> {
+        self.ensure_running()?;
         let reservation = self.inner.pool.reserve_activation()?;
         self.activate_restored_reserved(
             catalog,
@@ -189,6 +220,7 @@ impl CellRuntime {
         destination: PathBuf,
         owner: Owner,
     ) -> crate::Result<CellHandle> {
+        self.ensure_running()?;
         self.claiming_cell(&catalog, &observed, &owner)?;
         if observed.value().state != crate::ControlState::Idle
             || observed.value().owner.is_some()
@@ -237,6 +269,7 @@ impl CellRuntime {
         destination: PathBuf,
         owner: Owner,
     ) -> crate::Result<CellHandle> {
+        self.ensure_running()?;
         let cell = self.claiming_cell(&catalog, &observed, &owner)?;
         loop {
             if !matches!(
@@ -250,6 +283,7 @@ impl CellRuntime {
                 ));
             }
             tokio::time::sleep(TAKEOVER_OBSERVATION).await;
+            self.ensure_running()?;
             let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
             if current.value() != observed.value() {
                 self.claiming_cell(&catalog, &current, &owner)?;
@@ -379,6 +413,13 @@ impl CellRuntime {
         Ok(cell)
     }
 
+    fn ensure_running(&self) -> crate::Result<()> {
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(Error::RuntimeClosed);
+        }
+        Ok(())
+    }
+
     async fn activate_inner(
         &self,
         catalog: CatalogProof,
@@ -457,6 +498,9 @@ enum Message {
         admission: Arc<CellAdmission>,
         reply: oneshot::Sender<crate::Result<()>>,
     },
+    Shutdown {
+        reply: oneshot::Sender<crate::Result<()>>,
+    },
 }
 
 struct QueuedCommand {
@@ -509,6 +553,19 @@ struct ActiveCell {
     renewing: bool,
     fenced: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
+    shutdown_drain: bool,
+}
+
+impl ActiveCell {
+    fn draining(&self) -> bool {
+        self.drain.is_some() || self.shutdown_drain
+    }
+}
+
+struct ShutdownState {
+    reply: oneshot::Sender<crate::Result<()>>,
+    draining: bool,
+    error: Option<Error>,
 }
 
 struct LocalCell {
@@ -553,6 +610,7 @@ enum TaskResult {
     Deactivated {
         cell: CellId,
         reply: Option<oneshot::Sender<crate::Result<()>>>,
+        shutdown_drain: bool,
         result: crate::Result<()>,
     },
 }
@@ -561,15 +619,48 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
     let mut tasks = JoinSet::<TaskResult>::new();
+    let mut shutdown = None::<ShutdownState>;
     let mut renewal_tick = tokio::time::interval(RENEWAL_SCAN);
     renewal_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     renewal_tick.tick().await;
     loop {
+        if shutdown.as_ref().is_some_and(|state| state.draining) {
+            if tasks.is_empty() {
+                if !cells.is_empty() || !transitioning.is_empty() {
+                    fail_shutdown(
+                        &mut shutdown,
+                        Error::Control("Cell shutdown left local state without a task"),
+                    );
+                }
+                finish_shutdown(&mut shutdown);
+                return;
+            }
+            let Some(Ok(result)) = tasks.join_next().await else {
+                fail_shutdown(&mut shutdown, Error::RuntimeClosed);
+                finish_shutdown(&mut shutdown);
+                return;
+            };
+            handle_task(
+                result,
+                &pool,
+                &mut cells,
+                &mut transitioning,
+                &mut tasks,
+                &mut shutdown,
+            );
+            continue;
+        }
         if tasks.is_empty() {
             tokio::select! {
                 message = receiver.recv() => {
-                    let Some(message) = message else { break; };
-                    handle_message(message, &pool, &mut cells, &mut transitioning, &mut tasks);
+                    let Some(message) = message else {
+                        if shutdown.is_some() {
+                            start_shutdown_drain(&pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                            continue;
+                        }
+                        break;
+                    };
+                    handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
                 }
                 _ = renewal_tick.tick() => {
                     start_due_renewals(&pool, &mut cells, &mut tasks);
@@ -580,19 +671,23 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
         tokio::select! {
             message = receiver.recv() => {
                 let Some(message) = message else {
+                    if shutdown.is_some() {
+                        start_shutdown_drain(&pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
+                        continue;
+                    }
                     while let Some(result) = tasks.join_next().await {
                         let Ok(result) = result else { return; };
-                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks);
+                        handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
                     }
                     break;
                 };
-                handle_message(message, &pool, &mut cells, &mut transitioning, &mut tasks);
+                handle_message(message, &mut receiver, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
             }
             result = tasks.join_next() => {
                 let Some(Ok(result)) = result else {
                     return;
                 };
-                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks);
+                handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks, &mut shutdown);
             }
             _ = renewal_tick.tick() => {
                 start_due_renewals(&pool, &mut cells, &mut tasks);
@@ -601,12 +696,59 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
     }
 }
 
-fn handle_message(
-    message: Message,
+fn start_shutdown_drain(
     pool: &SqlWorkerPool,
     cells: &mut HashMap<CellId, ActiveCell>,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
+    shutdown: &mut Option<ShutdownState>,
+) {
+    let Some(state) = shutdown.as_mut() else {
+        return;
+    };
+    if state.draining {
+        return;
+    }
+    state.draining = true;
+    let mut ready = Vec::new();
+    for (cell, active) in cells.iter_mut() {
+        active.shutdown_drain = true;
+        active.admission.draining.store(true, Ordering::Release);
+        active.admission.requests.close();
+        active.admission.bytes.close();
+        if !active.busy && !active.renewing && active.queue.is_empty() {
+            ready.push(*cell);
+        }
+    }
+    for cell in ready {
+        start_deactivate(cell, pool, cells, transitioning, tasks);
+    }
+}
+
+fn fail_shutdown(shutdown: &mut Option<ShutdownState>, error: Error) {
+    if let Some(state) = shutdown.as_mut()
+        && state.error.is_none()
+    {
+        state.error = Some(error);
+    }
+}
+
+fn finish_shutdown(shutdown: &mut Option<ShutdownState>) {
+    let Some(mut state) = shutdown.take() else {
+        return;
+    };
+    let result = state.error.take().map_or(Ok(()), Err);
+    let _ = state.reply.send(result);
+}
+
+fn handle_message(
+    message: Message,
+    receiver: &mut mpsc::Receiver<Message>,
+    pool: &SqlWorkerPool,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    transitioning: &mut HashSet<CellId>,
+    tasks: &mut JoinSet<TaskResult>,
+    shutdown: &mut Option<ShutdownState>,
 ) {
     match message {
         Message::Activate {
@@ -675,7 +817,7 @@ fn handle_message(
                 send_command_reply(&mut command, Err(Error::CellNotActive));
                 return;
             }
-            if active.fenced || active.drain.is_some() {
+            if active.fenced || active.draining() {
                 let error = if active.fenced {
                     Error::Fenced
                 } else {
@@ -696,7 +838,7 @@ fn handle_message(
                 send_query_reply(&mut query, Err(Error::CellNotActive));
                 return;
             }
-            if active.fenced || active.drain.is_some() {
+            if active.fenced || active.draining() {
                 let error = if active.fenced {
                     Error::Fenced
                 } else {
@@ -721,7 +863,7 @@ fn handle_message(
                 send_resolve_reply(&mut resolve, Ok(Resolution::Unknown));
                 return;
             }
-            if active.drain.is_some() {
+            if active.draining() {
                 send_resolve_reply(&mut resolve, Err(Error::CellDraining));
                 return;
             }
@@ -730,7 +872,7 @@ fn handle_message(
         }
         Message::Lookup { cell, reply } => {
             let local = cells.get(&cell).and_then(|active| {
-                (!active.fenced && active.drain.is_none()).then(|| LocalCell {
+                (!active.fenced && !active.draining()).then(|| LocalCell {
                     admission: active.admission.clone(),
                     incarnation: active.incarnation,
                     code: active.code,
@@ -752,7 +894,7 @@ fn handle_message(
                 let _ = reply.send(Err(Error::CellNotActive));
                 return;
             }
-            if active.drain.is_some() {
+            if active.draining() {
                 let _ = reply.send(Err(Error::CellDraining));
                 return;
             }
@@ -760,6 +902,18 @@ fn handle_message(
             if !active.busy && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             }
+        }
+        Message::Shutdown { reply } => {
+            if shutdown.is_some() {
+                let _ = reply.send(Err(Error::RuntimeClosed));
+                return;
+            }
+            receiver.close();
+            *shutdown = Some(ShutdownState {
+                reply,
+                draining: false,
+                error: None,
+            });
         }
     }
 }
@@ -1012,6 +1166,7 @@ fn handle_task(
     cells: &mut HashMap<CellId, ActiveCell>,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
+    shutdown: &mut Option<ShutdownState>,
 ) {
     match result {
         TaskResult::Activated {
@@ -1022,8 +1177,16 @@ fn handle_task(
             result,
         } => match result {
             Ok(interrupt) => {
+                if shutdown.as_ref().is_some_and(|state| state.draining) {
+                    admission.draining.store(true, Ordering::Release);
+                    admission.requests.close();
+                    admission.bytes.close();
+                    let _ = reply.send(Err(Error::RuntimeClosed));
+                    start_orphan_deactivate(cell, pool, *publisher, transitioning, tasks, true);
+                    return;
+                }
                 if reply.send(Ok(admission.clone())).is_err() {
-                    start_orphan_deactivate(cell, pool, *publisher, transitioning, tasks);
+                    start_orphan_deactivate(cell, pool, *publisher, transitioning, tasks, false);
                     return;
                 }
                 transitioning.remove(&cell);
@@ -1045,6 +1208,7 @@ fn handle_task(
                         renewing: false,
                         fenced: false,
                         drain: None,
+                        shutdown_drain: false,
                     },
                 );
             }
@@ -1071,7 +1235,7 @@ fn handle_task(
                 fence_active(active);
             }
             send_command_reply(&mut command, result);
-            if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
+            if active.draining() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
                 start_next(active, pool, tasks);
@@ -1093,7 +1257,7 @@ fn handle_task(
                 fence_active(active);
             }
             send_query_reply(&mut query, result);
-            if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
+            if active.draining() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
                 start_next(active, pool, tasks);
@@ -1115,7 +1279,7 @@ fn handle_task(
                 fence_active(active);
             }
             send_resolve_reply(&mut resolve, result);
-            if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
+            if active.draining() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
                 start_next(active, pool, tasks);
@@ -1135,7 +1299,7 @@ fn handle_task(
                 active.fenced = true;
                 fence_active(active);
             }
-            if active.drain.is_some() && !active.busy && active.queue.is_empty() {
+            if active.draining() && !active.busy && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
                 start_next(active, pool, tasks);
@@ -1144,11 +1308,31 @@ fn handle_task(
         TaskResult::Deactivated {
             cell,
             reply,
+            shutdown_drain,
             result,
         } => {
             transitioning.remove(&cell);
-            if let Some(reply) = reply {
-                let _ = reply.send(result);
+            let runtime_waiting =
+                shutdown_drain || shutdown.as_ref().is_some_and(|state| state.draining);
+            match (reply, runtime_waiting) {
+                (Some(reply), true) => {
+                    if result.is_err() {
+                        fail_shutdown(
+                            shutdown,
+                            Error::Control("one or more Cells failed to drain"),
+                        );
+                    }
+                    let _ = reply.send(result);
+                }
+                (Some(reply), false) => {
+                    let _ = reply.send(result);
+                }
+                (None, true) => {
+                    if let Err(error) = result {
+                        fail_shutdown(shutdown, error);
+                    }
+                }
+                (None, false) => {}
             }
         }
     }
@@ -1214,7 +1398,7 @@ fn start_due_renewals(
         if active.busy
             || active.renewing
             || active.fenced
-            || active.drain.is_some()
+            || active.draining()
             || !active.queue.is_empty()
             || active
                 .publisher
@@ -1266,6 +1450,7 @@ fn start_deactivate(
         TaskResult::Deactivated {
             cell,
             reply: active.drain,
+            shutdown_drain: active.shutdown_drain,
             result,
         }
     });
@@ -1277,6 +1462,7 @@ fn start_orphan_deactivate(
     mut publisher: CellPublisher,
     transitioning: &mut HashSet<CellId>,
     tasks: &mut JoinSet<TaskResult>,
+    shutdown_drain: bool,
 ) {
     let pool = pool.clone();
     tasks.spawn(async move {
@@ -1288,6 +1474,7 @@ fn start_orphan_deactivate(
         TaskResult::Deactivated {
             cell,
             reply: None,
+            shutdown_drain,
             result,
         }
     });

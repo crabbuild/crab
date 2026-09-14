@@ -286,6 +286,12 @@ UNKNOWN; exit by 120 s. A stuck native callback requires process termination;
 never release its permits and continue running it in the background. Successors
 recover authoritative origin roots. VM supervisors use the same lifecycle.
 
+`CellRuntime::shutdown` now implements the Cell-local portion through SQLite
+close and control release. Server signal handling, readiness withdrawal,
+activity cancellation, the 110-second escalation and final SQL-worker join are
+still delivery work; the existence of the runtime method alone does not satisfy
+this process-level contract.
+
 ## Backup, restore and offline collection
 
 Backup pins exact Cell/incarnation/root with strict-create before returning,

@@ -23,6 +23,12 @@ activation path has been removed. FIFO Resolve now distinguishes authoritative
 stored outcomes, absence, expiry and fenced/in-flight uncertainty, including
 after a successor restores a later root. Normal drain and orphaned activation
 close the SQL worker before conditionally releasing control ownership to `Idle`.
+Node-wide terminal shutdown is also implemented: it closes node and Cell
+admission, drains every message accepted before the shutdown marker through
+ordinary publication, closes every active SQLite handle, and releases every
+owned control before returning. This primitive is not yet wired into the HTTP
+server's signal/readiness lifecycle, and it does not yet join the fixed SQL
+worker threads while other runtime or handle clones remain alive.
 The dispatcher now renews idle owners through one bounded node-level scanner;
 strict CAS reconciliation accepts an exact lost response, and an observed
 takeover fences the old executor. Long immutable-root preparation interleaves
@@ -127,8 +133,9 @@ publication path. Private peer routing and server runtime composition remain;
 KV, SQL, Queue and Workflow primitive handles are complete for local routing.
 The server now compiles a canonical repository module descriptor and
 its first migration, and `cells release inspect --json` emits those exact
-registry bytes from the built binary. Runtime lifecycle composition and product
-route cutover remain.
+registry bytes from the built binary. Runtime lifecycle composition, including
+invoking the implemented terminal drain from server shutdown and joining worker
+threads after all capabilities are dropped, and product route cutover remain.
 
 ## Deliverable and contract precedence
 
