@@ -199,9 +199,14 @@ crab-http-server --config CONFIG cells release status
 
 `cells release inspect --json` is now implemented and read-only; it prints the
 canonical descriptor compiled into the binary without accessing object storage.
-Prepare, activate and status remain target commands. Prepare reads only the
-compiled descriptor. Administrative storage credentials provide authority;
-there is no public deployment API.
+`cells release prepare` and `cells release status` are also implemented. The
+first prepare strict-creates or adopts the root identity, uploads only the exact
+compiled descriptor, validates its digest and image digest, then strict-creates
+or ETag-updates canonical release state at the expected revision. Exact retries
+reuse the winning operation ID and bytes. Compatibility inventory, activation
+and migration remain target behavior; until activation exists, prepare does not
+make the descriptor current or authorize serving Cells. Administrative storage
+credentials provide authority; there is no public deployment API.
 
 release.json <=8 KiB: version=1, application, revision as u64 decimal string,
 current/desired descriptor digest or null, desired_image, operation ID hex16,

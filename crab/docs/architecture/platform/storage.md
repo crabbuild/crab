@@ -41,6 +41,10 @@ application as hex32; it selects the one authorized tenant/application pair for
 this configured Crab root. Reject other pairs before routing. Administrative
 initialization retries read and adopt the winning IDs; they never overwrite it.
 
+This identity owner is now implemented by `ApplicationIdentityStore`. It rejects
+noncanonical JSON and another tenant/application winner, and constructs an
+application-scoped `CellStorageLayout` only from the verified persisted value.
+
 IDs in paths are lowercase fixed-width hex. `kind` is one of ltx, index, dir,
 root or bundle. Encoders accept typed IDs, never concatenate caller path text.
 `crab-storage` owns physical path construction; LTX receives a validated scoped

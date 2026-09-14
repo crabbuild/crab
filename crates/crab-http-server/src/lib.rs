@@ -39,6 +39,22 @@ pub fn cell_release_descriptor() -> Result<Vec<u8>> {
     Ok(cells::compiled_registry()?.release_bytes().to_vec())
 }
 
+/// Uploads the compiled descriptor and conditionally prepares it for rollout.
+pub async fn prepare_cell_release(
+    config: &Config,
+    expected_revision: u64,
+    image: &str,
+) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::prepare_release(config, expected_revision, image).await
+}
+
+/// Returns the canonical release selection stored for this application.
+pub async fn cell_release_status(config: &Config) -> Result<Vec<u8>> {
+    config.validate()?;
+    cells::release_status(config).await
+}
+
 /// Startup and server lifecycle errors with their original sources retained.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

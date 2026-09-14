@@ -23,7 +23,8 @@ does not establish a working runtime.
 | [workflow.rs](../../../../crates/crab-cell-runtime/src/workflow.rs) | Normative schema, pinned and registry-verified definitions, deterministic start/signal/timer transitions, cancellation, bounded action persistence, typed workflow-ID-sharded dispatch, published activity claims and validation, exact compiled native activity dispatch, durable heartbeat/completion/retry and terminal cleanup | Add effects, catalog-driven shard polling and bounded multi-activity orchestration |
 | [effects.rs](../../../../crates/crab-cell-runtime/src/effects.rs) | Stable source effect IDs/digests, bounded claim/lease/retry/delivery, target inbox dedup/savepoint isolation and sender/inbox cleanup horizons | Add Workflow/Queue adapters, compiled codecs, authenticated peer delivery and native supervision |
 | [scheduler.rs](../../../../crates/crab-cell-runtime/src/scheduler.rs) | Derives the earliest durable work/lease/expiry/retention deadline inside bootstrap and every command transaction; publication binds it to the exact pending root | Add catalog shard assignment/scanning and bounded idempotent Tick dispatch |
-| [registry.rs](../../../../crates/crab-cell-runtime/src/registry.rs) | Startup-only static module registration, migration/schema/namespace validation, exact descriptor/function/Workflow-definition/native-activity inventory matching, canonical module/release digests, typed Command/Query trampolines, transaction-scoped compiled dispatch and async activity dispatch with registry-owned primitive shard counts | Add server composition/release inspection |
+| [registry.rs](../../../../crates/crab-cell-runtime/src/registry.rs) | Startup-only static module registration, migration/schema/namespace validation, exact descriptor/function/Workflow-definition/native-activity inventory matching, canonical module/release digests, typed Command/Query trampolines, transaction-scoped compiled dispatch and async activity dispatch with registry-owned primitive shard counts | Add server runtime composition and compatibility activation |
+| [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared release CAS and checked status | Add compatibility inventory, node eligibility, Cell migration and activation CAS |
 | [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs) | Canonical bounded scalar/bytes/text/option encoding, strict full-input decoding and finite normalized floats | Add independent fixtures for each product codec and peer integration |
 | [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local command/query/Resolve capability, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts over the FIFO publication actor; typed KV, SQL, Queue and Workflow handles use it | Add authenticated peer transport and stale-owner retry |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
@@ -315,10 +316,12 @@ and explicit old/new definition dispatch, not language-engine behavior.
 
 ## Work package 6: releases, cutover and operations
 
-Implement embedded release descriptors and administrative subcommands in the
-existing crab-http-server binary. Reuse its image build, storage/auth construction,
-health routes and metrics exporter. Implement compile-time registry validation,
-namespace provisioning, migration and drain procedures from deployment.md.
+Embedded release descriptors, compile-time registry validation, read-only
+inspection, immutable root identity, descriptor upload, prepared-state CAS and
+status are implemented in the existing `crab-http-server` binary. Continue with
+compatibility analysis, activation, namespace provisioning, migration and drain
+procedures from deployment.md, reusing its image build, storage/auth construction,
+health routes and metrics exporter.
 
 Add `migration_digest_conflict_blocks_activation`,
 `lost_activation_cas_reconciles_published_cells`,

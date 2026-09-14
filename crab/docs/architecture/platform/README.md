@@ -134,9 +134,12 @@ publication path. Private peer routing and server runtime composition remain;
 KV, SQL, Queue and Workflow primitive handles are complete for local routing.
 The server now compiles a canonical repository module descriptor and
 its first migration, and `cells release inspect --json` emits those exact
-registry bytes from the built binary. Runtime lifecycle composition, including
-invoking the implemented terminal drain from server shutdown, and product route
-cutover remain.
+registry bytes from the built binary. `cells release prepare` now strict-creates
+or adopts the root's canonical tenant/application identity, uploads the exact
+digest-addressed descriptor, and conditionally publishes a canonical prepared
+release; `cells release status` reads that checked state. Compatibility analysis,
+activation, runtime lifecycle composition, including invoking the implemented
+terminal drain from server shutdown, and product route cutover remain.
 
 ## Deliverable and contract precedence
 

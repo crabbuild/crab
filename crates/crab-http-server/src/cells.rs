@@ -1,9 +1,14 @@
 use std::sync::OnceLock;
 
 use crab_cell_runtime::{
-    BuildDescriptor, CatalogRole, CellModule, Digest, MigrationDescriptor, ModuleDescriptor,
-    NamespaceDescriptor, NamespaceId, Registry, RegistryBuilder,
+    ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
+    CellModule, Digest, MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId,
+    Registry, RegistryBuilder, ReleaseStore, RequestId, TenantId,
 };
+use object_store::path::Path;
+use uuid::Uuid;
+
+use crate::{Config, Error, Result, storage_root::StorageRoot};
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
 const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
@@ -29,6 +34,68 @@ pub(crate) fn compiled_registry() -> crab_cell_runtime::Result<Registry> {
     });
     builder.register(RepositoryModule)?;
     builder.finish()
+}
+
+pub(crate) async fn prepare_release(
+    config: &Config,
+    expected_revision: u64,
+    image: &str,
+) -> Result<Vec<u8>> {
+    let root = StorageRoot::build(&config.storage)?;
+    let identities =
+        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+    let identity = match identities.load().await? {
+        Some(identity) => identity,
+        None => {
+            identities
+                .initialize(ApplicationIdentity::new(
+                    TenantId::from_bytes(Uuid::now_v7().into_bytes()),
+                    ApplicationId::from_bytes(Uuid::now_v7().into_bytes()),
+                ))
+                .await?
+        }
+    };
+    let registry = compiled_registry()?;
+    let releases = ReleaseStore::new(identities.layout(identity).await?, identity)?;
+    let operation = match releases.load().await? {
+        Some(observed)
+            if observed.record().revision() == expected_revision.saturating_add(1)
+                && observed.record().desired() == Some(registry.release_digest())
+                && observed.record().desired_image() == image
+                && observed.record().state() == crab_cell_runtime::ReleaseState::Prepared =>
+        {
+            observed.record().operation()
+        }
+        _ => RequestId::from_bytes(Uuid::now_v7().into_bytes()),
+    };
+    let prepared = releases
+        .prepare(
+            registry.release_bytes(),
+            registry.release_digest(),
+            expected_revision,
+            image,
+            operation,
+        )
+        .await?;
+    prepared.encode().map_err(Error::from)
+}
+
+pub(crate) async fn release_status(config: &Config) -> Result<Vec<u8>> {
+    let root = StorageRoot::build(&config.storage)?;
+    let identities =
+        ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
+    let identity = identities
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application is not initialized"))?;
+    let releases = ReleaseStore::new(identities.layout(identity).await?, identity)?;
+    releases
+        .load()
+        .await?
+        .ok_or(Error::Config("Cell application release is not prepared"))?
+        .record()
+        .encode()
+        .map_err(Error::from)
 }
 
 fn repository_descriptor() -> &'static ModuleDescriptor {

@@ -53,6 +53,15 @@ enum CellReleaseCommand {
         #[arg(long, required = true)]
         json: bool,
     },
+    /// Upload the compiled descriptor and conditionally select it for rollout.
+    Prepare {
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        image: String,
+    },
+    /// Print the canonical durable release selection.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -167,24 +176,35 @@ async fn main() -> crab_http_server::Result<()> {
         Command::Healthcheck => healthcheck(&config).await,
         Command::StorageProbe => crab_http_server::probe_storage(&config).await,
         Command::Repository { command } => repository(&config, command).await,
-        Command::Cells { command } => cells(command),
+        Command::Cells { command } => cells(&config, command).await,
     }
 }
 
-fn cells(command: CellsCommand) -> crab_http_server::Result<()> {
-    match command {
+async fn cells(
+    config: &crab_http_server::Config,
+    command: CellsCommand,
+) -> crab_http_server::Result<()> {
+    let bytes = match command {
         CellsCommand::Release {
             command: CellReleaseCommand::Inspect { json: true },
-        } => {
-            let descriptor = crab_http_server::cell_release_descriptor()?;
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(&descriptor)?;
-            stdout.write_all(b"\n")?;
-        }
+        } => crab_http_server::cell_release_descriptor()?,
         CellsCommand::Release {
             command: CellReleaseCommand::Inspect { json: false },
         } => return Err(crab_http_server::Error::Config("--json is required")),
-    }
+        CellsCommand::Release {
+            command:
+                CellReleaseCommand::Prepare {
+                    expected_revision,
+                    image,
+                },
+        } => crab_http_server::prepare_cell_release(config, expected_revision, &image).await?,
+        CellsCommand::Release {
+            command: CellReleaseCommand::Status,
+        } => crab_http_server::cell_release_status(config).await?,
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&bytes)?;
+    stdout.write_all(b"\n")?;
     Ok(())
 }
 
@@ -309,6 +329,52 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn release_prepare_and_status_match_the_administration_contract() {
+        let prepare = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "prepare",
+            "--expected-revision",
+            "7",
+            "--image",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .unwrap();
+        assert!(matches!(
+            prepare.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Prepare {
+                        expected_revision: 7,
+                        ..
+                    }
+                }
+            })
+        ));
+
+        let status = Arguments::try_parse_from([
+            "crab-http-server",
+            "--config",
+            "server.toml",
+            "cells",
+            "release",
+            "status",
+        ])
+        .unwrap();
+        assert!(matches!(
+            status.command,
+            Some(Command::Cells {
+                command: CellsCommand::Release {
+                    command: CellReleaseCommand::Status
+                }
+            })
+        ));
     }
 
     #[test]

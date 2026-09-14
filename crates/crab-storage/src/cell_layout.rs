@@ -55,7 +55,13 @@ impl CellStorageLayout {
 
     #[must_use]
     pub fn identity_path(&self) -> Path {
-        Path::from(format!("{}/cells/v1/identity.json", self.root))
+        Self::root_identity_path(&self.root)
+    }
+
+    /// Returns the application identity path before an application ID is known.
+    #[must_use]
+    pub fn root_identity_path(root: &Path) -> Path {
+        Path::from(format!("{root}/cells/v1/identity.json"))
     }
 
     #[must_use]

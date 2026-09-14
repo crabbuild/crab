@@ -13,6 +13,7 @@ blake3.workspace = true
 bytes.workspace = true
 crab-storage.workspace = true
 crab-ltx = { workspace = true, features = ["replica"] }
+object_store.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }
 rand = "0.9"
 serde.workspace = true
@@ -21,6 +22,5 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
-object_store.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

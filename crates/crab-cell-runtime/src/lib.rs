@@ -6,6 +6,7 @@
 //! concerns of `crab-http-server`.
 
 mod actor;
+mod application;
 mod authority;
 mod catalog;
 mod client;
@@ -20,6 +21,7 @@ mod maintenance;
 mod publication;
 mod queue;
 mod registry;
+mod release;
 mod scheduler;
 mod schema;
 mod sql;
@@ -27,6 +29,7 @@ mod worker;
 mod workflow;
 
 pub use actor::{CellHandle, CellRuntime};
+pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
 pub use catalog::{
     CatalogEntry, CatalogProof, CatalogRole, CatalogScanPage, CatalogShardScan, CellCatalog,
@@ -74,6 +77,7 @@ pub use registry::{
     MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, OperationDescriptor, Query,
     QueryContext, QueryInvocation, Registry, RegistryBuilder, RegistryError,
 };
+pub use release::{ReleaseRecord, ReleaseState, ReleaseStore, VersionedRelease};
 pub use scheduler::{
     DueCell, DueCellScan, SchedulerTickOutcome, preferred_scanner, scheduler_next_due_ms,
     scheduler_tick,
