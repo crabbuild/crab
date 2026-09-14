@@ -17,7 +17,36 @@ pub async fn initialize(
     head: &str,
 ) -> Result<RootSnapshot> {
     let record = RootRecord::encode(RepositoryRoot::initial(repository_id, head)?)?;
-    Ok(create_root(router, record).await?)
+    match load_root(router).await {
+        Ok(existing) => return Ok(existing),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: StorageError::NotFound { .. },
+        }) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let prefix =
+        object_store::path::Path::from(format!("{}/", router.repo_prefix().trim_end_matches('/')));
+    let existing = router.store().list_prefix_bounded(&prefix, 1).await?;
+    if !existing.is_some_and(|objects| objects.is_empty()) {
+        return match load_root(router).await {
+            Ok(root) => Ok(root),
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => Err(WriteError::CorruptObject {
+                path: prefix.to_string(),
+                reason: "repository prefix contains data but has no request-minimal root; Crab left it unchanged"
+                    .to_owned(),
+            }),
+            Err(error) => Err(error.into()),
+        };
+    }
+    match create_root(router, record).await {
+        Ok(created) => Ok(created),
+        Err(crab_metadata::error::MetadataError::Storage {
+            source: StorageError::StateConflict { .. },
+        }) => Ok(load_root(router).await?),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Open and verify the single root used for advertisement and publication CAS.
