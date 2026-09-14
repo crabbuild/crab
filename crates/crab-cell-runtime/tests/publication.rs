@@ -3,9 +3,11 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use bytes::Bytes;
 use crab_cell_runtime::{
-    CellExecutor, CellId, CommandExecution, Control, Digest, HandlerOutcome, IncarnationId,
-    MutationIdentity, Owner, RequestId, SessionId, StoredOutcome, install_runtime_schema,
+    CellAuthority, CellExecutor, CellId, CellPublisher, CommandExecution, Control, Digest,
+    HandlerOutcome, IncarnationId, MutationIdentity, Owner, RequestId, SessionId, StoredOutcome,
+    Transition, VersionedControl, install_runtime_schema,
 };
 use crab_ltx::{CellReplica, Limits, ManagedDb};
 use crab_storage::{CellStorageLayout, Store};
@@ -16,6 +18,7 @@ struct Fixture {
     database: std::path::PathBuf,
     cell: CellId,
     incarnation: IncarnationId,
+    layout: CellStorageLayout,
     replica: CellReplica,
     executor: CellExecutor,
 }
@@ -26,7 +29,7 @@ fn fixture() -> Fixture {
     let store = Store::new(Arc::new(InMemory::new()));
     let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
     let replica = CellReplica::new(
-        layout,
+        layout.clone(),
         *cell.as_bytes(),
         *incarnation.as_bytes(),
         Limits::default(),
@@ -48,9 +51,39 @@ fn fixture() -> Fixture {
         database,
         cell,
         incarnation,
+        layout,
         replica,
         executor: CellExecutor::new(writer, cell, incarnation, 1),
     }
+}
+
+async fn initialized_authority(
+    layout: &CellStorageLayout,
+    cell: CellId,
+    incarnation: IncarnationId,
+) -> (Control, CellAuthority, VersionedControl) {
+    let control = Control::initial(
+        cell,
+        incarnation,
+        Owner {
+            session: SessionId::from_bytes([4; 16]),
+            endpoint: "https://node.internal:8081".into(),
+        },
+        Digest::from_bytes([5; 32]),
+        1,
+    )
+    .unwrap();
+    layout
+        .store()
+        .create_strict(
+            &layout.control_path(cell.as_bytes()),
+            Bytes::from(control.encode().unwrap()),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(layout.clone());
+    let observed = authority.load(cell).await.unwrap().unwrap();
+    (control, authority, observed)
 }
 
 #[tokio::test]
@@ -60,6 +93,7 @@ async fn prepared_root_becomes_one_valid_control_successor() {
         database: _,
         cell,
         incarnation,
+        layout: _,
         replica,
         mut executor,
     } = fixture();
@@ -145,6 +179,7 @@ async fn business_rejection_rolls_back_domain_writes_and_publishes_the_outcome()
         database,
         cell: _,
         incarnation: _,
+        layout: _,
         replica,
         mut executor,
     } = fixture();
@@ -200,4 +235,89 @@ async fn business_rejection_rolls_back_domain_writes_and_publishes_the_outcome()
             .unwrap(),
         2
     );
+}
+
+#[tokio::test]
+async fn publisher_uploads_cas_and_releases_one_result() {
+    let Fixture {
+        _directory,
+        database: _,
+        cell,
+        incarnation,
+        layout,
+        replica,
+        mut executor,
+    } = fixture();
+    let (_, authority, observed) = initialized_authority(&layout, cell, incarnation).await;
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([14; 16]),
+        issued_at_ms: 100,
+        expires_at_ms: 20_000,
+    };
+    executor
+        .execute(identity, Digest::from_bytes([15; 32]), 110, |transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(HandlerOutcome::Success(b"committed".to_vec()))
+        })
+        .unwrap();
+    let mut publisher = CellPublisher::new(replica, authority, observed);
+    assert!(matches!(
+        publisher
+            .publish_pending(&mut executor, Some(500))
+            .await
+            .unwrap(),
+        StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"committed"
+    ));
+    assert_eq!(publisher.control().value().next_due_ms, Some(500));
+    assert!(executor.pending().is_none());
+    executor.close().unwrap();
+}
+
+#[tokio::test]
+async fn lost_publication_response_reconciles_without_replaying_sql() {
+    let Fixture {
+        _directory,
+        database: _,
+        cell,
+        incarnation,
+        layout,
+        replica,
+        mut executor,
+    } = fixture();
+    let (initial, authority, stale) = initialized_authority(&layout, cell, incarnation).await;
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([12; 16]),
+        issued_at_ms: 100,
+        expires_at_ms: 20_000,
+    };
+    let digest = Digest::from_bytes([13; 32]);
+    executor
+        .execute(identity, digest, 110, |transaction| {
+            transaction.execute("UPDATE counter SET value = value + 1", [])?;
+            Ok(HandlerOutcome::Success(b"published".to_vec()))
+        })
+        .unwrap();
+
+    let pending = executor.pending().unwrap();
+    let prepared = replica
+        .prepare(None, pending.cuts(), pending.outcome().commit_sequence(), 1)
+        .await
+        .unwrap();
+    let winner = initial.publish_prepared(&prepared, None).unwrap();
+    authority
+        .transition(&stale, winner.clone(), Transition::Publish)
+        .await
+        .unwrap();
+
+    let mut publisher = CellPublisher::new(replica, authority, stale);
+    assert!(matches!(
+        publisher
+            .publish_pending(&mut executor, None)
+            .await
+            .unwrap(),
+        StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"published"
+    ));
+    assert_eq!(publisher.control().value(), &winner);
+    assert!(executor.pending().is_none());
+    executor.close().unwrap();
 }

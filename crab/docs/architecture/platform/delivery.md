@@ -57,8 +57,11 @@ implemented. The executor runs application changes inside a savepoint, records
 success or rejection once, captures post-commit cuts, blocks later commands and
 releases the result only after the exact bound root is confirmed. Complete catalog
 proof, the bounded worker/mailbox actor and publication/CAS reconciliation. Enforce
-the remaining runtime.md timing, cancellation and panic supervision rules. All
-transitions use the existing Store conditional primitives, preserving sources.
+the bounded worker/mailbox actor and later-root request resolution. Exact-root
+lost-response reconciliation and renewal-token refresh are implemented without
+SQL replay. Enforce the remaining runtime.md timing, cancellation and panic
+supervision rules. All transitions use the existing Store conditional primitives,
+preserving sources.
 
 Add `crates/crab-cell-runtime/tests/publication.rs`:
 

@@ -6,9 +6,11 @@ identity/control/schema foundation and native-cut immutable root preparation now
 exist in `crab-cell-runtime` and `crab-ltx`; exact roots support lazy,
 authenticated page reads, and the local executor now persists request outcomes
 while retaining pending cuts/results until an exact prepared root is confirmed.
-Actor/mailbox supervision and CAS reconciliation, directory-backed writable
-SQLite, streaming directory updates, prepared compaction/bundles, primitives,
-HTTP cutover and capacity qualification remain incomplete.
+The publication coordinator also resolves a lost CAS response when origin names
+that exact root and refreshes through pure lease renewals. Actor/mailbox
+supervision, later-root request resolution, directory-backed writable SQLite,
+streaming directory updates, prepared compaction/bundles, primitives, HTTP
+cutover and capacity qualification remain incomplete.
 
 ## Deliverable and contract precedence
 

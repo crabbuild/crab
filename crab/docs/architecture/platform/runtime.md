@@ -6,8 +6,10 @@
 Implementation status: `CellExecutor` implements mutation lifetime checks,
 `sys_requests` dedup/conflict handling, application savepoint rollback, sequence/
 logical-clock advancement, post-commit capture ownership, prepared-root binding
-and exact-root confirmation. The node-wide mailbox actor, deadline/watchdog,
-authority-CAS reconciliation and recovery supervisor below remain to implement.
+and exact-root confirmation. `CellPublisher` performs immutable preparation,
+control CAS, exact-root reconciliation after a lost response, and safe renewal
+refresh without SQL replay. The node-wide mailbox actor, deadline/watchdog,
+later-root request resolution and recovery supervisor remain to implement.
 
 ## Rust interfaces and ownership
 

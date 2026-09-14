@@ -346,6 +346,10 @@ impl CellExecutor {
         self.db.close()?;
         Ok(())
     }
+
+    pub(crate) fn fence(&mut self) {
+        self.fenced = true;
+    }
 }
 
 enum TransactionResult {

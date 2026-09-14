@@ -10,6 +10,7 @@ mod control;
 mod error;
 mod executor;
 mod identity;
+mod publication;
 mod schema;
 
 pub use authority::{CellAuthority, VersionedControl};
@@ -22,4 +23,5 @@ pub use identity::{
     ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,
     TenantId, partition_for_shard, shard_for_scope,
 };
+pub use publication::CellPublisher;
 pub use schema::{install_runtime_schema, verify_runtime_schema};
