@@ -1,14 +1,19 @@
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::{Digest, Error, NamespaceId, RequestId, Result};
 
 mod activity;
+mod api;
 
 pub use activity::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
     ActivitySupport, ActivityTokenSource, SystemActivityTokens, workflow_claim_activities,
     workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
     workflow_validate_activity_claim,
+};
+pub use api::{
+    WorkflowCancelCommand, WorkflowGetQuery, WorkflowGetRequest, WorkflowModule, WorkflowNamespace,
+    WorkflowSignalCommand, WorkflowStartCommand, register_workflow,
 };
 
 const WORKFLOW_SCHEMA: &str = include_str!("migrations/workflow.sql");
@@ -103,7 +108,7 @@ impl WorkflowContext {
 }
 
 /// A statically registered, deterministic workflow state machine.
-pub trait WorkflowDefinition {
+pub trait WorkflowDefinition: Send + Sync + 'static {
     fn digest(&self) -> Digest;
 
     fn transition(
@@ -151,6 +156,18 @@ pub enum WorkflowOutcome {
     NotDue,
 }
 
+/// Materialized current state of one workflow run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkflowRun {
+    pub workflow_id: Vec<u8>,
+    pub run_id: [u8; 16],
+    pub definition_digest: Digest,
+    pub status: WorkflowStatus,
+    pub state: Vec<u8>,
+    pub event_sequence: u64,
+    pub result: Option<Vec<u8>>,
+}
+
 /// Installs the exact version-one Workflow schema during bootstrap or migration.
 pub fn install_workflow_schema(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(WORKFLOW_SCHEMA)?;
@@ -163,7 +180,7 @@ pub fn workflow_start(
     namespace: NamespaceId,
     now_ms: i64,
     request: &WorkflowStart,
-    definition: &impl WorkflowDefinition,
+    definition: &dyn WorkflowDefinition,
 ) -> Result<WorkflowOutcome> {
     validate_now(now_ms)?;
     validate_identifier(&request.workflow_id)?;
@@ -215,7 +232,7 @@ pub fn workflow_signal(
     transaction: &Transaction<'_>,
     now_ms: i64,
     signal: &WorkflowSignal,
-    definition: &impl WorkflowDefinition,
+    definition: &dyn WorkflowDefinition,
 ) -> Result<WorkflowOutcome> {
     validate_now(now_ms)?;
     validate_identifier(&signal.workflow_id)?;
@@ -309,7 +326,7 @@ pub fn workflow_fire_timer(
     now_ms: i64,
     run_id: [u8; 16],
     timer_id: [u8; 16],
-    definition: &impl WorkflowDefinition,
+    definition: &dyn WorkflowDefinition,
 ) -> Result<WorkflowOutcome> {
     validate_now(now_ms)?;
     let Some(run) = load_run_by_id(transaction, run_id)? else {
@@ -358,6 +375,57 @@ pub fn workflow_fire_timer(
         now_ms,
         decision,
     )
+}
+
+/// Reads one bounded current workflow state without exposing primitive tables.
+pub fn workflow_state(connection: &Connection, workflow_id: &[u8]) -> Result<Option<WorkflowRun>> {
+    validate_identifier(workflow_id)?;
+    let row = connection
+        .query_row(
+            "SELECT run_id, definition_digest, status, state, event_sequence, result FROM workflow_runs WHERE workflow_id = ?1",
+            [workflow_id],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<Vec<u8>>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((run_id, definition_digest, status, state, event_sequence, result)) = row else {
+        return Ok(None);
+    };
+    let run_id = run_id
+        .try_into()
+        .map_err(|_| Error::Command("invalid stored workflow run ID"))?;
+    let definition_digest = Digest::from_bytes(
+        definition_digest
+            .try_into()
+            .map_err(|_| Error::Command("invalid stored workflow definition digest"))?,
+    );
+    let status = WorkflowStatus::decode(status)?;
+    let event_sequence = u64::try_from(event_sequence)
+        .map_err(|_| Error::Command("invalid stored workflow event sequence"))?;
+    let result_bytes = result.as_ref().map_or(0, Vec::len);
+    if state.len() > MAX_WORKFLOW_BYTES
+        || result_bytes > MAX_WORKFLOW_BYTES
+        || state.len().saturating_add(result_bytes) > MAX_WORKFLOW_BYTES
+    {
+        return Err(Error::Command("workflow state result exceeds 1 MiB"));
+    }
+    Ok(Some(WorkflowRun {
+        workflow_id: workflow_id.to_vec(),
+        run_id,
+        definition_digest,
+        status,
+        state,
+        event_sequence,
+        result,
+    }))
 }
 
 #[derive(Clone)]
@@ -433,7 +501,7 @@ fn invalid_data(field: &'static str) -> rusqlite::Error {
 
 pub(super) fn verify_definition(
     run: &StoredRun,
-    definition: &impl WorkflowDefinition,
+    definition: &dyn WorkflowDefinition,
 ) -> Result<()> {
     if run.definition_digest != *definition.digest().as_bytes() {
         return Err(Error::Command("workflow definition digest is unavailable"));
@@ -444,7 +512,7 @@ pub(super) fn verify_definition(
 pub(super) fn prepare_transition(
     transaction: &Transaction<'_>,
     run: &StoredRun,
-    definition: &impl WorkflowDefinition,
+    definition: &dyn WorkflowDefinition,
     event: &[u8],
     now_ms: i64,
 ) -> Result<(u64, WorkflowDecision)> {

@@ -62,9 +62,8 @@ non-canonical bit pattern. Generic `Command`/`Query` registration uses
 monomorphized decode/execute/encode trampolines, with no raw byte-handler
 registration escape hatch. The implemented local `CellClient` covers canonical
 operation-digest integration and the actor path. Authenticated peer forwarding,
-bounded stale-owner retry, the Workflow primitive adapter and the server
-composition root remain to implement. Typed local SQL, KV and Queue capabilities
-are implemented.
+bounded stale-owner retry and the server composition root remain to implement.
+Typed local SQL, KV, Queue and Workflow capabilities are implemented.
 
 The trait is a source-level interface, not a stable ABI. Modules use normal
 Cargo dependencies and are monomorphized or privately type-erased inside the
@@ -323,7 +322,16 @@ shard count from the registry, publishes claims before returning payloads,
 revalidates exact tokens at a minimum receipt and exposes token-bound ack/retry/
 extend commands. Its integration test proves durable producer conflict,
 publication, validation, exact-root restore and acknowledgement.
-`WorkflowNamespace` remains.
+`WorkflowModule` binds one namespace, one statically linked definition and
+fixed start/signal/cancel/state IDs; `register_workflow` installs their typed
+codecs and exact definition-digest binding. Registry freeze rejects descriptor
+and transition-function drift. `WorkflowNamespace` derives its shard solely
+from the workflow ID and registry topology, binds the start run identity to the
+runtime mutation identity, returns durable typed rejection for non-applied
+outcomes and supports bounded minimum-receipt state reads. Its integration test
+proves start, signal, duplicate replay, conflict rejection, exact-root restore,
+state and cancellation. Native activity and effect supervision remain node
+services outside this application capability.
 
 WorkflowDefinition::transition(state, event, TransitionContext) -> Decision is
 synchronous; Decision/Action are native owned Rust values. Activities are

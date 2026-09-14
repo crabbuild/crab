@@ -309,7 +309,7 @@ pub fn workflow_complete_activity(
     transaction: &Transaction<'_>,
     now_ms: i64,
     completion: &ActivityCompletion,
-    definition: &impl WorkflowDefinition,
+    definition: &dyn WorkflowDefinition,
 ) -> Result<ActivityCompletionOutcome> {
     validate_now(now_ms)?;
     if completion.result.len() > MAX_ACTIVITY_BYTES || (!completion.failed && completion.retryable)

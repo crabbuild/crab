@@ -68,7 +68,14 @@ outstanding-task limits, terminal cancellation and exact-root restoration are
 implemented. Activity claims, post-publication lease validation, heartbeat extension,
 attempt-bound idempotent completion/failure, retry and terminal retention cleanup
 are now implemented through the same publication path. The node supervisor,
-effect actions and due-Cell scanner remain. The source effect ledger and target
+effect actions and due-Cell scanner remain. A typed `WorkflowNamespace` now
+binds each namespace and definition digest to fixed command/query IDs at
+startup, derives its shard only from the workflow ID and compiled registry,
+and exposes receipted start, signal, cancel and state operations. Registry
+freeze fails unless every declared definition has an exact statically linked
+transition binding. Its integration path proves start, idempotent signal,
+durable identity-conflict rejection, cancellation and minimum-receipt state
+after exact-root restoration. The source effect ledger and target
 inbox mechanics now derive immutable identities/digests, enforce command and
 claim bounds, validate only published leases, retry with stable bytes, dedup
 target execution, retain destination receipts beyond the sender horizon and
@@ -94,8 +101,8 @@ validates namespace/module code/schema and incarnation before admission, maps
 typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
 publication path. Private peer routing, server composition and release inspection
-remain; KV, SQL and Queue primitive handles are complete for local routing,
-while the Workflow adapter remains.
+remain; KV, SQL, Queue and Workflow primitive handles are complete for local
+routing.
 
 ## Deliverable and contract precedence
 

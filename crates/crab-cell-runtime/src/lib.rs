@@ -76,9 +76,12 @@ pub use sql::{
 pub use worker::{SqlWorkerPool, WorkerExecution};
 pub use workflow::{
     ActivityClaim, ActivityCompletion, ActivityCompletionOutcome, ActivityLeaseOutcome,
-    ActivitySupport, ActivityTokenSource, SystemActivityTokens, WorkflowAction, WorkflowContext,
-    WorkflowDecision, WorkflowDefinition, WorkflowOutcome, WorkflowSignal, WorkflowStart,
-    WorkflowStatus, install_workflow_schema, workflow_cancel, workflow_claim_activities,
+    ActivitySupport, ActivityTokenSource, SystemActivityTokens, WorkflowAction,
+    WorkflowCancelCommand, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
+    WorkflowGetRequest, WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowRun,
+    WorkflowSignal, WorkflowSignalCommand, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
+    install_workflow_schema, register_workflow, workflow_cancel, workflow_claim_activities,
     workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
-    workflow_fire_timer, workflow_signal, workflow_start, workflow_validate_activity_claim,
+    workflow_fire_timer, workflow_signal, workflow_start, workflow_state,
+    workflow_validate_activity_claim,
 };

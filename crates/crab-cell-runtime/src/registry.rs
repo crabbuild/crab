@@ -8,7 +8,7 @@ use descriptor::encode_release;
 
 use crate::{
     CatalogRole, CellId, Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch,
-    SqlResultSet, WireValue,
+    SqlResultSet, WireValue, WorkflowDefinition,
     codec::{decode_wire, encode_wire},
     sql_batch, sql_query_batch,
 };
@@ -221,6 +221,7 @@ pub struct RegistryBuilder {
     modules: Vec<&'static ModuleDescriptor>,
     commands: BTreeMap<BindingKey, CommandHandler>,
     queries: BTreeMap<BindingKey, QueryHandler>,
+    workflow_definitions: HashSet<(String, [u8; 32])>,
 }
 
 impl RegistryBuilder {
@@ -231,6 +232,7 @@ impl RegistryBuilder {
             modules: Vec::new(),
             commands: BTreeMap::new(),
             queries: BTreeMap::new(),
+            workflow_definitions: HashSet::new(),
         }
     }
 
@@ -265,6 +267,24 @@ impl RegistryBuilder {
         Ok(())
     }
 
+    /// Binds one descriptor digest to its statically linked transition function.
+    pub fn bind_workflow_definition(
+        &mut self,
+        module: &'static str,
+        definition: &'static dyn WorkflowDefinition,
+    ) -> std::result::Result<(), RegistryError> {
+        let digest = *definition.digest().as_bytes();
+        if !valid_name(module)
+            || digest.iter().all(|byte| *byte == 0)
+            || !self
+                .workflow_definitions
+                .insert((module.to_owned(), digest))
+        {
+            return Err(Error::Registry("invalid workflow definition binding"));
+        }
+        Ok(())
+    }
+
     /// Freezes registration after validating inventory and canonical bytes.
     pub fn finish(mut self) -> std::result::Result<Registry, RegistryError> {
         validate_build(&self.build)?;
@@ -291,6 +311,21 @@ impl RegistryBuilder {
             || expected_queries != self.queries.keys().cloned().collect()
         {
             return Err(Error::Registry("descriptor and function bindings differ"));
+        }
+        let expected_workflows = self
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .workflow_definitions
+                    .iter()
+                    .map(|digest| (module.name.to_owned(), *digest.as_bytes()))
+            })
+            .collect::<HashSet<_>>();
+        if expected_workflows != self.workflow_definitions {
+            return Err(Error::Registry(
+                "descriptor and workflow definition bindings differ",
+            ));
         }
         validate_namespaces(&namespace_owners)?;
 
