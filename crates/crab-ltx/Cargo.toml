@@ -29,3 +29,31 @@ tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "syn
 [dev-dependencies]
 object_store = { workspace = true, features = ["fs"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "replica_roundtrip"
+required-features = ["replica"]
+
+[[example]]
+name = "paged_read"
+required-features = ["replica"]
+
+[[example]]
+name = "sparse_writer"
+required-features = ["replica"]
+
+[[example]]
+name = "compact_history"
+required-features = ["replica"]
+
+[[example]]
+name = "repository_replication_lifecycle"
+required-features = ["replica"]
+
+[[example]]
+name = "rustfs_replication_scale_load"
+required-features = ["replica"]
+
+[[example]]
+name = "rustfs_paged_read_scale_performance"
+required-features = ["replica"]
