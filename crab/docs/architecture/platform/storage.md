@@ -198,8 +198,10 @@ directory format uses a separate versioned namespace; hard cutover is explicit.
 Extend ManagedDb transaction handling to preserve service errors instead of
 coercing them into rusqlite errors: `TransactionError<E> = Operation(E) | Sqlite
 | Capture`, preserving sources. Capture after local commit stays separately
-owned by the actor. Add scoped read/authorizer entry points; never expose a raw
-connection that can alter pager settings through application SQL helpers or private peer operations.
+owned by the actor. The runtime now layers bounded authorizer-protected helpers
+over the worker callback; the remaining typed contexts must expose only those
+helpers, never a raw connection that can alter pager settings through application
+SQL or private peer operations.
 
 ## Streaming and scratch
 

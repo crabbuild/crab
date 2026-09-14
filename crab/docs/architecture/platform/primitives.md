@@ -27,15 +27,36 @@ Only the runtime constructs CommandContext. Primitive modules have trusted SQL
 access; application SQL uses a scoped SQLite authorizer. Reject ATTACH,
 DETACH, transaction/savepoint commands, PRAGMA, extension loading and access to
 sys_* or primitive-owned tables. Match authorizer operations and resolved object
-names, not a regex over SQL text. Reject user table/view/trigger/index names
-starting sys_. Disable triggers/views that indirectly reach protected tables
-by enforcing authorization for their underlying accesses too.
+names, not a regex over SQL text. Application migrations run only during trusted
+bootstrap/maintenance; request batches cannot create, alter, analyze, reindex or
+drop schema objects. Compiled migration validation must reject table/view/
+trigger/index names starting sys_ or the reserved kv_, queue_ and workflow_
+prefixes. Disable
+triggers/views that indirectly reach protected tables by enforcing authorization
+for their underlying accesses too.
 
 `SqlBatch` executes 1..128 prepared statements in one command transaction,
 binding every parameter with the typed SqlValue codec. Return one ResultSet per
 statement. Limit aggregate returned rows to 1,000 and encoded bytes to 1 MiB;
 overflow rolls back before runtime result persistence. Read statements run under
-the read authorizer and cannot include RETURNING from a mutating statement.
+the read authorizer and cannot include RETURNING from a mutating statement. Each
+`SqlStatement.sql` contains exactly one statement without an unquoted semicolon;
+semicolons inside quoted values, identifiers or comments remain ordinary bytes.
+
+Implementation status: `crab-cell-runtime::sql` exposes `SqlValue`,
+`SqlStatement`, `SqlBatch` and materialized `SqlResultSet` plus separate command
+and read-only entry points. It validates 1..128 statements and a 1 MiB typed
+input before preparation, requires an exact parameter count, rejects non-finite
+real values, mutating `RETURNING`, more than 1,000 aggregate rows and more than
+1 MiB of materialized columns/values. A `rusqlite` authorizer is installed for
+the complete prepare/execute interval and removed by a guard on every return.
+It denies non-main databases, runtime/primitive names case-insensitively,
+protected trigger/view accessors, DDL, PRAGMA, transactions/savepoints,
+ATTACH/DETACH, virtual tables, ANALYZE/REINDEX, unknown operations and
+`load_extension`. `tests/sql.rs` covers typed mutation/read order, direct and
+indirect protected access, read-only enforcement, separator/parameter/input/
+row bounds and authorizer cleanup. Registry codecs and `CommandContext::sql()`
+remain to connect this helper to compiled Crab handlers.
 
 ## Request dedup and outbox
 

@@ -42,7 +42,10 @@ versions, logical TTL, bounded binary-prefix reads and cleanup through the same
 runtime publication path. Queue now implements producer dedup, bounded claims,
 unpredictable lease tokens, published-token validation, ack/retry/extend, expired
 lease reclamation, attempt limits and terminal cleanup. Dead-letter delivery
-still depends on the remaining effect subsystem.
+still depends on the remaining effect subsystem. The application SQL boundary
+now executes typed, bounded batches, classifies statements through SQLite,
+materializes bounded results and installs a scoped native authorizer that denies
+runtime/primitive access and connection, schema or transaction control.
 
 ## Deliverable and contract precedence
 
@@ -55,7 +58,8 @@ shared queue/KV/workflow namespaces use separate fixed shards where needed.
 
 The SQL migrations and private Protobuf descriptor are normative. Prose supplies
 validation, ordering and preconditions not expressible in those formats. Rust
-signatures below are interfaces to implement, not existing library symbols.
+signatures below are interfaces to implement unless their section explicitly
+records an implementation in `crab-cell-runtime`.
 This specification refines the shared runtime contracts in the earlier
 [HTTP next architecture](../../../../crates/crab-http-server/next-architecture/README.md);
 that design retains repository-specific data, Git and cutover requirements.

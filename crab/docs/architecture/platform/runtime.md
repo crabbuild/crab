@@ -225,9 +225,12 @@ reaches the requested sequence. Restore changes incarnation and rejects old
 receipts. Return the observed receipt with every read result. Historical snapshot
 streaming and replica routing are outside the v1 API.
 
-Add a ManagedDb read callback that installs the read-only authorizer, opens a
-read transaction, materializes at most 1,000 rows/1 MiB, and restores the trusted
-authorizer on every exit. SQL cursors never survive a network round trip.
+The worker's existing ManagedDb read callback supplies SQLite `query_only` and
+the five-second interrupt boundary. Inside it, `sql_query_batch` now installs the
+read-only authorizer, materializes at most 1,000 rows/1 MiB and clears that scoped
+authorizer on every exit before trusted runtime SQL can resume. The typed query
+context still needs to make this the only application entry point. SQL cursors
+never survive the synchronous callback or a network round trip.
 
 ## Workers and drain
 

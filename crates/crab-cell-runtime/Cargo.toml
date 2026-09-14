@@ -13,7 +13,7 @@ blake3.workspace = true
 bytes.workspace = true
 crab-storage.workspace = true
 crab-ltx = { workspace = true, features = ["replica"] }
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }
 rand = "0.9"
 serde.workspace = true
 serde_json.workspace = true

@@ -18,6 +18,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("Cell runtime SQLite schema failed")]
     Sqlite(#[from] rusqlite::Error),
+    #[error("Cell SQL returned invalid UTF-8 text")]
+    Utf8(#[from] std::str::Utf8Error),
     #[error("Cell authority storage failed")]
     Storage(#[from] crab_storage::StorageError),
     #[error("Cell LTX publication failed")]

@@ -8,7 +8,7 @@ does not establish a working runtime.
 
 | Source | Current behavior | Required change |
 | --- | --- | --- |
-| [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Add the final scoped SQL authorizer used by typed application contexts |
+| [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
 | [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell roots; cold reads and sparse writable activation use exact digest-pinned radix paths without a mutable head | Add prepared compaction/bundles, shared node cache and streaming directory/checksum updates |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
@@ -16,7 +16,8 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover and drain | Add sparse page-I/O deadlines, automatic fenced recovery and remaining primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, drain and bounded authorized SQL/KV/Queue mechanics | Add sparse page-I/O deadlines, automatic fenced recovery, typed registry adapters and Workflow/effect/scheduler modules |
+| [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization and scoped SQLite authorizers | Bind the helper to private compiled command/query contexts and stable codecs |
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup and binary pagination | Bind typed registry codecs and scheduler cleanup |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup | Add DLQ effects, registry codecs and native polling scheduler |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
@@ -223,8 +224,12 @@ Add tests:
   `unregistered_owner_endpoint_receives_no_credentials`.
 - Compile-fail cases for moving CommandContext across threads, returning a
   borrowed statement and using an async command callback.
-- `application_sql_cannot_attach_or_modify_system_table` checks direct and
-  trigger/view-mediated access. This proves SQL API constraints, not a Rust sandbox.
+- `tests/sql.rs` now checks that application SQL cannot attach, configure SQLite,
+  control transactions, load extensions or access protected state directly or
+  through a trigger/view. It also proves bounded typed inputs/results, read-only
+  classification and authorizer cleanup. This proves SQL API constraints, not a
+  Rust sandbox. Add the registry/actor acceptance case when `CommandContext::sql()`
+  lands.
 - `native_watchdog_fences_without_recycling_worker_permits`: block native code,
   expire its budget, verify no further admission or premature permit release;
   unblock it for test cleanup and prove its tentative writes never publish.
