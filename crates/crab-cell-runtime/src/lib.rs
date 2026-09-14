@@ -12,6 +12,7 @@ mod control;
 mod error;
 mod executor;
 mod identity;
+mod kv;
 mod publication;
 mod schema;
 mod worker;
@@ -28,6 +29,10 @@ pub use executor::{
 pub use identity::{
     ApplicationId, CellId, CellTarget, Digest, IncarnationId, NamespaceId, RequestId, SessionId,
     TenantId, partition_for_shard, shard_for_scope,
+};
+pub use kv::{
+    KvAtomicOutcome, KvAtomicRequest, KvCheck, KvCondition, KvEntry, KvMutation, KvMutationResult,
+    KvPage, install_kv_schema, kv_atomic, kv_cleanup_expired, kv_get, kv_list,
 };
 pub use publication::CellPublisher;
 pub use schema::{install_runtime_schema, verify_runtime_schema};

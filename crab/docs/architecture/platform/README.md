@@ -35,7 +35,11 @@ unknown while its permits remain held until the callback exits. A native callbac
 that exits late cannot publish its tentative commit. Sparse page-I/O deadline
 propagation and automatic fenced recovery,
 streaming directory and checksum updates, prepared compaction/bundles,
-primitives, HTTP cutover and capacity qualification remain incomplete.
+Queue/Workflow/effect/scheduler primitives, typed registry, HTTP cutover and
+capacity qualification remain incomplete. The scoped KV primitive now installs
+the normative schema and implements atomic checks/mutations, incarnation/sequence
+versions, logical TTL, bounded binary-prefix reads and cleanup through the same
+runtime publication path.
 
 ## Deliverable and contract precedence
 
