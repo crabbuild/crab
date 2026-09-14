@@ -73,6 +73,11 @@ This digest is separate from the established `BucketIdentity` used for logical
 cross-scheme comparison and cache keys. Raw `Store::new` wrappers have no target
 identity; integrity callers must not infer one from their display text.
 
+Official AWS S3 builders send an explicit SHA-256 upload checksum and expose
+that provider-validated integrity evidence through `Store`. Custom S3
+endpoints, GCS, Azure, URL-parsed stores, and raw `Store::new` wrappers remain
+readback-required; endpoint names and ETags never qualify an immutable write.
+
 Non-resumable multipart uploads use one bounded part queue with or without a
 progress callback. Part and completion failures attempt abort before returning;
 an abort failure does not replace the original error used for retry decisions.

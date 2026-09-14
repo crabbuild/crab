@@ -47,6 +47,16 @@ use crate::retry::{RetryPolicy, retry};
 /// the pair together because `PutMode::Update` consumes both.
 pub type ETag = object_store::UpdateVersion;
 
+/// Integrity evidence available after an acknowledged immutable PUT.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImmutableWriteVerification {
+    /// The provider contract is not sufficient; stream the stored body back.
+    #[default]
+    ReadbackRequired,
+    /// The provider accepted the request's explicit SHA-256 checksum.
+    Sha256Checksum,
+}
+
 /// Bounded-memory byte stream returned by object reads.
 pub type StorageByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>>;
 
@@ -65,6 +75,7 @@ pub struct Store {
     /// explicit identity — typically tests and the in-memory store.
     identity: BucketIdentity,
     target_identity: Option<[u8; 32]>,
+    immutable_write_verification: ImmutableWriteVerification,
     /// Optional parallel handle to the same underlying store viewed
     /// as a [`object_store::signer::Signer`]. Populated by storage
     /// provider builders for S3 backends (the only backend that
@@ -137,6 +148,7 @@ impl Store {
             retry: RetryPolicy::DEFAULT,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             multipart: None,
             multipart_identity: None,
@@ -146,6 +158,26 @@ impl Store {
             read_byte_observer: None,
             read_request_observer: None,
         }
+    }
+
+    /// Attach provider-qualified immutable-write integrity evidence.
+    ///
+    /// Callers must propagate this only from the provider builder that enabled
+    /// the corresponding request checksum. Endpoint names and ETags are not
+    /// qualification evidence.
+    #[must_use]
+    pub fn with_immutable_write_verification(
+        mut self,
+        verification: ImmutableWriteVerification,
+    ) -> Self {
+        self.immutable_write_verification = verification;
+        self
+    }
+
+    /// Return the proof available after a successful immutable PUT.
+    #[must_use]
+    pub fn immutable_write_verification(&self) -> ImmutableWriteVerification {
+        self.immutable_write_verification
     }
 
     /// Wraps `inner` with a custom retry policy.
@@ -160,6 +192,7 @@ impl Store {
             retry,
             identity: BucketIdentity::local_unset(),
             target_identity: None,
+            immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
             signer: None,
             multipart: None,
             multipart_identity: None,
@@ -524,6 +557,37 @@ impl Store {
             async move { self.put_once(&path, bytes, &expected_hash).await }
         })
         .await
+    }
+
+    /// Writes immutable bytes and proves that the acknowledged object has exact content.
+    ///
+    /// A provider-qualified SHA-256 request checksum proves a newly created
+    /// object's transfer integrity without another request. Other providers
+    /// stream the object back and verify its BLAKE3 digest. An existing object
+    /// was already read and verified by [`Self::put_if_absent`].
+    pub async fn put_if_absent_verified(&self, path: &Path, bytes: Bytes) -> Result<bool> {
+        let expected_hash = *blake3::hash(&bytes).as_bytes();
+        let maximum = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let created = self.put_if_absent(path, bytes).await?;
+        if !created
+            || self.immutable_write_verification == ImmutableWriteVerification::Sha256Checksum
+        {
+            return Ok(created);
+        }
+        let readback_path = self.write_path(path);
+        let (stored, _) = self.get_with_etag_bounded(&readback_path, maximum).await?;
+        let actual_hash = *blake3::hash(&stored).as_bytes();
+        if actual_hash != expected_hash {
+            return Err(StorageError::CorruptObject {
+                path: path.to_string(),
+                reason: format!(
+                    "expected blake3 {}, got {}",
+                    hex_lower(&expected_hash),
+                    hex_lower(&actual_hash)
+                ),
+            });
+        }
+        Ok(created)
     }
 
     /// Writes `bytes` at `path` iff nothing exists there yet.

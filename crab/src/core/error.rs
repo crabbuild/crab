@@ -1134,6 +1134,9 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::UnauthorizedObject => {
                 Self::Protocol("requested object is outside the visible generation".to_owned())
             }
+            crab_read::ReadError::RequestMinimalLimit { resource, maximum } => Self::Protocol(
+                format!("request-minimal read exceeds {resource} limit ({maximum} bytes)"),
+            ),
             crab_read::ReadError::Internal(message) => Self::Internal(message),
         }
     }
@@ -1971,6 +1974,10 @@ impl From<crab_write::WriteError> for CrabError {
                 path,
                 expected_etag: None,
             },
+            crab_write::WriteError::RequestMinimalRootChanged { path } => Self::CasConflict {
+                path,
+                expected_etag: None,
+            },
             crab_write::WriteError::Timestamp(source) => Self::from(source),
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
@@ -1985,6 +1992,7 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Cancelled => Self::Cancelled,
             error @ (crab_write::WriteError::Namespace(_)
             | crab_write::WriteError::InitialHead { .. }
+            | crab_write::WriteError::RequestMinimalCommitUncertain { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
             | crab_write::WriteError::PackIdentity { .. }
@@ -2015,6 +2023,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             }
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
+            | crab_metadata::error::MetadataError::RequestMinimalContract { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }
             | crab_metadata::error::MetadataError::ManifestCommitUncertain { .. }) => {
@@ -4043,6 +4052,44 @@ mod tests {
             maximum: 4,
         });
         assert_eq!(error.code(), "CRAB-E0060");
+    }
+
+    #[test]
+    fn request_minimal_read_limit_is_a_protocol_rejection() {
+        let error = CrabError::from(crab_read::ReadError::RequestMinimalLimit {
+            resource: "frontier bytes",
+            maximum: 1024,
+        });
+        assert_eq!(error.code(), "CRAB-E0060");
+    }
+
+    #[test]
+    fn request_minimal_root_change_is_a_cas_conflict() {
+        let error = CrabError::from(crab_write::WriteError::RequestMinimalRootChanged {
+            path: "repositories/test/root".to_owned(),
+        });
+        assert!(
+            matches!(error, CrabError::CasConflict { path, .. } if path == "repositories/test/root")
+        );
+    }
+
+    #[test]
+    fn request_minimal_contract_error_retains_its_source() {
+        let error = CrabError::from(
+            crab_metadata::error::MetadataError::RequestMinimalContract {
+                record: "root",
+                reason: "invalid digest".to_owned(),
+            },
+        );
+        let CrabError::Io(error) = error else {
+            panic!("expected typed I/O error");
+        };
+        assert!(
+            error
+                .get_ref()
+                .and_then(|source| { source.downcast_ref::<crab_metadata::error::MetadataError>() })
+                .is_some()
+        );
     }
 
     #[tokio::test]
