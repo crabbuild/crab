@@ -26,8 +26,10 @@ close the SQL worker before conditionally releasing control ownership to `Idle`.
 Node-wide terminal shutdown is also implemented: it closes node and Cell
 admission, drains every message accepted before the shutdown marker through
 ordinary publication, closes every active SQLite handle, and releases every
-owned control before returning. This primitive is not yet wired into the HTTP
-server's signal/readiness lifecycle. After all Cell deactivations settle it
+owned control before returning. The existing HTTP server now constructs this
+runtime as part of `serve`, rejects readiness after its terminal drain starts,
+and invokes the Cell drain after Axum, receives, transfers, and repository
+maintenance have drained. After all Cell deactivations settle it
 explicitly closes the shared fixed pool and joins every SQL worker thread; other
 runtime, pool or handle clones remain permanently closed.
 The dispatcher now renews idle owners through one bounded node-level scanner;
@@ -130,8 +132,11 @@ fail closed. The local `CellClient` now derives the canonical operation digest,
 validates namespace/module code/schema and incarnation before admission, maps
 typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
-publication path. Private peer routing and server runtime composition remain;
-KV, SQL, Queue and Workflow primitive handles are complete for local routing.
+publication path. The server composition root now owns one process-session
+`CellRuntime`, validates the compiled registry before admission, and shuts it
+down with the server. Private peer routing, release-gated activation, resource-
+derived budgets and repository Cell routing remain; KV, SQL, Queue and Workflow
+primitive handles are complete for local routing.
 The server now compiles and binds the first repository module slice: stable
 create-issue/create-comment commands, get-issue/get-comment queries, bounded
 codecs, and the schema that owns repository identity, sequences, issues and
@@ -143,9 +148,8 @@ emits those exact registry bytes from the built binary. `cells release prepare` 
 or adopts the root's canonical tenant/application identity, uploads the exact
 digest-addressed descriptor, and conditionally publishes a canonical prepared
 release; `cells release status` reads that checked state. Compatibility analysis,
-activation, runtime lifecycle composition, including invoking the implemented
-terminal drain from server shutdown, and product
-route cutover remain. Existing HTTP issue/comment routes still use the old
+activation, persistent Cell-directory configuration, product routing and
+capacity qualification remain. Existing HTTP issue/comment routes still use the old
 object documents; the native module is not yet a user-visible storage path.
 
 ## Deliverable and contract precedence

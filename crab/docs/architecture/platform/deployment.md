@@ -291,11 +291,17 @@ UNKNOWN; exit by 120 s. A stuck native callback requires process termination;
 never release its permits and continue running it in the background. Successors
 recover authoritative origin roots. VM supervisors use the same lifecycle.
 
-`CellRuntime::shutdown` now implements the Cell-local portion through SQLite
-close, control release and final SQL-worker join. Server signal handling,
-readiness withdrawal, activity cancellation and the 110-second escalation are
-still delivery work; the existence of the runtime method alone does not satisfy
-this process-level contract.
+The current `serve` composition now creates one process-session `CellRuntime`,
+validates its statically linked registry, places it on `Server`, rejects readiness
+once the runtime enters terminal drain, and calls its shutdown after public HTTP,
+Git receives, transfer permits and repository maintenance settle. Shutdown closes
+every active SQLite Cell, conditionally releases its exact control ownership,
+closes the fixed pool and joins all SQL worker threads before process return.
+The initial wiring uses CPU-derived 1..16 workers, a 10,000 active-Cell ceiling and
+a 32 MiB node mailbox byte semaphore. Those are conservative implementation
+constants, not a completed resource-profile contract. Effective cgroup memory,
+local-volume/FD admission, configured Cell directories, activity cancellation,
+the 110-second escalation and peer advertisement remain delivery work.
 
 ## Backup, restore and offline collection
 

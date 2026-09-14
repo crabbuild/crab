@@ -227,6 +227,7 @@ impl Harness {
         let server = Arc::new(Server {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
+            cell_runtime: start_test_cell_runtime(),
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],
             admission: Semaphore::new(16),
@@ -329,7 +330,7 @@ impl Harness {
             let _ = task.await;
         }
         self.server.finish_maintenance().await.unwrap();
-        self.server.runtime.shutdown().await;
+        self.server.shutdown_runtimes().await.unwrap();
     }
 }
 

@@ -11,7 +11,7 @@ Paths in this table are relative to `crates/crab-http-server/` unless stated.
 | Current surface | Entry and owner | Existing behavior | Next design impact |
 | --- | --- | --- | --- |
 | Process CLI | [main.rs](../src/main.rs) | Serve, healthcheck, storage-probe, repository create/adopt/set-members/list | Extend existing storage diagnosis and add scoped migration commands |
-| Server lifecycle | [server.rs](../src/server.rs) | Two listeners, catalog refresh, Git runtime and retained workers | Own node session, cells, peer client and staged shutdown |
+| Server lifecycle | [server.rs](../src/server.rs), [cells.rs](../src/cells.rs) | Two listeners, catalog refresh, Git runtime, plus one compiled-registry-validated Cell runtime/session whose terminal drain participates in readiness and shutdown | Add release/current gate, durable local directory, resource-derived admission, peer client and timed escalation |
 | Repository identity | [catalog.rs](../src/catalog.rs), `materialize_catalog` in [server.rs](../src/server.rs) | Catalog has stable UUID; runtime repository does not retain that field | Carry UUID independently of owner/name and Git placement identity |
 | Application boundary | [app.rs](../src/app.rs) | Repository/principal checks, eight production application slots, 30-second handler deadline | Preserve external contracts; move accepted durable work into tracked cells |
 | Collaboration persistence | [app_storage.rs](../src/app_storage.rs) | Bounded JSON, strict create, ETag update, CAS number allocation | Replace domain document storage with SQL repositories |
@@ -50,7 +50,10 @@ The server's static repository module now calls the managed runtime indirectly
 through typed `CellClient` commands and queries. Its schema owns repository
 identity, issue/comment sequences and rows; an integration test proves replay,
 durable rejection, LTX publication, full first-owner local deletion and exact-root
-readback on a second owner. This is still below the product route: no HTTP route
+readback on a second owner. `serve` now owns the same runtime lifecycle: it starts
+one process session with fixed SQL workers, includes terminal Cell drain in
+readiness, and drains/releases/joins it after accepted HTTP and Git work. This is
+still below the product route: no HTTP route
 currently calls that module, so application JSON persistence, Git publication
 and browser behavior above remain unchanged. See [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 

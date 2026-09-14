@@ -3,8 +3,10 @@
 Status: target server architecture. Local and optional remote `crab-ltx`
 mechanics are implemented, and the server now has a statically registered
 repository issue/comment module proven through local LTX publication and
-source-loss restore. The HTTP listener lifecycle, peer routing, importer and
-product-route hard cut are not yet integrated. Prepared 2026-09-13
+source-loss restore. The HTTP composition root now starts that native runtime,
+withdraws readiness when it drains and joins its SQL workers during ordinary
+server shutdown. Peer routing, importer, release activation and product-route
+hard cut are not yet integrated. Prepared 2026-09-13
 against Crab commit
 `f67181e0dcdc69a766b14a8b441e9119d3684f33`; deployment and integration notes were
 updated when rebasing onto `2cb79f1cdb56eb824c607195635615a6f9c4a23f`.

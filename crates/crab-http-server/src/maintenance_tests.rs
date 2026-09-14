@@ -43,6 +43,7 @@ pub(super) async fn fixture() -> Arc<Server> {
         )])
         .into(),
         runtime: Arc::new(RemoteGitRuntime::default()),
+        cell_runtime: start_test_cell_runtime(),
         options: RepositoryOptions::default(),
         cursor_key: [0; 32],
         admission: Semaphore::new(16),
@@ -124,7 +125,7 @@ async fn assert_released(repo: &Repository) {
 async fn close(server: &Server) {
     server.cancellation.cancel();
     server.finish_maintenance().await.unwrap();
-    server.runtime.shutdown().await;
+    server.shutdown_runtimes().await.unwrap();
 }
 
 fn enable_catalog_readiness(server: &mut Arc<Server>) {
@@ -180,6 +181,32 @@ async fn readiness_rejects_a_server_that_is_draining() {
         Some("5")
     );
     close(&server).await;
+}
+
+#[tokio::test]
+async fn readiness_rejects_a_draining_cell_runtime() {
+    let mut server = fixture().await;
+    enable_catalog_readiness(&mut server);
+    server.shutdown_runtimes().await.unwrap();
+
+    let response = management_router(Arc::clone(&server))
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("5")
+    );
 }
 
 #[tokio::test]

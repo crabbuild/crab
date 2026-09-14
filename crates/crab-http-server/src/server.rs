@@ -13,6 +13,7 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
+use crab_cell_runtime::{CellRuntime, SessionId, SqlWorkerPool};
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
@@ -39,6 +40,8 @@ const READ_ADMISSION_CAPACITY: usize = 16;
 const GIT_ADMISSION_CAPACITY: usize = 4;
 const APP_ADMISSION_CAPACITY: usize = 8;
 const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
+const MAX_ACTIVE_CELLS: usize = 10_000;
+const CELL_NODE_MAILBOX_BYTES: usize = 32 * 1024 * 1024;
 
 fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
     TransferAdmission::new(
@@ -49,6 +52,26 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
             .to_string(),
         GIT_ADMISSION_CAPACITY,
     )
+}
+
+fn start_cell_runtime(session: SessionId) -> Result<CellRuntime> {
+    crate::cells::compiled_registry()?;
+    Ok(CellRuntime::new(
+        SqlWorkerPool::for_system(MAX_ACTIVE_CELLS)?,
+        CELL_NODE_MAILBOX_BYTES,
+        session,
+    )?)
+}
+
+#[cfg(test)]
+fn start_test_cell_runtime() -> CellRuntime {
+    crate::cells::compiled_registry().unwrap();
+    CellRuntime::new(
+        SqlWorkerPool::new(1, 16).unwrap(),
+        2 * 1024 * 1024,
+        SessionId::from_bytes(Uuid::now_v7().into_bytes()),
+    )
+    .unwrap()
 }
 
 async fn probe_storage_contract(
@@ -266,6 +289,7 @@ impl Repository {
 pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
+    pub cell_runtime: CellRuntime,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
     pub admission: Semaphore,
@@ -315,6 +339,12 @@ impl Server {
         }
         result
     }
+
+    async fn shutdown_runtimes(&self) -> Result<()> {
+        let cells = self.cell_runtime.shutdown().await;
+        self.runtime.shutdown().await;
+        cells.map_err(Into::into)
+    }
 }
 
 /// Serve configured repositories and compiled React assets until shutdown.
@@ -357,9 +387,12 @@ pub async fn serve(config: Config) -> Result<()> {
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
+    let metrics = crate::metrics::Metrics::new()?;
+    let cell_runtime = start_cell_runtime(SessionId::from_bytes(Uuid::now_v7().into_bytes()))?;
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
+        cell_runtime,
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
         options,
@@ -374,7 +407,7 @@ pub async fn serve(config: Config) -> Result<()> {
         auth,
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
-        metrics: crate::metrics::Metrics::new()?,
+        metrics,
     });
     let app = router(Arc::clone(&server));
     let management = management_router(Arc::clone(&server));
@@ -408,11 +441,12 @@ pub async fn serve(config: Config) -> Result<()> {
     server.transfer_admission.close();
     server.transfer_admission.wait().await;
     let maintenance = server.finish_maintenance().await;
-    runtime.shutdown().await;
+    let runtimes = server.shutdown_runtimes().await;
     result
         .map(|_| ())
         .map_err(crate::Error::from)
         .and(maintenance)
+        .and(runtimes)
 }
 
 /// Validate the durable catalog and the storage coordination write path.
@@ -683,6 +717,9 @@ async fn readiness(State(server): State<Arc<Server>>) -> Response {
 async fn check_readiness(server: &Server) -> Result<()> {
     if server.cancellation.is_cancelled() {
         return Err(crate::Error::Config("server is draining"));
+    }
+    if server.cell_runtime.is_shutting_down() {
+        return Err(crate::Error::Config("embedded Cell runtime is draining"));
     }
     if !server.catalog_healthy.load(Ordering::Acquire) {
         return Err(crate::Error::Config("catalog refresh is unhealthy"));
@@ -985,6 +1022,7 @@ mod tests {
         let server = Arc::new(Server {
             repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
+            cell_runtime: start_test_cell_runtime(),
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],
             admission: Semaphore::new(1),
@@ -1088,7 +1126,7 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
-        let management = management_router(server);
+        let management = management_router(Arc::clone(&server));
         for (path, expected) in [
             ("/healthz", StatusCode::OK),
             ("/readyz", StatusCode::SERVICE_UNAVAILABLE),
@@ -1121,7 +1159,7 @@ mod tests {
         let body = std::str::from_utf8(&body).unwrap();
         assert!(body.contains("crab_http_server_catalog_healthy 0"));
         assert!(body.contains("crab_http_server_requests_total{method=\"get\",outcome=\"2xx\"} 2"));
-        runtime.shutdown().await;
+        server.shutdown_runtimes().await.unwrap();
     }
 }
 
