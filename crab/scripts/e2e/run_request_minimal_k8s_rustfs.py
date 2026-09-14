@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -154,6 +155,7 @@ class Qualification:
             text=True,
             check=True,
         ).stdout.strip()
+        binary_sha256 = hashlib.sha256(self.crab.read_bytes()).hexdigest()
 
         self.report = {
             "schema": "crab.request-minimal-k8s-rustfs",
@@ -175,6 +177,7 @@ class Qualification:
             "provenance": {
                 "crab_binary": str(self.crab),
                 "crab_version": version,
+                "crab_sha256": binary_sha256,
                 "git_version": self.git(["--version"], self.replay),
             },
             "commit_oids": commits,
@@ -256,11 +259,16 @@ class Qualification:
         self.save()
 
     def summarize(self) -> None:
-        pushes = self.report["pushes"]
+        seed = self.report["pushes"][0]
+        pushes = self.report["pushes"][1:]
         latencies = [item["elapsed_ms"] for item in pushes]
         requests = [item["object_store"]["requests"] for item in pushes]
         self.report["metrics"] = {
-            "push_count": len(pushes),
+            "seed": {
+                "elapsed_ms": seed["elapsed_ms"],
+                "object_store_requests": seed["object_store"]["requests"],
+            },
+            "incremental_push_count": len(pushes),
             "push_latency_ms": {
                 "mean": round(sum(latencies) / len(latencies), 2),
                 "p50": percentile(latencies, 0.50),
