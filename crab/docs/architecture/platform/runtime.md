@@ -33,7 +33,15 @@ only for the original digest, `ABSENT` only after earlier accepted work drained,
 `UNKNOWN` when publication fenced, and `EXPIRED` for a structurally valid expired
 identity. A successor that restores a later authoritative root resolves the
 predecessor's ledger without replay. Deadline/watchdog enforcement and the
-fenced recovery supervisor remain to implement.
+takeover acquisition/fenced recovery supervisor remain to implement. A single
+dispatcher timer currently scans every 100 ms and admits at most 32 concurrent
+owner renewals. Each idle owner renews every 3 s without a permanent per-Cell
+task. Renewal uses the same strict control CAS, reconciles exact lost responses,
+and fences the worker and mailbox if authority names another owner or cannot be
+proven within the 10 s renewal attempt. Immutable-root preparation interleaves
+renewal so retrying object I/O does not silently stop owner progress. SQL work
+still needs the specified 5 s interruption path so a blocking callback cannot
+delay its next renewal indefinitely.
 Normal drain now closes the worker-owned SQLite handle and then transitions the
 same observed control to `Idle` with no owner. Release retries provider-classified
 transient failures across pure renewals and reconciles an exact lost response;

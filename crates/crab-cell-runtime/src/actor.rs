@@ -26,6 +26,8 @@ use crate::{
 const INGRESS_REQUESTS: usize = 1_024;
 const CELL_REQUESTS: usize = 64;
 const CELL_BYTES: usize = 8 * 1024 * 1024;
+const RENEWAL_SCAN: std::time::Duration = std::time::Duration::from_millis(100);
+const MAX_RENEWALS_IN_FLIGHT: usize = 32;
 
 /// Node-wide dispatcher for bounded per-Cell command mailboxes.
 #[derive(Clone)]
@@ -285,6 +287,7 @@ struct ActiveCell {
     publisher: Option<CellPublisher>,
     queue: VecDeque<QueuedWork>,
     busy: bool,
+    renewing: bool,
     fenced: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
 }
@@ -316,6 +319,11 @@ enum TaskResult {
         result: crate::Result<Resolution>,
         fenced: bool,
     },
+    Renewed {
+        cell: CellId,
+        publisher: Box<CellPublisher>,
+        result: crate::Result<()>,
+    },
     Deactivated {
         cell: CellId,
         reply: Option<oneshot::Sender<crate::Result<()>>>,
@@ -327,12 +335,20 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
     let mut cells = HashMap::<CellId, ActiveCell>::new();
     let mut transitioning = HashSet::<CellId>::new();
     let mut tasks = JoinSet::<TaskResult>::new();
+    let mut renewal_tick = tokio::time::interval(RENEWAL_SCAN);
+    renewal_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    renewal_tick.tick().await;
     loop {
         if tasks.is_empty() {
-            let Some(message) = receiver.recv().await else {
-                break;
-            };
-            handle_message(message, &pool, &mut cells, &mut transitioning, &mut tasks);
+            tokio::select! {
+                message = receiver.recv() => {
+                    let Some(message) = message else { break; };
+                    handle_message(message, &pool, &mut cells, &mut transitioning, &mut tasks);
+                }
+                _ = renewal_tick.tick() => {
+                    start_due_renewals(&pool, &mut cells, &mut tasks);
+                }
+            }
             continue;
         }
         tokio::select! {
@@ -351,6 +367,9 @@ async fn run(mut receiver: mpsc::Receiver<Message>, pool: SqlWorkerPool) {
                     return;
                 };
                 handle_task(result, &pool, &mut cells, &mut transitioning, &mut tasks);
+            }
+            _ = renewal_tick.tick() => {
+                start_due_renewals(&pool, &mut cells, &mut tasks);
             }
         }
     }
@@ -495,7 +514,7 @@ fn handle_message(
                 return;
             }
             active.drain = Some(reply);
-            if !active.busy && active.queue.is_empty() {
+            if !active.busy && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             }
         }
@@ -543,7 +562,7 @@ async fn bootstrap_and_publish(
 }
 
 fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet<TaskResult>) {
-    if active.busy || active.fenced {
+    if active.busy || active.renewing || active.fenced {
         return;
     }
     let Some(work) = active.queue.pop_front() else {
@@ -703,6 +722,7 @@ fn handle_task(
                         publisher: Some(*publisher),
                         queue: VecDeque::new(),
                         busy: false,
+                        renewing: false,
                         fenced: false,
                         drain: None,
                     },
@@ -731,7 +751,7 @@ fn handle_task(
                 fence_active(active);
             }
             let _ = command.reply.send(result);
-            if active.drain.is_some() && active.queue.is_empty() {
+            if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
                 start_next(active, pool, tasks);
@@ -753,7 +773,7 @@ fn handle_task(
                 fence_active(active);
             }
             let _ = query.reply.send(result);
-            if active.drain.is_some() && active.queue.is_empty() {
+            if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
                 start_next(active, pool, tasks);
@@ -775,7 +795,27 @@ fn handle_task(
                 fence_active(active);
             }
             let _ = resolve.reply.send(result);
-            if active.drain.is_some() && active.queue.is_empty() {
+            if active.drain.is_some() && !active.renewing && active.queue.is_empty() {
+                start_deactivate(cell, pool, cells, transitioning, tasks);
+            } else {
+                start_next(active, pool, tasks);
+            }
+        }
+        TaskResult::Renewed {
+            cell,
+            publisher,
+            result,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                return;
+            };
+            active.renewing = false;
+            active.publisher = Some(*publisher);
+            if result.is_err() {
+                active.fenced = true;
+                fence_active(active);
+            }
+            if active.drain.is_some() && !active.busy && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
                 start_next(active, pool, tasks);
@@ -811,6 +851,54 @@ fn fence_active(active: &mut ActiveCell) {
                 let _ = resolve.reply.send(Ok(Resolution::Unknown));
             }
         }
+    }
+}
+
+fn start_due_renewals(
+    pool: &SqlWorkerPool,
+    cells: &mut HashMap<CellId, ActiveCell>,
+    tasks: &mut JoinSet<TaskResult>,
+) {
+    let active_renewals = cells.values().filter(|active| active.renewing).count();
+    let mut available = MAX_RENEWALS_IN_FLIGHT.saturating_sub(active_renewals);
+    if available == 0 {
+        return;
+    }
+    let now = std::time::Instant::now();
+    for (cell, active) in cells.iter_mut() {
+        if available == 0 {
+            break;
+        }
+        if active.busy
+            || active.renewing
+            || active.fenced
+            || active.drain.is_some()
+            || !active.queue.is_empty()
+            || active
+                .publisher
+                .as_ref()
+                .is_none_or(|publisher| !publisher.renewal_due(now))
+        {
+            continue;
+        }
+        let Some(mut publisher) = active.publisher.take() else {
+            continue;
+        };
+        active.renewing = true;
+        available -= 1;
+        let cell = *cell;
+        let pool = pool.clone();
+        tasks.spawn(async move {
+            let result = publisher.renew().await;
+            if result.is_err() {
+                let _ = pool.fence(cell).await;
+            }
+            TaskResult::Renewed {
+                cell,
+                publisher: Box::new(publisher),
+                result,
+            }
+        });
     }
 }
 

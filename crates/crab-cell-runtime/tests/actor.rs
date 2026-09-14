@@ -186,6 +186,76 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
     );
 }
 
+#[tokio::test]
+async fn idle_owner_progress_is_renewed_without_a_per_cell_task() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let initial = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let initial_progress = initial.value().progress;
+    let initial_root = initial.value().root.clone();
+
+    let renewed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let current = authority
+                .load(fixture.target.cell_id())
+                .await
+                .unwrap()
+                .unwrap();
+            if current.value().progress > initial_progress {
+                break current;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(renewed.value().root, initial_root);
+    assert_eq!(renewed.value().owner, initial.value().owner);
+    assert_eq!(renewed.value().revision, initial.value().revision + 1);
+    handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn observed_takeover_fences_the_old_cell_before_more_work() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let successor = observed
+        .value()
+        .takeover(Owner {
+            session: SessionId::from_bytes([99; 16]),
+            endpoint: "https://successor.internal:8081".into(),
+        })
+        .unwrap();
+    authority
+        .transition(&observed, successor, Transition::Takeover)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match handle.query(1, 1, |_| Ok(Vec::new())).await {
+                Err(crab_cell_runtime::Error::Fenced) => break,
+                Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+                Err(error) => panic!("unexpected query outcome while awaiting fence: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn query_waits_for_preceding_publication_and_cannot_write() {
     let fixture = fixture();

@@ -3,6 +3,8 @@ use crate::{
 };
 
 const MAX_RETRY_DELAY_MS: u64 = 1_000;
+const RENEW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+const SELF_FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Coordinates immutable preparation, authority CAS and result release.
 ///
@@ -13,6 +15,7 @@ pub struct CellPublisher {
     replica: crab_ltx::CellReplica,
     authority: CellAuthority,
     observed: VersionedControl,
+    renew_at: std::time::Instant,
 }
 
 impl CellPublisher {
@@ -26,6 +29,7 @@ impl CellPublisher {
             replica,
             authority,
             observed,
+            renew_at: std::time::Instant::now() + RENEW_INTERVAL,
         }
     }
 
@@ -34,8 +38,64 @@ impl CellPublisher {
         &self.observed
     }
 
+    pub(crate) fn renewal_due(&self, now: std::time::Instant) -> bool {
+        now >= self.renew_at
+    }
+
+    /// Advances owner progress or fences when the renewal cannot be proven in time.
+    pub(crate) async fn renew(&mut self) -> Result<()> {
+        let deadline = std::time::Instant::now() + SELF_FENCE_TIMEOUT;
+        let deadline_at = tokio::time::Instant::from_std(deadline);
+        let mut backoff = PublicationBackoff::default();
+        loop {
+            let successor = self.observed.value().renew()?;
+            let transition = tokio::time::timeout_at(
+                deadline_at,
+                self.authority
+                    .transition(&self.observed, successor.clone(), Transition::Renew),
+            )
+            .await
+            .map_err(|_| Error::Fenced)?;
+            match transition {
+                Ok(renewed) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(Error::Fenced);
+                    }
+                    self.observed = renewed;
+                    self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let current = tokio::time::timeout_at(
+                        deadline_at,
+                        self.authority.load(self.observed.value().cell),
+                    )
+                    .await
+                    .map_err(|_| Error::Fenced)??
+                    .ok_or(Error::Fenced)?;
+                    if current.value().is_same_or_pure_renewal_of(&successor) {
+                        self.observed = current;
+                        self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
+                        return Ok(());
+                    }
+                    let still_owned = current
+                        .value()
+                        .is_same_or_pure_renewal_of(self.observed.value());
+                    if still_owned && retryable_publication_error(&error) {
+                        self.observed = current;
+                        backoff
+                            .wait_until(runtime_retry_hint(&error), deadline)
+                            .await?;
+                        continue;
+                    }
+                    return Err(if still_owned { error } else { Error::Fenced });
+                }
+            }
+        }
+    }
+
     pub(crate) async fn prepare(
-        &self,
+        &mut self,
         pending: &crate::PendingCommit,
     ) -> Result<crab_ltx::PreparedRoot> {
         let base = self.observed.value().ltx_root();
@@ -48,7 +108,7 @@ impl CellPublisher {
     }
 
     pub(crate) async fn prepare_initial(
-        &self,
+        &mut self,
         cuts: &crab_ltx::CaptureBatch,
     ) -> Result<crab_ltx::PreparedRoot> {
         if self.observed.value().root.is_some() {
@@ -58,18 +118,26 @@ impl CellPublisher {
     }
 
     async fn prepare_cuts(
-        &self,
+        &mut self,
         base: Option<&crab_ltx::RootRef>,
         cuts: &crab_ltx::CaptureBatch,
         commit_sequence: u64,
     ) -> Result<crab_ltx::PreparedRoot> {
         let mut backoff = PublicationBackoff::default();
         loop {
-            match self
-                .replica
-                .prepare(base, cuts, commit_sequence, self.observed.value().schema)
-                .await
-            {
+            let replica = self.replica.clone();
+            let schema = self.observed.value().schema;
+            let attempt = replica.prepare(base, cuts, commit_sequence, schema);
+            tokio::pin!(attempt);
+            let result = loop {
+                tokio::select! {
+                    result = &mut attempt => break result,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(self.renew_at)) => {
+                        self.renew().await?;
+                    }
+                }
+            };
+            match result {
                 Ok(prepared) => return Ok(prepared),
                 Err(error) if retryable_ltx_error(&error) => {
                     backoff.wait(ltx_retry_hint(&error)).await;
@@ -97,6 +165,7 @@ impl CellPublisher {
             {
                 Ok(published) => {
                     self.observed = published;
+                    self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
                     return Ok(prepared.root());
                 }
                 Err(error) => {
@@ -113,6 +182,7 @@ impl CellPublisher {
                     if current.value().ltx_root() == Some(prepared.root()) {
                         self.observed = current;
                         return if self.observed.value().is_same_or_pure_renewal_of(&successor) {
+                            self.renew_at = std::time::Instant::now() + RENEW_INTERVAL;
                             Ok(prepared.root())
                         } else {
                             Err(Error::Fenced)
@@ -267,5 +337,23 @@ impl PublicationBackoff {
         let delay = std::time::Duration::from_millis(self.delay_ms);
         tokio::time::sleep(minimum.map_or(delay, |minimum| minimum.max(delay))).await;
         self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
+    }
+
+    async fn wait_until(
+        &mut self,
+        minimum: Option<std::time::Duration>,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        let delay = std::time::Duration::from_millis(self.delay_ms);
+        let delay = minimum.map_or(delay, |minimum| minimum.max(delay));
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or(Error::Fenced)?;
+        if delay >= remaining {
+            return Err(Error::Fenced);
+        }
+        tokio::time::sleep(delay).await;
+        self.delay_ms = self.delay_ms.saturating_mul(2).min(MAX_RETRY_DELAY_MS);
+        Ok(())
     }
 }

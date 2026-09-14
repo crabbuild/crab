@@ -166,6 +166,42 @@ impl Control {
             && previous.next_due_ms == self.next_due_ms
     }
 
+    /// Builds the sole valid successor that proves this owner is still live.
+    pub(crate) fn renew(&self) -> Result<Self> {
+        let mut next = self.clone();
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        self.validate_transition(&next, Transition::Renew)?;
+        Ok(next)
+    }
+
+    /// Builds a recovering successor owned by a different enrolled session.
+    pub fn takeover(&self, owner: Owner) -> Result<Self> {
+        let mut next = self.clone();
+        next.epoch = next
+            .epoch
+            .checked_add(1)
+            .ok_or(Error::Control("epoch overflow"))?;
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(Error::Control("revision overflow"))?;
+        next.progress = next
+            .progress
+            .checked_add(1)
+            .ok_or(Error::Control("progress overflow"))?;
+        next.state = ControlState::Recovering;
+        next.owner = Some(owner);
+        self.validate_transition(&next, Transition::Takeover)?;
+        Ok(next)
+    }
+
     /// Builds the sole valid publication successor for an uploaded root proposal.
     pub fn publish_prepared(
         &self,
@@ -532,27 +568,14 @@ mod tests {
             .validate_transition(&serving, Transition::Publish)
             .unwrap();
 
-        let mut renewed = serving.clone();
-        renewed.revision += 1;
-        renewed.progress += 1;
-        serving
-            .validate_transition(&renewed, Transition::Renew)
-            .unwrap();
+        let renewed = serving.renew().unwrap();
         assert!(serving.is_same_or_pure_renewal_of(&serving));
         assert!(renewed.is_same_or_pure_renewal_of(&serving));
         let mut skipped_progress = renewed.clone();
         skipped_progress.revision += 1;
         assert!(!skipped_progress.is_same_or_pure_renewal_of(&serving));
 
-        let mut takeover = renewed.clone();
-        takeover.state = ControlState::Recovering;
-        takeover.owner = Some(owner(5));
-        takeover.epoch += 1;
-        takeover.revision += 1;
-        takeover.progress += 1;
-        renewed
-            .validate_transition(&takeover, Transition::Takeover)
-            .unwrap();
+        let takeover = renewed.takeover(owner(5)).unwrap();
 
         let mut corrupted_compaction = takeover.clone();
         corrupted_compaction.state = ControlState::Serving;
