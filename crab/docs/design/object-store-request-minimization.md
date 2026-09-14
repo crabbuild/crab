@@ -6,15 +6,14 @@
 | --- | --- |
 | Project | Crab |
 | Scope | Push, clone/read, recovery, and garbage collection |
-| Status | Implementation in progress; not wired to user-facing commands |
+| Status | Protocol-v2 ordinary Git path implemented and live-qualified; extended workflows fail closed |
 | Priority | Correctness, then request latency, throughput, and transferred bytes |
 | Replaces | The v1 multi-object publication layout after an explicit cutover |
 | Companion | [Push Pipeline Deep Dive](push.md), [Canonical Object Storage Layout V1](../architecture/object-storage-layout.md) |
 
 ### Implementation status
 
-The first implementation slice is present but intentionally unreachable from
-the released push and read paths:
+The hard-cutover implementation is wired to the user-facing ordinary Git path:
 
 - `crab-metadata::request_minimal` owns bounded, versioned, checksum-bearing
   repository-root, capsule, ref-transaction, and checkpoint-pointer contracts;
@@ -23,8 +22,10 @@ the released push and read paths:
   CAS;
 - `crab-read::request_minimal` loads the root and its bounded capsule frontier
   concurrently, verifying every size, content, transaction, and base binding;
+- `crab init`, native and remote-helper push, full clone/fetch/pull, `crab
+  repack`, and repository GC use protocol v2 without a v1 fallback;
 - equal-size capsule runs merge as a binary counter, so a 500-push checkpoint
-  window has at most nine run objects and contains six after push 500;
+  window has no more than eight run objects and contains six after push 500;
 - the executable clean-path test proves exactly four object-store operations,
   including advertisement: root GET, capsule-run PUT, run GET, and root PUT;
 - the checksum-qualified AWS S3 test proves exactly three operations, while
@@ -34,12 +35,19 @@ the released push and read paths:
 - a 500-push executable model proves 1,994 qualified object-store operations,
   or 3.988 per push including advertisement and binary carry compaction;
 - CAS-loser, expected-old mismatch, payload corruption, and lost-root-response
-  tests fail closed or reconcile through exact transaction identity.
+  tests fail closed or reconcile through exact transaction identity;
+- the release-mode Kubernetes qualification replayed 5,000 first-parent
+  commits with a fetch and checkpoint every 500 pushes. All fetches, the final
+  independent clone, and full `git fsck` passed. RustFS measured 24,940
+  requests, or 4.988 per incremental push: p50 4, p95 8, p99 10, maximum 12
+  at binary carry boundaries. Incremental latency was p50 273 ms, p95 545 ms,
+  and p99 927 ms.
 
-The current CLI remains on v1. Git pack/sidecar ingestion into capsules,
-capsule-aware clone/fetch, checkpoint construction, v2 GC, provider checksum
-qualification, migration, and live qualification remain required before the
-hard cutover.
+The hard cutover deliberately has no v1 fallback. Shallow and filtered fetch,
+raw promisor recovery, capsule-native Crab pointer payloads, managed protected
+push, active-active publication, and prepared mirror/recovery push currently
+fail closed until their protocol-v2 contracts are implemented. Those failures
+do not reinterpret a v2 repository as v1 or publish partial state.
 
 ## 1. Decision summary
 
@@ -114,8 +122,9 @@ The protocol MUST:
 9. Bound cold-clone metadata amplification through immutable checkpoints.
 10. Scale request count by capsules or multipart parts, not commits, files,
     chunks, refs, or metadata record count.
-11. Continue serving standard Git packfile responses for clone, fetch, pull,
-    shallow fetch, partial clone, and lazy object recovery.
+11. Continue serving standard Git packfile responses for full clone, fetch,
+    and pull. Unsupported shallow, partial, and lazy-object requests must fail
+    before mutating local or remote state.
 
 ## 4. Non-goals
 
@@ -787,29 +796,32 @@ safe while omitted required bytes violate reconstruction.
 
 ## 17. Implementation sequence
 
-1. **In progress:** freeze the v2 root, capsule, embedded Git pack, checkpoint
-   pack, footer, locator, checksum, visibility, and error contracts. Root,
-   capsule, ref-transaction, and checkpoint-pointer contracts exist; pack,
-   locator, and visibility semantics remain incomplete.
-2. **In progress:** build a deterministic capsule writer, range reader, and
-   corruption corpus. Whole-capsule encode/decode and section authentication
-   exist; range reading remains.
-3. **Started:** add a transport request observer and executable budgets before
-   wiring push. The readback path has an exact four-request unit gate; live
-   provider gates remain.
-4. **Started:** implement verified-put capability negotiation and mandatory
-   readback fallback. Official AWS S3 uses an explicit SHA-256 request checksum;
-   unqualified and custom endpoints retain readback. Live provider gates remain.
-5. Replace direct push publication with capsule upload plus root CAS.
-6. Implement checkpoint-pack passthrough and selected-object response-pack
-   generation over capsule-aware locators.
-7. Replace clone, fetch, pull, shallow, partial, lazy-object, hydrate, mount,
-   fsck, and repository-browsing reads.
-8. Implement background checkpoints, bounded delta traversal, and the hard
-   publication backpressure at maximum delta depth.
-9. Implement fence-free normal GC and root-exclusive forced GC.
-10. Qualify RustFS and every hosted provider under failure and concurrency.
-11. Perform the explicit hard cutover and delete v1 runtime paths.
+1. **Complete:** freeze the v2 root, capsule, embedded Git pack, checkpoint,
+   locator, checksum, visibility, fence, and error contracts.
+2. **Complete for whole objects:** build deterministic writers/readers and a
+   corruption corpus. Selected range reading remains a throughput optimization.
+3. **Complete:** enforce exact transport-level request budgets for qualified
+   checksum and mandatory-readback stores.
+4. **Complete:** qualify official AWS S3 checksum responses explicitly; custom
+   S3 endpoints and unqualified providers retain mandatory readback.
+5. **Complete:** publish ordinary native and remote-helper pushes with capsule
+   upload plus root CAS.
+6. **Complete for full reads:** checkpoint and capsule packs carry authenticated
+   indexes, reverse indexes, and object locators; full readers install them
+   without per-object storage requests.
+7. **Complete for ordinary full clone/fetch/pull:** remove their v1 runtime
+   path. Shallow, partial, pointer-data, mount, and browsing adapters remain
+   explicit fail-closed follow-up work.
+8. **Complete:** enforce bounded binary-run traversal and checkpoint after each
+   500-push qualification window.
+9. **Complete:** fence repository GC with one root transition, recheck object
+   identity before delete, and release through another root transition.
+10. **Complete on RustFS:** live-qualify a fresh Kubernetes source with 5,000
+    incremental pushes, 10 fetches, 11 checkpoints including the seed, a final
+    independent clone, and full Git integrity verification. Hosted-provider,
+    injected-failure, and concurrency qualification remain release gates.
+11. **Complete for the ordinary Git path:** v2 is canonical and v1 fallback is
+    absent. Extended v1-only workflows are rejected rather than invoked.
 
 Each step must keep one canonical implementation. Temporary development code
 may exist on a branch, but the released binary must not retain v1 fallback

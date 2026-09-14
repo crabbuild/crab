@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::io::Stderr;
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,7 +20,8 @@ use crate::audit::default_log_path;
 use crate::core::error::{CrabError, Result};
 use crate::core::metrics::{Metrics, MetricsSummary, persist_metrics_delta};
 use crate::core::output::{JsonlStream, OutputMode};
-use crate::git::fetch::{CommitGraphProvider, FetchConfig, PackInfo, PackStore, run_fetch_batch};
+#[cfg(test)]
+use crate::git::fetch::{CommitGraphProvider, PackInfo, PackStore};
 use crate::git::push::{
     PushConfig, PushRejectReason, PushResult, RefPushOutcome,
     configure_active_active_push_coordinator, duplicate_destination_result,
@@ -30,6 +32,7 @@ use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
+#[cfg(test)]
 use crab_metadata::manifests::{PackEntry, PackList, PackManifestEntry};
 
 pub(crate) const AGENT_REBASE_FETCH_REF_FILTERING_ENV: &str =
@@ -513,8 +516,6 @@ fn finalize_batch(
 struct SessionCache {
     /// Session config, augmented once by replica discovery before the first read operation.
     config: crate::core::config::Config,
-    /// PackList from the most recent fetch, reused by `check_repack_threshold`.
-    pack_list: Option<crab_metadata::manifests::PackList>,
     /// Cached result of the `has_commit_graph_summary` probe.
     has_commit_graph: Option<bool>,
     /// Primary v2 root retained from `list for-push` as the publication CAS base.
@@ -527,7 +528,6 @@ impl SessionCache {
     fn new(config: crate::core::config::Config) -> Self {
         Self {
             config,
-            pack_list: None,
             has_commit_graph: None,
             request_minimal_root: None,
             metrics: Arc::new(Metrics::new()),
@@ -2104,6 +2104,7 @@ fn cache_aware_storage_for_selected_read(
 ///
 /// Returns the cached result when available; otherwise probes the store
 /// via a HEAD request and caches the outcome for the rest of the session.
+#[cfg(test)]
 async fn has_commit_graph_summary(
     store: Option<&crate::storage::store::Store>,
     _prefix: &str,
@@ -2156,6 +2157,7 @@ pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> St
 }
 
 /// Read refs from the compacted manifest plus committed journal overlay.
+#[cfg(test)]
 async fn read_remote_refs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
@@ -2213,6 +2215,7 @@ fn list_output_from_root(
     }
 }
 
+#[cfg(test)]
 async fn read_remote_refs_for_advertisement(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
@@ -2289,6 +2292,7 @@ fn map_fetch_admission_reject(
 }
 
 #[derive(Clone)]
+#[cfg(test)]
 struct RemoteFetchStore {
     store: crate::storage::store::Store,
     router: StoreLayout,
@@ -2298,6 +2302,7 @@ struct RemoteFetchStore {
     pack_list: Arc<tokio::sync::Mutex<Option<PackList>>>,
 }
 
+#[cfg(test)]
 impl RemoteFetchStore {
     fn new(
         store: crate::storage::store::Store,
@@ -2367,6 +2372,7 @@ impl RemoteFetchStore {
     }
 }
 
+#[cfg(test)]
 impl PackStore for RemoteFetchStore {
     async fn list_remote_packs(&self) -> Result<Vec<PackInfo>> {
         let pack_list = self.load_pack_list().await?;
@@ -2427,6 +2433,7 @@ impl PackStore for RemoteFetchStore {
     }
 }
 
+#[cfg(test)]
 impl CommitGraphProvider for RemoteFetchStore {
     async fn fetch_commit_graph(&self) -> Result<Option<Arc<dyn CommitGraphTraversal>>> {
         let snapshot =
@@ -2473,6 +2480,7 @@ impl CommitGraphProvider for RemoteFetchStore {
     }
 }
 
+#[cfg(test)]
 fn remote_graph_oid(value: &str) -> Result<[u8; 20]> {
     let oid = gix_hash::ObjectId::from_hex(value.as_bytes()).map_err(|error| {
         CrabError::CorruptObject {
@@ -2626,6 +2634,7 @@ fn classify_raw_object_fetch(entries: &[FetchEntry]) -> Result<bool> {
     Ok(raw_object_count > 0)
 }
 
+#[cfg(test)]
 async fn try_fetch_exact_shallow_closure(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
@@ -2719,6 +2728,7 @@ async fn try_fetch_exact_shallow_closure(
     Ok(Some(vec![installed.pack_path]))
 }
 
+#[cfg(test)]
 async fn fetch_promisor_objects(
     store: &crate::storage::store::Store,
     prefix: &str,
@@ -2832,6 +2842,7 @@ async fn fetch_promisor_objects(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_raw_object_policy(
     wants: &[gix_hash::ObjectId],
     visible_tips: &std::collections::HashSet<gix_hash::ObjectId>,
@@ -2854,8 +2865,10 @@ fn validate_raw_object_policy(
     ))
 }
 
+#[cfg(test)]
 static PROMISOR_SIDECAR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
 async fn install_promisor_sidecar(pack_dir: &std::path::Path, canonical_name: &str) -> Result<()> {
     let sidecar = pack_dir.join(format!("pack-{canonical_name}.promisor"));
     if tokio::fs::try_exists(&sidecar).await? {
@@ -2889,6 +2902,7 @@ async fn install_promisor_sidecar(pack_dir: &std::path::Path, canonical_name: &s
     Ok(())
 }
 
+#[cfg(test)]
 fn ensure_lazy_checkout_config_for_new_helper_repo(repo_root: &std::path::Path) {
     let config_path = repo_root.join(".crab").join("local.toml");
     if config_path.exists() {
@@ -3174,6 +3188,42 @@ mod tests {
             .expect("initialize canonical test remote");
     }
 
+    async fn publish_request_minimal_test_refs(
+        store: &crate::storage::store::Store,
+        router: &StoreLayout,
+        refs: &std::collections::BTreeMap<String, String>,
+        head: &str,
+    ) {
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base = crab_write::request_minimal::initialize(&layout, &"9".repeat(64), head)
+            .await
+            .expect("initialize request-minimal test root");
+        let edits = refs
+            .iter()
+            .map(|(name, oid)| {
+                crab_metadata::request_minimal::CapsuleRefEdit::new(
+                    name.clone(),
+                    None,
+                    Some(oid.clone()),
+                    None,
+                )
+            })
+            .collect();
+        let transaction =
+            crab_metadata::request_minimal::CapsuleTransaction::new(base.record().digest(), edits)
+                .expect("build request-minimal test transaction");
+        let capsule =
+            crab_metadata::request_minimal::Capsule::build(&transaction, Vec::new(), Vec::new())
+                .expect("build request-minimal test capsule");
+        crab_write::request_minimal::publish(&layout, base, &transaction, &capsule)
+            .await
+            .expect("publish request-minimal test refs");
+    }
+
     /// Run the production protocol loop with a resolved in-memory context.
     async fn run(input: &str) -> String {
         let push_state_root = tempfile::tempdir().expect("push state tempdir");
@@ -3196,7 +3246,7 @@ mod tests {
     async fn capabilities_response() {
         let output = run("capabilities\n").await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nagent=crab/{}\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
@@ -3589,7 +3639,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_batch_selector_failure_uses_primary_manifest_policy() {
+    async fn fetch_batch_selector_failure_uses_primary_root_policy() {
         let _guard = GitWorktreeGuard::new();
         let (primary_store, _primary_router) = memory_store_with_manifest(
             "refs/heads/main",
@@ -3605,7 +3655,7 @@ mod tests {
         }];
         let mut writer = Vec::new();
 
-        dispatch_fetch_batch_with_selector(
+        let error = dispatch_fetch_batch_with_selector(
             &entries,
             &options,
             &mut writer,
@@ -3622,10 +3672,10 @@ mod tests {
             },
         )
         .await
-        .expect("fetch batch");
+        .expect_err("unadvertised object must fail closed");
 
-        let output = String::from_utf8(writer).expect("utf8 output");
-        assert!(output.contains("error refs/heads/main not-at-tip"));
+        assert!(matches!(error, CrabError::Protocol(message) if message.contains("not visible")));
+        assert!(writer.is_empty());
     }
 
     async fn memory_store_with_manifest(
@@ -3650,6 +3700,7 @@ mod tests {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), prefix.to_owned());
         let refs = BTreeMap::from([(ref_name.to_owned(), sha.to_owned())]);
+        publish_request_minimal_test_refs(&store, &router, &refs, ref_name).await;
         let mut manifest = Manifest {
             version: crate::metadata::manifest::MANIFEST_VERSION,
             generation: 1,
@@ -4142,12 +4193,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_dispatch_with_staged_pointer_hydrates_uploaded_content() {
-        use crate::cache::LocalCache;
-        use crate::core::config::CacheConfig;
-        use crate::metadata::manifest::Manifest;
+    async fn push_dispatch_rejects_unrepresented_staged_pointer() {
         use crate::storage::store::Store;
-        use crab_cache_store::CachingStore;
         use crab_staging::StagingAreaReadOnly;
         use object_store::memory::InMemory;
 
@@ -4212,59 +4259,18 @@ mod tests {
         .await
         .expect("dispatch push batch");
 
-        assert_eq!(
-            String::from_utf8(writer).expect("utf8 helper output"),
-            "ok refs/heads/main\n\n"
+        let output = String::from_utf8(writer).expect("utf8 helper output");
+        assert!(output.contains("error refs/heads/main internal"));
+        assert!(output.contains("file-data and recipe sections are not yet wired"));
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
         );
-
-        let (manifest_bytes, _) = store
-            .get_with_etag(&router.manifest_path())
+        let root = crab_write::request_minimal::open_root(&layout)
             .await
-            .expect("manifest uploaded");
-        let manifest: Manifest = serde_json::from_slice(&manifest_bytes).expect("manifest json");
-        assert!(manifest.refs.contains_key("refs/heads/main"));
-        assert!(!manifest.shard_index_hash.is_empty());
-        assert!(
-            !store
-                .list_prefix(&crab_storage::global_content_prefix(
-                    router.global_prefix(),
-                    "xorbs",
-                ))
-                .await
-                .expect("list xorbs")
-                .is_empty(),
-            "push should upload xorbs"
-        );
-        assert!(
-            !store
-                .list_prefix(&crab_storage::global_content_prefix(
-                    router.global_prefix(),
-                    "shards",
-                ))
-                .await
-                .expect("list shards")
-                .is_empty(),
-            "push should upload shards"
-        );
-
-        let hydrate_cache = Arc::new(LocalCache::new(tmp.path().join("hydrate-cache")));
-        let caching_store = CachingStore::new_with_local_cache(
-            store.clone(),
-            &CacheConfig::default(),
-            hydrate_cache,
-        )
-        .expect("caching store");
-        let hydrator = crate::read::build_cli_hydrator(
-            caching_store,
-            router,
-            &crate::core::config::Config::default(),
-        )
-        .expect("hydration runtime");
-        let hydrated = hydrator
-            .reconstruct_from_pointer(&pointer_bytes)
-            .await
-            .expect("hydrate pushed pointer");
-        assert_eq!(hydrated, content);
+            .expect("request-minimal root remains readable");
+        assert!(root.record().root().refs().is_empty());
     }
 
     #[tokio::test]
@@ -4272,7 +4278,7 @@ mod tests {
         let input = "capabilities\noption progress false\nlist\n";
         let output = run(input).await;
         let expected = format!(
-            "fetch\npush\noption\ncheck-connectivity\nstateless-connect\nagent=crab/{}\n\nok\n\n",
+            "fetch\npush\noption\ncheck-connectivity\nagent=crab/{}\n\nok\n\n",
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
@@ -4332,12 +4338,26 @@ mod tests {
         assert!(push_output.contains("ok refs/tags/v1\n"));
 
         let router = StoreLayout::new(store.clone(), prefix.to_owned());
-        let (manifest, _) = crate::metadata::manifest::read_manifest(&store, &router)
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let root = crab_write::request_minimal::open_root(&layout)
             .await
-            .expect("pushed manifest");
-        assert_eq!(manifest.refs.get("refs/heads/main"), Some(&commit));
-        assert_eq!(manifest.refs.get("refs/heads/dev"), Some(&commit));
-        assert_eq!(manifest.refs.get("refs/tags/v1"), Some(&tag_oid));
+            .expect("pushed request-minimal root");
+        assert_eq!(
+            root.record().root().refs().get("refs/heads/main"),
+            Some(&commit)
+        );
+        assert_eq!(
+            root.record().root().refs().get("refs/heads/dev"),
+            Some(&commit)
+        );
+        assert_eq!(
+            root.record().root().refs().get("refs/tags/v1"),
+            Some(&tag_oid)
+        );
 
         run_git(&repo, &["update-ref", "-d", "refs/tags/v1"]);
         let loose_tag = git_dir
@@ -5664,6 +5684,7 @@ mod tests {
             "refs/tags/v1.0".to_owned(),
             "1234567890abcdef1234567890abcdef12345678".to_owned(),
         );
+        publish_request_minimal_test_refs(&store, &router, &refs, "refs/heads/main").await;
 
         let mut manifest = Manifest {
             version: crate::metadata::manifest::MANIFEST_VERSION,

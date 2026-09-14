@@ -1497,6 +1497,20 @@ mod tests {
 
     use super::*;
 
+    async fn run_legacy_test_repack(
+        store: &Store,
+        prefix: &str,
+        config: &RepackConfig,
+        cancel: &CancellationToken,
+    ) -> Result<RepackOutcome> {
+        match run_repack_with_budget(store, prefix, config, cancel, None).await? {
+            RepackRunResult::Completed { outcome, .. } => Ok(outcome),
+            RepackRunResult::Deferred { .. } => Err(CrabError::Internal(
+                "unbounded legacy test repack unexpectedly deferred".to_owned(),
+            )),
+        }
+    }
+
     fn budget_pack(size: u64, object_count: u64) -> PackManifestEntry {
         PackManifestEntry {
             pack_id: format!("{object_count:064x}"),
@@ -1844,7 +1858,7 @@ mod tests {
         )
         .await?;
 
-        let outcome = run_repack(
+        let outcome = run_legacy_test_repack(
             &store,
             prefix,
             &RepackConfig {
@@ -1982,7 +1996,7 @@ mod tests {
         manifest.seal_git_validation();
         crate::metadata::manifest::create_manifest(&store, &router, &manifest).await?;
 
-        let outcome = run_repack(
+        let outcome = run_legacy_test_repack(
             &store,
             prefix,
             &RepackConfig {

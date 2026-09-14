@@ -21,13 +21,16 @@ pub mod marks;
 pub mod parallel_enum;
 
 use std::collections::HashSet;
+#[cfg(test)]
 use std::future::Future;
 use std::io::Stdout;
+#[cfg(test)]
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(test)]
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryStreamExt};
 use object_store::path::Path as ObjectPath;
@@ -59,6 +62,7 @@ const REPO_GC_PREFIXES: &[&str] = &[
 ];
 const DEFAULT_DELETE_CONCURRENCY: usize = 64;
 const DEFAULT_LIST_CONCURRENCY: usize = 32;
+#[cfg(test)]
 const GENERATED_PACK_DESCRIPTOR_MAX_BYTES: u64 = 4 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -675,6 +679,7 @@ async fn list_repo_gc_candidates_with_concurrency(
 /// Streams repo-local LIST results directly into the durable candidate plan.
 /// The old helper remains available to callers that need a preview vector;
 /// destructive runs never retain the full candidate namespace in memory.
+#[cfg(test)]
 async fn plan_repo_gc_candidates_streaming(
     store: &Store,
     router: &StoreLayout,
@@ -786,6 +791,7 @@ pub async fn run_gc(
     clippy::too_many_arguments,
     reason = "The durable GC execution seam keeps storage, policy, cancellation, and output explicit"
 )]
+#[cfg(test)]
 async fn finish_repo_gc_from_marks(
     args: &GcArgs,
     store: &Store,
@@ -934,6 +940,7 @@ async fn finish_repo_gc_from_marks(
     clippy::too_many_arguments,
     reason = "The repository sweep boundary keeps the durable journal, root walk, policy, and lease explicit"
 )]
+#[cfg(test)]
 async fn run_repo_gc_durable_streaming_roots(
     args: &GcArgs,
     store: &Store,
@@ -1376,6 +1383,7 @@ async fn execute_journaled_deletes(
     aggregate
 }
 
+#[cfg(test)]
 async fn resume_gc_run(
     args: &GcArgs,
     journal: &mut journal::GcRunJournal,
@@ -1809,6 +1817,7 @@ async fn list_shallow_closure_entry_keys(
 }
 
 /// Read the manifest and build the repo-local object set that must survive GC.
+#[cfg(test)]
 pub async fn reachable_repo_objects_from_manifest(
     store: &Store,
     router: &StoreLayout,
@@ -1822,6 +1831,7 @@ pub async fn reachable_repo_objects_from_manifest(
     Ok((snapshot.manifest, snapshot.reachable_keys))
 }
 
+#[cfg(test)]
 struct RepoGcReachability {
     manifest: crate::metadata::manifest::Manifest,
     reachable_keys: HashSet<String>,
@@ -1830,12 +1840,14 @@ struct RepoGcReachability {
 }
 
 #[derive(Default)]
+#[cfg(test)]
 struct ReachabilityDigest {
     count: u64,
     xor: [u8; 32],
     sum: [u8; 32],
 }
 
+#[cfg(test)]
 impl ReachabilityDigest {
     fn add(&mut self, category: &str, value: &str) {
         let mut hasher = blake3::Hasher::new();
@@ -1862,12 +1874,14 @@ impl ReachabilityDigest {
 /// Streams repository roots into a run-owned mark set while computing the
 /// sealed root identity. The optional writer is absent when a deleting run is
 /// resumed; in that case the same walk only revalidates the identity.
+#[cfg(test)]
 struct RepoReachabilitySink<'a> {
     writer: Option<&'a mut marks::DurableMarkWriter>,
     digest: &'a mut ReachabilityDigest,
     cancel: &'a CancellationToken,
 }
 
+#[cfg(test)]
 impl RepoReachabilitySink<'_> {
     async fn add(&mut self, key: String) -> Result<()> {
         check_cancelled(self.cancel)?;
@@ -1879,12 +1893,14 @@ impl RepoReachabilitySink<'_> {
     }
 }
 
+#[cfg(test)]
 struct StreamedRepoRootSnapshot {
     root_identity: String,
 }
 
 /// Walks the repository roots without constructing a process-wide reachable
 /// key set. Mark chunks are flushed by [`DurableMarkWriter`] as they fill.
+#[cfg(test)]
 async fn stream_repo_reachability(
     store: &Store,
     router: &StoreLayout,
@@ -1991,6 +2007,7 @@ async fn stream_repo_reachability(
     })
 }
 
+#[cfg(test)]
 fn generated_pack_cache_artifact_key(
     router: &StoreLayout,
     descriptor_key: &str,
@@ -2025,6 +2042,7 @@ fn generated_pack_cache_artifact_key(
         .to_owned())
 }
 
+#[cfg(test)]
 async fn extend_generated_pack_cache_reachable(
     store: &Store,
     router: &StoreLayout,
@@ -2086,6 +2104,7 @@ async fn extend_generated_pack_cache_reachable(
     }
 }
 
+#[cfg(test)]
 async fn stream_generated_pack_cache_reachable(
     store: &Store,
     router: &StoreLayout,
@@ -2147,6 +2166,7 @@ async fn stream_generated_pack_cache_reachable(
     }
 }
 
+#[cfg(test)]
 async fn resolve_generated_pack_cache_descriptor(
     store: Store,
     router: StoreLayout,
@@ -2176,6 +2196,7 @@ async fn resolve_generated_pack_cache_descriptor(
     Ok(Some((descriptor_key, artifact_key)))
 }
 
+#[cfg(test)]
 async fn stream_reachable_bulk_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2273,6 +2294,7 @@ async fn stream_reachable_bulk_objects(
     Ok(())
 }
 
+#[cfg(test)]
 async fn stream_shallow_closure_reachable(
     store: &Store,
     router: &StoreLayout,
@@ -2311,6 +2333,7 @@ async fn stream_shallow_closure_reachable(
     Ok(())
 }
 
+#[cfg(test)]
 fn pack_object_keys(router: &StoreLayout, pack_id: &str) -> [String; 5] {
     [
         router.pack_path(pack_id).as_ref().to_owned(),
@@ -2321,11 +2344,13 @@ fn pack_object_keys(router: &StoreLayout, pack_id: &str) -> [String; 5] {
     ]
 }
 
+#[cfg(test)]
 struct PackReachabilityVisitor<'router, 'sink, 'roots> {
     router: &'router StoreLayout,
     sink: &'sink mut RepoReachabilitySink<'roots>,
 }
 
+#[cfg(test)]
 impl
     crab_metadata::segmented_store::AsyncRecordVisitor<
         crate::metadata::manifest::PackManifestEntry,
@@ -2345,10 +2370,12 @@ impl
     }
 }
 
+#[cfg(test)]
 struct WorkflowArtifactReachabilityVisitor<'sink, 'roots> {
     sink: &'sink mut RepoReachabilitySink<'roots>,
 }
 
+#[cfg(test)]
 impl crab_workflow::RemoteArtifactReachabilityVisitor<CrabError>
     for WorkflowArtifactReachabilityVisitor<'_, '_>
 {
@@ -2357,8 +2384,10 @@ impl crab_workflow::RemoteArtifactReachabilityVisitor<CrabError>
     }
 }
 
+#[cfg(test)]
 const MAX_WORKFLOW_ROOT_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+#[cfg(test)]
 async fn stream_reachable_workflow_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2473,6 +2502,7 @@ async fn stream_reachable_workflow_objects(
     Ok(())
 }
 
+#[cfg(test)]
 async fn stream_workflow_stage_manifest(
     store: &Store,
     router: &StoreLayout,
@@ -2550,6 +2580,7 @@ async fn stream_workflow_stage_manifest(
     Ok(manifest_path)
 }
 
+#[cfg(test)]
 async fn reachable_repo_objects_from_manifest_with_concurrency(
     store: &Store,
     router: &StoreLayout,
@@ -2565,6 +2596,7 @@ async fn reachable_repo_objects_from_manifest_with_concurrency(
     .await
 }
 
+#[cfg(test)]
 async fn reachable_repo_objects_from_manifest_with_options(
     store: &Store,
     router: &StoreLayout,
@@ -2649,6 +2681,7 @@ async fn reachable_repo_objects_from_manifest_with_options(
     })
 }
 
+#[cfg(test)]
 async fn extend_reachable_pack_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2670,6 +2703,7 @@ async fn extend_reachable_pack_objects(
     Ok(())
 }
 
+#[cfg(test)]
 fn insert_pack_objects(router: &StoreLayout, pack_id: &str, reachable: &mut HashSet<String>) {
     reachable.insert(router.pack_path(pack_id).as_ref().to_owned());
     reachable.insert(router.pack_index_path(pack_id).as_ref().to_owned());
@@ -2682,6 +2716,7 @@ fn insert_pack_objects(router: &StoreLayout, pack_id: &str, reachable: &mut Hash
 /// Workflow refs are the authoritative roots for stage-cache and experiment
 /// namespaces; malformed roots abort the mark phase instead of allowing a
 /// partially parsed live set to authorize deletion.
+#[cfg(test)]
 async fn extend_reachable_workflow_objects(
     store: &Store,
     router: &StoreLayout,
@@ -2796,6 +2831,7 @@ async fn extend_reachable_workflow_objects(
     Ok(())
 }
 
+#[cfg(test)]
 async fn protect_workflow_stage_manifest(
     store: &Store,
     router: &StoreLayout,
@@ -3049,6 +3085,7 @@ async fn sweep_request_minimal_objects(
     })
 }
 
+#[cfg(test)]
 async fn run_repo_remote_gc_under_maintenance(
     args: &GcArgs,
     store: &Store,
@@ -3130,6 +3167,7 @@ async fn run_repo_remote_gc_under_maintenance(
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(test)]
 struct PackStorageClasses {
     active: u64,
     retained: u64,
@@ -3137,6 +3175,7 @@ struct PackStorageClasses {
     collectible: u64,
 }
 
+#[cfg(test)]
 fn classify_pack_storage(
     objects: &[ObjectMeta],
     current_pack_keys: &HashSet<String>,
@@ -4070,13 +4109,14 @@ mod tests {
             yes: true,
             ..GcArgs::default()
         };
-        run_repo_remote_gc(
+        run_repo_remote_gc_under_maintenance(
             &args,
             &store,
             &router,
             &HashSet::new(),
             &CancellationToken::new(),
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4181,13 +4221,14 @@ mod tests {
             yes: true,
             ..GcArgs::default()
         };
-        let outcome = run_repo_remote_gc(
+        let outcome = run_repo_remote_gc_under_maintenance(
             &args,
             &store,
             &router,
             &HashSet::new(),
             &CancellationToken::new(),
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4483,7 +4524,7 @@ mod tests {
             .put(&garbage, bytes::Bytes::from_static(b"unreferenced"))
             .await
             .unwrap();
-        let outcome = run_repo_remote_gc(
+        let outcome = run_repo_remote_gc_under_maintenance(
             &GcArgs {
                 force: true,
                 yes: true,
@@ -4494,6 +4535,7 @@ mod tests {
             &HashSet::new(),
             &CancellationToken::new(),
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4717,13 +4759,14 @@ mod tests {
         let protected: HashSet<String> = [protected_key.to_owned()].into_iter().collect();
         let cancel = CancellationToken::new();
 
-        let outcome = run_repo_remote_gc(
+        let outcome = run_repo_remote_gc_under_maintenance(
             &args,
             &store,
             &router,
             &protected,
             &cancel,
             Duration::from_secs(3600),
+            None,
             None,
         )
         .await
@@ -4764,7 +4807,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let error = run_repo_remote_gc(
+        let error = run_repo_remote_gc_under_maintenance(
             &GcArgs::default(),
             &store,
             &router,
@@ -4772,14 +4815,80 @@ mod tests {
             &CancellationToken::new(),
             Duration::from_secs(3600),
             None,
+            None,
         )
         .await
         .unwrap_err();
         assert!(matches!(error, CrabError::PushLockHeld { .. }));
 
-        let preview = run_repo_remote_gc(
+        let preview = run_repo_remote_gc_under_maintenance(
             &GcArgs {
                 dry_run: true,
+                ..GcArgs::default()
+            },
+            &store,
+            &router,
+            &HashSet::new(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(preview.dry_run);
+        writer.release().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_minimal_gc_retains_root_frontier_and_clears_fence() {
+        use bytes::Bytes;
+        use crab_metadata::request_minimal::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use object_store::memory::InMemory;
+        use object_store::path::Path as ObjectPath;
+        use std::sync::Arc;
+
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let store = Store::new(inner);
+        let router = StoreLayout::new(store.clone(), "org/v2-gc".to_owned());
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::request_minimal::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        let published = crab_write::request_minimal::publish(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let live = layout
+            .request_minimal_capsule_path(published.record().root().capsule_frontier()[0].hash());
+        let orphan = layout.request_minimal_capsule_path(&"f".repeat(64));
+        store
+            .put(
+                &ObjectPath::from(orphan.to_string()),
+                Bytes::from_static(b"orphan"),
+            )
+            .await
+            .unwrap();
+
+        let outcome = run_repo_remote_gc(
+            &GcArgs {
+                force: true,
+                yes: true,
                 ..GcArgs::default()
             },
             &store,
@@ -4791,8 +4900,21 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(preview.dry_run);
-        writer.release().await.unwrap();
+
+        assert_eq!(outcome.packs_deleted, 1);
+        assert!(store.head(&live).await.is_ok());
+        assert!(matches!(
+            store.head(&orphan).await,
+            Err(CrabError::NotFound { .. })
+        ));
+        let root = crab_write::request_minimal::open_root(&layout)
+            .await
+            .unwrap();
+        assert!(root.record().root().gc_fence().is_none());
+        assert_eq!(
+            root.record().root().refs().get("refs/heads/main"),
+            Some(&"2".repeat(40))
+        );
     }
 
     #[tokio::test]

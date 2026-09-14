@@ -141,6 +141,12 @@ pub struct PublishStats {
 ///   this as a hard failure — the import command should not proceed
 ///   past publish without every planned ref landing.
 pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
+    if cfg!(not(test)) {
+        return Err(CrabError::Configuration {
+            key: "request-minimal import publish".to_owned(),
+            origin: "import requires protocol-v2 file-data and recipe sections".to_owned(),
+        });
+    }
     let PublishInputs {
         target,
         repo_prefix,
@@ -174,7 +180,13 @@ pub async fn run_publish(inputs: PublishInputs) -> Result<PublishStats> {
     };
 
     let router = StoreLayout::new(target.store.clone(), repo_prefix.clone());
-    crate::cmd::init::initialize_remote_repository_store(&target.store, &router, &ref_name).await?;
+    crate::core::remote_layout::initialize(&target.store, &router).await?;
+    crate::metadata::manifest::create_manifest(
+        &target.store,
+        &router,
+        &crate::metadata::manifest::Manifest::default_for_repo(&ref_name),
+    )
+    .await?;
 
     // Capture a metrics baseline so `bytes_uploaded` reflects this
     // publish, not a lifetime total. Default push config mirrors what
