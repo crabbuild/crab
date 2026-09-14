@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, exact-root publication reconciliation, and a fixed bounded SQL worker pool that retains accepted commands/cuts after caller cancellation | Add catalog proof, per-Cell mailbox/publication supervision, later-root resolution and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, fixed SQL workers, node/per-Cell mailbox admission, FIFO publication, transient retry, unknown outcomes and drain | Add catalog proof, deadline/read/recovery supervision, later-root resolution and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -60,10 +60,12 @@ worker layer is also implemented: 1-16 OS threads, 256-command bounded shard
 queues, stable Cell-ID routing, a node-wide 10,000-Cell admission ceiling, and
 continued execution after an accepted caller is cancelled. Exact-root lost-response
 reconciliation and renewal-token refresh are implemented without SQL replay.
-Complete catalog proof, per-Cell byte/request mailboxes, asynchronous publication
-coordination, later-root request resolution, and the remaining runtime.md timing,
-cancellation and panic supervision rules. All transitions use the existing Store
-conditional primitives, preserving sources.
+The node dispatcher now adds 64-request/8-MiB Cell admission, node byte admission,
+single-flight FIFO publication, 100/200/400/1,000-ms storage retry, structured
+unknown outcomes and accepted-work drain without a permanent task per Cell.
+Complete catalog proof, deadlines/SQLite interruption, read jobs, later-root
+request resolution, fenced takeover recovery, and panic supervision. All
+transitions use the existing Store conditional primitives, preserving sources.
 
 Add `crates/crab-cell-runtime/tests/publication.rs`:
 
@@ -88,6 +90,23 @@ Current worker coverage is in `crates/crab-cell-runtime/tests/workers.rs`:
 - `active_cell_admission_is_global_and_released_after_drain` places Cells on
   different worker shards and proves the node-wide ceiling is returned only by
   a completed drain.
+
+Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
+
+- `dispatcher_serializes_and_publishes_commands_before_drain` proves two queued
+  commits receive sequences one and two and are visible after SQLite close.
+- `cancelled_command_waiter_is_resolved_by_original_identity` proves cancellation
+  does not stop publication and retry returns the first stored result.
+- `per_cell_request_admission_caps_inflight_and_queued_commands` proves the 64th
+  retained command exhausts admission while one handler is in flight.
+- `node_byte_admission_rejects_before_sql_execution` proves byte rejection is a
+  pre-SQL outcome; `post_commit_publication_failure_returns_resolvable_unknown_outcome`
+  proves the opposite boundary carries the original identity and digest.
+- `proven_handler_rollback_keeps_the_cell_servable` proves application errors do
+  not inherit infrastructure fencing.
+
+`publication_rebases_over_a_pure_lease_renewal_without_sql_replay` covers the
+coordinator's latest-token retry path.
 
 Exit: two local runtime processes against isolated RustFS pass counter increment,
 owner kill, full source-directory removal and query recovery.

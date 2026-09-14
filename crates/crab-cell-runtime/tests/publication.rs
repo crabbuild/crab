@@ -13,6 +13,8 @@ use crab_ltx::{CellReplica, Limits, ManagedDb};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
 
+const RESULT_LIMIT: usize = 1 << 20;
+
 struct Fixture {
     _directory: tempfile::TempDir,
     database: std::path::PathBuf,
@@ -107,16 +109,22 @@ async fn prepared_root_becomes_one_valid_control_successor() {
     let observed = calls.clone();
     assert_eq!(
         executor
-            .execute(identity, operation_digest, 20, move |transaction| {
-                observed.fetch_add(1, Ordering::SeqCst);
-                transaction.execute("UPDATE counter SET value = value + 1", [])?;
-                Ok(HandlerOutcome::Success(b"one".to_vec()))
-            })
+            .execute(
+                identity,
+                operation_digest,
+                20,
+                RESULT_LIMIT,
+                move |transaction| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(b"one".to_vec()))
+                }
+            )
             .unwrap(),
         CommandExecution::Pending
     );
     assert!(matches!(
-        executor.execute(identity, operation_digest, 20, |_| {
+        executor.execute(identity, operation_digest, 20, RESULT_LIMIT, |_| {
             Ok(HandlerOutcome::Success(Vec::new()))
         }),
         Err(crab_cell_runtime::Error::PendingPublication)
@@ -160,7 +168,7 @@ async fn prepared_root_becomes_one_valid_control_successor() {
     );
     assert!(matches!(
         executor
-            .execute(identity, operation_digest, 21, |_| {
+            .execute(identity, operation_digest, 21, RESULT_LIMIT, |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(HandlerOutcome::Success(b"two".to_vec()))
             })
@@ -191,7 +199,7 @@ async fn business_rejection_rolls_back_domain_writes_and_publishes_the_outcome()
     let digest = Digest::from_bytes([9; 32]);
     assert_eq!(
         executor
-            .execute(identity, digest, 110, |transaction| {
+            .execute(identity, digest, 110, RESULT_LIMIT, |transaction| {
                 transaction.execute("UPDATE counter SET value = value + 1", [])?;
                 Ok(HandlerOutcome::Rejected(b"insufficient quota".to_vec()))
             })
@@ -211,9 +219,13 @@ async fn business_rejection_rolls_back_domain_writes_and_publishes_the_outcome()
             if result == b"insufficient quota"
     ));
     assert!(matches!(
-        executor.execute(identity, Digest::from_bytes([10; 32]), 111, |_| {
-            Ok(HandlerOutcome::Success(Vec::new()))
-        }),
+        executor.execute(
+            identity,
+            Digest::from_bytes([10; 32]),
+            111,
+            RESULT_LIMIT,
+            |_| { Ok(HandlerOutcome::Success(Vec::new())) },
+        ),
         Err(crab_cell_runtime::Error::RequestConflict)
     ));
     executor.close().unwrap();
@@ -255,10 +267,16 @@ async fn publisher_uploads_cas_and_releases_one_result() {
         expires_at_ms: 20_000,
     };
     executor
-        .execute(identity, Digest::from_bytes([15; 32]), 110, |transaction| {
-            transaction.execute("UPDATE counter SET value = value + 1", [])?;
-            Ok(HandlerOutcome::Success(b"committed".to_vec()))
-        })
+        .execute(
+            identity,
+            Digest::from_bytes([15; 32]),
+            110,
+            RESULT_LIMIT,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"committed".to_vec()))
+            },
+        )
         .unwrap();
     let mut publisher = CellPublisher::new(replica, authority, observed);
     assert!(matches!(
@@ -292,7 +310,7 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
     };
     let digest = Digest::from_bytes([13; 32]);
     executor
-        .execute(identity, digest, 110, |transaction| {
+        .execute(identity, digest, 110, RESULT_LIMIT, |transaction| {
             transaction.execute("UPDATE counter SET value = value + 1", [])?;
             Ok(HandlerOutcome::Success(b"published".to_vec()))
         })
@@ -319,5 +337,55 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
     ));
     assert_eq!(publisher.control().value(), &winner);
     assert!(executor.pending().is_none());
+    executor.close().unwrap();
+}
+
+#[tokio::test]
+async fn publication_rebases_over_a_pure_lease_renewal_without_sql_replay() {
+    let Fixture {
+        _directory,
+        database: _,
+        cell,
+        incarnation,
+        layout,
+        replica,
+        mut executor,
+    } = fixture();
+    let (initial, authority, stale) = initialized_authority(&layout, cell, incarnation).await;
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([16; 16]),
+        issued_at_ms: 100,
+        expires_at_ms: 20_000,
+    };
+    executor
+        .execute(
+            identity,
+            Digest::from_bytes([17; 32]),
+            110,
+            RESULT_LIMIT,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"renewed".to_vec()))
+            },
+        )
+        .unwrap();
+
+    let mut renewed = initial;
+    renewed.revision += 1;
+    renewed.progress += 1;
+    authority
+        .transition(&stale, renewed, Transition::Renew)
+        .await
+        .unwrap();
+
+    let mut publisher = CellPublisher::new(replica, authority, stale);
+    assert!(matches!(
+        publisher
+            .publish_pending(&mut executor, None)
+            .await
+            .unwrap(),
+        StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"renewed"
+    ));
+    assert_eq!(publisher.control().value().revision, 3);
     executor.close().unwrap();
 }

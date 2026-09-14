@@ -8,6 +8,8 @@ use crab_ltx::{CellReplica, Limits, ManagedDb};
 use crab_storage::{CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
 
+const RESULT_LIMIT: usize = 1 << 20;
+
 struct Fixture {
     _directory: tempfile::TempDir,
     cell: CellId,
@@ -67,7 +69,7 @@ async fn fixed_workers_own_execute_prepare_confirm_and_dedup() {
     let request = identity(4);
     let digest = Digest::from_bytes([5; 32]);
     let pending = match pool
-        .execute(cell, request, digest, 20, |transaction| {
+        .execute(cell, request, digest, 20, RESULT_LIMIT, |transaction| {
             transaction.execute("UPDATE counter SET value = value + 1", [])?;
             Ok(HandlerOutcome::Success(b"one".to_vec()))
         })
@@ -87,7 +89,7 @@ async fn fixed_workers_own_execute_prepare_confirm_and_dedup() {
         StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"one"
     ));
     assert!(matches!(
-        pool.execute(cell, request, digest, 21, |_| {
+        pool.execute(cell, request, digest, 21, RESULT_LIMIT, |_| {
             Ok(HandlerOutcome::Success(b"wrong".to_vec()))
         })
         .await
@@ -118,6 +120,7 @@ async fn cancelled_waiter_does_not_cancel_an_accepted_sql_command() {
                 identity(7),
                 Digest::from_bytes([8; 32]),
                 20,
+                RESULT_LIMIT,
                 move |transaction| {
                     started_tx.send(()).unwrap();
                     release_rx.recv().unwrap();

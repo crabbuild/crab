@@ -30,8 +30,19 @@ pub enum Error {
     CellNotActive,
     #[error("Cell is already active on its assigned worker")]
     CellAlreadyActive,
+    #[error("Cell is draining and no longer accepts commands")]
+    CellDraining,
+    #[error("accepted Cell command outcome is unknown")]
+    OutcomeUnknown {
+        request_id: crate::RequestId,
+        operation_digest: crate::Digest,
+        #[source]
+        source: Box<Error>,
+    },
     #[error("Cell runtime capacity exhausted: {0}")]
     Capacity(&'static str),
     #[error("failed to start Cell SQL worker")]
     WorkerStart(#[source] Box<std::io::Error>),
+    #[error("Cell runtime requires an active Tokio runtime")]
+    RuntimeStart(#[source] tokio::runtime::TryCurrentError),
 }

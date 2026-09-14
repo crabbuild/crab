@@ -10,6 +10,33 @@ The service boundary accepts serializable commands and queries. Local and remote
 owners run the same validation, handler and publication path. A local call may
 avoid a network hop, but cannot bypass identity, size or durability checks.
 
+The current lower-level implementation is intentionally narrower than the typed
+registry below. `CellRuntime::activate` moves a restored `CellExecutor` onto its
+stable SQL worker and returns a capability-bound `CellHandle`. Its implemented
+command entry point is:
+
+```rust,ignore
+pub async fn execute<F>(
+    &self,
+    identity: MutationIdentity,
+    operation_digest: Digest,
+    now_ms: i64,
+    operation_bytes: usize,
+    max_result_bytes: usize,
+    next_due_ms: Option<i64>,
+    handler: F,
+) -> Result<StoredOutcome>
+where
+    F: for<'tx> FnOnce(&rusqlite::Transaction<'tx>)
+        -> Result<HandlerOutcome> + Send + 'static;
+```
+
+This is an internal construction API, not the final application surface. The
+registry must derive the digest and byte declarations from a registered codec,
+hide the raw transaction behind `CommandContext`, and map `OutcomeUnknown` to
+`PendingMutation`. HTTP code must not accept caller-selected digests, byte limits
+or closures.
+
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {
     fn encode(&self, out: &mut BoundedEncoder) -> Result<(), CodecError>;

@@ -153,6 +153,7 @@ impl CellExecutor {
         identity: MutationIdentity,
         operation_digest: Digest,
         now_ms: i64,
+        max_result_bytes: usize,
         handler: impl FnOnce(&crab_ltx::rusqlite::Transaction<'_>) -> Result<HandlerOutcome>,
     ) -> Result<CommandExecution> {
         if self.fenced {
@@ -160,6 +161,9 @@ impl CellExecutor {
         }
         if self.pending.is_some() {
             return Err(Error::PendingPublication);
+        }
+        if max_result_bytes > MAX_RESULT_BYTES {
+            return Err(Error::Command("result limit exceeds 1 MiB"));
         }
         identity.validate(now_ms)?;
         let cell = self.cell;
@@ -206,9 +210,11 @@ impl CellExecutor {
                 if digest.as_slice() != operation_digest.as_bytes() {
                     return Err(Error::RequestConflict);
                 }
-                return Ok(TransactionResult::Recorded(stored_outcome(
-                    outcome, result, sequence,
-                )?));
+                let outcome = stored_outcome(outcome, result, sequence)?;
+                if outcome.result().len() > max_result_bytes {
+                    return Err(Error::Command("stored result exceeds command limit"));
+                }
+                return Ok(TransactionResult::Recorded(outcome));
             }
 
             let sequence = meta
@@ -231,8 +237,8 @@ impl CellExecutor {
                     (2, result)
                 }
             };
-            if result.len() > MAX_RESULT_BYTES {
-                return Err(Error::Command("handler result exceeds 1 MiB"));
+            if result.len() > max_result_bytes {
+                return Err(Error::Command("handler result exceeds command limit"));
             }
             let retain_until_ms = identity
                 .expires_at_ms
@@ -354,6 +360,16 @@ impl CellExecutor {
 
     pub(crate) fn drained(&self) -> bool {
         self.pending.is_none() && !self.fenced
+    }
+
+    pub(crate) fn worker_state(&self) -> crate::worker::WorkerState {
+        if self.fenced {
+            crate::worker::WorkerState::Fenced
+        } else if self.pending.is_some() {
+            crate::worker::WorkerState::Pending
+        } else {
+            crate::worker::WorkerState::Ready
+        }
     }
 }
 

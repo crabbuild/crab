@@ -5,6 +5,7 @@
 //! executor. HTTP, authentication and provider construction remain product
 //! concerns of `crab-http-server`.
 
+mod actor;
 mod authority;
 mod control;
 mod error;
@@ -14,6 +15,7 @@ mod publication;
 mod schema;
 mod worker;
 
+pub use actor::{CellHandle, CellRuntime};
 pub use authority::{CellAuthority, VersionedControl};
 pub use control::{Control, ControlState, Owner, RootRef, Transition};
 pub use error::{Error, Result};

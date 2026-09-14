@@ -7,13 +7,14 @@ exist in `crab-cell-runtime` and `crab-ltx`; exact roots support lazy,
 authenticated page reads, and the local executor now persists request outcomes
 while retaining pending cuts/results until an exact prepared root is confirmed.
 The publication coordinator also resolves a lost CAS response when origin names
-that exact root and refreshes through pure lease renewals. Actor/mailbox
-supervision now has its fixed SQL worker foundation: one to sixteen OS threads,
-bounded worker queues, stable Cell routing, global active-Cell admission, and
-retention of accepted work after caller cancellation. Per-Cell mailboxes,
-publication multiplexing, later-root request resolution, directory-backed writable SQLite,
-streaming directory updates, prepared compaction/bundles, primitives, HTTP
-cutover and capacity qualification remain incomplete.
+that exact root and refreshes through pure lease renewals. The node-wide runtime
+dispatcher now combines the fixed SQL workers with per-Cell request/byte
+mailboxes, node byte admission, FIFO single-flight publication, cancellation-safe
+accepted work, bounded retry backoff, structured unknown outcomes and drain.
+Catalog activation, deadlines/watchdogs, later-root request resolution, fenced
+recovery, reads, directory-backed writable SQLite, streaming directory updates,
+prepared compaction/bundles, primitives, HTTP cutover and capacity qualification
+remain incomplete.
 
 ## Deliverable and contract precedence
 

@@ -1,0 +1,390 @@
+use std::sync::{Arc, mpsc};
+
+use bytes::Bytes;
+use crab_cell_runtime::{
+    CellAuthority, CellExecutor, CellId, CellRuntime, Control, Digest, HandlerOutcome,
+    IncarnationId, MutationIdentity, Owner, RequestId, SessionId, SqlWorkerPool, StoredOutcome,
+    install_runtime_schema,
+};
+use crab_ltx::{CellReplica, Limits, ManagedDb};
+use crab_storage::{CellStorageLayout, Store};
+use object_store::{memory::InMemory, path::Path};
+
+struct Fixture {
+    _directory: tempfile::TempDir,
+    database: std::path::PathBuf,
+    cell: CellId,
+    layout: CellStorageLayout,
+    replica: CellReplica,
+    executor: Option<CellExecutor>,
+}
+
+fn fixture() -> Fixture {
+    let cell = CellId::from_bytes([1; 32]);
+    let incarnation = IncarnationId::from_bytes([2; 16]);
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = CellStorageLayout::new(store, Path::from("runtime"), [3; 16]);
+    let replica = CellReplica::new(
+        layout.clone(),
+        *cell.as_bytes(),
+        *incarnation.as_bytes(),
+        Limits::default(),
+    )
+    .unwrap();
+    let directory = tempfile::TempDir::new().unwrap();
+    let database = directory.path().join("cell.sqlite");
+    let mut connection = crab_ltx::rusqlite::Connection::open(&database).unwrap();
+    install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+        )
+        .unwrap();
+    drop(connection);
+    let writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    Fixture {
+        _directory: directory,
+        database,
+        cell,
+        layout,
+        replica,
+        executor: Some(CellExecutor::new(writer, cell, incarnation, 1)),
+    }
+}
+
+async fn activate(fixture: &mut Fixture, node_bytes: usize) -> crab_cell_runtime::CellHandle {
+    let replica = fixture.replica.clone();
+    activate_with_replica(fixture, node_bytes, replica).await
+}
+
+async fn activate_with_replica(
+    fixture: &mut Fixture,
+    node_bytes: usize,
+    replica: CellReplica,
+) -> crab_cell_runtime::CellHandle {
+    let control = Control::initial(
+        fixture.cell,
+        IncarnationId::from_bytes([2; 16]),
+        Owner {
+            session: SessionId::from_bytes([4; 16]),
+            endpoint: "https://node.internal:8081".into(),
+        },
+        Digest::from_bytes([5; 32]),
+        1,
+    )
+    .unwrap();
+    fixture
+        .layout
+        .store()
+        .create_strict(
+            &fixture.layout.control_path(fixture.cell.as_bytes()),
+            Bytes::from(control.encode().unwrap()),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority.load(fixture.cell).await.unwrap().unwrap();
+    let runtime = CellRuntime::new(SqlWorkerPool::new(2, 10).unwrap(), node_bytes).unwrap();
+    runtime
+        .activate(
+            fixture.cell,
+            fixture.executor.take().unwrap(),
+            replica,
+            authority,
+            observed,
+        )
+        .await
+        .unwrap()
+}
+
+fn identity(byte: u8) -> MutationIdentity {
+    MutationIdentity {
+        request_id: RequestId::from_bytes([byte; 16]),
+        issued_at_ms: 10,
+        expires_at_ms: 10_000,
+    }
+}
+
+#[tokio::test]
+async fn dispatcher_serializes_and_publishes_commands_before_drain() {
+    let mut fixture = fixture();
+    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    let first = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    identity(6),
+                    Digest::from_bytes([7; 32]),
+                    20,
+                    1_024,
+                    1_024,
+                    None,
+                    |transaction| {
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(b"one".to_vec()))
+                    },
+                )
+                .await
+        })
+    };
+    let second = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    identity(8),
+                    Digest::from_bytes([9; 32]),
+                    21,
+                    1_024,
+                    1_024,
+                    Some(500),
+                    |transaction| {
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(b"two".to_vec()))
+                    },
+                )
+                .await
+        })
+    };
+    assert!(matches!(
+        first.await.unwrap().unwrap(),
+        StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"one"
+    ));
+    assert!(matches!(
+        second.await.unwrap().unwrap(),
+        StoredOutcome::Success { ref result, commit_sequence: 2 } if result == b"two"
+    ));
+    handle.drain().await.unwrap();
+
+    let connection = crab_ltx::rusqlite::Connection::open(&fixture.database).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn cancelled_command_waiter_is_resolved_by_original_identity() {
+    let mut fixture = fixture();
+    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    let request = identity(10);
+    let digest = Digest::from_bytes([11; 32]);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let waiting = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    request,
+                    digest,
+                    20,
+                    1_024,
+                    1_024,
+                    None,
+                    move |transaction| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(b"survived".to_vec()))
+                    },
+                )
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+        .await
+        .unwrap();
+    waiting.abort();
+    assert!(matches!(waiting.await, Err(error) if error.is_cancelled()));
+    release_tx.send(()).unwrap();
+
+    assert!(matches!(
+        handle
+            .execute(request, digest, 21, 1_024, 1_024, None, |_| {
+                Ok(HandlerOutcome::Success(b"wrong".to_vec()))
+            })
+            .await
+            .unwrap(),
+        StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"survived"
+    ));
+    handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn node_byte_admission_rejects_before_sql_execution() {
+    let mut fixture = fixture();
+    let handle = activate(&mut fixture, 1024 * 1024).await;
+    assert!(matches!(
+        handle
+            .execute(
+                identity(12),
+                Digest::from_bytes([13; 32]),
+                20,
+                1_025,
+                1024 * 1024,
+                None,
+                |_| Ok(HandlerOutcome::Success(Vec::new())),
+            )
+            .await,
+        Err(crab_cell_runtime::Error::Capacity(_))
+    ));
+    handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
+    let mut fixture = fixture();
+    let wrong_replica =
+        CellReplica::new(fixture.layout.clone(), [99; 32], [2; 16], Limits::default()).unwrap();
+    let handle = activate_with_replica(&mut fixture, 16 * 1024 * 1024, wrong_replica).await;
+    let request = identity(14);
+    let digest = Digest::from_bytes([15; 32]);
+    assert!(matches!(
+        handle
+            .execute(request, digest, 20, 1_024, 1_024, None, |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(b"not-yet-published".to_vec()))
+            })
+            .await,
+        Err(crab_cell_runtime::Error::OutcomeUnknown {
+            request_id,
+            operation_digest,
+            ..
+        }) if request_id == request.request_id && operation_digest == digest
+    ));
+    assert!(matches!(
+        handle
+            .execute(request, digest, 21, 1_024, 1_024, None, |_| {
+                Ok(HandlerOutcome::Success(Vec::new()))
+            })
+            .await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+}
+
+#[tokio::test]
+async fn proven_handler_rollback_keeps_the_cell_servable() {
+    let mut fixture = fixture();
+    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    assert!(matches!(
+        handle
+            .execute(
+                identity(16),
+                Digest::from_bytes([17; 32]),
+                20,
+                1_024,
+                1_024,
+                None,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 10", [])?;
+                    Err(crab_cell_runtime::Error::Command("application failure"))
+                },
+            )
+            .await,
+        Err(crab_cell_runtime::Error::Command("application failure"))
+    ));
+    assert!(matches!(
+        handle
+            .execute(
+                identity(24),
+                Digest::from_bytes([25; 32]),
+                20,
+                1_024,
+                1,
+                None,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 10", [])?;
+                    Ok(HandlerOutcome::Success(b"too large".to_vec()))
+                },
+            )
+            .await,
+        Err(crab_cell_runtime::Error::Command(
+            "handler result exceeds command limit"
+        ))
+    ));
+    assert!(matches!(
+        handle
+            .execute(
+                identity(18),
+                Digest::from_bytes([19; 32]),
+                21,
+                1_024,
+                1_024,
+                None,
+                |transaction| {
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(b"recovered".to_vec()))
+                },
+            )
+            .await
+            .unwrap(),
+        StoredOutcome::Success { ref result, commit_sequence: 1 } if result == b"recovered"
+    ));
+    handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
+    let mut fixture = fixture();
+    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    identity(29),
+                    Digest::from_bytes([29; 32]),
+                    20,
+                    0,
+                    1,
+                    None,
+                    move |_| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok(HandlerOutcome::Success(Vec::new()))
+                    },
+                )
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+        .await
+        .unwrap();
+
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+    for byte in 30..94 {
+        let handle = handle.clone();
+        let result_tx = result_tx.clone();
+        tokio::spawn(async move {
+            let result = handle
+                .execute(
+                    identity(byte),
+                    Digest::from_bytes([byte; 32]),
+                    21,
+                    0,
+                    1,
+                    None,
+                    |_| Ok(HandlerOutcome::Success(Vec::new())),
+                )
+                .await;
+            let _ = result_tx.send(result);
+        });
+    }
+    drop(result_tx);
+    assert!(matches!(
+        result_rx.recv().await.unwrap(),
+        Err(crab_cell_runtime::Error::Capacity(_))
+    ));
+    release_tx.send(()).unwrap();
+    first.await.unwrap().unwrap();
+    for _ in 0..63 {
+        assert!(result_rx.recv().await.unwrap().is_ok());
+    }
+    handle.drain().await.unwrap();
+}

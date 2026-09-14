@@ -18,13 +18,20 @@ const MAX_WORKERS: usize = 16;
 const MAX_ACTIVE_CELLS: usize = 10_000;
 const WORKER_QUEUE: usize = 256;
 
-type Handler = Box<
+pub(crate) type Handler = Box<
     dyn for<'connection> FnOnce(
             &crab_ltx::rusqlite::Transaction<'connection>,
         ) -> Result<HandlerOutcome>
         + Send
         + 'static,
 >;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerState {
+    Ready,
+    Pending,
+    Fenced,
+}
 
 /// Result returned by one SQL worker without releasing pending command output.
 #[derive(Clone)]
@@ -113,6 +120,7 @@ impl SqlWorkerPool {
         identity: MutationIdentity,
         operation_digest: Digest,
         now_ms: i64,
+        max_result_bytes: usize,
         handler: F,
     ) -> Result<WorkerExecution>
     where
@@ -130,6 +138,7 @@ impl SqlWorkerPool {
                 identity,
                 operation_digest,
                 now_ms,
+                max_result_bytes,
                 handler: Box::new(handler),
                 reply,
             },
@@ -173,6 +182,21 @@ impl SqlWorkerPool {
     ) -> Result<StoredOutcome> {
         let (reply, response) = oneshot::channel();
         self.send(cell, WorkerCommand::ConfirmPublished { cell, root, reply })
+            .await?;
+        receive(response).await
+    }
+
+    /// Stops admission after a publication or worker invariant becomes unsafe.
+    pub(crate) async fn fence(&self, cell: CellId) -> Result<()> {
+        let (reply, response) = oneshot::channel();
+        self.send(cell, WorkerCommand::Fence { cell, reply })
+            .await?;
+        receive(response).await
+    }
+
+    pub(crate) async fn state(&self, cell: CellId) -> Result<WorkerState> {
+        let (reply, response) = oneshot::channel();
+        self.send(cell, WorkerCommand::State { cell, reply })
             .await?;
         receive(response).await
     }
@@ -237,6 +261,7 @@ enum WorkerCommand {
         identity: MutationIdentity,
         operation_digest: Digest,
         now_ms: i64,
+        max_result_bytes: usize,
         handler: Handler,
         reply: oneshot::Sender<Result<WorkerExecution>>,
     },
@@ -253,6 +278,14 @@ enum WorkerCommand {
         cell: CellId,
         root: crab_ltx::RootRef,
         reply: oneshot::Sender<Result<StoredOutcome>>,
+    },
+    Fence {
+        cell: CellId,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    State {
+        cell: CellId,
+        reply: oneshot::Sender<Result<WorkerState>>,
     },
     Deactivate {
         cell: CellId,
@@ -302,6 +335,7 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 identity,
                 operation_digest,
                 now_ms,
+                max_result_bytes,
                 handler,
                 reply,
             } => {
@@ -309,10 +343,13 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
                     .and_then(|cell| {
-                        match cell
-                            .executor
-                            .execute(identity, operation_digest, now_ms, handler)?
-                        {
+                        match cell.executor.execute(
+                            identity,
+                            operation_digest,
+                            now_ms,
+                            max_result_bytes,
+                            handler,
+                        )? {
                             CommandExecution::Recorded(outcome) => {
                                 Ok(WorkerExecution::Recorded(outcome))
                             }
@@ -350,6 +387,20 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                     .get_mut(&cell)
                     .ok_or(Error::CellNotActive)
                     .and_then(|cell| cell.executor.confirm_published(&root));
+                let _ = reply.send(result);
+            }
+            WorkerCommand::Fence { cell, reply } => {
+                let result = cells
+                    .get_mut(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .map(|cell| cell.executor.fence());
+                let _ = reply.send(result);
+            }
+            WorkerCommand::State { cell, reply } => {
+                let result = cells
+                    .get(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .map(|cell| cell.executor.worker_state());
                 let _ = reply.send(result);
             }
             WorkerCommand::Deactivate { cell, reply } => {
