@@ -7,8 +7,8 @@ use crab_storage::{Store, StoreLayout};
 use crab_write::{
     WriteError,
     journal::{
-        CommitOptions, commit_edits, commit_existing_ref_edit, compact_for_owner,
-        compact_for_reader,
+        CommitOptions, capture_existing_ref_commit_base, commit_captured_existing_ref_edit,
+        commit_edits, commit_existing_ref_edit, compact_for_owner, compact_for_reader,
     },
 };
 use futures_util::TryStreamExt;
@@ -116,6 +116,84 @@ async fn existing_ref_commit_uses_the_captured_journal_position() {
 
     assert!(matches!(wrong_old, Err(WriteError::RefChanged { .. })));
     assert!(matches!(stale, Err(WriteError::RefChanged { .. })));
+    let state = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    assert_eq!(state.journal.refs.get(REF), Some(&"b".repeat(40)));
+    lease.release().await.unwrap();
+}
+
+#[tokio::test]
+async fn captured_existing_ref_commit_rejects_a_changed_head() {
+    let (store, layout) = storage("captured-existing-ref-position").await;
+    let lease = pending(&store, &layout).await;
+    let captured = capture_existing_ref_commit_base(&store, &layout, REF)
+        .await
+        .unwrap()
+        .unwrap();
+    let initial = captured.transaction_id().unwrap().to_owned();
+    let cancel = CancellationToken::new();
+
+    commit_existing_ref_edit(
+        &store,
+        &layout,
+        &initial,
+        edit(REF, Some('a'), Some('b')),
+        vec![],
+        CommitOptions::new(TTL, &cancel),
+    )
+    .await
+    .unwrap();
+    let stale = commit_captured_existing_ref_edit(
+        &store,
+        &layout,
+        captured,
+        edit(REF, Some('a'), Some('c')),
+        vec![],
+        CommitOptions::new(TTL, &cancel),
+    )
+    .await;
+
+    assert!(stale.is_err());
+    let state = manifest_store::read_repository_snapshot(&store, &layout)
+        .await
+        .unwrap();
+    assert_eq!(state.journal.refs.get(REF), Some(&"b".repeat(40)));
+    lease.release().await.unwrap();
+}
+
+#[tokio::test]
+async fn captured_existing_ref_commit_accepts_a_manifest_only_ref() {
+    let (store, layout) = storage("captured-manifest-only-ref").await;
+    let old_oid = "a".repeat(40);
+    let mut manifest = Manifest::default_for_repo(REF);
+    manifest.refs.insert(REF.to_owned(), old_oid.clone());
+    manifest.seal_git_validation();
+    manifest_store::create_manifest(&store, &layout, &manifest)
+        .await
+        .unwrap();
+    let lease = PushLock::acquire_ref(store.inner(), layout.repo_prefix(), REF, TTL)
+        .await
+        .unwrap();
+    let captured = capture_existing_ref_commit_base(&store, &layout, REF)
+        .await
+        .unwrap()
+        .unwrap();
+    let cancel = CancellationToken::new();
+
+    assert_eq!(captured.transaction_id(), None);
+    assert_eq!(captured.old_oid(), old_oid);
+    commit_captured_existing_ref_edit(
+        &store,
+        &layout,
+        captured,
+        edit(REF, Some('a'), Some('b')),
+        vec![],
+        CommitOptions::new(TTL, &cancel),
+    )
+    .await
+    .unwrap();
+
     let state = manifest_store::read_repository_snapshot(&store, &layout)
         .await
         .unwrap();

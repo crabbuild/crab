@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crab_coordination::{PushLock, PushLockAcquireContext};
 use crab_metadata::{
     manifest_store::RepositorySnapshot,
-    manifests::PackManifestEntry,
+    manifests::{Manifest, PackManifestEntry},
     ref_journal::{self, RefJournalCommitResult, RefJournalEdit, RefJournalTransaction},
 };
 use crab_storage::{Store, StoreLayout};
@@ -51,6 +51,72 @@ impl<'a> CommitOptions<'a> {
         self.plan_id = Some(plan_id);
         self
     }
+}
+
+/// Existing ref state captured while its caller-owned lease is held.
+#[derive(Debug, Clone)]
+pub struct ExistingRefCommitBase {
+    head: ref_journal::RefJournalHeadSnapshot,
+    transaction_id: Option<String>,
+    old_oid: String,
+    manifest: Manifest,
+}
+
+impl ExistingRefCommitBase {
+    /// Return the optional journal transaction visible at the captured ref head.
+    #[must_use]
+    pub fn transaction_id(&self) -> Option<&str> {
+        self.transaction_id.as_deref()
+    }
+
+    /// Return the object ID visible for the captured ref.
+    #[must_use]
+    pub fn old_oid(&self) -> &str {
+        &self.old_oid
+    }
+
+    /// Return the compacted manifest observed after the captured ref head.
+    #[must_use]
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+}
+
+/// Capture one existing ref's mutable head, compacted manifest and visible value.
+///
+/// The caller must already hold and continue renewing the ref lease. Missing
+/// refs return `None`; corrupt objects return errors. The caller-owned ref
+/// lease makes the head and manifest safe to capture concurrently; the final
+/// head CAS protects both manifest-only and journal-backed refs.
+pub async fn capture_existing_ref_commit_base(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    ref_name: &str,
+) -> Result<Option<ExistingRefCommitBase>> {
+    let (head, (manifest, _)) = tokio::try_join!(
+        ref_journal::read_ref_head(store, router, ref_name),
+        crab_metadata::manifest_store::read_manifest(store, router),
+    )?;
+    let transaction_id = head.visible_transaction.clone();
+    let old_oid = if let Some(transaction_id) = transaction_id.as_deref() {
+        let transaction = ref_journal::read_transaction(store, router, transaction_id).await?;
+        transaction
+            .edits
+            .iter()
+            .find(|edit| edit.ref_name == ref_name)
+            .and_then(|edit| edit.new_oid.clone())
+    } else {
+        manifest.refs.get(ref_name).cloned()
+    };
+    let Some(old_oid) = old_oid else {
+        return Ok(None);
+    };
+    Ok(Some(ExistingRefCommitBase {
+        head,
+        transaction_id,
+        old_oid,
+        manifest,
+    }))
 }
 
 /// Commit a validated batch against a snapshot captured while holding every edited ref lease.
@@ -120,20 +186,19 @@ pub async fn commit_existing_ref_edit(
     packs: Vec<PackManifestEntry>,
     options: CommitOptions<'_>,
 ) -> Result<RefJournalCommitResult> {
-    let CommitOptions {
-        plan_id,
-        lock_ttl: _,
-        cancel,
-    } = options;
-    check_cancelled(cancel)?;
     if edit.old_oid.is_none() || edit.new_oid.is_none() {
         return Err(WriteError::RefChanged {
             ref_name: edit.ref_name.clone(),
             path: router.repo_prefix().to_owned(),
         });
     }
-    let observed = ref_journal::read_ref_head(store, router, &edit.ref_name).await?;
-    if observed.visible_transaction.as_deref() != Some(expected_transaction) {
+    let Some(base) = capture_existing_ref_commit_base(store, router, &edit.ref_name).await? else {
+        return Err(WriteError::RefChanged {
+            ref_name: edit.ref_name.clone(),
+            path: router.repo_prefix().to_owned(),
+        });
+    };
+    if base.transaction_id.as_deref() != Some(expected_transaction) {
         return Err(WriteError::RefChanged {
             ref_name: edit.ref_name.clone(),
             path: router
@@ -141,31 +206,45 @@ pub async fn commit_existing_ref_edit(
                 .to_string(),
         });
     }
-    let parent = ref_journal::read_transaction(store, router, expected_transaction).await?;
-    let current_oid = parent
-        .edits
-        .iter()
-        .find(|parent_edit| parent_edit.ref_name == edit.ref_name)
-        .and_then(|parent_edit| parent_edit.new_oid.as_ref());
-    if current_oid != edit.old_oid.as_ref() {
+    commit_captured_existing_ref_edit(store, router, base, edit, packs, options).await
+}
+
+/// Commit one existing ref using its lease-bound captured state.
+///
+/// The caller must retain and renew the same ref lease from capture through
+/// completion. The final head CAS rejects any writer that bypassed that lease.
+pub async fn commit_captured_existing_ref_edit(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    base: ExistingRefCommitBase,
+    edit: RefJournalEdit,
+    packs: Vec<PackManifestEntry>,
+    options: CommitOptions<'_>,
+) -> Result<RefJournalCommitResult> {
+    let CommitOptions {
+        plan_id,
+        lock_ttl: _,
+        cancel,
+    } = options;
+    check_cancelled(cancel)?;
+    if edit.ref_name != base.head.head.ref_name
+        || edit.old_oid.as_deref() != Some(base.old_oid.as_str())
+        || edit.new_oid.is_none()
+    {
         return Err(WriteError::RefChanged {
-            ref_name: edit.ref_name,
-            path: router
-                .ref_journal_transaction_path(expected_transaction)
-                .to_string(),
+            ref_name: edit.ref_name.clone(),
+            path: router.repo_prefix().to_owned(),
         });
     }
     let transaction = RefJournalTransaction::new(
-        std::collections::BTreeMap::from([(
-            edit.ref_name.clone(),
-            Some(expected_transaction.to_owned()),
-        )]),
+        std::collections::BTreeMap::from([(edit.ref_name.clone(), base.transaction_id)]),
         vec![edit],
         None,
         packs,
         vec![],
     )?;
-    commit_transaction_with_heads(store, router, transaction, vec![observed], plan_id, cancel).await
+    commit_transaction_with_heads(store, router, transaction, vec![base.head], plan_id, cancel)
+        .await
 }
 
 fn check_old_values(

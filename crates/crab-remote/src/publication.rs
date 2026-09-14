@@ -118,27 +118,29 @@ impl PublicationLeases {
             .count()
     }
 
-    /// Stop renewal workers, release all fences, then release ref leases.
+    /// Stop renewal workers, then release independent fences and ref leases concurrently.
     pub async fn release(mut self) {
         let fences = std::mem::take(&mut self.fences);
-        let fences = join_all(
-            fences
-                .into_iter()
-                .rev()
-                .map(|(lease, heartbeat)| async move {
-                    heartbeat.stop().await;
-                    lease
-                }),
-        )
-        .await;
-        for result in join_all(fences.iter().map(GcFenceLease::release)).await {
-            if let Err(error) = result {
-                tracing::warn!(%error, "publication GC fence release failed");
-            }
-        }
-        while let Some(entry) = self.entries.pop() {
-            entry.lease.release().await;
-        }
+        let entries = std::mem::take(&mut self.entries);
+        let release_fences =
+            async {
+                let fences = join_all(fences.into_iter().rev().map(
+                    |(lease, heartbeat)| async move {
+                        heartbeat.stop().await;
+                        lease
+                    },
+                ))
+                .await;
+                for result in join_all(fences.iter().map(GcFenceLease::release)).await {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "publication GC fence release failed");
+                    }
+                }
+            };
+        // Ref publication is already durable. Releasing independent GC fences
+        // and ref leases concurrently removes a request round trip without
+        // changing either holder-checked cleanup contract.
+        tokio::join!(release_fences, release_entries(entries));
     }
 }
 

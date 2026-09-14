@@ -3342,8 +3342,12 @@ fn push_admission_required_slots(
     worker_slots.max(memory_slots)
 }
 
-fn uses_object_store_push_admission(protected_push: bool, active_active: bool) -> bool {
-    !protected_push && !active_active
+fn uses_object_store_push_admission(
+    protected_push: bool,
+    active_active: bool,
+    exact_existing_ref: bool,
+) -> bool {
+    !protected_push && !active_active && !exact_existing_ref
 }
 
 fn push_admission_throttle_cooldown(retry_after: Option<Duration>, ttl: Duration) -> Duration {
@@ -4172,6 +4176,8 @@ pub struct PushPipeline {
     // Ref decisions and payload proof must use the same captured journal.
     // Projecting refs alone loses shards whose staging was already retired.
     base_snapshot: tokio::sync::Mutex<Option<Arc<RepositorySnapshot>>>,
+    /// Exact ref position for the bounded single-existing-branch path.
+    existing_ref_base: tokio::sync::Mutex<Option<ExistingRefPushBase>>,
     /// Base split commit graph loaded on demand as the fast-forward
     /// fallback when `git merge-base --is-ancestor` can't answer
     /// (shallow / sparse client missing the old tip locally). `None`
@@ -5664,12 +5670,16 @@ async fn while_admitted_until_commit<T>(
                     commit_signal_open = false;
                     continue;
                 }
-                if let Err(error) = permit.release().await {
+                let (release_result, result) = tokio::join!(permit.release(), operation);
+                if let Err(error) = release_result {
                     warn!(error = %error, "push admission ticket release failed after commit");
                 }
                 // Derived indexes and cache warming are repairable and must
                 // not retain scarce write capacity after the ref is visible.
-                return operation.await;
+                return match (result, renewal_error) {
+                    (Ok(_), Some(error)) => Err(CrabError::from(error)),
+                    (result, _) => result,
+                };
             }
             _ = ticker.tick(), if renewal_error.is_none() => {
                 if let Err(error) = permit.renew().await {
@@ -6448,6 +6458,84 @@ pub struct PrePopulatedWalk {
     pub remote_alias: String,
 }
 
+/// Exact base for one existing branch captured while its ref lease is held.
+#[derive(Clone)]
+pub(crate) struct ExistingRefPushBase {
+    manifest: Manifest,
+    ref_name: String,
+    commit_base: crab_write::journal::ExistingRefCommitBase,
+}
+
+impl ExistingRefPushBase {
+    pub(crate) fn ref_name(&self) -> &str {
+        &self.ref_name
+    }
+
+    pub(crate) fn old_oid(&self) -> &str {
+        self.commit_base.old_oid()
+    }
+
+    fn projected_manifest(&self) -> Manifest {
+        let mut manifest = self.manifest.clone();
+        manifest
+            .refs
+            .insert(self.ref_name.clone(), self.old_oid().to_owned());
+        manifest.peeled_refs.remove(&self.ref_name);
+        manifest
+    }
+
+    pub(crate) fn remote_refs(&self) -> BTreeMap<String, String> {
+        BTreeMap::from([(self.ref_name.clone(), self.old_oid().to_owned())])
+    }
+}
+
+/// Read the bounded state needed to update one existing branch.
+///
+/// The caller must hold the branch's publication lease through commitment.
+/// Missing refs return `None`; refs represented only by the compacted manifest
+/// are valid existing-ref bases. Creates retain the full coherent-snapshot path.
+pub(crate) async fn read_existing_ref_push_base(
+    store: &Store,
+    router: &StoreLayout,
+    specs: &[PushSpec],
+    config: &PushConfig,
+) -> Result<Option<ExistingRefPushBase>> {
+    let [spec] = specs else {
+        return Ok(None);
+    };
+    if spec.src.is_empty()
+        || !spec.dst.starts_with("refs/heads/")
+        || config.protected_push.is_some()
+        || config.active_active_replication.is_some()
+        || config.mirror_plan_id.is_some()
+    {
+        return Ok(None);
+    }
+
+    let storage_layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let commit_base = crab_write::journal::capture_existing_ref_commit_base(
+        store.as_storage(),
+        &storage_layout,
+        &spec.dst,
+    )
+    .await
+    .map_err(CrabError::from)?;
+    let Some(commit_base) = commit_base else {
+        return Ok(None);
+    };
+    let manifest = commit_base.manifest().clone();
+
+    Ok(Some(ExistingRefPushBase {
+        manifest,
+        ref_name: spec.dst.clone(),
+        commit_base,
+    }))
+}
+
 /// Ref leases and read-only work captured while those leases were active.
 ///
 /// `locked_base_snapshot` may only be set when the snapshot was read after
@@ -6458,6 +6546,7 @@ pub(crate) struct LockedPushHandoff {
     leases: PushLockLease,
     prepopulated: Option<PrePopulatedWalk>,
     locked_base_snapshot: Option<Arc<RepositorySnapshot>>,
+    existing_ref_base: Option<ExistingRefPushBase>,
 }
 
 impl LockedPushHandoff {
@@ -6466,6 +6555,7 @@ impl LockedPushHandoff {
             leases,
             prepopulated,
             locked_base_snapshot: None,
+            existing_ref_base: None,
         }
     }
 
@@ -6473,6 +6563,13 @@ impl LockedPushHandoff {
     #[must_use]
     pub(crate) fn with_locked_base_snapshot(mut self, snapshot: Arc<RepositorySnapshot>) -> Self {
         self.locked_base_snapshot = Some(snapshot);
+        self
+    }
+
+    /// Attach one exact existing-ref base captured under the supplied lease.
+    #[must_use]
+    pub(crate) fn with_existing_ref_base(mut self, base: ExistingRefPushBase) -> Self {
+        self.existing_ref_base = Some(base);
         self
     }
 }
@@ -6553,6 +6650,7 @@ impl PushPipeline {
             prepopulated: tokio::sync::Mutex::new(None),
             metadb: tokio::sync::Mutex::new(None),
             base_snapshot: tokio::sync::Mutex::new(None),
+            existing_ref_base: tokio::sync::Mutex::new(None),
             base_commit_graph: tokio::sync::Mutex::new(None),
             base_commit_graph_loaded: tokio::sync::Mutex::new(false),
             manifest_etag: tokio::sync::Mutex::new(None),
@@ -6997,19 +7095,24 @@ impl PushPipeline {
 
     /// Establish the pipeline's initial base without rereading a locked snapshot.
     async fn ensure_initial_base_manifest(&self) -> Result<()> {
-        if self.base_snapshot.lock().await.is_some() {
-            debug!("reusing initial snapshot captured under push locks");
+        if self.base_snapshot.lock().await.is_some()
+            || self.existing_ref_base.lock().await.is_some()
+        {
+            debug!("reusing initial state captured under push locks");
             return Ok(());
         }
         self.read_base_manifest().await
     }
 
     async fn base_manifest(&self) -> Option<Manifest> {
-        self.base_snapshot
+        if let Some(snapshot) = self.base_snapshot.lock().await.as_ref() {
+            return Some(snapshot.materialized_manifest());
+        }
+        self.existing_ref_base
             .lock()
             .await
             .as_ref()
-            .map(|snapshot| snapshot.materialized_manifest())
+            .map(ExistingRefPushBase::projected_manifest)
     }
 
     async fn load_base_split_commit_graph(
@@ -8448,6 +8551,167 @@ impl PushPipeline {
         }
         self.stop_heartbeat_and_release_lock().await;
         Ok(true)
+    }
+
+    async fn prepare_existing_ref_edit(
+        &self,
+        sha_map: &HashMap<String, String>,
+    ) -> Result<Option<crate::metadata::manifest::RefJournalEdit>> {
+        let Some(base) = self.existing_ref_base.lock().await.clone() else {
+            return Ok(None);
+        };
+        let [spec] = self.specs.as_slice() else {
+            return Err(CrabError::Internal(
+                "existing-ref push requires exactly one ref".to_owned(),
+            ));
+        };
+        let new_oid = sha_map.get(&spec.src).cloned().ok_or_else(|| {
+            CrabError::Internal(format!(
+                "existing-ref push is missing source ref {}",
+                spec.src
+            ))
+        })?;
+        let lock_holder = {
+            let lock_state = self.lock_state.lock().await;
+            let lock_path = crab_coordination::push_lock_path(&self.prefix, &spec.dst)?;
+            lock_state
+                .as_ref()
+                .and_then(|state| {
+                    state
+                        .leases
+                        .lock_identities()
+                        .find(|(path, _)| *path == lock_path)
+                        .map(|(_, holder)| holder.to_owned())
+                })
+                .ok_or_else(|| {
+                    CrabError::Internal(
+                        "existing-ref push lost its publication lease identity".to_owned(),
+                    )
+                })?
+        };
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("existing-ref push requires a store".to_owned()))?;
+        let mut edits = [crate::metadata::manifest::RefJournalEdit {
+            ref_name: spec.dst.clone(),
+            old_oid: Some(base.old_oid().to_owned()),
+            new_oid: Some(new_oid),
+            peeled_oid: None,
+            lock_holder: Some(lock_holder),
+            visibility_evidence_hash: None,
+        }];
+        let visibility =
+            if git_visibility_proof_available_for_manifest(store, &self.router, &base.manifest)
+                .await?
+            {
+                GitVisibilityPublication::Published
+            } else {
+                ensure_current_git_visibility(
+                    store,
+                    &self.router,
+                    self.config.lock_ttl,
+                    self.config.max_cas_retries,
+                    &self.cancel,
+                )
+                .await?
+            };
+        match visibility {
+            GitVisibilityPublication::Published | GitVisibilityPublication::CatalogBound => {
+                self.publish_ref_visibility_edits(
+                    store,
+                    &mut edits,
+                    &HashSet::from([base.old_oid().to_owned()]),
+                )
+                .await?;
+            }
+            GitVisibilityPublication::CompletePackOnly(capacity) => {
+                warn!(
+                    proof_objects = capacity.observed,
+                    maximum = capacity.maximum,
+                    "push exceeds the synchronous Git visibility profile; complete-pack fetch remains available"
+                );
+            }
+        }
+        let [edit] = edits;
+        Ok(Some(edit))
+    }
+
+    /// Commit one existing branch without materializing repository-wide indexes.
+    async fn commit_existing_ref(
+        &self,
+        decisions: HashMap<String, RefUpdateDecision>,
+        edit: crate::metadata::manifest::RefJournalEdit,
+        admission_commit: &mut Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<HashMap<String, RefUpdateDecision>> {
+        let started = Instant::now();
+        let base =
+            self.existing_ref_base.lock().await.clone().ok_or_else(|| {
+                CrabError::Internal("existing-ref push base is missing".to_owned())
+            })?;
+        let [spec] = self.specs.as_slice() else {
+            return Err(CrabError::Internal(
+                "existing-ref push requires exactly one ref".to_owned(),
+            ));
+        };
+        if !matches!(
+            decisions.get(&spec.dst),
+            Some(RefUpdateDecision::Proceed { .. })
+        ) {
+            return Err(CrabError::Internal(
+                "existing-ref push reached commitment without a proceeding ref".to_owned(),
+            ));
+        }
+        if !self.uploaded_shard_hashes.lock().await.is_empty() {
+            return Err(CrabError::Internal(
+                "existing-ref Git path cannot publish shard dependencies".to_owned(),
+            ));
+        }
+        let packs = self
+            .uploaded_packs
+            .lock()
+            .await
+            .iter()
+            .map(|pack| pack.entry.clone())
+            .collect();
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("existing-ref push requires a store".to_owned()))?;
+        let storage = store.as_storage();
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            storage.clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let result = crab_write::journal::commit_captured_existing_ref_edit(
+            storage,
+            &layout,
+            base.commit_base,
+            edit,
+            packs,
+            crab_write::journal::CommitOptions::new(self.config.lock_ttl, &self.cancel),
+        )
+        .await;
+        let committed = match crab_remote::publication::journal_outcome(result)? {
+            crab_remote::publication::CommitOutcome::Committed(committed) => committed,
+            crab_remote::publication::CommitOutcome::Indeterminate { source, .. } => {
+                return Err((*source).into());
+            }
+        };
+        info!(
+            transaction_id = %committed.transaction_id,
+            refs_count = committed.edited_refs,
+            duration_ms = started.elapsed().as_millis() as u64,
+            "existing ref journal transaction committed"
+        );
+        if let Some(signal) = admission_commit.take() {
+            let _ = signal.send(());
+        }
+        self.stop_heartbeat_and_release_lock().await;
+        self.git_visibility_published
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        Ok(decisions)
     }
 
     /// Commit independently locked refs through one atomic journal transaction.
@@ -12993,24 +13257,6 @@ impl PushPipeline {
                 if let Some(progress) = &self.progress {
                     progress.begin_git_upload();
                 }
-                let (uploaded, verified_meta) = upload_push_pack_file_body(
-                    store,
-                    &pack_path,
-                    packed.pack_path.as_ref(),
-                    packed.pack_size,
-                    packed.pack_blake3,
-                    &self.cancel,
-                    multipart_journal,
-                    self.metrics.as_deref(),
-                    Some(&on_part_done),
-                )
-                .await?;
-                if let Some(progress) = &self.progress {
-                    progress.finish_git_pack_body();
-                }
-                if !uploaded {
-                    debug!(pack_id = %pack_sha, "step 10: pack already exists remotely, skipping body upload");
-                }
                 let mut locations = crab_git::pack_locator::PackLocationIter::open(
                     &installed.idx_path,
                     &installed.rev_path,
@@ -13042,28 +13288,47 @@ impl PushPipeline {
                     })
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(CrabError::from)?;
-                let kind_by_oid = match self.discover_git_dir() {
-                    Ok(git_dir) => resolve_local_object_kinds(&git_dir, &object_ids).await,
-                    Err(error) => {
-                        warn!(error = %error, "Git object-kind catalog metadata is unavailable; owner rebuild can repair it");
-                        None
+                let upload_body = upload_push_pack_file_body(
+                    store,
+                    &pack_path,
+                    packed.pack_path.as_ref(),
+                    packed.pack_size,
+                    packed.pack_blake3,
+                    &self.cancel,
+                    multipart_journal,
+                    self.metrics.as_deref(),
+                    Some(&on_part_done),
+                );
+                let upload_kinds = async {
+                    let kind_by_oid = match self.discover_git_dir() {
+                        Ok(git_dir) => resolve_local_object_kinds(&git_dir, &object_ids).await,
+                        Err(error) => {
+                            warn!(error = %error, "Git object-kind catalog metadata is unavailable; owner rebuild can repair it");
+                            None
+                        }
+                    };
+                    let kind_metadata = kind_by_oid
+                        .as_ref()
+                        .map(|kinds| {
+                            encode_pack_kind_metadata(&object_ids, &installed.git_sha1, kinds)
+                        })
+                        .transpose()?;
+                    if let Some(kind_metadata) = &kind_metadata {
+                        store
+                            .put(
+                                &self.router.pack_kind_metadata_path(&pack_sha),
+                                kind_metadata.clone(),
+                            )
+                            .await?;
                     }
+                    Ok::<_, CrabError>(kind_metadata.is_some())
                 };
-                let kind_metadata = kind_by_oid
-                    .as_ref()
-                    .map(|kinds| encode_pack_kind_metadata(&object_ids, &installed.git_sha1, kinds))
-                    .transpose()?;
-                if let Some(kind_metadata) = &kind_metadata {
-                    store
-                        .put(
-                            &self.router.pack_kind_metadata_path(&pack_sha),
-                            kind_metadata.clone(),
-                        )
-                        .await?;
-                }
-                // Protected receive rebuilds and verifies the Git index from
-                // the staged pack; `.idx` is not an accepted wire object.
-                if store.staging_write_prefix().is_none() {
+                let upload_sidecars = async {
+                    // Protected receive rebuilds and verifies the Git index
+                    // from the staged pack; sidecars are not wire objects.
+                    if store.staging_write_prefix().is_some() {
+                        return Ok::<_, CrabError>(());
+                    }
                     let idx_path = installed.idx_path.clone();
                     let rev_path = installed.rev_path.clone();
                     let ((idx_hash, idx_size), (rev_hash, rev_size)) =
@@ -13081,7 +13346,7 @@ impl PushPipeline {
                         })??;
                     let remote_idx_path = self.router.pack_index_path(&pack_sha);
                     let remote_rev_path = self.router.pack_reverse_index_path(&pack_sha);
-                    tokio::try_join!(
+                    let (idx_result, rev_result) = tokio::join!(
                         upload_pack_sidecar_file(
                             store,
                             &remote_idx_path,
@@ -13098,7 +13363,24 @@ impl PushPipeline {
                             rev_hash,
                             &self.cancel,
                         ),
-                    )?;
+                    );
+                    idx_result?;
+                    rev_result?;
+                    Ok(())
+                };
+                // All three artifacts are immutable and independently named.
+                // Their presence is not published until the metadata/origin
+                // receipts below, so failed siblings leave only safe orphans.
+                let (body_result, kind_result, sidecar_result) =
+                    tokio::join!(upload_body, upload_kinds, upload_sidecars);
+                let (uploaded, verified_meta) = body_result?;
+                let kind_metadata_published = kind_result?;
+                sidecar_result?;
+                if let Some(progress) = &self.progress {
+                    progress.finish_git_pack_body();
+                }
+                if !uploaded {
+                    debug!(pack_id = %pack_sha, "step 10: pack already exists remotely, skipping body upload");
                 }
 
                 let origin_entry = PackManifestEntry {
@@ -13165,7 +13447,7 @@ impl PushPipeline {
                 Ok::<_, CrabError>((index, UploadedGitPack {
                     entry,
                     idx_path: installed.idx_path,
-                    kind_metadata_published: kind_metadata.is_some(),
+                    kind_metadata_published,
                     _evidence_dir: Arc::clone(evidence_dir),
                 }))
             });
@@ -13237,7 +13519,16 @@ impl PushPipeline {
             CrabError::Internal("no store available for Git locator lookup".to_owned())
         })?;
         let Some(snapshot) = self.base_snapshot.lock().await.clone() else {
-            return Ok(Some(RemotePackBasis::ExactObjects(HashSet::new())));
+            let ref_tips = self
+                .existing_ref_base
+                .lock()
+                .await
+                .as_ref()
+                .map(|base| vec![base.old_oid().to_owned()]);
+            return Ok(Some(match ref_tips {
+                Some(ref_tips) => RemotePackBasis::RefTips(ref_tips),
+                None => RemotePackBasis::ExactObjects(HashSet::new()),
+            }));
         };
         if snapshot.journal.packs.is_empty() {
             return Ok(Some(RemotePackBasis::ExactObjects(HashSet::new())));
@@ -13414,6 +13705,9 @@ impl PushPipeline {
     }
 
     async fn compute_remote_pack_basis(&self) -> Result<RemotePackBasis> {
+        if let Some(base) = self.existing_ref_base.lock().await.as_ref() {
+            return Ok(RemotePackBasis::RefTips(vec![base.old_oid().to_owned()]));
+        }
         let packs = self
             .base_snapshot
             .lock()
@@ -13532,6 +13826,12 @@ impl PushPipeline {
         if self.config.protected_push.is_some() {
             return Ok(prior_decisions.clone());
         }
+        if self.existing_ref_base.lock().await.is_some() {
+            // This exact ref position was captured after the caller acquired
+            // its lease. The journal commit rechecks the mutable head before
+            // publication, so a repository-wide refresh would add no safety.
+            return Ok(prior_decisions.clone());
+        }
         let store = self.store.as_ref().ok_or_else(|| {
             CrabError::Internal("under-lock base refresh requires a store".to_owned())
         })?;
@@ -13641,6 +13941,15 @@ impl PushPipeline {
         );
         *self.manifest_etag.lock().await = Some(snapshot.manifest_etag.clone());
         *self.base_snapshot.lock().await = Some(snapshot);
+    }
+
+    async fn install_existing_ref_base(&self, base: ExistingRefPushBase) {
+        debug!(
+            ref_name = %base.ref_name,
+            expected_transaction = ?base.commit_base.transaction_id(),
+            "installing existing-ref push base captured under push lock"
+        );
+        *self.existing_ref_base.lock().await = Some(base);
     }
 
     /// Install a pre-computed pointer walk produced by the native push
@@ -16162,10 +16471,16 @@ impl PushPipeline {
         // Ref ownership and the under-lock no-op recheck come before
         // repository-wide admission. Same-ref waiters cannot perform upload
         // work, so making them scan admission slots only amplifies contention.
+        let exact_existing_ref = self.existing_ref_base.lock().await.is_some();
         let object_store_admission = uses_object_store_push_admission(
             self.config.protected_push.is_some(),
             self.config.active_active_replication.is_some(),
+            exact_existing_ref,
         );
+        // Exact-ref pushes already own both GC fences through their ref-lease
+        // handoff and have no xorb pipeline. Their Git pack work has its own
+        // fixed concurrency and memory bounds, so a second capacity object
+        // adds coordination latency without strengthening either invariant.
         if object_store_admission {
             self.at_stage(
                 PushFailureStage::GitPackPrepare,
@@ -16353,10 +16668,17 @@ impl PushPipeline {
         self.emit_perf_phase(shard_upload_phase.finish(0, shard_upload_bytes, shard_upload_count));
         check_cancelled(&self.cancel)?;
         let pack_upload_phase = PhaseTimer::start("push", "pack_upload");
-        self.at_stage(
-            PushFailureStage::GitPackUpload,
-            self.upload_packs_with_progress().await,
-        )?;
+        let prepare_visibility = async {
+            match preflight.as_ref() {
+                Some((sha_map, _)) => self.prepare_existing_ref_edit(sha_map).await,
+                None => Ok(None),
+            }
+        };
+        let (pack_upload_result, prepared_existing_ref_edit) =
+            tokio::join!(self.upload_packs_with_progress(), prepare_visibility,);
+        self.at_stage(PushFailureStage::GitPackUpload, pack_upload_result)?;
+        let prepared_existing_ref_edit =
+            self.at_stage(PushFailureStage::RefCommit, prepared_existing_ref_edit)?;
         let (pack_upload_bytes, pack_upload_count) = {
             let packs = self.uploaded_packs.lock().await;
             (
@@ -16405,58 +16727,76 @@ impl PushPipeline {
                 CrabError::Internal("push ref preflight result is missing".to_owned())
             });
             let (sha_map, decisions) = self.at_stage(PushFailureStage::RefCommit, preflight)?;
-            let manifest_prepare_phase = PhaseTimer::start("push", "manifest_prepare");
-            let apply_result = self
-                .apply_decisions_with_sha_map(&decisions, self.config.atomic, &sha_map)
-                .await;
-            let (manifest, bulk) = self.at_stage(PushFailureStage::RefCommit, apply_result)?;
-            self.emit_perf_phase(manifest_prepare_phase.finish(0, 0, 0));
-            let metadata_phase = PhaseTimer::start("push", "candidate_metadb");
-            let metadata_result = self.publish_candidate_metadb(&manifest).await;
-            self.at_stage(PushFailureStage::RefCommit, metadata_result)?;
-            self.emit_perf_phase(metadata_phase.finish(
-                0,
-                0,
-                self.pending_file_index_plan.lock().await.len() as u64,
-            ));
-            let manifest_bytes = self
-                .at_stage(
-                    PushFailureStage::RefCommit,
-                    serde_json::to_vec_pretty(&manifest)
-                        .map_err(|e| CrabError::Internal(format!("manifest serialize: {e}"))),
-                )?
-                .len() as u64;
-            let manifest_phase = PhaseTimer::start("push", "ref_journal_commit");
-            let manifest_item_count = manifest.refs.len() as u64;
-            let manifest_bytes_out = manifest_bytes + bulk_data_bytes(&bulk);
-            let active_active_result = self
-                .active_active_commit_and_materialize(&manifest, &bulk, &decisions, &sha_map)
-                .await;
-            let committed_decisions = if let Some(outcome) =
-                self.at_stage(PushFailureStage::RefCommit, active_active_result)?
-            {
-                active_active_commit = Some(PushCommitMetadata::from(outcome));
-                debug!("steps 11-12: committed through active-active coordinator");
-                decisions
-            } else if self.config.protected_push.is_some() {
-                active_active_commit = self.at_stage(
-                    PushFailureStage::RefCommit,
-                    self.protected_push_finalize(manifest, bulk).await,
-                )?;
-                decisions
+            if self.existing_ref_base.lock().await.is_some() {
+                let edit = prepared_existing_ref_edit.ok_or_else(|| {
+                    CrabError::Internal("existing-ref visibility edit is missing".to_owned())
+                });
+                let edit = self.at_stage(PushFailureStage::RefCommit, edit)?;
+                let manifest_phase = PhaseTimer::start("push", "ref_journal_commit");
+                let commit_result = self
+                    .commit_existing_ref(decisions, edit, &mut admission_commit)
+                    .await;
+                let committed = self.at_stage(PushFailureStage::RefCommit, commit_result)?;
+                self.emit_perf_phase(manifest_phase.finish(0, 0, 1));
+                Some(committed)
             } else {
-                let commit_result = Box::pin(self.commit_ref_journal(
-                    manifest,
-                    bulk,
-                    &sha_map,
-                    decisions,
-                    &mut admission_commit,
-                ))
-                .await;
-                self.at_stage(PushFailureStage::RefCommit, commit_result)?
-            };
-            self.emit_perf_phase(manifest_phase.finish(0, manifest_bytes_out, manifest_item_count));
-            Some(committed_decisions)
+                let manifest_prepare_phase = PhaseTimer::start("push", "manifest_prepare");
+                let apply_result = self
+                    .apply_decisions_with_sha_map(&decisions, self.config.atomic, &sha_map)
+                    .await;
+                let (manifest, bulk) = self.at_stage(PushFailureStage::RefCommit, apply_result)?;
+                self.emit_perf_phase(manifest_prepare_phase.finish(0, 0, 0));
+                let metadata_phase = PhaseTimer::start("push", "candidate_metadb");
+                let metadata_result = self.publish_candidate_metadb(&manifest).await;
+                self.at_stage(PushFailureStage::RefCommit, metadata_result)?;
+                self.emit_perf_phase(metadata_phase.finish(
+                    0,
+                    0,
+                    self.pending_file_index_plan.lock().await.len() as u64,
+                ));
+                let manifest_bytes = self
+                    .at_stage(
+                        PushFailureStage::RefCommit,
+                        serde_json::to_vec_pretty(&manifest)
+                            .map_err(|e| CrabError::Internal(format!("manifest serialize: {e}"))),
+                    )?
+                    .len() as u64;
+                let manifest_phase = PhaseTimer::start("push", "ref_journal_commit");
+                let manifest_item_count = manifest.refs.len() as u64;
+                let manifest_bytes_out = manifest_bytes + bulk_data_bytes(&bulk);
+                let active_active_result = self
+                    .active_active_commit_and_materialize(&manifest, &bulk, &decisions, &sha_map)
+                    .await;
+                let committed_decisions = if let Some(outcome) =
+                    self.at_stage(PushFailureStage::RefCommit, active_active_result)?
+                {
+                    active_active_commit = Some(PushCommitMetadata::from(outcome));
+                    debug!("steps 11-12: committed through active-active coordinator");
+                    decisions
+                } else if self.config.protected_push.is_some() {
+                    active_active_commit = self.at_stage(
+                        PushFailureStage::RefCommit,
+                        self.protected_push_finalize(manifest, bulk).await,
+                    )?;
+                    decisions
+                } else {
+                    let commit_result = Box::pin(self.commit_ref_journal(
+                        manifest,
+                        bulk,
+                        &sha_map,
+                        decisions,
+                        &mut admission_commit,
+                    ))
+                    .await;
+                    self.at_stage(PushFailureStage::RefCommit, commit_result)?
+                };
+                self.emit_perf_phase(manifest_phase.finish(
+                    0,
+                    manifest_bytes_out,
+                    manifest_item_count,
+                ));
+                Some(committed_decisions)
+            }
         } else {
             debug!("steps 11-12: no store, skipping manifest build and CAS");
             None
@@ -16626,6 +16966,7 @@ pub(crate) async fn run_push_batch_with_locks(
         leases,
         prepopulated,
         locked_base_snapshot,
+        existing_ref_base,
     } = handoff;
     if specs.is_empty() {
         debug!("push batch is empty, releasing pre-acquired locks");
@@ -16675,6 +17016,9 @@ pub(crate) async fn run_push_batch_with_locks(
     pipeline.install_locks(leases).await;
     if let Some(snapshot) = locked_base_snapshot {
         pipeline.install_locked_base_snapshot(snapshot).await;
+    }
+    if let Some(base) = existing_ref_base {
+        pipeline.install_existing_ref_base(base).await;
     }
     if let Some(pre) = prepopulated {
         pipeline.install_prepopulated_walk(pre).await;
@@ -22609,9 +22953,10 @@ mod tests {
 
     #[test]
     fn object_store_admission_is_direct_push_only() {
-        assert!(!uses_object_store_push_admission(true, false));
-        assert!(!uses_object_store_push_admission(false, true));
-        assert!(uses_object_store_push_admission(false, false));
+        assert!(!uses_object_store_push_admission(true, false, false));
+        assert!(!uses_object_store_push_admission(false, true, false));
+        assert!(!uses_object_store_push_admission(false, false, true));
+        assert!(uses_object_store_push_admission(false, false, false));
     }
 
     #[test]
@@ -22823,6 +23168,115 @@ mod tests {
         manifest.generation = 1;
         manifest.seal_git_validation();
         manifest
+    }
+
+    #[tokio::test]
+    async fn existing_ref_base_read_is_independent_of_pack_index() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let counting = Arc::new(crab_storage::test_support::CountingObjectStore::new(inner));
+        let store = Store::new(counting.clone());
+        let router = StoreLayout::new(store.clone(), "bounded-existing-ref".to_owned());
+        let ref_name = "refs/heads/main";
+        let first_oid = "a".repeat(40);
+        let current_oid = "b".repeat(40);
+        let mut manifest = Manifest::default_for_repo(ref_name);
+        manifest.generation = 1;
+        manifest.refs.insert(ref_name.to_owned(), first_oid.clone());
+        // The bounded reader must not open or materialize this repository-wide
+        // content-addressed index.
+        manifest.pack_index_hash = "c".repeat(64);
+        manifest.seal_git_validation();
+        create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .expect("create manifest");
+        let head = crate::metadata::manifest::read_ref_journal_head(&store, &router, ref_name)
+            .await
+            .expect("read empty journal head");
+        let transaction = crate::metadata::manifest::RefJournalTransaction::new(
+            BTreeMap::from([(ref_name.to_owned(), None)]),
+            vec![crate::metadata::manifest::RefJournalEdit {
+                ref_name: ref_name.to_owned(),
+                old_oid: Some(first_oid),
+                new_oid: Some(current_oid.clone()),
+                peeled_oid: None,
+                lock_holder: None,
+                visibility_evidence_hash: None,
+            }],
+            None,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("build journal transaction");
+        crate::metadata::manifest::commit_ref_journal_transaction(
+            &store,
+            &router,
+            &transaction,
+            &[head],
+        )
+        .await
+        .expect("commit journal transaction");
+
+        counting.reset();
+        let base = read_existing_ref_push_base(
+            &store,
+            &router,
+            &[make_spec(ref_name)],
+            &PushConfig::default(),
+        )
+        .await
+        .expect("read existing-ref base")
+        .expect("journal-backed existing ref");
+
+        assert_eq!(base.remote_refs().get(ref_name), Some(&current_oid));
+        assert_eq!(
+            counting.counts(),
+            crab_storage::test_support::ObjectReadCounts {
+                heads: 0,
+                ranges: 0,
+                full: 3,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn manifest_only_existing_ref_uses_bounded_base_read() {
+        let inner: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let counting = Arc::new(crab_storage::test_support::CountingObjectStore::new(inner));
+        let store = Store::new(counting.clone());
+        let router = StoreLayout::new(store.clone(), "manifest-only-existing-ref".to_owned());
+        let ref_name = "refs/heads/main";
+        let current_oid = "b".repeat(40);
+        let mut manifest = Manifest::default_for_repo(ref_name);
+        manifest.generation = 1;
+        manifest
+            .refs
+            .insert(ref_name.to_owned(), current_oid.clone());
+        manifest.pack_index_hash = "c".repeat(64);
+        manifest.seal_git_validation();
+        create_manifest_with_etag(&store, &router, &manifest)
+            .await
+            .expect("create manifest");
+
+        counting.reset();
+        let base = read_existing_ref_push_base(
+            &store,
+            &router,
+            &[make_spec(ref_name)],
+            &PushConfig::default(),
+        )
+        .await
+        .expect("read existing-ref base")
+        .expect("manifest-backed existing ref");
+
+        assert_eq!(base.remote_refs().get(ref_name), Some(&current_oid));
+        assert_eq!(
+            counting.counts(),
+            crab_storage::test_support::ObjectReadCounts {
+                heads: 0,
+                ranges: 0,
+                full: 2,
+            }
+        );
     }
 
     #[test]
