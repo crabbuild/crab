@@ -5501,20 +5501,46 @@ pub(crate) async fn acquire_push_lock_leases(
     config: &PushConfig,
     cancel: &CancellationToken,
 ) -> Result<PushLockLease> {
+    acquire_push_lock_leases_while(store, prefix, specs, config, cancel, async { Ok(()) })
+        .await
+        .map(|(leases, ())| leases)
+}
+
+pub(crate) async fn acquire_push_lock_leases_while<T>(
+    store: &Store,
+    prefix: &str,
+    specs: &[PushSpec],
+    config: &PushConfig,
+    cancel: &CancellationToken,
+    work: impl Future<Output = Result<T>>,
+) -> Result<(PushLockLease, T)> {
     let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
-    crab_remote::publication::acquire_leases(
+    let options = crab_remote::publication::LeaseOptions {
+        ttl: config.lock_ttl,
+        wait: config.lock_wait,
+        renewal_interval: config.heartbeat_interval,
+    };
+    let leases = crab_remote::publication::acquire_ref_leases(
         store.as_storage(),
         &layout,
         push_lock_refs(specs),
-        crab_remote::publication::LeaseOptions {
-            ttl: config.lock_ttl,
-            wait: config.lock_wait,
-            renewal_interval: config.heartbeat_interval,
-        },
+        options,
         cancel,
     )
     .await
-    .map_err(CrabError::from)
+    .map_err(CrabError::from)?;
+    let (admission, work) = tokio::join!(
+        leases.with_gc_fences(store.as_storage(), &layout, options, cancel),
+        work,
+    );
+    match (admission, work) {
+        (Ok(leases), Ok(value)) => Ok((leases, value)),
+        (Ok(leases), Err(error)) => {
+            release_push_lock_leases(leases).await;
+            Err(error)
+        }
+        (Err(error), _) => Err(CrabError::from(error)),
+    }
 }
 
 async fn acquire_push_capacity_lock(
@@ -6517,17 +6543,24 @@ pub(crate) async fn read_existing_ref_push_base(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    let commit_base = crab_write::journal::capture_existing_ref_commit_base(
-        store.as_storage(),
-        &storage_layout,
-        &spec.dst,
-    )
-    .await
-    .map_err(CrabError::from)?;
+    let capture_base = async {
+        crab_write::journal::capture_existing_ref_commit_base(
+            store.as_storage(),
+            &storage_layout,
+            &spec.dst,
+        )
+        .await
+        .map_err(CrabError::from)
+    };
+    let read_manifest = async {
+        crab_metadata::manifest_store::read_manifest(store.as_storage(), &storage_layout)
+            .await
+            .map_err(CrabError::from)
+    };
+    let (commit_base, (manifest, _)) = tokio::try_join!(capture_base, read_manifest)?;
     let Some(commit_base) = commit_base else {
         return Ok(None);
     };
-    let manifest = commit_base.manifest().clone();
 
     Ok(Some(ExistingRefPushBase {
         manifest,
@@ -8708,7 +8741,7 @@ impl PushPipeline {
         if let Some(signal) = admission_commit.take() {
             let _ = signal.send(());
         }
-        self.stop_heartbeat_and_release_lock().await;
+        self.stop_heartbeat_and_release_committed_lock().await;
         self.git_visibility_published
             .store(false, std::sync::atomic::Ordering::Relaxed);
         Ok(decisions)
@@ -16245,6 +16278,15 @@ impl PushPipeline {
 
     /// Stop heartbeat tasks and release push locks, if held.
     async fn stop_heartbeat_and_release_lock(&self) {
+        self.stop_heartbeat_and_release_lock_inner(false).await;
+    }
+
+    /// Release an exact-ref writer after the journal marker rooted its pack.
+    async fn stop_heartbeat_and_release_committed_lock(&self) {
+        self.stop_heartbeat_and_release_lock_inner(true).await;
+    }
+
+    async fn stop_heartbeat_and_release_lock_inner(&self, committed: bool) {
         let state = self.lock_state.lock().await.take();
         let held_for = self
             .lock_acquired_at
@@ -16253,7 +16295,11 @@ impl PushPipeline {
             .take()
             .map(|at| at.elapsed());
         if let Some(LockState { leases }) = state {
-            release_push_lock_leases(leases).await;
+            if committed {
+                leases.release_after_commit().await;
+            } else {
+                release_push_lock_leases(leases).await;
+            }
             if let Some(held_for) = held_for {
                 info!(
                     phase = "push_lock",
@@ -16539,9 +16585,14 @@ impl PushPipeline {
     ) -> Result<PushResult> {
         // LFS publication belongs inside the existing writer admission, not
         // preflight: a waiting/rejected push must not upload dependencies while
-        // a sweep owns the fence. Managed pushes still use private staging.
-        if let (Some(store), Some((sha_map, decisions))) = (self.store.as_ref(), preflight.as_ref())
-        {
+        // a sweep owns the fence. It is independent of Git/xorb preparation,
+        // so join and drain both branches before any ref can become visible.
+        let publish_lfs = async {
+            let (Some(store), Some((sha_map, decisions))) =
+                (self.store.as_ref(), preflight.as_ref())
+            else {
+                return Ok(());
+            };
             let tips: Vec<String> = self
                 .specs
                 .iter()
@@ -16566,7 +16617,7 @@ impl PushPipeline {
                 .as_ref()
                 .map(|manifest| manifest.refs.values().cloned().collect())
                 .unwrap_or_default();
-            let publication = crate::lfs::publication::publish_reachable(
+            crate::lfs::publication::publish_reachable(
                 store.as_storage().clone(),
                 self.router.repo_prefix().to_owned(),
                 self.common_git_dir()?,
@@ -16574,9 +16625,8 @@ impl PushPipeline {
                 remote_tips,
                 &self.cancel,
             )
-            .await;
-            self.at_stage(PushFailureStage::Preflight, publication)?;
-        }
+            .await
+        };
 
         // Step 5-7: one bounded read -> pack -> resume-proof -> upload DAG.
         // Git reachability/locator preparation is independent and joins
@@ -16603,14 +16653,16 @@ impl PushPipeline {
             "starting bounded xorb pipeline"
         );
         let (packed_tx, packed_rx) = tokio::sync::mpsc::channel(queue_capacity);
-        let (pack_result, upload_result, git_prepare_result) = tokio::join!(
+        let (pack_result, upload_result, git_prepare_result, lfs_result) = tokio::join!(
             self.pack_xorbs_with_output(Some(packed_tx), Some(packed_payload_budget)),
             self.upload_packed_xorb_stream(packed_rx),
             self.prepare_git_pack(),
+            publish_lfs,
         );
         let pack_summary = self.at_stage(PushFailureStage::XorbPack, pack_result)?;
         let upload_summary = self.at_stage(PushFailureStage::XorbUpload, upload_result)?;
         self.at_stage(PushFailureStage::GitPackPrepare, git_prepare_result)?;
+        self.at_stage(PushFailureStage::Preflight, lfs_result)?;
         if pack_summary.xorb_count != upload_summary.planned_xorbs
             || pack_summary.payload_bytes != upload_summary.planned_bytes
         {
@@ -16674,11 +16726,20 @@ impl PushPipeline {
                 None => Ok(None),
             }
         };
-        let (pack_upload_result, prepared_existing_ref_edit) =
-            tokio::join!(self.upload_packs_with_progress(), prepare_visibility,);
+        // Connectivity depends only on the prepared local pack basis. It must
+        // pass before commitment, but need not wait for independent immutable
+        // uploads or visibility-evidence construction. Pack validity was
+        // already established by strict local `git index-pack`; this branch
+        // proves graph reachability from each new tip.
+        let (pack_upload_result, prepared_existing_ref_edit, connectivity_result) = tokio::join!(
+            self.upload_packs_with_progress(),
+            prepare_visibility,
+            self.verify_connectivity(),
+        );
         self.at_stage(PushFailureStage::GitPackUpload, pack_upload_result)?;
         let prepared_existing_ref_edit =
             self.at_stage(PushFailureStage::RefCommit, prepared_existing_ref_edit)?;
+        self.at_stage(PushFailureStage::Connectivity, connectivity_result)?;
         let (pack_upload_bytes, pack_upload_count) = {
             let packs = self.uploaded_packs.lock().await;
             (
@@ -16687,27 +16748,6 @@ impl PushPipeline {
             )
         };
         self.emit_perf_phase(pack_upload_phase.finish(0, pack_upload_bytes, pack_upload_count));
-
-        // Cancellation check: after uploads, before connectivity.
-        check_cancelled(&self.cancel)?;
-
-        // Step 10b: connectivity check. Before we move refs, prove every
-        // object reachable from each new tip exists locally. Step 10 strictly
-        // indexed the outgoing non-thin pack in a temporary evidence directory;
-        // keeping it out of `.git/objects/pack/` prevents repeated pushes from
-        // making every source-ODB walk scan an ever-growing pack set. The source
-        // ODB still owns every packed object, so a missing object here is either
-        // a pack-gen bug or a corrupt local ODB. It is strictly safer to reject
-        // the push than to commit a ref that points at incomplete history.
-        //
-        // Surfaces per-ref failures via
-        // [`CrabError::PushConnectivityMissing`] which is mapped to
-        // [`PushRejectReason::ConnectivityMissing`] by the per-ref
-        // outcome collapse in `execute`.
-        self.at_stage(
-            PushFailureStage::Connectivity,
-            self.verify_connectivity().await,
-        )?;
 
         // Cancellation check: after connectivity, before manifest CAS.
         check_cancelled(&self.cancel)?;

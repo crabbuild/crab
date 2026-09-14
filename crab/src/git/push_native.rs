@@ -20,8 +20,9 @@ use crate::git::discover;
 use crate::git::progress::NativePushProgress;
 use crate::git::push::{
     ExistingRefPushBase, LockedPushHandoff, PrePopulatedWalk, PushConfig, PushFailureStage,
-    PushLockLease, PushResult, acquire_push_lock_leases, duplicate_destination_result,
-    read_existing_ref_push_base, release_push_lock_leases, run_push_batch_with_locks,
+    PushLockLease, PushResult, acquire_push_lock_leases, acquire_push_lock_leases_while,
+    duplicate_destination_result, read_existing_ref_push_base, release_push_lock_leases,
+    run_push_batch_with_locks,
 };
 use crate::git::push_staging::PushStaging;
 use crate::git::push_state::PushState;
@@ -365,42 +366,76 @@ async fn run_native_push_inner(
     // ── Phase 1: Discover ──────────────────────────────────────────
     release_native_locks_on_error(check_cancelled(&cancel), &mut pre_acquired_locks).await?;
     let phase_start = Instant::now();
+    let speculative_refs = if !config.followtags && config.push.protected_push.is_none() {
+        local_existing_ref_frontier(specs, push_state, remote_url, remote_name, &git_dirs)
+    } else {
+        None
+    };
+    let mut speculative_discovery_task = speculative_refs.as_ref().map(|refs| {
+        let specs = specs.to_vec();
+        let push_state = push_state.clone();
+        let remote_url = remote_url.to_owned();
+        let refs = refs.clone();
+        let incremental = config.incremental;
+        let git_dirs = git_dirs.clone();
+        tokio::task::spawn_blocking(move || {
+            phase_discover(
+                &specs,
+                &push_state,
+                &remote_url,
+                Some(&refs),
+                incremental,
+                &git_dirs,
+            )
+        })
+    });
+    let mut speculative_discovery = None;
+    let mut acquired_existing_ref_base = None;
     if pre_acquired_locks.is_none() && !config.followtags && config.push.protected_push.is_none() {
-        match acquire_push_lock_leases(&store, router.repo_prefix(), specs, &config.push, &cancel)
-            .await
-        {
-            Ok(leases) => {
+        let acquire = acquire_push_lock_leases_while(
+            &store,
+            router.repo_prefix(),
+            specs,
+            &config.push,
+            &cancel,
+            read_existing_ref_push_base(&store, &router, specs, &config.push),
+        );
+        let discovery = async {
+            match speculative_discovery_task.take() {
+                Some(task) => task.await.map(Some).map_err(|error| {
+                    CrabError::Internal(format!("speculative discovery join failed: {error}"))
+                }),
+                None => Ok(None),
+            }
+        };
+        let (acquired, discovered) = tokio::join!(acquire, discovery);
+        match acquired {
+            Ok((leases, existing_ref_base)) => {
                 debug!(
                     lock_count = leases.len(),
                     "native push: acquired push locks before repository snapshot"
                 );
                 pre_acquired_locks = Some(leases);
+                acquired_existing_ref_base = Some(existing_ref_base);
             }
             Err(e) => {
                 warn!(error = %e, "native push: failed to acquire push lock before discovery");
                 return Ok(push_lock_rejection_result(specs, &e));
             }
         }
+        speculative_discovery =
+            release_native_locks_on_error(discovered, &mut pre_acquired_locks).await?;
     }
     let mut locked_base_snapshot = None;
-    let speculative_refs = if pre_acquired_locks.is_some() && !config.followtags {
-        local_existing_ref_frontier(specs, push_state, remote_url, remote_name, &git_dirs)
-    } else {
-        None
-    };
-    let mut speculative_discovery = None;
-    let mut existing_ref_base = if pre_acquired_locks.is_some() && !config.followtags {
+    let mut existing_ref_base = if let Some(existing_ref_base) = acquired_existing_ref_base {
+        existing_ref_base
+    } else if pre_acquired_locks.is_some() && !config.followtags {
         let capture = read_existing_ref_push_base(&store, &router, specs, &config.push);
-        let captured = if let Some(refs) = speculative_refs.as_ref() {
+        let captured = if let Some(task) = speculative_discovery_task.take() {
             let discover = async {
-                phase_discover(
-                    specs,
-                    push_state,
-                    remote_url,
-                    Some(refs),
-                    config.incremental,
-                    &git_dirs,
-                )
+                task.await.map_err(|error| {
+                    CrabError::Internal(format!("speculative discovery join failed: {error}"))
+                })?
             };
             let (captured, discovered) = tokio::join!(capture, discover);
             speculative_discovery = Some(discovered);

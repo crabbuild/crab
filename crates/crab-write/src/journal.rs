@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crab_coordination::{PushLock, PushLockAcquireContext};
 use crab_metadata::{
     manifest_store::RepositorySnapshot,
-    manifests::{Manifest, PackManifestEntry},
+    manifests::PackManifestEntry,
     ref_journal::{self, RefJournalCommitResult, RefJournalEdit, RefJournalTransaction},
 };
 use crab_storage::{Store, StoreLayout};
@@ -59,7 +59,6 @@ pub struct ExistingRefCommitBase {
     head: ref_journal::RefJournalHeadSnapshot,
     transaction_id: Option<String>,
     old_oid: String,
-    manifest: Manifest,
 }
 
 impl ExistingRefCommitBase {
@@ -74,29 +73,20 @@ impl ExistingRefCommitBase {
     pub fn old_oid(&self) -> &str {
         &self.old_oid
     }
-
-    /// Return the compacted manifest observed after the captured ref head.
-    #[must_use]
-    pub fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
 }
 
-/// Capture one existing ref's mutable head, compacted manifest and visible value.
+/// Capture one existing ref's mutable head and visible value.
 ///
 /// The caller must already hold and continue renewing the ref lease. Missing
-/// refs return `None`; corrupt objects return errors. The caller-owned ref
-/// lease makes the head and manifest safe to capture concurrently; the final
-/// head CAS protects both manifest-only and journal-backed refs.
+/// refs return `None`; corrupt objects return errors. Journal-backed refs do
+/// not read the repository manifest. The final head CAS protects both
+/// manifest-only and journal-backed refs.
 pub async fn capture_existing_ref_commit_base(
     store: &Store,
     router: &StoreLayout<Store>,
     ref_name: &str,
 ) -> Result<Option<ExistingRefCommitBase>> {
-    let (head, (manifest, _)) = tokio::try_join!(
-        ref_journal::read_ref_head(store, router, ref_name),
-        crab_metadata::manifest_store::read_manifest(store, router),
-    )?;
+    let head = ref_journal::read_ref_head(store, router, ref_name).await?;
     let transaction_id = head.visible_transaction.clone();
     let old_oid = if let Some(transaction_id) = transaction_id.as_deref() {
         let transaction = ref_journal::read_transaction(store, router, transaction_id).await?;
@@ -106,6 +96,7 @@ pub async fn capture_existing_ref_commit_base(
             .find(|edit| edit.ref_name == ref_name)
             .and_then(|edit| edit.new_oid.clone())
     } else {
+        let (manifest, _) = crab_metadata::manifest_store::read_manifest(store, router).await?;
         manifest.refs.get(ref_name).cloned()
     };
     let Some(old_oid) = old_oid else {
@@ -115,7 +106,6 @@ pub async fn capture_existing_ref_commit_base(
         head,
         transaction_id,
         old_oid,
-        manifest,
     }))
 }
 
