@@ -1,9 +1,12 @@
 # Next-generation crab-http-server: repository SQLite cells and LTX durability
 
-Status: proposed technical design; no SQLite/LTX runtime is implemented by this
-document. Prepared 2026-09-13 against Crab commit
+Status: target server architecture; local and optional remote `crab-ltx` mechanics are implemented,
+but the HTTP server is not yet integrated with SQLite/LTX. Prepared 2026-09-13
+against Crab commit
 `f67181e0dcdc69a766b14a8b441e9119d3684f33`; deployment and integration notes were
 updated when rebasing onto `2cb79f1cdb56eb824c607195635615a6f9c4a23f`.
+The local crate implementation was added against `c6a64db0c28` and its API,
+limits and qualification status are recorded in [crab-ltx](crab-ltx.md).
 
 Audience: implementers of the HTTP application, storage and publication owners,
 operators, and reviewers of correctness and migration evidence.
@@ -23,7 +26,9 @@ The existing [system and write design](../DESIGN.md) describes current behavior.
 The [reference](../REFERENCE.md) remains the authority for implemented APIs and
 qualification status. This proposal defines intended behavior, implementation
 boundaries, and acceptance gates; examples of new configuration, commands, SQL,
-and Rust interfaces are design examples, not currently available APIs.
+and server-layer Rust interfaces remain design examples. The callable
+[crab-ltx API and current limits](crab-ltx.md#implemented-library-api) are explicitly
+marked as implemented; library/RustFS proof is not HTTP owner-publication or UI proof.
 
 ## Reading guide
 
@@ -36,7 +41,7 @@ and deployment boundaries.
 | [Architecture, scope, and guarantees](overview.md) | System diagram, data ownership, safety properties, and design decisions. |
 | [Current implementation and evidence](current-implementation.md) | Existing HTTP, Git, application storage, deployment, and test boundaries. |
 | [Celld architecture and Rust integration](celld-and-rust.md) | Per-cell LTX mechanics, differences from Celld, dependency strategy, and Rust ownership. |
-| [crab-ltx source integration and crate design](crab-ltx.md) | Approved Celld source reuse, licenses, capture/checksum adaptations, exact restore, and qualification. |
+| [crab-ltx source integration and crate design](crab-ltx.md) | Local/remote APIs, sparse SQL, epoch inheritance, bundles, compaction, Celld provenance and qualification. |
 | [Object storage and commit publication](storage-protocol.md) | Control record, immutable recovery graph, publication CAS, and response gating. |
 | [Ownership, placement, and load balancing](ownership-and-load-balancing.md) | Leases, activation, capacity admission, idle handoff, and fleet balancing. |
 | [SQLite runtime and application data model](sqlite-and-data-model.md) | WAL capture, checkpoints, read consistency, schema, transactions, and retries. |

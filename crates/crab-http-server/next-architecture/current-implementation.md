@@ -1,6 +1,6 @@
 # Current implementation and evidence
 
-[Design index](README.md) · Proposed architecture; not implemented.
+[Design index](README.md) · Current HTTP behavior plus implemented local replication library.
 
 ## Current implementation and evidence
 
@@ -28,6 +28,27 @@ Current persistence is described in
 [pagination and storage](../REFERENCE.md#understand-pagination-and-storage).
 The `app/v1` namespace includes visible objects, sequences, claims, reservations,
 and tombstones. The migration cannot infer the complete state from UI list APIs.
+
+### Replication crate now available
+
+[crab-ltx](../../crab-ltx/README.md) is a workspace member based on pinned,
+modified Celld source. It supplies owned SQLite writer/capture lifecycle,
+checksum-bearing LTX, full snapshots, exact verified local restore and complete
+chain compaction. Empty default features keep the local library provider/runtime
+independent. Optional `replica` adds existing Crab storage/Tokio, immutable
+remote manifests, epoch-head CAS, inherited exact recovery/resume, bundles,
+range/level compaction, immutable views and writable sparse SQL with hydration.
+It does not introduce a second SQLite library. See the
+[parity matrix](../../crab-ltx/PARITY.md) for API and qualification boundaries.
+
+Local tests cover commit/rollback, checkpoint/shrink/regrowth, source-directory
+loss, process kill, independent CRC/format vectors and byte-identical
+snapshot/compaction recovery. Remote tests additionally cover concurrent/stale
+CAS, malformed indexes/heads, range corruption and paged SQLite. A real RustFS
+round trip covers publication, source loss, SQL readback and remote compaction.
+This is library-level evidence only. No HTTP route
+currently calls `ManagedDb`; application JSON persistence, Git publication and
+browser behavior above remain unchanged. See [remaining gates](validation-and-delivery.md#verification-scope-for-the-current-implementation).
 
 ### Existing tests to preserve or evolve
 

@@ -52,6 +52,25 @@ class CacheScopeTests(unittest.TestCase):
 
 
 class StorageScopeTests(unittest.TestCase):
+    def test_object_store_feature_ownership_distinguishes_test_fixtures(self):
+        metadata = {"packages": [{
+            "name": "crab-ltx",
+            "dependencies": [
+                {
+                    "name": "object_store", "kind": None,
+                    "uses_default_features": False, "features": [],
+                },
+                {
+                    "name": "object_store", "kind": "dev",
+                    "uses_default_features": False, "features": ["fs"],
+                },
+            ],
+        }]}
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(GATES.check_object_store_features(metadata))
+            metadata["packages"][0]["dependencies"][0]["features"] = ["fs"]
+            self.assertFalse(GATES.check_object_store_features(metadata))
+
     def test_dependency_prefixes_ignore_words_embedded_in_test_names(self):
         metadata = {"packages": [{
             "name": "crab-storage",
