@@ -5,9 +5,9 @@ use std::sync::{
 
 use bytes::Bytes;
 use crab_cell_runtime::{
-    CellAuthority, CellExecutor, CellId, CellPublisher, CommandExecution, Control, Digest,
-    HandlerOutcome, IncarnationId, MutationIdentity, Owner, RequestId, SessionId, StoredOutcome,
-    Transition, VersionedControl, install_runtime_schema,
+    CellAuthority, CellExecutor, CellId, CellPublisher, CommandExecution, Control, ControlState,
+    Digest, HandlerOutcome, IncarnationId, MutationIdentity, Owner, RequestId, SessionId,
+    StoredOutcome, Transition, VersionedControl, install_runtime_schema,
 };
 use crab_ltx::{CellReplica, Limits, ManagedDb};
 use crab_storage::{CellStorageLayout, Store};
@@ -338,6 +338,81 @@ async fn lost_publication_response_reconciles_without_replaying_sql() {
     assert_eq!(publisher.control().value(), &winner);
     assert!(executor.pending().is_none());
     executor.close().unwrap();
+}
+
+#[tokio::test]
+async fn published_root_observed_after_takeover_fences_the_old_executor() {
+    let Fixture {
+        _directory,
+        database: _,
+        cell,
+        incarnation,
+        layout,
+        replica,
+        mut executor,
+    } = fixture();
+    let (initial, authority, stale) = initialized_authority(&layout, cell, incarnation).await;
+    let identity = MutationIdentity {
+        request_id: RequestId::from_bytes([18; 16]),
+        issued_at_ms: 100,
+        expires_at_ms: 20_000,
+    };
+    executor
+        .execute(
+            identity,
+            Digest::from_bytes([19; 32]),
+            110,
+            RESULT_LIMIT,
+            |transaction| {
+                transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                Ok(HandlerOutcome::Success(
+                    b"published-before-takeover".to_vec(),
+                ))
+            },
+        )
+        .unwrap();
+    let pending = executor.pending().unwrap();
+    let prepared = replica
+        .prepare(None, pending.cuts(), pending.outcome().commit_sequence(), 1)
+        .await
+        .unwrap();
+    let published = authority
+        .transition(
+            &stale,
+            initial.publish_prepared(&prepared, None).unwrap(),
+            Transition::Publish,
+        )
+        .await
+        .unwrap();
+    let mut takeover = published.value().clone();
+    takeover.epoch += 1;
+    takeover.revision += 1;
+    takeover.progress += 1;
+    takeover.state = ControlState::Recovering;
+    takeover.owner = Some(Owner {
+        session: SessionId::from_bytes([20; 16]),
+        endpoint: "https://replacement.internal:8081".into(),
+    });
+    authority
+        .transition(&published, takeover, Transition::Takeover)
+        .await
+        .unwrap();
+
+    let mut publisher = CellPublisher::new(replica, authority, stale);
+    assert!(matches!(
+        publisher.publish_pending(&mut executor, None).await,
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
+    assert!(matches!(
+        executor.execute(
+            identity,
+            Digest::from_bytes([19; 32]),
+            111,
+            RESULT_LIMIT,
+            |_| Ok(HandlerOutcome::Success(Vec::new())),
+        ),
+        Err(crab_cell_runtime::Error::Fenced)
+    ));
 }
 
 #[tokio::test]

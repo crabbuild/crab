@@ -17,8 +17,15 @@ drain. Catalog-driven `activate_restored` reserves active-Cell capacity before
 remote reads, opens only control's exact immutable root through the sparse VFS on
 the assigned SQL worker, verifies `sys_meta` and root position/sequence, reloads
 authority after recovery, and accepts only the same control or pure renewals.
-Deadline/watchdog enforcement, later-root request resolution, read dispatch and
-the fenced recovery supervisor remain to implement.
+`bootstrap` reserves capacity first, exclusively creates the local file through
+the replica's host, installs runtime and compiled application schema in one
+worker-owned transaction, captures the initial LTX cut, publishes a sequence-zero
+root and only then exposes a handle. Failed initialization rolls back; failed
+publication closes the worker-owned database while leaving its local artifacts
+quarantined. A reconciled exact root is accepted only while the resulting
+control is the expected publication or its pure renewal; a later takeover fences
+the old executor. Deadline/watchdog enforcement, later-root request resolution,
+read dispatch and the fenced recovery supervisor remain to implement.
 
 ## Rust interfaces and ownership
 

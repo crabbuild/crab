@@ -39,16 +39,35 @@ impl CellPublisher {
         pending: &crate::PendingCommit,
     ) -> Result<crab_ltx::PreparedRoot> {
         let base = self.observed.value().ltx_root();
+        self.prepare_cuts(
+            base.as_ref(),
+            pending.cuts(),
+            pending.outcome().commit_sequence(),
+        )
+        .await
+    }
+
+    pub(crate) async fn prepare_initial(
+        &self,
+        cuts: &crab_ltx::CaptureBatch,
+    ) -> Result<crab_ltx::PreparedRoot> {
+        if self.observed.value().root.is_some() {
+            return Err(Error::Control("bootstrap control already has a root"));
+        }
+        self.prepare_cuts(None, cuts, 0).await
+    }
+
+    async fn prepare_cuts(
+        &self,
+        base: Option<&crab_ltx::RootRef>,
+        cuts: &crab_ltx::CaptureBatch,
+        commit_sequence: u64,
+    ) -> Result<crab_ltx::PreparedRoot> {
         let mut backoff = PublicationBackoff::default();
         loop {
             match self
                 .replica
-                .prepare(
-                    base.as_ref(),
-                    pending.cuts(),
-                    pending.outcome().commit_sequence(),
-                    self.observed.value().schema,
-                )
+                .prepare(base, cuts, commit_sequence, self.observed.value().schema)
                 .await
             {
                 Ok(prepared) => return Ok(prepared),
@@ -73,7 +92,7 @@ impl CellPublisher {
                 .publish_prepared(prepared, next_due_ms)?;
             match self
                 .authority
-                .transition(&self.observed, successor, Transition::Publish)
+                .transition(&self.observed, successor.clone(), Transition::Publish)
                 .await
             {
                 Ok(published) => {
@@ -93,7 +112,11 @@ impl CellPublisher {
                     };
                     if current.value().ltx_root() == Some(prepared.root()) {
                         self.observed = current;
-                        return Ok(prepared.root());
+                        return if self.observed.value().is_same_or_pure_renewal_of(&successor) {
+                            Ok(prepared.root())
+                        } else {
+                            Err(Error::Fenced)
+                        };
                     }
                     if current
                         .value()

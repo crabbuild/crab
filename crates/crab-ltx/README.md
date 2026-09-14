@@ -115,6 +115,7 @@ The next Cell runtime uses `CellReplica`, not the standalone epoch head:
 | API | Result |
 | --- | --- |
 | `CellReplica::new(layout, cell, incarnation, limits)` | Binds every immutable path to one typed Cell incarnation and rejects staged stores |
+| `CellReplica::open_new(path)` | Exclusively creates a fresh local database with the replica's filesystem, SQLite VFS and limits for worker-owned bootstrap |
 | `prepare(base, cuts, sequence, schema).await` | Admits the complete chain, verifies native LTX/index bytes, writes content-addressed directory/descriptor/root objects and returns an unforgeable `PreparedRoot`; writes no mutable key |
 | `open_root(root).await` | Reopens the exact digest, validates canonical metadata, scope, chain and the authenticated radix root without downloading LTX bodies or every directory leaf |
 | `VerifiedRoot::paged().read_page(page).await` | Walks only the selected hash-pinned radix path, range-reads its LTX frame and verifies frame BLAKE3, decoded page number and page checksum |

@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, exact-root sparse activation, fixed SQL workers, bounded FIFO publication, retry, unknown outcomes and drain | Add deadline/read/recovery supervision, later-root resolution and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, bounded FIFO publication, retry, unknown outcomes and drain | Add deadline/read/recovery supervision, later-root resolution and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -72,9 +72,15 @@ proof-before-control creation and local-session activation checks are implemente
 Exact-root restore now reserves active-Cell admission before I/O, prepares the
 authenticated checksum index, opens SQLite on the assigned worker, verifies
 `sys_meta` against control/root, and reloads authority before serving. Complete
-deadlines/SQLite interruption, read jobs, later-root request resolution, fenced
-takeover recovery, and panic supervision. All transitions use the existing Store
-conditional primitives, preserving sources.
+bootstrap now exclusively creates the local database with the replica host,
+installs runtime plus application schema in one worker transaction, captures and
+publishes its initial root before returning a handle, and releases activation
+capacity after initialization failure. Caller-opened runtime activation has been
+removed. Exact-root lost-response reconciliation also rejects a subsequent
+takeover instead of letting the old executor serve. Complete deadlines/SQLite
+interruption, read jobs, later-root request resolution, fenced takeover recovery,
+and panic supervision. All transitions use the existing Store conditional
+primitives, preserving sources.
 
 Add `crates/crab-cell-runtime/tests/publication.rs`:
 
@@ -116,9 +122,14 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
 - `source_loss_takeover_restores_exact_root_and_continues_publication` deletes
   bootstrap and first-owner local state, changes owner session, restores from the
   published root and advances the command sequence again.
+- `failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity` proves
+  application migration rollback leaves no root and returns the one active-Cell
+  slot for a successful retry at a fresh destination.
 
 `publication_rebases_over_a_pure_lease_renewal_without_sql_replay` covers the
-coordinator's latest-token retry path.
+coordinator's latest-token retry path;
+`published_root_observed_after_takeover_fences_the_old_executor` proves that
+durability confirmation does not retain stale serving authority.
 
 Current catalog coverage is in `crates/crab-cell-runtime/tests/catalog.rs`:
 

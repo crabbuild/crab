@@ -73,6 +73,10 @@ avoid a network hop, but cannot bypass identity, size or durability checks.
 
 The current lower-level implementation is intentionally narrower than the typed
 registry below. `CellRuntime::new` binds the node session and byte budget.
+`CellRuntime::bootstrap` consumes an unpublished owned control, exclusively
+creates the local SQLite file on its stable worker, runs the runtime schema and
+one compiled Rust initializer atomically, captures and publishes the initial
+root, and returns no handle before that root is authoritative.
 `CellRuntime::activate_restored` consumes an unforgeable `CatalogProof`, verifies
 that control belongs to that Cell and node session, reserves node activation,
 opens control's exact immutable root as a fresh sparse writer on its stable SQL

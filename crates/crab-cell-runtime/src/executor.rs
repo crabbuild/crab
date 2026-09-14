@@ -147,6 +147,36 @@ impl CellExecutor {
         }
     }
 
+    pub(crate) fn bootstrap(
+        mut db: ManagedDb,
+        cell: CellId,
+        incarnation: IncarnationId,
+        schema: u32,
+        initialize: impl FnOnce(&crab_ltx::rusqlite::Transaction<'_>) -> Result<()>,
+    ) -> Result<(Self, CaptureBatch)> {
+        let initialized = db.transaction_with(|transaction| {
+            crate::schema::install_runtime_schema_in(transaction, cell, incarnation, schema)?;
+            initialize(transaction)
+        });
+        if let Err(error) = initialized {
+            let error = transaction_error(error);
+            let _ = db.close();
+            return Err(error);
+        }
+        let cuts = match db.capture() {
+            Ok(cuts) if !cuts.segments.is_empty() => cuts,
+            Ok(_) => {
+                let _ = db.close();
+                return Err(Error::Control("bootstrap produced no LTX cut"));
+            }
+            Err(error) => {
+                let _ = db.close();
+                return Err(error.into());
+            }
+        };
+        Ok((Self::new(db, cell, incarnation, schema), cuts))
+    }
+
     pub(crate) fn from_restored(
         mut db: ManagedDb,
         cell: CellId,
@@ -464,5 +494,41 @@ fn stored_outcome(outcome: i64, result: Vec<u8>, sequence: i64) -> Result<Stored
             commit_sequence,
         }),
         _ => Err(Error::Command("invalid stored request outcome")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restored_executor_rejects_root_sequence_ahead_of_sqlite_metadata() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("cell.sqlite");
+        let cell = CellId::from_bytes([31; 32]);
+        let incarnation = IncarnationId::from_bytes([32; 16]);
+        let mut connection = crab_ltx::rusqlite::Connection::open(&path).unwrap();
+        crate::install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
+        drop(connection);
+        let mut db = ManagedDb::open(&path, crab_ltx::Limits::default()).unwrap();
+        db.transaction(|transaction| {
+            transaction.execute("UPDATE sys_meta SET logical_time_ms = 1", [])?;
+            Ok(())
+        })
+        .unwrap();
+        db.capture().unwrap();
+        let root = crab_ltx::RootRef {
+            cell: *cell.as_bytes(),
+            incarnation: *incarnation.as_bytes(),
+            digest: [33; 32],
+            position: db.position(),
+            commit_sequence: 1,
+        };
+        assert!(matches!(
+            CellExecutor::from_restored(db, cell, incarnation, 1, root),
+            Err(Error::Control(
+                "restored SQLite metadata does not match authoritative root"
+            ))
+        ));
     }
 }

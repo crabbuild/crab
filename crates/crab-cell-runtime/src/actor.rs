@@ -13,9 +13,9 @@ use tokio::{
 };
 
 use crate::{
-    CatalogProof, CellAuthority, CellExecutor, CellId, CellPublisher, Digest, Error,
-    MutationIdentity, SessionId, SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
-    worker::{CellReservation, Handler, WorkerState},
+    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, MutationIdentity, SessionId,
+    SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
+    worker::{CellReservation, Handler, Initializer, WorkerState},
 };
 
 const INGRESS_REQUESTS: usize = 1_024;
@@ -76,18 +76,42 @@ impl CellRuntime {
         })
     }
 
-    /// Activates one restored executor and binds its publication authority.
-    pub async fn activate(
+    /// Creates, initializes and publishes a new Cell before returning a handle.
+    pub async fn bootstrap<F>(
         &self,
         catalog: CatalogProof,
-        executor: CellExecutor,
         replica: crab_ltx::CellReplica,
         authority: CellAuthority,
         observed: VersionedControl,
-    ) -> crate::Result<CellHandle> {
+        destination: PathBuf,
+        initialize: F,
+    ) -> crate::Result<CellHandle>
+    where
+        F: for<'connection> FnOnce(
+                &crab_ltx::rusqlite::Transaction<'connection>,
+            ) -> crate::Result<()>
+            + Send
+            + 'static,
+    {
+        self.activation_cell(&catalog, &observed)?;
+        if observed.value().state != crate::ControlState::Recovering
+            || observed.value().root.is_some()
+        {
+            return Err(Error::Control("bootstrap requires an unpublished control"));
+        }
+        let reservation = self.inner.pool.reserve_activation()?;
+        let incarnation = observed.value().incarnation;
+        let schema = observed.value().schema;
         self.activate_inner(
             catalog,
-            Activation::Opened(Box::new(executor)),
+            Activation::Bootstrap(Box::new(BootstrapActivation {
+                replica: replica.clone(),
+                destination,
+                incarnation,
+                schema,
+                initialize: Box::new(initialize),
+                reservation,
+            })),
             replica,
             authority,
             observed,
@@ -191,8 +215,8 @@ impl CellRuntime {
 }
 
 enum Activation {
-    Opened(Box<CellExecutor>),
     Restored(Box<RestoredActivation>),
+    Bootstrap(Box<BootstrapActivation>),
 }
 
 struct RestoredActivation {
@@ -201,6 +225,15 @@ struct RestoredActivation {
     incarnation: crate::IncarnationId,
     schema: u32,
     root: crab_ltx::RootRef,
+    reservation: CellReservation,
+}
+
+struct BootstrapActivation {
+    replica: crab_ltx::CellReplica,
+    destination: PathBuf,
+    incarnation: crate::IncarnationId,
+    schema: u32,
+    initialize: Initializer,
     reservation: CellReservation,
 }
 
@@ -456,8 +489,8 @@ fn handle_message(
             });
             let pool = pool.clone();
             tasks.spawn(async move {
+                let mut publisher = publisher;
                 let result = match activation {
-                    Activation::Opened(executor) => pool.activate(cell, *executor).await,
                     Activation::Restored(activation) => {
                         let RestoredActivation {
                             database,
@@ -477,6 +510,9 @@ fn handle_message(
                             reservation,
                         )
                         .await
+                    }
+                    Activation::Bootstrap(activation) => {
+                        bootstrap_and_publish(cell, &pool, &mut publisher, *activation).await
                     }
                 };
                 TaskResult::Activated {
@@ -531,6 +567,46 @@ fn handle_message(
             }
         }
     }
+}
+
+async fn bootstrap_and_publish(
+    cell: CellId,
+    pool: &SqlWorkerPool,
+    publisher: &mut CellPublisher,
+    activation: BootstrapActivation,
+) -> crate::Result<()> {
+    let BootstrapActivation {
+        replica,
+        destination,
+        incarnation,
+        schema,
+        initialize,
+        reservation,
+    } = activation;
+    let cuts = pool
+        .bootstrap(
+            cell,
+            replica,
+            destination,
+            incarnation,
+            schema,
+            initialize,
+            reservation,
+        )
+        .await?;
+    let publication = async {
+        let prepared = publisher.prepare_initial(&cuts).await?;
+        publisher.publish_prepared(&prepared, None).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = publication {
+        return match pool.deactivate(cell).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(cleanup),
+        };
+    }
+    Ok(())
 }
 
 fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet<TaskResult>) {

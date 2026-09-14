@@ -27,6 +27,12 @@ pub(crate) type Handler = Box<
         + 'static,
 >;
 
+pub(crate) type Initializer = Box<
+    dyn for<'connection> FnOnce(&crab_ltx::rusqlite::Transaction<'connection>) -> Result<()>
+        + Send
+        + 'static,
+>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerState {
     Ready,
@@ -109,6 +115,35 @@ impl SqlWorkerPool {
                 reservation,
                 reply,
             },
+        )
+        .await?;
+        receive(response).await
+    }
+
+    /// Creates and captures a new Cell on its assigned SQL worker.
+    pub(crate) async fn bootstrap(
+        &self,
+        cell: CellId,
+        replica: crab_ltx::CellReplica,
+        destination: PathBuf,
+        incarnation: crate::IncarnationId,
+        schema: u32,
+        initialize: Initializer,
+        reservation: CellReservation,
+    ) -> Result<crab_ltx::CaptureBatch> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::Bootstrap(Box::new(WorkerBootstrap {
+                cell,
+                replica,
+                destination,
+                incarnation,
+                schema,
+                initialize,
+                reservation,
+                reply,
+            })),
         )
         .await?;
         receive(response).await
@@ -296,6 +331,7 @@ enum WorkerCommand {
         reservation: CellReservation,
         reply: oneshot::Sender<Result<()>>,
     },
+    Bootstrap(Box<WorkerBootstrap>),
     Execute {
         cell: CellId,
         identity: MutationIdentity,
@@ -331,6 +367,17 @@ enum WorkerCommand {
         cell: CellId,
         reply: oneshot::Sender<Result<()>>,
     },
+}
+
+struct WorkerBootstrap {
+    cell: CellId,
+    replica: crab_ltx::CellReplica,
+    destination: PathBuf,
+    incarnation: crate::IncarnationId,
+    schema: u32,
+    initialize: Initializer,
+    reservation: CellReservation,
+    reply: oneshot::Sender<Result<crab_ltx::CaptureBatch>>,
 }
 
 struct ActiveCell {
@@ -393,6 +440,35 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                                 executor,
                                 _reservation: reservation,
                             });
+                        }),
+                };
+                let _ = reply.send(result);
+            }
+            WorkerCommand::Bootstrap(bootstrap) => {
+                let WorkerBootstrap {
+                    cell,
+                    replica,
+                    destination,
+                    incarnation,
+                    schema,
+                    initialize,
+                    reservation,
+                    reply,
+                } = *bootstrap;
+                let result = match cells.entry(cell) {
+                    std::collections::hash_map::Entry::Occupied(_) => Err(Error::CellAlreadyActive),
+                    std::collections::hash_map::Entry::Vacant(entry) => replica
+                        .open_new(&destination)
+                        .map_err(Error::from)
+                        .and_then(|db| {
+                            CellExecutor::bootstrap(db, cell, incarnation, schema, initialize)
+                        })
+                        .map(|(executor, cuts)| {
+                            entry.insert(ActiveCell {
+                                executor,
+                                _reservation: reservation,
+                            });
+                            cuts
                         }),
                 };
                 let _ = reply.send(result);

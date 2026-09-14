@@ -1,13 +1,12 @@
 use std::sync::{Arc, mpsc};
 
 use crab_cell_runtime::{
-    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellExecutor, CellRuntime, CellTarget,
-    ControlState, Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId, Owner,
-    RequestId, SessionId, SqlWorkerPool, StoredOutcome, TenantId, Transition,
-    install_runtime_schema,
+    ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime, CellTarget, ControlState,
+    Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId, Owner, RequestId,
+    SessionId, SqlWorkerPool, StoredOutcome, TenantId, Transition,
 };
-use crab_ltx::{CellReplica, Limits, ManagedDb};
-use crab_storage::{CellStorageLayout, Store};
+use crab_ltx::{CellReplica, Limits};
+use crab_storage::{CellObjectKind, CellStorageLayout, Store};
 use object_store::{memory::InMemory, path::Path};
 
 struct Fixture {
@@ -16,7 +15,6 @@ struct Fixture {
     target: CellTarget,
     layout: CellStorageLayout,
     replica: CellReplica,
-    executor: Option<CellExecutor>,
 }
 
 fn fixture() -> Fixture {
@@ -40,35 +38,16 @@ fn fixture() -> Fixture {
     .unwrap();
     let directory = tempfile::TempDir::new().unwrap();
     let database = directory.path().join("cell.sqlite");
-    let mut connection = crab_ltx::rusqlite::Connection::open(&database).unwrap();
-    install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
-        )
-        .unwrap();
-    drop(connection);
-    let writer = ManagedDb::open(&database, Limits::default()).unwrap();
     Fixture {
         _directory: directory,
         database,
         target,
         layout,
         replica,
-        executor: Some(CellExecutor::new(writer, cell, incarnation, 1)),
     }
 }
 
-async fn activate(fixture: &mut Fixture, node_bytes: usize) -> crab_cell_runtime::CellHandle {
-    let replica = fixture.replica.clone();
-    activate_with_replica(fixture, node_bytes, replica).await
-}
-
-async fn activate_with_replica(
-    fixture: &mut Fixture,
-    node_bytes: usize,
-    replica: CellReplica,
-) -> crab_cell_runtime::CellHandle {
+async fn activate(fixture: &Fixture, node_bytes: usize) -> crab_cell_runtime::CellHandle {
     let catalog =
         crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
     let proof = catalog
@@ -99,12 +78,18 @@ async fn activate_with_replica(
     let runtime =
         CellRuntime::new(SqlWorkerPool::new(2, 10).unwrap(), node_bytes, session).unwrap();
     runtime
-        .activate(
+        .bootstrap(
             proof,
-            fixture.executor.take().unwrap(),
-            replica,
+            fixture.replica.clone(),
             authority,
             observed,
+            fixture.database.clone(),
+            |transaction| {
+                transaction.execute_batch(
+                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+                )?;
+                Ok(())
+            },
         )
         .await
         .unwrap()
@@ -120,8 +105,8 @@ fn identity(byte: u8) -> MutationIdentity {
 
 #[tokio::test]
 async fn dispatcher_serializes_and_publishes_commands_before_drain() {
-    let mut fixture = fixture();
-    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
     let first = {
         let handle = handle.clone();
         tokio::spawn(async move {
@@ -181,8 +166,8 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
 
 #[tokio::test]
 async fn cancelled_command_waiter_is_resolved_by_original_identity() {
-    let mut fixture = fixture();
-    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
     let request = identity(10);
     let digest = Digest::from_bytes([11; 32]);
     let (started_tx, started_rx) = mpsc::channel();
@@ -229,8 +214,8 @@ async fn cancelled_command_waiter_is_resolved_by_original_identity() {
 
 #[tokio::test]
 async fn node_byte_admission_rejects_before_sql_execution() {
-    let mut fixture = fixture();
-    let handle = activate(&mut fixture, 1024 * 1024).await;
+    let fixture = fixture();
+    let handle = activate(&fixture, 1024 * 1024).await;
     assert!(matches!(
         handle
             .execute(
@@ -250,10 +235,19 @@ async fn node_byte_admission_rejects_before_sql_execution() {
 
 #[tokio::test]
 async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
-    let mut fixture = fixture();
-    let wrong_replica =
-        CellReplica::new(fixture.layout.clone(), [99; 32], [2; 16], Limits::default()).unwrap();
-    let handle = activate_with_replica(&mut fixture, 16 * 1024 * 1024, wrong_replica).await;
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let cell = fixture.target.cell_id();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let control = authority.load(cell).await.unwrap().unwrap();
+    let root = control.value().root.as_ref().unwrap();
+    let root_path = fixture.layout.incarnation_object_path(
+        cell.as_bytes(),
+        control.value().incarnation.as_bytes(),
+        root.digest.as_bytes(),
+        CellObjectKind::Root,
+    );
+    fixture.layout.store().delete(&root_path).await.unwrap();
     let request = identity(14);
     let digest = Digest::from_bytes([15; 32]);
     assert!(matches!(
@@ -281,8 +275,8 @@ async fn post_commit_publication_failure_returns_resolvable_unknown_outcome() {
 
 #[tokio::test]
 async fn proven_handler_rollback_keeps_the_cell_servable() {
-    let mut fixture = fixture();
-    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
     assert!(matches!(
         handle
             .execute(
@@ -342,8 +336,8 @@ async fn proven_handler_rollback_keeps_the_cell_servable() {
 
 #[tokio::test]
 async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
-    let mut fixture = fixture();
-    let handle = activate(&mut fixture, 16 * 1024 * 1024).await;
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
     let first = {
@@ -404,7 +398,7 @@ async fn per_cell_request_admission_caps_inflight_and_queued_commands() {
 
 #[tokio::test]
 async fn activation_rejects_control_owned_by_another_node_session() {
-    let mut fixture = fixture();
+    let fixture = fixture();
     let catalog =
         crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
     let proof = catalog
@@ -439,16 +433,92 @@ async fn activation_rejects_control_owned_by_another_node_session() {
     .unwrap();
     assert!(matches!(
         runtime
-            .activate(
+            .bootstrap(
                 proof,
-                fixture.executor.take().unwrap(),
                 fixture.replica,
                 authority,
                 observed,
+                fixture.database,
+                |_| Ok(()),
             )
             .await,
         Err(crab_cell_runtime::Error::Fenced)
     ));
+}
+
+#[tokio::test]
+async fn failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity() {
+    let fixture = fixture();
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &fixture.target,
+                CatalogRole::Repository,
+                Digest::from_bytes([5; 32]),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let session = SessionId::from_bytes([4; 16]);
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let observed = authority
+        .create_initial(
+            &proof,
+            IncarnationId::from_bytes([2; 16]),
+            Owner {
+                session,
+                endpoint: "https://node.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let runtime =
+        CellRuntime::new(SqlWorkerPool::new(1, 1).unwrap(), 2 * 1024 * 1024, session).unwrap();
+    assert!(matches!(
+        runtime
+            .bootstrap(
+                proof.clone(),
+                fixture.replica.clone(),
+                authority.clone(),
+                observed,
+                fixture.database.clone(),
+                |transaction| {
+                    transaction.execute("CREATE TABLE should_rollback(value INTEGER)", [])?;
+                    Err(crab_cell_runtime::Error::Command("migration rejected"))
+                },
+            )
+            .await,
+        Err(crab_cell_runtime::Error::Command("migration rejected"))
+    ));
+    let current = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.value().state, ControlState::Recovering);
+    assert!(current.value().root.is_none());
+
+    let handle = runtime
+        .bootstrap(
+            proof,
+            fixture.replica,
+            authority,
+            current,
+            fixture.database.with_file_name("replacement.sqlite"),
+            |transaction| {
+                transaction.execute_batch(
+                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    handle.drain().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -485,32 +555,8 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
         .await
         .unwrap();
 
-    let bootstrap = tempfile::TempDir::new().unwrap();
-    let bootstrap_path = bootstrap.path().join("bootstrap.sqlite");
-    let mut connection = crab_ltx::rusqlite::Connection::open(&bootstrap_path).unwrap();
-    install_runtime_schema(&mut connection, cell, incarnation, 1).unwrap();
-    connection
-        .execute_batch(
-            "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
-        )
-        .unwrap();
-    drop(connection);
-    let mut writer = ManagedDb::open(&bootstrap_path, Limits::default()).unwrap();
-    writer
-        .transaction(|transaction| {
-            transaction.execute("UPDATE sys_meta SET logical_time_ms = 1", [])?;
-            Ok(())
-        })
-        .unwrap();
-    let prepared = replica
-        .prepare(None, &writer.capture().unwrap(), 0, 1)
-        .await
-        .unwrap();
-    writer.close().unwrap();
-    bootstrap.close().unwrap();
-
     let first_session = SessionId::from_bytes([46; 16]);
-    let authority = CellAuthority::new(layout);
+    let authority = CellAuthority::new(layout.clone());
     let recovering = authority
         .create_initial(
             &proof,
@@ -522,14 +568,6 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
         )
         .await
         .unwrap();
-    let serving = recovering
-        .value()
-        .publish_prepared(&prepared, None)
-        .unwrap();
-    let serving = authority
-        .transition(&recovering, serving, Transition::Publish)
-        .await
-        .unwrap();
 
     let first_local = tempfile::TempDir::new().unwrap();
     let runtime = CellRuntime::new(
@@ -539,12 +577,18 @@ async fn source_loss_takeover_restores_exact_root_and_continues_publication() {
     )
     .unwrap();
     let first = runtime
-        .activate_restored(
+        .bootstrap(
             proof.clone(),
             replica.clone(),
             authority.clone(),
-            serving,
+            recovering,
             first_local.path().join("cell.sqlite"),
+            |transaction| {
+                transaction.execute_batch(
+                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+                )?;
+                Ok(())
+            },
         )
         .await
         .unwrap();

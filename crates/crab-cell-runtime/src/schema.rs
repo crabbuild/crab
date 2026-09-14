@@ -21,12 +21,25 @@ pub fn install_runtime_schema(
     connection.execute_batch("PRAGMA foreign_keys = ON")?;
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    install_runtime_schema_in(&transaction, cell, incarnation, schema_version)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+pub(crate) fn install_runtime_schema_in(
+    transaction: &rusqlite::Transaction<'_>,
+    cell: CellId,
+    incarnation: IncarnationId,
+    schema_version: u32,
+) -> Result<()> {
+    if schema_version == 0 {
+        return Err(Error::Control("invalid initial schema version"));
+    }
     transaction.execute_batch(RUNTIME_SCHEMA)?;
     transaction.execute(
         "INSERT INTO sys_meta(singleton, cell_id, incarnation, commit_sequence, logical_time_ms, schema_version) VALUES (1, ?1, ?2, 0, 0, ?3)",
         (cell.as_bytes().as_slice(), incarnation.as_bytes().as_slice(), schema_version),
     )?;
-    transaction.commit()?;
     Ok(())
 }
 
