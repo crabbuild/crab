@@ -15,7 +15,7 @@ use tokio::{
 use crate::{
     CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, MutationIdentity, SessionId,
     SqlWorkerPool, StoredOutcome, VersionedControl, WorkerExecution,
-    worker::{CellReservation, Handler, Initializer, WorkerState},
+    worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
 const INGRESS_REQUESTS: usize = 1_024;
@@ -261,38 +261,7 @@ impl CellHandle {
             + Send
             + 'static,
     {
-        if operation_bytes > MAX_OPERATION_BYTES || max_result_bytes > MAX_RESULT_BYTES {
-            return Err(Error::Capacity("command operation or result bytes"));
-        }
-        let reservation_bytes = operation_bytes
-            .checked_add(max_result_bytes)
-            .ok_or(Error::Capacity("command mailbox bytes"))?;
-        if reservation_bytes == 0 {
-            return Err(Error::Capacity("command mailbox bytes"));
-        }
-        if self.admission.fenced.load(Ordering::Acquire) {
-            return Err(Error::Fenced);
-        }
-        if self.admission.draining.load(Ordering::Acquire) {
-            return Err(Error::CellDraining);
-        }
-        let request = try_one(self.admission.requests.clone(), "Cell mailbox requests")?;
-        let cell_bytes = try_many(
-            self.admission.bytes.clone(),
-            reservation_bytes,
-            "Cell mailbox bytes",
-        )?;
-        let node_bytes = try_many(
-            self.inner.node_bytes.clone(),
-            reservation_bytes,
-            "node mailbox bytes",
-        )?;
-        if self.admission.fenced.load(Ordering::Acquire) {
-            return Err(Error::Fenced);
-        }
-        if self.admission.draining.load(Ordering::Acquire) {
-            return Err(Error::CellDraining);
-        }
+        let admission = self.reserve_work(operation_bytes, max_result_bytes)?;
 
         let (reply, response) = oneshot::channel();
         self.inner
@@ -307,13 +276,79 @@ impl CellHandle {
                 next_due_ms,
                 handler: Some(Box::new(handler)),
                 reply,
-                _request: request,
-                _cell_bytes: cell_bytes,
-                _node_bytes: node_bytes,
+                _work: admission,
             })))
             .await
             .map_err(|_| Error::RuntimeClosed)?;
         response.await.map_err(|_| Error::RuntimeClosed)?
+    }
+
+    /// Runs one FIFO-ordered bounded read after all preceding writes publish.
+    pub async fn query<F>(
+        &self,
+        operation_bytes: usize,
+        max_result_bytes: usize,
+        handler: F,
+    ) -> crate::Result<Vec<u8>>
+    where
+        F: FnOnce(&crab_ltx::rusqlite::Connection) -> crate::Result<Vec<u8>> + Send + 'static,
+    {
+        let admission = self.reserve_work(operation_bytes, max_result_bytes)?;
+
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::Query(Box::new(QueuedQuery {
+                cell: self.cell,
+                admission: self.admission.clone(),
+                max_result_bytes,
+                handler: Some(Box::new(handler)),
+                reply,
+                _work: admission,
+            })))
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        response.await.map_err(|_| Error::RuntimeClosed)?
+    }
+
+    fn reserve_work(
+        &self,
+        operation_bytes: usize,
+        max_result_bytes: usize,
+    ) -> crate::Result<WorkAdmission> {
+        if operation_bytes > MAX_OPERATION_BYTES || max_result_bytes > MAX_RESULT_BYTES {
+            return Err(Error::Capacity("operation or result bytes"));
+        }
+        let reservation_bytes = operation_bytes
+            .checked_add(max_result_bytes)
+            .filter(|bytes| *bytes != 0)
+            .ok_or(Error::Capacity("mailbox bytes"))?;
+        if self.admission.fenced.load(Ordering::Acquire) {
+            return Err(Error::Fenced);
+        }
+        if self.admission.draining.load(Ordering::Acquire) {
+            return Err(Error::CellDraining);
+        }
+        let admission = WorkAdmission {
+            _request: try_one(self.admission.requests.clone(), "Cell mailbox requests")?,
+            _cell_bytes: try_many(
+                self.admission.bytes.clone(),
+                reservation_bytes,
+                "Cell mailbox bytes",
+            )?,
+            _node_bytes: try_many(
+                self.inner.node_bytes.clone(),
+                reservation_bytes,
+                "node mailbox bytes",
+            )?,
+        };
+        if self.admission.fenced.load(Ordering::Acquire) {
+            return Err(Error::Fenced);
+        }
+        if self.admission.draining.load(Ordering::Acquire) {
+            return Err(Error::CellDraining);
+        }
+        Ok(admission)
     }
 
     /// Stops admission, publishes accepted commands, then closes the SQLite handle.
@@ -377,6 +412,7 @@ enum Message {
         reply: oneshot::Sender<crate::Result<Arc<CellAdmission>>>,
     },
     Execute(Box<QueuedCommand>),
+    Query(Box<QueuedQuery>),
     Drain {
         cell: CellId,
         admission: Arc<CellAdmission>,
@@ -394,15 +430,33 @@ struct QueuedCommand {
     next_due_ms: Option<i64>,
     handler: Option<Handler>,
     reply: oneshot::Sender<crate::Result<StoredOutcome>>,
+    _work: WorkAdmission,
+}
+
+struct QueuedQuery {
+    cell: CellId,
+    admission: Arc<CellAdmission>,
+    max_result_bytes: usize,
+    handler: Option<QueryHandler>,
+    reply: oneshot::Sender<crate::Result<Vec<u8>>>,
+    _work: WorkAdmission,
+}
+
+struct WorkAdmission {
     _request: OwnedSemaphorePermit,
     _cell_bytes: OwnedSemaphorePermit,
     _node_bytes: OwnedSemaphorePermit,
 }
 
+enum QueuedWork {
+    Command(Box<QueuedCommand>),
+    Query(Box<QueuedQuery>),
+}
+
 struct ActiveCell {
     admission: Arc<CellAdmission>,
     publisher: Option<CellPublisher>,
-    queue: VecDeque<Box<QueuedCommand>>,
+    queue: VecDeque<QueuedWork>,
     busy: bool,
     fenced: bool,
     drain: Option<oneshot::Sender<crate::Result<()>>>,
@@ -421,6 +475,12 @@ enum TaskResult {
         publisher: Box<CellPublisher>,
         command: Box<QueuedCommand>,
         result: crate::Result<StoredOutcome>,
+        fenced: bool,
+    },
+    Queried {
+        cell: CellId,
+        query: Box<QueuedQuery>,
+        result: crate::Result<Vec<u8>>,
         fenced: bool,
     },
     Deactivated {
@@ -541,7 +601,27 @@ fn handle_message(
                 }));
                 return;
             }
-            active.queue.push_back(command);
+            active.queue.push_back(QueuedWork::Command(command));
+            start_next(active, pool, tasks);
+        }
+        Message::Query(query) => {
+            let Some(active) = cells.get_mut(&query.cell) else {
+                let _ = query.reply.send(Err(Error::CellNotActive));
+                return;
+            };
+            if !Arc::ptr_eq(&active.admission, &query.admission) {
+                let _ = query.reply.send(Err(Error::CellNotActive));
+                return;
+            }
+            if active.fenced || active.drain.is_some() {
+                let _ = query.reply.send(Err(if active.fenced {
+                    Error::Fenced
+                } else {
+                    Error::CellDraining
+                }));
+                return;
+            }
+            active.queue.push_back(QueuedWork::Query(query));
             start_next(active, pool, tasks);
         }
         Message::Drain {
@@ -613,17 +693,27 @@ fn start_next(active: &mut ActiveCell, pool: &SqlWorkerPool, tasks: &mut JoinSet
     if active.busy || active.fenced {
         return;
     }
-    let Some(command) = active.queue.pop_front() else {
-        return;
-    };
-    let Some(publisher) = active.publisher.take() else {
-        let _ = command.reply.send(Err(Error::Fenced));
-        active.fenced = true;
+    let Some(work) = active.queue.pop_front() else {
         return;
     };
     active.busy = true;
     let pool = pool.clone();
-    tasks.spawn(async move { execute_and_publish(pool, Box::new(publisher), command).await });
+    match work {
+        QueuedWork::Command(command) => {
+            let Some(publisher) = active.publisher.take() else {
+                let _ = command.reply.send(Err(Error::Fenced));
+                active.fenced = true;
+                active.busy = false;
+                return;
+            };
+            tasks.spawn(
+                async move { execute_and_publish(pool, Box::new(publisher), command).await },
+            );
+        }
+        QueuedWork::Query(query) => {
+            tasks.spawn(async move { execute_query(pool, query).await });
+        }
+    }
 }
 
 async fn execute_and_publish(
@@ -686,6 +776,26 @@ async fn execute_and_publish(
     }
 }
 
+async fn execute_query(pool: SqlWorkerPool, mut query: Box<QueuedQuery>) -> TaskResult {
+    let result = match query.handler.take() {
+        Some(handler) => {
+            pool.query(query.cell, query.max_result_bytes, handler)
+                .await
+        }
+        None => Err(Error::Fenced),
+    };
+    let fenced = result.is_err() && !matches!(pool.state(query.cell).await, Ok(WorkerState::Ready));
+    if fenced {
+        let _ = pool.fence(query.cell).await;
+    }
+    TaskResult::Queried {
+        cell: query.cell,
+        query,
+        result,
+        fenced,
+    }
+}
+
 fn handle_task(
     result: TaskResult,
     pool: &SqlWorkerPool,
@@ -739,15 +849,31 @@ fn handle_task(
             active.publisher = Some(*publisher);
             active.fenced |= fenced;
             if active.fenced {
-                active.admission.fenced.store(true, Ordering::Release);
-                active.admission.draining.store(true, Ordering::Release);
-                active.admission.requests.close();
-                active.admission.bytes.close();
-                while let Some(queued) = active.queue.pop_front() {
-                    let _ = queued.reply.send(Err(Error::Fenced));
-                }
+                fence_active(active);
             }
             let _ = command.reply.send(result);
+            if active.drain.is_some() && active.queue.is_empty() {
+                start_deactivate(cell, pool, cells, transitioning, tasks);
+            } else {
+                start_next(active, pool, tasks);
+            }
+        }
+        TaskResult::Queried {
+            cell,
+            query,
+            result,
+            fenced,
+        } => {
+            let Some(active) = cells.get_mut(&cell) else {
+                let _ = query.reply.send(Err(Error::CellNotActive));
+                return;
+            };
+            active.busy = false;
+            active.fenced |= fenced;
+            if active.fenced {
+                fence_active(active);
+            }
+            let _ = query.reply.send(result);
             if active.drain.is_some() && active.queue.is_empty() {
                 start_deactivate(cell, pool, cells, transitioning, tasks);
             } else {
@@ -762,6 +888,23 @@ fn handle_task(
             transitioning.remove(&cell);
             if let Some(reply) = reply {
                 let _ = reply.send(result);
+            }
+        }
+    }
+}
+
+fn fence_active(active: &mut ActiveCell) {
+    active.admission.fenced.store(true, Ordering::Release);
+    active.admission.draining.store(true, Ordering::Release);
+    active.admission.requests.close();
+    active.admission.bytes.close();
+    while let Some(queued) = active.queue.pop_front() {
+        match queued {
+            QueuedWork::Command(command) => {
+                let _ = command.reply.send(Err(Error::Fenced));
+            }
+            QueuedWork::Query(query) => {
+                let _ = query.reply.send(Err(Error::Fenced));
             }
         }
     }

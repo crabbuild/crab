@@ -19,6 +19,17 @@ pub enum TransactionError<E: std::error::Error + 'static> {
     Capture(#[source] CrabError),
 }
 
+/// Failure from a read-only managed-database callback.
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError<E: std::error::Error + 'static> {
+    #[error("query operation failed")]
+    Operation(#[source] E),
+    #[error("SQLite read-only boundary failed")]
+    Sqlite(#[source] rusqlite::Error),
+    #[error("managed database cannot serve the query")]
+    State(#[source] CrabError),
+}
+
 /// Capture and recovery failures; none imply remote publication succeeded.
 #[derive(Debug, thiserror::Error)]
 pub enum CrabError {

@@ -8,7 +8,7 @@ does not establish a working runtime.
 
 | Source | Current behavior | Required change |
 | --- | --- | --- |
-| [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Trusted synchronous SQL callback; separate capture; local-only commit | Typed operation errors, restricted application/read callbacks and actor-owned cut transfer |
+| [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Add the final scoped SQL authorizer used by typed application contexts |
 | [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native cuts prepare immutable Cell roots; cold reads and sparse writable activation use exact digest-pinned radix paths without a mutable head | Add prepared compaction/bundles, shared node cache and streaming directory/checksum updates |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, bounded FIFO publication, retry, unknown outcomes and drain | Add deadline/read/recovery supervision, later-root resolution and primitive modules |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes and drain | Add deadline/recovery supervision, later-root resolution and primitive modules |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage | Native repository Cell integration after runtime acceptance |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -77,8 +77,10 @@ installs runtime plus application schema in one worker transaction, captures and
 publishes its initial root before returning a handle, and releases activation
 capacity after initialization failure. Caller-opened runtime activation has been
 removed. Exact-root lost-response reconciliation also rejects a subsequent
-takeover instead of letting the old executor serve. Complete deadlines/SQLite
-interruption, read jobs, later-root request resolution, fenced takeover recovery,
+takeover instead of letting the old executor serve. Ordered queries now share
+Cell/node admission and the mutation FIFO, run only after prior publication, use
+SQLite `query_only`, and enforce declared result bytes. Complete deadlines/SQLite
+interruption, later-root request resolution, fenced takeover recovery,
 and panic supervision. All transitions use the existing Store conditional
 primitives, preserving sources.
 
@@ -125,6 +127,9 @@ Current dispatcher coverage is in `crates/crab-cell-runtime/tests/actor.rs`:
 - `failed_bootstrap_keeps_control_unpublished_and_releases_cell_capacity` proves
   application migration rollback leaves no root and returns the one active-Cell
   slot for a successful retry at a fresh destination.
+- `query_waits_for_preceding_publication_and_cannot_write` proves a concurrent
+  read observes the preceding published mutation, a write through the query
+  callback is rejected, and the Cell remains readable.
 
 `publication_rebases_over_a_pure_lease_renewal_without_sql_replay` covers the
 coordinator's latest-token retry path;

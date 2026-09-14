@@ -24,8 +24,12 @@ root and only then exposes a handle. Failed initialization rolls back; failed
 publication closes the worker-owned database while leaving its local artifacts
 quarantined. A reconciled exact root is accepted only while the resulting
 control is the expected publication or its pure renewal; a later takeover fences
-the old executor. Deadline/watchdog enforcement, later-root request resolution,
-read dispatch and the fenced recovery supervisor remain to implement.
+the old executor. `CellHandle::query` uses the same request/byte admission and
+per-Cell FIFO as mutations, so it cannot observe a locally committed root before
+publication. Its worker callback runs with SQLite `query_only`, enforces the
+declared output bound, and leaves the Cell usable after a proven query error.
+Deadline/watchdog enforcement, later-root request resolution and the fenced
+recovery supervisor remain to implement.
 
 ## Rust interfaces and ownership
 
@@ -243,9 +247,10 @@ returns `OutcomeUnknown { request_id, operation_digest, source }`. A proven
 handler rollback consults worker state and leaves the Cell usable.
 
 The dispatcher uses `pending`, `bind_prepared` and `confirm_published`; direct
-access to worker-owned executors is impossible. The next supervision work must
-add wall deadlines and SQLite interruption, retain fenced Cells for takeover/
-later-root resolution instead of only stopping admission, and expose read jobs.
+access to worker-owned executors is impossible. Reads enter the same FIFO and
+execute only after the publisher returns from every preceding mutation. The next
+supervision work must add wall deadlines and SQLite interruption and retain
+fenced Cells for takeover/later-root resolution instead of only stopping admission.
 
 Drain closes admission, resolves accepted publications, captures/publishes any
 checkpoint cuts, closes SQLite, then releases ownership. Fenced sessions only

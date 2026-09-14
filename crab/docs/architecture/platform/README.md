@@ -20,7 +20,7 @@ exclusively created on their assigned SQL worker: runtime and application schema
 installation commit together, the initial cut is captured, and root publication
 completes before a handle becomes visible. The previous caller-opened runtime
 activation path has been removed. Deadlines/watchdogs, later-root request
-resolution, fenced recovery, reads, streaming directory and checksum updates,
+resolution, fenced recovery, streaming directory and checksum updates,
 prepared compaction/bundles, primitives, HTTP cutover and capacity qualification
 remain incomplete.
 

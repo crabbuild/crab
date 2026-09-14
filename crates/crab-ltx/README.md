@@ -88,6 +88,12 @@ db.close()?;
 # }
 ```
 
+`ManagedDb::transaction_with` preserves typed application failures separately
+from SQLite and WAL-boundary ambiguity. `ManagedDb::query_with` temporarily
+enables SQLite `query_only` for one synchronous callback and fences the session
+if that boundary cannot be installed or removed. This is a trusted-code
+guardrail, not a sandbox or a replacement for the runtime's scoped authorizer.
+
 Runnable demonstration, from the repository root with this worktree's external
 Cargo target directory configured:
 

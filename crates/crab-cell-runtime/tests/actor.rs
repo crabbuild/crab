@@ -164,6 +164,81 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn query_waits_for_preceding_publication_and_cannot_write() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mutation = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .execute(
+                    identity(52),
+                    Digest::from_bytes([53; 32]),
+                    20,
+                    1_024,
+                    1_024,
+                    None,
+                    move |transaction| {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                        Ok(HandlerOutcome::Success(Vec::new()))
+                    },
+                )
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+        .await
+        .unwrap();
+    let query = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .query(64, 64, |connection| {
+                    let value = connection
+                        .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                    Ok(value.to_be_bytes().to_vec())
+                })
+                .await
+        })
+    };
+    release_tx.send(()).unwrap();
+    mutation.await.unwrap().unwrap();
+    assert_eq!(query.await.unwrap().unwrap(), 1_i64.to_be_bytes());
+
+    assert!(matches!(
+        handle.query(1, 1, |_| Ok(vec![0; 2])).await,
+        Err(crab_cell_runtime::Error::Command(
+            "query result exceeds command limit"
+        ))
+    ));
+    assert!(matches!(
+        handle
+            .query(64, 64, |connection| {
+                connection.execute("UPDATE counter SET value = 99", [])?;
+                Ok(Vec::new())
+            })
+            .await,
+        Err(crab_cell_runtime::Error::Sqlite(_))
+    ));
+    assert_eq!(
+        handle
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        1_i64.to_be_bytes()
+    );
+    handle.drain().await.unwrap();
+}
+
 #[tokio::test]
 async fn cancelled_command_waiter_is_resolved_by_original_identity() {
     let fixture = fixture();

@@ -97,13 +97,25 @@ pub async fn execute<F>(
 where
     F: for<'tx> FnOnce(&rusqlite::Transaction<'tx>)
         -> Result<HandlerOutcome> + Send + 'static;
+
+pub async fn query<F>(
+    &self,
+    operation_bytes: usize,
+    max_result_bytes: usize,
+    handler: F,
+) -> Result<Vec<u8>>
+where
+    F: FnOnce(&rusqlite::Connection)
+        -> Result<Vec<u8>> + Send + 'static;
 ```
 
 This is an internal construction API, not the final application surface. The
 registry must derive the digest and byte declarations from a registered codec,
 hide the raw transaction behind `CommandContext`, and map `OutcomeUnknown` to
 `PendingMutation`. HTTP code must not accept caller-selected digests, byte limits
-or closures.
+or closures. The lower-level query shares mutation admission and FIFO ordering;
+its SQLite connection is set to `query_only` for the callback and its output is
+bounded before admission and again on the SQL worker.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {

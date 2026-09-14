@@ -396,6 +396,37 @@ impl CellExecutor {
         }
     }
 
+    /// Runs one bounded read only when no unpublished local commit exists.
+    pub fn query(
+        &mut self,
+        max_result_bytes: usize,
+        handler: impl FnOnce(&crab_ltx::rusqlite::Connection) -> Result<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        if self.fenced {
+            return Err(Error::Fenced);
+        }
+        if self.pending.is_some() {
+            return Err(Error::PendingPublication);
+        }
+        if max_result_bytes > MAX_RESULT_BYTES {
+            return Err(Error::Command("result limit exceeds 1 MiB"));
+        }
+        let result = self.db.query_with(handler);
+        match result {
+            Ok(result) if result.len() <= max_result_bytes => Ok(result),
+            Ok(_) => Err(Error::Command("query result exceeds command limit")),
+            Err(crab_ltx::QueryError::Operation(error)) => Err(error),
+            Err(crab_ltx::QueryError::Sqlite(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+            Err(crab_ltx::QueryError::State(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+        }
+    }
+
     #[must_use]
     pub fn pending(&self) -> Option<&PendingCommit> {
         self.pending.as_ref()

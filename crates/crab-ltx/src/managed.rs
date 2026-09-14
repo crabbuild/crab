@@ -307,6 +307,31 @@ impl ManagedDb {
         Ok(value)
     }
 
+    /// Runs one synchronous callback with SQLite writes disabled.
+    ///
+    /// The callback must not change connection pragmas or retain borrowed SQLite
+    /// values. Establishing or removing the read-only boundary failure fences
+    /// this capture session; an application error leaves it reusable.
+    pub fn query_with<T, E>(
+        &mut self,
+        operation: impl FnOnce(&Connection) -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, crate::QueryError<E>>
+    where
+        E: std::error::Error + 'static,
+    {
+        self.ensure_active().map_err(crate::QueryError::State)?;
+        if let Err(error) = self.writer.pragma_update(None, "query_only", true) {
+            self.fenced = true;
+            return Err(crate::QueryError::Sqlite(error));
+        }
+        let result = operation(&self.writer);
+        if let Err(error) = self.writer.pragma_update(None, "query_only", false) {
+            self.fenced = true;
+            return Err(crate::QueryError::Sqlite(error));
+        }
+        result.map_err(crate::QueryError::Operation)
+    }
+
     /// Captures committed WAL pages and all cuts made by checkpoint maintenance.
     ///
     /// Any failure fences further use, since some local cuts may already exist.

@@ -33,6 +33,9 @@ pub(crate) type Initializer = Box<
         + 'static,
 >;
 
+pub(crate) type QueryHandler =
+    Box<dyn FnOnce(&crab_ltx::rusqlite::Connection) -> Result<Vec<u8>> + Send + 'static>;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerState {
     Ready,
@@ -212,6 +215,27 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    /// Runs one synchronous read on the Cell's assigned SQLite worker.
+    pub(crate) async fn query(
+        &self,
+        cell: CellId,
+        max_result_bytes: usize,
+        handler: QueryHandler,
+    ) -> Result<Vec<u8>> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::Query {
+                cell,
+                max_result_bytes,
+                handler,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     /// Binds the immutable proposal before any authority CAS can use it.
     pub async fn bind_prepared(
         &self,
@@ -340,6 +364,12 @@ enum WorkerCommand {
         max_result_bytes: usize,
         handler: Handler,
         reply: oneshot::Sender<Result<WorkerExecution>>,
+    },
+    Query {
+        cell: CellId,
+        max_result_bytes: usize,
+        handler: QueryHandler,
+        reply: oneshot::Sender<Result<Vec<u8>>>,
     },
     BindPrepared {
         cell: CellId,
@@ -505,6 +535,18 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                                 .ok_or(Error::Fenced),
                         }
                     });
+                let _ = reply.send(result);
+            }
+            WorkerCommand::Query {
+                cell,
+                max_result_bytes,
+                handler,
+                reply,
+            } => {
+                let result = cells
+                    .get_mut(&cell)
+                    .ok_or(Error::CellNotActive)
+                    .and_then(|cell| cell.executor.query(max_result_bytes, handler));
                 let _ = reply.send(result);
             }
             WorkerCommand::BindPrepared {
