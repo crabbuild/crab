@@ -520,6 +520,8 @@ struct SessionCache {
     has_commit_graph: Option<bool>,
     /// Primary v2 root retained from `list for-push` as the publication CAS base.
     capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+    /// A separately validated canonical-v1 repository uses its existing reader.
+    legacy_v1: bool,
     metrics: Arc<Metrics>,
     persisted_metrics: MetricsSummary,
 }
@@ -530,6 +532,7 @@ impl SessionCache {
             config,
             has_commit_graph: None,
             capsule_root: None,
+            legacy_v1: false,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
         }
@@ -742,7 +745,8 @@ pub async fn run_remote_helper(
     // Load push state for incremental walk (used by native push pipeline).
     let repo_root = push_state_repo_root();
     let mut cache = SessionCache::new(config);
-    cache.capsule_root = Some(resolved.capsule_root);
+    cache.legacy_v1 = resolved.capsule_root.is_none();
+    cache.capsule_root = resolved.capsule_root;
     let context = RemoteHelperContext {
         store: resolved.store,
         prefix: resolved.repository_prefix,
@@ -1394,33 +1398,46 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
         Batch::List { for_push } => {
             tracing::debug!(for_push, "list requested");
             let output = if let Some(s) = store {
-                let (read_store, router, hidden_ref_patterns, may_reuse_primary_root) = {
+                if cache.legacy_v1 {
                     let cfg = cache.config();
-                    let selected =
+                    let (read_store, router) =
                         read_store_for_list_batch(s, prefix, remote_url, cfg, *for_push, cancel)
                             .await;
-                    let may_reuse_primary_root = *for_push
-                        || cfg
-                            .replication
-                            .as_ref()
-                            .is_none_or(|replication| !replication.has_read_replicas());
-                    (
-                        selected.0,
-                        selected.1,
-                        cfg.transfer_hide_refs.clone(),
-                        may_reuse_primary_root,
-                    )
-                };
-                let (output, root) = match cache.capsule_root.take() {
-                    Some(root) if may_reuse_primary_root => {
-                        (list_output_from_root(&root, &hidden_ref_patterns), root)
-                    }
-                    _ => read_remote_refs_with_snapshot(&read_store, &router, &hidden_ref_patterns)
+                    read_remote_refs(&read_store, &router, &cfg.transfer_hide_refs).await?
+                } else {
+                    let (read_store, router, hidden_ref_patterns, may_reuse_primary_root) = {
+                        let cfg = cache.config();
+                        let selected = read_store_for_list_batch(
+                            s, prefix, remote_url, cfg, *for_push, cancel,
+                        )
+                        .await;
+                        let may_reuse_primary_root = *for_push
+                            || cfg
+                                .replication
+                                .as_ref()
+                                .is_none_or(|replication| !replication.has_read_replicas());
+                        (
+                            selected.0,
+                            selected.1,
+                            cfg.transfer_hide_refs.clone(),
+                            may_reuse_primary_root,
+                        )
+                    };
+                    let (output, root) = match cache.capsule_root.take() {
+                        Some(root) if may_reuse_primary_root => {
+                            (list_output_from_root(&root, &hidden_ref_patterns), root)
+                        }
+                        _ => read_remote_refs_with_snapshot(
+                            &read_store,
+                            &router,
+                            &hidden_ref_patterns,
+                        )
                         .await
                         .map_err(map_missing_capsule_root)?,
-                };
-                cache.capsule_root = Some(root);
-                output
+                    };
+                    cache.capsule_root = Some(root);
+                    output
+                }
             } else {
                 ListOutput {
                     refs: Vec::new(),
@@ -2160,7 +2177,6 @@ pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> St
 }
 
 /// Read refs from the compacted manifest plus committed journal overlay.
-#[cfg(test)]
 async fn read_remote_refs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,

@@ -490,6 +490,36 @@ pub(crate) async fn open_repository_root(
     }
 }
 
+/// Open a protocol-v2 root or recognize one canonical-v1 repository.
+///
+/// The formats remain disjoint: a present but invalid v2 root never falls back
+/// to v1, and an arbitrary non-empty prefix is not treated as a repository.
+pub(crate) async fn open_repository_root_for_read(
+    store: &Store,
+    repository_prefix: &str,
+    remote_url: &str,
+) -> Result<Option<crab_metadata::capsule_protocol::RootSnapshot>> {
+    match open_repository_root(store, repository_prefix, remote_url).await {
+        Ok(root) => Ok(Some(root)),
+        Err(CrabError::RepositoryNotInitialized { .. }) => {
+            let router =
+                crate::storage::StoreLayout::new(store.clone(), repository_prefix.to_owned());
+            match crate::core::remote_layout::open(store, &router).await {
+                Ok(_) => Ok(None),
+                Err(CrabError::NotFound { path })
+                    if path == router.layout_descriptor_path().as_ref() =>
+                {
+                    Err(CrabError::RepositoryNotInitialized {
+                        url: remote_url.to_owned(),
+                    })
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn build_store_from_credentials(bucket: &str, creds: CloudCredentials) -> Result<Store> {
     crab_auth_store::build_store_from_credentials(bucket, creds)
         .map(Store::from_storage)
@@ -584,6 +614,63 @@ mod tests {
         validate_repository_store(&store, "org/repo", "crab://bucket/org/repo")
             .await
             .expect("protocol-v2 root should open");
+    }
+
+    #[tokio::test]
+    async fn repository_read_admission_keeps_v1_and_v2_formats_disjoint() {
+        let v1_store = Store::new(Arc::new(InMemory::new()));
+        let v1_router = StoreLayout::new(v1_store.clone(), "org/v1".to_owned());
+        let v1_layout = crab_storage::StoreLayout::with_global_prefix(
+            v1_store.as_storage().clone(),
+            v1_router.repo_prefix().to_owned(),
+            v1_router.global_prefix().to_owned(),
+        );
+        crab_write::initialize::initialize_repository(
+            v1_store.as_storage(),
+            &v1_layout,
+            "refs/heads/main",
+        )
+        .await
+        .expect("initialize canonical-v1 repository");
+        assert!(
+            open_repository_root_for_read(&v1_store, "org/v1", "crab://bucket/org/v1")
+                .await
+                .expect("recognize canonical-v1 repository")
+                .is_none()
+        );
+
+        let v2_store = Store::new(Arc::new(InMemory::new()));
+        let v2_router = StoreLayout::new(v2_store.clone(), "org/v2".to_owned());
+        let v2_layout = crab_storage::StoreLayout::with_global_prefix(
+            v2_store.as_storage().clone(),
+            v2_router.repo_prefix().to_owned(),
+            v2_router.global_prefix().to_owned(),
+        );
+        crab_write::capsule_protocol::initialize(&v2_layout, &"2".repeat(64), "refs/heads/main")
+            .await
+            .expect("initialize protocol-v2 repository");
+        assert!(
+            open_repository_root_for_read(&v2_store, "org/v2", "crab://bucket/org/v2")
+                .await
+                .expect("open protocol-v2 repository")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_read_admission_rejects_an_unowned_prefix() {
+        let store = Store::new(Arc::new(InMemory::new()));
+
+        let error =
+            open_repository_root_for_read(&store, "org/missing", "crab://bucket/org/missing")
+                .await
+                .expect_err("unowned prefix must fail closed");
+
+        assert!(matches!(
+            error,
+            CrabError::RepositoryNotInitialized { ref url }
+                if url == "crab://bucket/org/missing"
+        ));
     }
 
     /// Helper: build a `Config` with the given auth provider and storage provider.
