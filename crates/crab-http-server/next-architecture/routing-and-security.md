@@ -102,11 +102,15 @@ Public Host/origin/CSRF checks remain at external ingress; the private route doe
 not spoof those headers or bypass product authorization.
 
 Cold acquisition is a sender-side runtime operation, not a peer-protocol mode.
-Before it is added to product routing, it must follow the
-[capacity admission path](ownership-and-load-balancing.md#placement-and-balancing),
-win control CAS, restore the exact root and expose a local handle before any
-command is dispatched. A missing owner never authorizes execution without those
-steps.
+`RepositoryCellRouter` now follows the
+[capacity admission path](ownership-and-load-balancing.md#placement-and-balancing):
+it serializes the local cold path by Cell ID, reloads proof and control, wins the
+idle owner CAS, restores the exact root, and exposes only a typed local client.
+Rootless Cells bootstrap migration plus repository UUID in one worker
+transaction; another owner's strict-create win is adopted only after an
+authoritative reload. Product handlers do not invoke this router until the
+offline importer and coherent route-group cut are ready. A missing owner never
+authorizes execution without acquisition and restore.
 
 ### Retry and loop prevention
 

@@ -27,8 +27,8 @@ does not establish a working runtime.
 | [application.rs](../../../../crates/crab-cell-runtime/src/application.rs), [release.rs](../../../../crates/crab-cell-runtime/src/release.rs) | Canonical immutable root identity, exact-winner initialization, immutable descriptor upload, expected-revision prepared CAS, verified descriptor reads, operation-bound resumable activating/ready transitions and release-aware catalog provisioning with post-publication operation recheck | Add eligible-node quorum, Cell migration progress and maintenance activation |
 | [node.rs](../../../../crates/crab-cell-runtime/src/node.rs) | Canonical signed 15-second node advertisements, strict-create/ETag refresh with exact ambiguous-write reconciliation, fleet/certificate/release/key/inventory/capacity binding, monotonic progress and certificate-SPKI-bound session verification | Add fleet listing/eligibility and scheduler progress aggregation |
 | [codec.rs](../../../../crates/crab-cell-runtime/src/codec.rs), [peer.rs](../../../../crates/crab-cell-runtime/src/peer.rs) | Canonical bounded scalar/bytes/text/option encoding; generated peer Protobuf messages; strict request/reply unknown/duplicate/oneof rejection; exact nested-payload BLAKE3; canonical Ed25519 signing; enrollment/release/time binding; two-hop forwarding; mandatory authorization; active-owner resolution; canonical local dispatch; bounded mTLS management ingress; and mutation-safe ambiguous transport classification | Add authenticated effect delivery and fuzz the complete boundary |
-| [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local and authenticated peer command/query/Resolve capabilities, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts; typed KV, SQL, Queue and Workflow handles use it | Wire these handles into authorized repository product routes |
-| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [peer_tls.rs](../../../../crates/crab-http-server/src/peer_tls.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs) | Static repository registry with UUID lookup; typed issue/comment bindings; exact replay, durable rejection and source-loss restore; process-session runtime lifecycle; authoritative local peer resolution; current repository issuer/member/action reauthorization; strict Ed25519 certificate/key/CA loading; mandatory management mTLS; initial node publication and heartbeat; authoritative outbound owner reload; endpoint/enrollment equality; pinned bounded peer client reuse; one definitely-not-started stale-owner retry; compatible activation and release-aware provisioning; idempotent first-install bootstrap plus descriptor/inventory startup gate before listener binding | Add migration/node eligibility quorum, complete resource-derived Cell budgets, idle acquisition and hard-cut the authorized product routes |
+| [client.rs](../../../../crates/crab-cell-runtime/src/client.rs) | Typed local and authenticated peer command/query/Resolve capabilities, namespace/code/schema/incarnation checks, canonical operation digest, outcome classification and minimum receipts; typed KV, SQL, Queue and Workflow handles use it | Wire the repository router result into authorized product route adapters |
+| [HTTP server.rs](../../../../crates/crab-http-server/src/server.rs), [peer.rs](../../../../crates/crab-http-server/src/peer.rs), [peer_tls.rs](../../../../crates/crab-http-server/src/peer_tls.rs), [cells.rs](../../../../crates/crab-http-server/src/cells.rs), [cells/repository.rs](../../../../crates/crab-http-server/src/cells/repository.rs), [cells/router.rs](../../../../crates/crab-http-server/src/cells/router.rs) | Static repository registry with UUID lookup; typed issue/comment bindings; exact replay, durable rejection and source-loss restore; process-session runtime lifecycle; authoritative local peer resolution; current repository issuer/member/action reauthorization; strict Ed25519 certificate/key/CA loading; mandatory management mTLS; initial node publication and heartbeat; authoritative outbound owner reload; endpoint/enrollment equality; pinned bounded peer client reuse; one definitely-not-started stale-owner retry; release-fenced provision, rootless bootstrap, exact local reuse, authenticated remote selection and idle exact-root restore; idempotent first-install bootstrap plus descriptor/inventory startup gate before listener binding | Add importer and product adapters, active-owner takeover, migration/node eligibility quorum, complete resource-derived Cell budgets and hard-cut the authorized route group |
 | [HTTP app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Existing object application storage still serves product routes | Retain only as offline importer input after the coherent HTTP hard cut |
 
 Reuse existing [publication tests](../../../../crates/crab-ltx/tests/publication.rs),
@@ -269,8 +269,12 @@ identity-specific clients, and reloads ownership once only when execution is
 definitely not started. Ambiguous mutation transport is converted to the same
 resolvable `OutcomeUnknown` evidence as a local lost publication response.
 
-Next, connect authorized product handlers to local-versus-peer `CellClient`
-routing plus idle acquisition. Preserve product HTTP authorization in app.rs.
+The server-owned `RepositoryCellRouter` now resolves authorized identities to a
+local-or-peer `CellClient`, including release-fenced provision, serialized
+rootless bootstrap, local handle reuse and idle exact-root acquisition. Its test
+publishes through the router, drains the first owner and verifies a second
+session restores and reads the same row. Next, connect authorized product
+handlers to that result. Preserve product HTTP authorization in app.rs.
 Switch the complete issue/comment route group only after its offline importer and
 route-level recovery test exist. Do not ship a selectable second persistence
 backend or route some mutations to JSON while related reads use SQLite.
@@ -317,7 +321,8 @@ dispatch are now covered. A real two-endpoint mTLS test proves server-owned owne
 selection, exact endpoint/certificate/SPKI validation and authoritative reload
 after a stale endpoint returns definitely-not-started. A transport unit test
 proves an ambiguous command is sent once and retains its original request ID and
-operation digest. Public route selection and idle acquisition remain.
+operation digest. Repository routing and idle acquisition are now implemented
+and integration-tested below the public adapter boundary.
 `crab-http-server` now supplies the
 first compiled repository implementation, including migration, descriptors,
 typed codecs and bindings for the complete internal issue/comment route group.
@@ -326,8 +331,10 @@ Its runtime test
 native create/update/list/detail behavior, replay, rejection and source-loss
 recovery; its codec tests pin exact bytes for all eight operation input/output
 pairs; its binary command and inspection tests prove release bytes remain
-deterministic. Offline import, product routing and the coherent HTTP hard cut
-remain.
+deterministic. `route_provisions_reuses_and_restores_repository_cell`
+additionally proves release-aware provision, rootless bootstrap, local reuse and
+second-session idle restoration through the server-owned router. Offline import,
+public product adapters and the coherent HTTP hard cut remain.
 
 Fuzz peer decoding, signed envelope validation and path/identity encoding.
 Pin independent command/input/output fixtures for every registered codec version.

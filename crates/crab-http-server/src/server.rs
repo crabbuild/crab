@@ -13,7 +13,9 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use crab_cell_runtime::{CellRuntime, NodeDirectory, SessionId, SqlWorkerPool};
+use crab_cell_runtime::{
+    CellRuntime, NodeDirectory, Owner, PeerRoundTrip, PeerSigner, SessionId, SqlWorkerPool,
+};
 use crab_metadata::manifest_store::read_manifest;
 use crab_remote_git::{
     OperationLimits, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
@@ -322,6 +324,11 @@ pub(crate) struct Server {
     pub repositories: RepositorySet,
     pub runtime: Arc<RemoteGitRuntime>,
     pub cell_runtime: CellRuntime,
+    #[expect(
+        dead_code,
+        reason = "startup owns routing state before the coherent repository route-group cutover"
+    )]
+    pub(crate) repository_cells: Option<crate::cells::RepositoryCellRouter>,
     pub(crate) peer_receiver: Option<crate::peer::PeerReceiver>,
     pub options: RepositoryOptions,
     pub cursor_key: [u8; 32],
@@ -439,6 +446,7 @@ pub async fn serve(config: Config) -> Result<()> {
         registry.module_digests(),
         config.cells.data_dir.clone(),
     )?;
+    let session_dir = node_publisher.session_dir();
     // A pod must prove the complete storage contract before it owns any socket;
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
@@ -450,9 +458,9 @@ pub async fn serve(config: Config) -> Result<()> {
         startup.identity,
         cell_runtime.clone(),
     );
-    let peer_round_trip = Arc::new(crate::peer::PeerHttpRoundTrip::new(
+    let peer_round_trip: Arc<dyn PeerRoundTrip> = Arc::new(crate::peer::PeerHttpRoundTrip::new(
         startup.identity,
-        crab_cell_runtime::CellAuthority::new(startup.layout),
+        crab_cell_runtime::CellAuthority::new(startup.layout.clone()),
         directory.clone(),
         peer_tls.client_identity(),
         session,
@@ -461,8 +469,25 @@ pub async fn serve(config: Config) -> Result<()> {
         directory.clone(),
         Arc::clone(&registry),
         cell_resolver,
-        peer_round_trip,
+        Arc::clone(&peer_round_trip),
     );
+    let repository_cells = crate::cells::RepositoryCellRouter::new(
+        startup.identity,
+        startup.layout,
+        Arc::clone(&registry),
+        cell_runtime.clone(),
+        Arc::new(PeerSigner::new(
+            session,
+            registry.release_digest(),
+            peer_tls.signing_key().clone(),
+        )),
+        peer_round_trip,
+        Owner {
+            session,
+            endpoint: config.cells.peer_advertise.to_string(),
+        },
+        session_dir,
+    )?;
     let advertised = match node_publisher.publish_initial().await {
         Ok(advertised) => advertised,
         Err(error) => {
@@ -476,6 +501,7 @@ pub async fn serve(config: Config) -> Result<()> {
         repositories: repositories.into(),
         runtime: Arc::clone(&runtime),
         cell_runtime,
+        repository_cells: Some(repository_cells),
         peer_receiver: Some(peer_receiver),
         cancellation: cancellation.clone(),
         receives: tokio_util::task::TaskTracker::new(),
@@ -1131,6 +1157,7 @@ mod tests {
             repositories: RepositorySet::from(BTreeMap::<(String, String), Repository>::new()),
             runtime: Arc::clone(&runtime),
             cell_runtime: start_test_cell_runtime(),
+            repository_cells: None,
             peer_receiver: None,
             options: RepositoryOptions::default(),
             cursor_key: [0; 32],

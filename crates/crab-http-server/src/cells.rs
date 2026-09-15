@@ -13,6 +13,9 @@ use uuid::Uuid;
 use crate::{Config, Error, Result, storage_root::StorageRoot};
 
 mod repository;
+mod router;
+
+pub(crate) use router::RepositoryCellRouter;
 
 const REPOSITORY_MIGRATION: &str = include_str!("cells/migrations/0001_repository_identity.sql");
 pub(crate) const REPOSITORY_NAMESPACE: NamespaceId = NamespaceId::from_bytes(*b"crab-repository1");
@@ -484,7 +487,7 @@ mod tests {
         assert_eq!(descriptor["modules"][0]["name"], "repository");
         assert_eq!(
             descriptor["modules"][0]["code"],
-            "6c2ba0a24f1cfbb00849e55156a855ed2be4141850837d2fa4fdc1a8ddf8766d"
+            "eda57736a6d7954df989676442990b50ed6aa2ba677be5e20cceb339d19974a1"
         );
         assert_eq!(descriptor["modules"][0]["schema_min"], 1);
         assert_eq!(descriptor["modules"][0]["schema_max"], 1);

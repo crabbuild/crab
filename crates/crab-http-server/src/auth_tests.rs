@@ -229,6 +229,7 @@ impl Harness {
             repositories: BTreeMap::from([(("team".into(), "private".into()), repository)]).into(),
             runtime: Arc::new(RemoteGitRuntime::default()),
             cell_runtime: start_test_cell_runtime(),
+            repository_cells: None,
             peer_receiver: None,
             options: RepositoryOptions::default(),
             cursor_key: [7; 32],

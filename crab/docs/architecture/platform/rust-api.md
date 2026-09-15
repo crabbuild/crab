@@ -615,8 +615,37 @@ failure, HTTP 429/503, or protocol `UNAVAILABLE/NOT_STARTED` reloads control at
 most once within the original deadline. Timeout, response-stream failure,
 malformed success, or HTTP 5xx after connection is an ambiguous mutation and is
 never automatically retried. Never use the public Service for private forwarding
-or send credentials to an endpoint copied from unverified control data. Public
-product routing and idle-owner acquisition remain the next integration slice.
+or send credentials to an endpoint copied from unverified control data.
+
+`RepositoryCellRouter` is now constructed once by `serve` with the selected
+application identity, storage layout, compiled registry, runtime, boot-session
+signer, peer round trip, exact local owner and the node's already-created session
+directory. Its repository route algorithm is fixed:
+
+1. Accept one of the exact repository read/create/update actions and derive the
+   `CellTarget` from the catalog UUID, never owner/name.
+2. Load catalog proof and control. Return an exact local handle if the current
+   runtime still owns it; construct a signed `CellClient::peer` when another
+   session owns it; fence a same-session/different-endpoint observation.
+3. Serialize a cold path with one of 4,096 Cell-ID shards, then reload both
+   records. Provision absence only through `ReleaseStore::provision`; create a
+   rootless control with a fresh incarnation using strict create. A concurrent
+   creator is adopted only by reloading its authoritative control.
+4. Bootstrap rootless local ownership with the repository migration and UUID in
+   the same worker transaction. For `Idle`, win owner CAS and restore the exact
+   published root. For a same-session handle lost from memory, restore the exact
+   root without changing authority. Every attempt uses a unique SQLite path
+   below `cells.data_dir/sessions/<session>/<cell>/`; failed files remain
+   quarantined from later activation.
+5. Return only a typed `CellClient`; HTTP handlers never receive a SQLite
+   connection, replica, control token or peer endpoint.
+
+The router is integration-qualified for provision/bootstrap, local reuse, clean
+idle release, source-independent exact-root acquisition by a second session and
+post-restore typed reads. Public issue/comment adapters, offline import and the
+single route-group hard cut remain. A live remote owner is forwarded to rather
+than stolen; expired active-owner takeover remains a separate bounded ownership
+procedure.
 
 Read describe=true may provision an explicit-key Cell only with create
 capability; absent fixed shards return NOT_FOUND. A null bootstrap root returns

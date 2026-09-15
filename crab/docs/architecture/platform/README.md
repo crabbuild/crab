@@ -150,9 +150,13 @@ and shuts the heartbeat and runtime down with the server. The server-side peer
 round trip now reloads authoritative ownership, requires the owner endpoint to
 match a live signed node advertisement, pins CA/hostname/leaf/SPKI through mTLS,
 reuses a bounded client pool and retries only definitely-not-started failures
-once within the original deadline. Upgrade migrations, complete resource-derived
-budgets, idle acquisition and repository product-route integration remain; KV,
-SQL, Queue and Workflow primitive handles are complete for local routing.
+once within the original deadline. The server-owned repository router now
+provisions through the selected release, serializes activation, bootstraps a new
+Cell, reuses an exact local handle, selects the authenticated remote peer, and
+acquires an idle Cell by restoring its exact root. Upgrade migrations,
+active-owner takeover, complete resource-derived budgets and the coherent
+repository HTTP route cut remain; KV, SQL, Queue and Workflow primitive handles
+are complete for local routing.
 The object-store node directory now strict-creates and conditionally refreshes
 canonical, short-lived advertisements. Each record binds one nonzero boot
 session, HTTPS endpoint, fleet and certificate digests, compiled release,
@@ -214,12 +218,13 @@ upgrade is admitted without stealing activation ownership. `serve` verifies the
 selected descriptor bytes and complete Cell inventory before binding either
 listener. A candidate binary is eligible while its exact digest is `prepared` or
 `activating`; a steady server requires its exact `ready.current`. Compose, Helm
-and the ECS evaluation task execute bootstrap before first start. No product
-route creates Cells yet.
+and the ECS evaluation task execute bootstrap before first start. The server
+constructs one repository router before readiness, but no public product route
+invokes it yet.
 Eligible-node quorum, old-code/schema migration,
-persistent Cell-directory configuration, product routing and capacity
-qualification remain. Existing HTTP issue/comment routes still use the old object
-documents; the native module is not yet a user-visible storage path.
+active-owner takeover, product route adapters, offline import and capacity
+qualification remain. Existing HTTP issue/comment routes still use the old
+object documents; the native module is not yet a user-visible storage path.
 
 ## Deliverable and contract precedence
 

@@ -116,6 +116,12 @@ impl NodePublisher {
             .await?)
     }
 
+    pub(crate) fn session_dir(&self) -> PathBuf {
+        self.data_dir
+            .join("sessions")
+            .join(encode_session(self.session))
+    }
+
     pub(crate) async fn run(
         self,
         server: Arc<Server>,
@@ -459,9 +465,14 @@ fn authorize_repository(
         }
         Some(peer_wire::peer_request::Operation::Resolve(_)) => {
             access >= RepositoryAccess::Write
-                && ["repository.issue.create", "repository.comment.create"]
-                    .iter()
-                    .any(|action| request.permits(action))
+                && [
+                    "repository.issue.create",
+                    "repository.comment.create",
+                    "repository.issue.update",
+                    "repository.comment.update",
+                ]
+                .iter()
+                .any(|action| request.permits(action))
         }
         _ => false,
     };
@@ -475,6 +486,8 @@ const fn required_mutation_action(command_id: u32) -> Option<&'static str> {
     match command_id {
         1 => Some("repository.issue.create"),
         2 => Some("repository.comment.create"),
+        3 => Some("repository.issue.update"),
+        4 => Some("repository.comment.update"),
         _ => None,
     }
 }
@@ -514,7 +527,7 @@ mod tests {
         }
     }
 
-    fn verified(actions: Vec<String>) -> VerifiedPeerRequest {
+    fn verified(command_id: u32, actions: Vec<String>) -> VerifiedPeerRequest {
         let key = SigningKey::from_bytes(&[1; 32]);
         let signer = PeerSigner::new(
             SessionId::from_bytes([2; 16]),
@@ -548,7 +561,7 @@ mod tests {
                     timeout_ms: 30_000,
                     operation: Some(peer_wire::mutation_request::Operation::CellCommand(
                         peer_wire::CellCommand {
-                            command_id: 1,
+                            command_id,
                             codec_version: 1,
                             input: Vec::new(),
                         },
@@ -567,7 +580,7 @@ mod tests {
 
     #[test]
     fn current_membership_and_exact_action_are_required() {
-        let request = verified(vec!["repository.issue.create".into()]);
+        let request = verified(1, vec!["repository.issue.create".into()]);
         assert!(
             authorize_repository(&repository(), Some("https://issuer.example"), &request).is_ok()
         );
@@ -578,11 +591,22 @@ mod tests {
         assert!(
             authorize_repository(&repository(), Some("https://other.example"), &request).is_err()
         );
-        let wrong_action = verified(vec!["repository.comment.create".into()]);
+        let wrong_action = verified(1, vec!["repository.comment.create".into()]);
         assert!(
             authorize_repository(&repository(), Some("https://issuer.example"), &wrong_action)
                 .is_err()
         );
+        for (command, action) in [
+            (2, "repository.comment.create"),
+            (3, "repository.issue.update"),
+            (4, "repository.comment.update"),
+        ] {
+            let request = verified(command, vec![action.into()]);
+            assert!(
+                authorize_repository(&repository(), Some("https://issuer.example"), &request)
+                    .is_ok()
+            );
+        }
     }
 
     #[tokio::test]
