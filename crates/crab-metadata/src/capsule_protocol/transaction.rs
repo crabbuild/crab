@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MetadataError, Result};
 use crate::validation::{validate_content_hash, validate_sha1};
 
+use super::valid_ref_name;
+
 const TRANSACTION_VERSION: u32 = 2;
 
 /// One exact ref edit authenticated by a capsule transaction.
@@ -171,9 +173,7 @@ fn validate_transaction(transaction: &CapsuleTransaction) -> Result<()> {
 }
 
 fn validate_edit(edit: &CapsuleRefEdit) -> Result<()> {
-    if !edit.ref_name.starts_with("refs/")
-        || crab_git::refname::validate_push_refname(&edit.ref_name).is_err()
-    {
+    if !edit.ref_name.starts_with("refs/") || !valid_ref_name(&edit.ref_name) {
         return Err(contract_error("transaction contains an invalid ref name"));
     }
     if edit.expected_old.is_none() && edit.new_oid.is_none() {
