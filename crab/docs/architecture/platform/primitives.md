@@ -73,9 +73,14 @@ after publication. Delivery results use a nested savepoint so a business
 rejection rolls back destination writes while its inbox result remains durable.
 Lost responses retry the same effect bytes; the inbox returns the stored result
 without invoking the handler. Source retry/extension/delivery and both retention
-cleanups are bounded. The generic signed Cell peer transport and dispatcher
-exist, but Workflow/Queue effect insertion, effect codecs,
-DeliverEffect/ResolveEffect translation and the node delivery supervisor remain.
+cleanups are bounded. `CellHandle::deliver_effect` now applies destination work
+through the fixed SQL worker and ordinary LTX/control publication path;
+`resolve_effect` returns committed, absent, expired or unknown state from the
+published inbox, including after exact-root restoration. Accepted delivery
+continues after caller cancellation. The generic signed Cell peer transport and
+dispatcher exist, but Workflow/Queue effect insertion, effect codecs, peer
+DeliverEffect/ResolveEffect translation, source acknowledgement wiring and the
+node delivery supervisor remain.
 
 Runtime request outcome values: 1=success, 2=business rejection. Its result is
 the encoded MutationResult or Error, not a transport header. The stored sequence

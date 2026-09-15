@@ -224,6 +224,25 @@ pub async fn resolve(
     now_ms: i64,
     max_result_bytes: usize,
 ) -> Result<Resolution>;
+
+pub async fn deliver_effect<F>(
+    &self,
+    delivery: InboxDelivery,
+    now_ms: i64,
+    operation_bytes: usize,
+    max_result_bytes: usize,
+    handler: F,
+) -> Result<StoredOutcome>
+where
+    F: for<'tx> FnOnce(&rusqlite::Transaction<'tx>)
+        -> Result<HandlerOutcome> + Send + 'static;
+
+pub async fn resolve_effect(
+    &self,
+    delivery: InboxDelivery,
+    now_ms: i64,
+    max_result_bytes: usize,
+) -> Result<Resolution>;
 ```
 
 This is an internal construction API, not the final application surface. The
@@ -234,7 +253,11 @@ digests, byte limits or closures. The lower-level query shares mutation admissio
 its SQLite connection is set to `query_only` for the callback and its output is
 bounded before admission and again on the SQL worker. Resolve uses that same FIFO
 but returns a typed committed, absent, unknown or expired observation and never
-reruns the handler.
+reruns the handler. The effect entry points are private runtime construction
+APIs: they share Cell admission, FIFO actor ordering, SQL-worker affinity,
+cancellation-safe execution, exact-root publication and fence/unknown semantics.
+They are not exposed to application or browser callers; the pending peer
+translator must derive `InboxDelivery` only from authenticated source evidence.
 
 ```rust,ignore
 pub trait WireValue: Sized + Send + 'static {

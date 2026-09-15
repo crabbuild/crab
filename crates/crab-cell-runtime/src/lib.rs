@@ -47,7 +47,7 @@ pub use effects::{
     EffectClaim, EffectIntent, EffectLeaseOutcome, EffectState, EffectTokenSource,
     InboxApplyOutcome, InboxDelivery, SystemEffectTokens, effect_ack_delivered, effect_claim,
     effect_cleanup_terminal, effect_extend, effect_insert, effect_operation_digest, effect_retry,
-    effect_validate_claim, inbox_apply, inbox_cleanup_expired,
+    effect_validate_claim, inbox_apply, inbox_cleanup_expired, inbox_resolve,
 };
 pub use error::{Error, Result};
 pub use executor::{

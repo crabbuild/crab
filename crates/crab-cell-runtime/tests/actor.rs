@@ -2,8 +2,8 @@ use std::sync::{Arc, mpsc};
 
 use crab_cell_runtime::{
     ApplicationId, CatalogEntry, CatalogRole, CellAuthority, CellRuntime, CellTarget, ControlState,
-    Digest, HandlerOutcome, IncarnationId, MutationIdentity, NamespaceId, Owner, RequestId,
-    Resolution, SessionId, SqlWorkerPool, StoredOutcome, TenantId, Transition,
+    Digest, HandlerOutcome, InboxDelivery, IncarnationId, MutationIdentity, NamespaceId, Owner,
+    RequestId, Resolution, SessionId, SqlWorkerPool, StoredOutcome, TenantId, Transition,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellObjectKind, CellStorageLayout, Store};
@@ -206,6 +206,172 @@ async fn dispatcher_serializes_and_publishes_commands_before_drain() {
             .unwrap(),
         2
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn effect_delivery_survives_cancellation_and_exact_root_restore() {
+    let fixture = fixture();
+    let handle = activate(&fixture, 16 * 1024 * 1024).await;
+    let delivery = InboxDelivery {
+        effect_id: [70; 32],
+        operation_digest: Digest::from_bytes([71; 32]),
+        expires_at_ms: 10_000,
+    };
+    let (started_tx, started_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let first = tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            handle
+                .deliver_effect(delivery, 20, 64, 1_024, move |transaction| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    transaction.execute("UPDATE counter SET value = value + 1", [])?;
+                    Ok(HandlerOutcome::Success(b"delivered".to_vec()))
+                })
+                .await
+        }
+    });
+    tokio::task::spawn_blocking(move || started_rx.recv().unwrap())
+        .await
+        .unwrap();
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    release_tx.send(()).unwrap();
+
+    let replayed = handle
+        .deliver_effect(delivery, 21, 64, 1_024, |_| {
+            panic!("published inbox delivery must not execute twice")
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        replayed,
+        StoredOutcome::Success {
+            result: b"delivered".to_vec(),
+            commit_sequence: 1,
+        }
+    );
+    assert_eq!(
+        handle.resolve_effect(delivery, 22, 1_024).await.unwrap(),
+        Resolution::Committed(replayed.clone())
+    );
+    assert!(matches!(
+        handle
+            .resolve_effect(
+                InboxDelivery {
+                    operation_digest: Digest::from_bytes([72; 32]),
+                    ..delivery
+                },
+                22,
+                1_024,
+            )
+            .await,
+        Err(crab_cell_runtime::Error::RequestConflict)
+    ));
+    assert!(matches!(
+        handle
+            .resolve_effect(
+                InboxDelivery {
+                    expires_at_ms: delivery.expires_at_ms + 1,
+                    ..delivery
+                },
+                22,
+                1_024,
+            )
+            .await,
+        Err(crab_cell_runtime::Error::RequestConflict)
+    ));
+    assert_eq!(
+        handle
+            .resolve_effect(
+                InboxDelivery {
+                    effect_id: [73; 32],
+                    ..delivery
+                },
+                22,
+                1_024,
+            )
+            .await
+            .unwrap(),
+        Resolution::Absent
+    );
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let published = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(published.value().root.as_ref().unwrap().commit_sequence, 1);
+    assert_eq!(
+        handle
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        1_i64.to_be_bytes()
+    );
+    handle.drain().await.unwrap();
+
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .lookup(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let idle = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let session = SessionId::from_bytes([45; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        session,
+    )
+    .unwrap();
+    let restored = runtime
+        .acquire_idle_restored(
+            proof,
+            fixture.replica.clone(),
+            authority,
+            idle,
+            fixture._directory.path().join("effect-restored.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://effect-successor.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.resolve_effect(delivery, 30, 1_024).await.unwrap(),
+        Resolution::Committed(replayed)
+    );
+    assert_eq!(
+        restored
+            .resolve_effect(delivery, delivery.expires_at_ms, 1_024)
+            .await
+            .unwrap(),
+        Resolution::Expired
+    );
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        1_i64.to_be_bytes()
+    );
+    restored.drain().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

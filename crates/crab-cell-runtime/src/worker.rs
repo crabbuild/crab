@@ -12,8 +12,8 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome, MutationIdentity,
-    PendingCommit, Resolution, Result, StoredOutcome,
+    CellExecutor, CellId, CommandExecution, Digest, Error, HandlerOutcome, InboxDelivery,
+    MutationIdentity, PendingCommit, Resolution, Result, StoredOutcome,
 };
 
 const MAX_WORKERS: usize = 16;
@@ -249,6 +249,33 @@ impl SqlWorkerPool {
         receive(response).await
     }
 
+    /// Applies one destination inbox delivery on the Cell's assigned worker.
+    pub(crate) async fn deliver_effect(
+        &self,
+        cell: CellId,
+        delivery: InboxDelivery,
+        now_ms: i64,
+        max_result_bytes: usize,
+        deadline: Instant,
+        handler: Handler,
+    ) -> Result<WorkerExecution> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::DeliverEffect {
+                cell,
+                delivery,
+                now_ms,
+                max_result_bytes,
+                deadline,
+                handler,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
     /// Runs one synchronous read on the Cell's assigned SQLite worker.
     pub(crate) async fn query(
         &self,
@@ -289,6 +316,31 @@ impl SqlWorkerPool {
                 cell,
                 identity,
                 operation_digest,
+                now_ms,
+                max_result_bytes,
+                deadline,
+                reply,
+            },
+        )
+        .await?;
+        receive(response).await
+    }
+
+    /// Resolves one destination inbox identity on the Cell's assigned worker.
+    pub(crate) async fn resolve_effect(
+        &self,
+        cell: CellId,
+        delivery: InboxDelivery,
+        now_ms: i64,
+        max_result_bytes: usize,
+        deadline: Instant,
+    ) -> Result<Resolution> {
+        let (reply, response) = oneshot::channel();
+        self.send(
+            cell,
+            WorkerCommand::ResolveEffect {
+                cell,
+                delivery,
                 now_ms,
                 max_result_bytes,
                 deadline,
@@ -511,6 +563,15 @@ enum WorkerCommand {
         handler: Handler,
         reply: oneshot::Sender<Result<WorkerExecution>>,
     },
+    DeliverEffect {
+        cell: CellId,
+        delivery: InboxDelivery,
+        now_ms: i64,
+        max_result_bytes: usize,
+        deadline: Instant,
+        handler: Handler,
+        reply: oneshot::Sender<Result<WorkerExecution>>,
+    },
     Query {
         cell: CellId,
         max_result_bytes: usize,
@@ -522,6 +583,14 @@ enum WorkerCommand {
         cell: CellId,
         identity: MutationIdentity,
         operation_digest: Digest,
+        now_ms: i64,
+        max_result_bytes: usize,
+        deadline: Instant,
+        reply: oneshot::Sender<Result<Resolution>>,
+    },
+    ResolveEffect {
+        cell: CellId,
+        delivery: InboxDelivery,
         now_ms: i64,
         max_result_bytes: usize,
         deadline: Instant,
@@ -704,6 +773,41 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 });
                 let _ = reply.send(result);
             }
+            WorkerCommand::DeliverEffect {
+                cell,
+                delivery,
+                now_ms,
+                max_result_bytes,
+                deadline,
+                handler,
+                reply,
+            } => {
+                let result = crab_ltx::with_paged_io_deadline(deadline, || {
+                    cells
+                        .get_mut(&cell)
+                        .ok_or(Error::CellNotActive)
+                        .and_then(|cell| {
+                            match cell.executor.deliver_effect(
+                                delivery,
+                                now_ms,
+                                max_result_bytes,
+                                handler,
+                            )? {
+                                CommandExecution::Recorded(outcome) => {
+                                    Ok(WorkerExecution::Recorded(outcome))
+                                }
+                                CommandExecution::Pending => cell
+                                    .executor
+                                    .pending()
+                                    .cloned()
+                                    .map(Box::new)
+                                    .map(WorkerExecution::Pending)
+                                    .ok_or(Error::Fenced),
+                            }
+                        })
+                });
+                let _ = reply.send(result);
+            }
             WorkerCommand::Query {
                 cell,
                 max_result_bytes,
@@ -739,6 +843,25 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                                 now_ms,
                                 max_result_bytes,
                             )
+                        })
+                });
+                let _ = reply.send(result);
+            }
+            WorkerCommand::ResolveEffect {
+                cell,
+                delivery,
+                now_ms,
+                max_result_bytes,
+                deadline,
+                reply,
+            } => {
+                let result = crab_ltx::with_paged_io_deadline(deadline, || {
+                    cells
+                        .get_mut(&cell)
+                        .ok_or(Error::CellNotActive)
+                        .and_then(|cell| {
+                            cell.executor
+                                .resolve_effect(delivery, now_ms, max_result_bytes)
                         })
                 });
                 let _ = reply.send(result);

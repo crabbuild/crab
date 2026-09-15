@@ -94,8 +94,6 @@ impl StoredOutcome {
 /// Locally committed command retained until immutable upload and control CAS.
 #[derive(Clone)]
 pub struct PendingCommit {
-    identity: MutationIdentity,
-    operation_digest: Digest,
     outcome: StoredOutcome,
     logical_time_ms: i64,
     next_due_ms: Option<i64>,
@@ -104,16 +102,6 @@ pub struct PendingCommit {
 }
 
 impl PendingCommit {
-    #[must_use]
-    pub fn identity(&self) -> MutationIdentity {
-        self.identity
-    }
-
-    #[must_use]
-    pub fn operation_digest(&self) -> Digest {
-        self.operation_digest
-    }
-
     #[must_use]
     pub fn outcome(&self) -> &StoredOutcome {
         &self.outcome
@@ -249,8 +237,8 @@ impl CellExecutor {
                     ))
                 },
             )?;
-            let latest_request = transaction.query_row(
-                "SELECT COALESCE(MAX(commit_sequence), 0) FROM sys_requests",
+            let latest_ledger = transaction.query_row(
+                "SELECT COALESCE(MAX(commit_sequence), 0) FROM (SELECT commit_sequence FROM sys_requests UNION ALL SELECT commit_sequence FROM sys_inbox)",
                 [],
                 |row| row.get::<_, i64>(0),
             )?;
@@ -259,7 +247,7 @@ impl CellExecutor {
                 || metadata.2 != expected_sequence
                 || metadata.3 < 0
                 || metadata.4 != schema
-                || latest_request > metadata.2
+                || latest_ledger > metadata.2
             {
                 return Err(Error::Control(
                     "restored SQLite metadata does not match authoritative root",
@@ -298,27 +286,8 @@ impl CellExecutor {
         let incarnation = self.incarnation;
         let schema = self.schema;
         let transaction = self.db.transaction_with(|transaction| {
-            let meta = transaction.query_row(
-                "SELECT cell_id, incarnation, commit_sequence, logical_time_ms, schema_version FROM sys_meta WHERE singleton = 1",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, Vec<u8>>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, u32>(4)?,
-                    ))
-                },
-            )?;
-            if meta.0.as_slice() != cell.as_bytes()
-                || meta.1.as_slice() != incarnation.as_bytes()
-                || meta.2 < 0
-                || meta.3 < 0
-                || meta.4 != schema
-            {
-                return Err(Error::Command("runtime schema identity mismatch"));
-            }
+            let (commit_sequence, prior_logical_time_ms) =
+                runtime_metadata(transaction, cell, incarnation, schema)?;
 
             let existing = transaction
                 .query_row(
@@ -345,12 +314,11 @@ impl CellExecutor {
                 return Ok(TransactionResult::Recorded(outcome));
             }
 
-            let sequence = meta
-                .2
+            let sequence = commit_sequence
                 .checked_add(1)
                 .filter(|value| *value > 0)
                 .ok_or(Error::Command("commit sequence overflow"))?;
-            let logical_time_ms = now_ms.max(meta.3);
+            let logical_time_ms = now_ms.max(prior_logical_time_ms);
             transaction.execute_batch("SAVEPOINT application")?;
             let decision = handler(transaction)?;
             let (outcome, result) = match decision {
@@ -399,46 +367,93 @@ impl CellExecutor {
             })
         });
 
-        if let Some(error) = self.db.take_io_error() {
-            self.fenced = true;
-            return Err(ltx_error(error));
+        self.finish_transaction(transaction)
+    }
+
+    /// Applies or replays one destination inbox operation through normal publication.
+    pub fn deliver_effect(
+        &mut self,
+        delivery: crate::InboxDelivery,
+        now_ms: i64,
+        max_result_bytes: usize,
+        handler: impl FnOnce(&crab_ltx::rusqlite::Transaction<'_>) -> Result<HandlerOutcome>,
+    ) -> Result<CommandExecution> {
+        if self.fenced {
+            return Err(Error::Fenced);
         }
-        let transaction = match transaction {
-            Ok(value) => value,
-            Err(error) => match error {
-                TransactionError::Operation(error) => return Err(error),
-                error => {
-                    self.fenced = true;
-                    return Err(transaction_error(error));
-                }
-            },
-        };
-        match transaction {
-            TransactionResult::Recorded(outcome) => Ok(CommandExecution::Recorded(outcome)),
-            TransactionResult::Committed {
+        if self.pending.is_some() {
+            return Err(Error::PendingPublication);
+        }
+        if max_result_bytes > MAX_RESULT_BYTES {
+            return Err(Error::Command("effect result limit exceeds 1 MiB"));
+        }
+        let cell = self.cell;
+        let incarnation = self.incarnation;
+        let schema = self.schema;
+        let transaction = self.db.transaction_with(|transaction| {
+            let (commit_sequence, prior_logical_time_ms) =
+                runtime_metadata(transaction, cell, incarnation, schema)?;
+            let applied = crate::inbox_apply(
+                transaction,
+                now_ms,
+                delivery,
+                max_result_bytes,
+                handler,
+            )?;
+            let (outcome, duplicate) = match applied {
+                crate::InboxApplyOutcome::Success {
+                    result,
+                    commit_sequence,
+                    duplicate,
+                } => (
+                    StoredOutcome::Success {
+                        result,
+                        commit_sequence,
+                    },
+                    duplicate,
+                ),
+                crate::InboxApplyOutcome::Rejected {
+                    result,
+                    commit_sequence,
+                    duplicate,
+                } => (
+                    StoredOutcome::Rejected {
+                        result,
+                        commit_sequence,
+                    },
+                    duplicate,
+                ),
+                crate::InboxApplyOutcome::Conflict => return Err(Error::RequestConflict),
+                crate::InboxApplyOutcome::Expired => return Err(Error::EffectExpired),
+            };
+            if duplicate {
+                return Ok(TransactionResult::Recorded(outcome));
+            }
+            let sequence = commit_sequence
+                .checked_add(1)
+                .filter(|value| *value > 0)
+                .ok_or(Error::Command("commit sequence overflow"))?;
+            let published_sequence = u64::try_from(sequence)
+                .map_err(|_| Error::Command("effect destination sequence overflow"))?;
+            if outcome.commit_sequence() != published_sequence {
+                return Err(Error::Command("effect inbox sequence does not follow Cell state"));
+            }
+            let logical_time_ms = now_ms.max(prior_logical_time_ms);
+            if transaction.execute(
+                "UPDATE sys_meta SET commit_sequence = ?1, logical_time_ms = ?2 WHERE singleton = 1",
+                (sequence, logical_time_ms),
+            )? != 1
+            {
+                return Err(Error::Command("runtime metadata row missing"));
+            }
+            let next_due_ms = crate::scheduler_next_due_ms(transaction, logical_time_ms)?;
+            Ok(TransactionResult::Committed {
                 outcome,
                 logical_time_ms,
                 next_due_ms,
-            } => {
-                let cuts = match self.db.capture() {
-                    Ok(cuts) => cuts,
-                    Err(error) => {
-                        self.fenced = true;
-                        return Err(error.into());
-                    }
-                };
-                self.pending = Some(PendingCommit {
-                    identity,
-                    operation_digest,
-                    outcome,
-                    logical_time_ms,
-                    next_due_ms,
-                    cuts,
-                    prepared: None,
-                });
-                Ok(CommandExecution::Pending)
-            }
-        }
+            })
+        });
+        self.finish_transaction(transaction)
     }
 
     /// Runs one bounded read only when no unpublished local commit exists.
@@ -541,6 +556,37 @@ impl CellExecutor {
         Ok(Resolution::Committed(outcome))
     }
 
+    /// Resolves one destination inbox identity from published SQLite state.
+    pub fn resolve_effect(
+        &mut self,
+        delivery: crate::InboxDelivery,
+        now_ms: i64,
+        max_result_bytes: usize,
+    ) -> Result<Resolution> {
+        if self.fenced || self.pending.is_some() {
+            return Ok(Resolution::Unknown);
+        }
+        let result = self.db.query_with(|connection| {
+            crate::inbox_resolve(connection, now_ms, delivery, max_result_bytes)
+        });
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
+        match result {
+            Ok(resolution) => Ok(resolution),
+            Err(crab_ltx::QueryError::Operation(error)) => Err(error),
+            Err(crab_ltx::QueryError::Sqlite(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+            Err(crab_ltx::QueryError::State(error)) => {
+                self.fenced = true;
+                Err(error.into())
+            }
+        }
+    }
+
     #[must_use]
     pub fn pending(&self) -> Option<&PendingCommit> {
         self.pending.as_ref()
@@ -614,6 +660,78 @@ impl CellExecutor {
             crate::worker::WorkerState::Ready
         }
     }
+
+    fn finish_transaction(
+        &mut self,
+        transaction: std::result::Result<TransactionResult, TransactionError<Error>>,
+    ) -> Result<CommandExecution> {
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
+        let transaction = match transaction {
+            Ok(value) => value,
+            Err(TransactionError::Operation(error)) => return Err(error),
+            Err(error) => {
+                self.fenced = true;
+                return Err(transaction_error(error));
+            }
+        };
+        match transaction {
+            TransactionResult::Recorded(outcome) => Ok(CommandExecution::Recorded(outcome)),
+            TransactionResult::Committed {
+                outcome,
+                logical_time_ms,
+                next_due_ms,
+            } => {
+                let cuts = match self.db.capture() {
+                    Ok(cuts) => cuts,
+                    Err(error) => {
+                        self.fenced = true;
+                        return Err(error.into());
+                    }
+                };
+                self.pending = Some(PendingCommit {
+                    outcome,
+                    logical_time_ms,
+                    next_due_ms,
+                    cuts,
+                    prepared: None,
+                });
+                Ok(CommandExecution::Pending)
+            }
+        }
+    }
+}
+
+fn runtime_metadata(
+    transaction: &crab_ltx::rusqlite::Transaction<'_>,
+    cell: CellId,
+    incarnation: IncarnationId,
+    schema: u32,
+) -> Result<(i64, i64)> {
+    let meta = transaction.query_row(
+        "SELECT cell_id, incarnation, commit_sequence, logical_time_ms, schema_version FROM sys_meta WHERE singleton = 1",
+        [],
+        |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, u32>(4)?,
+            ))
+        },
+    )?;
+    if meta.0.as_slice() != cell.as_bytes()
+        || meta.1.as_slice() != incarnation.as_bytes()
+        || meta.2 < 0
+        || meta.3 < 0
+        || meta.4 != schema
+    {
+        return Err(Error::Command("runtime schema identity mismatch"));
+    }
+    Ok((meta.2, meta.3))
 }
 
 fn transaction_error(error: TransactionError<Error>) -> Error {

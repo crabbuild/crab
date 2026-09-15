@@ -18,9 +18,9 @@ pub use handle::CellHandle;
 use handle::{CellAdmission, WorkAdmission};
 
 use crate::{
-    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, MutationIdentity, Owner,
-    Resolution, SessionId, SqlWorkerPool, StoredOutcome, Transition, VersionedControl,
-    WorkerExecution,
+    CatalogProof, CellAuthority, CellId, CellPublisher, Digest, Error, InboxDelivery,
+    MutationIdentity, Owner, Resolution, SessionId, SqlWorkerPool, StoredOutcome, Transition,
+    VersionedControl, WorkerExecution,
     worker::{CellReservation, Handler, Initializer, QueryHandler, WorkerState},
 };
 
@@ -591,13 +591,43 @@ enum Message {
 struct QueuedCommand {
     cell: CellId,
     admission: Arc<CellAdmission>,
-    identity: MutationIdentity,
-    operation_digest: Digest,
+    operation: QueuedOperation,
     now_ms: i64,
     max_result_bytes: usize,
     handler: Option<Handler>,
     reply: Option<oneshot::Sender<crate::Result<StoredOutcome>>>,
     _work: WorkAdmission,
+}
+
+#[derive(Clone, Copy)]
+enum QueuedOperation {
+    Mutation {
+        identity: MutationIdentity,
+        operation_digest: Digest,
+    },
+    Effect {
+        delivery: InboxDelivery,
+    },
+}
+
+impl QueuedOperation {
+    fn unknown(self, source: Error) -> Error {
+        match self {
+            Self::Mutation {
+                identity,
+                operation_digest,
+            } => Error::OutcomeUnknown {
+                request_id: identity.request_id,
+                operation_digest,
+                source: Box::new(source),
+            },
+            Self::Effect { delivery } => Error::EffectOutcomeUnknown {
+                effect_id: delivery.effect_id,
+                operation_digest: delivery.operation_digest,
+                source: Box::new(source),
+            },
+        }
+    }
 }
 
 struct QueuedQuery {
@@ -612,12 +642,22 @@ struct QueuedQuery {
 struct QueuedResolve {
     cell: CellId,
     admission: Arc<CellAdmission>,
-    identity: MutationIdentity,
-    operation_digest: Digest,
+    operation: ResolveOperation,
     now_ms: i64,
     max_result_bytes: usize,
     reply: Option<oneshot::Sender<crate::Result<Resolution>>>,
     _work: WorkAdmission,
+}
+
+#[derive(Clone, Copy)]
+enum ResolveOperation {
+    Mutation {
+        identity: MutationIdentity,
+        operation_digest: Digest,
+    },
+    Effect {
+        delivery: InboxDelivery,
+    },
 }
 
 enum QueuedWork {
@@ -1110,31 +1150,51 @@ async fn execute_and_publish(
     let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let execution = match command.handler.take() {
         Some(handler) => {
-            let operation = pool.execute_until(
-                command.cell,
-                command.identity,
-                command.operation_digest,
-                command.now_ms,
-                command.max_result_bytes,
-                deadline,
-                handler,
-            );
+            let cell = command.cell;
+            let queued_operation = command.operation;
+            let now_ms = command.now_ms;
+            let max_result_bytes = command.max_result_bytes;
+            let worker_pool = pool.clone();
+            let operation = async move {
+                match queued_operation {
+                    QueuedOperation::Mutation {
+                        identity,
+                        operation_digest,
+                    } => {
+                        worker_pool
+                            .execute_until(
+                                cell,
+                                identity,
+                                operation_digest,
+                                now_ms,
+                                max_result_bytes,
+                                deadline,
+                                handler,
+                            )
+                            .await
+                    }
+                    QueuedOperation::Effect { delivery } => {
+                        worker_pool
+                            .deliver_effect(
+                                cell,
+                                delivery,
+                                now_ms,
+                                max_result_bytes,
+                                deadline,
+                                handler,
+                            )
+                            .await
+                    }
+                }
+            };
             tokio::pin!(operation);
             match tokio::time::timeout_at(deadline.into(), &mut operation).await {
                 Ok(result) => result,
                 Err(_) => {
                     interrupt.interrupt();
                     fence_admission(&command.admission);
-                    let request_id = command.identity.request_id;
-                    let operation_digest = command.operation_digest;
-                    send_command_reply(
-                        &mut command,
-                        Err(Error::OutcomeUnknown {
-                            request_id,
-                            operation_digest,
-                            source: Box::new(Error::Deadline),
-                        }),
-                    );
+                    let error = command.operation.unknown(Error::Deadline);
+                    send_command_reply(&mut command, Err(error));
                     let _ = operation.await;
                     let _ = pool.fence(command.cell).await;
                     return TaskResult::Executed {
@@ -1173,11 +1233,7 @@ async fn execute_and_publish(
         let _ = pool.fence(command.cell).await;
     }
     let result = if fenced {
-        result.map_err(|source| Error::OutcomeUnknown {
-            request_id: command.identity.request_id,
-            operation_digest: command.operation_digest,
-            source: Box::new(source),
-        })
+        result.map_err(|source| command.operation.unknown(source))
     } else {
         result
     };
@@ -1237,14 +1293,35 @@ async fn execute_resolve(
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
     let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
-    let operation = pool.resolve(
-        resolve.cell,
-        resolve.identity,
-        resolve.operation_digest,
-        resolve.now_ms,
-        resolve.max_result_bytes,
-        deadline,
-    );
+    let cell = resolve.cell;
+    let resolve_operation = resolve.operation;
+    let now_ms = resolve.now_ms;
+    let max_result_bytes = resolve.max_result_bytes;
+    let worker_pool = pool.clone();
+    let operation = async move {
+        match resolve_operation {
+            ResolveOperation::Mutation {
+                identity,
+                operation_digest,
+            } => {
+                worker_pool
+                    .resolve(
+                        cell,
+                        identity,
+                        operation_digest,
+                        now_ms,
+                        max_result_bytes,
+                        deadline,
+                    )
+                    .await
+            }
+            ResolveOperation::Effect { delivery } => {
+                worker_pool
+                    .resolve_effect(cell, delivery, now_ms, max_result_bytes, deadline)
+                    .await
+            }
+        }
+    };
     tokio::pin!(operation);
     let result = match tokio::time::timeout_at(deadline.into(), &mut operation).await {
         Ok(result) => result,

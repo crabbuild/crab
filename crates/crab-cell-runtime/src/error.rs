@@ -77,6 +77,15 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+    #[error("accepted Cell effect outcome is unknown")]
+    EffectOutcomeUnknown {
+        effect_id: [u8; 32],
+        operation_digest: crate::Digest,
+        #[source]
+        source: Box<Error>,
+    },
+    #[error("Cell effect expired before delivery")]
+    EffectExpired,
     #[error("Cell runtime capacity exhausted: {0}")]
     Capacity(&'static str),
     #[error("failed to start Cell SQL worker")]

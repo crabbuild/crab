@@ -5,9 +5,13 @@ use std::sync::{
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, oneshot};
 
-use super::{Message, QueuedCommand, QueuedQuery, QueuedResolve, RuntimeInner};
+use super::{
+    Message, QueuedCommand, QueuedOperation, QueuedQuery, QueuedResolve, ResolveOperation,
+    RuntimeInner,
+};
 use crate::{
-    CatalogProof, CellId, Digest, Error, IncarnationId, MutationIdentity, Resolution, StoredOutcome,
+    CatalogProof, CellId, Digest, Error, InboxDelivery, IncarnationId, MutationIdentity,
+    Resolution, StoredOutcome,
 };
 
 const MAX_OPERATION_BYTES: usize = 1024 * 1024;
@@ -88,8 +92,10 @@ impl CellHandle {
             .send(Message::Execute(Box::new(QueuedCommand {
                 cell: self.cell,
                 admission: self.admission.clone(),
-                identity,
-                operation_digest,
+                operation: QueuedOperation::Mutation {
+                    identity,
+                    operation_digest,
+                },
                 now_ms,
                 max_result_bytes,
                 handler: Some(Box::new(handler)),
@@ -101,6 +107,45 @@ impl CellHandle {
         response.await.map_err(|_| Error::OutcomeUnknown {
             request_id: identity.request_id,
             operation_digest,
+            source: Box::new(Error::RuntimeClosed),
+        })?
+    }
+
+    /// Applies or replays one private destination effect through durable publication.
+    pub async fn deliver_effect<F>(
+        &self,
+        delivery: InboxDelivery,
+        now_ms: i64,
+        operation_bytes: usize,
+        max_result_bytes: usize,
+        handler: F,
+    ) -> crate::Result<StoredOutcome>
+    where
+        F: for<'connection> FnOnce(
+                &crab_ltx::rusqlite::Transaction<'connection>,
+            ) -> crate::Result<crate::HandlerOutcome>
+            + Send
+            + 'static,
+    {
+        let admission = self.reserve_work(operation_bytes, max_result_bytes)?;
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::Execute(Box::new(QueuedCommand {
+                cell: self.cell,
+                admission: self.admission.clone(),
+                operation: QueuedOperation::Effect { delivery },
+                now_ms,
+                max_result_bytes,
+                handler: Some(Box::new(handler)),
+                reply: Some(reply),
+                _work: admission,
+            })))
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        response.await.map_err(|_| Error::EffectOutcomeUnknown {
+            effect_id: delivery.effect_id,
+            operation_digest: delivery.operation_digest,
             source: Box::new(Error::RuntimeClosed),
         })?
     }
@@ -157,8 +202,48 @@ impl CellHandle {
             .send(Message::Resolve(Box::new(QueuedResolve {
                 cell: self.cell,
                 admission: self.admission.clone(),
-                identity,
-                operation_digest,
+                operation: ResolveOperation::Mutation {
+                    identity,
+                    operation_digest,
+                },
+                now_ms,
+                max_result_bytes,
+                reply: Some(reply),
+                _work: admission,
+            })))
+            .await
+            .map_err(|_| Error::RuntimeClosed)?;
+        match response.await {
+            Ok(result) => result,
+            Err(_) => Ok(Resolution::Unknown),
+        }
+    }
+
+    /// Resolves one private destination effect without executing its handler again.
+    pub async fn resolve_effect(
+        &self,
+        delivery: InboxDelivery,
+        now_ms: i64,
+        max_result_bytes: usize,
+    ) -> crate::Result<Resolution> {
+        if delivery.expires_at_ms <= now_ms {
+            return Ok(Resolution::Expired);
+        }
+        if self.admission.fenced.load(Ordering::Acquire) {
+            return Ok(Resolution::Unknown);
+        }
+        let admission = match self.reserve_work(72, max_result_bytes) {
+            Ok(admission) => admission,
+            Err(Error::Fenced) => return Ok(Resolution::Unknown),
+            Err(error) => return Err(error),
+        };
+        let (reply, response) = oneshot::channel();
+        self.inner
+            .sender
+            .send(Message::Resolve(Box::new(QueuedResolve {
+                cell: self.cell,
+                admission: self.admission.clone(),
+                operation: ResolveOperation::Effect { delivery },
                 now_ms,
                 max_result_bytes,
                 reply: Some(reply),

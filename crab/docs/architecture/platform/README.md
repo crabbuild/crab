@@ -106,7 +106,12 @@ after exact-root restoration. The source effect ledger and target
 inbox mechanics now derive immutable identities/digests, enforce command and
 claim bounds, validate only published leases, retry with stable bytes, dedup
 target execution, retain destination receipts beyond the sender horizon and
-clean terminal rows in bounded batches. Private peer delivery and the node
+clean terminal rows in bounded batches. Destination delivery now enters the
+same bounded Cell actor as commands, records `sys_inbox`, advances `sys_meta`,
+captures LTX and waits for the exact control root before success. A cancelled
+caller does not cancel accepted work; stable retries return the stored outcome,
+and private Resolve reads the inbox after exact-root restoration. Compiled effect
+codecs, authenticated peer translation, source acknowledgement and the node
 effect supervisor still remain.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds

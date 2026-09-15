@@ -385,11 +385,17 @@ fn error_reply(error: Error) -> wire::PeerReply {
             "request identity conflicts with a stored operation",
             0,
         ),
-        Error::OutcomeUnknown { .. } => (
+        Error::OutcomeUnknown { .. } | Error::EffectOutcomeUnknown { .. } => (
             wire::error::Code::OutcomeUnknown,
             wire::error::Outcome::Unknown,
             "accepted command outcome requires resolution",
             100,
+        ),
+        Error::EffectExpired => (
+            wire::error::Code::RequestExpired,
+            wire::error::Outcome::Rejected,
+            "Cell effect expired before delivery",
+            0,
         ),
         Error::Capacity(_) => (
             wire::error::Code::ResourceExhausted,

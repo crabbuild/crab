@@ -1,7 +1,9 @@
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
-use crate::{CellId, Digest, Error, HandlerOutcome, IncarnationId, Result};
+use crate::{
+    CellId, Digest, Error, HandlerOutcome, IncarnationId, Resolution, Result, StoredOutcome,
+};
 
 const MAX_EFFECTS_PER_COMMAND: usize = 128;
 const MAX_EFFECT_BYTES: usize = 1 << 20;
@@ -448,7 +450,7 @@ pub fn inbox_apply(
     }
     let existing = transaction
         .query_row(
-            "SELECT operation_digest, outcome, result, commit_sequence FROM sys_inbox WHERE effect_id = ?1",
+            "SELECT operation_digest, outcome, result, commit_sequence, expires_at_ms FROM sys_inbox WHERE effect_id = ?1",
             [delivery.effect_id.as_slice()],
             |row| {
                 Ok((
@@ -456,12 +458,15 @@ pub fn inbox_apply(
                     row.get::<_, i64>(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )
         .optional()?;
-    if let Some((digest, outcome, result, sequence)) = existing {
-        if digest.as_slice() != delivery.operation_digest.as_bytes() {
+    if let Some((digest, outcome, result, sequence, expires_at_ms)) = existing {
+        if digest.as_slice() != delivery.operation_digest.as_bytes()
+            || expires_at_ms != delivery.expires_at_ms
+        {
             return Ok(InboxApplyOutcome::Conflict);
         }
         return inbox_outcome(outcome, result, sequence, max_result_bytes, true);
@@ -508,6 +513,51 @@ pub fn inbox_apply(
         ),
     )?;
     inbox_outcome(outcome, result, sequence, max_result_bytes, false)
+}
+
+/// Resolves one destination inbox identity without executing its handler.
+pub fn inbox_resolve(
+    connection: &Connection,
+    now_ms: i64,
+    delivery: InboxDelivery,
+    max_result_bytes: usize,
+) -> Result<Resolution> {
+    validate_now(now_ms)?;
+    if delivery.expires_at_ms <= now_ms {
+        return Ok(Resolution::Expired);
+    }
+    if max_result_bytes > MAX_EFFECT_BYTES {
+        return Err(Error::Command("effect result limit exceeds 1 MiB"));
+    }
+    let existing = connection
+        .query_row(
+            "SELECT operation_digest, outcome, result, commit_sequence, expires_at_ms FROM sys_inbox WHERE effect_id = ?1",
+            [delivery.effect_id.as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((digest, outcome, result, sequence, expires_at_ms)) = existing else {
+        return Ok(Resolution::Absent);
+    };
+    if digest.as_slice() != delivery.operation_digest.as_bytes()
+        || expires_at_ms != delivery.expires_at_ms
+    {
+        return Err(Error::RequestConflict);
+    }
+    Ok(Resolution::Committed(stored_inbox_outcome(
+        outcome,
+        result,
+        sequence,
+        max_result_bytes,
+    )?))
 }
 
 /// Removes at most 128 terminal source effects after their delivery horizon.
@@ -688,21 +738,45 @@ fn inbox_outcome(
     max_result_bytes: usize,
     duplicate: bool,
 ) -> Result<InboxApplyOutcome> {
+    match stored_inbox_outcome(outcome, result, sequence, max_result_bytes)? {
+        StoredOutcome::Success {
+            result,
+            commit_sequence,
+        } => Ok(InboxApplyOutcome::Success {
+            result,
+            commit_sequence,
+            duplicate,
+        }),
+        StoredOutcome::Rejected {
+            result,
+            commit_sequence,
+        } => Ok(InboxApplyOutcome::Rejected {
+            result,
+            commit_sequence,
+            duplicate,
+        }),
+    }
+}
+
+fn stored_inbox_outcome(
+    outcome: i64,
+    result: Vec<u8>,
+    sequence: i64,
+    max_result_bytes: usize,
+) -> Result<StoredOutcome> {
     if result.len() > max_result_bytes || sequence <= 0 {
         return Err(Error::Command("invalid stored inbox outcome"));
     }
     let commit_sequence =
         u64::try_from(sequence).map_err(|_| Error::Command("invalid stored inbox sequence"))?;
     match outcome {
-        1 => Ok(InboxApplyOutcome::Success {
+        1 => Ok(StoredOutcome::Success {
             result,
             commit_sequence,
-            duplicate,
         }),
-        2 => Ok(InboxApplyOutcome::Rejected {
+        2 => Ok(StoredOutcome::Rejected {
             result,
             commit_sequence,
-            duplicate,
         }),
         _ => Err(Error::Command("invalid stored inbox outcome")),
     }
