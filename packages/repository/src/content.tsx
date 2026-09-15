@@ -8,11 +8,13 @@ import {
   type CSSProperties,
 } from "react";
 import { File, MultiFileDiff } from "@pierre/diffs/react";
+import type { PostRenderPhase, TokenEventBase } from "@pierre/diffs";
 import { FileTree, useFileTree } from "@pierre/trees/react";
 import type { GitStatus } from "@pierre/trees";
 import { IconButton, Label, SegmentedControl } from "@primer/react";
 import {
   CopyIcon,
+  CodeIcon,
   DownloadIcon,
   PencilIcon,
   TrashIcon,
@@ -39,6 +41,13 @@ import {
   previewDescriptor,
   type PreviewDescriptor,
 } from "./file-preview-model";
+import {
+  codeSymbolLanguage,
+  findSymbolAt,
+  useCodeSymbols,
+  type CodeSymbol,
+} from "./code-symbols";
+import { CodeSymbolsPanel } from "./code-symbols-panel";
 
 const FilePreview = lazy(() =>
   import("./file-preview").then((module) => ({ default: module.FilePreview })),
@@ -104,8 +113,13 @@ export function FileView({
     DEFAULT_BLAME_PANE_WIDTH,
   );
   const [copied, setCopied] = useState(false);
+  const [symbolsOpen, setSymbolsOpen] = useState(true);
+  const [activeSymbol, setActiveSymbol] = useState<CodeSymbol | null>(null);
+  const sourceHost = useRef<HTMLElement | null>(null);
+  const symbolsRef = useRef<CodeSymbol[]>([]);
   useEffect(() => {
     setView(previewFirst ? "preview" : "code");
+    setActiveSymbol(null);
   }, [path, previewFirst]);
   useEffect(() => {
     if (preview === null && state.data?.text === null) setView("preview");
@@ -121,15 +135,92 @@ export function FileView({
     }),
     [name, state.data],
   );
+  const symbolLanguage = codeSymbolLanguage(name);
+  const symbolSource =
+    state.data?.classification === "OrdinaryGit" ? state.data.text : null;
+  const symbolState = useCodeSymbols(name, symbolSource);
+  symbolsRef.current = symbolState.symbols;
+
+  function sourceRoot() {
+    return sourceHost.current?.shadowRoot ?? sourceHost.current;
+  }
+
+  function clearSourceTarget() {
+    sourceRoot()
+      ?.querySelectorAll("[data-code-symbol-target]")
+      .forEach((element) => element.removeAttribute("data-code-symbol-target"));
+  }
+
+  function navigateToSymbol(symbol: CodeSymbol) {
+    setActiveSymbol(symbol);
+    clearSourceTarget();
+    const line = sourceRoot()?.querySelector<HTMLElement>(
+      `[data-line="${symbol.line}"]`,
+    );
+    line?.setAttribute("data-code-symbol-target", "true");
+    line?.scrollIntoView({ block: "center", behavior: "smooth" });
+    window.history.replaceState(null, "", `#L${symbol.line}`);
+  }
+
+  function tokenSymbol(token: TokenEventBase) {
+    return findSymbolAt(
+      symbolsRef.current,
+      token.lineNumber,
+      token.lineCharStart,
+      token.tokenText,
+    );
+  }
+
   const options = useMemo(
     () => ({
       theme: codeThemes,
       themeType: theme,
       disableFileHeader: true,
       preferredHighlighter: "shiki-js" as const,
-      onPostRender: enableCodeKeyboardScroll,
+      onPostRender: (
+        container: HTMLElement,
+        _instance: unknown,
+        phase: PostRenderPhase,
+      ) => {
+        if (phase === "unmount") {
+          sourceHost.current = null;
+          return;
+        }
+        sourceHost.current = container;
+        enableCodeKeyboardScroll(container);
+        const match = window.location.hash.match(/^#L(\d+)$/);
+        if (!match) return;
+        const line = container.shadowRoot?.querySelector<HTMLElement>(
+          `[data-line="${match[1]}"]`,
+        );
+        line?.setAttribute("data-code-symbol-target", "true");
+        line?.scrollIntoView({ block: "center" });
+      },
+      ...(symbolLanguage
+        ? {
+            unsafeCSS: `
+              [data-code-symbol-hover] { background: var(--bgColor-attention-muted); border-radius: 3px; cursor: pointer; }
+              [data-code-symbol-target] { background: var(--bgColor-accent-muted); }
+            `,
+            onTokenEnter: (token: TokenEventBase) => {
+              if (tokenSymbol(token)) {
+                token.tokenElement.setAttribute(
+                  "data-code-symbol-hover",
+                  "true",
+                );
+              }
+            },
+            onTokenLeave: (token: TokenEventBase) => {
+              token.tokenElement.removeAttribute("data-code-symbol-hover");
+            },
+            onTokenClick: (token: TokenEventBase) => {
+              const symbol = tokenSymbol(token);
+              if (symbol) navigateToSymbol(symbol);
+            },
+          }
+        : {}),
     }),
-    [codeThemes, theme],
+    [codeThemes, symbolLanguage, theme],
   );
   const activePreview: PreviewDescriptor | null =
     preview ??
@@ -181,6 +272,14 @@ export function FileView({
               </span>
             </div>
             <div className="file-actions">
+              {view === "code" && symbolLanguage && !symbolsOpen && (
+                <IconButton
+                  icon={CodeIcon}
+                  aria-label="Open code symbols"
+                  size="small"
+                  onClick={() => setSymbolsOpen(true)}
+                />
+              )}
               <a href={endpoint(repo, "blob", { rev, path_hex: path })}>Raw</a>
               {content.text !== null && (
                 <IconButton
@@ -391,11 +490,26 @@ export function FileView({
               </div>
             ) : null
           ) : (
-            <File
-              key={`${theme}:${codeThemes.light}:${codeThemes.dark}`}
-              file={file}
-              options={options}
-            />
+            <div
+              className={`file-source-workspace${symbolsOpen && symbolLanguage ? " has-symbols" : ""}`}
+            >
+              <div className="file-source-code">
+                <File
+                  key={`${theme}:${codeThemes.light}:${codeThemes.dark}:${symbolLanguage ?? "plain"}`}
+                  file={file}
+                  options={options}
+                />
+              </div>
+              {symbolsOpen && symbolLanguage && (
+                <CodeSymbolsPanel
+                  state={symbolState}
+                  active={activeSymbol}
+                  onActivate={navigateToSymbol}
+                  onClearActive={() => setActiveSymbol(null)}
+                  onClose={() => setSymbolsOpen(false)}
+                />
+              )}
+            </div>
           )}
         </section>
       )}

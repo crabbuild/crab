@@ -17,6 +17,24 @@ const readme =
   "![Architecture](docs/architecture.png) ![Vector](docs/vector.svg) " +
   "![Build status](https://status.example/build.svg)\n\n" +
   '```typescript\nconst project: string = "Crab";\n```\n';
+const rustSource = `pub struct Crab;
+
+impl Crab {
+    pub fn open(&self) {}
+}
+
+pub fn serve(crab: &Crab) {
+    crab.open();
+}
+`;
+const typescriptSource = `interface Repository {
+  open(): void;
+}
+
+export function browse(repository: Repository) {
+  repository.open();
+}
+`;
 const pathHex = (path: string) =>
   Array.from(new TextEncoder().encode(path), (byte) =>
     byte.toString(16).padStart(2, "0"),
@@ -478,10 +496,15 @@ test.beforeEach(async ({ page }) => {
         },
       });
     if (url.pathname.endsWith("/file")) {
+      const requestedPath = url.searchParams.get("path_hex");
       const text =
-        url.searchParams.get("path_hex") === pathHex("README.md")
+        requestedPath === pathHex("README.md")
           ? currentReadme
-          : "Hello, team!";
+          : requestedPath === pathHex("src/lib.rs")
+            ? rustSource
+            : requestedPath === pathHex("src/symbols.ts")
+              ? typescriptSource
+              : "Hello, team!";
       return route.fulfill({
         json: {
           oid:
@@ -1100,6 +1123,62 @@ test("code palette persists and follows light and dark appearance", async ({
     "data-code-theme",
     "vscode",
   );
+});
+
+test("Rust and TypeScript source expose browser-parsed current-file symbols", async ({
+  page,
+}) => {
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("src/lib.rs")}&kind=Blob`,
+  );
+
+  const symbols = page.getByRole("complementary", { name: "Code symbols" });
+  await expect(symbols).toBeVisible();
+  await expect(symbols.getByText("impl Crab", { exact: true })).toBeVisible();
+  await expect(
+    symbols.getByRole("button", { name: /serve function 7/ }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+
+  await symbols.getByPlaceholder("Filter symbols").fill("serve");
+  await expect(
+    symbols.getByRole("button", { name: /serve function 7/ }),
+  ).toBeVisible();
+  await expect(
+    symbols.getByRole("button", { name: /open method 4/ }),
+  ).toHaveCount(0);
+  await symbols.getByPlaceholder("Filter symbols").fill("");
+
+  await symbols.getByRole("button", { name: /serve function 7/ }).click();
+  await expect(page).toHaveURL(/#L7$/);
+  await expect(page.locator('[data-line="7"]')).toHaveAttribute(
+    "data-code-symbol-target",
+    "true",
+  );
+
+  await page.locator('[data-line="8"] span', { hasText: "open" }).click();
+  await expect(symbols.getByText("Definitions 1")).toBeVisible();
+  await expect(symbols.getByText("References 1")).toBeVisible();
+
+  await symbols.getByRole("button", { name: "Close symbols" }).click();
+  await expect(symbols).toHaveCount(0);
+  await page.getByRole("button", { name: "Open code symbols" }).click();
+  await expect(
+    page.getByRole("complementary", { name: "Code symbols" }),
+  ).toBeVisible();
+
+  await page.goto(
+    `/team/project?rev=refs%2Fheads%2Fmain&path=${pathHex("src/symbols.ts")}&kind=Blob`,
+  );
+  const typeScriptSymbols = page.getByRole("complementary", {
+    name: "Code symbols",
+  });
+  await expect(
+    typeScriptSymbols.getByRole("button", { name: /Repository interface 1/ }),
+  ).toBeVisible();
+  await expect(
+    typeScriptSymbols.getByRole("button", { name: /browse function 5/ }),
+  ).toBeVisible();
 });
 
 test("format-aware previews explore data, office files, media, and databases locally", async ({
