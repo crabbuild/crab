@@ -340,10 +340,11 @@ the ready CAS, rejects an unstable catalog snapshot and
 resumes exact retries without a new operation. The initial empty/exact-compatible
 activation path is proven against real RustFS. `ReleaseStore::provision` now admits
 only the exact compiled descriptor selected by `ready.current` or
-`activating.desired`, publishes the catalog entry, and reloads the same release
-operation before returning its proof. It accepts only the exact activation-to-ready
-successor, so a late catalog publication cannot introduce unsupported initial
-code/schema across the activator's final scan. The first-install
+`activating.desired` and requires the entry's initial pair to be that module's
+current code and maximum schema. It publishes the catalog entry, then reloads the
+same release operation before returning its proof. It accepts only the exact
+activation-to-ready successor, so a late catalog publication cannot introduce a
+retained or unsupported initial pair across the activator's final scan. The first-install
 `cells release bootstrap --image DIGEST` command uses a deterministic operation
 identity, so concurrent pods converge on one exact descriptor and image. It
 resumes activation only for the operation it created; an operator-prepared
@@ -367,8 +368,11 @@ stopped because the legacy deployment did not publish those node records.
 Single-Cell migration now covers current or explicitly retained predecessor code,
 adjacent schema SQL, and same-schema code-only rollover. The code-only path is
 proven through an authoritative LTX/control publication, while the schema path is
-also proven through exact-root restoration. Catalog-wide migration progress,
-remaining collaboration-domain import/adapters and capacity qualification remain.
+also proven through exact-root restoration. Release activation now treats a
+retained pair as executable but not complete, and refuses its final `ready` CAS
+until every non-tombstoned Cell uses the target code and maximum schema.
+Catalog-wide migration execution/progress, remaining collaboration-domain
+import/adapters and capacity qualification remain.
 Issue/comment HTTP reads and mutations now enter
 through the authenticated repository router and typed Cell API; legacy issue
 objects are maintenance-import input only and are ignored by serving code.

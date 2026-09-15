@@ -290,8 +290,11 @@ VM passes 1 and the two-replica Helm deployment passes 2. The same quorum is
 reloaded after the complete catalog compatibility scan and immediately before
 the ready CAS. Repeating the original command adopts the same ready record. It
 currently admits initial, current-code, or explicitly retained compatible
-code/schema inventories. It does not yet migrate those retained Cells to current
-code or persist catalog-wide migration progress.
+code/schema inventories for candidate startup and continued serving. Its final
+activation scan separately requires every non-tombstoned Cell to use the current
+module code and `schema_max`; a retained predecessor leaves the release in
+`activating` with an explicit migration-required error. It does not yet execute
+those migrations or persist a separate catalog-wide progress report.
 Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
 
@@ -320,8 +323,9 @@ scheduler and storage-write revocation proof required by the hard-cut procedure.
 
 `ReleaseStore::provision` implements the release-aware catalog boundary. It first
 requires the exact compiled descriptor bytes selected by `ready.current` or
-`activating.desired`, verifies the requested namespace/role/initial code/schema,
-then publishes the immutable page and catalog head. It reloads release state after
+`activating.desired`, then requires the requested namespace/role/initial code/schema
+to be the target release's current pair before publishing the immutable page and
+catalog head. It reloads release state after
 publication and accepts only the identical record or the same operation's exact
 `activating → ready` successor. Any other change fails before control creation;
 the already-visible catalog entry remains activation input and cannot be hidden.
@@ -409,7 +413,8 @@ old-capability rejection, retained typed-client execution, code-only publication
 a post-migration write, local-source loss and exact-root restore. Release
 activation does not yet walk the catalog or persist per-Cell migration progress.
 Until that orchestration exists, operators cannot treat a prepared release as an
-automatic fleet schema rollout.
+automatic fleet schema rollout. The final current-version scan does prevent it
+from marking a merely compatible retained inventory ready.
 
 ## Kubernetes and VM process lifecycle
 

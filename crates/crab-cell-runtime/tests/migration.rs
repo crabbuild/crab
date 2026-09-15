@@ -85,6 +85,8 @@ async fn migration_replaces_capability_publishes_schema_and_restores_exact_root(
     let code = registry.module_code(MODULE).unwrap();
     assert!(registry.supports_cell(NAMESPACE, CatalogRole::Sql, PREDECESSOR_CODE, 1));
     assert!(registry.supports_cell(NAMESPACE, CatalogRole::Sql, PREDECESSOR_CODE, 2));
+    assert!(!registry.is_current_cell(NAMESPACE, CatalogRole::Sql, PREDECESSOR_CODE, 2));
+    assert!(registry.is_current_cell(NAMESPACE, CatalogRole::Sql, code, 2));
     assert!(registry.module_digests().contains(&PREDECESSOR_CODE));
     assert!(registry.module_digests().contains(&code));
     let target = CellTarget::new(

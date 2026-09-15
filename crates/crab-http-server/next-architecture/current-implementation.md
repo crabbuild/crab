@@ -74,7 +74,9 @@ typed local and peer dispatch, and atomically publishes adjacent schema or
 same-schema code-only transitions. It replaces the old capability only after
 control publication, and restores the schema-migrated root after local loss. The
 server release activator does not yet enumerate and migrate the catalog or persist
-per-Cell progress. The complete issue/comment HTTP route
+per-Cell progress. It does separately require current code/maximum schema before
+the final ready CAS, so retained compatibility cannot be mistaken for completed
+migration. The complete issue/comment HTTP route
 group now calls the typed repository module and publishes through LTX. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and

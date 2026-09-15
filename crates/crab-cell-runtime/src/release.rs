@@ -331,7 +331,7 @@ impl ReleaseStore {
         let selected = selected_provision_release(&before)?;
         if selected != registry.release_digest()
             || self.descriptor(selected).await? != registry.release_bytes()
-            || !registry.supports_cell(
+            || !registry.is_current_cell(
                 entry.namespace(),
                 entry.role(),
                 entry.initial_code(),
@@ -339,7 +339,7 @@ impl ReleaseStore {
             )
         {
             return Err(Error::Release(
-                "compiled release does not support the catalog entry",
+                "catalog entry does not use the current release code and schema",
             ));
         }
 

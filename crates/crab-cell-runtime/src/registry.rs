@@ -878,6 +878,26 @@ impl Registry {
         self.supports_module_code(module, code, schema)
     }
 
+    /// Reports whether one Cell already uses the module's target code and schema.
+    #[must_use]
+    pub fn is_current_cell(
+        &self,
+        namespace: NamespaceId,
+        role: CatalogRole,
+        code: Digest,
+        schema: u32,
+    ) -> bool {
+        let Some((module, descriptor)) = self.namespace_modules.get(&namespace) else {
+            return false;
+        };
+        descriptor.role == role
+            && self.module_codes.get(*module) == Some(&code)
+            && self
+                .module_schemas
+                .get(*module)
+                .is_some_and(|(_, schema_max)| *schema_max == schema)
+    }
+
     /// Selects the next compiled migration for one exact Cell code/schema pair.
     pub fn next_migration(
         &self,

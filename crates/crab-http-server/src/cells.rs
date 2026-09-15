@@ -192,6 +192,7 @@ pub(crate) async fn bootstrap_release_at(
         && observed.record().desired_image() == image
     {
         verify_startup_release_at(layout, identity, registry).await?;
+        verify_current_cells(layout, identity, registry).await?;
         return observed.record().encode().map_err(Error::from);
     }
     if observed.record().desired() != Some(registry.release_digest())
@@ -221,9 +222,11 @@ pub(crate) async fn bootstrap_release_at(
     };
     if activating.state() == ReleaseState::Ready {
         verify_startup_release_at(layout, identity, registry).await?;
+        verify_current_cells(layout, identity, registry).await?;
         return activating.encode().map_err(Error::from);
     }
     verify_compatible_cells(layout, identity, registry).await?;
+    verify_current_cells(layout, identity, registry).await?;
     releases
         .complete_activation(activating.revision(), operation)
         .await?
@@ -391,12 +394,14 @@ pub(crate) async fn activate_release(
         .start_activation(expected_revision, operation)
         .await?;
     if activating.state() == ReleaseState::Ready {
+        verify_current_cells(&layout, identity, &registry).await?;
         return activating.encode().map_err(Error::from);
     }
     verify_compatible_cells(&layout, identity, &registry).await?;
     if let Some(directory) = &directory {
         verify_eligible_nodes(directory, &registry, unix_now_ms()?, minimum_eligible_nodes).await?;
     }
+    verify_current_cells(&layout, identity, &registry).await?;
     releases
         .complete_activation(activating.revision(), operation)
         .await?
@@ -451,6 +456,52 @@ async fn verify_compatible_cells(
     identity: ApplicationIdentity,
     registry: &Registry,
 ) -> Result<()> {
+    verify_cell_inventory(layout, identity, registry, CellInventory::Executable).await
+}
+
+async fn verify_current_cells(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    registry: &Registry,
+) -> Result<()> {
+    verify_cell_inventory(layout, identity, registry, CellInventory::Current).await
+}
+
+#[derive(Clone, Copy)]
+enum CellInventory {
+    Executable,
+    Current,
+}
+
+impl CellInventory {
+    fn accepts(
+        self,
+        registry: &Registry,
+        namespace: NamespaceId,
+        role: CatalogRole,
+        code: Digest,
+        schema: u32,
+    ) -> bool {
+        match self {
+            Self::Executable => registry.supports_cell(namespace, role, code, schema),
+            Self::Current => registry.is_current_cell(namespace, role, code, schema),
+        }
+    }
+
+    const fn error(self) -> &'static str {
+        match self {
+            Self::Executable => "compiled release cannot execute every cataloged Cell",
+            Self::Current => "cataloged Cells still require release migration",
+        }
+    }
+}
+
+async fn verify_cell_inventory(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    registry: &Registry,
+    requirement: CellInventory,
+) -> Result<()> {
     let catalog = CellCatalog::new(layout.clone(), identity.tenant());
     let authority = CellAuthority::new(layout.clone());
     for _ in 0..3 {
@@ -463,13 +514,15 @@ async fn verify_compatible_cells(
                     let entry = proof.entry();
                     let supported = match authority.load(entry.cell()).await? {
                         Some(control) if control.value().state == ControlState::Tombstoned => true,
-                        Some(control) => registry.supports_cell(
+                        Some(control) => requirement.accepts(
+                            registry,
                             entry.namespace(),
                             entry.role(),
                             control.value().code,
                             control.value().schema,
                         ),
-                        None => registry.supports_cell(
+                        None => requirement.accepts(
+                            registry,
                             entry.namespace(),
                             entry.role(),
                             entry.initial_code(),
@@ -477,9 +530,7 @@ async fn verify_compatible_cells(
                         ),
                     };
                     if !supported {
-                        return Err(Error::Config(
-                            "compiled release cannot execute every cataloged Cell",
-                        ));
+                        return Err(Error::Config(requirement.error()));
                     }
                 }
             }
@@ -562,12 +613,17 @@ fn source_revision() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::UNIX_EPOCH};
+    use std::{
+        sync::{Arc, OnceLock},
+        time::UNIX_EPOCH,
+    };
 
     use crab_cell_runtime::{
-        ApplicationIdentity, CatalogEntry, CellAuthority, CellClient, CellReplica, CellRuntime,
-        CellTarget, IncarnationId, InvocationError, MutationIdentity, NodeAdvertisement,
-        NodeCapacity, Owner, PeerCellResolver, ReplicaLimits, SessionId, SqlWorkerPool,
+        ApplicationIdentity, BuildDescriptor, CatalogEntry, CellAuthority, CellClient, CellModule,
+        CellReplica, CellRuntime, CellTarget, IncarnationId, InvocationError, MigrationDescriptor,
+        ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NodeAdvertisement, NodeCapacity,
+        Owner, PeerCellResolver, RegistryBuilder, ReplicaLimits, RetainedCodeDescriptor, SessionId,
+        SqlWorkerPool,
     };
     use crab_storage::{CellStorageLayout, Store};
     use ed25519_dalek::SigningKey;
@@ -582,6 +638,61 @@ mod tests {
         UpdateIssueOutcome,
     };
     use super::*;
+
+    const ROLLOVER_NAMESPACE: NamespaceId = NamespaceId::from_bytes([31; 16]);
+    const ROLLOVER_PREDECESSOR: Digest = Digest::from_bytes([32; 32]);
+    const ROLLOVER_SQL: &str = "CREATE TABLE rollover(value BLOB NOT NULL)";
+
+    struct RolloverModule;
+
+    impl CellModule for RolloverModule {
+        const NAME: &'static str = "rollover-test";
+
+        fn descriptor(&self) -> &'static ModuleDescriptor {
+            static DESCRIPTOR: OnceLock<ModuleDescriptor> = OnceLock::new();
+            DESCRIPTOR.get_or_init(|| ModuleDescriptor {
+                name: Self::NAME,
+                source_digest: Digest::from_bytes([33; 32]),
+                retained_codes: &[RetainedCodeDescriptor {
+                    code: ROLLOVER_PREDECESSOR,
+                    schema_min: 1,
+                    schema_max: 1,
+                }],
+                schema_min: 1,
+                schema_max: 1,
+                migrations: Box::leak(Box::new([MigrationDescriptor {
+                    version: 1,
+                    sql: ROLLOVER_SQL,
+                    digest: Digest::from_bytes(*blake3::hash(ROLLOVER_SQL.as_bytes()).as_bytes()),
+                }])),
+                commands: &[],
+                queries: &[],
+                workflow_definitions: &[],
+                activity_types: &[],
+                namespaces: &[NamespaceDescriptor {
+                    id: ROLLOVER_NAMESPACE,
+                    name: Self::NAME,
+                    role: CatalogRole::Sql,
+                    shards: 1,
+                    effect_targets: &[],
+                    dead_letter: None,
+                }],
+            })
+        }
+
+        fn register(self, _registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn rollover_registry() -> Registry {
+        let mut builder = RegistryBuilder::new(BuildDescriptor {
+            source_revision: "rollover-test".into(),
+            cargo_lock_digest: Digest::from_bytes([34; 32]),
+        });
+        builder.register(RolloverModule).unwrap();
+        builder.finish().unwrap()
+    }
 
     #[test]
     fn release_image_identity_must_be_a_nonzero_sha256_digest() {
@@ -832,6 +943,78 @@ mod tests {
             .unwrap();
         assert!(
             verify_compatible_cells(&layout, identity, &registry)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_cell_is_executable_but_cannot_complete_release_activation() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([35; 16]),
+            ApplicationId::from_bytes([36; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("retained-release-inventory"),
+            *identity.application().as_bytes(),
+        );
+        let registry = rollover_registry();
+        let target = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            ROLLOVER_NAMESPACE,
+            b"retained",
+        )
+        .unwrap();
+        CellCatalog::new(layout.clone(), identity.tenant())
+            .provision(
+                CatalogEntry::new(&target, CatalogRole::Sql, ROLLOVER_PREDECESSOR, 1).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        verify_compatible_cells(&layout, identity, &registry)
+            .await
+            .unwrap();
+        assert!(matches!(
+            verify_current_cells(&layout, identity, &registry).await,
+            Err(Error::Config(
+                "cataloged Cells still require release migration"
+            ))
+        ));
+
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let operation = RequestId::from_bytes([37; 16]);
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "a".repeat(64)),
+                operation,
+            )
+            .await
+            .unwrap();
+        releases
+            .start_activation(prepared.revision(), operation)
+            .await
+            .unwrap();
+        let another = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            ROLLOVER_NAMESPACE,
+            b"new-retained",
+        )
+        .unwrap();
+        assert!(
+            releases
+                .provision(
+                    &CellCatalog::new(layout, identity.tenant()),
+                    &registry,
+                    CatalogEntry::new(&another, CatalogRole::Sql, ROLLOVER_PREDECESSOR, 1,)
+                        .unwrap(),
+                )
                 .await
                 .is_err()
         );

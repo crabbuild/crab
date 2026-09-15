@@ -27,7 +27,8 @@ Durable scheduler retry/fairness and multi-node activity failure qualification
 remain. The shared runtime now supports declared predecessor code/schema pairs,
 serves them through the same typed local/peer bindings, and can publish adjacent
 schema or same-schema code-only transitions. The HTTP release activator does not
-yet orchestrate those transitions across the catalog or persist per-Cell progress.
+yet orchestrate those transitions across the catalog or persist per-Cell progress,
+but its final gate refuses `ready` while any retained predecessor remains.
 Remaining collaboration-domain import, configured multi-node quorum and the
 remaining product-domain route cuts are not yet integrated. New repository
 creation explicitly publishes an empty Cell and marks
