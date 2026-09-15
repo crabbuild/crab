@@ -274,9 +274,12 @@ container. On a new storage root, concurrent pods converge on one deterministic
 first-install operation and complete it. On an upgrade, prepare the new compiled
 release before changing `image.digest`; the init container validates the exact
 prepared/activating candidate but does not complete the operator-owned
-activation. Activate it with `cells release activate --strategy compatible`
-after the rollout admission checks. A different desired descriptor or image
-keeps the pod unstarted instead of silently replacing release state.
+activation. After the rollout admission checks, execute the immutable image's
+`cells release activate --strategy compatible --minimum-eligible-nodes 2`
+command with the prepared revision. Keep this value aligned with the intended
+live quorum; the command counts current signed advertisements rather than trusting
+the Deployment replica field. A different desired descriptor or image keeps the
+pod unstarted instead of silently replacing release state.
 
 The Deployment becomes ready only after a pod can read and validate the durable
 catalog and open the current Git view of every discovered repository. Confirm

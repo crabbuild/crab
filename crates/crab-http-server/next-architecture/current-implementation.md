@@ -58,9 +58,9 @@ legacy issue tree. Release administration can now CAS one prepared
 descriptor through activating to ready after checking all catalog shards and live
 control code/schema pairs against the exact binary registry; retries retain the
 same operation, and a real RustFS run reached canonical `current=desired` state.
-Explicit activation now also requires one live signed node with the exact fleet,
-image, release and module inventory. Configured multi-replica quorum and
-old-version migration are not implemented. The complete issue/comment HTTP route
+Explicit activation now also requires the operator-selected 1–10,000 live signed
+node quorum with the exact fleet, image, release and module inventory.
+Old-version migration is not implemented. The complete issue/comment HTTP route
 group now calls the typed repository module and publishes through LTX. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and

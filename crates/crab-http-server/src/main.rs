@@ -80,6 +80,8 @@ enum CellReleaseCommand {
         expected_revision: u64,
         #[arg(long, value_enum)]
         strategy: ActivationStrategy,
+        #[arg(long)]
+        minimum_eligible_nodes: usize,
     },
     /// Print the canonical durable release selection.
     Status,
@@ -232,8 +234,16 @@ async fn cells(
                 CellReleaseCommand::Activate {
                     expected_revision,
                     strategy: ActivationStrategy::Compatible,
+                    minimum_eligible_nodes,
                 },
-        } => crab_http_server::activate_cell_release(config, expected_revision).await?,
+        } => {
+            crab_http_server::activate_cell_release(
+                config,
+                expected_revision,
+                minimum_eligible_nodes,
+            )
+            .await?
+        }
         CellsCommand::Release {
             command: CellReleaseCommand::Status,
         } => crab_http_server::cell_release_status(config).await?,
@@ -446,6 +456,8 @@ mod tests {
             "8",
             "--strategy",
             "compatible",
+            "--minimum-eligible-nodes",
+            "2",
         ])
         .unwrap();
         assert!(matches!(
@@ -455,10 +467,27 @@ mod tests {
                     command: CellReleaseCommand::Activate {
                         expected_revision: 8,
                         strategy: ActivationStrategy::Compatible,
+                        minimum_eligible_nodes: 2,
                     }
                 }
             })
         ));
+
+        assert!(
+            Arguments::try_parse_from([
+                "crab-http-server",
+                "--config",
+                "server.toml",
+                "cells",
+                "release",
+                "activate",
+                "--expected-revision",
+                "8",
+                "--strategy",
+                "compatible",
+            ])
+            .is_err()
+        );
 
         let status = Arguments::try_parse_from([
             "crab-http-server",

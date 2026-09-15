@@ -247,7 +247,7 @@ Implement administrative subcommands in the existing executable:
 crab-http-server --config CONFIG cells release inspect --json
 crab-http-server --config CONFIG cells release bootstrap --image DIGEST
 crab-http-server --config CONFIG cells release prepare --expected-revision N --image DIGEST
-crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible
+crab-http-server --config CONFIG cells release activate --expected-revision N --strategy compatible --minimum-eligible-nodes K
 crab-http-server --config CONFIG cells release status
 crab-http-server --config CONFIG cells import-repository-issues --owner OWNER --name NAME --operation UUID
 ```
@@ -255,7 +255,8 @@ crab-http-server --config CONFIG cells import-repository-issues --owner OWNER --
 `cells release inspect --json` is now implemented and read-only; it prints the
 canonical descriptor compiled into the binary without accessing object storage.
 `cells release bootstrap`, `cells release prepare`, `cells release activate
---strategy compatible` and `cells release status` are also implemented.
+--strategy compatible --minimum-eligible-nodes K` and `cells release status` are
+also implemented.
 Bootstrap is an idempotent first-install operation: concurrent callers derive the
 same operation identity and converge on one descriptor/image. It resumes only
 the initial activation it created, admits an exact operator-prepared rollout
@@ -268,12 +269,16 @@ reuse the winning operation ID and bytes. Activate reloads the desired descripto
 requires byte equality with this binary, enters `activating` through CAS, scans
 every catalog shard and exact control code/schema pair, verifies shard revisions
 remain stable, then CASes `current=desired,state=ready`. Before changing release
-state it streams signed node advertisements and requires at least one unexpired
-node matching the exact fleet, image, release and module inventory; malformed,
-misplaced, foreign or excessive live records fail closed. Repeating the original
-command adopts the same ready record. It currently admits initial or already exact
-compatible inventories; old-code/schema migration and a configured multi-replica
-eligible-node quorum remain target behavior. Prepare alone never makes the descriptor current. Administrative
+state it streams signed node advertisements and requires the operator-selected
+number of unexpired nodes matching the exact fleet, image, release and module
+inventory; malformed, misplaced, foreign or excessive live records fail closed.
+The required count is explicit and bounded from 1 through 10,000; a single-node
+VM passes 1 and the two-replica Helm deployment passes 2. The same quorum is
+reloaded after the complete catalog compatibility scan and immediately before
+the ready CAS. Repeating the original command adopts the same ready record. It
+currently admits initial or already exact
+compatible inventories; old-code/schema migration remains target behavior.
+Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
 
 `cells import-repository-issues` is the first maintenance importer slice. It
@@ -326,10 +331,12 @@ using exact operation ID/digest. Retrying a phase retains its operation ID.
 2. Operator rolls out the ordinary Crab Deployment/VM binary. Candidate nodes
    register their compiled support and serve existing code/schema only where
    compatible. Incompatible nodes remain unready for that release.
-3. Require two eligible sessions in a multi-node fleet, or one for a one-replica
-   deployment. Remove old public-serving nodes before exposing new API semantics.
-   The operator supplies fleet membership; a transient missing heartbeat is not
-   proof that an old binary stopped.
+3. Pass `--minimum-eligible-nodes 2` for a multi-node fleet, or 1 for a
+   one-replica deployment. Activation rejects zero, values above 10,000 and any
+   live count below the explicit quorum before changing release state. Remove old
+   public-serving nodes before exposing new API semantics. The operator supplies
+   fleet membership; a transient missing heartbeat is not proof that an old
+   binary stopped.
 4. Compatible activation requires the descriptor support every old command codec
    through its retry horizon, old queue payloads and retained workflow definitions.
    Set activating, migrate each Cell through its owner, then CAS current=desired,

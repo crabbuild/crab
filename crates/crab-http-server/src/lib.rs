@@ -63,10 +63,14 @@ pub async fn cell_release_status(config: &Config) -> Result<Vec<u8>> {
     cells::release_status(config).await
 }
 
-/// Activates the prepared compiled release after exact Cell compatibility checks.
-pub async fn activate_cell_release(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+/// Activates the prepared release after the requested live-node quorum is eligible.
+pub async fn activate_cell_release(
+    config: &Config,
+    expected_revision: u64,
+    minimum_eligible_nodes: usize,
+) -> Result<Vec<u8>> {
     config.validate()?;
-    cells::activate_release(config, expected_revision).await
+    cells::activate_release(config, expected_revision, minimum_eligible_nodes).await
 }
 
 /// Initializes the empty application Cell for one newly cataloged repository.

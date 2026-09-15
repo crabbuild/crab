@@ -230,10 +230,10 @@ minute-level stale-record collection. It retains records through the complete
 advertisement lifetime plus maximum admitted clock skew, then conditionally
 replaces the exact expired ETag with a canonical tombstone before deletion; a
 concurrent heartbeat therefore either wins intact or loses its old ETag before
-deletion. Explicit compatible release activation now requires at least one
-live node for the exact fleet/image/release and compiled module inventory before
-entering the activation state machine. Configured multi-replica quorum and
-maintenance activation remain. The peer
+deletion. Explicit compatible release activation now requires an operator-chosen
+1–10,000 live-node quorum for the exact fleet/image/release and compiled module
+inventory before entering the activation state machine. Maintenance activation
+remains. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
 identities, proves the leaf certificate covers its advertised host and both TLS
@@ -284,10 +284,12 @@ emits those exact registry bytes from the built binary. `cells release prepare` 
 or adopts the root's canonical tenant/application identity, uploads the exact
 digest-addressed descriptor, and conditionally publishes a canonical prepared
 release; `cells release status` reads that checked state. `cells release activate
---strategy compatible` now verifies the exact compiled descriptor, CASes the
+--strategy compatible --minimum-eligible-nodes K` now verifies the exact compiled
+descriptor, CASes the
 operation-bound release through `prepared → activating → ready`, scans all 256
 catalog shards, checks every live control or bootstrap pair against the compiled
-namespace/role/code/schema inventory, rejects an unstable catalog snapshot and
+namespace/role/code/schema inventory, rechecks the live quorum immediately before
+the ready CAS, rejects an unstable catalog snapshot and
 resumes exact retries without a new operation. The initial empty/exact-compatible
 activation path is proven against real RustFS. `ReleaseStore::provision` now admits
 only the exact compiled descriptor selected by `ready.current` or
@@ -315,8 +317,8 @@ completed import; interruption after root publication restores and verifies that
 root before writing completion evidence. The command refuses a live signed Cell
 fleet, but operators must still independently prove that every legacy writer has
 stopped because the legacy deployment did not publish those node records.
-Configured multi-replica quorum, old-code/schema migration, remaining
-collaboration-domain import/adapters and capacity qualification remain.
+Old-code/schema migration, remaining collaboration-domain import/adapters and
+capacity qualification remain.
 Issue/comment HTTP reads and mutations now enter
 through the authenticated repository router and typed Cell API; legacy issue
 objects are maintenance-import input only and are ignored by serving code.

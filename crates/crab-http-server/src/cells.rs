@@ -341,7 +341,12 @@ const fn image_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-pub(crate) async fn activate_release(config: &Config, expected_revision: u64) -> Result<Vec<u8>> {
+pub(crate) async fn activate_release(
+    config: &Config,
+    expected_revision: u64,
+    minimum_eligible_nodes: usize,
+) -> Result<Vec<u8>> {
+    validate_eligible_node_quorum(minimum_eligible_nodes)?;
     let root = StorageRoot::build(&config.storage)?;
     let identities =
         ApplicationIdentityStore::new(root.store.clone(), Path::from(root.prefix.clone()));
@@ -367,15 +372,19 @@ pub(crate) async fn activate_release(config: &Config, expected_revision: u64) ->
             "prepared Cell descriptor differs from this binary",
         ));
     }
-    if observed.record().state() != ReleaseState::Ready {
+    let directory = if observed.record().state() == ReleaseState::Ready {
+        None
+    } else {
         let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
-        let directory = NodeDirectory::new(
+        Some(NodeDirectory::new(
             layout.clone(),
             peer_tls.fleet(),
             image_digest(observed.record().desired_image())?,
             registry.release_digest(),
-        );
-        verify_eligible_nodes(&directory, &registry, unix_now_ms()?).await?;
+        ))
+    };
+    if let Some(directory) = &directory {
+        verify_eligible_nodes(directory, &registry, unix_now_ms()?, minimum_eligible_nodes).await?;
     }
     let operation = observed.record().operation();
     let activating = releases
@@ -385,6 +394,9 @@ pub(crate) async fn activate_release(config: &Config, expected_revision: u64) ->
         return activating.encode().map_err(Error::from);
     }
     verify_compatible_cells(&layout, identity, &registry).await?;
+    if let Some(directory) = &directory {
+        verify_eligible_nodes(directory, &registry, unix_now_ms()?, minimum_eligible_nodes).await?;
+    }
     releases
         .complete_activation(activating.revision(), operation)
         .await?
@@ -396,13 +408,10 @@ async fn verify_eligible_nodes(
     directory: &NodeDirectory,
     registry: &Registry,
     now_ms: i64,
+    minimum_eligible_nodes: usize,
 ) -> Result<()> {
+    validate_eligible_node_quorum(minimum_eligible_nodes)?;
     let live = directory.live(now_ms, MAX_LIVE_NODES).await?;
-    if live.is_empty() {
-        return Err(Error::Config(
-            "Cell release activation requires a live eligible node",
-        ));
-    }
     let required_modules = registry.module_digests();
     if live
         .iter()
@@ -410,6 +419,20 @@ async fn verify_eligible_nodes(
     {
         return Err(Error::Config(
             "live Cell node does not contain the selected module inventory",
+        ));
+    }
+    if live.len() < minimum_eligible_nodes {
+        return Err(Error::Config(
+            "Cell release activation requires the configured eligible-node quorum",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_eligible_node_quorum(minimum_eligible_nodes: usize) -> Result<()> {
+    if !(1..=MAX_LIVE_NODES).contains(&minimum_eligible_nodes) {
+        return Err(Error::Config(
+            "Cell release eligible-node quorum must be between 1 and 10000",
         ));
     }
     Ok(())
@@ -601,7 +624,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn release_activation_requires_a_live_node_with_exact_modules() {
+    async fn release_activation_requires_configured_live_node_quorum_and_exact_modules() {
         let registry = compiled_registry().unwrap();
         let fleet = Digest::from_bytes([10; 32]);
         let image = Digest::from_bytes([11; 32]);
@@ -617,9 +640,9 @@ mod tests {
             registry.release_digest(),
         );
         assert!(matches!(
-            verify_eligible_nodes(&directory, &registry, now_ms).await,
+            verify_eligible_nodes(&directory, &registry, now_ms, 2).await,
             Err(Error::Config(
-                "Cell release activation requires a live eligible node"
+                "Cell release activation requires the configured eligible-node quorum"
             ))
         ));
 
@@ -650,9 +673,59 @@ mod tests {
             )
             .await
             .unwrap();
-        verify_eligible_nodes(&directory, &registry, now_ms + 1)
+        assert!(matches!(
+            verify_eligible_nodes(&directory, &registry, now_ms + 1, 2).await,
+            Err(Error::Config(
+                "Cell release activation requires the configured eligible-node quorum"
+            ))
+        ));
+        directory
+            .create(
+                NodeAdvertisement::sign(
+                    SessionId::from_bytes([15; 16]),
+                    "https://node-2.internal:8081".into(),
+                    fleet,
+                    Digest::from_bytes([16; 32]),
+                    image,
+                    registry.release_digest(),
+                    &key,
+                    1,
+                    now_ms,
+                    now_ms + 10_000,
+                    registry.module_digests(),
+                    vec![1],
+                    NodeCapacity {
+                        free_memory_bytes: 1,
+                        free_disk_bytes: 1,
+                        job_credits: 1,
+                    },
+                )
+                .unwrap(),
+                now_ms,
+            )
             .await
             .unwrap();
+        verify_eligible_nodes(&directory, &registry, now_ms + 1, 2)
+            .await
+            .unwrap();
+        assert!(matches!(
+            verify_eligible_nodes(&directory, &registry, now_ms + 10_001, 2).await,
+            Err(Error::Config(
+                "Cell release activation requires the configured eligible-node quorum"
+            ))
+        ));
+        assert!(matches!(
+            verify_eligible_nodes(&directory, &registry, now_ms + 1, 0).await,
+            Err(Error::Config(
+                "Cell release eligible-node quorum must be between 1 and 10000"
+            ))
+        ));
+        assert!(matches!(
+            verify_eligible_nodes(&directory, &registry, now_ms + 1, MAX_LIVE_NODES + 1).await,
+            Err(Error::Config(
+                "Cell release eligible-node quorum must be between 1 and 10000"
+            ))
+        ));
 
         let foreign_directory = NodeDirectory::new(
             CellStorageLayout::new(
@@ -667,17 +740,17 @@ mod tests {
         foreign_directory
             .create(
                 NodeAdvertisement::sign(
-                    SessionId::from_bytes([15; 16]),
-                    "https://node-2.internal:8081".into(),
+                    SessionId::from_bytes([17; 16]),
+                    "https://foreign-node.internal:8081".into(),
                     fleet,
-                    Digest::from_bytes([16; 32]),
+                    Digest::from_bytes([18; 32]),
                     image,
                     registry.release_digest(),
                     &key,
                     1,
                     now_ms,
                     now_ms + 10_000,
-                    vec![Digest::from_bytes([17; 32])],
+                    vec![Digest::from_bytes([19; 32])],
                     vec![1],
                     NodeCapacity {
                         free_memory_bytes: 1,
@@ -691,7 +764,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            verify_eligible_nodes(&foreign_directory, &registry, now_ms + 1).await,
+            verify_eligible_nodes(&foreign_directory, &registry, now_ms + 1, 1).await,
             Err(Error::Config(
                 "live Cell node does not contain the selected module inventory"
             ))
