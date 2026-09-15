@@ -221,10 +221,15 @@ scope, time and exact session path before returning an ETag-bearing observation;
 ambiguous creates/refreshes adopt only the exact published record. Fleet scans
 stream the complete directory, ignore only canonically verified expired sessions,
 sort live sessions deterministically and fail on misplaced, foreign or excessive
-live records. Explicit compatible release activation now requires at least one
+live records. The rendezvous owner for catalog shard zero also runs bounded
+minute-level stale-record collection. It retains records through the complete
+advertisement lifetime plus maximum admitted clock skew, then conditionally
+replaces the exact expired ETag with a canonical tombstone before deletion; a
+concurrent heartbeat therefore either wins intact or loses its old ETag before
+deletion. Explicit compatible release activation now requires at least one
 live node for the exact fleet/image/release and compiled module inventory before
 entering the activation state machine. Configured multi-replica quorum and
-stale advertisement collection remain. The peer
+maintenance activation remain. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
 identities, proves the leaf certificate covers its advertised host and both TLS

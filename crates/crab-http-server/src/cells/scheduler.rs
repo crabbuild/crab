@@ -23,6 +23,8 @@ const MAX_LIVE_NODES: usize = 10_000;
 const MAX_DUE_PER_CYCLE: usize = 128;
 const EFFECT_LEASE_MS: u32 = 30_000;
 const SCHEDULER_STALE_AFTER_MS: i64 = 15_000;
+const NODE_COLLECTION_INTERVAL_MS: i64 = 60_000;
+const NODE_COLLECTION_LIMIT: usize = 128;
 
 /// Shared scanner progress used by enrollment, readiness and metrics.
 #[derive(Clone)]
@@ -80,6 +82,7 @@ pub(crate) struct RepositoryCellScheduler {
     session: SessionId,
     status: SchedulerStatus,
     fleet: SchedulerFleet,
+    last_node_collection_ms: i64,
 }
 
 impl RepositoryCellScheduler {
@@ -99,6 +102,7 @@ impl RepositoryCellScheduler {
             session,
             status,
             fleet: SchedulerFleet::default(),
+            last_node_collection_ms: 0,
         }
     }
 
@@ -126,6 +130,16 @@ impl RepositoryCellScheduler {
         let nodes =
             self.fleet
                 .eligible_sessions(&advertisements, now_ms, SCHEDULER_STALE_AFTER_MS)?;
+        if preferred_scanner(0, &nodes)? == Some(self.session)
+            && now_ms.saturating_sub(self.last_node_collection_ms) >= NODE_COLLECTION_INTERVAL_MS
+        {
+            let removed = self
+                .directory
+                .collect_stale(now_ms, NODE_COLLECTION_LIMIT)
+                .await?;
+            self.last_node_collection_ms = now_ms;
+            tracing::debug!(removed, "collected stale Cell node advertisements");
+        }
         let mut remaining = MAX_DUE_PER_CYCLE;
         for shard in 0_u8..=u8::MAX {
             if remaining == 0 || preferred_scanner(shard, &nodes)? != Some(self.session) {
@@ -243,7 +257,7 @@ mod tests {
         NodeAdvertisement, NodeCapacity, Owner, PeerRoundTrip, PeerSigner, ReplicaLimits,
         SqlWorkerPool, TenantId,
     };
-    use crab_storage::{CellStorageLayout, Store};
+    use crab_storage::{CellStorageLayout, StorageError, Store};
     use ed25519_dalek::SigningKey;
     use object_store::{memory::InMemory, path::Path};
 
@@ -265,7 +279,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_routes_an_idle_due_cell_and_publishes_tick_progress() {
+    async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
         let identity = ApplicationIdentity::new(
             TenantId::from_bytes([1; 16]),
             ApplicationId::from_bytes([2; 16]),
@@ -351,6 +365,34 @@ mod tests {
             NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
         let key = SigningKey::from_bytes(&[6; 32]);
         let now_ms = super::super::unix_now_ms().unwrap();
+        let stale_session = SessionId::from_bytes([7; 16]);
+        let stale_issued_at_ms = now_ms - 400_000;
+        node_directory
+            .create(
+                NodeAdvertisement::sign(
+                    stale_session,
+                    "https://stale.internal:8789".into(),
+                    fleet,
+                    certificate,
+                    image,
+                    registry.release_digest(),
+                    &SigningKey::from_bytes(&[8; 32]),
+                    1,
+                    stale_issued_at_ms,
+                    stale_issued_at_ms + 15_000,
+                    registry.module_digests(),
+                    vec![1],
+                    NodeCapacity {
+                        free_memory_bytes: 1,
+                        free_disk_bytes: 1,
+                        job_credits: 1,
+                    },
+                )
+                .unwrap(),
+                stale_issued_at_ms,
+            )
+            .await
+            .unwrap();
         node_directory
             .create(
                 NodeAdvertisement::sign(
@@ -394,7 +436,7 @@ mod tests {
         let status = SchedulerStatus::new(now_ms).unwrap();
         let mut scheduler = RepositoryCellScheduler::new(
             identity,
-            layout,
+            layout.clone(),
             node_directory,
             router,
             session,
@@ -409,6 +451,13 @@ mod tests {
         assert_eq!(after.value().state, crab_cell_runtime::ControlState::Idle);
         assert_eq!(status.progress(), 2);
         assert!(status.is_healthy(super::super::unix_now_ms().unwrap()));
+        assert!(matches!(
+            layout
+                .store()
+                .get_with_etag_bounded(&layout.node_path(stale_session.as_bytes()), 1)
+                .await,
+            Err(StorageError::NotFound { .. })
+        ));
         runtime.shutdown().await.unwrap();
     }
 }

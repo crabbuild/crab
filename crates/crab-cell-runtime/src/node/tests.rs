@@ -76,6 +76,61 @@ async fn live_listing_is_sorted_bounded_and_ignores_expired_sessions() {
 }
 
 #[tokio::test]
+async fn stale_collection_fences_records_after_the_clock_skew_horizon() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let stale = SessionId::from_bytes([1; 16]);
+    let current = SessionId::from_bytes([8; 16]);
+    directory
+        .create(advertisement_for(stale, &key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let collection_ms = NOW_MS + 10_000 + STALE_ADVERTISEMENT_RETENTION_MS;
+    directory
+        .create(
+            advertisement_for(current, &key, 1, collection_ms),
+            collection_ms,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        directory.collect_stale(collection_ms - 1, 1).await.unwrap(),
+        0
+    );
+    assert_eq!(directory.collect_stale(collection_ms, 1).await.unwrap(), 1);
+    assert!(directory.load_canonical(stale).await.unwrap().is_none());
+    assert!(directory.is_live(current, collection_ms + 1).await.unwrap());
+}
+
+#[tokio::test]
+async fn stale_collection_preserves_a_session_refreshed_before_fencing() {
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let directory = directory();
+    let created = directory
+        .create(advertisement(&key, 1, NOW_MS), NOW_MS)
+        .await
+        .unwrap();
+    let collection_ms = NOW_MS + 10_000 + STALE_ADVERTISEMENT_RETENTION_MS;
+    directory
+        .refresh(
+            &created,
+            advertisement(&key, 2, collection_ms),
+            collection_ms,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(directory.collect_stale(collection_ms, 1).await.unwrap(), 0);
+    assert!(
+        directory
+            .is_live(SessionId::from_bytes([1; 16]), collection_ms + 1)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn live_listing_rejects_misplaced_or_foreign_active_records() {
     let key = SigningKey::from_bytes(&[7; 32]);
     let subject = directory();

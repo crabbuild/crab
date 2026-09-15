@@ -75,7 +75,13 @@ when a refresh cannot complete before the existing advertisement's one-second
 expiry margin. The scheduler advances progress only after a complete scan cycle;
 15 seconds without progress removes the node from scheduler rendezvous and
 withdraws its readiness while heartbeats may keep the peer endpoint live. A new
-process does not become ready before its first full scheduler cycle. Capacity hints currently measure OS/cgroup-available memory,
+process does not become ready before its first full scheduler cycle. Once per
+minute, the live rendezvous owner for catalog shard zero collects at most 128
+stale node records. Collection waits through the 15-second record lifetime and
+five-minute admitted clock skew, CAS-replaces the exact expired record with a
+canonical tombstone, and only then deletes it. Tombstones are never live and
+make a racing refresh lose its old ETag, so cleanup cannot erase a successful
+heartbeat. Capacity hints currently measure OS/cgroup-available memory,
 volume free space and 1–16 CPU job credits; full budget reservation and admission
 remain.
 

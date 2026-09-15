@@ -12,6 +12,8 @@ const MAX_MODULES: usize = 128;
 const MAX_PEER_VERSIONS: usize = 16;
 const MAX_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
 const MAX_CLOCK_SKEW_MS: i64 = 5 * 60_000;
+const STALE_ADVERTISEMENT_RETENTION_MS: i64 = MAX_CLOCK_SKEW_MS + MAX_ADVERTISEMENT_LIFETIME_MS;
+const MAX_STALE_COLLECTION_ITEMS: usize = 1_024;
 const SIGNING_DOMAIN: &[u8] = b"crab.node.v1\0";
 
 /// Capacity hints published by one node boot session.
@@ -349,10 +351,11 @@ impl NodeDirectory {
                 Err(StorageError::NotFound { .. }) => continue,
                 Err(error) => return Err(error.into()),
             };
-            let advertisement = NodeAdvertisement::decode_canonical(&body)?;
-            if self.layout.node_path(advertisement.session.as_bytes()) != meta.location {
-                return Err(Error::Node("advertisement path and session differ"));
-            }
+            let NodeRecord::Advertisement(advertisement) = NodeRecord::decode_canonical(&body)?
+            else {
+                continue;
+            };
+            validate_record_path(&self.layout, advertisement.session, &meta.location)?;
             if advertisement.expires_at_ms <= now_ms {
                 continue;
             }
@@ -360,10 +363,74 @@ impl NodeDirectory {
             if live.len() == limit {
                 return Err(Error::Node("live node directory exceeds its limit"));
             }
-            live.push(advertisement);
+            live.push(*advertisement);
         }
         live.sort_unstable_by(|left, right| left.session.as_bytes().cmp(right.session.as_bytes()));
         Ok(live)
+    }
+
+    /// Fences and removes a bounded number of advertisements past the clock-skew horizon.
+    pub async fn collect_stale(&self, now_ms: i64, limit: usize) -> Result<usize> {
+        if now_ms < 0 || !(1..=MAX_STALE_COLLECTION_ITEMS).contains(&limit) {
+            return Err(Error::Node(
+                "stale node collection limit or time is invalid",
+            ));
+        }
+        let cutoff_ms = now_ms.saturating_sub(STALE_ADVERTISEMENT_RETENTION_MS);
+        let prefix = self.layout.node_directory_path();
+        let mut stream = self.layout.store().inner().list(Some(&prefix));
+        let mut removed = 0;
+        while removed < limit
+            && let Some(item) = stream.next().await
+        {
+            let meta = item.map_err(|error| map_object_store_error(error, prefix.as_ref()))?;
+            let Some((record, token)) = self.load_record_at(&meta.location).await? else {
+                continue;
+            };
+            let session = record.session();
+            validate_record_path(&self.layout, session, &meta.location)?;
+            match record {
+                NodeRecord::Tombstone(_) => {
+                    self.delete_collected(&meta.location).await?;
+                    removed += 1;
+                }
+                NodeRecord::Advertisement(advertisement)
+                    if advertisement.expires_at_ms <= cutoff_ms =>
+                {
+                    let tombstone = NodeTombstone::new(
+                        advertisement.session,
+                        advertisement.expires_at_ms,
+                        now_ms,
+                    )?;
+                    let encoded = tombstone.encode()?;
+                    match self
+                        .layout
+                        .store()
+                        .update(&meta.location, Bytes::from(encoded), token)
+                        .await
+                    {
+                        Ok(_) => {
+                            self.delete_collected(&meta.location).await?;
+                            removed += 1;
+                        }
+                        Err(update_error) => match self.load_record_at(&meta.location).await? {
+                            None => removed += 1,
+                            Some((NodeRecord::Tombstone(_), _)) => {
+                                self.delete_collected(&meta.location).await?;
+                                removed += 1;
+                            }
+                            Some((NodeRecord::Advertisement(_), _)) => {
+                                if !matches!(update_error, StorageError::StateConflict { .. }) {
+                                    return Err(update_error.into());
+                                }
+                            }
+                        },
+                    }
+                }
+                NodeRecord::Advertisement(_) => {}
+            }
+        }
+        Ok(removed)
     }
 
     /// Authenticates one request against its live advertisement and mTLS leaf digest.
@@ -435,21 +502,40 @@ impl NodeDirectory {
         session: SessionId,
     ) -> Result<Option<(NodeAdvertisement, ETag)>> {
         let path = self.layout.node_path(session.as_bytes());
+        let Some((record, token)) = self.load_record_at(&path).await? else {
+            return Ok(None);
+        };
+        if record.session() != session {
+            return Err(Error::Node("advertisement path and session differ"));
+        }
+        match record {
+            NodeRecord::Advertisement(advertisement) => Ok(Some((*advertisement, token))),
+            NodeRecord::Tombstone(_) => Ok(None),
+        }
+    }
+
+    async fn load_record_at(
+        &self,
+        path: &object_store::path::Path,
+    ) -> Result<Option<(NodeRecord, ETag)>> {
         let (body, token) = match self
             .layout
             .store()
-            .get_with_etag_bounded(&path, MAX_NODE_BYTES)
+            .get_with_etag_bounded(path, MAX_NODE_BYTES)
             .await
         {
             Ok(value) => value,
             Err(StorageError::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let advertisement = NodeAdvertisement::decode_canonical(&body)?;
-        if advertisement.session != session {
-            return Err(Error::Node("advertisement path and session differ"));
+        Ok(Some((NodeRecord::decode_canonical(&body)?, token)))
+    }
+
+    async fn delete_collected(&self, path: &object_store::path::Path) -> Result<()> {
+        match self.layout.store().delete(path).await {
+            Ok(()) | Err(StorageError::NotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
         }
-        Ok(Some((advertisement, token)))
     }
 
     fn validate_scope(&self, advertisement: &NodeAdvertisement) -> Result<()> {
@@ -458,6 +544,98 @@ impl NodeDirectory {
             || advertisement.release != self.release
         {
             return Err(Error::Node("advertisement fleet, image or release differs"));
+        }
+        Ok(())
+    }
+}
+
+fn validate_record_path(
+    layout: &CellStorageLayout,
+    session: SessionId,
+    path: &object_store::path::Path,
+) -> Result<()> {
+    if layout.node_path(session.as_bytes()) != *path {
+        return Err(Error::Node("advertisement path and session differ"));
+    }
+    Ok(())
+}
+
+enum NodeRecord {
+    Advertisement(Box<NodeAdvertisement>),
+    Tombstone(NodeTombstone),
+}
+
+impl NodeRecord {
+    fn decode_canonical(bytes: &[u8]) -> Result<Self> {
+        if let Ok(advertisement) = NodeAdvertisement::decode_canonical(bytes) {
+            return Ok(Self::Advertisement(Box::new(advertisement)));
+        }
+        Ok(Self::Tombstone(NodeTombstone::decode_canonical(bytes)?))
+    }
+
+    const fn session(&self) -> SessionId {
+        match self {
+            Self::Advertisement(advertisement) => advertisement.session,
+            Self::Tombstone(tombstone) => tombstone.session,
+        }
+    }
+}
+
+struct NodeTombstone {
+    session: SessionId,
+    expires_at_ms: i64,
+    collected_at_ms: i64,
+}
+
+impl NodeTombstone {
+    fn new(session: SessionId, expires_at_ms: i64, collected_at_ms: i64) -> Result<Self> {
+        let tombstone = Self {
+            session,
+            expires_at_ms,
+            collected_at_ms,
+        };
+        tombstone.validate()?;
+        Ok(tombstone)
+    }
+
+    fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let encoded = serde_json::to_vec(&RawNodeTombstoneEnvelope::from(self))?;
+        if encoded.len() as u64 > MAX_NODE_BYTES {
+            return Err(Error::Node("node tombstone exceeds 64 KiB"));
+        }
+        Ok(encoded)
+    }
+
+    fn decode_canonical(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() as u64 > MAX_NODE_BYTES {
+            return Err(Error::Node("node tombstone exceeds 64 KiB"));
+        }
+        let raw: RawNodeTombstoneEnvelope = serde_json::from_slice(bytes)?;
+        if raw.tombstone.version != 1 {
+            return Err(Error::Node("unsupported node tombstone version"));
+        }
+        let tombstone = Self {
+            session: SessionId::from_bytes(decode_hex(&raw.tombstone.session)?),
+            expires_at_ms: canonical_i64(&raw.tombstone.expires_at_ms)?,
+            collected_at_ms: canonical_i64(&raw.tombstone.collected_at_ms)?,
+        };
+        tombstone.validate()?;
+        if tombstone.encode()?.as_slice() != bytes {
+            return Err(Error::Node("node tombstone JSON is not canonical"));
+        }
+        Ok(tombstone)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.session.as_bytes().iter().all(|byte| *byte == 0)
+            || self.expires_at_ms < 0
+            || self.collected_at_ms
+                < self
+                    .expires_at_ms
+                    .saturating_add(STALE_ADVERTISEMENT_RETENTION_MS)
+        {
+            return Err(Error::Node("node tombstone is invalid"));
         }
         Ok(())
     }
@@ -578,6 +756,34 @@ struct RawUnsignedAdvertisement {
     free_memory_bytes: String,
     free_disk_bytes: String,
     job_credits: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawNodeTombstoneEnvelope {
+    tombstone: RawNodeTombstone,
+}
+
+impl From<&NodeTombstone> for RawNodeTombstoneEnvelope {
+    fn from(value: &NodeTombstone) -> Self {
+        Self {
+            tombstone: RawNodeTombstone {
+                version: 1,
+                session: encode_hex(value.session.as_bytes()),
+                expires_at_ms: value.expires_at_ms.to_string(),
+                collected_at_ms: value.collected_at_ms.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RawNodeTombstone {
+    version: u8,
+    session: String,
+    expires_at_ms: String,
+    collected_at_ms: String,
 }
 
 impl From<&NodeAdvertisement> for RawUnsignedAdvertisement {
