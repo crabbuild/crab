@@ -546,6 +546,41 @@ impl Registry {
         )
     }
 
+    pub(crate) fn routed_command_contract(
+        &self,
+        namespace: NamespaceId,
+        id: u32,
+        codec_version: u32,
+    ) -> Result<(&'static str, OperationDescriptor, Digest)> {
+        self.routed_operation_contract(namespace, id, codec_version, &self.command_descriptors)
+    }
+
+    pub(crate) fn routed_query_contract(
+        &self,
+        namespace: NamespaceId,
+        id: u32,
+        codec_version: u32,
+    ) -> Result<(&'static str, OperationDescriptor, Digest)> {
+        self.routed_operation_contract(namespace, id, codec_version, &self.query_descriptors)
+    }
+
+    fn routed_operation_contract(
+        &self,
+        namespace: NamespaceId,
+        id: u32,
+        codec_version: u32,
+        descriptors: &BTreeMap<BindingKey, OperationDescriptor>,
+    ) -> Result<(&'static str, OperationDescriptor, Digest)> {
+        let module = self
+            .namespace_modules
+            .get(&namespace)
+            .map(|(module, _)| *module)
+            .ok_or(Error::Registry("operation namespace is unavailable"))?;
+        let (operation, code) =
+            self.operation_contract(namespace, module, id, codec_version, descriptors)?;
+        Ok((module, operation, code))
+    }
+
     fn operation_contract(
         &self,
         namespace: NamespaceId,

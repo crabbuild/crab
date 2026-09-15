@@ -14,6 +14,13 @@ pub(super) enum MessageKind {
     CellCommand,
     CellQuery,
     Receipt,
+    PeerReply,
+    MutationReply,
+    MutationResult,
+    ReadReply,
+    ResolveReply,
+    Error,
+    CellDescription,
 }
 
 #[derive(Clone, Copy)]
@@ -139,12 +146,58 @@ fn rules(kind: MessageKind) -> Vec<FieldRule> {
             vec![scalar(1, 0), scalar(2, 0), scalar(3, 2)]
         }
         MessageKind::Receipt => vec![scalar(1, 2), scalar(2, 2), scalar(3, 0)],
+        MessageKind::PeerReply => vec![
+            oneof(1, Some(MessageKind::MutationReply), 1),
+            oneof(2, Some(MessageKind::ReadReply), 1),
+            oneof(3, Some(MessageKind::ResolveReply), 1),
+            oneof(4, Some(MessageKind::Error), 1),
+        ],
+        MessageKind::MutationReply => vec![
+            message(1, MessageKind::Receipt),
+            oneof(2, Some(MessageKind::MutationResult), 1),
+            oneof(3, Some(MessageKind::Error), 1),
+        ],
+        MessageKind::MutationResult => vec![
+            scalar_oneof(1, 2, 1),
+            oneof(2, None, 1),
+            oneof(3, None, 1),
+            oneof(4, None, 1),
+            oneof(5, None, 1),
+            scalar_oneof(6, 2, 1),
+            scalar_oneof(7, 0, 1),
+        ],
+        MessageKind::ReadReply => vec![
+            message(1, MessageKind::Receipt),
+            oneof(2, Some(MessageKind::CellDescription), 1),
+            oneof(3, None, 1),
+            oneof(4, None, 1),
+            oneof(5, None, 1),
+            scalar_oneof(6, 2, 1),
+            oneof(7, Some(MessageKind::Error), 1),
+        ],
+        MessageKind::ResolveReply => vec![scalar(1, 0), message(2, MessageKind::MutationReply)],
+        MessageKind::Error => vec![
+            scalar(1, 0),
+            scalar(2, 0),
+            scalar(3, 2),
+            scalar(4, 0),
+            scalar(5, 2),
+        ],
+        MessageKind::CellDescription => {
+            vec![scalar(1, 2), scalar(2, 2), scalar(3, 2), scalar(4, 0)]
+        }
     }
 }
 
 pub(super) struct FieldOccurrence {
     tag: u32,
     payload: Option<Range<usize>>,
+}
+
+impl FieldOccurrence {
+    pub(super) const fn tag(&self) -> u32 {
+        self.tag
+    }
 }
 
 pub(super) fn validate_message(input: &[u8], kind: MessageKind) -> Result<Vec<FieldOccurrence>> {

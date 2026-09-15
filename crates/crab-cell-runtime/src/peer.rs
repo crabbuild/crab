@@ -3,7 +3,13 @@ use prost::Message;
 
 use crate::{ApplicationId, CellTarget, Digest, Error, NamespaceId, Result, SessionId, TenantId};
 
+mod dispatch;
 mod protobuf;
+mod transport;
+
+pub use dispatch::{PeerAuthorizer, PeerCellResolver, PeerDispatcher};
+pub(crate) use transport::PeerClientTransport;
+pub use transport::PeerRoundTrip;
 
 use protobuf::{
     MessageKind, field_payload, oneof_payload, require_fields, validate_message, validate_operation,
@@ -272,6 +278,147 @@ impl VerifiedPeerRequest {
             &self.operation_bytes,
         )
     }
+}
+
+/// Encodes one bounded canonical reply produced by the private dispatcher.
+pub fn encode_peer_reply(reply: &wire::PeerReply) -> Result<Vec<u8>> {
+    validate_reply(reply)?;
+    let encoded = reply.encode_to_vec();
+    if encoded.len() > MAX_REQUEST_BYTES {
+        return Err(Error::Peer("reply exceeds peer byte limit"));
+    }
+    Ok(encoded)
+}
+
+/// Strictly decodes a reply without allowing Prost to discard unknown fields.
+pub fn decode_peer_reply(input: &[u8]) -> Result<wire::PeerReply> {
+    if input.len() > MAX_REQUEST_BYTES {
+        return Err(Error::Peer("reply exceeds peer byte limit"));
+    }
+    let fields = validate_message(input, MessageKind::PeerReply)?;
+    if !fields.iter().any(|field| matches!(field.tag(), 1..=4)) {
+        return Err(Error::Peer("peer reply outcome is missing"));
+    }
+    let reply = wire::PeerReply::decode(input)?;
+    validate_reply(&reply)?;
+    Ok(reply)
+}
+
+fn validate_reply(reply: &wire::PeerReply) -> Result<()> {
+    match reply.outcome.as_ref() {
+        Some(wire::peer_reply::Outcome::Mutation(reply)) => validate_mutation_reply(reply),
+        Some(wire::peer_reply::Outcome::Read(reply)) => validate_read_reply(reply),
+        Some(wire::peer_reply::Outcome::Resolve(reply)) => validate_resolve_reply(reply),
+        Some(wire::peer_reply::Outcome::Error(error)) => validate_error(error),
+        None => Err(Error::Peer("peer reply outcome is missing")),
+    }
+}
+
+fn validate_mutation_reply(reply: &wire::MutationReply) -> Result<()> {
+    validate_receipt(
+        reply
+            .receipt
+            .as_ref()
+            .ok_or(Error::Peer("mutation reply receipt is missing"))?,
+    )?;
+    match reply.outcome.as_ref() {
+        Some(wire::mutation_reply::Outcome::Result(result)) => match result.result.as_ref() {
+            Some(wire::mutation_result::Result::CommandOutput(output))
+                if output.len() <= MAX_OPERATION_BYTES =>
+            {
+                Ok(())
+            }
+            Some(wire::mutation_result::Result::CommandOutput(_)) => {
+                Err(Error::Peer("mutation result exceeds one MiB"))
+            }
+            Some(_) => Err(Error::Peer("mutation result is not implemented")),
+            None => Err(Error::Peer("mutation result is missing")),
+        },
+        Some(wire::mutation_reply::Outcome::Error(error)) => validate_error(error),
+        None => Err(Error::Peer("mutation reply outcome is missing")),
+    }
+}
+
+fn validate_read_reply(reply: &wire::ReadReply) -> Result<()> {
+    if let Some(receipt) = &reply.receipt {
+        validate_receipt(receipt)?;
+    }
+    match reply.result.as_ref() {
+        Some(wire::read_reply::Result::Description(description)) => {
+            if reply.receipt.is_some()
+                || description.cell_id.len() != 32
+                || description.incarnation.len() != 16
+                || description.code.len() != 32
+                || description.schema == 0
+            {
+                return Err(Error::Peer("invalid peer Cell description"));
+            }
+            Ok(())
+        }
+        Some(wire::read_reply::Result::CommandOutput(output)) => {
+            validate_receipt(
+                reply
+                    .receipt
+                    .as_ref()
+                    .ok_or(Error::Peer("read reply receipt is missing"))?,
+            )?;
+            if output.len() > MAX_OPERATION_BYTES {
+                return Err(Error::Peer("read result exceeds one MiB"));
+            }
+            Ok(())
+        }
+        Some(wire::read_reply::Result::Error(error)) => validate_error(error),
+        Some(_) => Err(Error::Peer("read result is not implemented")),
+        None => Err(Error::Peer("read reply result is missing")),
+    }
+}
+
+fn validate_resolve_reply(reply: &wire::ResolveReply) -> Result<()> {
+    let state = wire::resolve_reply::State::try_from(reply.state)
+        .map_err(|_| Error::Peer("unknown resolve state"))?;
+    match state {
+        wire::resolve_reply::State::Committed | wire::resolve_reply::State::Rejected => {
+            validate_mutation_reply(
+                reply
+                    .reply
+                    .as_ref()
+                    .ok_or(Error::Peer("resolved mutation reply is missing"))?,
+            )
+        }
+        wire::resolve_reply::State::Absent
+        | wire::resolve_reply::State::Unknown
+        | wire::resolve_reply::State::Expired
+            if reply.reply.is_none() =>
+        {
+            Ok(())
+        }
+        wire::resolve_reply::State::Invalid => Err(Error::Peer("invalid resolve state")),
+        _ => Err(Error::Peer("resolve state and reply disagree")),
+    }
+}
+
+fn validate_receipt(receipt: &wire::Receipt) -> Result<()> {
+    if receipt.cell_id.len() != 32 || receipt.incarnation.len() != 16 {
+        return Err(Error::Peer("invalid peer receipt identity"));
+    }
+    Ok(())
+}
+
+fn validate_error(error: &wire::Error) -> Result<()> {
+    let code = wire::error::Code::try_from(error.code)
+        .map_err(|_| Error::Peer("unknown peer error code"))?;
+    let outcome = wire::error::Outcome::try_from(error.outcome)
+        .map_err(|_| Error::Peer("unknown peer error outcome"))?;
+    if code == wire::error::Code::Invalid
+        || outcome == wire::error::Outcome::Unspecified
+        || error.message.is_empty()
+        || error.message.len() > 2_048
+        || error.retry_after_ms > 60_000
+        || error.application_details.len() > MAX_OPERATION_BYTES
+    {
+        return Err(Error::Peer("invalid peer error bounds"));
+    }
+    Ok(())
 }
 
 fn validate_principal(principal: &PeerPrincipal) -> Result<()> {

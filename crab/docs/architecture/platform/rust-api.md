@@ -64,9 +64,11 @@ they reject incomplete/trailing input, non-finite floats and declared-limit
 overflow; encoding normalizes negative zero while decoding rejects its
 non-canonical bit pattern. Generic `Command`/`Query` registration uses
 monomorphized decode/execute/encode trampolines, with no raw byte-handler
-registration escape hatch. The implemented local `CellClient` covers canonical
-operation-digest integration and the actor path. Authenticated peer forwarding
-and bounded stale-owner retry remain to implement. Typed local SQL, KV, Queue
+registration escape hatch. The implemented `CellClient` covers canonical
+operation-digest integration across both the local actor path and authenticated
+peer transport. The peer transport signs requests, strictly decodes replies and
+preserves mutation evidence for Resolve; owner selection and bounded stale-owner
+retry remain to implement. Typed local SQL, KV, Queue
 and Workflow capabilities are implemented. The server composition root now
 compiles and binds create-issue/create-comment commands and get-issue/get-comment
 queries with its repository identity/sequence/issue/comment migration. A server
@@ -234,6 +236,13 @@ pub trait Query: Send + Sync + 'static {
         -> Result<Self::Output>;
 }
 impl CellClient {
+    pub fn local(registry: Arc<Registry>, handle: CellHandle) -> Self;
+    pub fn peer(
+        registry: Arc<Registry>,
+        signer: Arc<PeerSigner>,
+        principal: PeerPrincipal,
+        round_trip: Arc<dyn PeerRoundTrip>,
+    ) -> Self;
     pub async fn command<C: Command>(
         &self, target: &CellTarget, identity: MutationIdentity, input: C::Input,
     ) -> Result<Committed<C::Output>, InvocationError<C::Output>>;
@@ -254,13 +263,15 @@ mutation never ran. Never flatten these into a retryable string error.
 SQL/LTX/storage errors preserve their sources internally; HTTP mapping redacts
 SQL text, secrets and input bytes.
 
-The local implementation describes the active handle before dispatch and checks
+Both transports describe the active handle before dispatch and check
 target Cell, incarnation, registry-owned namespace, canonical module code and
 schema range. It hashes `crab.op.v1`, Cell/incarnation, immutable mutation
 identity, the CellCommand tag, typed command ID/codec version and exact encoded
-input. The transport rechecks the description immediately before actor
-admission. A query reads its receipt from `sys_meta` on the same FIFO SQL worker
-and fails if it cannot satisfy the requested minimum.
+input. The private describe reply therefore carries Cell ID, incarnation, code
+and schema; a boolean existence response is insufficient to enforce the same
+fence remotely. The receiving dispatcher rechecks the description immediately
+before actor admission. A query reads its receipt from `sys_meta` on the same
+FIFO SQL worker and fails if it cannot satisfy the requested minimum.
 
 CellTarget is created only from an authorized namespace capability and partition,
 not an arbitrary bucket/path. The registry selects handlers by namespace role,
@@ -508,14 +519,26 @@ application/x-protobuf. Its PeerRequest payload selects mutate, read, resolve,
 deliver_effect or resolve_effect. PeerReply carries the corresponding result.
 This path is never registered on the public router.
 
-The peer module in `crab-cell-runtime` is the implemented wire boundary. It generates
-private Rust messages from the checked-in descriptor and signs canonical
+The peer module in `crab-cell-runtime` is the implemented wire and dispatch
+boundary. It generates private Rust messages from the checked-in descriptor and
+signs canonical
 authorization bytes, but preserves and hashes the exact nested Protobuf bytes.
 Its strict pre-decoder rejects unknown fields, duplicate singular fields and
 duplicate oneofs before Prost can discard that evidence. The verifier binds the
 enrolled session public key, release digest, original principal/actions, current
 time, decreasing deadline and operation tag. The HTTP route must use this
 verifier and must not decode `PeerRequest` directly.
+
+`PeerRoundTrip` is the only unimplemented-network ownership boundary exposed to
+the embedded server. Its implementation must select an enrolled owner, send the
+already-signed bytes with the remaining deadline, and return exact response
+bytes. `CellClient::peer` translates typed describe/command/query/Resolve calls
+through this boundary and strictly validates the response. `PeerDispatcher`
+accepts only a `VerifiedPeerRequest`, invokes `PeerAuthorizer` before resolving
+the target, asks `PeerCellResolver` for a currently active local `CellHandle`,
+and executes through the same `LocalCellTransport` as an in-process call. This
+keeps registry selection, operation digests, receipts, durable rejections and
+unknown-outcome behavior identical across ingress nodes.
 
 Target contains resolved tenant/application/namespace IDs (16 bytes each) and
 partition (<=1024 bytes). Recompute Cell ID and shard; compare namespace role,
@@ -551,7 +574,8 @@ it matches verified enrollment and its compiled namespace/action grants; empty
 browser identity fields never imply runtime authority. Browser-originated
 commands carry the original issuer/subject and undergo normal repository checks.
 
-Read cached owner hint; local requests go to CellHandle, remote requests go
+The next server slice must read a cached owner hint; local requests go to
+CellHandle, remote requests go
 directly to the enrolled owner's advertised endpoint. Maximum two forwards;
 reject a third. On stale-owner response reload origin control once, then route
 or acquire within remaining deadline. Never use the public Service for private
@@ -585,9 +609,11 @@ Compute BLAKE3 from decoded validated values, not raw Protobuf bytes:
    Unset oneofs are invalid; no maps exist. Command input bytes use WireValue.
 
 Unknown fields fail rather than hash an incomplete operation. Any field-set
-change requires a protocol/digest version change. Test identical digests for
-local/forwarded calls and reordered Protobuf fields. No JSON primitive transport
-or cross-language value conversion is needed.
+change requires a protocol/digest version change. Tests now prove identical
+digest/dedup/result behavior when one command first uses `CellClient::local` and
+then reaches the same actor through `CellClient::peer`, strict verification,
+authorization and dispatch. They also cover reordered Protobuf fields. No JSON
+primitive transport or cross-language value conversion is needed.
 
 | Code | Crab HTTP mapping | Caller action |
 | --- | --- | --- |

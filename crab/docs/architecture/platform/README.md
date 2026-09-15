@@ -128,13 +128,19 @@ scoped contexts. The canonical bounded `WireValue` codec and generic typed
 `Command`/`Query` trampolines are implemented: inputs must decode completely
 before handler entry, outputs use the declared limit, and invalid tags,
 truncation, trailing bytes, non-finite/negative-zero floats and oversized values
-fail closed. The local `CellClient` now derives the canonical operation digest,
+fail closed. `CellClient` now derives the canonical operation digest,
 validates namespace/module code/schema and incarnation before admission, maps
 typed success or durable rejection to a receipt, preserves unknown mutation
 identity, and executes minimum-receipt reads through the same FIFO actor and LTX
-publication path. The server composition root now owns one process-session
+publication path. Its authenticated peer constructor uses the same typed API,
+signs bounded private requests, strictly decodes replies, and preserves the
+original mutation identity and digest for unknown outcomes. `PeerDispatcher`
+rechecks product authorization, resolves only an active local owner, and then
+reuses the canonical local transport rather than opening a second SQL execution
+path. The server composition root now owns one process-session
 `CellRuntime`, validates the compiled registry before admission, and shuts it
-down with the server. Private peer routing, upgrade migrations, resource-
+down with the server. Fleet enrollment lookup, mTLS HTTP routing, owner selection
+and bounded stale-owner retry, upgrade migrations, resource-
 derived budgets and repository Cell routing remain; KV, SQL, Queue and Workflow
 primitive handles are complete for local routing.
 The server now compiles and binds the first repository module slice: stable
@@ -299,7 +305,7 @@ crates/crab-http-server/src/
   server.rs, app.rs            lifecycle, auth/admission and existing HTTP routing
   cells.rs                    compiled repository registry and runtime composition
   peer.rs                     private authenticated forwarding on management listener
-  cells/commands.rs           repository command/query types and handlers
+  cells/repository.rs         repository command/query types and handlers
   cells/activities.rs         native Git/outbox activity adapters
   cells/migrations/           repository SQL migrations
 
@@ -309,7 +315,7 @@ crates/crab-cell-runtime/src/
   publication.rs              pending cut ownership and reconciliation
   catalog.rs, scheduler.rs     provision proof and transactional due summary (implemented), scanning/Tick
   registry.rs, api.rs          typed definitions, codecs and capability handles
-  peer.rs                     private message codec, no listener/auth policy
+  peer.rs                     private codec, client transport and local dispatcher
   sql.rs, kv.rs, queue.rs,
   workflow.rs, effects.rs      primitive mechanics
   migrations/                 SQL copied from contracts/

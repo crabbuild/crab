@@ -142,52 +142,52 @@ impl<T> std::error::Error for InvocationError<T> {
 }
 
 /// Owned encoded command accepted by a local or authenticated peer transport.
-struct EncodedCommand {
-    target: CellTarget,
-    expected: CellDescription,
-    identity: MutationIdentity,
-    operation_digest: Digest,
-    now_ms: i64,
-    module: &'static str,
-    operation_id: u32,
-    codec_version: u32,
-    input: Vec<u8>,
-    input_limit: u32,
-    output_limit: u32,
+pub(super) struct EncodedCommand {
+    pub(super) target: CellTarget,
+    pub(super) expected: CellDescription,
+    pub(super) identity: MutationIdentity,
+    pub(super) operation_digest: Digest,
+    pub(super) now_ms: i64,
+    pub(super) module: &'static str,
+    pub(super) operation_id: u32,
+    pub(super) codec_version: u32,
+    pub(super) input: Vec<u8>,
+    pub(super) input_limit: u32,
+    pub(super) output_limit: u32,
 }
 
 /// Owned encoded query accepted by a local or authenticated peer transport.
-struct EncodedQuery {
-    target: CellTarget,
-    expected: CellDescription,
-    minimum: Option<Receipt>,
-    now_ms: i64,
-    module: &'static str,
-    operation_id: u32,
-    codec_version: u32,
-    input: Vec<u8>,
-    input_limit: u32,
-    output_limit: u32,
+pub(super) struct EncodedQuery {
+    pub(super) target: CellTarget,
+    pub(super) expected: CellDescription,
+    pub(super) minimum: Option<Receipt>,
+    pub(super) now_ms: i64,
+    pub(super) module: &'static str,
+    pub(super) operation_id: u32,
+    pub(super) codec_version: u32,
+    pub(super) input: Vec<u8>,
+    pub(super) input_limit: u32,
+    pub(super) output_limit: u32,
 }
 
 /// Owned request-ledger lookup accepted by a routed transport.
-struct EncodedResolve {
-    target: CellTarget,
-    expected: CellDescription,
-    identity: MutationIdentity,
-    operation_digest: Digest,
-    now_ms: i64,
-    max_result_bytes: usize,
+pub(super) struct EncodedResolve {
+    pub(super) target: CellTarget,
+    pub(super) expected: CellDescription,
+    pub(super) identity: MutationIdentity,
+    pub(super) operation_digest: Digest,
+    pub(super) now_ms: i64,
+    pub(super) max_result_bytes: usize,
 }
 
 /// Encoded query output carrying the owner-observed commit position.
-struct EncodedObservation {
+pub(super) struct EncodedObservation {
     pub output: Vec<u8>,
     pub receipt: Receipt,
 }
 
 /// Internal routing boundary shared by local actors and the private peer client.
-trait CellTransport: Send + Sync + 'static {
+pub(super) trait CellTransport: Send + Sync + 'static {
     fn describe(
         &self,
         target: CellTarget,
@@ -232,6 +232,20 @@ impl CellClient {
             registry: registry.clone(),
             handle,
         });
+        Self::new(registry, transport)
+    }
+
+    /// Builds a typed capability over authenticated private peer routing.
+    #[must_use]
+    pub fn peer(
+        registry: Arc<Registry>,
+        signer: Arc<crate::PeerSigner>,
+        principal: crate::PeerPrincipal,
+        round_trip: Arc<dyn crate::PeerRoundTrip>,
+    ) -> Self {
+        let transport = Arc::new(crate::peer::PeerClientTransport::new(
+            signer, principal, round_trip,
+        ));
         Self::new(registry, transport)
     }
 
@@ -435,9 +449,9 @@ impl CellClient {
     }
 }
 
-struct LocalCellTransport {
-    registry: Arc<Registry>,
-    handle: CellHandle,
+pub(super) struct LocalCellTransport {
+    pub(super) registry: Arc<Registry>,
+    pub(super) handle: CellHandle,
 }
 
 impl CellTransport for LocalCellTransport {
@@ -574,6 +588,16 @@ pub fn command_operation_digest<C: Command>(
     identity: MutationIdentity,
     input: &[u8],
 ) -> Result<Digest> {
+    encoded_command_operation_digest(description, identity, C::ID, C::CODEC_VERSION, input)
+}
+
+pub(super) fn encoded_command_operation_digest(
+    description: CellDescription,
+    identity: MutationIdentity,
+    operation_id: u32,
+    codec_version: u32,
+    input: &[u8],
+) -> Result<Digest> {
     let input_len = u32::try_from(input.len())
         .map_err(|_| Error::Command("command input exceeds canonical digest range"))?;
     let mut hasher = blake3::Hasher::new();
@@ -584,8 +608,8 @@ pub fn command_operation_digest<C: Command>(
     hasher.update(&identity.issued_at_ms.to_be_bytes());
     hasher.update(&identity.expires_at_ms.to_be_bytes());
     hasher.update(&CELL_COMMAND_TAG.to_be_bytes());
-    hasher.update(&C::ID.to_be_bytes());
-    hasher.update(&C::CODEC_VERSION.to_be_bytes());
+    hasher.update(&operation_id.to_be_bytes());
+    hasher.update(&codec_version.to_be_bytes());
     hasher.update(&input_len.to_be_bytes());
     hasher.update(input);
     Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
@@ -656,7 +680,7 @@ fn validate_expected(handle: &CellHandle, expected: CellDescription) -> Result<(
     Ok(())
 }
 
-fn local_description(handle: &CellHandle) -> CellDescription {
+pub(super) fn local_description(handle: &CellHandle) -> CellDescription {
     CellDescription {
         cell: handle.cell_id(),
         incarnation: handle.incarnation(),
@@ -683,7 +707,7 @@ fn current_sequence(connection: &crab_ltx::rusqlite::Connection) -> Result<u64> 
     u64::try_from(sequence).map_err(|_| Error::Command("invalid commit sequence"))
 }
 
-fn receipt(description: CellDescription, commit_sequence: u64) -> Receipt {
+pub(super) fn receipt(description: CellDescription, commit_sequence: u64) -> Receipt {
     Receipt {
         cell: description.cell,
         incarnation: description.incarnation,

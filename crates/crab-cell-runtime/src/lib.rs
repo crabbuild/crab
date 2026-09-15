@@ -67,7 +67,9 @@ pub use maintenance::{
     register_maintenance,
 };
 pub use peer::{
-    PeerOperation, PeerPrincipal, PeerSigner, PeerVerifier, VerifiedPeerRequest, wire as peer_wire,
+    PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerOperation, PeerPrincipal, PeerRoundTrip,
+    PeerSigner, PeerVerifier, VerifiedPeerRequest, decode_peer_reply, encode_peer_reply,
+    wire as peer_wire,
 };
 pub use publication::CellPublisher;
 pub use queue::{

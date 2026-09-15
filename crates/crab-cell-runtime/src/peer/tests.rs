@@ -196,3 +196,40 @@ fn unsorted_actions_and_expired_authorization_are_rejected() {
         .unwrap();
     assert!(verifier(&signer).verify(&encoded, NOW_MS + 60_000).is_err());
 }
+
+#[test]
+fn reply_codec_rejects_unknown_fields_and_invalid_enums() {
+    let reply = wire::PeerReply {
+        outcome: Some(wire::peer_reply::Outcome::Read(wire::ReadReply {
+            receipt: None,
+            result: Some(wire::read_reply::Result::Description(
+                wire::CellDescription {
+                    cell_id: vec![1; 32],
+                    incarnation: vec![2; 16],
+                    code: vec![3; 32],
+                    schema: 1,
+                },
+            )),
+        })),
+    };
+    let encoded = encode_peer_reply(&reply).unwrap();
+    assert!(matches!(
+        decode_peer_reply(&encoded).unwrap().outcome,
+        Some(wire::peer_reply::Outcome::Read(_))
+    ));
+
+    let mut unknown = encoded;
+    encode_varint_field(&mut unknown, 99, 1);
+    assert!(decode_peer_reply(&unknown).is_err());
+
+    let invalid = wire::PeerReply {
+        outcome: Some(wire::peer_reply::Outcome::Error(wire::Error {
+            code: 99,
+            outcome: wire::error::Outcome::Rejected as i32,
+            message: "invalid".into(),
+            retry_after_ms: 0,
+            application_details: Vec::new(),
+        })),
+    };
+    assert!(encode_peer_reply(&invalid).is_err());
+}

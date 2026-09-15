@@ -28,6 +28,8 @@ pub enum Error {
     PeerDecode(#[from] prost::DecodeError),
     #[error("Cell peer signature verification failed")]
     PeerSignature(#[source] ed25519_dalek::SignatureError),
+    #[error("Cell peer authorization denied: {0}")]
+    PeerAuthorization(&'static str),
     #[error("Cell runtime SQLite schema failed")]
     Sqlite(#[from] rusqlite::Error),
     #[error("Cell SQL returned invalid UTF-8 text")]

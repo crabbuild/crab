@@ -73,8 +73,9 @@ after publication. Delivery results use a nested savepoint so a business
 rejection rolls back destination writes while its inbox result remains durable.
 Lost responses retry the same effect bytes; the inbox returns the stored result
 without invoking the handler. Source retry/extension/delivery and both retention
-cleanups are bounded. Workflow/Queue effect insertion, compiled codecs, private
-peer transport and the node delivery supervisor remain to implement.
+cleanups are bounded. The generic signed Cell peer transport and dispatcher
+exist, but Workflow/Queue effect insertion, effect codecs,
+DeliverEffect/ResolveEffect translation and the node delivery supervisor remain.
 
 Runtime request outcome values: 1=success, 2=business rejection. Its result is
 the encoded MutationResult or Error, not a transport header. The stored sequence

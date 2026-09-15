@@ -1,12 +1,14 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::{future::Future, pin::Pin, sync::Arc, time::UNIX_EPOCH};
 
 use crab_cell_runtime::{
     ApplicationId, BoundedDecoder, BoundedEncoder, BuildDescriptor, CatalogEntry, CatalogRole,
     CellAuthority, CellClient, CellDescription, CellModule, CellTarget, CodecError, Command,
     CommandContext, CommandResult, Digest, IncarnationId, InvocationError, MigrationDescriptor,
     ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor,
-    Owner, Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId, SessionId, SqlBatch,
-    SqlStatement, SqlValue, SqlWorkerPool, TenantId, WireValue, command_operation_digest,
+    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
+    PeerSigner, PeerVerifier, Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId,
+    SessionId, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, VerifiedPeerRequest,
+    WireValue, command_operation_digest,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -329,6 +331,79 @@ fn mutation(byte: u8) -> MutationIdentity {
     }
 }
 
+struct LocalResolver {
+    target: CellTarget,
+    handle: crab_cell_runtime::CellHandle,
+}
+
+impl PeerCellResolver for LocalResolver {
+    fn resolve(
+        &self,
+        target: CellTarget,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = crab_cell_runtime::Result<crab_cell_runtime::CellHandle>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let matches = target == self.target;
+        let handle = self.handle.clone();
+        Box::pin(async move {
+            if matches {
+                Ok(handle)
+            } else {
+                Err(crab_cell_runtime::Error::CellNotActive)
+            }
+        })
+    }
+}
+
+struct RepositoryAuthorizer;
+
+impl PeerAuthorizer for RepositoryAuthorizer {
+    fn authorize(&self, request: &VerifiedPeerRequest) -> crab_cell_runtime::Result<()> {
+        if request.permits("repository.issue.create") {
+            Ok(())
+        } else {
+            Err(crab_cell_runtime::Error::PeerAuthorization(
+                "missing repository action",
+            ))
+        }
+    }
+}
+
+struct LoopbackRoundTrip {
+    verifier: Arc<PeerVerifier>,
+    dispatcher: Arc<PeerDispatcher>,
+}
+
+impl PeerRoundTrip for LoopbackRoundTrip {
+    fn send(
+        &self,
+        target: CellTarget,
+        request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+        let verifier = Arc::clone(&self.verifier);
+        let dispatcher = Arc::clone(&self.dispatcher);
+        Box::pin(async move {
+            let now_ms = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|_| crab_cell_runtime::Error::Peer("test clock"))?
+                    .as_millis(),
+            )
+            .map_err(|_| crab_cell_runtime::Error::Peer("test clock overflow"))?;
+            let verified = verifier.verify(&request, now_ms)?;
+            if verified.target() != &target {
+                return Err(crab_cell_runtime::Error::Peer("round trip target changed"));
+            }
+            dispatcher.dispatch_bytes(&verified, now_ms).await
+        })
+    }
+}
+
 #[tokio::test]
 async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
     let fixture = fixture().await;
@@ -364,6 +439,63 @@ async fn typed_client_publishes_replays_rejections_and_receipted_reads() {
         .unwrap();
     assert_eq!(observed.output, 1);
     assert_eq!(observed.receipt.commit_sequence, 2);
+
+    fixture.handle.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn local_and_peer_command_share_digest_dedup_and_query_state() {
+    let fixture = fixture().await;
+    let client = CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone());
+    let identity = mutation(14);
+    let committed = client
+        .command::<CreateComment>(&fixture.target, identity, b"same".to_vec())
+        .await
+        .unwrap();
+
+    let signer = PeerSigner::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        ed25519_dalek::SigningKey::from_bytes(&[13; 32]),
+    );
+    let verifier = Arc::new(PeerVerifier::new(
+        SessionId::from_bytes([12; 16]),
+        fixture.registry.release_digest(),
+        signer.verifying_key(),
+    ));
+    let dispatcher = Arc::new(PeerDispatcher::new(
+        Arc::clone(&fixture.registry),
+        Arc::new(LocalResolver {
+            target: fixture.target.clone(),
+            handle: fixture.handle.clone(),
+        }),
+        Arc::new(RepositoryAuthorizer),
+    ));
+    let peer = CellClient::peer(
+        Arc::clone(&fixture.registry),
+        Arc::new(signer),
+        PeerPrincipal {
+            issuer: "https://identity.example".into(),
+            subject: "alice".into(),
+            actions: vec!["repository.issue.create".into()],
+        },
+        Arc::new(LoopbackRoundTrip {
+            verifier,
+            dispatcher,
+        }),
+    );
+    assert_eq!(
+        peer.command::<CreateComment>(&fixture.target, identity, b"same".to_vec())
+            .await
+            .unwrap(),
+        committed
+    );
+    let observed = peer
+        .query::<CountComments>(&fixture.target, Some(committed.receipt), ())
+        .await
+        .unwrap();
+    assert_eq!(observed.output, 1);
+    assert_eq!(observed.receipt.commit_sequence, 1);
 
     fixture.handle.drain().await.unwrap();
 }

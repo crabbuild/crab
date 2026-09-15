@@ -251,10 +251,16 @@ message ReadRequest {
 message KvEntry { bytes key = 1; bytes value = 2; bytes version = 3; optional int64 expires_at_ms = 4; }
 message KvPage { repeated KvEntry entries = 1; bytes next_after_key = 2; bool has_more = 3; }
 message WorkflowState { bytes run_id = 1; uint32 status = 2; bytes state = 3; bytes result = 4; }
+message CellDescription {
+  bytes cell_id = 1;
+  bytes incarnation = 2;
+  bytes code = 3;
+  uint32 schema = 4;
+}
 message ReadReply {
   Receipt receipt = 1;
   oneof result {
-    bool exists = 2;
+    CellDescription description = 2;
     ResultSet sql = 3;
     KvPage kv = 4;
     WorkflowState workflow = 5;
