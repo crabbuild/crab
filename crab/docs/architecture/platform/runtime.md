@@ -272,8 +272,9 @@ cursors never survive the synchronous callback or a network round trip.
 
 Create `max(1, min(available_vcpu, 16))` worker shards. A bounded channel feeds
 each shard; Cell ID hashes to one worker that owns its ManagedDb map. Every
-command/query/transition is synchronous within that worker. Activities run on
-Tokio outside SQLite and return through queued commands. Session movement
+command/query/transition is synchronous within that worker. Asynchronous
+activities run on Tokio outside SQLite; registered blocking activities run on a
+separate fixed OS-thread pool. Both return through queued commands. Session movement
 requires drain and exact-root reopen. The page-fault I/O driver runs independently
 of SQL workers. No worker thread or permanent activity task is allocated per Cell.
 
@@ -296,6 +297,19 @@ the fenced connection, releases only the still-owned control to Idle and restore
 from the authoritative root; a mutation/effect caller receives unknown outcome.
 With `panic=abort`, process restart follows the normal source-loss recovery path.
 Neither policy turns a panic into a business rejection.
+
+`BlockingActivityPool` contains `max(1, min(available_vcpu, 16))` named OS
+threads and an equally bounded submission channel. Its non-waiting reservation
+is acquired together with the node activity, byte and per-Cell reservations
+before the scheduler issues the durable claim. The reservation moves into the
+submitted job, not the awaiting Tokio future. Aborting that future therefore
+signals cooperative cancellation but cannot make the slot reusable while an
+uncancellable Rust callback is still running. Each callback is wrapped in
+`catch_unwind`; a panic fails that attempt and the same worker accepts later
+jobs. Pool shutdown closes admission, drains the channel and joins every thread
+on a joinable Tokio blocking task. An arbitrary callback that never returns
+cannot be safely killed; the server's 110-second shutdown deadline then forces
+process termination and origin-based lease recovery.
 
 The implemented `SqlWorkerPool` supplies the SQL ownership half of this contract. Construction
 accepts one through sixteen workers and one through 10,000 active Cells. Server

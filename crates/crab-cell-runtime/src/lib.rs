@@ -5,6 +5,7 @@
 //! executor. HTTP, authentication and provider construction remain product
 //! concerns of `crab-http-server`.
 
+mod activity_pool;
 mod actor;
 mod application;
 mod authority;
@@ -30,6 +31,7 @@ mod sql;
 mod worker;
 mod workflow;
 
+pub use activity_pool::{BlockingActivityPool, BlockingActivityReservation};
 pub use actor::{CellHandle, CellRuntime, NodeByteReservation};
 pub use application::{ApplicationIdentity, ApplicationIdentityStore};
 pub use authority::{CellAuthority, VersionedControl};
@@ -108,15 +110,16 @@ pub use workflow::{
     ActivityCancellation, ActivityClaim, ActivityCompletion, ActivityCompletionOutcome,
     ActivityContext, ActivityExecution, ActivityHandler, ActivityLeaseOutcome, ActivityRunOutcome,
     ActivitySupervisor, ActivitySupervisorError, ActivitySupport, ActivityTokenSource,
-    MAX_ACTIVITY_PAYLOAD_BYTES, SystemActivityTokens, WorkflowAction, WorkflowActivities,
-    WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
-    WorkflowActivityExtendCommand, WorkflowActivityExtendRequest, WorkflowActivityModule,
-    WorkflowActivityValidateQuery, WorkflowActivityValidateRequest, WorkflowCancelCommand,
-    WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery, WorkflowGetRequest,
-    WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowRun, WorkflowSignal,
-    WorkflowSignalCommand, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
-    install_workflow_schema, register_activity, register_workflow, register_workflow_activities,
-    workflow_cancel, workflow_claim_activities, workflow_cleanup_terminal,
-    workflow_complete_activity, workflow_extend_activity, workflow_fire_timer, workflow_signal,
-    workflow_start, workflow_state, workflow_validate_activity_claim,
+    BlockingActivityHandler, MAX_ACTIVITY_PAYLOAD_BYTES, SystemActivityTokens, WorkflowAction,
+    WorkflowActivities, WorkflowActivityClaimCommand, WorkflowActivityClaimRequest,
+    WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand, WorkflowActivityExtendRequest,
+    WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowActivityValidateRequest,
+    WorkflowCancelCommand, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
+    WorkflowGetRequest, WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowRun,
+    WorkflowSignal, WorkflowSignalCommand, WorkflowStart, WorkflowStartCommand, WorkflowStatus,
+    install_workflow_schema, register_activity, register_blocking_activity, register_workflow,
+    register_workflow_activities, workflow_cancel, workflow_claim_activities,
+    workflow_cleanup_terminal, workflow_complete_activity, workflow_extend_activity,
+    workflow_fire_timer, workflow_signal, workflow_start, workflow_state,
+    workflow_validate_activity_claim,
 };

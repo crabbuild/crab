@@ -371,6 +371,18 @@ allowing native activity futures to run without blocking later catalog scans or
 racing a scheduler-only Cell drain. The maintenance
 Tick dispatches timers across retained definitions.
 
+`register_activity` binds an asynchronous Tokio future.
+`register_blocking_activity` binds a synchronous trusted Rust callback to the
+node-owned `BlockingActivityPool`. A Workflow namespace containing any blocking
+binding is admitted conservatively: the scheduler reserves one blocking slot
+before claim because the claim result is not known until after publication.
+If that claim selects an asynchronous type, its attempt retains the already
+reserved slot; this bounded under-utilization avoids claiming blocking work that
+the node cannot start. Exhaustion leaves the durable row ready. The blocking job
+retains its slot after supervisor cancellation until the callback actually
+returns, after which an uncompleted lease is retried through the existing
+durable lease-expiry path.
+
 `WorkflowModule` binds one namespace, one current definition, a bounded static
 inventory of retained definitions, and fixed start/signal/cancel/state operation
 IDs. New runs use `CURRENT_DEFINITION`; signal and activity completion first

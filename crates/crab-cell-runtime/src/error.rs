@@ -96,6 +96,14 @@ pub enum Error {
     WorkerPanic,
     #[error("a native Cell callback panicked; its activation was fenced")]
     NativePanic,
+    #[error("failed to start Cell blocking activity worker")]
+    ActivityWorkerStart(#[source] Box<std::io::Error>),
+    #[error("failed to join Cell blocking activity worker supervisor")]
+    ActivityWorkerJoin(#[source] tokio::task::JoinError),
+    #[error("a Cell blocking activity worker panicked during shutdown")]
+    ActivityWorkerPanic,
+    #[error("a native Cell blocking activity handler panicked")]
+    ActivityPanic,
     #[error("Cell runtime requires an active Tokio runtime")]
     RuntimeStart(#[source] tokio::runtime::TryCurrentError),
 }

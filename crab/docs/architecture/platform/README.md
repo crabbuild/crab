@@ -111,7 +111,13 @@ knowing the module's Rust type. It bounds concurrent activity jobs by available
 CPU, caps them at 16 per node and one per Cell, and keeps catalog scanning
 independent of a long-running activity. The per-Cell reservation prevents an
 earlier temporary activation from draining while another activity still uses
-the same local actor. A typed `WorkflowNamespace` now
+the same local actor. Modules may separately register synchronous blocking Rust
+handlers. Registry freeze records every Workflow namespace containing one, and
+the scheduler reserves a slot in a dedicated fixed OS-thread pool before it
+claims any durable activity from that namespace. The submitted callback owns
+that slot until it actually exits, even if its Tokio supervisor is cancelled;
+shutdown drains submitted callbacks and joins every pool thread. Handler panic
+is converted to an activity failure without killing the worker. A typed `WorkflowNamespace` now
 binds each namespace and its current-plus-retained definition inventory to fixed
 command/query IDs at startup, derives its shard only from the workflow ID and compiled registry,
 and exposes receipted start, signal, cancel and state operations. Registry
@@ -194,8 +200,7 @@ shard one attempt before filling unused capacity, rotates the first shard and
 never discards the tail of a bounded control batch. A failed Cell remains due in
 its published control and is retried after the cursor completes and reloads the
 latest shard head, so a hot Cell or namespace cannot pin the catalog prefix.
-Multi-node activity failure qualification remains. Native blocking-handler
-isolation and dirty-job admission remain separate delivery work.
+Multi-node activity failure qualification and dirty-job admission remain.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never
@@ -514,6 +519,7 @@ crates/crab-http-server/src/
 crates/crab-cell-runtime/src/
   identity.rs, authority.rs    Cell identity and owner/control CAS
   actor.rs, executor.rs        supervised commands and bounded SQL workers
+  activity_pool.rs            joined fixed pool for native blocking activities
   publication.rs              pending cut ownership and reconciliation
   catalog.rs, scheduler.rs     provision proof and transactional due summary (implemented), scanning/Tick
   registry.rs, api.rs          typed definitions, codecs and capability handles

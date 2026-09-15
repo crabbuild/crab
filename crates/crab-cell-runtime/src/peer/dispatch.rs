@@ -621,6 +621,10 @@ fn error_reply(error: Error) -> wire::PeerReply {
         | Error::WorkerStart(_)
         | Error::WorkerJoin(_)
         | Error::WorkerPanic
+        | Error::ActivityWorkerStart(_)
+        | Error::ActivityWorkerJoin(_)
+        | Error::ActivityWorkerPanic
+        | Error::ActivityPanic
         | Error::NativePanic
         | Error::RuntimeStart(_)
         | Error::CellAlreadyActive => (

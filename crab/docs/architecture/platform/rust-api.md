@@ -611,6 +611,13 @@ pub trait ActivityHandler: Send + Sync + 'static {
         input: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = ActivityExecution> + Send + 'static>>;
 }
+pub trait BlockingActivityHandler: Send + Sync + 'static {
+    const TYPE: &'static str;
+    fn execute(context: ActivityContext, input: Vec<u8>) -> ActivityExecution;
+}
+
+register_activity::<RepositoryWorkflow, FetchMetadata>(&mut registry)?;
+register_blocking_activity::<RepositoryWorkflow, BuildPack>(&mut registry)?;
 ```
 
 The registry binds a definition digest to the exact transition implementation
@@ -637,10 +644,46 @@ the attempt guard and signals cooperative cancellation. Before claim, the
 server reserves the maximum 256 KiB input plus 256 KiB output from the same
 node-wide byte semaphore as queued Cell commands and holds it through
 completion; exhaustion leaves the durable activity unclaimed. Fair
-cycling/backoff between busy namespaces and a separate bounded blocking-activity
-pool remain delivery work. Neither future abortion
-nor `spawn_blocking` can terminate an arbitrary native CPU loop, so application
-handlers must honor the cancellation token.
+cycling uses retained revision-pinned cursors and rotates across assigned shards
+so a hot namespace cannot monopolize the cycle.
+
+`BlockingActivityHandler` uses the dedicated `BlockingActivityPool`, never
+Tokio's detached `spawn_blocking` path. For a namespace with any blocking type,
+the scheduler reserves one fixed worker slot before durable claim and transfers
+that reservation into the actual callback job. The job keeps it after waiter
+cancellation until the callback returns. Pool shutdown stops admission, drains
+submitted jobs and joins every named OS thread. Panic is isolated per attempt.
+Because Rust cannot force-stop an arbitrary native CPU loop, handlers must still
+observe `ActivityContext::cancellation`; a non-returning callback causes the
+server's bounded shutdown to terminate the process rather than recycle its slot.
+
+```mermaid
+sequenceDiagram
+    participant S as RepositoryCellScheduler
+    participant A as Node/byte/Cell admission
+    participant B as BlockingActivityPool
+    participant C as Cell actor
+    participant R as Compiled Registry
+
+    S->>A: try reserve job + 512 KiB + Cell
+    alt namespace contains a blocking binding
+        S->>B: try_reserve()
+        B-->>S: owned slot or exhausted
+    end
+    Note over S,C: Exhaustion stops here; no durable lease exists
+    S->>C: claim and publish activity lease
+    C-->>S: claim receipt
+    S->>C: validate exact published lease
+    S->>R: dispatch module + definition + type
+    alt asynchronous handler
+        R-->>S: await native Future
+    else blocking handler
+        R->>B: submit callback with owned slot
+        B-->>R: result; slot released only here
+    end
+    S->>C: publish completion or retry
+    Note over S,B: Cancellation drops the supervisor, but a submitted blocking job retains its slot
+```
 
 Queue consumers follow the same lease supervision. Side effects use stable
 message ID or (run_id, activity_id) at the destination, never attempt/token.

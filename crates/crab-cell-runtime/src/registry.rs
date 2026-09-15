@@ -12,12 +12,13 @@ use descriptor::encode_release;
 
 use crate::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
-    ActivitySupervisorError, ActivitySupport, ApplicationId, CatalogRole, CellClient, CellId,
-    CellTarget, Committed, Digest, EffectModule, EffectPeerClient, EffectRunOutcome,
-    EffectSupervisor, EffectSupervisorError, Error, HandlerOutcome, InvocationError,
-    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MutationIdentity, NamespaceId, Result, SqlBatch, SqlResultSet, TenantId, WireValue,
-    WorkflowActivities, WorkflowActivityModule, WorkflowDefinition,
+    ActivitySupervisorError, ActivitySupport, ApplicationId, BlockingActivityHandler,
+    BlockingActivityReservation, CatalogRole, CellClient, CellId, CellTarget, Committed, Digest,
+    EffectModule, EffectPeerClient, EffectRunOutcome, EffectSupervisor, EffectSupervisorError,
+    Error, HandlerOutcome, InvocationError, MaintenanceModule, MaintenanceTickCommand,
+    MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity, NamespaceId, Result,
+    SqlBatch, SqlResultSet, TenantId, WireValue, WorkflowActivities, WorkflowActivityModule,
+    WorkflowDefinition,
     codec::{decode_wire, encode_wire},
     sql_batch, sql_query_batch,
 };
@@ -172,7 +173,14 @@ type CommandHandler = for<'borrow, 'connection> fn(
 
 type QueryHandler = for<'borrow> fn(&mut QueryContext<'borrow>, &[u8]) -> Result<Vec<u8>>;
 type ActivityFuture = Pin<Box<dyn Future<Output = Result<ActivityExecution>> + Send + 'static>>;
-type ActivityFunction = fn(ActivityContext, Vec<u8>) -> ActivityFuture;
+type AsyncActivityFunction = fn(ActivityContext, Vec<u8>) -> ActivityFuture;
+type BlockingActivityFunction = fn(ActivityContext, Vec<u8>) -> Result<ActivityExecution>;
+
+#[derive(Clone, Copy)]
+enum ActivityFunction {
+    Async(AsyncActivityFunction),
+    Blocking(BlockingActivityFunction),
+}
 type MaintenanceFuture = Pin<
     Box<
         dyn Future<
@@ -201,7 +209,14 @@ type ActivityRunFuture = Pin<
             + 'static,
     >,
 >;
-type ActivityRunner = fn(CellClient, TenantId, ApplicationId, u32, u32) -> ActivityRunFuture;
+type ActivityRunner = fn(
+    CellClient,
+    TenantId,
+    ApplicationId,
+    u32,
+    u32,
+    Option<BlockingActivityReservation>,
+) -> ActivityRunFuture;
 
 /// Stored command decision encoded with the command's declared output codec.
 pub enum CommandResult<T> {
@@ -461,7 +476,31 @@ impl RegistryBuilder {
         definition: Digest,
     ) -> std::result::Result<(), RegistryError> {
         let key = ActivityKey::new(module, definition, A::TYPE)?;
-        if self.activities.insert(key, typed_activity::<A>).is_some() {
+        if self
+            .activities
+            .insert(key, ActivityFunction::Async(typed_activity::<A>))
+            .is_some()
+        {
+            return Err(Error::Registry("duplicate activity binding"));
+        }
+        Ok(())
+    }
+
+    /// Binds one descriptor activity to a node-owned blocking callback.
+    pub fn bind_blocking_activity<A: BlockingActivityHandler>(
+        &mut self,
+        module: &'static str,
+        definition: Digest,
+    ) -> std::result::Result<(), RegistryError> {
+        let key = ActivityKey::new(module, definition, A::TYPE)?;
+        if self
+            .activities
+            .insert(
+                key,
+                ActivityFunction::Blocking(typed_blocking_activity::<A>),
+            )
+            .is_some()
+        {
             return Err(Error::Registry("duplicate activity binding"));
         }
         Ok(())
@@ -609,6 +648,20 @@ impl RegistryBuilder {
             return Err(Error::Registry("release descriptor exceeds 256 KiB"));
         }
         let release_digest = Digest::from_bytes(*blake3::hash(&release_bytes).as_bytes());
+        let blocking_modules = self
+            .activities
+            .iter()
+            .filter_map(|(key, handler)| {
+                matches!(handler, ActivityFunction::Blocking(_)).then_some(key.module.as_str())
+            })
+            .collect::<HashSet<_>>();
+        let blocking_activity_namespaces = namespace_owners
+            .iter()
+            .filter_map(|(namespace, (module, descriptor))| {
+                (descriptor.role == CatalogRole::Workflow && blocking_modules.contains(*module))
+                    .then_some(*namespace)
+            })
+            .collect();
         Ok(Registry {
             release_bytes,
             release_digest,
@@ -620,6 +673,7 @@ impl RegistryBuilder {
             query_descriptors,
             namespace_modules: namespace_owners,
             activities: self.activities,
+            blocking_activity_namespaces,
             activity_runners: self.activity_runners,
             maintenance_runners: self.maintenance_runners,
             effect_runners: self.effect_runners,
@@ -651,6 +705,7 @@ pub struct Registry {
     query_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     namespace_modules: HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
     activities: BTreeMap<ActivityKey, ActivityFunction>,
+    blocking_activity_namespaces: HashSet<NamespaceId>,
     activity_runners: HashMap<NamespaceId, ActivityRunner>,
     maintenance_runners: BTreeMap<&'static str, MaintenanceRunner>,
     effect_runners: BTreeMap<&'static str, EffectRunner>,
@@ -731,6 +786,7 @@ impl Registry {
         activity: &str,
         context: ActivityContext,
         input: Vec<u8>,
+        blocking: Option<BlockingActivityReservation>,
     ) -> ActivityFuture {
         let key = match ActivityKey::new(module, definition, activity) {
             Ok(key) => key,
@@ -739,7 +795,24 @@ impl Registry {
         let Some(handler) = self.activities.get(&key).copied() else {
             return Box::pin(async { Err(Error::Registry("activity binding is unavailable")) });
         };
-        handler(context, input)
+        match handler {
+            ActivityFunction::Async(handler) => Box::pin(async move {
+                let _blocking = blocking;
+                handler(context, input).await
+            }),
+            ActivityFunction::Blocking(handler) => {
+                let Some(blocking) = blocking else {
+                    return Box::pin(async {
+                        Err(Error::Capacity("blocking activity slot was not reserved"))
+                    });
+                };
+                Box::pin(async move {
+                    blocking
+                        .execute(Box::new(move || handler(context, input)))
+                        .await
+                })
+            }
+        }
     }
 
     /// Runs the statically bound maintenance command for one namespace.
@@ -774,13 +847,31 @@ impl Registry {
         self.activity_runners.contains_key(&namespace)
     }
 
+    /// Reports whether this release contains any native blocking activity.
+    #[must_use]
+    pub fn has_blocking_activities(&self) -> bool {
+        !self.blocking_activity_namespaces.is_empty()
+    }
+
+    /// Reports whether this namespace needs pre-claim blocking admission.
+    #[must_use]
+    pub fn requires_blocking_activity(&self, namespace: NamespaceId) -> bool {
+        self.blocking_activity_namespaces.contains(&namespace)
+    }
+
     /// Runs at most one statically bound native activity from one Workflow shard.
     pub async fn run_activity_once(
         &self,
         client: CellClient,
         target: &CellTarget,
         lease_ms: u32,
+        blocking: Option<BlockingActivityReservation>,
     ) -> std::result::Result<ActivityRunOutcome, ActivitySupervisorError> {
+        if self.requires_blocking_activity(target.namespace()) && blocking.is_none() {
+            return Err(ActivitySupervisorError::Runtime(Error::Capacity(
+                "blocking activity slot was not reserved",
+            )));
+        }
         let runner = self
             .activity_runners
             .get(&target.namespace())
@@ -799,6 +890,7 @@ impl Registry {
             target.application(),
             shard,
             lease_ms,
+            blocking,
         )
         .await
     }
@@ -1106,11 +1198,26 @@ fn typed_activity<A: ActivityHandler>(context: ActivityContext, input: Vec<u8>) 
             ActivityExecution::Completed(result) => result,
             ActivityExecution::Failed { details, .. } => details,
         };
-        if payload.len() > 256 * 1024 {
+        if payload.len() > crate::MAX_ACTIVITY_PAYLOAD_BYTES {
             return Err(Error::Command("activity handler result exceeds 256 KiB"));
         }
         Ok(outcome)
     })
+}
+
+fn typed_blocking_activity<A: BlockingActivityHandler>(
+    context: ActivityContext,
+    input: Vec<u8>,
+) -> Result<ActivityExecution> {
+    let outcome = A::execute(context, input);
+    let payload = match &outcome {
+        ActivityExecution::Completed(result) => result,
+        ActivityExecution::Failed { details, .. } => details,
+    };
+    if payload.len() > crate::MAX_ACTIVITY_PAYLOAD_BYTES {
+        return Err(Error::Command("activity handler result exceeds 256 KiB"));
+    }
+    Ok(outcome)
 }
 
 fn typed_maintenance<M: MaintenanceModule>(
@@ -1146,6 +1253,7 @@ fn typed_activity_runner<M: WorkflowActivityModule>(
     application: ApplicationId,
     shard: u32,
     lease_ms: u32,
+    blocking: Option<BlockingActivityReservation>,
 ) -> ActivityRunFuture {
     Box::pin(async move {
         ActivitySupervisor::new(
@@ -1154,7 +1262,7 @@ fn typed_activity_runner<M: WorkflowActivityModule>(
             lease_ms,
         )
         .map_err(ActivitySupervisorError::Runtime)?
-        .run_once(shard)
+        .run_once(shard, blocking)
         .await
     })
 }

@@ -281,9 +281,10 @@ impl CellClient {
         activity: &str,
         context: ActivityContext,
         input: Vec<u8>,
+        blocking: Option<crate::BlockingActivityReservation>,
     ) -> Result<ActivityExecution> {
         self.registry
-            .execute_activity(module, definition, activity, context, input)
+            .execute_activity(module, definition, activity, context, input, blocking)
             .await
     }
 

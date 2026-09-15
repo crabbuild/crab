@@ -10,17 +10,18 @@ use std::{
 
 use crab_cell_runtime::{
     ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ApplicationId,
-    BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellClient, CellModule,
-    CellRuntime, CellTarget, Digest, DueCellScan, Error, IncarnationId, InvocationError,
-    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId,
-    OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId,
-    WorkflowAction, WorkflowActivityClaimCommand, WorkflowActivityCompleteCommand,
-    WorkflowActivityExtendCommand, WorkflowActivityModule, WorkflowActivityValidateQuery,
-    WorkflowCancelCommand, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
-    WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand,
-    WorkflowStartCommand, WorkflowStatus, install_workflow_schema, register_activity,
-    register_maintenance, register_workflow, register_workflow_activities,
+    BlockingActivityHandler, BlockingActivityPool, BuildDescriptor, CatalogEntry, CatalogRole,
+    CellAuthority, CellCatalog, CellClient, CellModule, CellRuntime, CellTarget, Digest,
+    DueCellScan, Error, IncarnationId, InvocationError, MaintenanceModule, MaintenanceTickCommand,
+    MaintenanceTickOutcome, MaintenanceTickRequest, MigrationDescriptor, ModuleDescriptor,
+    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner,
+    RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId, WorkflowAction,
+    WorkflowActivityClaimCommand, WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand,
+    WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext,
+    WorkflowDecision, WorkflowDefinition, WorkflowGetQuery, WorkflowModule, WorkflowNamespace,
+    WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand, WorkflowStartCommand, WorkflowStatus,
+    install_workflow_schema, register_activity, register_blocking_activity, register_maintenance,
+    register_workflow, register_workflow_activities,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -105,13 +106,20 @@ impl WorkflowDefinition for Definition {
         event: &[u8],
         context: WorkflowContext,
     ) -> crab_cell_runtime::Result<WorkflowDecision> {
-        if matches!(event, b"activity" | b"activity-retry") {
+        if matches!(
+            event,
+            b"activity" | b"activity-retry" | b"activity-blocking"
+        ) {
             return Ok(WorkflowDecision {
                 status: WorkflowStatus::Running,
                 state: b"waiting".to_vec(),
                 result: None,
                 actions: vec![WorkflowAction::Activity {
-                    activity_type: "echo".into(),
+                    activity_type: if event == b"activity-blocking" {
+                        "blocking-echo".into()
+                    } else {
+                        "echo".into()
+                    },
                     input: if event == b"activity-retry" {
                         b"retry".to_vec()
                     } else {
@@ -203,7 +211,7 @@ impl WorkflowModule for TestWorkflow {
 }
 
 impl WorkflowActivityModule for TestWorkflow {
-    const ACTIVITY_TYPES: &'static [&'static str] = &["echo"];
+    const ACTIVITY_TYPES: &'static [&'static str] = &["blocking-echo", "echo"];
     const ACTIVITY_CLAIM_COMMAND_ID: u32 = 4;
     const ACTIVITY_COMPLETE_COMMAND_ID: u32 = 5;
     const ACTIVITY_EXTEND_COMMAND_ID: u32 = 6;
@@ -248,6 +256,17 @@ impl ActivityHandler for EchoActivity {
     }
 }
 
+struct BlockingEchoActivity;
+
+impl BlockingActivityHandler for BlockingEchoActivity {
+    const TYPE: &'static str = "blocking-echo";
+
+    fn execute(_context: ActivityContext, mut input: Vec<u8>) -> ActivityExecution {
+        input.extend_from_slice(b"-blocking");
+        ActivityExecution::Completed(input)
+    }
+}
+
 impl CellModule for TestWorkflow {
     const NAME: &'static str = WORKFLOW_MODULE;
 
@@ -266,7 +285,7 @@ impl CellModule for TestWorkflow {
             commands: COMMANDS,
             queries: QUERIES,
             workflow_definitions: &[LEGACY_DEFINITION_DIGEST, DEFINITION_DIGEST],
-            activity_types: &["echo"],
+            activity_types: &["blocking-echo", "echo"],
             namespaces: &WORKFLOW_NAMESPACES,
         })
     }
@@ -275,6 +294,7 @@ impl CellModule for TestWorkflow {
         register_workflow::<Self>(registry)?;
         register_workflow_activities::<Self>(registry)?;
         register_activity::<Self, EchoActivity>(registry)?;
+        register_blocking_activity::<Self, BlockingEchoActivity>(registry)?;
         register_maintenance::<Self>(registry)
     }
 }
@@ -294,7 +314,7 @@ impl CellModule for EffectTargetDrift {
             commands: COMMANDS,
             queries: QUERIES,
             workflow_definitions: &[LEGACY_DEFINITION_DIGEST, DEFINITION_DIGEST],
-            activity_types: &["echo"],
+            activity_types: &["blocking-echo", "echo"],
             namespaces: &DRIFT_NAMESPACES,
         }))
     }
@@ -643,6 +663,8 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
 async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
     HEARTBEAT_OBSERVED.store(false, Ordering::Release);
     let registry = registry();
+    assert!(registry.has_blocking_activities());
+    assert!(registry.requires_blocking_activity(WORKFLOW_NAMESPACE));
     assert_eq!(
         registry.internal_command_action(WORKFLOW_NAMESPACE, 7, 1),
         Some("cell.scheduler.tick")
@@ -737,8 +759,17 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
         .await
         .unwrap();
     assert!(registry.has_activity_runner(target.namespace()));
+    let blocking_pool = BlockingActivityPool::new(1).unwrap();
+    assert!(matches!(
+        registry
+            .run_activity_once(client.clone(), &target, 5_000, None)
+            .await,
+        Err(crab_cell_runtime::ActivitySupervisorError::Runtime(
+            Error::Capacity("blocking activity slot was not reserved")
+        ))
+    ));
     let completed = registry
-        .run_activity_once(client, &target, 5_000)
+        .run_activity_once(client, &target, 5_000, blocking_pool.try_reserve().unwrap())
         .await
         .unwrap();
     let ActivityRunOutcome::Completed { workflow, receipt } = completed else {
@@ -775,11 +806,45 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
                 CellClient::local(registry.clone(), handle.clone()),
                 &target,
                 5_000,
+                blocking_pool.try_reserve().unwrap(),
             )
             .await
             .unwrap(),
         ActivityRunOutcome::Retrying { .. }
     ));
+    workflows
+        .start(
+            identity(29),
+            b"blocking-build".to_vec(),
+            b"activity-blocking".to_vec(),
+        )
+        .await
+        .unwrap();
+    let blocking = blocking_pool.try_reserve().unwrap().unwrap();
+    assert!(matches!(
+        registry
+            .run_activity_once(
+                CellClient::local(registry.clone(), handle.clone()),
+                &target,
+                5_000,
+                Some(blocking),
+            )
+            .await
+            .unwrap(),
+        ActivityRunOutcome::Completed { .. }
+    ));
+    assert!(
+        workflows
+            .state(b"blocking-build".to_vec(), None)
+            .await
+            .unwrap()
+            .output
+            .unwrap()
+            .result
+            .unwrap()
+            .ends_with(b"payload-blocking")
+    );
+    blocking_pool.shutdown().await.unwrap();
     handle.drain().await.unwrap();
 
     let idle = authority.load(cell).await.unwrap().unwrap();

@@ -19,10 +19,11 @@ pub use activity::{
 pub(crate) use activity::{workflow_cleanup_terminal_bounded, workflow_reclaim_expired_bounded};
 pub use activity_api::{
     ActivityCancellation, ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome,
-    ActivitySupervisor, ActivitySupervisorError, WorkflowActivities, WorkflowActivityClaimCommand,
-    WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand,
-    WorkflowActivityExtendRequest, WorkflowActivityModule, WorkflowActivityValidateQuery,
-    WorkflowActivityValidateRequest, register_activity, register_workflow_activities,
+    ActivitySupervisor, ActivitySupervisorError, BlockingActivityHandler, WorkflowActivities,
+    WorkflowActivityClaimCommand, WorkflowActivityClaimRequest, WorkflowActivityCompleteCommand,
+    WorkflowActivityExtendCommand, WorkflowActivityExtendRequest, WorkflowActivityModule,
+    WorkflowActivityValidateQuery, WorkflowActivityValidateRequest, register_activity,
+    register_blocking_activity, register_workflow_activities,
 };
 pub use api::{
     WorkflowCancelCommand, WorkflowGetQuery, WorkflowGetRequest, WorkflowModule, WorkflowNamespace,

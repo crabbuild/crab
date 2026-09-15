@@ -13,9 +13,10 @@ use std::{
 use rand::RngCore;
 
 use crate::{
-    ApplicationId, CatalogRole, CellClient, CellTarget, Command, CommandContext, CommandResult,
-    Committed, Error, InvocationError, MutationIdentity, Observed, PendingMutation, Query,
-    QueryContext, Receipt, RegistryBuilder, RequestId, TenantId, partition_for_shard,
+    ApplicationId, BlockingActivityReservation, CatalogRole, CellClient, CellTarget, Command,
+    CommandContext, CommandResult, Committed, Error, InvocationError, MutationIdentity, Observed,
+    PendingMutation, Query, QueryContext, Receipt, RegistryBuilder, RequestId, TenantId,
+    partition_for_shard,
 };
 
 use super::{
@@ -58,6 +59,16 @@ pub fn register_activity<M: WorkflowModule, A: ActivityHandler>(
 ) -> crate::Result<()> {
     for definition in definitions::<M>()? {
         registry.bind_activity::<A>(M::MODULE, definition.digest())?;
+    }
+    Ok(())
+}
+
+/// Registers one trusted blocking handler on the node-owned activity pool.
+pub fn register_blocking_activity<M: WorkflowModule, A: BlockingActivityHandler>(
+    registry: &mut RegistryBuilder,
+) -> crate::Result<()> {
+    for definition in definitions::<M>()? {
+        registry.bind_blocking_activity::<A>(M::MODULE, definition.digest())?;
     }
     Ok(())
 }
@@ -165,6 +176,13 @@ pub trait ActivityHandler: Send + Sync + 'static {
         context: ActivityContext,
         input: Vec<u8>,
     ) -> Pin<Box<dyn Future<Output = ActivityExecution> + Send + 'static>>;
+}
+
+/// Statically linked blocking activity implemented by trusted Rust code.
+pub trait BlockingActivityHandler: Send + Sync + 'static {
+    const TYPE: &'static str;
+
+    fn execute(context: ActivityContext, input: Vec<u8>) -> ActivityExecution;
 }
 
 /// Bounded activity claim parameters supplied by the native supervisor.
@@ -438,9 +456,17 @@ impl<M: WorkflowActivityModule> WorkflowActivities<M> {
         activity_type: String,
         input: Vec<u8>,
         context: ActivityContext,
+        blocking: Option<BlockingActivityReservation>,
     ) -> crate::Result<ActivityExecution> {
         self.client
-            .execute_activity(M::MODULE, definition, &activity_type, context, input)
+            .execute_activity(
+                M::MODULE,
+                definition,
+                &activity_type,
+                context,
+                input,
+                blocking,
+            )
             .await
     }
 
@@ -555,6 +581,7 @@ impl<M: WorkflowActivityModule> ActivitySupervisor<M> {
     pub async fn run_once(
         &self,
         shard: u32,
+        blocking: Option<BlockingActivityReservation>,
     ) -> std::result::Result<ActivityRunOutcome, ActivitySupervisorError> {
         let claimed = self
             .activities
@@ -586,6 +613,7 @@ impl<M: WorkflowActivityModule> ActivitySupervisor<M> {
             claim.activity_type.clone(),
             claim.input.clone(),
             context,
+            blocking,
         );
         tokio::pin!(execution);
         let heartbeat_period = Duration::from_millis(u64::from(self.lease_ms / 3));

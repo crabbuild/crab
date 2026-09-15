@@ -8,13 +8,13 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    ActivityContext, ActivityExecution, ActivityHandler, ApplicationId, BuildDescriptor,
+    ActivityContext, ActivityExecution, ApplicationId, BlockingActivityHandler, BuildDescriptor,
     CellModule, CellReplica, CellRuntime, CellTarget, Digest, IncarnationId, MaintenanceModule,
     MigrationDescriptor, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
     NodeCapacity, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, RegistryBuilder,
     ReplicaLimits, SqlWorkerPool, TenantId, WorkflowAction, WorkflowActivityModule,
     WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowModule, WorkflowNamespace,
-    WorkflowStatus, install_workflow_schema, register_activity, register_maintenance,
+    WorkflowStatus, install_workflow_schema, register_blocking_activity, register_maintenance,
     register_workflow, register_workflow_activities,
 };
 use crab_storage::{CellStorageLayout, StorageError, Store};
@@ -130,20 +130,15 @@ impl MaintenanceModule for SchedulerWorkflow {
 
 struct SchedulerEcho;
 
-impl ActivityHandler for SchedulerEcho {
+impl BlockingActivityHandler for SchedulerEcho {
     const TYPE: &'static str = "scheduler-echo";
 
-    fn execute(
-        _context: ActivityContext,
-        input: Vec<u8>,
-    ) -> Pin<Box<dyn Future<Output = ActivityExecution> + Send + 'static>> {
-        Box::pin(async move {
-            WORKFLOW_ACTIVITY_RUNS.fetch_add(1, Ordering::AcqRel);
-            while !WORKFLOW_ACTIVITY_RELEASE.load(Ordering::Acquire) {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-            ActivityExecution::Completed(input)
-        })
+    fn execute(_context: ActivityContext, input: Vec<u8>) -> ActivityExecution {
+        WORKFLOW_ACTIVITY_RUNS.fetch_add(1, Ordering::AcqRel);
+        while !WORKFLOW_ACTIVITY_RELEASE.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        ActivityExecution::Completed(input)
     }
 }
 
@@ -173,7 +168,7 @@ impl CellModule for SchedulerWorkflow {
     fn register(self, registry: &mut RegistryBuilder) -> crab_cell_runtime::Result<()> {
         register_workflow::<Self>(registry)?;
         register_workflow_activities::<Self>(registry)?;
-        register_activity::<Self, SchedulerEcho>(registry)?;
+        register_blocking_activity::<Self, SchedulerEcho>(registry)?;
         register_maintenance::<Self>(registry)
     }
 }
@@ -403,7 +398,17 @@ async fn scan_executes_registered_workflow_activity_without_blocking_the_scanner
     .unwrap();
     let status = SchedulerStatus::new(now_ms).unwrap();
     let mut scheduler =
-        RepositoryCellScheduler::new(identity, layout, node_directory, router, session, status);
+        RepositoryCellScheduler::new(identity, layout, node_directory, router, session, status)
+            .unwrap();
+    let blocking_pool = scheduler.blocking_activities.as_ref().unwrap().clone();
+    let mut blocking_reservations = Vec::new();
+    while let Some(reservation) = blocking_pool.try_reserve().unwrap() {
+        blocking_reservations.push(reservation);
+    }
+    scheduler.scan_once().await.unwrap();
+    assert_eq!(WORKFLOW_ACTIVITY_RUNS.load(Ordering::Acquire), 0);
+    assert!(scheduler.activity_jobs.is_empty());
+    drop(blocking_reservations);
     scheduler.scan_once().await.unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {
         while WORKFLOW_ACTIVITY_RUNS.load(Ordering::Acquire) != 1 {
@@ -563,7 +568,8 @@ async fn scan_cursor_advances_when_the_cycle_budget_is_exhausted() {
     .unwrap();
     let status = SchedulerStatus::new(now_ms).unwrap();
     let mut scheduler =
-        RepositoryCellScheduler::new(identity, layout, node_directory, router, session, status);
+        RepositoryCellScheduler::new(identity, layout, node_directory, router, session, status)
+            .unwrap();
 
     scheduler.scan_once_bounded(1).await.unwrap();
     let mut first_cycle = vec![
@@ -739,7 +745,8 @@ async fn scan_routes_due_cell_publishes_progress_and_collects_stale_node() {
         router,
         session,
         status.clone(),
-    );
+    )
+    .unwrap();
     scheduler.scan_once().await.unwrap();
     status.mark_completed(super::super::unix_now_ms().unwrap());
 

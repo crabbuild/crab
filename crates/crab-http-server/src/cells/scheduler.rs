@@ -8,10 +8,10 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    ActivityRunOutcome, ApplicationIdentity, CellAuthority, CellCatalog, CellId, CellTarget,
-    DueCellScan, EffectRunOutcome, InvocationError, MaintenanceTickOutcome, MaintenanceTickRequest,
-    MutationIdentity, NodeDirectory, Registry, RequestId, SchedulerFleet, SessionId,
-    preferred_scanner,
+    ActivityRunOutcome, ApplicationIdentity, BlockingActivityPool, BlockingActivityReservation,
+    CellAuthority, CellCatalog, CellId, CellTarget, DueCellScan, EffectRunOutcome, InvocationError,
+    MaintenanceTickOutcome, MaintenanceTickRequest, MutationIdentity, NodeDirectory, Registry,
+    RequestId, SchedulerFleet, SessionId, preferred_scanner,
 };
 use crab_storage::CellStorageLayout;
 use tokio_util::sync::CancellationToken;
@@ -90,6 +90,7 @@ pub(crate) struct RepositoryCellScheduler {
     scans: HashMap<u8, DueCellScan>,
     next_shard: u8,
     activity_admission: Arc<tokio::sync::Semaphore>,
+    blocking_activities: Option<BlockingActivityPool>,
     activity_cells: Arc<Mutex<HashSet<CellId>>>,
     activity_jobs: tokio::task::JoinSet<()>,
     last_node_collection_ms: i64,
@@ -103,9 +104,13 @@ impl RepositoryCellScheduler {
         router: RepositoryCellRouter,
         session: SessionId,
         status: SchedulerStatus,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         let registry = router.registry();
-        Self {
+        let blocking_activities = registry
+            .has_blocking_activities()
+            .then(BlockingActivityPool::for_system)
+            .transpose()?;
+        Ok(Self {
             identity,
             catalog: CellCatalog::new(layout.clone(), identity.tenant()),
             authority: CellAuthority::new(layout),
@@ -122,18 +127,17 @@ impl RepositoryCellScheduler {
                     .map_or(1, |count| count.get())
                     .min(MAX_ACTIVITY_JOBS),
             )),
+            blocking_activities,
             activity_cells: Arc::new(Mutex::new(HashSet::new())),
             activity_jobs: tokio::task::JoinSet::new(),
             last_node_collection_ms: 0,
-        }
+        })
     }
 
     pub(crate) async fn run(mut self, cancellation: CancellationToken) -> crate::Result<()> {
         loop {
             if cancellation.is_cancelled() {
-                self.activity_jobs.abort_all();
-                while self.activity_jobs.join_next().await.is_some() {}
-                return Ok(());
+                break;
             }
             self.reap_activity_jobs();
             match self.scan_once().await {
@@ -147,6 +151,12 @@ impl RepositoryCellScheduler {
                 () = tokio::time::sleep(SCAN_INTERVAL) => {}
             }
         }
+        self.activity_jobs.abort_all();
+        while self.activity_jobs.join_next().await.is_some() {}
+        if let Some(pool) = &self.blocking_activities {
+            pool.shutdown().await?;
+        }
+        Ok(())
     }
 
     async fn scan_once(&mut self) -> crate::Result<()> {
@@ -328,13 +338,14 @@ impl RepositoryCellScheduler {
             && let Ok(permit) = Arc::clone(&self.activity_admission).try_acquire_owned()
             && let Ok(activity_bytes) = self.router.reserve_activity_payloads()
             && let Some(activity_cell) = self.reserve_activity(cell.target.cell_id())
+            && let Some(blocking) = self.reserve_blocking_activity(cell.target.namespace())?
         {
             let registry = Arc::clone(&self.registry);
             let router = self.router.clone();
             self.activity_jobs.spawn(async move {
                 let target = cell.target.clone();
                 match registry
-                    .run_activity_once(cell.client.clone(), &target, ACTIVITY_LEASE_MS)
+                    .run_activity_once(cell.client.clone(), &target, ACTIVITY_LEASE_MS, blocking)
                     .await
                 {
                     Ok(ActivityRunOutcome::Idle { .. })
@@ -414,6 +425,22 @@ impl RepositoryCellScheduler {
             cell,
             cells: Arc::clone(&self.activity_cells),
         })
+    }
+
+    fn reserve_blocking_activity(
+        &self,
+        namespace: crab_cell_runtime::NamespaceId,
+    ) -> crate::Result<Option<Option<BlockingActivityReservation>>> {
+        if !self.registry.requires_blocking_activity(namespace) {
+            return Ok(Some(None));
+        }
+        let pool = self
+            .blocking_activities
+            .as_ref()
+            .ok_or(crab_cell_runtime::Error::Registry(
+                "blocking activity pool is unavailable",
+            ))?;
+        Ok(pool.try_reserve()?.map(Some))
     }
 }
 

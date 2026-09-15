@@ -16,7 +16,7 @@ that current configuration cannot identify:
 
 | Field | Type/validation | Reason |
 | --- | --- | --- |
-| cells.data_dir | Required absolute directory on private node volume | SQLite/WAL/scratch need durable filesystem semantics; not present in current HTTP config |
+| cells.data_dir | Required absolute directory on private node volume | SQLite/WAL/scratch use this implemented HTTP-server setting and require durable filesystem semantics |
 | cells.peer_advertise | Required HTTPS URL, <=512 bytes, direct Pod/VM endpoint on management_listen | A Service address cannot identify the current owner |
 | cells.peer_certificate | Required PEM path containing the leaf-first node certificate chain | Private mTLS identity, separate from browser login |
 | cells.peer_private_key | Required PEM path containing its matching Ed25519 PKCS#8 key | TLS proof and signed peer envelopes use one enrolled key |
