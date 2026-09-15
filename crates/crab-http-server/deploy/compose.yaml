@@ -29,7 +29,7 @@ x-server-service: &server-service
     - no-new-privileges:true
   tmpfs:
     - /var/lib/crab/tmp:rw,noexec,nosuid,nodev,size=${CRAB_TMP_SIZE:-2g},uid=10001,gid=10001,mode=0700
-    - /var/lib/crab/cells:rw,noexec,nosuid,nodev,size=${CRAB_CELL_SIZE:-4g},uid=10001,gid=10001,mode=0700
+    - /var/lib/crab/cells:rw,noexec,nosuid,nodev,size=${CRAB_CELL_SIZE:-32g},uid=10001,gid=10001,mode=0700
 
 services:
   rustfs:

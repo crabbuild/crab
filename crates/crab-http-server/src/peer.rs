@@ -71,6 +71,12 @@ pub(crate) struct NodePublisher {
     scheduler: crate::cells::SchedulerStatus,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LocalResources {
+    pub(crate) memory_bytes: u64,
+    pub(crate) free_disk_bytes: u64,
+}
+
 impl NodePublisher {
     #[expect(
         clippy::too_many_arguments,
@@ -126,6 +132,10 @@ impl NodePublisher {
         self.data_dir
             .join("sessions")
             .join(encode_session(self.session))
+    }
+
+    pub(crate) fn local_resources(&self) -> crate::Result<LocalResources> {
+        local_resources(&self.data_dir)
     }
 
     pub(crate) async fn run(
@@ -498,6 +508,29 @@ fn node_capacity(data_dir: &Path) -> crate::Result<NodeCapacity> {
     })
 }
 
+fn local_resources(data_dir: &Path) -> crate::Result<LocalResources> {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    // Startup budgets use the stable process limit. Reusing advertised free
+    // memory would make transient boot load permanently shrink Cell admission.
+    Ok(LocalResources {
+        memory_bytes: effective_memory_limit(system.total_memory()),
+        free_disk_bytes: fs4::available_space(data_dir)?,
+    })
+}
+
+fn effective_memory_limit(system_total: u64) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        let cgroup_limit = cgroup_memory_limit("/sys/fs/cgroup/memory.max")
+            .or_else(|| cgroup_memory_limit("/sys/fs/cgroup/memory/memory.limit_in_bytes"));
+        if let Some(cgroup_limit) = cgroup_limit {
+            return system_total.min(cgroup_limit);
+        }
+    }
+    system_total
+}
+
 fn effective_memory_available(system_available: u64) -> u64 {
     #[cfg(target_os = "linux")]
     {
@@ -518,17 +551,22 @@ fn effective_memory_available(system_available: u64) -> u64 {
 
 #[cfg(target_os = "linux")]
 fn cgroup_available_memory(limit_path: &str, usage_path: &str) -> Option<u64> {
-    let limit = std::fs::read_to_string(limit_path).ok()?;
-    if limit.trim() == "max" {
-        return None;
-    }
-    let limit = limit.trim().parse::<u64>().ok()?;
+    let limit = cgroup_memory_limit(limit_path)?;
     let usage = std::fs::read_to_string(usage_path)
         .ok()?
         .trim()
         .parse::<u64>()
         .ok()?;
     limit.checked_sub(usage)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_memory_limit(path: &str) -> Option<u64> {
+    let limit = std::fs::read_to_string(path).ok()?;
+    if limit.trim() == "max" {
+        return None;
+    }
+    limit.trim().parse().ok()
 }
 
 fn encode_session(session: SessionId) -> String {

@@ -43,7 +43,40 @@ const GIT_ADMISSION_CAPACITY: usize = 4;
 const APP_ADMISSION_CAPACITY: usize = 8;
 const MAINTENANCE_ADMISSION_CAPACITY: usize = 2;
 const MAX_ACTIVE_CELLS: usize = 10_000;
-const CELL_NODE_MAILBOX_BYTES: usize = 32 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
+const MIN_CELL_MEMORY_BYTES: u64 = 2 * GIB;
+const MIN_USABLE_CELL_DISK_BYTES: u64 = 20 * GIB;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CellRuntimeBudget {
+    node_mailbox_bytes: usize,
+}
+
+impl CellRuntimeBudget {
+    fn from_resources(resources: crate::peer::LocalResources) -> Result<Self> {
+        if resources.memory_bytes < MIN_CELL_MEMORY_BYTES {
+            return Err(crate::Error::Config(
+                "Cell runtime requires at least 2 GiB effective memory",
+            ));
+        }
+        let disk_reserve = (resources.free_disk_bytes / 5).max(10 * GIB);
+        let usable_disk = resources.free_disk_bytes.saturating_sub(disk_reserve);
+        if usable_disk < MIN_USABLE_CELL_DISK_BYTES {
+            return Err(crate::Error::Config(
+                "Cell runtime requires at least 20 GiB usable local disk",
+            ));
+        }
+        let process_reserve = (resources.memory_bytes / 4).max(512 * MIB);
+        let cell_memory = resources.memory_bytes - process_reserve;
+        let mailbox = usize::try_from(cell_memory / 20)
+            .unwrap_or(usize::MAX)
+            .min(tokio::sync::Semaphore::MAX_PERMITS);
+        Ok(Self {
+            node_mailbox_bytes: mailbox,
+        })
+    }
+}
 
 fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
     TransferAdmission::new(
@@ -56,11 +89,11 @@ fn transfer_admission(catalog: &CatalogStore) -> TransferAdmission {
     )
 }
 
-fn start_cell_runtime(session: SessionId) -> Result<CellRuntime> {
+fn start_cell_runtime(session: SessionId, budget: CellRuntimeBudget) -> Result<CellRuntime> {
     crate::cells::compiled_registry()?;
     Ok(CellRuntime::new(
         SqlWorkerPool::for_system(MAX_ACTIVE_CELLS)?,
-        CELL_NODE_MAILBOX_BYTES,
+        budget.node_mailbox_bytes,
         session,
     )?)
 }
@@ -453,12 +486,13 @@ pub async fn serve(config: Config) -> Result<()> {
         scheduler_status.clone(),
     )?;
     let session_dir = node_publisher.session_dir();
+    let cell_budget = CellRuntimeBudget::from_resources(node_publisher.local_resources()?)?;
     // A pod must prove the complete storage contract before it owns any socket;
     // otherwise incomplete cloud permissions can look partially started.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let management_listener = tokio::net::TcpListener::bind(config.management_listen).await?;
     let metrics = crate::metrics::Metrics::new()?;
-    let cell_runtime = start_cell_runtime(session)?;
+    let cell_runtime = start_cell_runtime(session, cell_budget)?;
     let cell_resolver = crate::peer::LocalCellResolver::new(
         startup.layout.clone(),
         startup.identity,
@@ -1157,6 +1191,31 @@ mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[test]
+    fn cell_runtime_budget_uses_effective_memory_and_reserved_disk() {
+        let budget = CellRuntimeBudget::from_resources(crate::peer::LocalResources {
+            memory_bytes: 2 * GIB,
+            free_disk_bytes: 30 * GIB,
+        })
+        .unwrap();
+        assert_eq!(budget.node_mailbox_bytes, (3 * GIB / 2 / 20) as usize);
+
+        assert!(
+            CellRuntimeBudget::from_resources(crate::peer::LocalResources {
+                memory_bytes: 2 * GIB - 1,
+                free_disk_bytes: 30 * GIB,
+            })
+            .is_err()
+        );
+        assert!(
+            CellRuntimeBudget::from_resources(crate::peer::LocalResources {
+                memory_bytes: 2 * GIB,
+                free_disk_bytes: 30 * GIB - 1,
+            })
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn storage_preflight_leaves_no_live_probe_object() {
