@@ -5,13 +5,14 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use bytes::Bytes;
 use crab_ltx::{
     CaptureBatch, CellReplica, Limits, ManagedDb, RootRef, VerifiedLocalPlan,
     bundle::{Bundle, BundleEntry},
     restore_exact,
 };
 use crab_storage::{CellStorageLayout, StorageReadKind, Store};
-use object_store::{memory::InMemory, path::Path};
+use object_store::{ObjectStoreExt as _, memory::InMemory, path::Path};
 
 fn checksum_path(database: &std::path::Path) -> std::path::PathBuf {
     let mut path = database.as_os_str().to_owned();
@@ -630,9 +631,10 @@ async fn prepare_does_not_write_mutable_keys() {
         .unwrap();
     writer.close().unwrap();
     directory.close().unwrap();
+    let compaction_scratch = tempfile::TempDir::new().unwrap();
 
     let compacted = replica
-        .prepare_compaction(&appended.root(), 0..2, 1)
+        .prepare_compaction(&appended.root(), 0..2, 1, compaction_scratch.path())
         .await
         .unwrap();
     assert_eq!(compacted.predecessor(), Some(appended.root()));
@@ -642,7 +644,7 @@ async fn prepare_does_not_write_mutable_keys() {
     assert_ne!(compacted.root().digest, appended.root().digest);
 
     let snapshot = replica
-        .prepare_compaction(&compacted.root(), 0..2, 9)
+        .prepare_compaction(&compacted.root(), 0..2, 9, compaction_scratch.path())
         .await
         .unwrap();
     assert_eq!(snapshot.verified().segment_count(), 1);
@@ -683,4 +685,106 @@ async fn prepare_does_not_write_mutable_keys() {
         3
     );
     restored.close().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compaction_streams_large_frames_and_cleans_scratch() {
+    let source = tempfile::TempDir::new().unwrap();
+    let database = source.path().join("large.sqlite");
+    let mut writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE payload(value BLOB NOT NULL);\
+                 INSERT INTO payload VALUES(randomblob(3000000))",
+            )
+        })
+        .unwrap();
+    let maximum_read = Arc::new(AtomicU64::new(0));
+    let observed = Arc::clone(&maximum_read);
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_max(bytes, Ordering::SeqCst);
+        }));
+    let replica = replica(store, [91; 32], [92; 16]);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+    let scratch = tempfile::TempDir::new().unwrap();
+    maximum_read.store(0, Ordering::SeqCst);
+
+    let compacted = replica
+        .prepare_compaction(&root, 0..1, 9, scratch.path())
+        .await
+        .unwrap();
+
+    assert_eq!(compacted.root().position, root.position);
+    assert!(
+        maximum_read.load(Ordering::SeqCst) <= 1 << 20,
+        "compaction must not download the complete LTX body"
+    );
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+    let restored = scratch.path().join("restored.sqlite");
+    compacted.verified().restore(&restored).await.unwrap();
+    let connection = crab_ltx::rusqlite::Connection::open(restored).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT length(value) FROM payload", [], |row| {
+                row.get::<_, u64>(0)
+            })
+            .unwrap(),
+        3_000_000
+    );
+}
+
+#[tokio::test]
+async fn compaction_rejects_selected_body_corruption_outside_page_frames() {
+    let source = tempfile::TempDir::new().unwrap();
+    let database = source.path().join("corrupt.sqlite");
+    let mut writer = ManagedDb::open(&database, Limits::default()).unwrap();
+    writer
+        .transaction(|transaction| {
+            transaction.execute_batch(
+                "CREATE TABLE messages(body TEXT NOT NULL);\
+                 INSERT INTO messages VALUES ('verified')",
+            )
+        })
+        .unwrap();
+    let batch = writer.capture().unwrap();
+    let info = batch.segments[0].info().clone();
+    let mut corrupted = std::fs::read(batch.segments[0].path()).unwrap();
+    corrupted[0] ^= 1;
+    let inner = Arc::new(InMemory::new());
+    let store = Store::new(inner.clone());
+    let cell = [93; 32];
+    let incarnation = [94; 16];
+    let layout = CellStorageLayout::new(store.clone(), Path::from("runtime"), [3; 16]);
+    let replica = CellReplica::new(layout.clone(), cell, incarnation, Limits::default()).unwrap();
+    let root = replica.prepare(None, &batch, 1, 1).await.unwrap().root();
+    writer.close().unwrap();
+    let object = layout.incarnation_object_path(
+        &cell,
+        &incarnation,
+        &info.blake3,
+        crab_storage::CellObjectKind::Ltx,
+    );
+    inner
+        .put(&object, Bytes::from(corrupted).into())
+        .await
+        .unwrap();
+    let scratch = tempfile::TempDir::new().unwrap();
+
+    let error = match replica
+        .prepare_compaction(&root, 0..1, 9, scratch.path())
+        .await
+    {
+        Ok(_) => panic!("corrupt selected LTX must not compact"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, crab_ltx::CrabError::ChecksumMismatch));
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
 }

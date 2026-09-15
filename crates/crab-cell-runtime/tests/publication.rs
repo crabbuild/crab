@@ -179,7 +179,7 @@ async fn prepared_root_becomes_one_valid_control_successor() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     let compacted = replica
-        .prepare_compaction(&prepared.root(), 0..1, 9)
+        .prepare_compaction(&prepared.root(), 0..1, 9, _directory.path())
         .await
         .unwrap();
     let compacted_control = published.publish_prepared(&compacted, Some(42)).unwrap();

@@ -81,6 +81,7 @@ impl SegmentDescriptor {
         self.offset
     }
 
+    #[cfg(test)]
     pub(super) const fn length(&self) -> u64 {
         self.length
     }

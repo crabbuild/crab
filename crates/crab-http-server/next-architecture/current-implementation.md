@@ -43,7 +43,10 @@ later truncation, uploads each completed 256-page radix leaf immediately and
 retains only node summaries while constructing parent levels. Writable Cell
 activation streams authenticated directory checksums to a disposable local
 eight-byte-per-page file; capture keeps only changed checksums resident and
-persists them after its matching LTX cut is durable.
+persists them after its matching LTX cut is durable. Cell range/full compaction
+spools authenticated indexes through the injected filesystem, externally merges
+one cursor per segment, range-fetches at most 1 MiB of adjacent frames and
+multipart-uploads the scratch-backed replacement without whole-LTX buffers.
 It does not introduce a second SQLite library. See the
 [parity matrix](../../crab-ltx/PARITY.md) for API and qualification boundaries.
 

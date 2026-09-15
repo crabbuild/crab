@@ -203,6 +203,7 @@ impl CellReplica {
     ) -> Result<PreparedRoot>;
     pub async fn prepare_compaction(
         &self, base: &RootRef, range: std::ops::Range<usize>, level: u8,
+        scratch_directory: &std::path::Path,
     ) -> Result<PreparedRoot>;
 }
 impl VerifiedRoot {
@@ -222,12 +223,18 @@ renumbering. Ownership epoch is not the physical LTX namespace in this format.
 `BundleEntry::for_cell` writes the canonical Cell/incarnation routing identity;
 `prepare_bundle` filters those rows from a shared multi-Cell envelope, verifies
 their exact chain, stores the complete bundle by digest and records absolute
-frame offsets with no native-object fallback. `prepare_compaction` verifies the
-selected bodies and their pinned indexes, compacts the exact range, replays only
-suffix indexes needed to replace final directory locators and preserves the
-base TXID, checksum, commit sequence and schema. The current compactor retains
-selected inputs in memory; the bounded external merge below remains required
-for the 5,000 MB qualification gate.
+frame offsets with no native-object fallback. `prepare_compaction` acquires
+recovery admission before remote reads, verifies authenticated index chunks
+while spooling them under the existing private `scratch_directory`, and
+externally merges one cursor per segment. It streams each complete selected LTX
+range through its manifest BLAKE3, then fetches the selected immutable page
+frames in adjacent runs capped at 1 MiB, verifies frame and page checksums, and
+streams the replacement LTX, codec index and authenticated sidecar to scratch.
+The LTX and sidecar upload in 8 MiB parts through an
+injected-filesystem range source. It then rebuilds the final radix directory
+from the original and compacted sidecars, preserving base TXID, checksum, commit
+sequence and schema. Scratch cleanup is best effort on success and failure. The
+5,000 MB RSS/disk qualification gate remains required.
 
 `PreparedRoot` fields are private; constructors must verify scope, complete
 dependency upload, cut continuity and root metadata. The runtime cannot build

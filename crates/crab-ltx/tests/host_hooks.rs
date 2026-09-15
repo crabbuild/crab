@@ -180,6 +180,52 @@ async fn cell_restore_install_failure_cleans_owned_scratch() {
 
 #[cfg(feature = "replica")]
 #[tokio::test(flavor = "multi_thread")]
+async fn cell_compaction_uses_injected_filesystem_and_cleans_failed_scratch() {
+    let (directory, faults, host, mut writer) = fixture();
+    let replica = CellReplica::new(
+        CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            ObjectPath::from("cell-compaction"),
+            [11; 16],
+        ),
+        [12; 32],
+        [13; 16],
+        Limits::default(),
+    )
+    .unwrap()
+    .with_host(host);
+    let root = replica
+        .prepare(None, &writer.capture().unwrap(), 1, 1)
+        .await
+        .unwrap()
+        .root();
+    writer.close().unwrap();
+
+    faults.arm(Some("write_all"));
+    injected(
+        replica
+            .prepare_compaction(&root, 0..1, 9, directory.path())
+            .await,
+    );
+    assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".crab-compaction-")
+    }));
+
+    faults.arm(None);
+    let compacted = replica
+        .prepare_compaction(&root, 0..1, 9, directory.path())
+        .await
+        .unwrap();
+    assert_eq!(compacted.root().position, root.position);
+    assert!(faults.calls.lock().unwrap().contains("open_rw"));
+}
+
+#[cfg(feature = "replica")]
+#[tokio::test(flavor = "multi_thread")]
 async fn cell_checksum_write_failure_fences_after_sealing_the_cut() {
     let (directory, faults, host, mut source) = fixture();
     let replica = CellReplica::new(

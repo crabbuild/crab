@@ -59,8 +59,10 @@ later truncation, uploads each 256-page leaf immediately and retains only radix
 node summaries. Writable activation now streams authenticated checksums to a
 local fixed-width file; capture keeps only changed checksums resident, updates
 the aggregate incrementally and persists them after sealing the LTX cut.
-External-merge compaction, remaining HTTP domain cutovers and capacity
-qualification remain incomplete. The scoped
+Cell range/full compaction now externally merges authenticated index streams,
+uses bounded frame reads and uploads scratch-backed output without whole-LTX
+buffers. Remaining HTTP domain cutovers and capacity qualification remain
+incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same

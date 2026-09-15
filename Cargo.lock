@@ -2363,6 +2363,7 @@ dependencies = [
 name = "crab-ltx"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "bytes",
  "crab-storage",
@@ -2375,6 +2376,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

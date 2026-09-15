@@ -7,6 +7,7 @@ use crab_storage::{CellObjectKind, CellStorageLayout};
 
 use crate::{CaptureBatch, CrabError, Host, Limits, Position, Result};
 
+mod compaction;
 mod directory;
 mod restore;
 mod root;
@@ -565,92 +566,20 @@ impl CellReplica {
     ///
     /// The output retains the base TXID, checksum, commit sequence and schema.
     /// Only the authority owner may later publish the proposal as a normal root CAS.
+    /// `scratch_directory` must already exist, be private to the caller and have
+    /// space for the selected indexes plus the compacted LTX and authenticated index.
+    /// Owned scratch files are removed after success or failure.
     pub async fn prepare_compaction(
         &self,
         base: &RootRef,
         range: std::ops::Range<usize>,
         level: u8,
+        scratch_directory: &Path,
     ) -> Result<PreparedRoot> {
-        let graph = self.load_graph(base).await?;
-        let schema = graph.document.schema;
-        let selected = graph
-            .descriptors
-            .get(range.clone())
-            .filter(|segments| !segments.is_empty())
-            .ok_or(CrabError::TxNotAvailable)?;
-        if !(1..=9).contains(&level)
-            || (level == 9 && (range.start != 0 || range.end != graph.descriptors.len()))
-            || (level < 9 && selected.iter().any(|segment| segment.level() >= level))
-        {
-            return Err(CrabError::InvalidState("invalid compaction level or range"));
-        }
-
-        let mut bodies = Vec::with_capacity(selected.len());
-        for descriptor in selected {
-            bodies.push(self.read_segment(descriptor).await?);
-        }
-        let infos = selected
-            .iter()
-            .map(|descriptor| descriptor.info.clone())
-            .collect::<Vec<_>>();
-        let expected_indexes = selected
-            .iter()
-            .map(|descriptor| (descriptor.index_digest, descriptor.index_length))
-            .collect::<Vec<_>>();
-        let limits = self.limits;
-        let (bytes, info, index) = self
-            .host
-            .run(move || {
-                for ((bytes, info), (digest, length)) in
-                    bodies.iter().zip(&infos).zip(expected_indexes)
-                {
-                    crate::recovery::verify_segment(bytes, info, limits)?;
-                    let index = crate::paged::encode_index(bytes)?;
-                    if *blake3::hash(&index).as_bytes() != digest || index.len() as u64 != length {
-                        return Err(CrabError::ChecksumMismatch);
-                    }
-                }
-                let (bytes, info) = crate::recovery::compact_inputs(&bodies, &infos, limits)?;
-                let index = crate::paged::encode_index(&bytes)?;
-                Ok::<_, CrabError>((bytes, info, index))
-            })
-            .await??;
-        let descriptor =
-            SegmentDescriptor::native(info, *blake3::hash(&index).as_bytes(), index.len() as u64)
-                .with_level(level);
-        self.put_object(&descriptor.info.blake3, CellObjectKind::Ltx, bytes)
-            .await?;
-        self.put_object(
-            &descriptor.index_digest,
-            CellObjectKind::Index,
-            index.clone(),
-        )
-        .await?;
-
-        let suffix = graph.descriptors[range.end..].to_vec();
-        let mut directory_inputs = vec![DirectoryInput {
-            descriptor: descriptor.clone(),
-            index,
-        }];
-        for descriptor in &suffix {
-            directory_inputs.push(DirectoryInput {
-                descriptor: descriptor.clone(),
-                index: self.read_index(descriptor).await?,
-            });
-        }
-        let mut descriptors = graph.descriptors.clone();
-        descriptors.splice(range, [descriptor]);
-        self.validate_chain(&descriptors, base.position)?;
-        self.finish_preparation(
-            Some(base),
-            Some(graph),
-            descriptors,
-            &directory_inputs,
-            base.position,
-            base.commit_sequence,
-            schema,
-        )
-        .await
+        let mut replica = self.clone();
+        replica.host = self.host.for_recovery().await?;
+        let graph = replica.load_graph(base).await?;
+        compaction::prepare(&replica, base, graph, range, level, scratch_directory).await
     }
 
     async fn prepare_append(
@@ -802,6 +731,35 @@ impl CellReplica {
                 .await?;
         }
 
+        self.finish_root(
+            base,
+            descriptors,
+            target,
+            commit_sequence,
+            schema,
+            page_size,
+            database_pages,
+            directory,
+        )
+        .await
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    async fn finish_root(
+        &self,
+        base: Option<&RootRef>,
+        descriptors: Vec<SegmentDescriptor>,
+        target: Position,
+        commit_sequence: u64,
+        schema: u32,
+        page_size: u32,
+        database_pages: u32,
+        directory: DirectoryTree,
+    ) -> Result<PreparedRoot> {
+        if directory.checksum() != target.checksum {
+            return Err(CrabError::ChecksumMismatch);
+        }
+
         let mut segment_pages = Vec::new();
         for page in descriptors.chunks(SEGMENTS_PER_PAGE) {
             let bytes = encode_segment_page(page)?;
@@ -862,47 +820,6 @@ impl CellReplica {
             return Err(CrabError::InvalidState("commit sequence did not advance"));
         }
         Ok(())
-    }
-
-    async fn read_segment(&self, descriptor: &SegmentDescriptor) -> Result<Vec<u8>> {
-        descriptor.validate(self.limits)?;
-        let end = descriptor
-            .offset()
-            .checked_add(descriptor.length())
-            .ok_or(CrabError::LTXCorrupted)?;
-        let path = self.layout.incarnation_object_path(
-            &self.cell,
-            &self.incarnation,
-            &descriptor.object_digest(),
-            descriptor.object_kind(),
-        );
-        let _permit = self.host.io_permit().await?;
-        let bytes = self
-            .layout
-            .store()
-            .range_get(&path, descriptor.offset()..end)
-            .await?;
-        if bytes.len() as u64 != descriptor.length() {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        Ok(bytes.to_vec())
-    }
-
-    async fn read_index(&self, descriptor: &SegmentDescriptor) -> Result<Vec<u8>> {
-        let bytes = self
-            .read_object(
-                &descriptor.index_digest,
-                CellObjectKind::Index,
-                descriptor.index_length,
-            )
-            .await?;
-        if bytes.len() as u64 != descriptor.index_length
-            || *blake3::hash(&bytes).as_bytes() != descriptor.index_digest
-        {
-            return Err(CrabError::ChecksumMismatch);
-        }
-        crate::paged::decode_index(&bytes)?;
-        Ok(bytes)
     }
 
     /// Reopens and verifies an exact immutable root and its metadata graph.

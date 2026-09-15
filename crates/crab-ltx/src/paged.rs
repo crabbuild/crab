@@ -6,7 +6,7 @@ use std::sync::Arc;
 mod map;
 use map::PageMap;
 
-const ENTRY_BYTES: usize = 60;
+pub(crate) const ENTRY_BYTES: usize = 60;
 const FRAME_PREFIX: usize = crate::ltx::PAGE_HEADER_SIZE + 4;
 
 pub(crate) struct IndexEntry {
@@ -25,52 +25,71 @@ impl Iterator for IndexEntries<'_> {
     type Item = Result<IndexEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.chunks.next().map(|entry| {
-            Ok(IndexEntry {
-                page: u32::from_be_bytes(array(&entry[..4])?),
-                offset: u64::from_be_bytes(array(&entry[4..12])?),
-                size: u64::from_be_bytes(array(&entry[12..20])?),
-                hash: array(&entry[20..52])?,
-                checksum: u64::from_be_bytes(array(&entry[52..60])?),
-            })
-        })
+        self.chunks.next().map(|entry| decode_index_entry(entry))
     }
+}
+
+pub(crate) fn decode_index_entry(entry: &[u8]) -> Result<IndexEntry> {
+    Ok(IndexEntry {
+        page: u32::from_be_bytes(array(entry.get(..4).ok_or(CrabError::LTXCorrupted)?)?),
+        offset: u64::from_be_bytes(array(entry.get(4..12).ok_or(CrabError::LTXCorrupted)?)?),
+        size: u64::from_be_bytes(array(entry.get(12..20).ok_or(CrabError::LTXCorrupted)?)?),
+        hash: array(entry.get(20..52).ok_or(CrabError::LTXCorrupted)?)?,
+        checksum: u64::from_be_bytes(array(entry.get(52..60).ok_or(CrabError::LTXCorrupted)?)?),
+    })
 }
 
 pub(crate) struct ValidatedIndexEntries<'a> {
     entries: IndexEntries<'a>,
-    info: &'a crate::SegmentInfo,
+    validator: IndexValidator,
+}
+
+pub(crate) struct IndexValidator {
+    info: crate::SegmentInfo,
     previous_page: u32,
     previous_end: u64,
+}
+
+impl IndexValidator {
+    pub(crate) fn new(info: &crate::SegmentInfo) -> Self {
+        Self {
+            info: info.clone(),
+            previous_page: 0,
+            previous_end: crate::ltx::HEADER_SIZE as u64,
+        }
+    }
+
+    pub(crate) fn validate(&mut self, entry: IndexEntry) -> Result<IndexEntry> {
+        let lock = crate::ltx::lock_pgno(self.info.page_size);
+        let max_frame = crate::lz4_block::compress_bound(self.info.page_size as usize) as u64
+            + FRAME_PREFIX as u64;
+        let end = entry
+            .offset
+            .checked_add(entry.size)
+            .ok_or(CrabError::LTXCorrupted)?;
+        let footer = crate::ltx::PAGE_HEADER_SIZE + 8 + crate::ltx::TRAILER_SIZE + 1;
+        if entry.page <= self.previous_page
+            || entry.page > self.info.database_pages
+            || entry.page == lock
+            || entry.offset != self.previous_end
+            || !(FRAME_PREFIX as u64..=max_frame).contains(&entry.size)
+            || end > self.info.size_bytes.saturating_sub(footer as u64)
+        {
+            return Err(CrabError::LTXCorrupted);
+        }
+        self.previous_page = entry.page;
+        self.previous_end = end;
+        Ok(entry)
+    }
 }
 
 impl Iterator for ValidatedIndexEntries<'_> {
     type Item = Result<IndexEntry>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.entries.next().map(|entry| {
-            let entry = entry?;
-            let lock = crate::ltx::lock_pgno(self.info.page_size);
-            let max_frame = crate::lz4_block::compress_bound(self.info.page_size as usize) as u64
-                + FRAME_PREFIX as u64;
-            let end = entry
-                .offset
-                .checked_add(entry.size)
-                .ok_or(CrabError::LTXCorrupted)?;
-            let footer = crate::ltx::PAGE_HEADER_SIZE + 8 + crate::ltx::TRAILER_SIZE + 1;
-            if entry.page <= self.previous_page
-                || entry.page > self.info.database_pages
-                || entry.page == lock
-                || entry.offset != self.previous_end
-                || !(FRAME_PREFIX as u64..=max_frame).contains(&entry.size)
-                || end > self.info.size_bytes.saturating_sub(footer as u64)
-            {
-                return Err(CrabError::LTXCorrupted);
-            }
-            self.previous_page = entry.page;
-            self.previous_end = end;
-            Ok(entry)
-        })
+        self.entries
+            .next()
+            .map(|entry| self.validator.validate(entry?))
     }
 }
 
@@ -329,9 +348,7 @@ pub(crate) fn validated_index_entries<'a>(
 ) -> Result<ValidatedIndexEntries<'a>> {
     Ok(ValidatedIndexEntries {
         entries: index_entries(bytes)?,
-        info,
-        previous_page: 0,
-        previous_end: crate::ltx::HEADER_SIZE as u64,
+        validator: IndexValidator::new(info),
     })
 }
 

@@ -9,7 +9,7 @@ does not establish a working runtime.
 | Source | Current behavior | Required change |
 | --- | --- | --- |
 | [managed.rs](../../../../crates/crab-ltx/src/managed.rs) | Typed mutation callbacks, capture ownership and a temporary SQLite `query_only` read boundary | Keep raw connection access inside the runtime; typed application SQL authorization is implemented above this layer |
-| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; initial construction k-way merges ordered index streams, rejects pre-truncation locators, uploads 256-page leaves as produced and retains only radix summaries; exact range/full compaction produces representation-only prepared roots; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache and coalesce adjacent frames into at most 1 MiB range reads; writable preparation streams authenticated checksums to local disk and capture updates only its changed-page overlay after sealing each LTX cut; full restore streams verified runs through a recovery reservation and atomically installs a new SQLite file; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add external-merge compaction and measured 5 GB/low-disk qualification |
+| [cell_replica.rs](../../../../crates/crab-ltx/src/cell_replica.rs) | Native and canonical Cell-selected bundle cuts prepare immutable roots; initial construction k-way merges ordered index streams, rejects pre-truncation locators, uploads 256-page leaves as produced and retains only radix summaries; exact range/full compaction disk-spools authenticated indexes, externally merges one cursor per segment, uses bounded adjacent-frame reads and multipart-uploads injected-filesystem output; cold reads and sparse writable activation use exact digest-pinned radix paths backed by a process-wide bounded directory cache and coalesce adjacent frames into at most 1 MiB range reads; writable preparation streams authenticated checksums to local disk and capture updates only its changed-page overlay after sealing each LTX cut; full restore streams verified runs through a recovery reservation and atomically installs a new SQLite file; incremental publication copy-on-writes only changed directory paths and safely prunes truncation | Add measured 5 GB/low-disk qualification |
 | [replica.rs](../../../../crates/crab-ltx/src/replica.rs) | Standalone immutable manifest plus per-epoch mutable head | Keep existing callers working; Cell runtime uses only `CellReplica` and never treats this head as authority |
 | [append.rs](../../../../crates/crab-ltx/src/replica/append.rs) | Shared native/bundle append verification | Reuse verification under the prepared-root API |
 | [paged.rs](../../../../crates/crab-ltx/src/paged.rs) | Authenticated but resident page map; sparse writable SQL | Bounded directory nodes/cache and capture checksum tracker |
@@ -59,8 +59,12 @@ construction now streams a k-way final-locator merge into immediately uploaded
 radix leaves without a complete locator map or retained node bodies. Exact Cell
 roots now stream authenticated checksums to a disposable local fixed-width file
 without LTX bodies; capture maintains an incremental changed-page overlay and
-commits it only after the corresponding cut is durable. Complete this package
-with external-merge compaction and measured large-database qualification. Exact
+commits it only after the corresponding cut is durable. Range/full compaction
+now admits before remote reads, spools indexes and output through the injected
+filesystem, recomputes every selected LTX manifest digest, authenticates every
+input frame and streams the replacement into immutable multipart objects.
+Complete this package with measured large-database
+and low-disk qualification. Exact
 Cell roots open a sparse writable continuation through the existing VFS.
 Existing standalone `Replica` callers retain their current API; Cell runtime
 code must not call its mutable epoch head.
@@ -239,12 +243,13 @@ restore are now implemented. Restore holds one recovery reservation, writes
 verified runs to an exclusive same-directory scratch file, checks the final
 database length and aggregate checksum, syncs the file, and installs it without
 replacing a destination. Initial root construction now merges authenticated
-index streams and uploads each completed leaf before continuing. Continue with
-external-merge compaction. Writable preparation now streams authenticated
-checksums to local disk and capture updates only the changed-page overlay after
-its cut is durable. Remove
-whole-DB buffers from active paths; do not preserve a second unbounded
-implementation as fallback.
+index streams and uploads each completed leaf before continuing. Cell compaction
+now uses disk-spooled indexes, one merge cursor per segment, at most 1 MiB
+adjacent-frame reads and 8 MiB multipart output parts; it removes owned scratch
+after success and injected failures. Writable preparation now streams
+authenticated checksums to local disk and capture updates only the changed-page
+overlay after its cut is durable. Keep whole-DB buffers out of Cell active paths;
+do not preserve a second unbounded implementation as fallback.
 
 Directory coverage rejection, truncation/regrowth and changed-node read bounds
 have local tests. Add `sparse_fault_pool_progresses_under_saturated_sql_workers`

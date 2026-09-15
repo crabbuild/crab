@@ -450,28 +450,32 @@ admission limits for compressed inputs, decoded pages, image buffers and scratch
 plus a node-wide concurrency budget. The implemented `Limits` defaults are
 256 MiB per database, 512 MiB per local file including WAL, 1 GiB aggregate
 plan/retained artifacts and 1,024 segments. These are not RSS or disk quotas;
-verification and compaction retain multiple buffers, and aggregate capture
-accounting can fail after local files have been installed. Reserve headroom.
+standalone plan verification/compaction retains input buffers, while Cell
+compaction uses bounded memory plus local scratch. Aggregate capture accounting
+can fail after local files have been installed. Reserve headroom.
 The Cell checksum index is disk-backed and its ordinary capture path is
 O(changed pages); truncation must additionally read the removed checksum suffix.
 Standalone local capture still uses an in-memory dense base. Oversized cells
-receive a clear capacity failure. Snapshot/compaction streaming and measured
-5 GB qualification remain follow-up evidence, not assumed properties.
+receive a clear capacity failure. Cell restore and compaction streaming are
+implemented; measured 5 GB/low-disk qualification remains follow-up evidence,
+not an assumed property.
 
 ## Compaction and cleanup
 
-The implemented API uses the upstream compactor on a verified snapshot chain
-or an exact contiguous delta span. Remote range compaction authenticates the original
-indexed plan, downloads only selected bodies, binds them to their index digests,
-compares the output with independently reduced selected page bytes, and verifies
-the replacement indexed plan before publication. Preserve
-the final database state/checksum and encode one qualified representation.
-The library returns a local immutable candidate. The server uploads it and
-publishes a replacement manifest with the same application revision; a failed
-CAS leaves an orphan candidate, not permission to delete original inputs.
-The optional `Replica::compact` implements that upload/epoch-head CAS for a
-complete pinned library plan. Binding its immutable root to the HTTP control
-record remains a separate server publication operation.
+The standalone API uses the upstream-derived compactor on a verified snapshot
+chain or exact contiguous delta span. `CellReplica::prepare_compaction` instead
+acquires recovery admission, range-fetches and verifies every authenticated
+index into caller-owned scratch, then externally merges one cursor per segment.
+It streams every selected LTX range through its manifest BLAKE3, fetches selected
+immutable frames in adjacent runs capped at 1 MiB, verifies frame and page
+checksums, streams the replacement LTX and sidecar, and uploads them in 8 MiB
+multipart ranges through the injected filesystem. It
+rebuilds the final radix directory from original and replacement sidecars and
+returns a representation-only `PreparedRoot`. The server publishes that root
+with the unchanged application revision through the normal authority CAS; a
+failed CAS leaves orphan immutable objects, not permission to delete inputs.
+The optional standalone `Replica::compact` still implements its own upload and
+epoch-head CAS. Neither API turns the standalone epoch head into HTTP authority.
 
 Keep remote deletion out of the first crate API. Upstream `ReplicaClient`
 includes listing, `delete_ltx_files` and `delete_all`; importing that entire
