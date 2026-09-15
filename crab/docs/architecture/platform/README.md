@@ -61,7 +61,9 @@ local fixed-width file; capture keeps only changed checksums resident, updates
 the aggregate incrementally and persists them after sealing the LTX cut.
 Cell range/full compaction now externally merges authenticated index streams,
 uses bounded frame reads and uploads scratch-backed output without whole-LTX
-buffers. Remaining HTTP domain cutovers and capacity qualification remain
+buffers. Sparse activation uses a page-I/O worker independent of the fixed SQL
+pool; a two-Cell test saturates both SQL workers on delayed authenticated page
+faults and proves both activations complete. Remaining HTTP domain cutovers and capacity qualification remain
 incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence

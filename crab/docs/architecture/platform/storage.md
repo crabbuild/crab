@@ -270,6 +270,12 @@ effort and never replaces another file. The 5,000 MB resource/RSS gate remains
 unqualified; this implementation removes the whole-database restore buffer but
 does not claim that capacity result.
 
+Sparse SQLite page faults run on the Host's long-lived page-I/O worker, outside
+the fixed SQL worker pool and its bounded blocking-job slots. Runtime coverage
+opens delayed sparse activations on two distinct workers concurrently and proves
+both complete while the entire SQL pool is synchronously waiting for
+authenticated page reads.
+
 Compaction performs external merge by page number through bounded scratch runs,
 choosing the last page in the selected TXID range. Verify output against an
 independent reduction/directory aggregate before preparation. Never materialize

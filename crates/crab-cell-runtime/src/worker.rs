@@ -966,3 +966,7 @@ fn worker_index(cell: CellId, workers: usize) -> usize {
 async fn receive<T>(response: oneshot::Receiver<Result<T>>) -> Result<T> {
     response.await.map_err(|_| Error::RuntimeClosed)?
 }
+
+#[cfg(test)]
+#[path = "worker/tests.rs"]
+mod tests;
