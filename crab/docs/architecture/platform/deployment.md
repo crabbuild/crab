@@ -431,11 +431,11 @@ Expiry drops the unfinished shutdown future and returns `ShutdownTimeout`, so
 the process does not recycle permits or detach a stuck native callback before
 the orchestrator's 120-second termination boundary.
 The initial wiring uses CPU-derived 1..16 workers and a 10,000 active-Cell
-ceiling. It derives the node mailbox byte semaphore as five percent of the Cell
+ceiling. It derives the node retained-byte semaphore as five percent of the Cell
 memory budget, derives active-Cell admission from the page-cache and descriptor
 budgets, and enforces the effective-memory and free-volume startup floors above.
 Native task/actor and dirty-job reservations, full use of the configured Cell
-directory, durable scheduler retry/fairness and multi-node activity failure
+directory and multi-node activity failure
 qualification remain delivery work. Scheduler shutdown already aborts and joins
 every tracked activity job; dropping its supervisor signals cooperative
 cancellation before runtime drain. Node identity,

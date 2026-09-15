@@ -483,9 +483,12 @@ seconds without progress and restores it after the counter advances. The local
 readiness gate opens only after the first complete cycle, then uses the same
 deadline as scheduler health/progress/lag metrics.
 The transactional Tick gives every installed maintenance class a protected
-share and passes unused capacity forward. Durable node retry queues,
-cross-Cell/per-namespace admission fairness and multi-node activity
-failure qualification remain. Active-local routing recovers a capability
+share and passes unused capacity forward. The node retains a revision-pinned
+cursor for every assigned shard, offers each shard one attempt before
+work-conserving fill and rotates the first shard each cycle. Failed items keep
+their durable due control and re-enter after a complete cursor wrap; a dominant
+namespace therefore cannot permanently hide later Cells. Multi-node activity
+failure qualification remains. Active-local routing recovers a capability
 from the dispatcher only when session, incarnation, code and schema match the
 scanned control and the Cell is not fenced or draining.
 

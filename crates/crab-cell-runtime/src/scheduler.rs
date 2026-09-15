@@ -124,8 +124,20 @@ impl DueCellScan {
 
     /// Advances by at most 32 entries; an empty page still represents progress.
     pub async fn next_batch(&mut self, now_ms: i64) -> Result<Option<Vec<DueCell>>> {
+        self.next_batch_bounded(now_ms, CONTROL_BATCH).await
+    }
+
+    /// Advances by at most `limit` entries without discarding unvisited proofs.
+    pub async fn next_batch_bounded(
+        &mut self,
+        now_ms: i64,
+        limit: usize,
+    ) -> Result<Option<Vec<DueCell>>> {
         if now_ms < 0 {
             return Err(Error::Command("negative scheduler scan time"));
+        }
+        if limit == 0 {
+            return Err(Error::Command("scheduler scan limit is zero"));
         }
         if self.pending.is_empty() {
             let Some(page) = self.catalog.next_page().await? else {
@@ -133,7 +145,7 @@ impl DueCellScan {
             };
             self.pending.extend(page.entries().iter().cloned());
         }
-        let count = self.pending.len().min(CONTROL_BATCH);
+        let count = self.pending.len().min(CONTROL_BATCH).min(limit);
         let mut due = Vec::new();
         for _ in 0..count {
             let proof = self

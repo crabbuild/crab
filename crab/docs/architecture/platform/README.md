@@ -186,9 +186,13 @@ it advances again; its own readiness stays closed until the first complete cycle
 and fails again on the same deadline. Prometheus
 exports scheduler health, progress and lag. The transactional Tick now reserves
 work for every installed maintenance class and passes unused capacity forward,
-so request retention cannot starve Queue or Workflow deadlines. Durable node
-retry queues, cross-Cell/per-namespace admission fairness
-and multi-node activity failure qualification remain. Native blocking-handler
+so request retention cannot starve Queue or Workflow deadlines. The scanner
+keeps one revision-pinned cursor per assigned shard across cycles, gives each
+shard one attempt before filling unused capacity, rotates the first shard and
+never discards the tail of a bounded control batch. A failed Cell remains due in
+its published control and is retried after the cursor completes and reloads the
+latest shard head, so a hot Cell or namespace cannot pin the catalog prefix.
+Multi-node activity failure qualification remains. Native blocking-handler
 isolation and dirty-job admission remain separate delivery work.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
