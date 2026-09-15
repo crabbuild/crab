@@ -37,8 +37,8 @@ declared output bound, and leaves the Cell usable after a proven query error.
 only for the original digest, `ABSENT` only after earlier accepted work drained,
 `UNKNOWN` when publication fenced, and `EXPIRED` for a structurally valid expired
 identity. A successor that restores a later authoritative root resolves the
-predecessor's ledger without replay. Sparse page-I/O deadline propagation and
-the automatic fenced recovery supervisor remain to implement. A single
+predecessor's ledger without replay. The automatic fenced recovery supervisor
+remains to implement. A single
 dispatcher timer currently scans every 100 ms and admits at most 32 concurrent
 owner renewals. Each idle owner renews every 3 s without a permanent per-Cell
 task. Renewal uses the same strict control CAS, reconciles exact lost responses,
@@ -52,8 +52,18 @@ read result. The accepted work and its byte/request permits remain owned by the
 same task until the synchronous callback actually exits. The worker is then
 fenced before any returned pending cut can prepare or publish. This also handles
 native Rust that ignores the interrupt: the caller and admission stop at five
-seconds, but Rust is never unsafely terminated. Deadline propagation into a
-blocking sparse VFS page fetch remains required.
+seconds, but Rust is never unsafely terminated. The actor now computes one
+absolute deadline and carries it through the worker command. The worker scopes
+that deadline around command, query and Resolve callbacks; nested scopes retain
+the earliest value. A sparse VFS page fault applies the same instant to both the
+asynchronous object-store `timeout_at` and its blocking `recv_timeout`, so queue
+or provider delay cannot extend the SQLite wait to the former 30-second default.
+The VFS retains a typed `CrabError::Deadline`; `CellExecutor` recovers that
+source from SQLite, fences the connection, and maps it to the runtime deadline
+contract. Mutations therefore return `OUTCOME_UNKNOWN`, queries return deadline,
+and Resolve returns `UNKNOWN`, regardless of whether the inner VFS timer or the
+outer actor watchdog observes the instant first. The 30-second default remains
+only for standalone `crab-ltx` sparse calls without a caller scope.
 
 `CellRuntime::acquire_idle_restored` handles an `Idle` control immediately;
 `CellRuntime::takeover_restored` handles a published `Recovering` or `Serving`
@@ -252,9 +262,11 @@ of SQL workers. No worker thread or permanent activity task is allocated per Cel
 
 Per-Cell mailbox ceiling: 64 requests and 8 MiB, further constrained by node
 byte admission. A dispatched job retains permits until actual completion even
-after waiter cancellation. SQL/page waits have a 5 s transaction wall deadline;
-install a SQLite progress handler/interrupt and propagate deadlines into page I/O.
-Check the deadline before and after native callbacks and before COMMIT. Native
+after waiter cancellation. SQL/page waits have a 5 s transaction wall deadline.
+The actor installs the SQLite interrupt and passes the same absolute deadline
+through the worker into `crab-ltx`; the sparse VFS bounds both its blocking wait
+and asynchronous provider read by it. Check the deadline before and after native
+callbacks and before COMMIT. Native
 Rust has no safe forced interruption: a watchdog fences admission and ownership,
 but retains job permits/connection ownership until the job really ends. A
 callback stuck outside SQLite requires supervisor termination of this process;
@@ -296,8 +308,8 @@ handler rollback consults worker state and leaves the Cell usable.
 The dispatcher uses `pending`, `bind_prepared` and `confirm_published`; direct
 access to worker-owned executors is impossible. Reads enter the same FIFO and
 execute only after the publisher returns from every preceding mutation. The next
-supervision work must propagate deadlines through sparse page I/O and add
-automatic recovery of fenced Cells instead of only stopping admission.
+supervision work must add automatic recovery of fenced Cells instead of only
+stopping admission.
 
 Per-Cell drain closes admission, resolves accepted publications, closes SQLite,
 then releases ownership. Node shutdown first closes node admission and runtime

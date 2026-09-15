@@ -40,11 +40,13 @@ active takeover requires an exact control remain unchanged for 15 seconds, then
 CASes the new owner before downloading and restoring the root. SQL/native
 operations now have a 5-second wall watchdog: SQLite receives a cross-thread
 interrupt, new admission is fenced immediately, and a timed-out mutation returns
-unknown while its permits remain held until the callback exits. A native callback
-that exits late cannot publish its tentative commit. Sparse page-I/O deadline
-propagation and automatic fenced recovery,
-streaming initial directory construction and directory-backed capture checksums,
-shared directory caching, prepared compaction/bundles,
+unknown while its permits remain held until the callback exits. The same absolute
+deadline reaches the SQL worker and bounds both the blocking sparse VFS wait and
+its asynchronous object-store read; a recovered VFS deadline source fences the
+connection and preserves mutation/query/Resolve outcome semantics. A native
+callback that exits late cannot publish its tentative commit. Automatic fenced
+recovery, streaming initial directory construction and directory-backed capture
+checksums, shared directory caching, prepared compaction/bundles,
 Workflow effect supervision, catalog-driven activity scheduling, scheduler
 progress advertisement and remote/idle routing, private peer routing, HTTP
 cutover and capacity qualification remain incomplete. The scoped

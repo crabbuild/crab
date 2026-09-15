@@ -35,6 +35,8 @@ mod paged;
 #[cfg(feature = "replica")]
 mod paged_io;
 #[cfg(feature = "replica")]
+pub use paged_io::with_paged_io_deadline;
+#[cfg(feature = "replica")]
 mod paged_vfs;
 #[cfg(feature = "replica")]
 mod replica;

@@ -56,6 +56,9 @@ pub enum CrabError {
     Sqlite(#[from] rusqlite::Error),
     #[error("resource limit exceeded: {0}")]
     Limit(&'static str),
+    #[cfg(feature = "replica")]
+    #[error("sparse page I/O exceeded its deadline")]
+    Deadline,
     #[error("invalid local replication state: {0}")]
     InvalidState(&'static str),
     #[error("capture failed; close this handle and restore an authoritative plan")]

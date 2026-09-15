@@ -193,7 +193,7 @@ impl CellExecutor {
         let next_due_ms = match initialized {
             Ok(next_due_ms) => next_due_ms,
             Err(error) => {
-                let error = transaction_error(error);
+                let error = transaction_error_with_io(&db, error);
                 let _ = db.close();
                 return Err(error);
             }
@@ -268,7 +268,7 @@ impl CellExecutor {
             Ok(())
         });
         if let Err(error) = verification {
-            let error = transaction_error(error);
+            let error = transaction_error_with_io(&db, error);
             let _ = db.close();
             return Err(error);
         }
@@ -399,13 +399,19 @@ impl CellExecutor {
             })
         });
 
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
         let transaction = match transaction {
             Ok(value) => value,
-            Err(TransactionError::Operation(error)) => return Err(error),
-            Err(error) => {
-                self.fenced = true;
-                return Err(transaction_error(error));
-            }
+            Err(error) => match error {
+                TransactionError::Operation(error) => return Err(error),
+                error => {
+                    self.fenced = true;
+                    return Err(transaction_error(error));
+                }
+            },
         };
         match transaction {
             TransactionResult::Recorded(outcome) => Ok(CommandExecution::Recorded(outcome)),
@@ -451,6 +457,10 @@ impl CellExecutor {
             return Err(Error::Command("result limit exceeds 1 MiB"));
         }
         let result = self.db.query_with(handler);
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
         match result {
             Ok(result) if result.len() <= max_result_bytes => Ok(result),
             Ok(_) => Err(Error::Command("query result exceeds command limit")),
@@ -502,6 +512,10 @@ impl CellExecutor {
                 )
                 .optional()
         });
+        if let Some(error) = self.db.take_io_error() {
+            self.fenced = true;
+            return Err(ltx_error(error));
+        }
         let existing = match result {
             Ok(existing) => existing,
             Err(crab_ltx::QueryError::Operation(error)) => return Err(error.into()),
@@ -598,6 +612,18 @@ fn transaction_error(error: TransactionError<Error>) -> Error {
         TransactionError::Operation(error) => error,
         TransactionError::Sqlite(error) => error.into(),
         TransactionError::Capture(error) => error.into(),
+    }
+}
+
+fn transaction_error_with_io(db: &ManagedDb, error: TransactionError<Error>) -> Error {
+    db.take_io_error()
+        .map_or_else(|| transaction_error(error), ltx_error)
+}
+
+fn ltx_error(error: crab_ltx::CrabError) -> Error {
+    match error {
+        crab_ltx::CrabError::Deadline => Error::Deadline,
+        error => Error::Ltx(error),
     }
 }
 

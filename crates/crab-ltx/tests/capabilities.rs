@@ -5,8 +5,47 @@ use crab_ltx::{
     bundle::{Bundle, BundleEntry},
 };
 use crab_storage::{Store, StoreLayout};
-use object_store::memory::InMemory;
-use std::{sync::Arc, time::Duration};
+use object_store::{
+    memory::InMemory,
+    throttle::{ThrottleConfig, ThrottledStore},
+};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sparse_sqlite_fault_honors_its_callers_deadline() {
+    let (_directory, batches) = captures();
+    let store = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig::default(),
+    ));
+    let replica = Replica::new(
+        StoreLayout::new(Store::new(store.clone()), "paged-deadline".into()),
+        "epoch",
+        Limits::default(),
+    )
+    .unwrap();
+    let head = replica.replicate(&batches[0], None).await.unwrap();
+    let paged = replica.paged(&head).await.unwrap();
+    store.config_mut(|config| config.wait_get_per_call = Duration::from_secs(1));
+
+    let started = Instant::now();
+    let error = tokio::task::spawn_blocking(move || {
+        crab_ltx::with_paged_io_deadline(Instant::now() + Duration::from_millis(20), || match paged
+            .open_sqlite()
+        {
+            Ok(_) => panic!("delayed page read must exceed the scoped deadline"),
+            Err(error) => error,
+        })
+    })
+    .await
+    .unwrap();
+
+    assert!(matches!(error, crab_ltx::CrabError::Deadline));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_paged_worker_keeps_provider_runtime_tasks_alive() {

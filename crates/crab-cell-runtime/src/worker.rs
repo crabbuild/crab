@@ -6,6 +6,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use tokio::sync::{mpsc, oneshot};
@@ -18,6 +19,7 @@ use crate::{
 const MAX_WORKERS: usize = 16;
 const MAX_ACTIVE_CELLS: usize = 10_000;
 const WORKER_QUEUE: usize = 256;
+const DEFAULT_PAGE_IO_DEADLINE: Duration = Duration::from_secs(30);
 
 pub(crate) type Handler = Box<
     dyn for<'connection> FnOnce(
@@ -207,6 +209,28 @@ impl SqlWorkerPool {
             + Send
             + 'static,
     {
+        self.execute_until(
+            cell,
+            identity,
+            operation_digest,
+            now_ms,
+            max_result_bytes,
+            Instant::now() + DEFAULT_PAGE_IO_DEADLINE,
+            Box::new(handler),
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_until(
+        &self,
+        cell: CellId,
+        identity: MutationIdentity,
+        operation_digest: Digest,
+        now_ms: i64,
+        max_result_bytes: usize,
+        deadline: Instant,
+        handler: Handler,
+    ) -> Result<WorkerExecution> {
         let (reply, response) = oneshot::channel();
         self.send(
             cell,
@@ -216,7 +240,8 @@ impl SqlWorkerPool {
                 operation_digest,
                 now_ms,
                 max_result_bytes,
-                handler: Box::new(handler),
+                deadline,
+                handler,
                 reply,
             },
         )
@@ -229,6 +254,7 @@ impl SqlWorkerPool {
         &self,
         cell: CellId,
         max_result_bytes: usize,
+        deadline: Instant,
         handler: QueryHandler,
     ) -> Result<Vec<u8>> {
         let (reply, response) = oneshot::channel();
@@ -237,6 +263,7 @@ impl SqlWorkerPool {
             WorkerCommand::Query {
                 cell,
                 max_result_bytes,
+                deadline,
                 handler,
                 reply,
             },
@@ -253,6 +280,7 @@ impl SqlWorkerPool {
         operation_digest: Digest,
         now_ms: i64,
         max_result_bytes: usize,
+        deadline: Instant,
     ) -> Result<Resolution> {
         let (reply, response) = oneshot::channel();
         self.send(
@@ -263,6 +291,7 @@ impl SqlWorkerPool {
                 operation_digest,
                 now_ms,
                 max_result_bytes,
+                deadline,
                 reply,
             },
         )
@@ -470,12 +499,14 @@ enum WorkerCommand {
         operation_digest: Digest,
         now_ms: i64,
         max_result_bytes: usize,
+        deadline: Instant,
         handler: Handler,
         reply: oneshot::Sender<Result<WorkerExecution>>,
     },
     Query {
         cell: CellId,
         max_result_bytes: usize,
+        deadline: Instant,
         handler: QueryHandler,
         reply: oneshot::Sender<Result<Vec<u8>>>,
     },
@@ -485,6 +516,7 @@ enum WorkerCommand {
         operation_digest: Digest,
         now_ms: i64,
         max_result_bytes: usize,
+        deadline: Instant,
         reply: oneshot::Sender<Result<Resolution>>,
     },
     BindPrepared {
@@ -629,44 +661,50 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 operation_digest,
                 now_ms,
                 max_result_bytes,
+                deadline,
                 handler,
                 reply,
             } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| {
-                        match cell.executor.execute(
-                            identity,
-                            operation_digest,
-                            now_ms,
-                            max_result_bytes,
-                            handler,
-                        )? {
-                            CommandExecution::Recorded(outcome) => {
-                                Ok(WorkerExecution::Recorded(outcome))
+                let result = crab_ltx::with_paged_io_deadline(deadline, || {
+                    cells
+                        .get_mut(&cell)
+                        .ok_or(Error::CellNotActive)
+                        .and_then(|cell| {
+                            match cell.executor.execute(
+                                identity,
+                                operation_digest,
+                                now_ms,
+                                max_result_bytes,
+                                handler,
+                            )? {
+                                CommandExecution::Recorded(outcome) => {
+                                    Ok(WorkerExecution::Recorded(outcome))
+                                }
+                                CommandExecution::Pending => cell
+                                    .executor
+                                    .pending()
+                                    .cloned()
+                                    .map(Box::new)
+                                    .map(WorkerExecution::Pending)
+                                    .ok_or(Error::Fenced),
                             }
-                            CommandExecution::Pending => cell
-                                .executor
-                                .pending()
-                                .cloned()
-                                .map(Box::new)
-                                .map(WorkerExecution::Pending)
-                                .ok_or(Error::Fenced),
-                        }
-                    });
+                        })
+                });
                 let _ = reply.send(result);
             }
             WorkerCommand::Query {
                 cell,
                 max_result_bytes,
+                deadline,
                 handler,
                 reply,
             } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| cell.executor.query(max_result_bytes, handler));
+                let result = crab_ltx::with_paged_io_deadline(deadline, || {
+                    cells
+                        .get_mut(&cell)
+                        .ok_or(Error::CellNotActive)
+                        .and_then(|cell| cell.executor.query(max_result_bytes, handler))
+                });
                 let _ = reply.send(result);
             }
             WorkerCommand::Resolve {
@@ -675,15 +713,22 @@ fn run_worker(mut receiver: mpsc::Receiver<WorkerCommand>) {
                 operation_digest,
                 now_ms,
                 max_result_bytes,
+                deadline,
                 reply,
             } => {
-                let result = cells
-                    .get_mut(&cell)
-                    .ok_or(Error::CellNotActive)
-                    .and_then(|cell| {
-                        cell.executor
-                            .resolve(identity, operation_digest, now_ms, max_result_bytes)
-                    });
+                let result = crab_ltx::with_paged_io_deadline(deadline, || {
+                    cells
+                        .get_mut(&cell)
+                        .ok_or(Error::CellNotActive)
+                        .and_then(|cell| {
+                            cell.executor.resolve(
+                                identity,
+                                operation_digest,
+                                now_ms,
+                                max_result_bytes,
+                            )
+                        })
+                });
                 let _ = reply.send(result);
             }
             WorkerCommand::BindPrepared {

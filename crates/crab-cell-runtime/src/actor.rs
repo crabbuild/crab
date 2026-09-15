@@ -1002,18 +1002,20 @@ async fn execute_and_publish(
     mut command: Box<QueuedCommand>,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
+    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let execution = match command.handler.take() {
         Some(handler) => {
-            let operation = pool.execute(
+            let operation = pool.execute_until(
                 command.cell,
                 command.identity,
                 command.operation_digest,
                 command.now_ms,
                 command.max_result_bytes,
+                deadline,
                 handler,
             );
             tokio::pin!(operation);
-            match tokio::time::timeout(SQL_WALL_DEADLINE, &mut operation).await {
+            match tokio::time::timeout_at(deadline.into(), &mut operation).await {
                 Ok(result) => result,
                 Err(_) => {
                     interrupt.interrupt();
@@ -1088,11 +1090,12 @@ async fn execute_query(
     mut query: Box<QueuedQuery>,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
+    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let result = match query.handler.take() {
         Some(handler) => {
-            let operation = pool.query(query.cell, query.max_result_bytes, handler);
+            let operation = pool.query(query.cell, query.max_result_bytes, deadline, handler);
             tokio::pin!(operation);
-            match tokio::time::timeout(SQL_WALL_DEADLINE, &mut operation).await {
+            match tokio::time::timeout_at(deadline.into(), &mut operation).await {
                 Ok(result) => result,
                 Err(_) => {
                     interrupt.interrupt();
@@ -1128,15 +1131,17 @@ async fn execute_resolve(
     mut resolve: Box<QueuedResolve>,
     interrupt: Arc<crab_ltx::rusqlite::InterruptHandle>,
 ) -> TaskResult {
+    let deadline = std::time::Instant::now() + SQL_WALL_DEADLINE;
     let operation = pool.resolve(
         resolve.cell,
         resolve.identity,
         resolve.operation_digest,
         resolve.now_ms,
         resolve.max_result_bytes,
+        deadline,
     );
     tokio::pin!(operation);
-    let result = match tokio::time::timeout(SQL_WALL_DEADLINE, &mut operation).await {
+    let result = match tokio::time::timeout_at(deadline.into(), &mut operation).await {
         Ok(result) => result,
         Err(_) => {
             interrupt.interrupt();
@@ -1152,8 +1157,14 @@ async fn execute_resolve(
             };
         }
     };
-    let fenced =
-        result.is_err() && !matches!(pool.state(resolve.cell).await, Ok(WorkerState::Ready));
+    let deadline = matches!(result, Err(Error::Deadline));
+    let result = if deadline {
+        Ok(Resolution::Unknown)
+    } else {
+        result
+    };
+    let fenced = deadline
+        || result.is_err() && !matches!(pool.state(resolve.cell).await, Ok(WorkerState::Ready));
     if fenced {
         let _ = pool.fence(resolve.cell).await;
     }

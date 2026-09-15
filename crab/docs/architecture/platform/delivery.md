@@ -16,7 +16,7 @@ does not establish a working runtime.
 | [environment.rs](../../../../crates/crab-ltx/src/environment.rs) | Filesystem/executor hooks and count admission | Byte reservations held through actual job completion |
 | [store.rs](../../../../crates/crab-storage/src/store.rs) | Conditional updates; ambiguous update not retried | Preserve behavior; runtime owns CAS reconciliation |
 | [cell_layout.rs](../../../../crates/crab-storage/src/cell_layout.rs) | Typed application/Cell/incarnation object paths | Reuse from authority, immutable-root and backup code; never rebuild path strings in callers |
-| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, five-second SQL/native watchdog, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain with explicit worker join, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities, exact native activity execution, signed node enrollment plus strict peer client/dispatch contracts | Add sparse page-I/O deadlines, automatic fenced recovery, fleet listing, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
+| [crab-cell-runtime](../../../../crates/crab-cell-runtime/src/lib.rs) | Stable IDs/control authority/schema, verified CAS catalog, worker-owned bootstrap, exact-root sparse activation, fixed SQL workers, ordered bounded reads, FIFO publication, retry, unknown outcomes, one absolute five-second SQL/native/sparse-page deadline, bounded owner renewal, idle acquisition, observed takeover, per-Cell drain, node-wide terminal drain with explicit worker join, transactional scheduler summaries, revision-pinned due scans and bounded typed Tick, typed registry/CellClient and bounded authorized SQL/KV/Queue/Workflow capabilities, exact native activity execution, signed node enrollment plus strict peer client/dispatch contracts | Add automatic fenced recovery, fleet listing, Workflow effects, catalog-driven activity scheduling and scheduler liveness/routing |
 | [sql.rs](../../../../crates/crab-cell-runtime/src/sql.rs) | Typed 128-statement/1-MiB batches, read/write classification, 1,000-row/1-MiB materialization, scoped SQLite authorizers, registered codecs and a role-checked SqlCell proven through publish and exact-root restore | Use the completed handle from the repository HTTP adapter |
 | [kv.rs](../../../../crates/crab-cell-runtime/src/kv.rs) | Normative schema install, bounded atomic check/write, stable versions, TTL get/list/cleanup, binary pagination and typed scope-sharded KvNamespace/registry codecs | Add scheduler cleanup invocation |
 | [queue.rs](../../../../crates/crab-cell-runtime/src/queue.rs) | Normative schema, producer dedup, bounded claim, token validation, lease mutations/reclaim and retention cleanup plus typed producer-sharded QueueNamespace and registry codecs | Add DLQ effects and native polling scheduler |
@@ -102,9 +102,12 @@ capacity after initialization failure. Caller-opened runtime activation has been
 removed. Exact-root lost-response reconciliation also rejects a subsequent
 takeover instead of letting the old executor serve. Ordered queries now share
 Cell/node admission and the mutation FIFO, run only after prior publication, use
-SQLite `query_only`, and enforce declared result bytes. Complete deadlines/SQLite
-interruption, fenced takeover recovery,
-and panic supervision. All transitions use the existing Store conditional
+SQLite `query_only`, and enforce declared result bytes. Command, query and
+Resolve now carry one absolute five-second deadline into the SQL worker and
+sparse VFS; both the blocking page wait and asynchronous provider read stop at
+that instant, and the executor recovers the typed VFS source before fencing.
+Complete callback-side deadline checks, fenced takeover recovery and panic
+supervision. All transitions use the existing Store conditional
 primitives, preserving sources.
 Drained and orphaned activations close their SQL worker first, then release the
 same observed authority record to `Idle`; transient CAS failures retry across
