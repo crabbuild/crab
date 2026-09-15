@@ -5,13 +5,13 @@ use crab_cell_runtime::{
     CellAuthority, CellClient, CellDescription, CellModule, CellTarget, CodecError, Command,
     CommandContext, CommandResult, Digest, EffectBatch, EffectClaim, EffectClaimRequest,
     EffectCommandIntent, EffectLeaseOutcome, EffectModule, EffectPeerClient, EffectRunOutcome,
-    EffectSource, EffectSupervisor, IncarnationId, InvocationError, MigrationDescriptor,
-    ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor,
-    Owner, PeerAuthorizer, PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip,
-    PeerSigner, PeerVerifier, Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId,
-    Resolution, SessionId, SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId,
-    VerifiedPeerRequest, WireValue, command_operation_digest, effect_id, effect_operation_digest,
-    peer_wire as wire, register_effect_delivery,
+    EffectSource, IncarnationId, InvocationError, MigrationDescriptor, ModuleDescriptor,
+    MutationIdentity, NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, PeerAuthorizer,
+    PeerCellResolver, PeerDispatcher, PeerPrincipal, PeerRoundTrip, PeerSigner, PeerVerifier,
+    Query, QueryContext, Receipt, Registry, RegistryBuilder, RequestId, Resolution, SessionId,
+    SqlBatch, SqlStatement, SqlValue, SqlWorkerPool, TenantId, VerifiedPeerRequest, WireValue,
+    command_operation_digest, effect_id, effect_operation_digest, peer_wire as wire,
+    register_effect_delivery,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -804,13 +804,19 @@ async fn effect_supervisor_delivers_to_inbox_and_acknowledges_source() {
             dispatcher,
         }),
     );
-    let source = EffectSource::<RepositoryModule>::new(
-        CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone()),
-        fixture.target.clone(),
+    assert!(
+        fixture
+            .registry
+            .has_effect_runner(fixture.target.namespace())
     );
-    let outcome = EffectSupervisor::new(source, peer, 5_000)
-        .unwrap()
-        .run_once()
+    let outcome = fixture
+        .registry
+        .run_effect_once(
+            CellClient::local(Arc::clone(&fixture.registry), fixture.handle.clone()),
+            fixture.target.clone(),
+            peer,
+            5_000,
+        )
         .await
         .unwrap();
     assert!(

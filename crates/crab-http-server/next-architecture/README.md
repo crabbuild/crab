@@ -15,13 +15,16 @@ counters, visible edits and incomplete reservations, with two-pass source
 verification, immutable evidence and crash-resumable LTX publication. The
 repository router now distinguishes a live signed remote owner from an absent or
 expired session and uses the runtime's unchanged-control observation before
-takeover. The server now also runs a bounded catalog-driven repository scheduler:
-live-node rendezvous ownership selects shards, typed Tick and effect operations
-route to local/remote owners, and scheduler-only activations drain back to Idle.
+takeover. The server now also runs a bounded catalog-driven Cell scheduler:
+live-node rendezvous ownership selects shards, and the compiled registry resolves
+type-erased Tick, native activity and effect runners for each due namespace.
+Operations route to local/remote owners, and scheduler-only activations drain
+back to Idle. Activity jobs use CPU-derived admission capped at 16 and one per
+Cell, so they do not block later scans or race a temporary-activation drain.
 Completed cycles advance signed node progress; a node stalled for 15 seconds
 loses readiness and is excluded so the next rendezvous candidate takes over.
-Workflow activity polling remains. Remaining
-collaboration-domain import, old-version migration/configured
+Durable scheduler retry/fairness and multi-node activity failure qualification
+remain. Remaining collaboration-domain import, old-version migration/configured
 multi-node quorum and the remaining product-domain route cuts are not yet
 integrated. New repository creation explicitly publishes an empty Cell and marks
 the catalog ready; adoption remains blocked until verified import. Startup

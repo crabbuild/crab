@@ -59,9 +59,8 @@ later truncation, uploads each 256-page leaf immediately and retains only radix
 node summaries. Writable activation now streams authenticated checksums to a
 local fixed-width file; capture keeps only changed checksums resident, updates
 the aggregate incrementally and persists them after sealing the LTX cut.
-External-merge compaction,
-catalog-driven Workflow activity scheduling,
-remaining HTTP domain cutovers and capacity qualification remain incomplete. The scoped
+External-merge compaction, remaining HTTP domain cutovers and capacity
+qualification remain incomplete. The scoped
 KV primitive now installs
 the normative schema and implements atomic checks/mutations, incarnation/sequence
 versions, logical TTL, bounded binary-prefix reads and cleanup through the same
@@ -101,8 +100,14 @@ are now implemented through the same publication path. The native
 root to publish, validates its exact lease, runs only the statically bound Rust
 future outside SQLite, heartbeats through durable commands and publishes its
 completion or retry transition. Its mutation evidence survives unknown outcomes,
-and dropping the supervisor cycle signals cooperative cancellation. Catalog-driven
-Workflow-namespace polling and bounded multi-activity orchestration remain. A typed `WorkflowNamespace` now
+and dropping the supervisor cycle signals cooperative cancellation. Registration
+now also installs one type-erased runner per compiled Workflow namespace. The
+server scheduler may therefore execute a statically bound activity without
+knowing the module's Rust type. It bounds concurrent activity jobs by available
+CPU, caps them at 16 per node and one per Cell, and keeps catalog scanning
+independent of a long-running activity. The per-Cell reservation prevents an
+earlier temporary activation from draining while another activity still uses
+the same local actor. A typed `WorkflowNamespace` now
 binds each namespace and its current-plus-retained definition inventory to fixed
 command/query IDs at startup, derives its shard only from the workflow ID and compiled registry,
 and exposes receipted start, signal, cancel and state operations. Registry
@@ -142,7 +147,8 @@ owner-independent typed command effects through one source-target-bound
 decisions may emit effects while still rejecting new local work. The batch uses
 the Cell commit sequence and assigns ordinals across every transition in one
 scheduler Tick, so different runs cannot collide in `sys_effects`. Queue
-dead-letter insertion is implemented; generic non-repository effect polling still remains.
+dead-letter insertion and generic compiled-namespace effect polling are
+implemented.
 Bootstrap and every committed command now derive the earliest durable work or
 retention deadline from SQLite inside the same transaction. The runtime binds
 that summary to the pending LTX cut and publishes it in control; application
@@ -153,21 +159,26 @@ summary. It dispatches timer and terminal activity events through the run's
 retained definition. Revision-pinned catalog iteration now verifies one immutable
 256-entry page at a time; due filtering reads at most 32 controls per step, and
 the preferred scanner is selected by order-independent rendezvous hashing.
-`crab-http-server` now runs the repository scanner once per second. A cycle
+`crab-http-server` now runs the Cell scanner once per second. A cycle
 enumerates the exact live fleet, rendezvous-assigns all 256 shards, processes at
 most 128 due Cells, routes Tick to an existing local or authenticated remote
 owner, or temporarily acquires an idle/stale-owner Cell from its exact root. A
 temporary local activation drains back to `Idle` after processing. When Tick
-reports no maintenance item, the same cycle runs one source effect supervision
-step. Tick/effect peer operations use fleet/session-bound internal grants, not a
-browser principal. Each completed cycle advances a shared boot-session progress
-counter. Heartbeats publish that counter while allowing unchanged progress, and
+reports no maintenance item, the registry identifies whether the due namespace
+has an activity or effect runner. Activity work runs in a CPU-derived bounded
+`JoinSet`; effects run after the activity or inline when no activity is admitted.
+The scanner never waits for the activity future. Tick, activity and effect peer
+operations use exact registered operation IDs/codecs and fleet/session-bound
+internal grants, not a browser principal. Scheduler shutdown aborts and joins
+all activity jobs; dropping their supervisor futures signals cooperative
+cancellation before runtime drain. Each completed cycle advances a shared
+boot-session progress counter. Heartbeats publish that counter while allowing unchanged progress, and
 every scheduler tracks the last observed change per live session. A node with no
 advertised progress for 15 seconds is removed from rendezvous assignment until
 it advances again; its own readiness stays closed until the first complete cycle
 and fails again on the same deadline. Prometheus
-exports scheduler health, progress and lag. Bounded retry queues and general
-Workflow activity polling remain.
+exports scheduler health, progress and lag. Durable scheduler retry queues,
+per-namespace fairness and multi-node activity failure qualification remain.
 `CellRuntime::local_handle` now resolves a due Cell
 only when the dispatcher still owns the exact incarnation/code/schema under the
 current session and the admission is neither fenced nor draining; it never

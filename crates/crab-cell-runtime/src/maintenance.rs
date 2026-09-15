@@ -20,6 +20,7 @@ pub fn register_maintenance<M: MaintenanceModule>(
     registry: &mut RegistryBuilder,
 ) -> crate::Result<()> {
     registry.bind_maintenance_module(M::MODULE, M::QUEUE_DEAD_LETTER)?;
+    registry.bind_maintenance_runner::<M>()?;
     registry.bind_command::<MaintenanceTickCommand<M>>()
 }
 

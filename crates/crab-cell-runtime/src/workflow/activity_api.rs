@@ -45,6 +45,7 @@ pub fn register_workflow_activities<M: WorkflowActivityModule>(
     for definition in definitions::<M>()? {
         registry.bind_activity_inventory(M::MODULE, definition.digest(), M::ACTIVITY_TYPES)?;
     }
+    registry.bind_activity_runner::<M>()?;
     registry.bind_command::<WorkflowActivityClaimCommand<M>>()?;
     registry.bind_command::<WorkflowActivityCompleteCommand<M>>()?;
     registry.bind_command::<WorkflowActivityExtendCommand<M>>()?;

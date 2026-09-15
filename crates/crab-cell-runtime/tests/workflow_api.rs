@@ -9,19 +9,18 @@ use std::{
 };
 
 use crab_cell_runtime::{
-    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
-    ApplicationId, BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog,
-    CellClient, CellModule, CellRuntime, CellTarget, Digest, DueCellScan, Error, IncarnationId,
-    InvocationError, MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome,
-    MaintenanceTickRequest, MigrationDescriptor, ModuleDescriptor, MutationIdentity,
-    NamespaceDescriptor, NamespaceId, OperationDescriptor, Owner, RegistryBuilder, RequestId,
-    SessionId, SqlWorkerPool, TenantId, WorkflowAction, WorkflowActivities,
-    WorkflowActivityClaimCommand, WorkflowActivityCompleteCommand, WorkflowActivityExtendCommand,
-    WorkflowActivityModule, WorkflowActivityValidateQuery, WorkflowCancelCommand, WorkflowContext,
-    WorkflowDecision, WorkflowDefinition, WorkflowGetQuery, WorkflowModule, WorkflowNamespace,
-    WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand, WorkflowStartCommand, WorkflowStatus,
-    install_workflow_schema, register_activity, register_maintenance, register_workflow,
-    register_workflow_activities,
+    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ApplicationId,
+    BuildDescriptor, CatalogEntry, CatalogRole, CellAuthority, CellCatalog, CellClient, CellModule,
+    CellRuntime, CellTarget, Digest, DueCellScan, Error, IncarnationId, InvocationError,
+    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MigrationDescriptor, ModuleDescriptor, MutationIdentity, NamespaceDescriptor, NamespaceId,
+    OperationDescriptor, Owner, RegistryBuilder, RequestId, SessionId, SqlWorkerPool, TenantId,
+    WorkflowAction, WorkflowActivityClaimCommand, WorkflowActivityCompleteCommand,
+    WorkflowActivityExtendCommand, WorkflowActivityModule, WorkflowActivityValidateQuery,
+    WorkflowCancelCommand, WorkflowContext, WorkflowDecision, WorkflowDefinition, WorkflowGetQuery,
+    WorkflowModule, WorkflowNamespace, WorkflowOutcome, WorkflowSignal, WorkflowSignalCommand,
+    WorkflowStartCommand, WorkflowStatus, install_workflow_schema, register_activity,
+    register_maintenance, register_workflow, register_workflow_activities,
 };
 use crab_ltx::{CellReplica, Limits};
 use crab_storage::{CellStorageLayout, Store};
@@ -540,9 +539,10 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
         .unwrap()
         .unwrap();
     let scheduler_client = CellClient::local(registry.clone(), routed);
-    let tick = scheduler_client
-        .command::<MaintenanceTickCommand<TestWorkflow>>(
-            &target,
+    let tick = registry
+        .run_maintenance_once(
+            scheduler_client.clone(),
+            target.clone(),
             identity(17),
             MaintenanceTickRequest {
                 expected_commit_sequence: timer.receipt.commit_sequence,
@@ -564,9 +564,10 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
             .state,
         b"timer-complete"
     );
-    let stale = scheduler_client
-        .command::<MaintenanceTickCommand<TestWorkflow>>(
-            &target,
+    let stale = registry
+        .run_maintenance_once(
+            scheduler_client,
+            target.clone(),
             identity(18),
             MaintenanceTickRequest {
                 expected_commit_sequence: timer.receipt.commit_sequence,
@@ -642,6 +643,22 @@ async fn typed_workflow_namespace_publishes_rejects_reads_and_survives_restore()
 async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
     HEARTBEAT_OBSERVED.store(false, Ordering::Release);
     let registry = registry();
+    assert_eq!(
+        registry.internal_command_action(WORKFLOW_NAMESPACE, 7, 1),
+        Some("cell.scheduler.tick")
+    );
+    assert_eq!(
+        registry.internal_command_action(WORKFLOW_NAMESPACE, 4, 1),
+        Some("cell.activity.source")
+    );
+    assert_eq!(
+        registry.internal_query_action(WORKFLOW_NAMESPACE, 2, 1),
+        Some("cell.activity.source")
+    );
+    assert_eq!(
+        registry.internal_command_action(WORKFLOW_NAMESPACE, 1, 1),
+        None
+    );
     let target = CellTarget::new(
         TenantId::from_bytes([21; 16]),
         ApplicationId::from_bytes([22; 16]),
@@ -719,11 +736,11 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
         )
         .await
         .unwrap();
-    let activities =
-        WorkflowActivities::<TestWorkflow>::new(client, target.tenant(), target.application())
-            .unwrap();
-    let supervisor = ActivitySupervisor::new(activities, 5_000).unwrap();
-    let completed = supervisor.run_once(0).await.unwrap();
+    assert!(registry.has_activity_runner(target.namespace()));
+    let completed = registry
+        .run_activity_once(client, &target, 5_000)
+        .await
+        .unwrap();
     let ActivityRunOutcome::Completed { workflow, receipt } = completed else {
         panic!("native activity was not completed");
     };
@@ -753,7 +770,14 @@ async fn native_activity_supervisor_heartbeats_completes_and_restores_result() {
         .await
         .unwrap();
     assert!(matches!(
-        supervisor.run_once(0).await.unwrap(),
+        registry
+            .run_activity_once(
+                CellClient::local(registry.clone(), handle.clone()),
+                &target,
+                5_000,
+            )
+            .await
+            .unwrap(),
         ActivityRunOutcome::Retrying { .. }
     ));
     handle.drain().await.unwrap();

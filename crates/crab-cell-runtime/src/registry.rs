@@ -11,9 +11,13 @@ mod descriptor;
 use descriptor::encode_release;
 
 use crate::{
-    ActivityContext, ActivityExecution, ActivityHandler, ActivitySupport, CatalogRole, CellId,
-    CellTarget, Digest, Error, HandlerOutcome, NamespaceId, Result, SqlBatch, SqlResultSet,
-    WireValue, WorkflowDefinition,
+    ActivityContext, ActivityExecution, ActivityHandler, ActivityRunOutcome, ActivitySupervisor,
+    ActivitySupervisorError, ActivitySupport, ApplicationId, CatalogRole, CellClient, CellId,
+    CellTarget, Committed, Digest, EffectModule, EffectPeerClient, EffectRunOutcome,
+    EffectSupervisor, EffectSupervisorError, Error, HandlerOutcome, InvocationError,
+    MaintenanceModule, MaintenanceTickCommand, MaintenanceTickOutcome, MaintenanceTickRequest,
+    MutationIdentity, NamespaceId, Result, SqlBatch, SqlResultSet, TenantId, WireValue,
+    WorkflowActivities, WorkflowActivityModule, WorkflowDefinition,
     codec::{decode_wire, encode_wire},
     sql_batch, sql_query_batch,
 };
@@ -169,6 +173,35 @@ type CommandHandler = for<'borrow, 'connection> fn(
 type QueryHandler = for<'borrow> fn(&mut QueryContext<'borrow>, &[u8]) -> Result<Vec<u8>>;
 type ActivityFuture = Pin<Box<dyn Future<Output = Result<ActivityExecution>> + Send + 'static>>;
 type ActivityFunction = fn(ActivityContext, Vec<u8>) -> ActivityFuture;
+type MaintenanceFuture = Pin<
+    Box<
+        dyn Future<
+                Output = std::result::Result<
+                    Committed<MaintenanceTickOutcome>,
+                    InvocationError<MaintenanceTickOutcome>,
+                >,
+            > + Send
+            + 'static,
+    >,
+>;
+type MaintenanceRunner =
+    fn(CellClient, CellTarget, MutationIdentity, MaintenanceTickRequest) -> MaintenanceFuture;
+type EffectFuture = Pin<
+    Box<
+        dyn Future<Output = std::result::Result<EffectRunOutcome, EffectSupervisorError>>
+            + Send
+            + 'static,
+    >,
+>;
+type EffectRunner = fn(CellClient, CellTarget, EffectPeerClient, u32) -> EffectFuture;
+type ActivityRunFuture = Pin<
+    Box<
+        dyn Future<Output = std::result::Result<ActivityRunOutcome, ActivitySupervisorError>>
+            + Send
+            + 'static,
+    >,
+>;
+type ActivityRunner = fn(CellClient, TenantId, ApplicationId, u32, u32) -> ActivityRunFuture;
 
 /// Stored command decision encoded with the command's declared output codec.
 pub enum CommandResult<T> {
@@ -242,8 +275,14 @@ pub struct RegistryBuilder {
     workflow_definitions: HashMap<(String, [u8; 32]), Vec<NamespaceId>>,
     activities: BTreeMap<ActivityKey, ActivityFunction>,
     activity_claims: BTreeSet<ActivityKey>,
+    activity_runners: HashMap<NamespaceId, ActivityRunner>,
     queue_bindings: Vec<QueueBinding>,
     maintenance_bindings: BTreeMap<&'static str, Option<crate::QueueDeadLetterTarget>>,
+    maintenance_runners: BTreeMap<&'static str, MaintenanceRunner>,
+    effect_runners: BTreeMap<&'static str, EffectRunner>,
+    maintenance_operations: BTreeMap<&'static str, (u32, u32)>,
+    effect_operations: BTreeMap<&'static str, (u32, u32, u32, u32)>,
+    activity_operations: HashMap<NamespaceId, (u32, u32, u32, u32, u32)>,
 }
 
 impl RegistryBuilder {
@@ -257,8 +296,14 @@ impl RegistryBuilder {
             workflow_definitions: HashMap::new(),
             activities: BTreeMap::new(),
             activity_claims: BTreeSet::new(),
+            activity_runners: HashMap::new(),
             queue_bindings: Vec::new(),
             maintenance_bindings: BTreeMap::new(),
+            maintenance_runners: BTreeMap::new(),
+            effect_runners: BTreeMap::new(),
+            maintenance_operations: BTreeMap::new(),
+            effect_operations: BTreeMap::new(),
+            activity_operations: HashMap::new(),
         }
     }
 
@@ -330,6 +375,60 @@ impl RegistryBuilder {
         {
             return Err(Error::Registry("duplicate maintenance module binding"));
         }
+        Ok(())
+    }
+
+    pub(crate) fn bind_maintenance_runner<M: MaintenanceModule>(&mut self) -> Result<()> {
+        if self
+            .maintenance_runners
+            .insert(M::MODULE, typed_maintenance::<M>)
+            .is_some()
+        {
+            return Err(Error::Registry("duplicate maintenance runner binding"));
+        }
+        self.maintenance_operations
+            .insert(M::MODULE, (M::TICK_COMMAND_ID, M::CODEC_VERSION));
+        Ok(())
+    }
+
+    pub(crate) fn bind_effect_runner<M: EffectModule>(&mut self) -> Result<()> {
+        if self
+            .effect_runners
+            .insert(M::MODULE, typed_effect::<M>)
+            .is_some()
+        {
+            return Err(Error::Registry("duplicate effect runner binding"));
+        }
+        self.effect_operations.insert(
+            M::MODULE,
+            (
+                M::CLAIM_COMMAND_ID,
+                M::LEASE_COMMAND_ID,
+                M::VALIDATE_QUERY_ID,
+                M::CODEC_VERSION,
+            ),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn bind_activity_runner<M: WorkflowActivityModule>(&mut self) -> Result<()> {
+        if self
+            .activity_runners
+            .insert(M::NAMESPACE, typed_activity_runner::<M>)
+            .is_some()
+        {
+            return Err(Error::Registry("duplicate activity runner binding"));
+        }
+        self.activity_operations.insert(
+            M::NAMESPACE,
+            (
+                M::ACTIVITY_CLAIM_COMMAND_ID,
+                M::ACTIVITY_COMPLETE_COMMAND_ID,
+                M::ACTIVITY_EXTEND_COMMAND_ID,
+                M::ACTIVITY_VALIDATE_QUERY_ID,
+                M::CODEC_VERSION,
+            ),
+        );
         Ok(())
     }
 
@@ -463,6 +562,34 @@ impl RegistryBuilder {
         )?;
         validate_queue_bindings(&self.queue_bindings, &namespace_owners, &self.modules)?;
         validate_maintenance_bindings(&self.maintenance_bindings, &self.queue_bindings)?;
+        if self
+            .maintenance_bindings
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != self.maintenance_runners.keys().copied().collect()
+        {
+            return Err(Error::Registry(
+                "maintenance metadata and runner bindings differ",
+            ));
+        }
+        let expected_activity_runners = self
+            .modules
+            .iter()
+            .filter(|module| !module.activity_types.is_empty())
+            .flat_map(|module| {
+                module
+                    .namespaces
+                    .iter()
+                    .filter(|namespace| namespace.role == CatalogRole::Workflow)
+                    .map(|namespace| namespace.id)
+            })
+            .collect::<HashSet<_>>();
+        if expected_activity_runners != self.activity_runners.keys().copied().collect() {
+            return Err(Error::Registry(
+                "activity metadata and runner bindings differ",
+            ));
+        }
 
         let command_descriptors = operation_descriptors(&self.modules, |module| module.commands);
         let query_descriptors = operation_descriptors(&self.modules, |module| module.queries);
@@ -493,6 +620,12 @@ impl RegistryBuilder {
             query_descriptors,
             namespace_modules: namespace_owners,
             activities: self.activities,
+            activity_runners: self.activity_runners,
+            maintenance_runners: self.maintenance_runners,
+            effect_runners: self.effect_runners,
+            maintenance_operations: self.maintenance_operations,
+            effect_operations: self.effect_operations,
+            activity_operations: self.activity_operations,
         })
     }
 }
@@ -518,6 +651,12 @@ pub struct Registry {
     query_descriptors: BTreeMap<BindingKey, OperationDescriptor>,
     namespace_modules: HashMap<NamespaceId, (&'static str, NamespaceDescriptor)>,
     activities: BTreeMap<ActivityKey, ActivityFunction>,
+    activity_runners: HashMap<NamespaceId, ActivityRunner>,
+    maintenance_runners: BTreeMap<&'static str, MaintenanceRunner>,
+    effect_runners: BTreeMap<&'static str, EffectRunner>,
+    maintenance_operations: BTreeMap<&'static str, (u32, u32)>,
+    effect_operations: BTreeMap<&'static str, (u32, u32, u32, u32)>,
+    activity_operations: HashMap<NamespaceId, (u32, u32, u32, u32, u32)>,
 }
 
 impl Registry {
@@ -601,6 +740,164 @@ impl Registry {
             return Box::pin(async { Err(Error::Registry("activity binding is unavailable")) });
         };
         handler(context, input)
+    }
+
+    /// Runs the statically bound maintenance command for one namespace.
+    pub async fn run_maintenance_once(
+        &self,
+        client: CellClient,
+        target: CellTarget,
+        identity: MutationIdentity,
+        request: MaintenanceTickRequest,
+    ) -> std::result::Result<
+        Committed<MaintenanceTickOutcome>,
+        InvocationError<MaintenanceTickOutcome>,
+    > {
+        let module = self
+            .namespace_modules
+            .get(&target.namespace())
+            .map(|(module, _)| *module)
+            .ok_or_else(|| InvocationError::NotStarted(Error::Registry("namespace unavailable")))?;
+        let runner = self
+            .maintenance_runners
+            .get(module)
+            .copied()
+            .ok_or_else(|| {
+                InvocationError::NotStarted(Error::Registry("maintenance runner unavailable"))
+            })?;
+        runner(client, target, identity, request).await
+    }
+
+    /// Reports whether one namespace has statically linked native activities.
+    #[must_use]
+    pub fn has_activity_runner(&self, namespace: NamespaceId) -> bool {
+        self.activity_runners.contains_key(&namespace)
+    }
+
+    /// Runs at most one statically bound native activity from one Workflow shard.
+    pub async fn run_activity_once(
+        &self,
+        client: CellClient,
+        target: &CellTarget,
+        lease_ms: u32,
+    ) -> std::result::Result<ActivityRunOutcome, ActivitySupervisorError> {
+        let runner = self
+            .activity_runners
+            .get(&target.namespace())
+            .copied()
+            .ok_or(ActivitySupervisorError::Runtime(Error::Registry(
+                "activity runner unavailable",
+            )))?;
+        let shard = u32::from_be_bytes(target.partition().try_into().map_err(|_| {
+            ActivitySupervisorError::Runtime(Error::Identity(
+                "Workflow partition is not a canonical shard",
+            ))
+        })?);
+        runner(
+            client,
+            target.tenant(),
+            target.application(),
+            shard,
+            lease_ms,
+        )
+        .await
+    }
+
+    /// Runs at most one statically bound effect from one explicit source Cell.
+    pub async fn run_effect_once(
+        &self,
+        client: CellClient,
+        target: CellTarget,
+        peer: EffectPeerClient,
+        lease_ms: u32,
+    ) -> std::result::Result<EffectRunOutcome, EffectSupervisorError> {
+        let module = self
+            .namespace_modules
+            .get(&target.namespace())
+            .map(|(module, _)| *module)
+            .ok_or(EffectSupervisorError::Runtime(Error::Registry(
+                "namespace unavailable",
+            )))?;
+        let runner =
+            self.effect_runners
+                .get(module)
+                .copied()
+                .ok_or(EffectSupervisorError::Runtime(Error::Registry(
+                    "effect runner unavailable",
+                )))?;
+        runner(client, target, peer, lease_ms).await
+    }
+
+    /// Reports whether one namespace's module registered effect supervision.
+    #[must_use]
+    pub fn has_effect_runner(&self, namespace: NamespaceId) -> bool {
+        self.namespace_modules
+            .get(&namespace)
+            .is_some_and(|(module, _)| self.effect_runners.contains_key(module))
+    }
+
+    /// Maps one registered internal command to its exact fleet authorization.
+    #[must_use]
+    pub fn internal_command_action(
+        &self,
+        namespace: NamespaceId,
+        command_id: u32,
+        codec_version: u32,
+    ) -> Option<&'static str> {
+        let module = self.namespace_modules.get(&namespace)?.0;
+        if self
+            .maintenance_operations
+            .get(module)
+            .is_some_and(|&(tick, codec)| tick == command_id && codec == codec_version)
+        {
+            return Some("cell.scheduler.tick");
+        }
+        if self
+            .effect_operations
+            .get(module)
+            .is_some_and(|&(claim, lease, _, codec)| {
+                codec == codec_version && matches!(command_id, id if id == claim || id == lease)
+            })
+        {
+            return Some("cell.effect.source");
+        }
+        if self.activity_operations.get(&namespace).is_some_and(
+            |&(claim, complete, extend, _, codec)| {
+                codec == codec_version
+                    && matches!(command_id, id if id == claim || id == complete || id == extend)
+            },
+        ) {
+            return Some("cell.activity.source");
+        }
+        None
+    }
+
+    /// Maps one registered internal query to its exact fleet authorization.
+    #[must_use]
+    pub fn internal_query_action(
+        &self,
+        namespace: NamespaceId,
+        query_id: u32,
+        codec_version: u32,
+    ) -> Option<&'static str> {
+        let module = self.namespace_modules.get(&namespace)?.0;
+        if self
+            .effect_operations
+            .get(module)
+            .is_some_and(|&(_, _, validate, codec)| validate == query_id && codec == codec_version)
+        {
+            return Some("cell.effect.source");
+        }
+        if self
+            .activity_operations
+            .get(&namespace)
+            .is_some_and(|&(_, _, _, validate, codec)| {
+                validate == query_id && codec == codec_version
+            })
+        {
+            return Some("cell.activity.source");
+        }
+        None
     }
 
     pub(crate) fn namespace_contract(
@@ -813,6 +1110,52 @@ fn typed_activity<A: ActivityHandler>(context: ActivityContext, input: Vec<u8>) 
             return Err(Error::Command("activity handler result exceeds 256 KiB"));
         }
         Ok(outcome)
+    })
+}
+
+fn typed_maintenance<M: MaintenanceModule>(
+    client: CellClient,
+    target: CellTarget,
+    identity: MutationIdentity,
+    request: MaintenanceTickRequest,
+) -> MaintenanceFuture {
+    Box::pin(async move {
+        client
+            .command::<MaintenanceTickCommand<M>>(&target, identity, request)
+            .await
+    })
+}
+
+fn typed_effect<M: EffectModule>(
+    client: CellClient,
+    target: CellTarget,
+    peer: EffectPeerClient,
+    lease_ms: u32,
+) -> EffectFuture {
+    Box::pin(async move {
+        EffectSupervisor::<M>::new(crate::EffectSource::new(client, target), peer, lease_ms)
+            .map_err(EffectSupervisorError::Runtime)?
+            .run_once()
+            .await
+    })
+}
+
+fn typed_activity_runner<M: WorkflowActivityModule>(
+    client: CellClient,
+    tenant: TenantId,
+    application: ApplicationId,
+    shard: u32,
+    lease_ms: u32,
+) -> ActivityRunFuture {
+    Box::pin(async move {
+        ActivitySupervisor::new(
+            WorkflowActivities::<M>::new(client, tenant, application)
+                .map_err(ActivitySupervisorError::Runtime)?,
+            lease_ms,
+        )
+        .map_err(ActivitySupervisorError::Runtime)?
+        .run_once(shard)
+        .await
     })
 }
 

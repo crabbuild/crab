@@ -498,9 +498,7 @@ from the workflow ID and registry topology, binds the start run identity to the
 runtime mutation identity, returns durable typed rejection for non-applied
 outcomes and supports bounded minimum-receipt state reads. Its integration test
 proves start, signal, duplicate replay, conflict rejection, exact-root restore,
-state and cancellation. Catalog-driven Workflow activity polling remains a
-node service outside this application capability; repository effects are now
-polled by the server scheduler. `WorkflowActivities<M>` and
+state and cancellation. `WorkflowActivities<M>` and
 `ActivitySupervisor<M>` now implement the first native execution unit: registry
 freeze verifies the exact definition/type/handler matrix, claims and validation
 cross a published receipt, the statically linked future runs without a SQLite
@@ -508,8 +506,10 @@ borrow, heartbeat extensions publish as independent commands, and completion or
 retry feeds the pinned state machine. The activity context exposes stable run,
 activity and external-idempotency identities, the current durable lease deadline
 and cooperative cancellation. Pending mutations retain their exact identity for
-resolution. Catalog-driven Workflow shard polling and bounded concurrent cycles
-remain; the maintenance Tick owns timer dispatch.
+resolution. `register_workflow_activities::<M>` also installs a type-erased
+namespace runner in the compiled registry. The server calls that runner from
+catalog-derived work without carrying `M` through its product composition
+types. The maintenance Tick owns timer dispatch.
 
 `MaintenanceModule` binds one private Tick operation ID. A scanner submits the
 published root's commit sequence; `MaintenanceTickCommand` no-ops stale scans,
@@ -523,14 +523,22 @@ orchestration every second: it loads at most 10,000 exact live sessions, assigns
 all 256 shards, processes at most 128 due Cells, and routes each one to the
 existing local or authenticated remote owner. It may acquire an Idle Cell or
 perform the normal observed stale-owner takeover; activations created solely for
-the scheduler drain after the Tick/effect cycle, while already-active Cells stay
-owned. Each successful full cycle advances the shared node progress used by the
+the scheduler drain after the Tick/activity/effect cycle, while already-active
+Cells stay owned. A zero-item Tick consults the registry's type-erased
+activity/effect runner table. Activity execution uses CPU-derived admission
+capped at 16 jobs, a one-job-per-Cell reservation and a tracked `JoinSet`, so
+the scan completes without waiting
+for the native future; scheduler shutdown aborts and joins every job, triggering
+cooperative cancellation. Effect-only work executes inline, and an activity job
+runs one effect step after its activity outcome. Each successful full cycle advances the shared node progress used by the
 heartbeat. `SchedulerFleet` remembers the last progress change for every live
 session and excludes a stalled session after 15 seconds, allowing the next
 rendezvous candidate to scan; progress recovery readmits it. Local readiness and
 Prometheus scheduler health/progress/lag use the same completion timestamp, and
-readiness cannot open before the first completed cycle.
-Bounded retry queues and generic Workflow activity polling remain. For a locally owned Cell,
+readiness cannot open before the first completed cycle. Exact compiled operation
+IDs/codecs map peer requests to scheduler, activity or effect grants;
+unregistered and product operations fail closed. Durable retry queues,
+per-namespace fairness and multi-node activity failure qualification remain. For a locally owned Cell,
 `CellRuntime::local_handle` asks the dispatcher for a capability and
 returns one only if the scanned control's session/incarnation/code/schema still
 match an unfenced, non-draining active entry. Callers never inspect the runtime's
@@ -609,15 +617,18 @@ event/state writes. The action contains only `EffectCommandIntent`, so
 definitions cannot persist pre-encoded peer requests or pin an owner
 incarnation.
 
-Use a node-wide Tokio supervisor with at most min(32, 2 * vCPU) running activities
-and byte reservations for input/output. It cycles eligible shards, backs off
-100 ms–1 s on empty claims, renews at lease/3, and delivers completion through
-the command actor. Lease loss requests cancellation and prevents further
+The current node-wide Tokio supervisor admits at most `min(vCPU, 16)` running
+activity jobs and one job per Cell. It retains both reservations until the
+future terminates, preventing a scheduler-only activation from draining under a
+second activity on the same actor. `ActivitySupervisor` renews at lease/3 and
+delivers completion through the command actor. Lease loss requests cancellation and prevents further
 completion with that token; cancellation cannot undo an already issued network
-effect. Keep task permits until actual task termination. Blocking activity work
-uses a separate pool capped at min(vCPU, 4), never a SQL shard or the page-I/O
-driver. Neither spawn_blocking nor future abortion can terminate arbitrary
-native CPU loops.
+effect. Scheduler shutdown aborts and joins every tracked future, which drops
+the attempt guard and signals cooperative cancellation. Input/output byte
+reservations, fair cycling/backoff between busy namespaces and a separate
+bounded blocking-activity pool remain delivery work. Neither future abortion
+nor `spawn_blocking` can terminate an arbitrary native CPU loop, so application
+handlers must honor the cancellation token.
 
 Queue consumers follow the same lease supervision. Side effects use stable
 message ID or (run_id, activity_id) at the destination, never attempt/token.
@@ -628,7 +639,7 @@ Rust cannot prevent hidden clocks, randomness or network calls in trusted code.
 
 | Existing source | Integration change to implement |
 | --- | --- |
-| [server.rs](../../../../crates/crab-http-server/src/server.rs) | Constructs one runtime with the existing resolved Store, starts the catalog-driven repository scheduler after node publication, cancels/joins it during shutdown and then drains/joins the runtime |
+| [server.rs](../../../../crates/crab-http-server/src/server.rs) | Constructs one runtime with the existing resolved Store, starts the catalog-driven Cell scheduler after node publication, invokes compiled maintenance/activity/effect runners, cancels/joins tracked activity work during shutdown and then drains/joins the runtime |
 | [app.rs](../../../../crates/crab-http-server/src/app.rs) | Keep Principal/repository admission before native commands; map durable, rejected and unknown outcomes |
 | [app_storage.rs](../../../../crates/crab-http-server/src/app_storage.rs) | Replace collaboration JSON persistence with typed SQL handlers after hard cutover |
 | [config.rs](../../../../crates/crab-http-server/src/config.rs) | Extend existing config for local Cell data and private peers; do not add a second provider/auth stack |

@@ -429,7 +429,10 @@ ceiling. It derives the node mailbox byte semaphore as five percent of the Cell
 memory budget, derives active-Cell admission from the page-cache and descriptor
 budgets, and enforces the effective-memory and free-volume startup floors above.
 Native task/actor and dirty-job reservations, full use of the configured Cell
-directory and activity cancellation remain delivery work. Node identity,
+directory, durable scheduler retry/fairness and multi-node activity failure
+qualification remain delivery work. Scheduler shutdown already aborts and joins
+every tracked activity job; dropping its supervisor signals cooperative
+cancellation before runtime drain. Node identity,
 mandatory management mTLS, initial advertisement, refresh supervision and an
 mTLS-aware binary healthcheck are implemented; production Kubernetes and ECS
 manifests still need per-node direct endpoints and per-node certificate delivery.

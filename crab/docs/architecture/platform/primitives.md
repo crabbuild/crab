@@ -363,9 +363,12 @@ cycle is dropped or loses its lease. Integration coverage holds an activity
 past its first heartbeat, completes its state-machine transition, then restores
 and reads that terminal result from the exact LTX root. Effect actions are now
 persisted as owner-independent typed commands; raw peer requests are not an
-application surface. Catalog-driven Workflow-namespace polling and bounded
-concurrent activity orchestration remain to implement; the maintenance Tick now
-dispatches timers across retained definitions.
+application surface. Activity registration installs one type-erased runner for
+the compiled Workflow namespace. The catalog scanner invokes it with
+CPU-derived admission capped at 16 concurrent jobs per node and one per Cell,
+allowing native activity futures to run without blocking later catalog scans or
+racing a scheduler-only Cell drain. The maintenance
+Tick dispatches timers across retained definitions.
 
 `WorkflowModule` binds one namespace, one current definition, a bounded static
 inventory of retained definitions, and fixed start/signal/cancel/state operation
@@ -463,18 +466,23 @@ root position before doing maintenance, and its resulting summary publishes
 through the ordinary actor/LTX/control path. `CatalogShardScan` pins one head
 revision and verifies one immutable page per call; `DueCellScan` inspects at
 most 32 controls per step, and `preferred_scanner` implements deterministic
-rendezvous assignment. The server's repository scheduler now loads the exact
+rendezvous assignment. The server's Cell scheduler now loads the exact
 live node directory, rendezvous-assigns all 256 shards, caps each one-second
 cycle at 128 due Cells, and routes Tick through an existing local owner,
 authenticated remote owner or temporary exact-root activation. Temporary local
-acquisitions drain back to Idle. A zero-item Tick triggers one effect-supervisor
-step because a published effect deadline may be the due source. Completed cycles
+acquisitions drain back to Idle. A zero-item Tick consults the registry for the
+due namespace's activity and effect runners. It starts an admitted activity in a
+tracked job and runs a following effect step, or runs an effect-only source
+inline. Exact registered internal operation IDs and codecs determine the peer
+authorization action; product commands cannot reuse the scheduler grant.
+Completed cycles
 advance signed node progress; equal-progress heartbeats keep the session live
 without claiming scanner progress. Every scanner excludes a session after 15
 seconds without progress and restores it after the counter advances. The local
 readiness gate opens only after the first complete cycle, then uses the same
 deadline as scheduler health/progress/lag metrics.
-Bounded retry queues and generic Workflow-activity routing remain. Active-local routing recovers a capability
+Durable retry queues, per-namespace fairness and multi-node activity failure
+qualification remain. Active-local routing recovers a capability
 from the dispatcher only when session, incarnation, code and schema match the
 scanned control and the Cell is not fenced or draining.
 

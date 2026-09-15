@@ -88,8 +88,14 @@ impl RepositoryCellRouter {
         action: &'static str,
     ) -> crate::Result<RepositoryCell> {
         validate_action(action)?;
-        self.route_principal(
-            repository,
+        let target = CellTarget::new(
+            self.identity.tenant(),
+            self.identity.application(),
+            REPOSITORY_NAMESPACE,
+            repository.as_bytes(),
+        )?;
+        self.route_target(
+            target,
             PeerPrincipal {
                 issuer: principal.issuer.clone(),
                 subject: principal.subject.clone(),
@@ -100,15 +106,39 @@ impl RepositoryCellRouter {
         .map(|scheduled| scheduled.cell)
     }
 
-    pub(crate) async fn route_scheduler(
+    pub(crate) async fn route_scheduler_target(
         &self,
-        repository: Uuid,
+        target: CellTarget,
     ) -> crate::Result<ScheduledRepositoryCell> {
-        self.route_principal(
-            repository,
-            self.runtime_principal(&["cell.effect.source", "cell.scheduler.tick"]),
+        self.route_runtime(
+            target,
+            self.runtime_principal(&[
+                "cell.activity.source",
+                "cell.effect.source",
+                "cell.scheduler.tick",
+            ]),
         )
         .await
+    }
+
+    pub(crate) async fn route_runtime(
+        &self,
+        target: CellTarget,
+        principal: PeerPrincipal,
+    ) -> crate::Result<ScheduledRepositoryCell> {
+        if target.tenant() != self.identity.tenant()
+            || target.application() != self.identity.application()
+        {
+            return Err(crab_cell_runtime::Error::PeerAuthorization(
+                "runtime target belongs to another application",
+            )
+            .into());
+        }
+        self.route_target(target, principal).await
+    }
+
+    pub(crate) fn registry(&self) -> Arc<Registry> {
+        Arc::clone(&self.registry)
     }
 
     pub(crate) fn effect_peer_client(&self) -> EffectPeerClient {
@@ -119,17 +149,11 @@ impl RepositoryCellRouter {
         )
     }
 
-    async fn route_principal(
+    async fn route_target(
         &self,
-        repository: Uuid,
+        target: CellTarget,
         principal: PeerPrincipal,
     ) -> crate::Result<ScheduledRepositoryCell> {
-        let target = CellTarget::new(
-            self.identity.tenant(),
-            self.identity.application(),
-            REPOSITORY_NAMESPACE,
-            repository.as_bytes(),
-        )?;
         if let Some(routed) = self.route_existing(&target, &principal).await? {
             return Ok(ScheduledRepositoryCell {
                 cell: routed,
@@ -339,6 +363,7 @@ impl RepositoryCellRouter {
         Ok(directory.join(format!("{}.sqlite", Uuid::now_v7())))
     }
 
+    #[cfg(test)]
     pub(crate) async fn drain_local(&self, repository: Uuid) -> crate::Result<()> {
         let target = CellTarget::new(
             self.identity.tenant(),
@@ -346,6 +371,10 @@ impl RepositoryCellRouter {
             REPOSITORY_NAMESPACE,
             repository.as_bytes(),
         )?;
+        self.drain_local_target(&target).await
+    }
+
+    pub(crate) async fn drain_local_target(&self, target: &CellTarget) -> crate::Result<()> {
         let proof = self
             .catalog
             .lookup(target.cell_id())

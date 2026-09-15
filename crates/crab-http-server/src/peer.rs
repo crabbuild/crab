@@ -277,6 +277,19 @@ impl PeerCellResolver for LocalCellResolver {
 
 impl PeerAuthorizer for Server {
     fn authorize(&self, request: &VerifiedPeerRequest) -> crab_cell_runtime::Result<()> {
+        let receiver = self.peer_receiver.as_ref().ok_or_else(denied)?;
+        if matches!(
+            request.operation(),
+            Some(
+                peer_wire::peer_request::Operation::DeliverEffect(_)
+                    | peer_wire::peer_request::Operation::ResolveEffect(_)
+            )
+        ) {
+            return authorize_runtime_effect(receiver.directory.fleet(), request);
+        }
+        if let Some(action) = runtime_cell_action(&receiver.registry, request) {
+            return authorize_runtime_action(receiver.directory.fleet(), request, action);
+        }
         if request.target().namespace() != crate::cells::REPOSITORY_NAMESPACE {
             return Err(denied());
         }
@@ -288,28 +301,6 @@ impl PeerAuthorizer for Server {
                 .map_err(|_| denied())?,
         );
         let repository = self.repositories.by_id(repository_id).ok_or_else(denied)?;
-        if matches!(
-            request.operation(),
-            Some(
-                peer_wire::peer_request::Operation::DeliverEffect(_)
-                    | peer_wire::peer_request::Operation::ResolveEffect(_)
-            )
-        ) {
-            let fleet = self
-                .peer_receiver
-                .as_ref()
-                .map(|receiver| receiver.directory.fleet())
-                .ok_or_else(denied)?;
-            return authorize_runtime_effect(fleet, request);
-        }
-        if let Some(action) = runtime_cell_action(request) {
-            let fleet = self
-                .peer_receiver
-                .as_ref()
-                .map(|receiver| receiver.directory.fleet())
-                .ok_or_else(denied)?;
-            return authorize_runtime_action(fleet, request, action);
-        }
         let issuer = self
             .auth
             .as_ref()
@@ -345,51 +336,44 @@ fn authorize_runtime_action(
     Ok(())
 }
 
-fn runtime_cell_action(request: &VerifiedPeerRequest) -> Option<&'static str> {
+fn runtime_cell_action(registry: &Registry, request: &VerifiedPeerRequest) -> Option<&'static str> {
     match request.operation() {
         Some(peer_wire::peer_request::Operation::Mutate(mutation)) => {
             match mutation.operation.as_ref() {
-                Some(peer_wire::mutation_request::Operation::CellCommand(command)) => {
-                    match command.command_id {
-                        crate::cells::REPOSITORY_TICK_COMMAND_ID => Some("cell.scheduler.tick"),
-                        crate::cells::REPOSITORY_EFFECT_CLAIM_COMMAND_ID
-                        | crate::cells::REPOSITORY_EFFECT_LEASE_COMMAND_ID => {
-                            Some("cell.effect.source")
-                        }
-                        _ => None,
-                    }
-                }
+                Some(peer_wire::mutation_request::Operation::CellCommand(command)) => registry
+                    .internal_command_action(
+                        request.target().namespace(),
+                        command.command_id,
+                        command.codec_version,
+                    ),
                 _ => None,
             }
         }
         Some(peer_wire::peer_request::Operation::Read(read)) => match read.operation.as_ref() {
             Some(peer_wire::read_request::Operation::Describe(true)) => {
-                if request.permits("cell.scheduler.tick") {
-                    Some("cell.scheduler.tick")
-                } else if request.permits("cell.effect.source") {
-                    Some("cell.effect.source")
-                } else {
-                    None
-                }
+                runtime_principal_action(request)
             }
-            Some(peer_wire::read_request::Operation::CellQuery(query))
-                if query.query_id == crate::cells::REPOSITORY_EFFECT_VALIDATE_QUERY_ID =>
-            {
-                Some("cell.effect.source")
-            }
+            Some(peer_wire::read_request::Operation::CellQuery(query)) => registry
+                .internal_query_action(
+                    request.target().namespace(),
+                    query.query_id,
+                    query.codec_version,
+                ),
             _ => None,
         },
-        Some(peer_wire::peer_request::Operation::Resolve(_)) => {
-            if request.permits("cell.scheduler.tick") {
-                Some("cell.scheduler.tick")
-            } else if request.permits("cell.effect.source") {
-                Some("cell.effect.source")
-            } else {
-                None
-            }
-        }
+        Some(peer_wire::peer_request::Operation::Resolve(_)) => runtime_principal_action(request),
         _ => None,
     }
+}
+
+fn runtime_principal_action(request: &VerifiedPeerRequest) -> Option<&'static str> {
+    [
+        "cell.activity.source",
+        "cell.effect.source",
+        "cell.scheduler.tick",
+    ]
+    .into_iter()
+    .find(|action| request.permits(action))
 }
 
 pub(crate) async fn forward(
@@ -927,12 +911,13 @@ mod tests {
         );
         assert!(authorize_runtime_effect(fleet, &browser).is_err());
 
+        let registry = crate::cells::compiled_registry().unwrap();
         assert_eq!(
-            runtime_cell_action(&verified(5, vec!["cell.scheduler.tick".into()])),
+            runtime_cell_action(&registry, &verified(5, vec!["cell.scheduler.tick".into()])),
             Some("cell.scheduler.tick")
         );
         assert_eq!(
-            runtime_cell_action(&verified(6, vec!["cell.effect.source".into()])),
+            runtime_cell_action(&registry, &verified(6, vec!["cell.effect.source".into()])),
             Some("cell.effect.source")
         );
         assert!(
