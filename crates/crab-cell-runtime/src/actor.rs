@@ -193,6 +193,86 @@ impl CellRuntime {
         .await
     }
 
+    /// Takes over an unchanged unpublished owner, initializes and publishes the Cell.
+    pub async fn takeover_unpublished<F>(
+        &self,
+        catalog: CatalogProof,
+        replica: crab_ltx::CellReplica,
+        authority: CellAuthority,
+        mut observed: VersionedControl,
+        destination: PathBuf,
+        owner: Owner,
+        initialize: F,
+    ) -> crate::Result<CellHandle>
+    where
+        F: for<'connection> FnOnce(
+                &crab_ltx::rusqlite::Transaction<'connection>,
+            ) -> crate::Result<()>
+            + Send
+            + 'static,
+    {
+        self.ensure_running()?;
+        let cell = self.claiming_cell(&catalog, &observed, &owner)?;
+        loop {
+            if observed.value().state != crate::ControlState::Recovering
+                || observed.value().owner.is_none()
+                || observed.value().root.is_some()
+            {
+                return Err(Error::Control(
+                    "unpublished takeover requires an active rootless control",
+                ));
+            }
+            tokio::time::sleep(TAKEOVER_OBSERVATION).await;
+            self.ensure_running()?;
+            let current = authority.load(cell).await?.ok_or(Error::Fenced)?;
+            if current.value() != observed.value() {
+                self.claiming_cell(&catalog, &current, &owner)?;
+                observed = current;
+                continue;
+            }
+            let reservation = self.inner.pool.reserve_activation()?;
+            let successor = current.value().takeover(owner.clone())?;
+            let claimed = match authority
+                .transition(&current, successor.clone(), Transition::Takeover)
+                .await
+            {
+                Ok(claimed) => claimed,
+                Err(error) => {
+                    let latest = authority.load(cell).await?.ok_or(Error::Fenced)?;
+                    if latest.value() == &successor {
+                        latest
+                    } else if matches!(
+                        &error,
+                        Error::Storage(crab_storage::StorageError::StateConflict { .. })
+                    ) {
+                        observed = latest;
+                        continue;
+                    } else {
+                        return Err(error);
+                    }
+                }
+            };
+            let incarnation = claimed.value().incarnation;
+            let schema = claimed.value().schema;
+            return self
+                .activate_inner(
+                    catalog,
+                    Activation::Bootstrap(Box::new(BootstrapActivation {
+                        replica: replica.clone(),
+                        destination,
+                        incarnation,
+                        schema,
+                        initialize: Box::new(initialize),
+                        reservation,
+                    })),
+                    replica,
+                    authority,
+                    claimed,
+                )
+                .await;
+        }
+    }
+
     /// Cold-opens the exact authoritative root on the Cell's SQL worker.
     pub async fn activate_restored(
         &self,
@@ -941,17 +1021,38 @@ async fn bootstrap_and_publish(
         initialize,
         reservation,
     } = activation;
-    let bootstrap = pool
-        .bootstrap(
-            cell,
-            replica,
-            destination,
-            incarnation,
-            schema,
-            initialize,
-            reservation,
-        )
-        .await?;
+    let bootstrap = pool.bootstrap(
+        cell,
+        replica,
+        destination,
+        incarnation,
+        schema,
+        initialize,
+        reservation,
+    );
+    tokio::pin!(bootstrap);
+    let mut renewal_error = None;
+    let bootstrap = loop {
+        tokio::select! {
+            result = &mut bootstrap => break result,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(publisher.renewal_at())) => {
+                if let Err(error) = publisher.renew().await {
+                    renewal_error = Some(error);
+                    break bootstrap.await;
+                }
+            }
+        }
+    };
+    if let Some(error) = renewal_error {
+        return match bootstrap {
+            Ok(_) => match pool.deactivate(cell).await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(cleanup),
+            },
+            Err(bootstrap) => Err(bootstrap),
+        };
+    }
+    let bootstrap = bootstrap?;
     let publication = async {
         let prepared = publisher.prepare_initial(&bootstrap.cuts).await?;
         publisher

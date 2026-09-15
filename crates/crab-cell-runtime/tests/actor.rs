@@ -494,6 +494,150 @@ async fn unchanged_dead_owner_is_taken_over_then_restored() {
     restored.drain().await.unwrap();
 }
 
+#[tokio::test]
+async fn unchanged_unpublished_owner_is_taken_over_then_bootstrapped() {
+    let fixture = fixture();
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &fixture.target,
+                CatalogRole::Repository,
+                Digest::from_bytes([5; 32]),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let stale = authority
+        .create_initial(
+            &proof,
+            IncarnationId::from_bytes([2; 16]),
+            Owner {
+                session: SessionId::from_bytes([4; 16]),
+                endpoint: "https://stopped-import.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let session = SessionId::from_bytes([42; 16]);
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        session,
+    )
+    .unwrap();
+    let restored = runtime
+        .takeover_unpublished(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            stale,
+            fixture
+                ._directory
+                .path()
+                .join("takeover-unpublished.sqlite"),
+            Owner {
+                session,
+                endpoint: "https://import-successor.internal:8081".into(),
+            },
+            |transaction| {
+                transaction.execute_batch(
+                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (7)",
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        restored
+            .query(64, 64, |connection| {
+                let value = connection
+                    .query_row("SELECT value FROM counter", [], |row| row.get::<_, i64>(0))?;
+                Ok(value.to_be_bytes().to_vec())
+            })
+            .await
+            .unwrap(),
+        7_i64.to_be_bytes()
+    );
+    let owned = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owned.value().epoch, 2);
+    assert_eq!(owned.value().owner.as_ref().unwrap().session, session);
+    restored.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn slow_bootstrap_renews_unpublished_ownership_before_publication() {
+    let fixture = fixture();
+    let catalog =
+        crab_cell_runtime::CellCatalog::new(fixture.layout.clone(), fixture.target.tenant());
+    let proof = catalog
+        .provision(
+            CatalogEntry::new(
+                &fixture.target,
+                CatalogRole::Repository,
+                Digest::from_bytes([5; 32]),
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let authority = CellAuthority::new(fixture.layout.clone());
+    let session = SessionId::from_bytes([43; 16]);
+    let observed = authority
+        .create_initial(
+            &proof,
+            IncarnationId::from_bytes([2; 16]),
+            Owner {
+                session,
+                endpoint: "https://slow-bootstrap.internal:8081".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 10).unwrap(),
+        16 * 1024 * 1024,
+        session,
+    )
+    .unwrap();
+    let handle = runtime
+        .bootstrap(
+            proof,
+            fixture.replica.clone(),
+            authority.clone(),
+            observed,
+            fixture._directory.path().join("slow-bootstrap.sqlite"),
+            |transaction| {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                transaction.execute_batch(
+                    "CREATE TABLE counter(value INTEGER NOT NULL); INSERT INTO counter VALUES (0)",
+                )?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    let published = authority
+        .load(fixture.target.cell_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(published.value().state, ControlState::Serving);
+    assert!(published.value().revision >= 3);
+    handle.drain().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_handler_deadline_discards_late_commit_and_reopens_authoritative_root() {
     let fixture = fixture();

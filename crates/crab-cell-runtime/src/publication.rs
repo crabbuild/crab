@@ -42,6 +42,10 @@ impl CellPublisher {
         now >= self.renew_at
     }
 
+    pub(crate) fn renewal_at(&self) -> std::time::Instant {
+        self.renew_at
+    }
+
     /// Advances owner progress or fences when the renewal cannot be proven in time.
     pub(crate) async fn renew(&mut self) -> Result<()> {
         let deadline = std::time::Instant::now() + SELF_FENCE_TIMEOUT;
