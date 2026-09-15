@@ -634,6 +634,7 @@ async fn assemble_view(
         .map(|run| (run.hash().to_owned(), run))
         .collect::<BTreeMap<_, _>>();
     let mut required_transactions = BTreeSet::new();
+    let mut transaction_predecessors = BTreeMap::<String, BTreeSet<String>>::new();
     for (ref_name, frontier) in &ref_frontiers {
         let transaction_ids = frontier
             .iter()
@@ -663,11 +664,20 @@ async fn assemble_view(
                 })?,
             None => 0,
         };
+        let required = &transaction_ids[start..];
         required_transactions.extend(
-            transaction_ids[start..]
+            required
                 .iter()
                 .map(|transaction_id| (*transaction_id).to_owned()),
         );
+        // Expected-old OIDs cannot order A -> B -> A histories. Preserve the
+        // authenticated per-ref frontier order so a later A successor waits.
+        for pair in required.windows(2) {
+            transaction_predecessors
+                .entry(pair[1].to_owned())
+                .or_default()
+                .insert(pair[0].to_owned());
+        }
     }
     let mut root_capsules = Vec::new();
     let mut root_capsule_identities = BTreeMap::new();
@@ -729,6 +739,7 @@ async fn assemble_view(
         snapshot.record().root().refs(),
         snapshot.record().root().peeled_refs(),
         &visibility_refs,
+        &transaction_predecessors,
         journal_capsules,
     )?;
     for capsule in &ordered {
@@ -972,22 +983,38 @@ fn order_ref_capsules(
     base_refs: &BTreeMap<String, String>,
     base_peeled: &BTreeMap<String, String>,
     base_visibility: &BTreeMap<String, Vec<String>>,
+    predecessors: &BTreeMap<String, BTreeSet<String>>,
     mut pending: BTreeMap<String, Capsule>,
 ) -> Result<Vec<Capsule>> {
     let mut refs = base_refs.clone();
     let mut peeled = base_peeled.clone();
     let mut visibility = base_visibility.clone();
+    let tracked = pending
+        .values()
+        .map(|capsule| capsule.transaction_id().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut applied = BTreeSet::new();
     let mut ordered = Vec::with_capacity(pending.len());
     while !pending.is_empty() {
         let ready = pending
             .iter()
-            .find_map(
-                |(id, capsule)| match capsule_is_ready(capsule, &refs, &visibility) {
+            .find_map(|(id, capsule)| {
+                if predecessors
+                    .get(capsule.transaction_id())
+                    .is_some_and(|required| {
+                        required.iter().any(|transaction_id| {
+                            tracked.contains(transaction_id) && !applied.contains(transaction_id)
+                        })
+                    })
+                {
+                    return None;
+                }
+                match capsule_is_ready(capsule, &refs, &visibility) {
                     Ok(true) => Some(Ok(id.clone())),
                     Ok(false) => None,
                     Err(error) => Some(Err(error)),
-                },
-            )
+                }
+            })
             .transpose()?;
         let Some(ready) = ready else {
             return Err(corrupt_path(
@@ -1002,6 +1029,7 @@ fn order_ref_capsules(
         if capsule.visibility_delta()?.is_some() {
             apply_capsule_visibility(&capsule, &mut visibility)?;
         }
+        applied.insert(capsule.transaction_id().to_owned());
         ordered.push(capsule);
     }
     Ok(ordered)
@@ -1753,6 +1781,7 @@ mod tests {
             &BTreeMap::from([("refs/heads/main".to_owned(), old_tip.clone())]),
             &BTreeMap::new(),
             &BTreeMap::from([("refs/heads/main".to_owned(), vec![old_tip])]),
+            &BTreeMap::new(),
             pending,
         )
         .unwrap();
@@ -1764,5 +1793,77 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![source.transaction_id(), branch.transaction_id()]
         );
+    }
+
+    #[test]
+    fn ref_capsules_follow_authenticated_predecessors_when_oid_repeats() {
+        let oid_a = "1".repeat(40);
+        let oid_b = "2".repeat(40);
+        let oid_c = "3".repeat(40);
+        let capsule = |expected_old: Option<String>, new_oid: String| {
+            let transaction = CapsuleTransaction::new(
+                &"a".repeat(64),
+                vec![CapsuleRefEdit::new(
+                    "refs/heads/main",
+                    expected_old,
+                    Some(new_oid),
+                    None,
+                )],
+            )
+            .unwrap();
+            Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap()
+        };
+        let first = capsule(None, oid_a.clone());
+        let second = capsule(Some(oid_a.clone()), oid_b.clone());
+        let third = capsule(Some(oid_b), oid_a.clone());
+        let fourth = capsule(Some(oid_a), oid_c.clone());
+        let predecessors = BTreeMap::from([
+            (
+                second.transaction_id().to_owned(),
+                BTreeSet::from([first.transaction_id().to_owned()]),
+            ),
+            (
+                third.transaction_id().to_owned(),
+                BTreeSet::from([second.transaction_id().to_owned()]),
+            ),
+            (
+                fourth.transaction_id().to_owned(),
+                BTreeSet::from([third.transaction_id().to_owned()]),
+            ),
+        ]);
+        let pending = BTreeMap::from([
+            ("a-first".to_owned(), first.clone()),
+            ("b-fourth".to_owned(), fourth.clone()),
+            ("c-second".to_owned(), second.clone()),
+            ("d-third".to_owned(), third.clone()),
+        ]);
+
+        let ordered = order_ref_capsules(
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &predecessors,
+            pending,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ordered
+                .iter()
+                .map(Capsule::transaction_id)
+                .collect::<Vec<_>>(),
+            vec![
+                first.transaction_id(),
+                second.transaction_id(),
+                third.transaction_id(),
+                fourth.transaction_id(),
+            ]
+        );
+        let mut refs = BTreeMap::new();
+        let mut peeled = BTreeMap::new();
+        for capsule in &ordered {
+            apply_capsule_refs(capsule, &mut refs, &mut peeled).unwrap();
+        }
+        assert_eq!(refs["refs/heads/main"], oid_c);
     }
 }

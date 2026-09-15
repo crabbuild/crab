@@ -329,7 +329,30 @@ async fn run_inner(
     let changes_namespace = edits
         .iter()
         .any(|edit| edit.expected_old().is_none() != edit.new_oid().is_none());
+    let lfs_tips = updates
+        .iter()
+        .map(|update| update.new_sha.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let lfs_remote_tips = updates
+        .iter()
+        .filter_map(|update| update.old_sha.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let publication: Result<Option<()>> = async {
+        // LFS bytes share the ref visibility boundary with Git and Xet data.
+        // Publishing them here also covers mirror batches that own hook stdin.
+        crate::lfs::publication::publish_reachable(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            common_git_dir.clone(),
+            lfs_tips,
+            lfs_remote_tips,
+            cancel,
+        )
+        .await?;
         let pointer_delta = super::xet_publication::prepare_delta(
             &layout,
             &base,
@@ -790,6 +813,7 @@ mod tests {
 
     use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
     use object_store::memory::InMemory;
+    use sha2::{Digest, Sha256};
 
     use super::*;
 
@@ -842,6 +866,47 @@ mod tests {
         git(repository, &["rev-parse", "HEAD"])
     }
 
+    async fn publish_ref_edits_with_visibility(
+        layout: &crab_storage::StoreLayout<crab_storage::Store>,
+        git_dir: &Path,
+        edits: Vec<crab_metadata::capsule_protocol::CapsuleRefEdit>,
+    ) {
+        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        };
+        let view = crab_read::capsule_protocol::open_view(layout, limits)
+            .await
+            .expect("open base view");
+        let root = crab_write::capsule_protocol::open_root(layout)
+            .await
+            .expect("open root");
+        let visibility =
+            prepare_visibility_delta(git_dir, view.refs(), &edits).expect("prepare Git visibility");
+        let transaction =
+            crab_metadata::capsule_protocol::CapsuleTransaction::new(root.record().digest(), edits)
+                .expect("build ref transaction");
+        let sections = visibility
+            .map(|visibility| {
+                visibility
+                    .encode()
+                    .map(|bytes| {
+                        vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                            crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                            bytes,
+                        )]
+                    })
+                    .expect("encode Git visibility")
+            })
+            .unwrap_or_default();
+        let capsule =
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), sections)
+                .expect("build ref capsule");
+        crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+            .await
+            .expect("publish ref transaction");
+    }
+
     #[test]
     fn missing_remote_tip_requests_refresh_instead_of_internal_failure() {
         let source = tempfile::tempdir().expect("source repository");
@@ -857,6 +922,82 @@ mod tests {
             is_ancestor(&source.path().join(".git"), &"f".repeat(40), &tip)
                 .expect("missing object is a normal refresh condition"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn capsule_push_publishes_reachable_lfs_dependencies() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let content = b"capsule LFS dependency".to_vec();
+        let pointer = crab_git::lfs_pointer::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        std::fs::write(source.path().join("asset.bin"), pointer.serialize())
+            .expect("write LFS pointer");
+        git(source.path(), &["add", "asset.bin"]);
+        git(source.path(), &["commit", "-m", "LFS dependency"]);
+        let lfs_dir = crate::lfs::config::LfsConfig::resolve_storage_dir(source.path())
+            .expect("resolve local LFS store");
+        crate::lfs::cache::install_bytes(&lfs_dir, &pointer.oid, pointer.size, &content)
+            .expect("install local LFS object");
+
+        let store = crate::storage::store::Store::new(Arc::new(InMemory::new()));
+        let router = crate::storage::StoreLayout::new(store.clone(), "repos/lfs".to_owned());
+        let layout =
+            crab_storage::StoreLayout::new(store.as_storage().clone(), "repos/lfs".to_owned());
+        let root =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .expect("initialize root");
+        let view = crab_read::capsule_protocol::open_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("open initial view");
+        let config = PushConfig {
+            git_dir: Some(source.path().join(".git")),
+            ..PushConfig::default()
+        };
+
+        let (result, _) = run(
+            &config,
+            &[PushSpec {
+                force: false,
+                src: "refs/heads/main".to_owned(),
+                dst: "refs/heads/main".to_owned(),
+            }],
+            &store,
+            &router,
+            Some(view),
+            &[],
+            None,
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("publish capsule ref and LFS dependency");
+
+        assert!(result.all_ok());
+        let remote = crab_lfs::LfsObjectStore::new(store.as_storage().clone(), "repos/lfs");
+        assert_eq!(
+            remote
+                .verify(&pointer.oid)
+                .await
+                .expect("verify remote LFS"),
+            Bytes::from(content)
         );
     }
 
@@ -1077,5 +1218,100 @@ mod tests {
         )
         .await
         .expect("GC preserves every referenced checkpoint and capsule");
+    }
+
+    #[tokio::test]
+    async fn single_ref_successor_extends_committed_multi_ref_history() {
+        let source = tempfile::tempdir().expect("source repository");
+        git(source.path(), &["init", "-b", "main"]);
+        git(source.path(), &["config", "user.name", "Crab Test"]);
+        git(
+            source.path(),
+            &["config", "user.email", "crab@example.invalid"],
+        );
+        let first = commit(source.path(), "first");
+        let second = commit(source.path(), "second");
+        git(source.path(), &["reset", "--hard", &first]);
+        let third = commit(source.path(), "third");
+
+        let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
+        let layout = crab_storage::StoreLayout::new(storage, "repos/ref-history".to_owned());
+        crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .expect("initialize root");
+        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        };
+        let main = "refs/heads/main";
+        let sibling = &format!("refs/heads/{}", "a".repeat(40));
+
+        for edits in [
+            vec![
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                    main,
+                    None,
+                    Some(first.clone()),
+                    None,
+                ),
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                    sibling,
+                    None,
+                    Some(first.clone()),
+                    None,
+                ),
+            ],
+            vec![
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                    main,
+                    Some(first.clone()),
+                    Some(second.clone()),
+                    None,
+                ),
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                    sibling,
+                    Some(first.clone()),
+                    Some(second.clone()),
+                    None,
+                ),
+            ],
+            vec![
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                    main,
+                    Some(second.clone()),
+                    Some(first.clone()),
+                    None,
+                ),
+                crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                    sibling,
+                    Some(second.clone()),
+                    None,
+                    None,
+                ),
+            ],
+        ] {
+            publish_ref_edits_with_visibility(&layout, &source.path().join(".git"), edits).await;
+            crab_read::capsule_protocol::open_view(&layout, limits)
+                .await
+                .expect("multi-ref history remains readable");
+        }
+
+        publish_ref_edits_with_visibility(
+            &layout,
+            &source.path().join(".git"),
+            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+                main,
+                Some(first),
+                Some(third.clone()),
+                None,
+            )],
+        )
+        .await;
+
+        let view = crab_read::capsule_protocol::open_view(&layout, limits)
+            .await
+            .expect("single-ref successor must preserve readable multi-ref history");
+        assert_eq!(view.refs().get(main), Some(&third));
+        assert!(!view.refs().contains_key(sibling));
     }
 }

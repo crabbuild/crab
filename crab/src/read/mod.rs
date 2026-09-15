@@ -21,7 +21,6 @@ use crate::cmd::hydrate::HydrationRuntime;
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
-use crate::metadata::manifest::{Manifest, PackManifestEntry};
 use crate::storage::{StoreLayout, resolve_object_url_store};
 use crab_cache_store::CachingStore;
 use crab_git::lfs_pointer::LfsPointer;
@@ -469,18 +468,22 @@ impl Inner {
     }
 
     async fn remote_snapshot_git_dir(&self, rev: &str) -> Result<(String, PathBuf)> {
-        let snapshot = self.read_remote_snapshot().await?;
-        let manifest = snapshot.materialized_manifest();
-        let resolved = resolve_manifest_rev(&manifest, rev).ok_or_else(|| CrabError::NotFound {
-            path: format!("revision:{rev}"),
-        })?;
-        let git_dir = self
-            .remote_git_dir_for_packs(&snapshot.journal.packs)
-            .await?;
+        let view = self.read_remote_capsule_view().await?;
+        let resolved = resolve_remote_rev(view.refs(), view.peeled_refs(), view.head(), rev)
+            .ok_or_else(|| CrabError::NotFound {
+                path: format!("revision:{rev}"),
+            })?;
+        let git_dir = self.remote_git_dir().await?;
+        let maximum = if self.config.uploadpack_max_egress_bytes == 0 {
+            u64::MAX
+        } else {
+            self.config.uploadpack_max_egress_bytes
+        };
+        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, maximum).await?;
         Ok((resolved, git_dir))
     }
 
-    async fn remote_git_dir_for_packs(&self, packs: &[PackManifestEntry]) -> Result<PathBuf> {
+    async fn remote_git_dir(&self) -> Result<PathBuf> {
         let git_dir = self
             .remote_git_dir
             .get_or_try_init(|| async {
@@ -490,62 +493,32 @@ impl Inner {
                 Ok::<_, CrabError>(Arc::new(git_dir))
             })
             .await?;
-
-        let remote = self.remote().await?;
-        if !packs.is_empty() {
-            let pack_dir = git_dir.join("objects").join("pack");
-            install_remote_git_packs(&remote, &pack_dir, packs).await?;
-        }
-
         Ok((**git_dir).clone())
     }
 
-    async fn read_remote_snapshot(&self) -> Result<crate::metadata::manifest::RepositorySnapshot> {
+    async fn read_remote_capsule_view(
+        &self,
+    ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
         let remote = self.remote().await?;
-        let origin = crate::storage::Store::from_storage(remote.caching_store.origin().clone());
-        crate::metadata::manifest::read_repository_snapshot(&origin, &remote.router).await
-    }
-}
-
-async fn install_remote_git_packs(
-    remote: &RemoteContext,
-    pack_dir: &Path,
-    packs: &[PackManifestEntry],
-) -> Result<()> {
-    for pack in packs {
-        let final_pack = pack_dir.join(format!("pack-{}.pack", pack.pack_id));
-        let final_idx = pack_dir.join(format!("pack-{}.idx", pack.pack_id));
-        if final_pack.exists() && final_idx.exists() {
-            continue;
-        }
-
-        let tmp_pack = tempfile::Builder::new()
-            .prefix(".crab-download-pack-")
-            .suffix(".pack")
-            .tempfile_in(pack_dir)?
-            .into_temp_path();
-        let tmp_pack_path = tmp_pack.to_path_buf();
-        let remote_path = remote.router.pack_path(&pack.pack_id);
-        remote
-            .caching_store
-            .origin()
-            .download_to_path_bounded(&remote_path, &tmp_pack_path, pack.size)
-            .await?;
-
-        let install_result = crate::git::pack::install_pack_file_locally(
-            pack_dir,
-            &tmp_pack_path,
-            &pack.pack_id,
-            0,
-            true,
+        let maximum = if self.config.uploadpack_max_egress_bytes == 0 {
+            u64::MAX
+        } else {
+            self.config.uploadpack_max_egress_bytes
+        };
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            remote.caching_store.origin().clone(),
+            remote.router.repo_prefix().to_owned(),
+            remote.router.global_prefix().to_owned(),
+        );
+        Ok(crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: maximum,
+                max_frontier_bytes: maximum,
+            },
         )
-        .await;
-        let _ = tokio::fs::remove_file(&tmp_pack_path).await;
-        drop(tmp_pack);
-        install_result?;
+        .await?)
     }
-
-    Ok(())
 }
 
 fn read_blob_at_commit(git_dir: &Path, commit_sha: &str, path: &str) -> Result<Vec<u8>> {
@@ -802,14 +775,19 @@ fn read_workspace_remote(work_dir: &Path, config: &Config) -> Result<String> {
     })
 }
 
-fn resolve_manifest_rev(manifest: &Manifest, rev: &str) -> Option<String> {
+fn resolve_remote_rev(
+    refs: &std::collections::BTreeMap<String, String>,
+    peeled_refs: &std::collections::BTreeMap<String, String>,
+    head: &str,
+    rev: &str,
+) -> Option<String> {
     if is_full_hex_sha(rev) {
         return Some(rev.to_ascii_lowercase());
     }
 
     let ref_name = if rev == "HEAD" || rev == "head" {
-        manifest.head.clone()
-    } else if manifest.refs.contains_key(rev) {
+        head.to_owned()
+    } else if refs.contains_key(rev) {
         rev.to_owned()
     } else if !rev.starts_with("refs/") {
         [
@@ -818,12 +796,15 @@ fn resolve_manifest_rev(manifest: &Manifest, rev: &str) -> Option<String> {
             format!("refs/tags/{rev}"),
         ]
         .into_iter()
-        .find(|candidate| manifest.refs.contains_key(candidate))?
+        .find(|candidate| refs.contains_key(candidate))?
     } else {
         return None;
     };
 
-    manifest.refs.get(&ref_name).cloned()
+    peeled_refs
+        .get(&ref_name)
+        .or_else(|| refs.get(&ref_name))
+        .cloned()
 }
 
 fn is_full_hex_sha(rev: &str) -> bool {
@@ -954,31 +935,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_manifest_rev_accepts_common_names() {
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest
-            .refs
-            .insert("refs/heads/main".to_owned(), "a".repeat(40));
-        manifest
-            .refs
-            .insert("refs/tags/v1".to_owned(), "b".repeat(40));
+    fn resolve_remote_rev_accepts_common_names_and_peels_tags() {
+        let refs = std::collections::BTreeMap::from([
+            ("refs/heads/main".to_owned(), "a".repeat(40)),
+            ("refs/tags/v1".to_owned(), "b".repeat(40)),
+        ]);
+        let peeled_refs =
+            std::collections::BTreeMap::from([("refs/tags/v1".to_owned(), "c".repeat(40))]);
 
         assert_eq!(
-            resolve_manifest_rev(&manifest, "HEAD"),
+            resolve_remote_rev(&refs, &peeled_refs, "refs/heads/main", "HEAD"),
             Some("a".repeat(40))
         );
         assert_eq!(
-            resolve_manifest_rev(&manifest, "main"),
+            resolve_remote_rev(&refs, &peeled_refs, "refs/heads/main", "main"),
             Some("a".repeat(40))
         );
-        assert_eq!(resolve_manifest_rev(&manifest, "v1"), Some("b".repeat(40)));
+        assert_eq!(
+            resolve_remote_rev(&refs, &peeled_refs, "refs/heads/main", "v1"),
+            Some("c".repeat(40))
+        );
     }
 
     #[test]
     fn unborn_head_does_not_resolve_to_an_existing_tag() {
-        let mut manifest = Manifest::default_for_repo("refs/heads/unborn");
-        manifest.refs.insert("refs/tags/v1".into(), "a".repeat(40));
-        assert_eq!(resolve_manifest_rev(&manifest, "HEAD"), None);
+        let refs = std::collections::BTreeMap::from([("refs/tags/v1".into(), "a".repeat(40))]);
+        assert_eq!(
+            resolve_remote_rev(
+                &refs,
+                &std::collections::BTreeMap::new(),
+                "refs/heads/unborn",
+                "HEAD",
+            ),
+            None
+        );
     }
 
     #[test]
