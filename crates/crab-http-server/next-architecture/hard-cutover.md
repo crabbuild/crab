@@ -83,14 +83,20 @@ head. Reopening traffic is the fleet's operational cutover point; there is no
 claim of a multi-repository atomic object-store transaction. Partial completion
 keeps the deployment in maintenance until imports are resolved and verified.
 
-The release command `cells release activate --strategy maintenance` now
-implements the new-fleet portion of step 1: an operation-bound release CAS stops
-admission, every observing server drains, zero-capacity heartbeats remain visible
-through runtime shutdown, and the command waits for live or expired unfenced
-sessions to disappear. It cannot prove termination of a legacy fleet that never
-advertised into this directory, and it intentionally stops in `maintenance`.
-Persisted-work inventory, multi-domain transforms and final release publication
-remain required before reopening traffic.
+The release command `cells release activate --strategy maintenance` now performs
+the new-fleet drain and the registry-supported Cell migration portion of this
+transition. An operation-bound release CAS stops admission, every observing
+server drains, zero-capacity heartbeats remain visible through runtime shutdown,
+and the command waits for live or expired unfenced sessions to disappear. It
+then claims an operation-keyed signed zero-capacity executor advertisement and
+runs a local-only single-worker maintenance runtime. The singleton executor
+sequentially restores and migrates every non-tombstoned catalog Cell, shuts that
+runtime down, requires its lease to be the directory's only session, checks the
+current inventory, publishes the exact Ready successor, and withdraws its ETag.
+Lease loss aborts publication. It cannot prove termination of a legacy fleet that never
+advertised into this directory. Persisted-work inventory and multi-domain or
+unsupported-source transforms remain required for release changes that need
+them; such a command fails and leaves the release in `maintenance`.
 
 The current issue import command implements steps 3 through 7 only for the
 legacy `app/v1/issues` tree. It retains issue/comment sequences, all visible

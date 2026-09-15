@@ -86,9 +86,16 @@ operation-bound `--strategy maintenance` release path now CASes a prepared
 release into `maintenance`; every server's one-second release observer starts
 normal drain, and the command waits for expired as well as live unfenced sessions.
 Draining nodes advertise zero capacity until listener, background, Cell, SQLite
-and worker shutdown completes, then withdraw the exact session. This proves
-maintenance entry and new-fleet drain, but does not yet perform persisted-work
-inventory, offline data transformation or the final ready CAS. The
+and worker shutdown completes, then withdraw the exact session. The command then
+strict-creates and refreshes a signed zero-capacity executor advertisement at the
+operation-derived session path. That singleton holder starts a local-only
+single-worker runtime, scans all catalog shards sequentially, restores and
+migrates every non-tombstoned Cell supported by the candidate registry, drains
+the runtime, requires exclusive directory ownership, checks the current
+inventory, CASes the same operation to `ready`, and withdraws its exact ETag. The
+offline peer transport fails closed and lease loss prevents publication.
+Persisted-work admission, removed-namespace transforms and
+remaining collaboration-domain imports are not implemented. The
 private management route can dispatch or forward registered calls between
 compatible nodes. The repository module additionally registers private Tick and
 effect claim/lease/validation operations. Its server-owned due scanner reads the

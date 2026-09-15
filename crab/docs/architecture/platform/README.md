@@ -282,12 +282,22 @@ replaces the exact expired ETag with a canonical tombstone before deletion; a
 concurrent heartbeat therefore either wins intact or loses its old ETag before
 deletion. Explicit compatible release activation now requires an operator-chosen
 1–10,000 live-node quorum for the exact fleet/image/release and compiled module
-inventory before entering the activation state machine. The maintenance entry is
-also operation-bound and resumable: it selects `maintenance` by release
-CAS, causes every serving binary to self-drain, and waits for the complete
-unfenced session inventory rather than treating heartbeat expiry as shutdown
-proof. Maintenance-only persisted-work inventory, data transformation and final
-`ready` publication remain. The peer
+inventory before entering the activation state machine. Maintenance activation
+is also operation-bound and resumable: it selects `maintenance` by release CAS,
+causes every serving binary to self-drain, and waits for the complete unfenced
+session inventory rather than treating heartbeat expiry as shutdown proof. The
+command then acquires a signed, zero-capacity executor lease at the operation's
+fixed node-session path and starts one local-only, single-worker maintenance
+runtime. It scans all 256 catalog shards sequentially, restores each
+non-tombstoned Cell from its authoritative root, executes every
+registry-supported adjacent-schema or same-schema code migration, drains that
+runtime, requires the node directory to contain only its executor lease, checks
+the current Cell inventory, and only then CASes the same operation to `ready`.
+The executor withdraws its exact ETag after publication. Persisted
+Workflow/Queue/effect/request inventory, arbitrary transforms
+whose source code is absent from the candidate, namespace removal, and the
+remaining collaboration-domain imports still require explicit maintenance
+implementations. The peer
 pre-decoder can extract the structurally valid but explicitly untrusted session
 claim for that lookup. The server now loads only CA-trusted Ed25519 PKCS#8
 identities, proves the leaf certificate covers its advertised host and both TLS
@@ -379,9 +389,20 @@ release state once per second; `maintenance`, `failed`, or a completed `ready`
 release that excludes its compiled digest starts normal server drain. Draining
 nodes keep zero-capacity advertisements until accepted HTTP and Git work,
 schedulers, activities, maintenance jobs, Cell publication, SQLite close and
-worker joins have settled. Retrying with the original prepared revision adopts
-the same maintenance operation. This command deliberately returns a
-`maintenance` record: it does not transform Cell data or publish `ready`.
+worker joins have settled. The command then strict-creates a signed,
+zero-capacity maintenance executor advertisement at the operation-derived
+session path. A random progress value makes concurrent holders' canonical bytes
+distinct, so only one create-only write can win. While that lease refreshes every
+three seconds, a local-only Cell runtime with one SQL worker and one active-Cell
+slot migrates the complete catalog sequentially. Its peer transport fails
+closed. After runtime shutdown it requires the directory to contain exactly its
+own executor session, reloads every catalog/control pair and CASes `maintenance
+→ ready` only when every non-tombstoned Cell is on the compiled current code
+and maximum schema; it then conditionally withdraws the executor advertisement.
+Lease loss prevents publication and drains the runtime. Retrying with the
+original prepared revision adopts either the same maintenance operation or its
+exact Ready successor; an abandoned executor is recoverable only after the
+existing node-advertisement expiry, clock-skew retention and ETag-tombstone fence.
 The maintenance CLI now implements a resumable issue/comment repository import:
 `cells import-repository-issues --owner OWNER --name NAME --operation UUID`.
 It stages a bounded, version-pinned `app/v1/issues` inventory in SQLite, verifies

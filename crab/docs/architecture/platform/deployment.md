@@ -311,15 +311,33 @@ bounded, cursor-paginated pending and terminal-failure view for that operation.
 Prepare alone never makes the descriptor current. Administrative
 storage credentials provide authority; there is no public deployment API.
 
-Maintenance activation is intentionally a bounded entry and drain gate, not yet
-a complete breaking-schema activation. It verifies the prepared descriptor,
-CASes the same operation from `prepared` to `maintenance`, then waits at most
-125 seconds for the fleet's unfenced advertisement inventory to become empty.
-The inventory includes expired advertisements; a record disappears only after
-graceful shutdown withdraws its exact ETag or stale collection first replaces
-that exact ETag. Repeating the command with the original prepared revision
-resumes the same operation. It returns the canonical `maintenance` record and
-does not run transforms or publish `current=desired,state=ready`.
+Maintenance activation implements bounded fleet drain plus registry-supported
+offline Cell migration. It verifies the prepared descriptor, CASes the same
+operation from `prepared` to `maintenance`, then waits at most 125 seconds for
+the fleet's unfenced advertisement inventory to become empty. The inventory
+includes expired advertisements; a record disappears only after graceful
+shutdown withdraws its exact ETag or stale collection first replaces that exact
+ETag. The command strict-creates a signed, zero-capacity executor advertisement
+at the operation-derived session path; a random nonzero progress field prevents
+two concurrent commands from adopting identical bytes. The winner refreshes
+that lease every three seconds while a local-only single-worker/single-Cell
+runtime walks all catalog shards sequentially and uses the ordinary exact-root
+restore/takeover/migration path for every non-tombstoned Cell. Remote transport
+is disabled. It shuts down the maintenance runtime, requires the node directory
+to contain exactly that executor session, verifies every Cell is on current code
+and maximum schema, CASes `current=desired,state=ready`, then withdraws the exact
+executor ETag. Lease loss aborts publication and drains the runtime. Repeating
+the command with the original prepared revision resumes the maintenance
+operation or adopts its exact Ready successor. A crashed holder becomes
+replaceable only after normal advertisement expiry, clock-skew retention and
+ETag-tombstone collection.
+
+This runner can execute only migration source pairs and plans retained in the
+candidate registry. It does not yet authorize namespace removal, inspect
+persisted Workflow definitions, Queue payloads, effects or request outcomes for
+removed codecs, or execute arbitrary export/import transforms. A candidate
+requiring those changes remains in `maintenance` until a purpose-built verified
+transform and persisted-work admission are implemented.
 
 Every serving process polls the canonical release once per second. `maintenance`
 and `failed` admit no process. `prepared` and `activating` admit only the current
@@ -429,9 +447,11 @@ Compatible means both old and new published schema/code pairs remain executable
 in the rolling binary set; no automatic downmigration. Incompatible activation
 now enters maintenance, stops public admission and background activities, drains
 publishers, and verifies all old process sessions have stopped or been
-ETag-fenced. The subsequent persisted-work inventory, Cell transformation and
-final ready CAS remain to be implemented. Only that future maintenance runner
-may change Cell schemas.
+ETag-fenced. It then migrates every registry-supported Cell sequentially and
+publishes Ready only after a second empty-fleet and current-inventory check.
+Persisted-work inventory and arbitrary export/import transforms remain to be
+implemented; only those purpose-built maintenance steps may authorize contract
+removal or unsupported-source schema changes.
 A release flag alone cannot fence a stale process because it is not the per-Cell
 CAS authority. Leave affected admission gated after failure. Resume using the
 same operation identity and already published roots.

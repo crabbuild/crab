@@ -1,17 +1,25 @@
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use crab_cell_runtime::{
     ApplicationId, ApplicationIdentity, ApplicationIdentityStore, BuildDescriptor, CatalogRole,
-    CellAuthority, CellCatalog, CellId, CellModule, ControlState, Digest, EffectModule,
-    MaintenanceModule, MigrationDescriptor, MigrationFailure, MigrationProgressState,
-    MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeDirectory,
-    OperationDescriptor, Registry, RegistryBuilder, ReleaseState, ReleaseStore, RequestId,
-    TenantId, register_effect_delivery, register_maintenance,
+    CellAuthority, CellCatalog, CellId, CellModule, CellRuntime, CellTarget, ControlState, Digest,
+    EffectModule, MaintenanceModule, MigrationDescriptor, MigrationFailure, MigrationProgressState,
+    MigrationProgressStore, ModuleDescriptor, NamespaceDescriptor, NamespaceId, NodeAdvertisement,
+    NodeCapacity, NodeDirectory, OperationDescriptor, Owner, PeerRoundTrip, PeerSigner, Registry,
+    RegistryBuilder, ReleaseRecord, ReleaseState, ReleaseStore, RequestId, SessionId,
+    SqlWorkerPool, TenantId, VersionedNodeAdvertisement, register_effect_delivery,
+    register_maintenance,
 };
 use crab_storage::CellStorageLayout;
+use ed25519_dalek::SigningKey;
 use object_store::path::Path;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{Config, Error, Result, storage_root::StorageRoot};
@@ -41,6 +49,11 @@ const MAX_MIGRATION_STATUS_LIMIT: usize = 256;
 const MAX_MIGRATION_STATUS_EXAMINED: usize = 1_024;
 const MAINTENANCE_DRAIN_TIMEOUT: Duration = Duration::from_secs(125);
 const MAINTENANCE_DRAIN_POLL: Duration = Duration::from_secs(1);
+const MAINTENANCE_RUNTIME_BYTES: usize = 8 * 1024 * 1024;
+const MAINTENANCE_ADVERTISEMENT_LIFETIME_MS: i64 = 15_000;
+const MAINTENANCE_ADVERTISEMENT_EXPIRY_MARGIN_MS: i64 = 1_000;
+const MAINTENANCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+const MAINTENANCE_HEARTBEAT_RETRY: Duration = Duration::from_millis(500);
 const REPOSITORY_COMMANDS: &[OperationDescriptor] = &[
     operation(1, 80 * 1024, 80 * 1024),
     operation(2, 80 * 1024, 80 * 1024),
@@ -653,27 +666,164 @@ pub(crate) async fn enter_maintenance(config: &Config, expected_revision: u64) -
         .await?
         .ok_or(Error::Config("Cell application is not initialized"))?;
     let layout = identities.layout(identity).await?;
-    let registry = compiled_registry()?;
+    let registry = Arc::new(compiled_registry()?);
     let peer_tls = crate::peer_tls::LoadedPeerTls::load(&config.cells)?;
     let releases = ReleaseStore::new(layout.clone(), identity)?;
     let observed = releases
         .load()
         .await?
         .ok_or(Error::Config("Cell application release is not prepared"))?;
+    let image = image_digest(observed.record().desired_image())?;
     let directory = NodeDirectory::new(
-        layout,
+        layout.clone(),
         peer_tls.fleet(),
-        image_digest(observed.record().desired_image())?,
+        image,
         registry.release_digest(),
     );
-    enter_maintenance_at(
+    let maintenance = enter_maintenance_at(
         &releases,
         &registry,
         &directory,
         expected_revision,
         MAINTENANCE_DRAIN_TIMEOUT,
     )
+    .await?;
+    if maintenance.state() == ReleaseState::Ready {
+        let lease_session = SessionId::from_bytes(*maintenance.operation().as_bytes());
+        if let Some(stale) = directory.load(lease_session, unix_now_ms()?).await? {
+            directory.withdraw(&stale, unix_now_ms()?).await?;
+        }
+        return maintenance.encode().map_err(Error::from);
+    }
+
+    std::fs::create_dir_all(&config.cells.data_dir)?;
+    let session_dir = tempfile::Builder::new()
+        .prefix("maintenance-")
+        .tempdir_in(&config.cells.data_dir)?;
+    let session = SessionId::from_bytes(Uuid::now_v7().into_bytes());
+    let runtime = CellRuntime::new(
+        SqlWorkerPool::new(1, 1)?,
+        MAINTENANCE_RUNTIME_BYTES,
+        session,
+    )?;
+    let router = RepositoryCellRouter::new(
+        identity,
+        layout.clone(),
+        Arc::clone(&registry),
+        runtime.clone(),
+        RepositoryCellPeer::new(
+            directory.clone(),
+            Arc::new(PeerSigner::new(
+                session,
+                registry.release_digest(),
+                peer_tls.signing_key().clone(),
+            )),
+            Arc::new(OfflinePeerRoundTrip),
+            Owner {
+                session,
+                endpoint: config.cells.peer_advertise.to_string(),
+            },
+        ),
+        session_dir.path().to_owned(),
+    )?;
+    let lease = MaintenanceAdvertisement::new(
+        directory.clone(),
+        peer_tls.signing_key().clone(),
+        SessionId::from_bytes(*maintenance.operation().as_bytes()),
+        config.cells.peer_advertise.to_string(),
+        peer_tls.fleet(),
+        peer_tls.certificate(),
+        image,
+        registry.release_digest(),
+        registry.module_digests(),
+        rand::random::<u64>().max(1),
+    );
+    let advertised = match lease.publish_initial().await {
+        Ok(advertised) => advertised,
+        Err(error) => {
+            runtime.shutdown().await?;
+            return Err(error);
+        }
+    };
+    complete_maintenance_inventory(
+        &layout,
+        identity,
+        &releases,
+        &registry,
+        &directory,
+        &router,
+        &runtime,
+        lease,
+        advertised,
+        maintenance,
+    )
     .await
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "offline release, fleet and runtime authorities remain explicit"
+)]
+async fn complete_maintenance_inventory(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    releases: &ReleaseStore,
+    registry: &Registry,
+    directory: &NodeDirectory,
+    router: &RepositoryCellRouter,
+    runtime: &CellRuntime,
+    lease: MaintenanceAdvertisement,
+    advertised: VersionedNodeAdvertisement,
+    maintenance: ReleaseRecord,
+) -> Result<Vec<u8>> {
+    let lease_session = lease.session;
+    let lease_shutdown = CancellationToken::new();
+    let mut heartbeat = tokio::spawn(lease.run(advertised, lease_shutdown.clone()));
+    let migration = migrate_maintenance_inventory(layout, identity, router);
+    tokio::pin!(migration);
+    let migrated = tokio::select! {
+        result = &mut migration => result,
+        joined = &mut heartbeat => {
+            let lease_result = match joined {
+                Ok(result) => result,
+                Err(error) => Err(error.into()),
+            };
+            let shutdown = runtime.shutdown().await;
+            lease_result?;
+            shutdown?;
+            return Err(Error::Config("Cell maintenance executor stopped unexpectedly"));
+        }
+    };
+    let shutdown = runtime.shutdown().await;
+    let completed = async {
+        migrated?;
+        shutdown?;
+        let advertised_sessions = directory
+            .advertised_sessions(unix_now_ms()?, MAX_LIVE_NODES)
+            .await?;
+        if advertised_sessions.as_slice() != [lease_session] {
+            return Err(Error::Config(
+                "Cell maintenance executor does not exclusively own the node directory",
+            ));
+        }
+        verify_current_cells(layout, identity, registry).await?;
+        releases
+            .complete_maintenance(maintenance.revision(), maintenance.operation())
+            .await?
+            .encode()
+            .map_err(Error::from)
+    }
+    .await;
+    lease_shutdown.cancel();
+    let lease_result = match heartbeat.await {
+        Ok(result) => result,
+        Err(error) => Err(error.into()),
+    };
+    match (completed, lease_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(completed), Ok(())) => Ok(completed),
+    }
 }
 
 async fn enter_maintenance_at(
@@ -682,7 +832,7 @@ async fn enter_maintenance_at(
     directory: &NodeDirectory,
     expected_revision: u64,
     timeout: Duration,
-) -> Result<Vec<u8>> {
+) -> Result<ReleaseRecord> {
     let observed = releases
         .load()
         .await?
@@ -698,17 +848,26 @@ async fn enter_maintenance_at(
         ));
     }
     let operation = observed.record().operation();
+    if observed.record().state() == ReleaseState::Ready
+        && observed.record().current() == Some(registry.release_digest())
+        && expected_revision
+            .checked_add(2)
+            .is_some_and(|revision| observed.record().revision() == revision)
+    {
+        return Ok(observed.record().clone());
+    }
     let maintenance = releases
         .start_maintenance(expected_revision, operation)
         .await?;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        directory.collect_stale(unix_now_ms()?, 128).await?;
         if directory
             .advertised_sessions(unix_now_ms()?, MAX_LIVE_NODES)
             .await?
             .is_empty()
         {
-            return maintenance.encode().map_err(Error::from);
+            return Ok(maintenance);
         }
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -717,6 +876,197 @@ async fn enter_maintenance_at(
             ));
         }
         tokio::time::sleep(MAINTENANCE_DRAIN_POLL.min(deadline - now)).await;
+    }
+}
+
+async fn migrate_maintenance_inventory(
+    layout: &CellStorageLayout,
+    identity: ApplicationIdentity,
+    router: &RepositoryCellRouter,
+) -> Result<()> {
+    let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+    let authority = CellAuthority::new(layout.clone());
+    for shard in 0_u8..=u8::MAX {
+        let mut scan = catalog.scan_shard(shard).await?;
+        while let Some(page) = scan.next_page().await? {
+            for proof in page.entries() {
+                if authority
+                    .load(proof.entry().cell())
+                    .await?
+                    .is_some_and(|control| control.value().state == ControlState::Tombstoned)
+                {
+                    continue;
+                }
+                let target = CellTarget::new(
+                    identity.tenant(),
+                    identity.application(),
+                    proof.entry().namespace(),
+                    proof.entry().partition(),
+                )?;
+                router.migrate_target(target).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct MaintenanceAdvertisement {
+    directory: NodeDirectory,
+    signing_key: SigningKey,
+    session: SessionId,
+    endpoint: String,
+    fleet: Digest,
+    certificate: Digest,
+    image: Digest,
+    release: Digest,
+    module_digests: Vec<Digest>,
+    progress: u64,
+}
+
+impl MaintenanceAdvertisement {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the signed maintenance executor identity remains explicit"
+    )]
+    fn new(
+        directory: NodeDirectory,
+        signing_key: SigningKey,
+        session: SessionId,
+        endpoint: String,
+        fleet: Digest,
+        certificate: Digest,
+        image: Digest,
+        release: Digest,
+        module_digests: Vec<Digest>,
+        progress: u64,
+    ) -> Self {
+        Self {
+            directory,
+            signing_key,
+            session,
+            endpoint,
+            fleet,
+            certificate,
+            image,
+            release,
+            module_digests,
+            progress,
+        }
+    }
+
+    async fn publish_initial(&self) -> Result<VersionedNodeAdvertisement> {
+        let now_ms = unix_now_ms()?;
+        self.directory
+            .create(self.advertisement(now_ms)?, now_ms)
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn run(
+        self,
+        mut observed: VersionedNodeAdvertisement,
+        shutdown: CancellationToken,
+    ) -> Result<()> {
+        let heartbeat = 'heartbeat: loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break Ok(()),
+                () = tokio::time::sleep(MAINTENANCE_HEARTBEAT_INTERVAL) => {}
+            }
+            loop {
+                let now_ms = match unix_now_ms() {
+                    Ok(now_ms) => now_ms,
+                    Err(error) => break 'heartbeat Err(error),
+                };
+                let next = match self.advertisement(now_ms) {
+                    Ok(next) => next,
+                    Err(error) => break 'heartbeat Err(error),
+                };
+                match self.directory.refresh(&observed, next, now_ms).await {
+                    Ok(next) => {
+                        observed = next;
+                        break;
+                    }
+                    Err(error) => {
+                        let retry_deadline = observed
+                            .advertisement()
+                            .expires_at_ms()
+                            .saturating_sub(MAINTENANCE_ADVERTISEMENT_EXPIRY_MARGIN_MS);
+                        if now_ms >= retry_deadline {
+                            break 'heartbeat Err(error.into());
+                        }
+                        let retry_ms = retry_deadline
+                            .saturating_sub(now_ms)
+                            .min(MAINTENANCE_HEARTBEAT_RETRY.as_millis() as i64);
+                        tokio::select! {
+                            () = shutdown.cancelled() => break 'heartbeat Ok(()),
+                            () = tokio::time::sleep(Duration::from_millis(retry_ms as u64)) => {}
+                        }
+                    }
+                }
+            }
+        };
+        let withdrawal = match unix_now_ms() {
+            Ok(now_ms) => self
+                .directory
+                .withdraw(&observed, now_ms)
+                .await
+                .map_err(Error::from),
+            Err(error) => Err(error),
+        };
+        match (heartbeat, withdrawal) {
+            (Err(error), Err(withdrawal)) => {
+                tracing::warn!(
+                    error = %withdrawal,
+                    "failed to withdraw maintenance executor advertisement"
+                );
+                Err(error)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), withdrawal) => withdrawal,
+        }
+    }
+
+    fn advertisement(&self, now_ms: i64) -> Result<NodeAdvertisement> {
+        NodeAdvertisement::sign(
+            self.session,
+            self.endpoint.clone(),
+            self.fleet,
+            self.certificate,
+            self.image,
+            self.release,
+            &self.signing_key,
+            self.progress,
+            now_ms,
+            now_ms.saturating_add(MAINTENANCE_ADVERTISEMENT_LIFETIME_MS),
+            self.module_digests.clone(),
+            vec![1],
+            NodeCapacity {
+                free_memory_bytes: 0,
+                free_disk_bytes: 0,
+                job_credits: 0,
+            },
+        )
+        .map_err(Into::into)
+    }
+}
+
+struct OfflinePeerRoundTrip;
+
+impl PeerRoundTrip for OfflinePeerRoundTrip {
+    fn send(
+        &self,
+        _target: CellTarget,
+        _request: Vec<u8>,
+        _remaining_ms: u32,
+    ) -> Pin<Box<dyn Future<Output = crab_cell_runtime::Result<Vec<u8>>> + Send + 'static>> {
+        Box::pin(async {
+            Err(crab_cell_runtime::Error::PeerTransport {
+                context: "offline maintenance cannot contact a peer",
+                source: Box::new(std::io::Error::other(
+                    "offline maintenance peer transport was invoked",
+                )),
+            })
+        })
     }
 }
 
@@ -1293,8 +1643,329 @@ mod tests {
         )
         .await
         .unwrap();
-        let encoded: Value = serde_json::from_slice(&resumed).unwrap();
-        assert_eq!(encoded["state"], "maintenance");
+        assert_eq!(resumed.state(), ReleaseState::Maintenance);
+    }
+
+    #[tokio::test]
+    async fn maintenance_executor_advertisement_is_singleton_per_operation() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([58; 16]),
+            ApplicationId::from_bytes([59; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("maintenance-singleton"),
+            *identity.application().as_bytes(),
+        );
+        let registry = compiled_registry().unwrap();
+        let fleet = Digest::from_bytes([60; 32]);
+        let image = Digest::from_bytes([61; 32]);
+        let directory = NodeDirectory::new(layout, fleet, image, registry.release_digest());
+        let session = SessionId::from_bytes([62; 16]);
+        let first = MaintenanceAdvertisement::new(
+            directory.clone(),
+            SigningKey::from_bytes(&[63; 32]),
+            session,
+            "https://maintenance.internal:8789".into(),
+            fleet,
+            Digest::from_bytes([64; 32]),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            1,
+        );
+        let observed = first.publish_initial().await.unwrap();
+        let contender = MaintenanceAdvertisement::new(
+            directory.clone(),
+            SigningKey::from_bytes(&[63; 32]),
+            session,
+            "https://maintenance.internal:8789".into(),
+            fleet,
+            Digest::from_bytes([64; 32]),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            2,
+        );
+
+        assert!(contender.publish_initial().await.is_err());
+        directory
+            .withdraw(&observed, unix_now_ms().unwrap())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn maintenance_completion_publishes_ready_after_offline_inventory() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([61; 16]),
+            ApplicationId::from_bytes([62; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("maintenance-completion"),
+            *identity.application().as_bytes(),
+        );
+        let registry = Arc::new(compiled_registry().unwrap());
+        let image = Digest::from_bytes([0xbb; 32]);
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let operation = RequestId::from_bytes([63; 16]);
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "bb".repeat(32)),
+                operation,
+            )
+            .await
+            .unwrap();
+        let fleet = Digest::from_bytes([64; 32]);
+        let directory = NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+        let maintenance = enter_maintenance_at(
+            &releases,
+            &registry,
+            &directory,
+            prepared.revision(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let session = SessionId::from_bytes([65; 16]);
+        let runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 1).unwrap(),
+            MAINTENANCE_RUNTIME_BYTES,
+            session,
+        )
+        .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[66; 32]);
+        let router = RepositoryCellRouter::new(
+            identity,
+            layout.clone(),
+            Arc::clone(&registry),
+            runtime.clone(),
+            RepositoryCellPeer::new(
+                directory.clone(),
+                Arc::new(PeerSigner::new(
+                    session,
+                    registry.release_digest(),
+                    signing_key.clone(),
+                )),
+                Arc::new(OfflinePeerRoundTrip),
+                Owner {
+                    session,
+                    endpoint: "https://maintenance.internal:8789".into(),
+                },
+            ),
+            scratch.path().to_owned(),
+        )
+        .unwrap();
+        let lease = MaintenanceAdvertisement::new(
+            directory.clone(),
+            signing_key,
+            SessionId::from_bytes(*operation.as_bytes()),
+            "https://maintenance.internal:8789".into(),
+            fleet,
+            Digest::from_bytes([67; 32]),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            2,
+        );
+        let advertised = lease.publish_initial().await.unwrap();
+
+        let completed = complete_maintenance_inventory(
+            &layout,
+            identity,
+            &releases,
+            &registry,
+            &directory,
+            &router,
+            &runtime,
+            lease,
+            advertised,
+            maintenance,
+        )
+        .await
+        .unwrap();
+        let encoded: Value = serde_json::from_slice(&completed).unwrap();
+        assert_eq!(encoded["state"], "ready");
+        assert_eq!(
+            enter_maintenance_at(
+                &releases,
+                &registry,
+                &directory,
+                prepared.revision(),
+                Duration::ZERO,
+            )
+            .await
+            .unwrap()
+            .state(),
+            ReleaseState::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_restores_migrates_and_publishes_an_old_cell() {
+        let identity = ApplicationIdentity::new(
+            TenantId::from_bytes([71; 16]),
+            ApplicationId::from_bytes([72; 16]),
+        );
+        let layout = CellStorageLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            Path::from("maintenance-cell-migration"),
+            *identity.application().as_bytes(),
+        );
+        let registry = Arc::new(rollover_registry());
+        let target = CellTarget::new(
+            identity.tenant(),
+            identity.application(),
+            ROLLOVER_NAMESPACE,
+            b"maintenance-cell",
+        )
+        .unwrap();
+        let catalog = CellCatalog::new(layout.clone(), identity.tenant());
+        let proof = catalog
+            .provision(
+                CatalogEntry::new(&target, CatalogRole::Sql, ROLLOVER_PREDECESSOR, 1).unwrap(),
+            )
+            .await
+            .unwrap();
+        let authority = CellAuthority::new(layout.clone());
+        let first_session = SessionId::from_bytes([73; 16]);
+        let first = authority
+            .create_initial(
+                &proof,
+                IncarnationId::from_bytes([74; 16]),
+                Owner {
+                    session: first_session,
+                    endpoint: "https://old.internal:8789".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let first_runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 1).unwrap(),
+            MAINTENANCE_RUNTIME_BYTES,
+            first_session,
+        )
+        .unwrap();
+        let first_scratch = tempfile::tempdir().unwrap();
+        first_runtime
+            .bootstrap(
+                proof,
+                CellReplica::new(
+                    layout.clone(),
+                    *target.cell_id().as_bytes(),
+                    *first.value().incarnation.as_bytes(),
+                    ReplicaLimits::default(),
+                )
+                .unwrap(),
+                authority.clone(),
+                first,
+                first_scratch.path().join("old.sqlite"),
+                |transaction| transaction.execute_batch(ROLLOVER_SQL).map_err(Into::into),
+            )
+            .await
+            .unwrap()
+            .drain()
+            .await
+            .unwrap();
+        first_runtime.shutdown().await.unwrap();
+
+        let releases = ReleaseStore::new(layout.clone(), identity).unwrap();
+        let operation = RequestId::from_bytes([75; 16]);
+        let prepared = releases
+            .prepare(
+                registry.release_bytes(),
+                registry.release_digest(),
+                0,
+                &format!("sha256:{}", "cc".repeat(32)),
+                operation,
+            )
+            .await
+            .unwrap();
+        let image = Digest::from_bytes([0xcc; 32]);
+        let fleet = Digest::from_bytes([76; 32]);
+        let directory = NodeDirectory::new(layout.clone(), fleet, image, registry.release_digest());
+        let maintenance = enter_maintenance_at(
+            &releases,
+            &registry,
+            &directory,
+            prepared.revision(),
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let session = SessionId::from_bytes([77; 16]);
+        let runtime = CellRuntime::new(
+            SqlWorkerPool::new(1, 1).unwrap(),
+            MAINTENANCE_RUNTIME_BYTES,
+            session,
+        )
+        .unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let signing_key = SigningKey::from_bytes(&[78; 32]);
+        let router = RepositoryCellRouter::new(
+            identity,
+            layout.clone(),
+            Arc::clone(&registry),
+            runtime.clone(),
+            RepositoryCellPeer::new(
+                directory.clone(),
+                Arc::new(PeerSigner::new(
+                    session,
+                    registry.release_digest(),
+                    signing_key.clone(),
+                )),
+                Arc::new(OfflinePeerRoundTrip),
+                Owner {
+                    session,
+                    endpoint: "https://maintenance.internal:8789".into(),
+                },
+            ),
+            scratch.path().to_owned(),
+        )
+        .unwrap();
+        let lease = MaintenanceAdvertisement::new(
+            directory.clone(),
+            signing_key,
+            SessionId::from_bytes(*operation.as_bytes()),
+            "https://maintenance.internal:8789".into(),
+            fleet,
+            Digest::from_bytes([79; 32]),
+            image,
+            registry.release_digest(),
+            registry.module_digests(),
+            2,
+        );
+        let advertised = lease.publish_initial().await.unwrap();
+
+        let completed = complete_maintenance_inventory(
+            &layout,
+            identity,
+            &releases,
+            &registry,
+            &directory,
+            &router,
+            &runtime,
+            lease,
+            advertised,
+            maintenance,
+        )
+        .await
+        .unwrap();
+        let record: Value = serde_json::from_slice(&completed).unwrap();
+        assert_eq!(record["state"], "ready");
+        let migrated = authority.load(target.cell_id()).await.unwrap().unwrap();
+        assert_eq!(
+            migrated.value().code,
+            registry.module_code(RolloverModule::NAME).unwrap()
+        );
+        assert_eq!(migrated.value().schema, 1);
+        assert_eq!(migrated.value().state, ControlState::Idle);
+        assert_eq!(migrated.value().root.as_ref().unwrap().commit_sequence, 1);
     }
 
     #[tokio::test]

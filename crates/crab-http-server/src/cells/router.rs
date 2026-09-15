@@ -162,7 +162,7 @@ impl RepositoryCellRouter {
             .into());
         }
         loop {
-            self.require_activating_release().await?;
+            self.require_migration_release().await?;
             let proof = self
                 .catalog
                 .lookup(target.cell_id())
@@ -237,18 +237,20 @@ impl RepositoryCellRouter {
         )
     }
 
-    async fn require_activating_release(&self) -> crate::Result<()> {
+    async fn require_migration_release(&self) -> crate::Result<()> {
         let release = ReleaseStore::new(self.layout.clone(), self.identity)?
             .load()
             .await?
             .ok_or(crab_cell_runtime::Error::Release(
                 "release is unavailable during Cell migration",
             ))?;
-        if release.record().state() != ReleaseState::Activating
-            || release.record().desired() != Some(self.registry.release_digest())
+        if !matches!(
+            release.record().state(),
+            ReleaseState::Activating | ReleaseState::Maintenance
+        ) || release.record().desired() != Some(self.registry.release_digest())
         {
             return Err(crab_cell_runtime::Error::Release(
-                "Cell migration requires the compiled release to be activating",
+                "Cell migration requires the compiled release to be activating or in maintenance",
             )
             .into());
         }

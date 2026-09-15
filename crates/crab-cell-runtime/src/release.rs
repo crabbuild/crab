@@ -443,10 +443,41 @@ impl ReleaseStore {
         expected_revision: u64,
         operation: RequestId,
     ) -> Result<ReleaseRecord> {
-        let observed = self
-            .load()
-            .await?
-            .ok_or(Error::Release("release is not activating"))?;
+        self.complete(
+            expected_revision,
+            operation,
+            ReleaseState::Activating,
+            "release is not activating",
+            "activating release changed concurrently",
+        )
+        .await
+    }
+
+    /// Publishes the desired maintenance release after offline admission succeeds.
+    pub async fn complete_maintenance(
+        &self,
+        expected_revision: u64,
+        operation: RequestId,
+    ) -> Result<ReleaseRecord> {
+        self.complete(
+            expected_revision,
+            operation,
+            ReleaseState::Maintenance,
+            "release is not in maintenance",
+            "maintenance release changed concurrently",
+        )
+        .await
+    }
+
+    async fn complete(
+        &self,
+        expected_revision: u64,
+        operation: RequestId,
+        required_state: ReleaseState,
+        unavailable: &'static str,
+        changed: &'static str,
+    ) -> Result<ReleaseRecord> {
+        let observed = self.load().await?.ok_or(Error::Release(unavailable))?;
         if completion_retry(&observed.record, expected_revision, operation) {
             let desired = observed
                 .record
@@ -456,10 +487,10 @@ impl ReleaseStore {
             return Ok(observed.record);
         }
         if observed.record.revision != expected_revision
-            || observed.record.state != ReleaseState::Activating
+            || observed.record.state != required_state
             || observed.record.operation != operation
         {
-            return Err(Error::Release("activating release changed concurrently"));
+            return Err(Error::Release(changed));
         }
         let desired = observed
             .record
@@ -916,6 +947,20 @@ mod tests {
                 )
                 .await
                 .is_err()
+        );
+        let ready = releases
+            .complete_maintenance(maintenance.revision(), operation)
+            .await
+            .unwrap();
+        assert_eq!(ready.revision(), 3);
+        assert_eq!(ready.state(), ReleaseState::Ready);
+        assert_eq!(ready.current(), Some(digest));
+        assert_eq!(
+            releases
+                .complete_maintenance(maintenance.revision(), operation)
+                .await
+                .unwrap(),
+            ready
         );
     }
 
