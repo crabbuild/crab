@@ -74,7 +74,12 @@ impl SchedulerFleet {
                     changed_at_ms: now_ms,
                 };
             }
-            if now_ms.saturating_sub(observation.changed_at_ms) < stale_after_ms {
+            let capacity = node.capacity();
+            if now_ms.saturating_sub(observation.changed_at_ms) < stale_after_ms
+                && capacity.free_memory_bytes != 0
+                && capacity.free_disk_bytes != 0
+                && capacity.job_credits != 0
+            {
                 eligible.push(node.session());
             }
         }

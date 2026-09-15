@@ -84,10 +84,14 @@ make a racing refresh lose its old ETag, so cleanup cannot erase a successful
 heartbeat. Normal shutdown uses the same exact-ETag tombstone transition to
 withdraw the latest local advertisement immediately; a concurrently changed
 record fails closed and remains published. Capacity hints measure dynamic
-OS/cgroup-available memory, volume free space and 1–16 CPU job credits. Startup
+OS/cgroup-available memory, volume free space and 1–16 CPU job credits. A session
+with any zero hint leaves scheduler rendezvous until a later signed refresh
+restores all three; the selected node still performs authoritative local
+admission before ownership CAS. Startup
 separately derives its stable memory budget from the lower of host RAM and the
 cgroup limit, reserves the larger of 512 MiB or one quarter for the process,
-and gives five percent of the remaining Cell budget to the node mailbox. It
+and gives five percent of the remaining Cell budget to node-retained command
+and activity bytes. It
 rejects less than 2 GiB effective memory or less than 20 GiB disk after the
 larger of 10 GiB or one fifth of current free space is reserved. Active-Cell
 admission also reserves three 64 KiB SQLite caches and eight persistent file

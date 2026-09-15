@@ -533,7 +533,10 @@ cooperative cancellation. Effect-only work executes inline, and an activity job
 runs one effect step after its activity outcome. Each successful full cycle advances the shared node progress used by the
 heartbeat. `SchedulerFleet` remembers the last progress change for every live
 session and excludes a stalled session after 15 seconds, allowing the next
-rendezvous candidate to scan; progress recovery readmits it. Local readiness and
+rendezvous candidate to scan; progress recovery readmits it. A session with zero
+free memory, free disk or job credits is also excluded until a later signed
+refresh restores all three; these fields remain hints and never replace local
+admission. Local readiness and
 Prometheus scheduler health/progress/lag use the same completion timestamp, and
 readiness cannot open before the first completed cycle. Exact compiled operation
 IDs/codecs map peer requests to scheduler, activity or effect grants;

@@ -326,11 +326,80 @@ fn stalled_scanner_is_removed_until_its_advertised_progress_advances() {
     );
 }
 
+#[test]
+fn exhausted_scanner_is_removed_until_its_capacity_recovers() {
+    let key = SigningKey::from_bytes(&[9; 32]);
+    let exhausted = [
+        NodeCapacity {
+            free_memory_bytes: 0,
+            free_disk_bytes: 1,
+            job_credits: 1,
+        },
+        NodeCapacity {
+            free_memory_bytes: 1,
+            free_disk_bytes: 0,
+            job_credits: 1,
+        },
+        NodeCapacity {
+            free_memory_bytes: 1,
+            free_disk_bytes: 1,
+            job_credits: 0,
+        },
+    ];
+    let available = advertisement(2, 1, 0, &key);
+    let mut fleet = SchedulerFleet::default();
+
+    for capacity in exhausted {
+        assert_eq!(
+            fleet
+                .eligible_sessions(
+                    &[
+                        advertisement_with_capacity(1, 1, 0, &key, capacity),
+                        available.clone(),
+                    ],
+                    0,
+                    100,
+                )
+                .unwrap(),
+            vec![SessionId::from_bytes([2; 16])]
+        );
+    }
+    assert_eq!(
+        fleet
+            .eligible_sessions(&[advertisement(1, 1, 50, &key), available], 50, 100)
+            .unwrap(),
+        vec![
+            SessionId::from_bytes([1; 16]),
+            SessionId::from_bytes([2; 16])
+        ]
+    );
+}
+
 fn advertisement(
     session: u8,
     progress: u64,
     issued_at_ms: i64,
     key: &SigningKey,
+) -> NodeAdvertisement {
+    advertisement_with_capacity(
+        session,
+        progress,
+        issued_at_ms,
+        key,
+        NodeCapacity {
+            free_memory_bytes: 1,
+            free_disk_bytes: 1,
+            job_credits: 1,
+        },
+    )
+}
+
+fn advertisement_with_capacity(
+    session: u8,
+    progress: u64,
+    issued_at_ms: i64,
+    key: &SigningKey,
+    capacity: NodeCapacity,
 ) -> NodeAdvertisement {
     NodeAdvertisement::sign(
         SessionId::from_bytes([session; 16]),
@@ -345,11 +414,7 @@ fn advertisement(
         issued_at_ms + 10_000,
         vec![Digest::from_bytes([5; 32])],
         vec![1],
-        NodeCapacity {
-            free_memory_bytes: 1,
-            free_disk_bytes: 1,
-            job_credits: 1,
-        },
+        capacity,
     )
     .unwrap()
 }

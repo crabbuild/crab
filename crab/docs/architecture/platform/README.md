@@ -182,8 +182,10 @@ cancellation before runtime drain. Each completed cycle advances a shared
 boot-session progress counter. Heartbeats publish that counter while allowing unchanged progress, and
 every scheduler tracks the last observed change per live session. A node with no
 advertised progress for 15 seconds is removed from rendezvous assignment until
-it advances again; its own readiness stays closed until the first complete cycle
-and fails again on the same deadline. Prometheus
+it advances again. A live session advertising zero free memory, free disk or job
+credits is likewise excluded until a later signed refresh restores capacity;
+local admission remains authoritative. Its own readiness stays closed until the
+first complete cycle and fails again on the same deadline. Prometheus
 exports scheduler health, progress and lag. The transactional Tick now reserves
 work for every installed maintenance class and passes unused capacity forward,
 so request retention cannot starve Queue or Workflow deadlines. The scanner
